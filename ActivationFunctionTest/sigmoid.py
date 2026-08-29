@@ -13,8 +13,8 @@ print("State Size:", state_size)
 print("Action Size:", action_size)
 
 model = Sequential([
-    Dense(24, activation="relu", input_shape=(state_size,)),
-    Dense(action_size, activation="linear")
+    Dense(24, activation="sigmoid", input_shape=(state_size,)),
+    Dense(action_size, activation="sigmoid")
 ])
 
 model.compile(optimizer="adam", loss="mse")
@@ -23,7 +23,7 @@ gamma = 0.95
 epsilon = 1.0
 epsilon_decay = 0.99
 epsilon_min = 0.01
-episodes = 50
+episodes = 100
 
 
 for episode in range(episodes):
