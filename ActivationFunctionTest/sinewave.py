@@ -13,17 +13,9 @@ action_size = int(env.action_space.n)
 print("State Size:", state_size)
 print("Action Size:", action_size)
 
-class ActivationFunction:
-    # Sine parameters
-    a: float = -1
-    h: float = 0
-    b: float = 1/3
-    k: float = 0
-    decay_window: int = 1_000
 
 def activation_function(x):
-    out = -1 * tf.math.sin((1/3) * (x-0)) + 0
-    return out
+    return -1 * tf.math.sin((1/3) * (x-0)) + 0
 
 
 model = Sequential([
