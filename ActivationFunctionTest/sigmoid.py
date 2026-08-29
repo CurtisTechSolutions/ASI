@@ -23,7 +23,7 @@ gamma = 0.95
 epsilon = 1.0
 epsilon_decay = 0.99
 epsilon_min = 0.01
-episodes = 100
+episodes = 250
 
 
 for episode in range(episodes):
