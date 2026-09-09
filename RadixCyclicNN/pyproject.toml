@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radixnet"
+version = "0.1.0"
+description = "Self-compressing cyclic-graph neural network (Radix Tree inspired) with a sine activation, Dijkstra prediction, 2NRL and GAN-style self-upgrading. Pure Python, optional torch acceleration."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "../LICENSE" }
+dependencies = []
+
+[project.optional-dependencies]
+gpu = ["torch"]
+
+[project.scripts]
+radixnet = "radixnet.cli:main"
+
+[tool.setuptools]
+packages = ["radixnet"]
