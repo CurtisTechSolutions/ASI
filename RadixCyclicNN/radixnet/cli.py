@@ -668,6 +668,67 @@ def cmd_two_nrl(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
+    """Learn from rated texts: 2NRL when both kinds are given, reward on good alone, punish on bad alone."""
+    good = list(args.good_text or [])
+    bad = list(args.bad_text or [])
+    if args.good:
+        good += read_texts([args.good], what="good")
+    if args.bad:
+        bad += read_texts([args.bad], what="bad")
+    good = [t for t in good if t.strip()]
+    bad = [t for t in bad if t.strip()]
+    if not good and not bad:
+        raise CliError("nothing to learn from: give --good / --good-text (thumbs up) and/or --bad / --bad-text (thumbs down)")
+    action = "2nrl" if good and bad else ("reward" if good else "punish")
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("backend", backend_label(model)),
+        ("thumbs up", f"{len(good)} texts"),
+        ("thumbs down", f"{len(bad)} texts"),
+        ("action", {"2nrl": "2NRL: bad -> invert -> good", "reward": "reward: train on the good texts",
+                    "punish": "punish: train on the bad texts, then invert"}[action]),
+        ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
+        ("positive", f"epochs={args.pos_epochs} lr={args.pos_lr} act_lr={args.pos_lr / 10}"),
+        ("batch", args.batch_size),
+        ("output", out),
+    ])
+    console.say()
+    printer = EpochPrinter(console, phased=True)
+    stop = threading.Event()
+
+    def work() -> dict:
+        if action == "2nrl":
+            return model.two_nrl(
+                bad, good, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
+                pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size,
+            )
+        if action == "reward":
+            records = model.train(
+                good, epochs=args.pos_epochs, lr=args.pos_lr, act_lr=args.pos_lr / 10, batch_size=args.batch_size,
+                progress=lambda rec: printer({**rec, "phase": "positive"}), stop_event=stop,
+            )
+            return {"negative": [], "positive": [{**r, "phase": "positive"} for r in records], "inverted": model.graph.inverted}
+        records = model.train(
+            bad, epochs=args.neg_epochs, lr=args.neg_lr, batch_size=args.batch_size,
+            progress=lambda rec: printer({**rec, "phase": "negative"}), stop_event=stop,
+        )
+        if not stop.is_set():
+            model.invert()
+        return {"negative": [{**r, "phase": "negative"} for r in records], "positive": [], "inverted": model.graph.inverted}
+
+    result, interrupted = run_interruptible(work, stop, console, "epoch")
+    saved = _finish_training(console, model, out, interrupted, printer, "epoch")
+    console.say(f"action: {action}; inverted: {fmt(result['inverted'])}")
+    return {
+        "model": origin.to_dict(), "out": out, "action": action, "good_texts": len(good), "bad_texts": len(bad),
+        "negative": result["negative"], "positive": result["positive"], "inverted": result["inverted"],
+        "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+    }
+
+
 def cmd_invert(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
     was = model.graph.inverted
@@ -1312,6 +1373,27 @@ def build_parser() -> argparse.ArgumentParser:
     _add_two_nrl_options(p, neg_epochs=3, pos_epochs=3, batch_size=TrainConfig.batch_size)
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_two_nrl)
+
+    # feedback -------------------------------------------------------------
+    p = command(
+        "feedback", "learn from rated texts (thumbs up / thumbs down) with 2NRL",
+        "Thumbs up (--good / --good-text) are correct texts, thumbs down (--bad / --bad-text) garbage.  Both:\n"
+        "2NRL (train on the bad texts, invert, fine-tune on the good ones).  Only good: reward (a positive-phase\n"
+        "pass).  Only bad: punish (a negative-phase pass, then the network is inverted so those texts become\n"
+        "unlikely).  The same rule the frontend's Generate tab uses for its ratings.",
+    )
+    p.add_argument("--good", metavar="FILE", help="thumbs-up texts, one per line")
+    p.add_argument("--bad", metavar="FILE", help="thumbs-down texts, one per line")
+    p.add_argument("--good-text", action="append", metavar="TEXT", help="a thumbs-up text (repeatable)")
+    p.add_argument("--bad-text", action="append", metavar="TEXT", help="a thumbs-down text (repeatable)")
+    group = p.add_argument_group("2NRL options")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (punish) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (reward) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase (activation parameters use a tenth)")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step (rated sets are small)")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_feedback)
 
     # invert / compress ----------------------------------------------------
     p = command("invert", "invert the network and save", "Flip every edge weight and activation amplitude, then save.")

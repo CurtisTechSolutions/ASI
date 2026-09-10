@@ -499,6 +499,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/generate` | `{"count","max_length","mode","temperature"}` | `{"samples": [{"text","cost","path"}]}` |
 | POST `/api/score` | `{"text"}` | score dict |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
+| POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
 | POST `/api/invert` | | `stats()` |
 | POST `/api/compress` | | `{"merges", **stats}` |
 | POST `/api/evolve/start` | EvolveConfig fields + `{"corpus": [...]}` or `"corpus_text"` + `"generations"` (null/0 = forever) | job (async, type "evolve") |

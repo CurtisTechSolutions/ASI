@@ -1047,3 +1047,79 @@ details.attempt summary .issue {
   padding: 10px 12px;
   margin-bottom: 10px;
 }
+
+/* ---- sample ratings (Generate tab: thumbs up / down -> 2NRL) ---- */
+.samples li.rated.up .sample {
+  border-left: 3px solid #16a34a;
+}
+
+.samples li.rated.down .sample {
+  border-left: 3px solid #dc2626;
+}
+
+.rating {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+
+button.rate {
+  padding: 1px 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--input-bg);
+  cursor: pointer;
+}
+
+button.rate:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button.rate.up.active {
+  background: rgba(22, 163, 74, 0.18);
+  border-color: #16a34a;
+}
+
+button.rate.down.active {
+  background: rgba(220, 38, 38, 0.18);
+  border-color: #dc2626;
+}
+
+button.rate:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+ul.ratings {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+ul.ratings li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+ul.ratings code {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge.up {
+  color: #16a34a;
+}
+
+.badge.down {
+  color: #dc2626;
+}

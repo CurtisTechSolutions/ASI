@@ -427,6 +427,50 @@ class ModelService:
 
         return self._start_job("2nrl", work)
 
+    def start_feedback(
+        self,
+        good: list[str],
+        bad: list[str],
+        neg_epochs: int = 2,
+        pos_epochs: int = 3,
+        neg_lr: float = 0.5,
+        pos_lr: float = 0.1,
+        **overrides: Any,
+    ) -> dict:
+        """Start a ``feedback`` job from rated texts (thumbs up = ``good``, thumbs down = ``bad``).
+
+        Both sets: 2NRL (bad, invert, good).  Only ``good``: reward - a
+        positive-phase training pass.  Only ``bad``: punish - a negative-phase
+        pass, then the network is inverted so the rated texts become unlikely.
+        """
+        action = feedback_action(good, bad)
+        if action is None:
+            raise ApiError(400, "nothing to learn from: give 'good' (thumbs up) and/or 'bad' (thumbs down) texts")
+        TrainConfig(epochs=neg_epochs, lr=neg_lr, **overrides).validate()
+        TrainConfig(epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, **overrides).validate()
+
+        def work(job: Job) -> None:
+            progress = self._progress(job)
+            if action == "2nrl":
+                self.model.two_nrl(
+                    bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
+                    progress=progress, stop_event=job.stop_event, **overrides,
+                )
+            elif action == "reward":
+                self.model.train(
+                    good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10,
+                    progress=lambda rec: progress({**rec, "phase": "positive"}), stop_event=job.stop_event, **overrides,
+                )
+            else:
+                self.model.train(
+                    bad, epochs=neg_epochs, lr=neg_lr,
+                    progress=lambda rec: progress({**rec, "phase": "negative"}), stop_event=job.stop_event, **overrides,
+                )
+                if not job.stop_event.is_set():
+                    self.model.invert()
+
+        return self._start_job("feedback", work)
+
     def start_evolve(self, corpus: list[str], generations: int | None, config: EvolveConfig) -> dict:
         """Start an ``evolve`` job (``generations`` ``None`` / ``0`` = until stopped).
 
@@ -1044,6 +1088,43 @@ def _r_status(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.status()
 
 
+def feedback_action(good: list[str], bad: list[str]) -> str | None:
+    """What rated texts lead to: ``"2nrl"`` (both), ``"reward"`` (good only), ``"punish"`` (bad only), ``None``."""
+    if good and bad:
+        return "2nrl"
+    if good:
+        return "reward"
+    if bad:
+        return "punish"
+    return None
+
+
+def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    whole_file = f.flag("whole_file", False)
+    good = f.texts_optional("good", "good_text")
+    bad = f.texts_optional("bad", "bad_text")
+    for names, target in ((f.names("good_files"), good), (f.names("bad_files"), bad)):
+        if names:
+            target.extend(svc.upload_texts(names, whole_file=whole_file))
+    action = feedback_action(good, bad)
+    if action is None:
+        raise ApiError(
+            400, "give 'good' (thumbs up) and/or 'bad' (thumbs down) texts: lists, good_text / bad_text (one per line) "
+                 "or good_files / bad_files (upload names)"
+        )
+    overrides = _train_overrides(f)
+    overrides.setdefault("batch_size", 4)  # rated sets are small
+    job = svc.start_feedback(
+        good, bad,
+        neg_epochs=f.integer("neg_epochs", 2, minimum=0),
+        pos_epochs=f.integer("pos_epochs", 3, minimum=0),
+        neg_lr=f.number("neg_lr", 0.5, minimum=0.0),
+        pos_lr=f.number("pos_lr", 0.1, minimum=0.0),
+        **overrides,
+    )
+    return 202, {"job": job, "action": action, "good": len(good), "bad": len(bad)}
+
+
 def _train_config(f: Fields) -> TrainConfig:
     """The optional training settings of a request body, defaults from :class:`TrainConfig`."""
     return TrainConfig(
@@ -1470,6 +1551,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/generate", _r_generate, "sample texts from START: {count, max_length, mode, temperature}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
+    ("POST", "/api/feedback", _r_feedback,
+     "learn from rated texts: {good (thumbs up), bad (thumbs down), ...} -> 2NRL when both, reward on good alone, punish (negative phase + invert) on bad alone"),
     ("POST", "/api/invert", _r_invert, "invert the network"),
     ("POST", "/api/compress", _r_compress, "merge unary chains"),
     ("POST", "/api/evolve/start", _r_evolve_start, "start the GAN-style loop: {corpus | corpus_text, generations, samples, ...}"),

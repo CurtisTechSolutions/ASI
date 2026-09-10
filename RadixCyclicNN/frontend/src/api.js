@@ -77,6 +77,8 @@ export const api = {
   generate: (body) => post("/api/generate", body),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),
+  /** Rated texts -> 2NRL (both kinds), reward (thumbs up only) or punish (thumbs down only). */
+  feedback: (body) => post("/api/feedback", body),
   invert: () => post("/api/invert"),
   compress: () => post("/api/compress"),
   evolveStart: (body) => post("/api/evolve/start", body),

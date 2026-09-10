@@ -146,6 +146,7 @@ Global options (before or after the command): `--model PATH` (default
 | `generate` | `--count`, `--max-length`, `--mode`, `--temperature` |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--out` |
+| `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
 | `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
 | `info` | statistics and the training history tail |
@@ -184,6 +185,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/generate` | `{"count","max_length","mode","temperature"}` -> `{"samples": [{"text","cost","path"}]}` |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
+| `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, ...}` -> job |
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` / `{"path"}` / `{"seed"}` |
@@ -207,7 +209,9 @@ curl -X POST localhost:8000/api/evolve/stop
 `frontend/` is a Vite + React app (React, ReactDOM, Vite only). The prebuilt
 `frontend/dist` is committed and served by the API, so nothing needs npm to use
 it. Panels: status bar (live statistics and job progress), Train (texts and/or
-uploaded files), Predict (path with per-step costs), Generate, Score, 2NRL,
+uploaded files), Predict (path with per-step costs), Generate (with thumbs
+up / thumbs down ratings: "Train on ratings" runs 2NRL on them, thumbs down as
+the negative phase, thumbs up as the positive phase), Score, 2NRL,
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Code (code generation with the sandbox and the judge),
 Checkpoints (save / restore / load / reset) and a Graph view of the most
