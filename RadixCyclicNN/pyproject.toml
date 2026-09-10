@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Self-compressing cyclic-graph neural network (Radix Tree inspired) with a sine activation, Dijkstra prediction, 2NRL and GAN-style self-upgrading. Pure Python, optional torch acceleration."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "../LICENSE" }
+# Licensed under the custom source-available license in ../LICENSE (repository root).
 dependencies = []
 
 [project.optional-dependencies]

@@ -1,0 +1,18 @@
+# Keep the build context small and deterministic.
+.git
+.gitignore
+.env
+*.log
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+checkpoints/
+*-checkpoints/
+model*.json
+model*.json.gz
+discriminator*.json
+discriminator*.json.gz
+Makefile
+docker-compose*.yml

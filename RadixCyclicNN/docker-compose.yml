@@ -1,0 +1,193 @@
+# RadixCyclicNN — Docker Compose stack.
+#
+#   docker compose up -d                      API + prebuilt frontend on http://localhost:8000
+#   docker compose --profile auto up -d       ... and immediately start the GAN-style self-upgrade loop in it
+#   docker compose run --rm train             one-shot training into the shared data volume
+#   docker compose --profile evolve up -d     headless self-upgrading loop (CLI) beside the API
+#   docker compose --profile dev up           + Vite dev server with hot reload on http://localhost:5173
+#   docker compose run --rm test              unit tests inside the image
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build   GPU build (torch)
+#
+# The model, the discriminator and all checkpoints live in the named volume
+# `radixnet-data` (mounted at /data).  Corpora are bind-mounted read-only from
+# ./data, so new text files need no rebuild.  Every knob below has a default and
+# can be overridden from the environment or a .env file (see .env.example).
+#
+# Note: the API process keeps its own in-memory model.  Anything the `train` or
+# `evolve` services write to /data/model.json shows up in the UI after
+# POST /api/load {"path": "/data/model.json"} (make docker-reload), or on the
+# next restart with RADIXNET_RESUME=1.  The `auto` profile avoids this entirely
+# by running the self-upgrade loop inside the API itself.
+
+name: radixcyclicnn
+
+x-radixnet: &radixnet
+  build:
+    context: .
+    args:
+      WITH_TORCH: ${WITH_TORCH:-0}
+  image: radixcyclicnn:latest
+  volumes:
+    - radixnet-data:/data
+    - ./data:/app/data:ro
+
+services:
+  # ---- the API + frontend -------------------------------------------------
+  api:
+    <<: *radixnet
+    container_name: radixnet-api
+    command:
+      - --model
+      - /data/model.json
+      - --backend
+      - ${RADIXNET_BACKEND:-auto}
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --frontend-dir
+      - /app/frontend/dist
+      - --checkpoint-dir
+      - /data/checkpoints
+    environment:
+      RADIXNET_RESUME: ${RADIXNET_RESUME:-0}
+      RADIXNET_MODEL: /data/model.json
+      RADIXNET_CHECKPOINT_DIR: /data/checkpoints
+    ports:
+      - "${RADIXNET_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---- kick off the constantly self-upgrading loop inside the API ----------
+  # One-shot sidecar: waits for the API to be healthy, then POSTs
+  # /api/evolve/start with the corpus so the loop runs (and checkpoints)
+  # inside the API process, visible live in the frontend's Evolve panel.
+  autoevolve:
+    <<: *radixnet
+    profiles: ["auto"]
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      RADIXNET_CORPUS: ${RADIXNET_CORPUS:-sample_corpus.txt}
+      EVOLVE_SAMPLES: ${EVOLVE_SAMPLES:-8}
+      EVOLVE_MAX_LENGTH: ${EVOLVE_MAX_LENGTH:-40}
+      EVOLVE_CHECKPOINT_EVERY: ${EVOLVE_CHECKPOINT_EVERY:-5}
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import json, os, sys, urllib.error, urllib.request
+        corpus_path = "/app/data/" + os.environ.get("RADIXNET_CORPUS", "sample_corpus.txt")
+        with open(corpus_path, encoding="utf-8") as fh:
+            corpus = [line.strip() for line in fh if line.strip()]
+        body = {
+            "corpus": corpus,
+            "generations": None,
+            "samples": int(os.environ.get("EVOLVE_SAMPLES", "8")),
+            "max_length": int(os.environ.get("EVOLVE_MAX_LENGTH", "40")),
+            "checkpoint_every": int(os.environ.get("EVOLVE_CHECKPOINT_EVERY", "5")),
+        }
+        req = urllib.request.Request(
+            "http://api:8000/api/evolve/start",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                print("autoevolve: started ->", resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            print("autoevolve: API answered", err.code, err.read().decode("utf-8"), file=sys.stderr)
+            sys.exit(0 if err.code == 409 else 1)
+
+  # ---- one-shot training (docker compose run --rm train) -------------------
+  train:
+    <<: *radixnet
+    profiles: ["tools"]
+    command:
+      - --model
+      - /data/model.json
+      - --backend
+      - ${RADIXNET_BACKEND:-auto}
+      - train
+      - --data
+      - /app/data/${RADIXNET_CORPUS:-sample_corpus.txt}
+      - --epochs
+      - "${EPOCHS:-10}"
+      - --lr
+      - "${LR:-0.5}"
+      - --batch-size
+      - "${BATCH:-4}"
+      - --checkpoint-dir
+      - /data/train-checkpoints
+
+  # ---- headless self-upgrading loop (docker compose --profile evolve up -d) -
+  evolve:
+    <<: *radixnet
+    profiles: ["evolve"]
+    container_name: radixnet-evolve
+    command:
+      - --model
+      - /data/model.json
+      - --backend
+      - ${RADIXNET_BACKEND:-auto}
+      - evolve
+      - --data
+      - /app/data/${RADIXNET_CORPUS:-sample_corpus.txt}
+      - --generations
+      - "0"
+      - --samples
+      - "${EVOLVE_SAMPLES:-8}"
+      - --max-length
+      - "${EVOLVE_MAX_LENGTH:-40}"
+      - --batch-size
+      - "${BATCH:-4}"
+      - --discriminator
+      - /data/discriminator.json
+      - --checkpoint-dir
+      - /data/evolve-checkpoints
+      - --checkpoint-every
+      - "1"
+      - --out
+      - /data/model.json
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  # ---- unit tests and benchmark inside the image ---------------------------
+  test:
+    <<: *radixnet
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "unittest"]
+    command: ["discover", "-s", "tests", "-v"]
+
+  bench:
+    <<: *radixnet
+    profiles: ["tools"]
+    command: ["--backend", "${RADIXNET_BACKEND:-auto}", "bench", "--chars", "${BENCH_CHARS:-50000}"]
+
+  # ---- frontend dev server with hot reload (docker compose --profile dev up)
+  frontend-dev:
+    image: node:22-alpine
+    profiles: ["dev"]
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    environment:
+      VITE_PROXY_TARGET: http://api:8000
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "${RADIXNET_DEV_PORT:-5173}:5173"
+    depends_on:
+      - api
+
+volumes:
+  radixnet-data:
+  frontend-node-modules:

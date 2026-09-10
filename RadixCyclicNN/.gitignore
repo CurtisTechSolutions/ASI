@@ -6,3 +6,7 @@ checkpoints/
 /model.json.gz
 /*.json.gz
 .pytest_cache/
+discriminator*.json
+discriminator*.json.gz
+model-from-docker.json
+.env
