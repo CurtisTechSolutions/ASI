@@ -14,3 +14,7 @@ uploads/
 codegen-report.json
 ollama-good.txt
 ollama-garbage.txt
+build/
+*.egg-info/
+dist/
+!frontend/dist/
