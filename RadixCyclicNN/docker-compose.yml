@@ -56,6 +56,8 @@ services:
       RADIXNET_CHECKPOINT_DIR: /data/checkpoints
     ports:
       - "${RADIXNET_PORT:-8000}:8000"
+    # SIGINT = Ctrl-C for the CLI: the server stops a running job cleanly on the way out.
+    stop_signal: SIGINT
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
@@ -157,6 +159,9 @@ services:
       - "1"
       - --out
       - /data/model.json
+    # SIGINT = Ctrl-C for the CLI: finish the current generation, save the model
+    # and the discriminator, then exit (SIGTERM would kill it without saving).
+    stop_signal: SIGINT
     stop_grace_period: 60s
     restart: unless-stopped
 
