@@ -68,6 +68,9 @@ export default function StatusBar({ onStatus }) {
   return (
     <div className="statusbar" aria-live="polite">
       {error ? <span className="stat err">API offline: {error}</span> : null}
+      <span className="stat" title="The active model kind (select it in the header)">
+        model <b>{s.model_label || s.kind || "–"}</b>
+      </span>
       <span className="stat">
         nodes <b>{fmtInt(s.nodes)}</b>
       </span>
@@ -96,6 +99,11 @@ export default function StatusBar({ onStatus }) {
         epochs <b>{fmtInt(s.epochs_total)}</b> · 2NRL runs <b>{fmtInt(s.twonrl_runs)}</b> · last loss{" "}
         <b>{fmtNum(s.last_loss, 4)}</b>
       </span>
+      {s.kind === "count" ? (
+        <span className="stat" title="Sum of rewards and penalties applied to edges">
+          rewards <b>+{fmtNum(s.edge_reward_positive, 1)}</b> / <b>{fmtNum(s.edge_reward_negative, 1)}</b>
+        </span>
+      ) : null}
       <span className={`stat job ${jobState}`}>
         job{" "}
         <b>

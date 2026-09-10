@@ -32,12 +32,15 @@ from .checkpoint import CheckpointManager
 from .encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
-from .model import RadixNet, TrainConfig
+from .beam import Prediction, beam_predict
+from .countnet import CountRewardGraph, CountRewardNet
+from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .search import PathResult, dijkstra_predict, sample_walk
 
 __all__ = [
     "__version__",
-    "RadixNet", "TrainConfig",
+    "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
+    "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
     "get_backend", "describe_backends", "torch_available",
     "CheckpointManager", "Evolver", "EvolveConfig",

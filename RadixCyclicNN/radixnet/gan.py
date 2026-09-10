@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .encoding import WINDOW
-from .model import RadixNet
+from .model import GraphModel, RadixNet
 
 __all__ = ["EvolveConfig", "Evolver"]
 
@@ -68,9 +68,9 @@ class Evolver:
 
     def __init__(
         self,
-        generator: RadixNet,
+        generator: GraphModel,
         corpus: Iterable[str],
-        discriminator: RadixNet | None = None,
+        discriminator: GraphModel | None = None,
         config: EvolveConfig | None = None,
     ) -> None:
         self.config = EvolveConfig() if config is None else config
@@ -80,7 +80,8 @@ class Evolver:
         if not self.corpus:
             raise ValueError(f"corpus needs at least one text of {WINDOW}+ characters")
         if discriminator is None:
-            discriminator = RadixNet(
+            # the same kind as the generator (RadixNet, or the count / reward model)
+            discriminator = type(generator)(
                 seed=self.config.seed + 1, backend=generator.backend.name, device=generator.backend.device
             )
         self.discriminator = discriminator

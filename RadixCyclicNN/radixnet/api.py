@@ -2,7 +2,8 @@
 
 Architecture
 ------------
-* :class:`ModelService` owns one :class:`~radixnet.model.RadixNet` behind an
+* :class:`ModelService` owns one model (a :class:`~radixnet.model.RadixNet` or a
+  :class:`~radixnet.countnet.CountRewardNet`, switchable at run time) behind an
   ``RLock``.  Short operations (predict, generate, score, graph, status, ...)
   run synchronously under the lock.  Long operations - ``train``, ``2nrl`` and
   the GAN-style ``evolve`` loop - run in a daemon thread as a :class:`Job`
@@ -64,7 +65,8 @@ from .codegen import (
 )
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
-from .model import RadixNet, TrainConfig
+from .beam import Prediction, path_probability
+from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
     DEFAULT_URL as OLLAMA_DEFAULT_URL,
@@ -242,6 +244,7 @@ class ModelService:
         upload_dir: str | None = None,
         ollama_url: str | None = None,
         ollama_model: str | None = None,
+        kind: str | None = None,
     ) -> None:
         self.model_path = os.path.abspath(model_path) if model_path else None
         self.checkpoint_dir = os.path.abspath(checkpoint_dir) if checkpoint_dir else None
@@ -263,19 +266,22 @@ class ModelService:
         self._job_ids = itertools.count(1)
         self._evolve_history: list[dict] = []
         self._codegen_history: list[dict] = []
-        self._discriminator: RadixNet | None = None
+        self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
+        self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
+        self._path_kind = model_class(kind).kind  # the kind ``model_path`` belongs to
         if self.model_path and os.path.isfile(self.model_path):
-            self.model = RadixNet.load(self.model_path, backend=backend, device=device)
+            self.model: GraphModel = load_model(self.model_path, backend=backend, device=device)
+            self._path_kind = self.model.kind
             self.loaded_from: str | None = self.model_path
         else:
-            self.model = RadixNet(seed=self.seed, backend=backend, device=device)
+            self.model = new_model(self._path_kind, seed=self.seed, backend=backend, device=device)
             self.loaded_from = None
 
     # -- locking -------------------------------------------------------------
 
     @contextlib.contextmanager
-    def session(self) -> Iterator[RadixNet]:
+    def session(self) -> Iterator[GraphModel]:
         """Hold the model lock.
 
         A running job owns the lock while it works and hands it over at its
@@ -296,7 +302,7 @@ class ModelService:
             self._lock.release()
 
     @contextlib.contextmanager
-    def mutating(self) -> Iterator[RadixNet]:
+    def mutating(self) -> Iterator[GraphModel]:
         """Like :meth:`session` but refuses (409) while a job is running."""
         self._ensure_idle()
         with self.session() as model:
@@ -326,7 +332,7 @@ class ModelService:
         return self._job
 
     @property
-    def discriminator(self) -> RadixNet | None:
+    def discriminator(self) -> GraphModel | None:
         """Discriminator kept across evolve runs of the same model and seed."""
         return self._discriminator
 
@@ -395,6 +401,76 @@ class ModelService:
         job.stop_event.set()
         return job.to_dict()
 
+    # -- model kinds ---------------------------------------------------------
+
+    @property
+    def kind(self) -> str:
+        """The active model's kind (``"radix"`` or ``"count"``)."""
+        return self.model.kind
+
+    def model_path_for(self, kind: str) -> str | None:
+        """Default file of a model kind: ``model_path`` for the kind it belongs to, ``<stem>.<kind><ext>`` otherwise."""
+        if not self.model_path:
+            return None
+        if kind == self._path_kind:
+            return self.model_path
+        root, ext = os.path.splitext(self.model_path)
+        if ext == ".gz":
+            root, inner = os.path.splitext(root)
+            ext = inner + ext
+        return f"{root}.{kind}{ext}"
+
+    def describe_model(self) -> dict:
+        """The active kind, every available kind and where each is saved by default."""
+        kinds = model_kinds()
+        return {
+            "kind": self.kind,
+            "label": type(self.model).label,
+            "kinds": kinds,
+            "model_path": self.model_path_for(self.kind),
+            "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
+            "in_memory": sorted({self.kind, *self._parked}),
+        }
+
+    def select_kind(self, kind: str) -> dict:
+        """Make ``kind`` the active model: the one kept in memory, else its file, else a fresh one.
+
+        The model that was active stays in memory (unsaved work included) and
+        comes back when its kind is selected again; the evolve discriminator
+        and history belong to a model and are dropped on a switch.
+        """
+        cls = model_class(kind)
+        self._ensure_idle()
+        with self.session():
+            self._ensure_idle()
+            origin = "active"
+            if cls.kind != self.model.kind:
+                current = self.model
+                model = self._parked.pop(cls.kind, None)
+                origin = "memory"
+                if model is None:
+                    path = self.model_path_for(cls.kind)
+                    if path and os.path.isfile(path):
+                        model = load_model(path, backend=self.backend_name, device=self.device)
+                        origin = "file"
+                        if model.kind != cls.kind:
+                            raise ApiError(400, f"{path} holds a {model.kind} model, not a {cls.kind} one")
+                    else:
+                        model = cls(seed=self.seed, backend=self.backend_name, device=self.device)
+                        origin = "new"
+                self._parked[current.kind] = current
+                self.model = model
+                self._discriminator = None
+                self._discriminator_seed = None
+                self._evolve_history = []
+                self._log(f"model kind {current.kind} -> {model.kind} ({origin})")
+            result = self.describe_model()
+            result["origin"] = origin
+            result["stats"] = self.model.stats()
+            return result
+
+    # -- jobs (continued) ----------------------------------------------------
+
     def start_train(self, texts: list[str], config: TrainConfig) -> dict:
         """Start a ``train`` job; returns its status."""
         config.validate()
@@ -416,16 +492,17 @@ class ModelService:
         pos_epochs: int = 3,
         neg_lr: float = 0.05,
         pos_lr: float = 0.01,
+        strength: float | None = None,
         **overrides: Any,
     ) -> dict:
-        """Start a ``2nrl`` job (``overrides``: batch_size, auto_compress, clip, shuffle)."""
+        """Start a ``2nrl`` job (``overrides``: batch_size, auto_compress, clip, shuffle; ``strength``: count model)."""
         TrainConfig(epochs=neg_epochs, lr=neg_lr, **overrides).validate()
         TrainConfig(epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, **overrides).validate()
 
         def work(job: Job) -> None:
             self.model.two_nrl(
                 bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
-                progress=self._progress(job), stop_event=job.stop_event, **overrides,
+                progress=self._progress(job), stop_event=job.stop_event, strength=strength, **overrides,
             )
 
         return self._start_job("2nrl", work)
@@ -438,13 +515,16 @@ class ModelService:
         pos_epochs: int = 3,
         neg_lr: float = 0.5,
         pos_lr: float = 0.1,
+        strength: float | None = None,
         **overrides: Any,
     ) -> dict:
         """Start a ``feedback`` job from rated texts (thumbs up = ``good``, thumbs down = ``bad``).
 
-        Both sets: 2NRL (bad, invert, good).  Only ``good``: reward - a
-        positive-phase training pass.  Only ``bad``: punish - a negative-phase
-        pass, then the network is inverted so the rated texts become unlikely.
+        Both sets: ``two_nrl``.  Only ``good``: ``reward``.  Only ``bad``:
+        ``punish``.  For RadixNet that is 2NRL (bad, invert, good), a
+        positive-phase pass, or a negative-phase pass followed by an
+        inversion; the count / reward model penalises and rewards the paths
+        by ``strength`` instead.
         """
         action = feedback_action(good, bad)
         if action is None:
@@ -457,20 +537,18 @@ class ModelService:
             if action == "2nrl":
                 self.model.two_nrl(
                     bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
-                    progress=progress, stop_event=job.stop_event, **overrides,
+                    progress=progress, stop_event=job.stop_event, strength=strength, **overrides,
                 )
             elif action == "reward":
-                self.model.train(
-                    good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10,
-                    progress=lambda rec: progress({**rec, "phase": "positive"}), stop_event=job.stop_event, **overrides,
+                self.model.reward(
+                    good, epochs=pos_epochs, lr=pos_lr, strength=strength, progress=progress, stop_event=job.stop_event,
+                    **overrides,
                 )
             else:
-                self.model.train(
-                    bad, epochs=neg_epochs, lr=neg_lr,
-                    progress=lambda rec: progress({**rec, "phase": "negative"}), stop_event=job.stop_event, **overrides,
+                self.model.punish(
+                    bad, epochs=neg_epochs, lr=neg_lr, strength=strength, progress=progress, stop_event=job.stop_event,
+                    **overrides,
                 )
-                if not job.stop_event.is_set():
-                    self.model.invert()
 
         return self._start_job("feedback", work)
 
@@ -507,9 +585,12 @@ class ModelService:
             stats = model.stats()
         job = self._job
         stats.update(
+            kind=self.kind,
+            model_label=type(self.model).label,
+            kinds=model_kinds(),
             job=job.to_dict() if job is not None else None,
             backends=self.backends,
-            model_path=self.model_path,
+            model_path=self.model_path_for(self.kind),
             checkpoint_dir=self.checkpoint_dir,
             upload_dir=self.upload_dir,
             ollama={"url": self.ollama_url, "model": self.ollama_model},
@@ -517,19 +598,33 @@ class ModelService:
         return stats
 
     def predict(self, prefix: str, **options: Any) -> dict:
+        """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each)."""
         with self.session() as model:
+            if model.kind != "count":
+                options.pop("k", None)
+                options.pop("beam", None)
+                if options.get("mode") == "beam":
+                    options["mode"] = "dijkstra"
             result = model.predict(prefix, **options)
-        return {
+        payload = {
             "prefix": prefix,
+            "kind": model.kind,
             "continuation": result.text,
             "full_text": result.full_text,
             "cost": result.cost,
+            "probability": path_probability(result),
             "step_costs": list(result.step_costs),
             "path": list(result.labels),
             "node_ids": list(result.node_ids),
             "expanded": result.expanded,
             "reached_end": result.reached_end,
         }
+        if isinstance(result, Prediction):
+            payload.update(
+                mode=result.mode, k=result.k, beam=result.beam,
+                top=[_path_dict(r) for r in result.top], bottom=[_path_dict(r) for r in result.bottom],
+            )
+        return payload
 
     def generate(self, **options: Any) -> dict:
         with self.session() as model:
@@ -569,7 +664,7 @@ class ModelService:
     def save(self, path: str | None = None) -> dict:
         """Write the model (default: ``model_path``); allowed while a job runs
         because it snapshots the model at an epoch boundary."""
-        target = path or self.model_path
+        target = path or self.model_path_for(self.kind)
         if not target:
             raise ApiError(400, "no 'path' given and the server was started without a model path")
         target = os.path.abspath(target)
@@ -580,17 +675,22 @@ class ModelService:
     def load(self, path: str) -> dict:
         """Replace the model with the one at ``path`` (parsed outside the lock)."""
         self._ensure_idle()
-        model = RadixNet.load(path, backend=self.backend_name, device=self.device)
+        model = load_model(path, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
 
-    def reset(self, seed: int | None = None) -> dict:
-        """Replace the model with a fresh one (``seed`` defaults to the server seed)."""
+    def reset(self, seed: int | None = None, kind: str | None = None) -> dict:
+        """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind)."""
         self._ensure_idle()
-        model = RadixNet(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device)
+        cls = model_class(kind or self.kind)
+        model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
 
-    def _replace_model(self, model: RadixNet) -> dict:
+    def _replace_model(self, model: GraphModel) -> dict:
+        """Install ``model``; a model of another kind that was active is kept in memory (see :meth:`select_kind`)."""
         with self.mutating():
+            if model.kind != self.model.kind:
+                self._parked[self.model.kind] = self.model
+            self._parked.pop(model.kind, None)
             self.model = model
             self._discriminator = None
             self._discriminator_seed = None
@@ -770,6 +870,20 @@ def _sample_dict(result: PathResult) -> dict:
     }
 
 
+def _path_dict(result: PathResult) -> dict:
+    """One of the top / bottom continuations of a count-model prediction."""
+    return {
+        "continuation": result.text,
+        "full_text": result.full_text,
+        "cost": result.cost,
+        "probability": path_probability(result),
+        "step_costs": list(result.step_costs),
+        "path": list(result.labels),
+        "node_ids": list(result.node_ids),
+        "reached_end": result.reached_end,
+    }
+
+
 def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     """Top-``limit`` alive nodes by visit count (ties: lowest id) plus START/END, and the edges among them."""
     alive = graph.alive
@@ -788,16 +902,18 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     ]
     edge_w = graph.edge_w
     edge_count = graph.edge_count
+    edge_reward = getattr(graph, "edge_reward", None)
     edges = []
     for p in ids:
         for c, e, cost in graph.child_costs(p):
             if c in chosen:
-                edges.append(
-                    {
-                        "source": p, "target": c, "weight": edge_w[e], "count": edge_count[e],
-                        "prob": math.exp(-cost), "cost": cost,
-                    }
-                )
+                edge = {
+                    "source": p, "target": c, "weight": edge_w[e], "count": edge_count[e],
+                    "prob": math.exp(-cost), "cost": cost,
+                }
+                if edge_reward is not None:
+                    edge["reward"] = edge_reward[e]
+                edges.append(edge)
     edges.sort(key=lambda d: (d["source"], d["target"]))
     return {
         "nodes": nodes, "edges": edges, "limit": limit,
@@ -1123,6 +1239,7 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         pos_epochs=f.integer("pos_epochs", 3, minimum=0),
         neg_lr=f.number("neg_lr", 0.5, minimum=0.0),
         pos_lr=f.number("pos_lr", 0.1, minimum=0.0),
+        strength=f.number("strength", None, minimum=0.0),
         **overrides,
     )
     return 202, {"job": job, "action": action, "good": len(good), "bad": len(bad)}
@@ -1188,6 +1305,8 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         temperature=f.number("temperature", 1.0, minimum=0.0),
         to_end=f.flag("to_end", False),
         max_length=f.integer("max_length", None, minimum=0),
+        k=f.integer("k", 5, minimum=0),
+        beam=f.integer("beam", None, minimum=1),
     )
 
 
@@ -1215,6 +1334,7 @@ def _r_two_nrl(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         pos_epochs=f.integer("pos_epochs", 3, minimum=0),
         neg_lr=f.number("neg_lr", 0.05, minimum=0.0),
         pos_lr=f.number("pos_lr", 0.01, minimum=0.0),
+        strength=f.number("strength", None, minimum=0.0),
         **_train_overrides(f),
     )
     return 202, {"job": job}
@@ -1270,7 +1390,21 @@ def _r_load(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _r_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.reset(f.integer("seed", None))
+    return 200, svc.reset(f.integer("seed", None), kind=f.text("kind", None) or None)
+
+
+def _r_model(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.describe_model()
+
+
+def _r_model_select(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    kind = f.text("kind")
+    if not kind:
+        raise ApiError(400, "'kind' must not be empty")
+    try:
+        return 200, svc.select_kind(kind)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
 
 
 def _r_checkpoints(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1569,7 +1703,10 @@ def _r_codegen_run(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
-    ("GET", "/api/status", _r_status, "model stats, current job, backend availability, paths"),
+    ("GET", "/api/status", _r_status, "model stats (with the active kind), current job, backend availability, paths"),
+    ("GET", "/api/model", _r_model, "the active model kind, every kind (radix | count) and their default files"),
+    ("POST", "/api/model/select", _r_model_select,
+     "switch the active model kind: {kind: radix | count}; the previous model stays in memory"),
     ("POST", "/api/train", _r_train,
      "start a training job: {texts | text | files, epochs, lr, act_lr, lr_schedule, act_lr_schedule, batch_size, auto_compress}"),
     ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
@@ -1577,7 +1714,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr} -> {points}"),
     ("GET", "/api/job", _r_job, "status of the current / last job"),
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
-    ("POST", "/api/predict", _r_predict, "continue a prefix: {prefix, length, mode, to_end, step_penalty, temperature, max_length (optional cap; default none)}"),
+    ("POST", "/api/predict", _r_predict,
+     "continue a prefix: {prefix, length, mode, to_end, step_penalty, temperature, max_length (optional cap; default none), "
+     "k, beam (count model: top-K and bottom-K continuations)}"),
     ("POST", "/api/generate", _r_generate, "sample texts from START: {count, max_length, mode, temperature}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
@@ -1590,7 +1729,7 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/evolve/history", _r_evolve_history, "generation records of all evolve runs"),
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
-    ("POST", "/api/reset", _r_reset, "replace the model with a fresh one: {seed}"),
+    ("POST", "/api/reset", _r_reset, "replace the model with a fresh one: {seed, kind}"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
@@ -1964,6 +2103,7 @@ def create_server(
     upload_dir: str | None = None,
     ollama_url: str | None = None,
     ollama_model: str | None = None,
+    kind: str | None = None,
 ) -> tuple[RadixNetHTTPServer, ModelService]:
     """Build (and bind) the server; ``port=0`` picks a free port.
 
@@ -1977,7 +2117,7 @@ def create_server(
     """
     service = ModelService(
         model_path=model_path, checkpoint_dir=checkpoint_dir, backend=backend, device=device,
-        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model,
+        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
     )
     server = RadixNetHTTPServer((host, port), service, frontend_dir=frontend_dir, quiet=quiet)
     return server, service
@@ -1996,12 +2136,13 @@ def run_server(
     upload_dir: str | None = None,
     ollama_url: str | None = None,
     ollama_model: str | None = None,
+    kind: str | None = None,
 ) -> None:
     """Serve until ``KeyboardInterrupt``; a running job is stopped on the way out."""
     server, service = create_server(
         host, port, model_path=model_path, checkpoint_dir=checkpoint_dir, frontend_dir=frontend_dir,
         backend=backend, device=device, seed=seed, quiet=quiet, upload_dir=upload_dir,
-        ollama_url=ollama_url, ollama_model=ollama_model,
+        ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
     )
     if not quiet:
         sys.stderr.write(f"radixnet API listening on {server.url} (Ctrl-C to stop)\n")

@@ -16,7 +16,7 @@ import re
 import threading
 from datetime import datetime, timezone
 
-from .model import RadixNet, read_json_file, write_bytes_atomic
+from .model import GraphModel, load_model, read_json_file, write_bytes_atomic
 
 __all__ = ["CheckpointManager"]
 
@@ -37,7 +37,7 @@ def _sort_key(record: dict) -> tuple[int, str, str]:
 
 
 class CheckpointManager:
-    """Save / list / restore rotated checkpoints of a :class:`RadixNet`.
+    """Save / list / restore rotated checkpoints of a model (any kind: :class:`RadixNet`, ``CountRewardNet``).
 
     ``keep`` is the number of checkpoints retained; the oldest (by
     ``(step, saved_at)``) are pruned after every save, except the one
@@ -129,7 +129,7 @@ class CheckpointManager:
 
     # -- public API ----------------------------------------------------------
 
-    def save(self, model: RadixNet, step: int, tag: str = "epoch", metrics: dict | None = None) -> dict:
+    def save(self, model: GraphModel, step: int, tag: str = "epoch", metrics: dict | None = None) -> dict:
         """Write ``ckpt-<tag>-<step:06d>.json[.gz]``, update ``latest``, prune.
 
         Returns the record ``{"name", "path", "step", "tag", "metrics",
@@ -179,12 +179,12 @@ class CheckpointManager:
             record["path"] = path
             return record
 
-    def load_latest(self, backend: str = "auto", device: str | None = None) -> RadixNet | None:
-        """Load the checkpoint ``latest.json`` points at, or ``None``."""
+    def load_latest(self, backend: str = "auto", device: str | None = None) -> GraphModel | None:
+        """Load the checkpoint ``latest.json`` points at (of whatever model kind it holds), or ``None``."""
         record = self.latest()
         if record is None:
             return None
-        return RadixNet.load(record["path"], backend=backend, device=device)
+        return load_model(record["path"], backend=backend, device=device)
 
     def resolve(self, name_or_path: str) -> str:
         """Absolute path of a checkpoint given its name, stem or path (``FileNotFoundError`` otherwise).
@@ -204,9 +204,9 @@ class CheckpointManager:
                 return os.path.abspath(candidate)
         raise FileNotFoundError(f"no checkpoint {name_or_path!r} in {self.directory}")
 
-    def load(self, name_or_path: str, backend: str = "auto", device: str | None = None) -> RadixNet:
-        """Load a checkpoint by record name, bare stem or file path."""
-        return RadixNet.load(self.resolve(name_or_path), backend=backend, device=device)
+    def load(self, name_or_path: str, backend: str = "auto", device: str | None = None) -> GraphModel:
+        """Load a checkpoint by record name, bare stem or file path (of whatever model kind it holds)."""
+        return load_model(self.resolve(name_or_path), backend=backend, device=device)
 
     def delete(self, name: str) -> bool:
         """Remove a checkpoint; ``latest`` moves to the newest remaining one.

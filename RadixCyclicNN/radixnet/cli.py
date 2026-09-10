@@ -30,7 +30,8 @@ from typing import Any, NoReturn, TextIO, TypeVar
 from . import __version__
 from .checkpoint import CheckpointManager
 from .gan import EvolveConfig, Evolver
-from .model import RadixNet, TrainConfig
+from .beam import Prediction, path_probability
+from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 
 __all__ = ["main", "build_parser", "CliError", "EXIT_OK", "EXIT_ERROR", "EXIT_ABORTED"]
 
@@ -40,6 +41,9 @@ DEFAULT_CHECKPOINT_DIR = "checkpoints"
 DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
+PREDICT_MODES = ("dijkstra", "beam", "sample")
+KINDS = ("radix", "count")
+DEFAULT_COUNT_MODEL = "model.count.json"
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -404,8 +408,16 @@ def effective_seed(args: argparse.Namespace) -> int:
     return 0 if args.seed is None else int(args.seed)
 
 
-def backend_label(model: RadixNet) -> str:
+def backend_label(model: GraphModel) -> str:
     return f"{model.backend.name} ({model.backend.device})"
+
+
+def kind_label(model: GraphModel) -> str:
+    return f"{model.kind} ({type(model).label})"
+
+
+def effective_kind(args: argparse.Namespace) -> str:
+    return getattr(args, "kind", None) or "radix"
 
 
 def read_text_file(path: str) -> str:
@@ -442,30 +454,36 @@ def read_texts(paths: Sequence[str], whole_file: bool = False, what: str = "trai
 
 def open_model(
     args: argparse.Namespace, console: Console, *, required: bool, manager: CheckpointManager | None = None
-) -> tuple[RadixNet, Origin]:
-    """Load ``--model`` (or the latest checkpoint of ``manager``), else create a fresh model.
+) -> tuple[GraphModel, Origin]:
+    """Load ``--model`` (or the latest checkpoint of ``manager``), else create a fresh model of ``--kind``.
 
     ``required`` turns a missing model file into an error (inference and
     maintenance commands); training commands start from a new model instead.
+    A file's own kind wins over ``--kind`` (a note says so when they differ).
     """
     backend, device = args.backend, args.device
+    wanted = getattr(args, "kind", None)
     if manager is not None:
         record = manager.latest()
         if record is not None:
-            model = RadixNet.load(record["path"], backend=backend, device=device)
-            return model, Origin("checkpoint", record["path"], f"{model.meta['epochs_total']} epochs trained")
+            model = load_model(record["path"], backend=backend, device=device)
+            return model, Origin("checkpoint", record["path"], f"{model.kind}, {model.meta['epochs_total']} epochs trained")
         console.note(f"note: no checkpoint to resume from in {manager.directory}")
     path = args.model
     if os.path.isfile(path):
-        model = RadixNet.load(path, backend=backend, device=device)
-        return model, Origin("model", path, f"{model.meta['epochs_total']} epochs trained")
+        model = load_model(path, backend=backend, device=device)
+        if wanted and wanted != model.kind:
+            console.note(f"note: {path} holds a {model.kind} model; --kind {wanted} applies to new models only")
+        return model, Origin("model", path, f"{model.kind}, {model.meta['epochs_total']} epochs trained")
     if required:
         raise CliError(f"model file not found: {path} (train one first with `{PROG} train --data FILE`)")
     seed = effective_seed(args)
-    return RadixNet(seed=seed, backend=backend, device=device), Origin("new", None, f"seed {seed}")
+    kind = effective_kind(args)
+    model = model_class(kind)(seed=seed, backend=backend, device=device)
+    return model, Origin("new", None, f"seed {seed}, kind {kind}")
 
 
-def save_model(model: RadixNet, path: str) -> dict:
+def save_model(model: GraphModel, path: str) -> dict:
     model.save(path)
     return {"path": path, "bytes": os.path.getsize(path)}
 
@@ -495,7 +513,7 @@ def _resolve_frontend_dir(path: str | None) -> str:
     return packaged if os.path.isdir(packaged) else DEFAULT_FRONTEND_DIR
 
 
-def _finish_training(console: Console, model: RadixNet, out: str, interrupted: bool, printer: _RowPrinter, unit: str) -> dict:
+def _finish_training(console: Console, model: GraphModel, out: str, interrupted: bool, printer: _RowPrinter, unit: str) -> dict:
     """Common tail of train / 2nrl / evolve: note an early stop, save, report."""
     if interrupted:
         console.note(f"stopped after {printer.seen} {unit}(s); saving")
@@ -572,18 +590,27 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
 
 def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
-    result = model.predict(
-        args.prefix, length=args.length, mode=args.mode, step_penalty=args.step_penalty,
-        temperature=args.temperature, to_end=args.to_end, max_length=args.max_length,
+    mode = args.mode
+    options = dict(
+        length=args.length, mode=mode, step_penalty=args.step_penalty, temperature=args.temperature,
+        to_end=args.to_end, max_length=args.max_length,
     )
+    if model.kind == "count":
+        options.update(k=args.k, beam=args.beam)
+    elif mode == "beam":
+        console.note("note: 'beam' (top-K / bottom-K) belongs to the count model; using dijkstra")
+        mode = options["mode"] = "dijkstra"
+    result = model.predict(args.prefix, **options)
     console.pairs([
+        ("model", kind_label(model)),
         ("prefix", quote(args.prefix)),
         ("continuation", quote(result.text)),
         ("full text", quote(result.full_text)),
         ("cost", result.cost),
+        ("probability", path_probability(result)),
         ("reached end", result.reached_end),
         ("expanded", result.expanded),
-        ("mode", args.mode),
+        ("mode", mode),
     ])
     console.say()
     console.say("path:")
@@ -593,18 +620,34 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         for i, (node, label) in enumerate(zip(result.node_ids, result.labels))
     ]
     console.table(("step", "node", "cost", "label"), rows)
-    return {
+    doc = {
         "prefix": args.prefix,
+        "kind": model.kind,
         "continuation": result.text,
         "full_text": result.full_text,
         "cost": result.cost,
+        "probability": path_probability(result),
         "step_costs": list(result.step_costs),
         "path": list(result.labels),
         "node_ids": list(result.node_ids),
         "expanded": result.expanded,
         "reached_end": result.reached_end,
-        "mode": args.mode,
+        "mode": mode,
     }
+    if isinstance(result, Prediction):
+        for title, paths in (("top", result.top), ("bottom", result.bottom)):
+            console.say()
+            console.say(f"{title} {len(paths)} continuation(s) (k={result.k}, beam={result.beam}):")
+            console.table(
+                ("#", "cost", "prob", "end", "continuation"),
+                [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 80))] for i, r in enumerate(paths)],
+            )
+        doc.update(
+            k=result.k, beam=result.beam,
+            top=[{**r.to_dict(), "probability": path_probability(r)} for r in result.top],
+            bottom=[{**r.to_dict(), "probability": path_probability(r)} for r in result.bottom],
+        )
+    return doc
 
 
 def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
@@ -640,6 +683,20 @@ def cmd_score(args: argparse.Namespace, console: Console) -> dict:
     return {"results": results, "count": len(results), "mean_log_prob": mean_log_prob, "mean_per_char": mean_per_char}
 
 
+def _phase_pairs(model: GraphModel, args: argparse.Namespace) -> list[tuple[str, Any]]:
+    """Console lines describing the negative / positive phases for the model's kind."""
+    if model.kind == "count":
+        return [
+            ("negative", f"{args.neg_epochs} pass(es): reward -= {args.strength} on every edge of the bad paths"),
+            ("positive", f"{args.pos_epochs} pass(es): traversal counted and reward += {args.strength} on the good paths"),
+        ]
+    return [
+        ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
+        ("positive", f"epochs={args.pos_epochs} lr={args.pos_lr} act_lr={args.pos_lr / 10}"),
+        ("batch", args.batch_size),
+    ]
+
+
 def cmd_two_nrl(args: argparse.Namespace, console: Console) -> dict:
     bad = read_texts([args.bad], what="bad")
     good = read_texts([args.good], what="good")
@@ -647,12 +704,11 @@ def cmd_two_nrl(args: argparse.Namespace, console: Console) -> dict:
     out = args.out or args.model
     console.pairs([
         ("model", origin.describe()),
+        ("kind", kind_label(model)),
         ("backend", backend_label(model)),
         ("bad", f"{len(bad)} texts from {args.bad}"),
         ("good", f"{len(good)} texts from {args.good}"),
-        ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
-        ("positive", f"epochs={args.pos_epochs} lr={args.pos_lr} act_lr={args.pos_lr / 10}"),
-        ("batch", args.batch_size),
+        *_phase_pairs(model, args),
         ("output", out),
     ])
     console.say()
@@ -661,7 +717,7 @@ def cmd_two_nrl(args: argparse.Namespace, console: Console) -> dict:
     result, interrupted = run_interruptible(
         lambda: model.two_nrl(
             bad, good, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
-            pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size,
+            pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size, strength=args.strength,
         ),
         stop, console, "epoch",
     )
@@ -736,16 +792,20 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     action = "2nrl" if good and bad else ("reward" if good else "punish")
     model, origin = open_model(args, console, required=False)
     out = args.out or args.model
+    if model.kind == "count":
+        wording = {"2nrl": "2NRL: penalise the bad paths, then count + reward the good ones",
+                   "reward": "reward: count + reward the good paths", "punish": "punish: penalise the bad paths"}
+    else:
+        wording = {"2nrl": "2NRL: bad -> invert -> good", "reward": "reward: train on the good texts",
+                   "punish": "punish: train on the bad texts, then invert"}
     console.pairs([
         ("model", origin.describe()),
+        ("kind", kind_label(model)),
         ("backend", backend_label(model)),
         ("thumbs up", f"{len(good)} texts"),
         ("thumbs down", f"{len(bad)} texts"),
-        ("action", {"2nrl": "2NRL: bad -> invert -> good", "reward": "reward: train on the good texts",
-                    "punish": "punish: train on the bad texts, then invert"}[action]),
-        ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
-        ("positive", f"epochs={args.pos_epochs} lr={args.pos_lr} act_lr={args.pos_lr / 10}"),
-        ("batch", args.batch_size),
+        ("action", wording[action]),
+        *_phase_pairs(model, args),
         ("output", out),
     ])
     console.say()
@@ -756,21 +816,19 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
         if action == "2nrl":
             return model.two_nrl(
                 bad, good, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
-                pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size,
+                pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size, strength=args.strength,
             )
         if action == "reward":
-            records = model.train(
-                good, epochs=args.pos_epochs, lr=args.pos_lr, act_lr=args.pos_lr / 10, batch_size=args.batch_size,
-                progress=lambda rec: printer({**rec, "phase": "positive"}), stop_event=stop,
+            records = model.reward(
+                good, epochs=args.pos_epochs, lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
+                progress=printer, stop_event=stop,
             )
-            return {"negative": [], "positive": [{**r, "phase": "positive"} for r in records], "inverted": model.graph.inverted}
-        records = model.train(
-            bad, epochs=args.neg_epochs, lr=args.neg_lr, batch_size=args.batch_size,
-            progress=lambda rec: printer({**rec, "phase": "negative"}), stop_event=stop,
+            return {"negative": [], "positive": records, "inverted": model.graph.inverted}
+        records = model.punish(
+            bad, epochs=args.neg_epochs, lr=args.neg_lr, batch_size=args.batch_size, strength=args.strength,
+            progress=printer, stop_event=stop,
         )
-        if not stop.is_set():
-            model.invert()
-        return {"negative": [{**r, "phase": "negative"} for r in records], "positive": [], "inverted": model.graph.inverted}
+        return {"negative": records, "positive": [], "inverted": model.graph.inverted}
 
     result, interrupted = run_interruptible(work, stop, console, "epoch")
     saved = _finish_training(console, model, out, interrupted, printer, "epoch")
@@ -823,11 +881,11 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
     manager = checkpoint_manager(args)
     every = checkpoint_every(args, manager)
     generator, origin = open_model(args, console, required=False)
-    discriminator: RadixNet | None = None
+    discriminator: GraphModel | None = None
     disc_origin: Origin | None = None
     if args.discriminator:
         if os.path.isfile(args.discriminator):
-            discriminator = RadixNet.load(args.discriminator, backend=args.backend, device=args.device)
+            discriminator = load_model(args.discriminator, backend=args.backend, device=args.device)
             disc_origin = Origin("model", args.discriminator, f"{discriminator.meta['epochs_total']} epochs trained")
         else:
             disc_origin = Origin("new", None, f"seed {effective_seed(args) + 1}, saved to {args.discriminator}")
@@ -887,6 +945,7 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
     tail = model.history[-args.tail:] if args.tail > 0 else []
     console.pairs([
         ("model", args.model),
+        ("kind", kind_label(model)),
         ("backend", backend_label(model)),
         ("nodes", stats["nodes"]),
         ("edges", stats["edges"]),
@@ -897,6 +956,9 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
         ("trained", f"{stats['trained_texts']} texts, {stats['trained_chars']} chars"),
         ("2NRL runs", stats["twonrl_runs"]),
         ("last loss", stats["last_loss"]),
+        *([("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
+                       f"{stats['feedback_passes']} feedback pass(es); edge rewards +{fmt(stats['edge_reward_positive'])} "
+                       f"/ {fmt(stats['edge_reward_negative'])}")] if model.kind == "count" else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -938,7 +1000,7 @@ def cmd_checkpoints(args: argparse.Namespace, console: Console) -> dict:
         except FileNotFoundError as exc:
             raise CliError(str(exc)) from None
         record = next((r for r in records if r["path"] == path), None) or {"name": os.path.basename(path), "path": path}
-    model = RadixNet.load(record["path"], backend=args.backend, device=args.device)
+    model = load_model(record["path"], backend=args.backend, device=args.device)
     out = args.out or args.model
     saved = save_model(model, out)
     stats = model.stats()
@@ -1203,6 +1265,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         "url": f"http://{args.host}:{args.port}/",
         "model": args.model,
         "model_exists": os.path.isfile(args.model),
+        "kind": effective_kind(args),
         "checkpoint_dir": args.checkpoint_dir,
         "upload_dir": args.upload_dir,
         "frontend_dir": frontend_dir,
@@ -1230,6 +1293,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         host=args.host, port=args.port, model_path=args.model, checkpoint_dir=args.checkpoint_dir,
         frontend_dir=frontend_dir, backend=args.backend, device=args.device, seed=effective_seed(args),
         upload_dir=args.upload_dir, ollama_url=args.ollama_url, ollama_model=args.ollama_model,
+        kind=getattr(args, "kind", None),
     )
     return None
 
@@ -1303,6 +1367,11 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="backend device (cpu, cuda, mps); default: the backend's own choice")
     group.add_argument("--seed", type=int, metavar="N", default=default(None),
                        help="RNG seed for a newly created model (default 0) and for `generate` sampling")
+    group.add_argument("--kind", choices=KINDS, default=default(None),
+                       help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
+                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction); a "
+                            "loaded file's own kind always wins.  With --kind count the default --model is "
+                            f"{DEFAULT_COUNT_MODEL}")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 
@@ -1323,6 +1392,8 @@ def _add_two_nrl_options(parser: argparse.ArgumentParser, neg_epochs: int, pos_e
     group.add_argument("--pos-lr", type=nonneg_float, default=0.01,
                        help="learning rate of the positive phase (activation parameters use a tenth of it)")
     group.add_argument("--batch-size", type=pos_int, default=batch_size, help="transitions per backend step in both phases")
+    group.add_argument("--strength", type=nonneg_float, default=1.0,
+                       help="count model: reward / penalty added to every edge of a path per pass (radix: ignored)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1390,7 +1461,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--length", type=nonneg_int, default=20, help="characters to emit (dijkstra: minimum)")
     p.add_argument("--max-length", type=nonneg_int, metavar="N",
                    help="optional hard cap on emitted characters (default: no limit; dijkstra returns the whole cheapest path)")
-    p.add_argument("--mode", choices=MODES, default="dijkstra", help="search strategy")
+    p.add_argument("--mode", choices=PREDICT_MODES, default="dijkstra",
+                   help="search strategy (beam = the count model's top-K / bottom-K search; dijkstra means beam there)")
+    p.add_argument("--k", type=nonneg_int, default=5, help="count model: continuations per side (top K and bottom K)")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="count model: beam width (default: max(4k, 16))")
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
@@ -1455,7 +1529,8 @@ def build_parser() -> argparse.ArgumentParser:
         "Thumbs up (--good / --good-text) are correct texts, thumbs down (--bad / --bad-text) garbage.  Both:\n"
         "2NRL (train on the bad texts, invert, fine-tune on the good ones).  Only good: reward (a positive-phase\n"
         "pass).  Only bad: punish (a negative-phase pass, then the network is inverted so those texts become\n"
-        "unlikely).  The same rule the frontend's Generate tab uses for its ratings.",
+        "unlikely).  The count / reward model penalises / rewards the rated paths by --strength instead (no\n"
+        "inversion).  The same rule the frontend's Generate tab uses for its ratings.",
     )
     p.add_argument("--good", metavar="FILE", help="thumbs-up texts, one per line")
     p.add_argument("--bad", metavar="FILE", help="thumbs-down texts, one per line")
@@ -1467,6 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
     group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase (activation parameters use a tenth)")
     group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step (rated sets are small)")
+    group.add_argument("--strength", type=nonneg_float, default=1.0,
+                       help="count model: reward / penalty added to every edge of a rated path per pass (radix: ignored)")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_feedback)
 
@@ -1700,6 +1777,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse: --help / --version (0) or a usage error (1)
         return exc.code if isinstance(exc.code, int) else (EXIT_OK if exc.code is None else EXIT_ERROR)
+    if getattr(args, "kind", None) == "count" and args.model == DEFAULT_MODEL:
+        args.model = DEFAULT_COUNT_MODEL  # a count model does not overwrite the radix default file
     console = Console(bool(args.json))
     try:
         doc = args.handler(args, console)

@@ -810,14 +810,12 @@ class CodeGenTrainer:
             )
             result.update(action="2nrl", neg_loss=_last_loss(outcome["negative"]), pos_loss=_last_loss(outcome["positive"]))
         elif good_all:
-            records = self.model.train(
-                good_all, epochs=cfg.pos_epochs, lr=cfg.pos_lr, act_lr=cfg.pos_lr / 10, batch_size=cfg.batch_size,
-                stop_event=self._stop,
+            records = self.model.reward(
+                good_all, epochs=cfg.pos_epochs, lr=cfg.pos_lr, batch_size=cfg.batch_size, stop_event=self._stop,
             )
             result.update(action="reward", pos_loss=_last_loss(records))
-        else:  # punish only: negative phase, then invert so the wrong programs become unlikely
-            records = self.model.train(bad, epochs=cfg.neg_epochs, lr=cfg.neg_lr, batch_size=cfg.batch_size, stop_event=self._stop)
-            self.model.invert()
+        else:  # punish only: negative phase, then (RadixNet) invert so the wrong programs become unlikely
+            records = self.model.punish(bad, epochs=cfg.neg_epochs, lr=cfg.neg_lr, batch_size=cfg.batch_size, stop_event=self._stop)
             result.update(action="punish", neg_loss=_last_loss(records))
         for text in good:
             if text not in self.replay_buffer:

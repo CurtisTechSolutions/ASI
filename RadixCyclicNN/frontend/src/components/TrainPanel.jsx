@@ -48,7 +48,8 @@ export default function TrainPanel({ status }) {
   const { job, running, busy, error, start, stop, clearError } = useJob("train");
 
   const otherJobRunning = jobIsRunning(status) && !running;
-  const scheduled = lrSchedule.trim() !== "" || actLrSchedule.trim() !== "";
+  const countKind = Boolean(status && status.kind === "count");
+  const scheduled = !countKind && (lrSchedule.trim() !== "" || actLrSchedule.trim() !== "");
 
   const loadHistory = useCallback(async () => {
     try {
@@ -147,8 +148,8 @@ export default function TrainPanel({ status }) {
         epochs: parseInteger(epochs, 5),
         lr: parseNumber(lr, 0.05),
         act_lr: parseNumber(actLr, 0.005),
-        ...(lrSchedule.trim() ? { lr_schedule: lrSchedule.trim() } : {}),
-        ...(actLrSchedule.trim() ? { act_lr_schedule: actLrSchedule.trim() } : {}),
+        ...(scheduled && lrSchedule.trim() ? { lr_schedule: lrSchedule.trim() } : {}),
+        ...(scheduled && actLrSchedule.trim() ? { act_lr_schedule: actLrSchedule.trim() } : {}),
         batch_size: parseInteger(batchSize, 256),
         auto_compress: autoCompress,
       }),
@@ -210,10 +211,17 @@ export default function TrainPanel({ status }) {
             onChange={setBatchSize}
             min={1}
             step={1}
-            disabled={running}
+            disabled={running || countKind}
+            hint={countKind ? "not used by the count model" : undefined}
           />
         </div>
-        <div className="row">
+        {countKind ? (
+          <p className="muted">
+            Count / reward model: every epoch counts one more traversal of each text's path (edge weight = log(1 +
+            traversals) + rewards). There are no learning rates or batches to set.
+          </p>
+        ) : null}
+        <div className="row" hidden={countKind}>
           <NumberField label="Learning rate" hint="lr0" value={lr} onChange={setLr} min={0} disabled={running} />
           <NumberField
             label="Activation lr"
@@ -224,7 +232,7 @@ export default function TrainPanel({ status }) {
             disabled={running}
           />
         </div>
-        <fieldset className="schedule">
+        <fieldset className="schedule" hidden={countKind}>
           <legend>Learning-rate schedule (graph function of the epoch)</legend>
           <SelectField
             label="Preset"

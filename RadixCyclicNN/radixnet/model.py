@@ -35,7 +35,20 @@ from .graph import END, START, RadixCyclicGraph
 from .search import PathResult, dijkstra_predict, sample_walk
 from .schedule import preview_points
 
-__all__ = ["TrainConfig", "RadixNet", "UNKNOWN_PROB", "MODEL_FORMAT", "MODEL_FORMAT_VERSION"]
+__all__ = [
+    "GraphModel",
+    "MODEL_FORMAT",
+    "MODEL_FORMAT_VERSION",
+    "RadixNet",
+    "TrainConfig",
+    "UNKNOWN_PROB",
+    "load_model",
+    "model_class",
+    "model_classes",
+    "model_from_dict",
+    "model_kinds",
+    "new_model",
+]
 
 MODEL_FORMAT = "radixnet"
 MODEL_FORMAT_VERSION = 1
@@ -166,22 +179,27 @@ def _resolve_config(config: TrainConfig | None, overrides: dict) -> TrainConfig:
     return cfg
 
 
-class RadixNet:
-    """The self-compressing cyclic-graph network.
+class GraphModel:
+    """What every model kind shares: the graph, text encoding, prefix location, sampling, scoring, persistence.
 
-    ``graph`` holds structure and parameters, ``backend`` runs the learning
-    rule, ``history`` collects one record per trained epoch and ``meta``
-    keeps lifetime counters.  All records are plain JSON-serialisable dicts.
+    Concrete kinds (:class:`RadixNet`, :class:`~radixnet.countnet.CountRewardNet`)
+    differ in how edges get their weights (``train`` / ``reward`` / ``punish`` /
+    ``two_nrl`` / ``invert``) and in what ``predict`` returns; everything below
+    only needs ``graph``, ``encoder`` and ``decoder``.  ``kind`` names the
+    algorithm in files, the API and the CLI.
     """
 
-    def __init__(self, seed: int = 0, backend: str = "auto", device: str | None = None) -> None:
-        self.seed = int(seed)
-        self.graph = RadixCyclicGraph(seed=self.seed)
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
-        self.backend: Backend = get_backend(backend, device)
-        self.history: list[dict] = []
-        self.meta: dict = self._new_meta(self.seed)
+    kind = "graph"
+    label = "graph model"
+    description = ""
+
+    graph: RadixCyclicGraph
+    encoder: Encoder
+    decoder: Decoder
+    backend: Backend
+    history: list[dict]
+    meta: dict
+    seed: int
 
     @staticmethod
     def _new_meta(seed: int) -> dict:
@@ -194,7 +212,37 @@ class RadixNet:
             "twonrl_runs": 0,
         }
 
-    # -- training ------------------------------------------------------------
+    # -- the algorithm-specific part (implemented by every kind) -------------
+
+    def train(self, texts, config=None, *, checkpoint_manager=None, progress=None, stop_event=None, phase=None, **overrides):
+        raise NotImplementedError
+
+    def predict(self, prefix: str, **options):
+        raise NotImplementedError
+
+    def two_nrl(self, bad, good, **options) -> dict:
+        raise NotImplementedError
+
+    def reward(self, texts, **options) -> list[dict]:
+        raise NotImplementedError
+
+    def punish(self, texts, **options) -> list[dict]:
+        raise NotImplementedError
+
+    def invert(self) -> None:
+        raise NotImplementedError
+
+    def stats(self) -> dict:
+        raise NotImplementedError
+
+    def to_dict(self) -> dict:
+        raise NotImplementedError
+
+    @classmethod
+    def from_dict(cls, d: dict, backend: str = "auto", device: str | None = None):
+        raise NotImplementedError
+
+    # -- texts and structure -------------------------------------------------
 
     @staticmethod
     def _clean_texts(texts: Iterable[str] | str) -> tuple[list[str], int]:
@@ -211,8 +259,8 @@ class RadixNet:
                 kept.append(t)
         return kept, skipped
 
-    def _observe(self, texts: list[str], count: bool) -> tuple[list[tuple[int, int]], int]:
-        """Register every text structurally; returns ``(transitions, structure_version)``.
+    def _observe_grams(self, grams: list[list[str]], count: bool) -> list[tuple[int, int]]:
+        """Register encoded texts structurally; returns the ``(parent_id, edge_id)`` transitions.
 
         A text observed later can split a node that an earlier text's
         transition points at (the edge moves to the new node), so whenever the
@@ -221,7 +269,6 @@ class RadixNet:
         """
         graph = self.graph
         observe = graph.observe_sequence
-        grams = [self.encoder.encode(t) for t in texts]
         before = graph.structure_version
         transitions: list[tuple[int, int]] = []
         extend = transitions.extend
@@ -232,7 +279,251 @@ class RadixNet:
             extend = transitions.extend
             for g in grams:
                 extend(observe(g, False))
-        return transitions, graph.structure_version
+        return transitions
+
+    def _observe(self, texts: list[str], count: bool) -> tuple[list[tuple[int, int]], int]:
+        """Register every text structurally; returns ``(transitions, structure_version)``."""
+        transitions = self._observe_grams([self.encoder.encode(t) for t in texts], count)
+        return transitions, self.graph.structure_version
+
+    # -- locating a prefix ---------------------------------------------------
+
+    def _best_trigram(self, key: str) -> tuple[int, int] | None:
+        """Most-visited ``(node, offset)`` holding a trigram that starts with ``key``."""
+        count = self.graph.count
+        best: tuple[int, int] | None = None
+        best_rank: tuple[int, int, int] | None = None
+        for t, (node, off) in self.graph.trigram_index.items():
+            if t.startswith(key):
+                rank = (-count[node], node, off)
+                if best_rank is None or rank < best_rank:
+                    best, best_rank = (node, off), rank
+        return best
+
+    def _best_node_with_prefix(self, prefix: str) -> int | None:
+        """Most-visited real node whose label starts with ``prefix``."""
+        g = self.graph
+        best: int | None = None
+        best_count = -1
+        for node in range(2, len(g.labels)):
+            if g.alive[node] and g.labels[node].startswith(prefix):
+                c = g.count[node]
+                if c > best_count:
+                    best, best_count = node, c
+        return best
+
+    def _locate(self, prefix: str) -> tuple[int, int, int]:
+        """``(node, offset, matched)``: where ``prefix`` ends in the graph.
+
+        ``matched`` is how many characters of the located trigram (or, for a
+        short prefix, of the node label) the prefix actually covers; the rest
+        of that trigram is a guessed continuation.  ``(START, 0, 0)`` if
+        nothing matches.
+        """
+        n = len(prefix)
+        if n == 0:
+            return START, 0, 0
+        if n >= _W:
+            loc = self.graph.lookup(prefix[-_W:])
+            if loc is not None:
+                return loc[0], loc[1], _W
+            for m in (_W - 1, 1):
+                found = self._best_trigram(prefix[-m:])
+                if found is not None:
+                    return found[0], found[1], m
+            return START, 0, 0
+        node = self._best_node_with_prefix(prefix)
+        if node is not None:
+            return node, 0, n
+        return START, 0, 0
+
+    def locate(self, prefix: str) -> tuple[int, int]:
+        """Node and trigram offset where a prediction for ``prefix`` starts.
+
+        Exact match of the last three characters first; otherwise the
+        most-visited node holding a trigram that starts with the last two
+        (then the last one) characters; a prefix shorter than three characters
+        matches the most-visited node whose label starts with it.  Falls back
+        to ``(START, 0)``.
+        """
+        node, offset, _ = self._locate(prefix)
+        return node, offset
+
+    def _prefix_start(self, prefix: str) -> tuple[int, int, str]:
+        """``(node, offset, lead)`` for a prediction: where the prefix ends and the unmatched rest of that trigram.
+
+        When only a partial trigram of the prefix could be matched, ``lead`` is
+        the remainder of the located trigram - a guessed opening of the
+        continuation that every predicted path starts with.
+        """
+        node, offset, matched = self._locate(prefix)
+        lead = "" if node == START or matched >= _W else self.graph.labels[node][offset + matched : offset + _W]
+        return node, offset, lead
+
+    # -- generation and scoring ----------------------------------------------
+
+    def generate(
+        self,
+        max_length: int = 60,
+        mode: str = "sample",
+        temperature: float = 1.0,
+        count: int = 1,
+        seed: int | None = None,
+    ) -> list[PathResult]:
+        """Generate texts from START.
+
+        ``"sample"`` draws ``count`` stochastic walks (``seed`` gives a private
+        RNG; otherwise the model's seeded RNG is consumed); ``"dijkstra"``
+        returns the single cheapest path to END, so the list has one entry.
+        """
+        if max_length < 0:
+            raise ValueError(f"max_length must be >= 0, got {max_length}")
+        if count < 0:
+            raise ValueError(f"count must be >= 0, got {count}")
+        mode = (mode or "sample").lower()
+        if mode not in ("dijkstra", "sample"):
+            raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra' or 'sample'")
+        if count == 0:
+            return []
+        graph = self.graph
+        if mode == "dijkstra":
+            result = dijkstra_predict(graph, START, 0, min_chars=0, max_chars=max_length, to_end=True)
+            result.full_text = result.text
+            return [result]
+        rng = random.Random(seed) if seed is not None else None
+        results: list[PathResult] = []
+        for _ in range(count):
+            result = sample_walk(graph, START, 0, max_chars=max_length, temperature=temperature, rng=rng)
+            result.full_text = result.text
+            results.append(result)
+        return results
+
+    def _edge_log_prob(self, p: int, offset: int, c: int) -> float | None:
+        """``log P(c | p)`` for the edge ``p -> c`` taken from ``p``'s trigram at ``offset``.
+
+        ``None`` when ``p`` is not positioned at its last trigram (a transition
+        out of the middle of a compressed node is impossible) or the edge does
+        not exist.
+        """
+        g = self.graph
+        if p != START and offset + _W != len(g.labels[p]):
+            return None
+        for child, _edge, cost in g.child_costs(p):
+            if child == c:
+                return -cost
+        return None
+
+    def score(self, text: str) -> dict:
+        """Log-probability of ``text`` under the model.
+
+        The text's trigrams are walked ``START -> ... -> END`` through the
+        structure; every edge contributes ``log softmax`` of its score, steps
+        inside a compressed node are deterministic (cost 0) and are not
+        counted as transitions.  An unknown trigram, a missing edge or a
+        transition that would need a split contributes ``log(UNKNOWN_PROB)``
+        and is counted in ``unknown_transitions``.
+        """
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        grams = self.encoder.encode(text)
+        chars = len(text)
+        if not grams:
+            return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0, "unknown_transitions": 0}
+        index = self.graph.trigram_index
+        log_prob = 0.0
+        transitions = 0
+        unknown = 0
+        node = START
+        offset = 0
+        lost = False  # position unknown after an unknown trigram
+        for t in grams:
+            loc = index.get(t)
+            if loc is None:
+                transitions += 1
+                unknown += 1
+                log_prob += _LOG_UNKNOWN
+                lost = True
+                continue
+            n, o = loc
+            if not lost and n == node and o == offset + 1:
+                offset = o  # deterministic in-node step
+                continue
+            transitions += 1
+            lp = None if lost or o != 0 else self._edge_log_prob(node, offset, n)
+            if lp is None:
+                unknown += 1
+                log_prob += _LOG_UNKNOWN
+            else:
+                log_prob += lp
+            node, offset, lost = n, o, False
+        transitions += 1
+        lp = None if lost else self._edge_log_prob(node, offset, END)
+        if lp is None:
+            unknown += 1
+            log_prob += _LOG_UNKNOWN
+        else:
+            log_prob += lp
+        return {
+            "log_prob": log_prob,
+            "per_char": log_prob / max(1, chars),
+            "chars": chars,
+            "transitions": transitions,
+            "unknown_transitions": unknown,
+        }
+
+    # -- structure -----------------------------------------------------------
+
+    def compress(self) -> int:
+        """Merge all unary chains; returns the number of merges."""
+        return self.graph.compress()
+
+    # -- persistence ---------------------------------------------------------
+
+    def save(self, path: str) -> None:
+        """Write the model as JSON (gzip when ``path`` ends with ``.gz``), atomically."""
+        payload = json.dumps(self.to_dict(), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        write_bytes_atomic(path, payload, use_gzip=path.endswith(".gz"))
+
+    @classmethod
+    def load(cls, path: str, backend: str = "auto", device: str | None = None) -> "GraphModel":
+        """Load a model written by :meth:`save` (of this class; :func:`load_model` detects the kind)."""
+        return cls.from_dict(read_json_file(path), backend=backend, device=device)
+
+    def __repr__(self) -> str:
+        g = self.graph
+        return (
+            f"{type(self).__name__}(seed={self.seed}, nodes={g.num_nodes()}, edges={g.num_edges()}, "
+            f"trigrams={g.num_trigrams()}, inverted={g.inverted})"
+        )
+
+
+class RadixNet(GraphModel):
+    """The self-compressing cyclic-graph network.
+
+    ``graph`` holds structure and parameters, ``backend`` runs the learning
+    rule, ``history`` collects one record per trained epoch and ``meta``
+    keeps lifetime counters.  All records are plain JSON-serialisable dicts.
+    """
+
+    kind = "radix"
+    format = MODEL_FORMAT
+    label = "RadixNet (sine activation)"
+    description = (
+        "edge weights and per-node sine activations learned by the one-hop rule; Dijkstra prediction; "
+        "2NRL inverts the network"
+    )
+
+    def __init__(self, seed: int = 0, backend: str = "auto", device: str | None = None) -> None:
+        self.seed = int(seed)
+        self.graph = RadixCyclicGraph(seed=self.seed)
+        self.encoder = Encoder(_W)
+        self.decoder = Decoder(_W)
+        self.backend: Backend = get_backend(backend, device)
+        self.history: list[dict] = []
+        self.meta: dict = self._new_meta(self.seed)
+
+    # -- training ------------------------------------------------------------
+
 
     def train(
         self,
@@ -351,69 +642,6 @@ class RadixNet:
                 break
         return records
 
-    # -- locating a prefix ---------------------------------------------------
-
-    def _best_trigram(self, key: str) -> tuple[int, int] | None:
-        """Most-visited ``(node, offset)`` holding a trigram that starts with ``key``."""
-        count = self.graph.count
-        best: tuple[int, int] | None = None
-        best_rank: tuple[int, int, int] | None = None
-        for t, (node, off) in self.graph.trigram_index.items():
-            if t.startswith(key):
-                rank = (-count[node], node, off)
-                if best_rank is None or rank < best_rank:
-                    best, best_rank = (node, off), rank
-        return best
-
-    def _best_node_with_prefix(self, prefix: str) -> int | None:
-        """Most-visited real node whose label starts with ``prefix``."""
-        g = self.graph
-        best: int | None = None
-        best_count = -1
-        for node in range(2, len(g.labels)):
-            if g.alive[node] and g.labels[node].startswith(prefix):
-                c = g.count[node]
-                if c > best_count:
-                    best, best_count = node, c
-        return best
-
-    def _locate(self, prefix: str) -> tuple[int, int, int]:
-        """``(node, offset, matched)``: where ``prefix`` ends in the graph.
-
-        ``matched`` is how many characters of the located trigram (or, for a
-        short prefix, of the node label) the prefix actually covers; the rest
-        of that trigram is a guessed continuation.  ``(START, 0, 0)`` if
-        nothing matches.
-        """
-        n = len(prefix)
-        if n == 0:
-            return START, 0, 0
-        if n >= _W:
-            loc = self.graph.lookup(prefix[-_W:])
-            if loc is not None:
-                return loc[0], loc[1], _W
-            for m in (_W - 1, 1):
-                found = self._best_trigram(prefix[-m:])
-                if found is not None:
-                    return found[0], found[1], m
-            return START, 0, 0
-        node = self._best_node_with_prefix(prefix)
-        if node is not None:
-            return node, 0, n
-        return START, 0, 0
-
-    def locate(self, prefix: str) -> tuple[int, int]:
-        """Node and trigram offset where a prediction for ``prefix`` starts.
-
-        Exact match of the last three characters first; otherwise the
-        most-visited node holding a trigram that starts with the last two
-        (then the last one) characters; a prefix shorter than three characters
-        matches the most-visited node whose label starts with it.  Falls back
-        to ``(START, 0)``.
-        """
-        node, offset, _ = self._locate(prefix)
-        return node, offset
-
     # -- inference -----------------------------------------------------------
 
     def predict(
@@ -449,8 +677,7 @@ class RadixNet:
         if mode not in ("dijkstra", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra' or 'sample'")
         graph = self.graph
-        node, offset, matched = self._locate(prefix)
-        lead = "" if node == START or matched >= _W else graph.labels[node][offset + matched : offset + _W]
+        node, offset, lead = self._prefix_start(prefix)
         want = max(0, length - len(lead))
         cap: int | None
         if mode == "dijkstra":
@@ -475,114 +702,6 @@ class RadixNet:
         result.full_text = prefix + result.text
         return result
 
-    def generate(
-        self,
-        max_length: int = 60,
-        mode: str = "sample",
-        temperature: float = 1.0,
-        count: int = 1,
-        seed: int | None = None,
-    ) -> list[PathResult]:
-        """Generate texts from START.
-
-        ``"sample"`` draws ``count`` stochastic walks (``seed`` gives a private
-        RNG; otherwise the model's seeded RNG is consumed); ``"dijkstra"``
-        returns the single cheapest path to END, so the list has one entry.
-        """
-        if max_length < 0:
-            raise ValueError(f"max_length must be >= 0, got {max_length}")
-        if count < 0:
-            raise ValueError(f"count must be >= 0, got {count}")
-        mode = (mode or "sample").lower()
-        if mode not in ("dijkstra", "sample"):
-            raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra' or 'sample'")
-        if count == 0:
-            return []
-        graph = self.graph
-        if mode == "dijkstra":
-            result = dijkstra_predict(graph, START, 0, min_chars=0, max_chars=max_length, to_end=True)
-            result.full_text = result.text
-            return [result]
-        rng = random.Random(seed) if seed is not None else None
-        results: list[PathResult] = []
-        for _ in range(count):
-            result = sample_walk(graph, START, 0, max_chars=max_length, temperature=temperature, rng=rng)
-            result.full_text = result.text
-            results.append(result)
-        return results
-
-    def _edge_log_prob(self, p: int, offset: int, c: int) -> float | None:
-        """``log P(c | p)`` for the edge ``p -> c`` taken from ``p``'s trigram at ``offset``.
-
-        ``None`` when ``p`` is not positioned at its last trigram (a transition
-        out of the middle of a compressed node is impossible) or the edge does
-        not exist.
-        """
-        g = self.graph
-        if p != START and offset + _W != len(g.labels[p]):
-            return None
-        for child, _edge, cost in g.child_costs(p):
-            if child == c:
-                return -cost
-        return None
-
-    def score(self, text: str) -> dict:
-        """Log-probability of ``text`` under the model.
-
-        The text's trigrams are walked ``START -> ... -> END`` through the
-        structure; every edge contributes ``log softmax`` of its score, steps
-        inside a compressed node are deterministic (cost 0) and are not
-        counted as transitions.  An unknown trigram, a missing edge or a
-        transition that would need a split contributes ``log(UNKNOWN_PROB)``
-        and is counted in ``unknown_transitions``.
-        """
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-        grams = self.encoder.encode(text)
-        chars = len(text)
-        if not grams:
-            return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0, "unknown_transitions": 0}
-        index = self.graph.trigram_index
-        log_prob = 0.0
-        transitions = 0
-        unknown = 0
-        node = START
-        offset = 0
-        lost = False  # position unknown after an unknown trigram
-        for t in grams:
-            loc = index.get(t)
-            if loc is None:
-                transitions += 1
-                unknown += 1
-                log_prob += _LOG_UNKNOWN
-                lost = True
-                continue
-            n, o = loc
-            if not lost and n == node and o == offset + 1:
-                offset = o  # deterministic in-node step
-                continue
-            transitions += 1
-            lp = None if lost or o != 0 else self._edge_log_prob(node, offset, n)
-            if lp is None:
-                unknown += 1
-                log_prob += _LOG_UNKNOWN
-            else:
-                log_prob += lp
-            node, offset, lost = n, o, False
-        transitions += 1
-        lp = None if lost else self._edge_log_prob(node, offset, END)
-        if lp is None:
-            unknown += 1
-            log_prob += _LOG_UNKNOWN
-        else:
-            log_prob += lp
-        return {
-            "log_prob": log_prob,
-            "per_char": log_prob / max(1, chars),
-            "chars": chars,
-            "transitions": transitions,
-            "unknown_transitions": unknown,
-        }
 
     # -- structural operations -----------------------------------------------
 
@@ -590,9 +709,6 @@ class RadixNet:
         """Flip every edge weight and activation amplitude (``graph.invert()``)."""
         self.graph.invert()
 
-    def compress(self) -> int:
-        """Merge all unary chains; returns the number of merges."""
-        return self.graph.compress()
 
     def two_nrl(
         self,
@@ -605,9 +721,13 @@ class RadixNet:
         progress: ProgressFn | None = None,
         checkpoint_manager=None,
         stop_event: threading.Event | None = None,
+        strength: float | None = None,
         **overrides,
     ) -> dict:
         """2NRL: train on ``bad``, invert, fine-tune on ``good``.
+
+        ``strength`` is accepted for interface parity with the count / reward
+        model and ignored here.
 
         The negative phase uses ``neg_lr``; the positive phase uses ``pos_lr``
         for weights and states and ``pos_lr / 10`` for the activation
@@ -642,6 +762,40 @@ class RadixNet:
             checkpoint_manager.save(self, self.meta["twonrl_runs"], "2nrl", last)
         return {"negative": negative, "positive": positive, "inverted": self.graph.inverted}
 
+    def reward(
+        self,
+        texts: Iterable[str] | str,
+        *,
+        epochs: int = 3,
+        lr: float = 0.1,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        strength: float | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """Thumbs up: a positive-phase pass over ``texts`` (``act_lr = lr / 10``); records carry ``phase="positive"``."""
+        return self.train(
+            texts, epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive", progress=progress, stop_event=stop_event,
+            **overrides,
+        )
+
+    def punish(
+        self,
+        texts: Iterable[str] | str,
+        *,
+        epochs: int = 2,
+        lr: float = 0.5,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        strength: float | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """Thumbs down: a negative-phase pass over ``texts``, then the network is inverted (unless stopped)."""
+        records = self.train(texts, epochs=epochs, lr=lr, phase="negative", progress=progress, stop_event=stop_event, **overrides)
+        if stop_event is None or not stop_event.is_set():
+            self.invert()
+        return records
+
     # -- introspection -------------------------------------------------------
 
     def stats(self) -> dict:
@@ -649,6 +803,7 @@ class RadixNet:
         g = self.graph
         meta = self.meta
         return {
+            "kind": self.kind,
             "nodes": g.num_nodes(),
             "edges": g.num_edges(),
             "trigrams": g.num_trigrams(),
@@ -695,15 +850,6 @@ class RadixNet:
         model.meta = meta
         return model
 
-    def save(self, path: str) -> None:
-        """Write the model as JSON (gzip when ``path`` ends with ``.gz``), atomically."""
-        payload = json.dumps(self.to_dict(), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        write_bytes_atomic(path, payload, use_gzip=path.endswith(".gz"))
-
-    @classmethod
-    def load(cls, path: str, backend: str = "auto", device: str | None = None) -> "RadixNet":
-        """Load a model written by :meth:`save`."""
-        return cls.from_dict(read_json_file(path), backend=backend, device=device)
 
     def __repr__(self) -> str:
         g = self.graph
@@ -711,3 +857,51 @@ class RadixNet:
             f"RadixNet(seed={self.seed}, nodes={g.num_nodes()}, edges={g.num_edges()}, "
             f"trigrams={g.num_trigrams()}, inverted={g.inverted}, backend={self.backend.name!r})"
         )
+
+
+# ---------------------------------------------------------------------------
+# model kinds
+# ---------------------------------------------------------------------------
+
+
+def model_classes() -> dict[str, type[GraphModel]]:
+    """``{kind: class}`` of every model kind (``"radix"`` and ``"count"``)."""
+    from .countnet import CountRewardNet  # local import: countnet builds on this module
+
+    return {RadixNet.kind: RadixNet, CountRewardNet.kind: CountRewardNet}
+
+
+def model_kinds() -> list[dict]:
+    """``[{"kind", "label", "description"}]`` for menus and help texts."""
+    return [{"kind": c.kind, "label": c.label, "description": c.description} for c in model_classes().values()]
+
+
+def model_class(kind: str | None) -> type[GraphModel]:
+    """The class of a model kind (``None`` / ``""`` = ``"radix"``); ``ValueError`` for an unknown kind."""
+    key = (kind or RadixNet.kind).strip().lower()
+    classes = model_classes()
+    if key not in classes:
+        raise ValueError(f"unknown model kind {kind!r}; expected one of: {', '.join(classes)}")
+    return classes[key]
+
+
+def new_model(kind: str | None = None, seed: int = 0, backend: str = "auto", device: str | None = None) -> GraphModel:
+    """A fresh model of ``kind``."""
+    return model_class(kind)(seed=seed, backend=backend, device=device)
+
+
+def model_from_dict(d: dict, backend: str = "auto", device: str | None = None) -> GraphModel:
+    """Rebuild a model of whatever kind a document holds (``format`` decides)."""
+    if not isinstance(d, dict):
+        raise ValueError("not a radixnet model document")
+    fmt = d.get("format")
+    for cls in model_classes().values():
+        if fmt == getattr(cls, "format", None):
+            return cls.from_dict(d, backend=backend, device=device)
+    expected = ", ".join(str(getattr(cls, "format", cls.kind)) for cls in model_classes().values())
+    raise ValueError(f"not a radixnet model document (format {fmt!r}; expected one of: {expected})")
+
+
+def load_model(path: str, backend: str = "auto", device: str | None = None) -> GraphModel:
+    """Load a model file of any kind (see :func:`model_from_dict`)."""
+    return model_from_dict(read_json_file(path), backend=backend, device=device)

@@ -45,7 +45,10 @@ RadixCyclicNN/
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
-    model.py                RadixNet, TrainConfig (train / predict / generate / score / two_nrl / invert / compress / save / load)
+    beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
+    model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
+    countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
+    schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
     bench.py                benchmarks (chars/sec, predictions/sec)
@@ -720,3 +723,58 @@ stamps both on the epoch record (`"lr"`, `"act_lr"`), so the history shows what 
 lr / 10") feed the CLI listing, `GET /api/schedule` and the preset select of the Train tab; `POST
 /api/schedule/preview` is what the tab's live chart calls (debounced) while an expression is typed. CLI:
 `radixnet schedule` (table + `#` bar graph, or the preset listing) and `train --lr-schedule / --act-lr-schedule`.
+
+## 19. The count / reward model (`countnet.py`, `beam.py`) — a second algorithm, selectable at run time
+
+`GraphModel` (in `model.py`) is what both kinds share: `graph`, `encoder` / `decoder`, `_clean_texts`,
+`_observe_grams` / `_observe`, prefix location (`_locate`, `locate`, `_prefix_start`), `generate`, `score`,
+`compress`, `save` / `load`. A kind implements `train`, `predict`, `two_nrl`, `reward`, `punish`, `invert`, `stats`,
+`to_dict` / `from_dict` and names itself with `kind` / `format` / `label` / `description`. `model_classes()`,
+`model_kinds()`, `model_class(kind)`, `new_model(kind, ...)`, `model_from_dict(d)` and `load_model(path)` dispatch on
+the document's `format` (`"radixnet"` vs `"radixnet-count"`), so checkpoints, `POST /api/load` and the CLI restore
+whatever kind a file holds. `RadixNet.reward` / `punish` are the thumbs-up / thumbs-down primitives (a positive-phase
+pass; a negative-phase pass followed by `invert`) that the API, the CLI `feedback` command and the codegen trainer
+call instead of spelling the rule out themselves.
+
+`CountRewardGraph(RadixCyclicGraph)` keeps a third per-edge list, `edge_reward`, next to `edge_w` / `edge_count`,
+and derives every weight from the two tracked numbers: `weight(count, reward) = count_scale * log1p(count) +
+reward_scale * reward`. Every node is created with `a = 0, k = 1`, so the sine activation is the constant 1 and the
+base class's score `w * f_p * f_c` is the weight itself: `child_probs`, `child_costs`, Dijkstra, sampling, `split`
+(the new internal edge gets the node's count and reward 0) and `merge_child` (activation ratios are 1) work
+unchanged. `add_reward(edge_ids, amount)` and `recompute_weights()` keep `edge_w` in sync and bump `version` so the
+cost cache refreshes; `invert()` negates the rewards; `to_dict` / `from_dict` carry `edges.reward` and the two scales
+(`weights`) and rebuild the weights on load.
+
+`CountRewardNet(GraphModel)`: one `_passes(texts, cfg, count, reward, phase)` routine underlies everything. It
+registers the texts structurally first (no counting) and compresses, so every pass - the first included - walks the
+same transitions (steps inside a compressed node are deterministic and never counted); then per epoch it re-observes
+with `count=True` (`train`: one more traversal per path), adds `reward` to every edge of every path (`reward`:
+`+strength` with a traversal; `punish`: `-strength` without one), recomputes the weights, measures the loss as the
+mean `-log P` of the transitions and records the usual epoch fields plus `traversed` and `reward`. `two_nrl` is
+`punish(bad)` then `reward(good)` - no inversion, a penalty already makes a path unlikely. `TrainConfig` fields
+`lr` / `act_lr` / `batch_size` are accepted and ignored; feedback magnitude is `strength` (default 1: one unit
+multiplies an edge's odds by `e`), which the 2NRL / feedback endpoints, `--strength` and the panels pass through
+(RadixNet accepts and ignores it).
+
+`beam.py` - `beam_predict(graph, start_node, start_offset, min_chars, k, beam, max_chars, step_penalty, to_end)`
+runs two beams over the depth-unrolled graph, each a list of distinct partial paths kept in a parent-pointer table:
+the *top* beam keeps the `beam` cheapest partial paths per step, the *bottom* beam the `beam` dearest. A path is
+complete at END, at `min_chars` emitted characters (unless `to_end`) or at a cap; the `k` cheapest and the `k`
+dearest complete paths are collected in bounded heaps, the top side stops early once no partial path can beat its
+k-th finished one, and the bottom side excludes anything that is in the top list. With `to_end` and no cap the
+bottom side is capped at about twice the longest top path so "least likely" stays comparable instead of cycling
+for hundreds of steps. `Prediction(PathResult)` is the best path plus `top`, `bottom`, `k`, `beam`, `mode`;
+`CountRewardNet.predict(prefix, length, mode="beam" | "sample", k=5, beam=None, ...)` applies the same partial-trigram
+lead and cap rules as `RadixNet.predict` to every returned path, so `result.text` / `full_text` keep working for the
+codegen trainer, the Ollama sampler and the evolve loop.
+
+API: `ModelService` holds the active model, a `_parked` dict with the other kinds' models, and `_path_kind`;
+`model_path_for(kind)` derives `<stem>.<kind><ext>` for the kinds the server path does not belong to. `GET /api/model`,
+`POST /api/model/select {kind}` (parks the active model, restores the parked / saved / fresh one; 409 while a job
+runs), `kind` on `POST /api/reset`, `k` / `beam` on `POST /api/predict` (ignored by RadixNet, `mode: "beam"` mapped to
+dijkstra there), `strength` on `/api/2nrl` and `/api/feedback`, `reward` on `/api/graph` edges, `kind` / `kinds` /
+`model_label` on `/api/status`. CLI: `--kind radix|count` (new models; `model.count.json` default), `predict --k /
+--beam / --mode beam` with top / bottom tables, `--strength` on `2nrl` / `feedback`, `info` shows the kind and reward
+totals. Frontend: `ModelSelector` in the header (bound to `status.kind`, `POST /api/model/select`), the status bar
+shows the kind and reward totals, the Predict tab shows K / beam fields and the two tables, the Train tab hides the
+rate fields, Generate and 2NRL get a strength field.

@@ -41,7 +41,8 @@ STATS_KEYS = {
 }
 JOB_KEYS = {"id", "type", "state", "progress", "history", "error", "started_at", "finished_at", "stop_requested"}
 PREDICT_KEYS = {
-    "prefix", "continuation", "full_text", "cost", "step_costs", "path", "node_ids", "expanded", "reached_end",
+    "prefix", "kind", "continuation", "full_text", "cost", "probability", "step_costs", "path", "node_ids", "expanded",
+    "reached_end",
 }
 NODE_KEYS = {"id", "label", "count", "activation", "z", "a", "b", "h", "k"}
 EDGE_KEYS = {"source", "target", "weight", "count", "prob", "cost"}

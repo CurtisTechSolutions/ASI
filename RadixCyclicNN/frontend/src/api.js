@@ -70,6 +70,9 @@ export function unwrapJob(data) {
 export const api = {
   health: () => get("/api/health"),
   status: () => get("/api/status"),
+  /** Model kinds: the active one, every kind and their files; switching keeps the previous model in memory. */
+  model: () => get("/api/model"),
+  selectModel: (kind) => post("/api/model/select", { kind }),
   train: (body) => post("/api/train", body),
   /** Learning-rate schedules: what an expression may use (presets, variables, functions) and a per-epoch preview. */
   schedule: () => get("/api/schedule"),

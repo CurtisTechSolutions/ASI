@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
 import StatusBar from "./components/StatusBar.jsx";
+import ModelSelector from "./components/ModelSelector.jsx";
 import TrainPanel from "./components/TrainPanel.jsx";
 import PredictPanel from "./components/PredictPanel.jsx";
 import GeneratePanel from "./components/GeneratePanel.jsx";
@@ -69,9 +70,13 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>RadixCyclicNN</h1>
+        <div className="app-header-row">
+          <h1>RadixCyclicNN</h1>
+          <ModelSelector status={status} onStatus={setStatus} />
+        </div>
         <p className="tagline">
-          self-compressing cyclic graph · sine activation · Dijkstra prediction · 2NRL · GAN-style evolution
+          self-compressing cyclic graph · sine activation or count / reward edges · Dijkstra and top-K / bottom-K
+          prediction · 2NRL · GAN-style evolution
         </p>
       </header>
 

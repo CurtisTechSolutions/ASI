@@ -45,8 +45,10 @@ export default function GeneratePanel({ status }) {
   const [posEpochs, setPosEpochs] = useState("3");
   const [negLr, setNegLr] = useState("0.5");
   const [posLr, setPosLr] = useState("0.1");
+  const [strength, setStrength] = useState("1");
   const [lastAction, setLastAction] = useState(null);
   const { job, running, busy, error: jobError, start, stop, clearError } = useJob("feedback");
+  const countKind = Boolean(status && status.kind === "count");
 
   const otherJobRunning = jobIsRunning(status) && !running;
   const ups = ratings.filter((r) => r.rating === "up");
@@ -101,6 +103,7 @@ export default function GeneratePanel({ status }) {
         pos_epochs: parseInteger(posEpochs, 3),
         neg_lr: parseNumber(negLr, 0.5),
         pos_lr: parseNumber(posLr, 0.1),
+        ...(countKind ? { strength: parseNumber(strength, 1) } : {}),
       }),
     );
     if (result) setLastAction(action);
@@ -233,6 +236,16 @@ export default function GeneratePanel({ status }) {
         <div className="row">
           <NumberField label="Negative lr" value={negLr} onChange={setNegLr} min={0} disabled={running} />
           <NumberField label="Positive lr" value={posLr} onChange={setPosLr} min={0} disabled={running} />
+          {countKind ? (
+            <NumberField
+              label="Strength"
+              hint="count model: reward / penalty per rated path"
+              value={strength}
+              onChange={setStrength}
+              min={0}
+              disabled={running}
+            />
+          ) : null}
         </div>
         <div className="actions">
           <button

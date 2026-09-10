@@ -24,6 +24,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
+| Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
@@ -137,17 +138,19 @@ Behind a registry mirror, pass `--build-arg PYTHON_IMAGE=... --build-arg NODE_IM
 ## CLI reference
 
 Global options (before or after the command): `--model PATH` (default
-`model.json`, gzip when the name ends with `.gz`), `--backend auto|python|torch`,
+`model.json`, gzip when the name ends with `.gz`), `--kind radix|count` (the
+algorithm of a *new* model; a file's own kind wins; with `count` the default
+model file is `model.count.json`), `--backend auto|python|torch`,
 `--device cpu|cuda|mps`, `--seed N`, `--json` (one JSON document on stdout).
 
 | Command | Main options |
 |---|---|
 | `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out` |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
-| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|sample`, `--to-end`, `--step-penalty`, `--temperature` |
+| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; count model: `--k 5` (top K and bottom K continuations), `--beam N` |
 | `generate` | `--count`, `--max-length`, `--mode`, `--temperature` |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
-| `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--out` |
+| `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
 | `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
@@ -170,7 +173,9 @@ at a time, and mutating requests answer 409 while it runs.
 | Method and path | Body / result |
 |---|---|
 | `GET /api/health` | `{"ok": true, "version"}` |
-| `GET /api/status` | model statistics, current job, available backends, model path |
+| `GET /api/status` | model statistics (with the active `kind`), current job, available backends, model path |
+| `GET /api/model` | `{"kind", "label", "kinds": [{"kind","label","description"}], "model_path", "paths", "in_memory"}` |
+| `POST /api/model/select` | `{"kind": "radix"\|"count"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
@@ -185,16 +190,16 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
-| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}` |
+| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; count model: `mode: "beam"`, `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
 | `POST /api/generate` | `{"count","max_length","mode","temperature"}` -> `{"samples": [{"text","cost","path"}]}` |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, ...}` -> job |
-| `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` / `{"path"}` / `{"seed"}` |
+| `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
-| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, probability and cost |
+| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (and `reward` for the count model) |
 | `GET /api/history` | training history |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
 
@@ -334,6 +339,33 @@ no training) and `POST /api/codegen/run` (sandbox only). The frontend's Code
 tab drives all of it: problems (typed or uploaded), live attempt / problem /
 round records, a "try a problem" box and a sandbox runner.
 
+## Two models: RadixNet and the count / reward model
+
+The selector at the top of the frontend (and `--kind` in the CLI, `POST
+/api/model/select` in the API) chooses the algorithm.  Both live on the same
+self-compressing cyclic graph and share encoding, prefix location, sampling,
+scoring, compression, checkpoints and persistence; a model file records its
+kind, so `load` always restores the right one.
+
+| | RadixNet (`radix`) | Count / reward (`count`) |
+|---|---|---|
+| edge weight | learned by the one-hop rule together with the per-node sine activations | `count_scale · log(1 + traversals) + reward_scale · reward`: two numbers per edge, no gradient, no learning rate |
+| training | epochs over mini-batches with `lr` / `act_lr` (and their schedules) | every epoch counts one more traversal of each text's path |
+| feedback (thumbs, 2NRL, codegen judge, adversarial review) | train on the bad texts, invert, fine-tune on the good ones | `punish`: reward −= `strength` on every edge of a bad path; `reward`: a traversal plus reward += `strength`; nothing is inverted |
+| `invert` | flips every weight and activation amplitude | flips the sign of every reward |
+| prediction | Dijkstra's cheapest path (or sampling) | a beam search that returns the **top K** (most likely) and **bottom K** (least likely) continuations of one prefix in one call; the best one is the prediction |
+
+```bash
+python -m radixnet --kind count train --data data/sample_corpus.txt --epochs 3     # -> model.count.json
+python -m radixnet --model model.count.json predict --prefix 'the quick' --length 10 --k 5
+python -m radixnet --model model.count.json feedback --good-text 'the quick brown fox' --bad-text 'zzz qqq' --strength 2
+```
+
+The server keeps the model of each kind in memory: switching kinds parks the
+active model (unsaved work included) and brings the other one back, loading
+its file (`model.json` / `model.count.json`) or creating a fresh one the
+first time.
+
 ## Learning-rate schedules (graph functions)
 
 The learning rate and the activation learning rate can grow (or shrink) from
@@ -417,7 +449,8 @@ make test        # python -m unittest discover -s tests -v
 
 ```
 RadixCyclicNN/
-  radixnet/           activation, encoding, graph, backend(+torch), search, model, gan, checkpoint, bench, cli, api
+  radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
+                      checkpoint, bench, cli, api, ollama, codegen
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data)

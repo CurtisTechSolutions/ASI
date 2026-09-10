@@ -200,7 +200,8 @@ export default function GraphView() {
               const opacity =
                 hoverId === null ? 0.15 + 0.85 * g.prob : connected ? Math.max(0.9, g.prob) : 0.04 + 0.1 * g.prob;
               const className = `graph-edge${g.negative ? " neg" : ""}${connected ? " hl" : ""}`;
-              const title = `${labelOf(g.edge.source)} → ${labelOf(g.edge.target)} · p=${fmtNum(g.edge.prob, 3)} · cost=${fmtNum(g.edge.cost, 3)} · w=${fmtNum(g.edge.weight, 3)} · n=${fmtInt(g.edge.count)}`;
+              const reward = typeof g.edge.reward === "number" ? ` · reward=${fmtNum(g.edge.reward, 2)}` : "";
+              const title = `${labelOf(g.edge.source)} → ${labelOf(g.edge.target)} · p=${fmtNum(g.edge.prob, 3)} · cost=${fmtNum(g.edge.cost, 3)} · w=${fmtNum(g.edge.weight, 3)} · n=${fmtInt(g.edge.count)}${reward}`;
               return g.loop ? (
                 <circle
                   key={g.key}
