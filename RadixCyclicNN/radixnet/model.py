@@ -130,12 +130,16 @@ class TrainConfig:
     """Graph function of the epoch for ``lr`` (see :mod:`radixnet.schedule`), e.g. ``"linear(lr0, 4 * lr0)"``."""
     act_lr_schedule: str | None = None
     """Graph function of the epoch for ``act_lr``; may use ``lr`` (the epoch's learning rate), e.g. ``"lr / 10"``."""
+    reverse_schedule: bool = False
+    """Play the schedules backwards: the last epoch's rates come first (a ramp up becomes a ramp down)."""
 
     def rates(self) -> list[tuple[float, float]]:
         """``(lr, act_lr)`` for every epoch of this config, schedules applied (constant when none are set)."""
         if self.lr_schedule is None and self.act_lr_schedule is None:
             return [(self.lr, self.act_lr)] * self.epochs
-        points = preview_points(self.lr_schedule, self.act_lr_schedule, self.epochs, self.lr, self.act_lr)
+        points = preview_points(
+            self.lr_schedule, self.act_lr_schedule, self.epochs, self.lr, self.act_lr, reverse=bool(self.reverse_schedule)
+        )
         return [(p["lr"], p["act_lr"]) for p in points]
 
     def validate(self) -> None:

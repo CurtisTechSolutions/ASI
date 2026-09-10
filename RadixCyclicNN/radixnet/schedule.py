@@ -190,9 +190,19 @@ def parse_schedule(expression: str | None) -> Schedule | None:
 
 
 def preview_points(
-    lr_schedule: str | None, act_lr_schedule: str | None, epochs: int, lr: float, act_lr: float
+    lr_schedule: str | None,
+    act_lr_schedule: str | None,
+    epochs: int,
+    lr: float,
+    act_lr: float,
+    reverse: bool = False,
 ) -> list[dict]:
-    """``[{"epoch", "lr", "act_lr"}]`` for every epoch; the activation schedule sees the epoch's ``lr``."""
+    """``[{"epoch", "lr", "act_lr"}]`` for every epoch; the activation schedule sees the epoch's ``lr``.
+
+    ``reverse`` plays the schedule backwards: the rates of the last epoch come
+    first (a ramp up becomes a ramp down, a warm-up a cool-down); the pairing
+    of ``lr`` and ``act_lr`` within an epoch is kept.
+    """
     if epochs < 0:
         raise ScheduleError("epochs must be >= 0")
     lr_fn = parse_schedule(lr_schedule)
@@ -202,6 +212,8 @@ def preview_points(
         rate = lr_fn(epoch, epochs, lr, act_lr0=act_lr, lr=lr) if lr_fn else float(lr)
         act = act_fn(epoch, epochs, act_lr, act_lr0=act_lr, lr=rate) if act_fn else float(act_lr)
         points.append({"epoch": epoch, "lr": rate, "act_lr": act})
+    if reverse:
+        points = [{"epoch": i + 1, "lr": p["lr"], "act_lr": p["act_lr"]} for i, p in enumerate(reversed(points))]
     return points
 
 

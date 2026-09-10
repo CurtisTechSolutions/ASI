@@ -645,3 +645,36 @@ class TestServe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestZipData(unittest.TestCase):
+    """``--data`` accepts ZIP archives: every text entry inside contributes its lines (or one text per file)."""
+
+    def test_train_and_score_from_a_zip(self):
+        import io
+        import zipfile
+
+        with tempfile.TemporaryDirectory(prefix="radixnet-cli-zip-") as tmp:
+            with open(CORPUS, encoding="utf-8") as fh:
+                lines = [line for line in fh.read().splitlines() if line.strip()]
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                z.writestr("corpus/a.txt", "\n".join(lines[:20]) + "\n")
+                z.writestr("corpus/b.txt", "\n".join(lines[20:]) + "\n")
+                z.writestr("image.png", b"\x00\x01binary")
+                z.writestr("__MACOSX/._a.txt", "junk")
+            archive = os.path.join(tmp, "corpus.zip")
+            with open(archive, "wb") as fh:
+                fh.write(buf.getvalue())
+            model = os.path.join(tmp, "m.json")
+            doc = run_json("train", "--data", archive, "--epochs", 1, *FAST, model=model)
+            self.assertEqual(doc["texts"], len(lines))
+            doc = run_json("train", "--data", archive, "--whole-file", "--epochs", 1, *FAST, model=os.path.join(tmp, "w.json"))
+            self.assertEqual(doc["texts"], 2)
+            doc = run_json("score", "--data", archive, model=model)
+            self.assertEqual(doc["count"], len(lines))
+            with open(os.path.join(tmp, "bad.zip"), "wb") as fh:
+                fh.write(b"PK\x03\x04 not really an archive")
+            proc = run_cli("train", "--data", os.path.join(tmp, "bad.zip"), model=os.path.join(tmp, "x.json"), expect=1)
+            self.assertIn("not a valid ZIP archive", proc.stderr)
+

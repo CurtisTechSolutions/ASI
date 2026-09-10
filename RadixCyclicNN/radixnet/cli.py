@@ -28,6 +28,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, NoReturn, TextIO, TypeVar
 
 from . import __version__
+from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import EvolveConfig, Evolver
 from .beam import Prediction, path_probability
@@ -431,22 +432,39 @@ def read_text_file(path: str) -> str:
         raise CliError(f"{path} is not valid UTF-8 text: {exc}") from exc
 
 
+def _is_zip_file(path: str) -> bool:
+    if not os.path.isfile(path):
+        return False
+    with open(path, "rb") as fh:
+        return fh.read(4) in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
 def read_texts(paths: Sequence[str], whole_file: bool = False, what: str = "training") -> list[str]:
     """Texts from files: one per non-blank line, or one per file with ``whole_file``.
 
-    Lines are kept verbatim (only blank ones are dropped); in whole-file mode
-    trailing line terminators are stripped.  Raises :class:`CliError` when
-    nothing usable was found.
+    A ``.zip`` archive contributes every text entry it holds (unpacked in
+    memory; directories, metadata, binary, nested-archive and empty entries
+    are skipped).  Lines are kept verbatim (only blank ones are dropped); in
+    whole-file mode trailing line terminators are stripped and an archive
+    entry counts as one file.  Raises :class:`CliError` when nothing usable
+    was found.
     """
     texts: list[str] = []
     for path in paths:
-        content = read_text_file(path)
-        if whole_file:
-            text = content.rstrip("\r\n")
-            if text:
-                texts.append(text)
+        if _is_zip_file(path):
+            try:
+                contents = [entry.text for entry in zip_texts_from_file(path)]
+            except ValueError as exc:
+                raise CliError(f"{path}: {exc}") from exc
         else:
-            texts.extend(line for line in content.split("\n") if line.strip())
+            contents = [read_text_file(path)]
+        for content in contents:
+            if whole_file:
+                text = content.rstrip("\r\n")
+                if text:
+                    texts.append(text)
+            else:
+                texts.extend(line for line in content.split("\n") if line.strip())
     if not texts:
         raise CliError(f"no {what} texts found in {', '.join(paths)}")
     return texts
@@ -538,7 +556,7 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
     config = TrainConfig(
         epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size,
         auto_compress=not args.no_compress, checkpoint_every=every,
-        lr_schedule=args.lr_schedule, act_lr_schedule=args.act_lr_schedule,
+        lr_schedule=args.lr_schedule, act_lr_schedule=args.act_lr_schedule, reverse_schedule=args.reverse_schedule,
     )
     try:
         config.validate()
@@ -551,6 +569,7 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
         rates = config.rates()
         schedule_note = (
             f" lr_schedule={config.lr_schedule or '-'} act_lr_schedule={config.act_lr_schedule or '-'}"
+            + (" (reversed)" if config.reverse_schedule else "")
             + (f" (lr {fmt(rates[0][0])} -> {fmt(rates[-1][0])}, act_lr {fmt(rates[0][1])} -> {fmt(rates[-1][1])})" if rates else "")
         )
     console.pairs([
@@ -753,7 +772,9 @@ def cmd_schedule(args: argparse.Namespace, console: Console) -> dict:
             console.say("  " + line)
         return {"presets": info["presets"], "variables": info["variables"], "functions": info["functions"], "helpers": info["helpers"]}
     try:
-        points = preview_points(args.lr_schedule, args.act_lr_schedule, args.epochs, args.lr, args.act_lr)
+        points = preview_points(
+            args.lr_schedule, args.act_lr_schedule, args.epochs, args.lr, args.act_lr, reverse=args.reverse_schedule,
+        )
     except ScheduleError as exc:
         raise CliError(str(exc)) from exc
     width = 30
@@ -768,12 +789,13 @@ def cmd_schedule(args: argparse.Namespace, console: Console) -> dict:
         ("lr", f"{args.lr} -> {args.lr_schedule or 'constant'}"),
         ("act_lr", f"{args.act_lr} -> {args.act_lr_schedule or 'constant'}"),
         ("epochs", args.epochs),
+        ("reversed", args.reverse_schedule),
     ])
     console.say()
     console.table(("epoch", "lr", "lr graph", "act_lr", "act_lr graph"), rows)
     return {
         "lr_schedule": args.lr_schedule, "act_lr_schedule": args.act_lr_schedule, "epochs": args.epochs,
-        "lr": args.lr, "act_lr": args.act_lr, "points": points,
+        "lr": args.lr, "act_lr": args.act_lr, "reverse_schedule": args.reverse_schedule, "points": points,
     }
 
 
@@ -1432,7 +1454,8 @@ def build_parser() -> argparse.ArgumentParser:
         "(e.g. --batch-size 1..8 --lr 0.5..1.0).  Ctrl-C stops after the current epoch and saves.",
     )
     p.add_argument("--data", nargs="+", required=True, metavar="FILE",
-                   help="training text files, one text per line (blank lines are skipped)")
+                   help="training text files, one text per line (blank lines are skipped); a .zip archive contributes "
+                        "every text file inside it")
     p.add_argument("--whole-file", action="store_true", help="treat each file as a single text")
     p.add_argument("--epochs", type=nonneg_int, default=TrainConfig.epochs, help="training epochs")
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="learning rate for edge weights and node states")
@@ -1443,6 +1466,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "'warmup(lr0 / 10, lr0, 3)' (variables: epoch, i, epochs, t, lr0; see `radixnet schedule --help`)")
     p.add_argument("--act-lr-schedule", metavar="EXPR",
                    help="graph function of the epoch for the activation learning rate; may use lr (the epoch's rate), e.g. 'lr / 10'")
+    p.add_argument("--reverse-schedule", action="store_true",
+                   help="play the schedules backwards: the last epoch's rates first (a ramp up becomes a ramp down)")
     p.add_argument("--batch-size", type=pos_int, default=TrainConfig.batch_size, help="transitions per backend step")
     p.add_argument("--no-compress", action="store_true", help="do not merge unary chains after each epoch")
     _add_checkpoint_options(p, "epoch")
@@ -1518,6 +1543,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--lr-schedule", metavar="EXPR", help="learning-rate expression, e.g. 'linear(lr0, 4 * lr0)'")
     p.add_argument("--act-lr-schedule", metavar="EXPR", help="activation learning-rate expression, e.g. 'lr / 10'")
+    p.add_argument("--reverse-schedule", action="store_true", help="play the schedules backwards (last epoch first)")
     p.add_argument("--epochs", type=nonneg_int, default=10, help="epochs to preview")
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="base learning rate (lr0)")
     p.add_argument("--act-lr", type=nonneg_float, default=TrainConfig.act_lr, help="base activation learning rate (act_lr0)")

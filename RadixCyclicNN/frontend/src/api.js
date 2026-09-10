@@ -21,7 +21,9 @@ export class ApiError extends Error {
 
 async function request(method, path, body) {
   const init = { method, headers: { Accept: "application/json" } };
-  if (body !== undefined) {
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    init.body = body; // multipart/form-data: the browser sets the boundary
+  } else if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
@@ -101,6 +103,12 @@ export const api = {
   uploads: () => get("/api/uploads"),
   /** Upload one text file (read in the browser); the server keeps it under its upload directory. */
   upload: (name, content) => post("/api/uploads", { name, content }),
+  /** Upload a file as bytes (multipart); a ZIP archive is unpacked into text files on the server. */
+  uploadFile: (file) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return post("/api/uploads", form);
+  },
   deleteUpload: (name) => post("/api/uploads/delete", { name }),
   /** Ollama (see OllamaPanel). `url` optionally overrides the server's configured Ollama URL. */
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),

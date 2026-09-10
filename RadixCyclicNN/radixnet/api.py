@@ -29,6 +29,8 @@ table.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
 import heapq
 import html
@@ -50,6 +52,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import __version__
+from .archive import extract_texts, is_zip
 from .backend import describe_backends
 from .checkpoint import CheckpointManager
 from .codegen import (
@@ -754,6 +757,44 @@ class ModelService:
         self._log(f"upload {record['name']} ({record['bytes']} bytes, {record['lines']} lines)")
         return record
 
+    def upload_bytes(self, name: str, data: bytes) -> dict:
+        """A binary upload: a ZIP archive is unpacked into text uploads, anything else is stored as UTF-8 text.
+
+        Returns ``{"uploads": [records], "archives": [summary]}`` (``archives``
+        only for an archive).
+        """
+        if is_zip(name, data):
+            return self.unpack_archive(name, data)
+        return {"uploads": [self.upload(name, _decode_text(data))]}
+
+    def unpack_archive(self, name: str, data: bytes) -> dict:
+        """Unpack the text entries of a ZIP archive into the upload directory (the archive itself is not kept).
+
+        Every entry becomes the upload ``<archive stem>__<dir>__<file>``;
+        directories, metadata, nested archives, encrypted, binary and empty
+        entries are skipped and listed with a reason; an archive over the
+        entry or size limits is refused (400).
+        """
+        self._require_uploads()
+        archive_name = sanitize_upload_name(name)
+        try:
+            extracted, skipped = extract_texts(data, archive_name)
+        except ValueError as exc:
+            raise ApiError(400, f"{archive_name}: {exc}") from exc
+        records = [self.upload(entry.name, entry.text) for entry in extracted]
+        for record, entry in zip(records, extracted):
+            record["archive"] = archive_name
+            record["entry"] = entry.path
+        summary = {
+            "name": archive_name,
+            "bytes": len(data),
+            "entries": len(extracted) + len(skipped),
+            "extracted": len(extracted),
+            "skipped": [item.to_dict() for item in skipped],
+        }
+        self._log(f"unpacked {archive_name}: {len(extracted)} text file(s), {len(skipped)} skipped")
+        return {"uploads": records, "archives": [summary]}
+
     def delete_upload(self, name: str) -> dict:
         path = self._upload_path(name)
         with self._upload_lock:
@@ -1070,19 +1111,40 @@ class Fields:
             raise self._bad(name, "a list of non-empty strings", value)
         return list(value)
 
-    def upload_files(self) -> list[tuple[str, str]]:
-        """``{name, content}`` or ``{files: [{name, content}, ...]}`` -> ``[(name, content), ...]``."""
+    def _upload_payload(self) -> str | bytes:
+        """The content of one upload: ``content`` (text), ``content_base64`` (bytes) or internal ``data`` (bytes)."""
+        data = self._lookup("data")
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        encoded = self._lookup("content_base64")
+        if encoded is not _MISSING:
+            if not isinstance(encoded, str):
+                raise self._bad("content_base64", "a base64 string", encoded)
+            try:
+                return base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ApiError(400, f"'content_base64' is not valid base64: {exc}") from exc
+        if self._lookup("content") is _MISSING:
+            raise ApiError(400, "missing field 'content' (string) or 'content_base64' (base64 of a text file or ZIP archive)")
+        return self.text("content")
+
+    def upload_files(self) -> list[tuple[str, str | bytes]]:
+        """``{name, content | content_base64}`` or ``{files: [...]}`` -> ``[(name, text or bytes), ...]``.
+
+        Bytes (``content_base64``, multipart parts, raw bodies) may hold a ZIP
+        archive, which the service unpacks; text is stored as it is.
+        """
         files = self._lookup("files")
         if files is _MISSING:
-            return [(self.text("name"), self.text("content"))]
+            return [(self.text("name"), self._upload_payload())]
         if not isinstance(files, list) or not files:
-            raise self._bad("files", "a non-empty list of {name, content} objects", files)
-        result = []
+            raise self._bad("files", "a non-empty list of {name, content | content_base64} objects", files)
+        result: list[tuple[str, str | bytes]] = []
         for i, item in enumerate(files):
             if not isinstance(item, dict):
-                raise ApiError(400, f"'files[{i}]' must be an object with 'name' and 'content'")
+                raise ApiError(400, f"'files[{i}]' must be an object with 'name' and 'content' (or 'content_base64')")
             entry = Fields(item)
-            result.append((entry.text("name"), entry.text("content")))
+            result.append((entry.text("name"), entry._upload_payload()))
         return result
 
 
@@ -1133,7 +1195,7 @@ def _multipart_files(body: bytes, content_type: str) -> list[dict]:
         if not filename:
             continue  # plain form fields are ignored
         payload = part.get_payload(decode=True) or b""
-        files.append({"name": filename, "content": _decode_text(payload)})
+        files.append({"name": filename, "data": payload})
     if not files:
         raise ApiError(400, "multipart body contains no file parts (use -F file=@corpus.txt)")
     return files
@@ -1142,9 +1204,9 @@ def _multipart_files(body: bytes, content_type: str) -> list[dict]:
 def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]]) -> dict:
     """Body of ``POST /api/uploads`` in any accepted form, normalised to the JSON form.
 
-    * ``application/json``: ``{name, content}`` or ``{files: [{name, content}, ...]}``
-    * ``multipart/form-data``: every part with a file name
-    * anything else (``text/plain``, ``--data-binary @file``): the raw body, named by ``?name=``
+    * ``application/json``: ``{name, content | content_base64}`` or ``{files: [...]}``
+    * ``multipart/form-data``: every part with a file name (bytes: text files or ZIP archives)
+    * anything else (``text/plain``, ``--data-binary @file.zip``): the raw body, named by ``?name=``
     """
     kind = content_type.split(";", 1)[0].strip().lower()
     names = [n for n in query.get("name", []) if n.strip()]
@@ -1154,7 +1216,7 @@ def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]]) ->
         return parse_body(body)
     if not names:
         raise ApiError(400, "raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})")
-    return {"files": [{"name": names[0], "content": _decode_text(body)}]}
+    return {"files": [{"name": names[0], "data": body}]}
 
 
 def _texts_and_files(
@@ -1253,6 +1315,7 @@ def _train_config(f: Fields) -> TrainConfig:
         act_lr=f.number("act_lr", TrainConfig.act_lr, minimum=0.0),
         lr_schedule=f.text("lr_schedule", "").strip() or None,
         act_lr_schedule=f.text("act_lr_schedule", "").strip() or None,
+        reverse_schedule=f.flag("reverse_schedule", False),
         batch_size=f.integer("batch_size", TrainConfig.batch_size, minimum=1),
         clip=f.number("clip", TrainConfig.clip),
         auto_compress=f.flag("auto_compress", TrainConfig.auto_compress),
@@ -1277,13 +1340,14 @@ def _r_schedule_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any
     epochs = f.integer("epochs", TrainConfig.epochs, minimum=0)
     lr = f.number("lr", TrainConfig.lr, minimum=0.0)
     act_lr = f.number("act_lr", TrainConfig.act_lr, minimum=0.0)
+    reverse = f.flag("reverse_schedule", False)
     try:
-        points = preview_points(lr_schedule, act_lr_schedule, epochs, lr, act_lr)
+        points = preview_points(lr_schedule, act_lr_schedule, epochs, lr, act_lr, reverse=reverse)
     except ScheduleError as exc:
         raise ApiError(400, str(exc)) from exc
     return 200, {
         "lr_schedule": lr_schedule, "act_lr_schedule": act_lr_schedule, "epochs": epochs, "lr": lr, "act_lr": act_lr,
-        "points": points,
+        "reverse_schedule": reverse, "points": points,
     }
 
 
@@ -1440,7 +1504,22 @@ def _r_uploads(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _r_upload(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 201, {"uploads": [svc.upload(name, content) for name, content in f.upload_files()]}
+    uploads: list[dict] = []
+    archives: list[dict] = []
+    for name, payload in f.upload_files():
+        if isinstance(payload, bytes):
+            result = svc.upload_bytes(name, payload)
+            uploads.extend(result["uploads"])
+            archives.extend(result.get("archives", []))
+        else:
+            uploads.append(svc.upload(name, payload))
+    if not uploads:
+        reasons = "; ".join(f"{item['path']}: {item['reason']}" for a in archives for item in a["skipped"][:8])
+        raise ApiError(400, "no text files to keep: " + (reasons or "the archive is empty"))
+    body: dict[str, Any] = {"uploads": uploads}
+    if archives:
+        body["archives"] = archives
+    return 201, body
 
 
 def _r_upload_delete(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1708,10 +1787,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/model/select", _r_model_select,
      "switch the active model kind: {kind: radix | count}; the previous model stays in memory"),
     ("POST", "/api/train", _r_train,
-     "start a training job: {texts | text | files, epochs, lr, act_lr, lr_schedule, act_lr_schedule, batch_size, auto_compress}"),
+     "start a training job: {texts | text | files, epochs, lr, act_lr, lr_schedule, act_lr_schedule, reverse_schedule, "
+     "batch_size, auto_compress}"),
     ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
     ("POST", "/api/schedule/preview", _r_schedule_preview,
-     "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr} -> {points}"),
+     "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr, "
+     "reverse_schedule} -> {points}"),
     ("GET", "/api/job", _r_job, "status of the current / last job"),
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict,
@@ -1736,7 +1817,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/graph", _r_graph, "top nodes by visit count and the edges among them (?limit=150)"),
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
-    ("POST", "/api/uploads", _r_upload, "upload text files: JSON {name, content} | {files: [...]}, multipart/form-data, or a raw body with ?name="),
+    ("POST", "/api/uploads", _r_upload,
+     "upload text files or ZIP archives (unpacked on the server): JSON {name, content | content_base64} | {files: [...]}, "
+     "multipart/form-data, or a raw body with ?name="),
     ("POST", "/api/uploads/delete", _r_upload_delete, "delete an uploaded file: {name}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,

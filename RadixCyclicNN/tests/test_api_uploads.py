@@ -241,3 +241,172 @@ class UploadsDisabledTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZipUploadTests(unittest.TestCase):
+    """ZIP archives are unpacked on the server: every text entry becomes its own upload."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="radixnet-zips-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.client, self.server, self.service = start_server(self.addCleanup, upload_dir=self.dir)
+
+    @staticmethod
+    def archive(entries):
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, content in entries:
+                z.writestr(name, content)
+        return buf.getvalue()
+
+    def sample(self):
+        return self.archive([
+            ("corpus/part1.txt", "\n".join(CORPUS[:4]) + "\n"),
+            ("corpus/sub/part2.txt", "﻿" + "\n".join(CORPUS[4:7]) + "\n"),
+            ("corpus/notes.md", "# notes\n\nabout the corpus\n"),
+            ("image.png", b"\x89PNG\r\n\x1a\n\x00\x00binary"),
+            ("__MACOSX/corpus/._part1.txt", "resource fork"),
+            ("corpus/.DS_Store", "junk"),
+            ("empty.txt", "  \n\n"),
+            ("inner.zip", b"PK\x03\x04nested"),
+            ("corpus/dir/", ""),
+        ])
+
+    def test_raw_zip_is_unpacked(self):
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads?name=sample.zip", raw=self.sample(), headers={"Content-Type": "application/zip"}
+        )
+        self.assertEqual(status, 201, data)
+        self.assertEqual(
+            [(u["name"], u["lines"], u["entry"], u["archive"]) for u in data["uploads"]],
+            [
+                ("sample__corpus__part1.txt", 4, "corpus/part1.txt", "sample.zip"),
+                ("sample__corpus__sub__part2.txt", 3, "corpus/sub/part2.txt", "sample.zip"),
+                ("sample__corpus__notes.md", 2, "corpus/notes.md", "sample.zip"),
+            ],
+        )
+        archive = data["archives"][0]
+        self.assertEqual((archive["name"], archive["extracted"], archive["entries"], archive["bytes"]), ("sample.zip", 3, 9, len(self.sample())))
+        self.assertEqual(
+            {(s["path"], s["reason"]) for s in archive["skipped"]},
+            {
+                ("image.png", "binary"), ("__MACOSX/corpus/._part1.txt", "macOS metadata"), ("corpus/.DS_Store", "system file"),
+                ("empty.txt", "empty"), ("inner.zip", "nested archive"), ("corpus/dir/", "directory"),
+            },
+        )
+        self.assertEqual(sorted(os.listdir(self.dir)), sorted(u["name"] for u in data["uploads"]))  # the archive itself is not kept
+        with open(os.path.join(self.dir, "sample__corpus__sub__part2.txt"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "\n".join(CORPUS[4:7]) + "\n")  # the BOM is dropped
+        status, data, _ = self.client.get("/api/uploads")
+        self.assertEqual(len(data["uploads"]), 3)
+
+    def test_json_base64_and_multipart_zip(self):
+        import base64
+
+        payload = base64.b64encode(self.sample()).decode("ascii")
+        status, data, _ = self.client.post("/api/uploads", {"name": "b64.zip", "content_base64": payload})
+        self.assertEqual(status, 201, data)
+        self.assertEqual([u["name"] for u in data["uploads"]][:1], ["b64__corpus__part1.txt"])
+        status, data, _ = self.client.post(
+            "/api/uploads", {"files": [{"name": "plain.txt", "content": "a line\n"}, {"name": "batch.zip", "content_base64": payload}]}
+        )
+        self.assertEqual(status, 201, data)
+        self.assertEqual([u["name"] for u in data["uploads"]], ["plain.txt", "batch__corpus__part1.txt", "batch__corpus__sub__part2.txt", "batch__corpus__notes.md"])
+        self.assertEqual([a["name"] for a in data["archives"]], ["batch.zip"])
+
+        boundary = "----radixnet-zip-boundary"
+        body = (
+            f"--{boundary}\r\n".encode("ascii")
+            + b'Content-Disposition: form-data; name="file"; filename="multi.zip"\r\nContent-Type: application/zip\r\n\r\n'
+            + self.sample()
+            + f"\r\n--{boundary}--\r\n".encode("ascii")
+        )
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads", raw=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        self.assertEqual(status, 201, data)
+        self.assertEqual(len(data["uploads"]), 3)
+        self.assertTrue(all(u["name"].startswith("multi__") for u in data["uploads"]))
+
+    def test_zip_errors_and_text_fallbacks(self):
+        status, data, _ = self.client.post("/api/uploads", {"name": "x.zip", "content_base64": "@@not base64@@"})
+        self.assertEqual(status, 400, data)
+        self.assertIn("base64", data["error"])
+        status, data, _ = self.client.post("/api/uploads", {"name": "x.zip"})
+        self.assertEqual(status, 400, data)
+        self.assertIn("content_base64", data["error"])
+        # a ".zip" name with text bytes is just a text upload: the magic bytes decide
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads?name=notreally.zip", raw=b"just text\n", headers={"Content-Type": "application/zip"}
+        )
+        self.assertEqual(status, 201, data)
+        self.assertEqual((data["uploads"][0]["name"], data["uploads"][0]["lines"]), ("notreally.zip", 1))
+        self.assertNotIn("archives", data)
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads?name=empty.zip", raw=self.archive([]), headers={"Content-Type": "application/zip"}
+        )
+        self.assertEqual(status, 400, data)
+        self.assertIn("no text files", data["error"])
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads?name=bin.zip", raw=self.archive([("a.bin", b"\x00\x01\x02")]),
+            headers={"Content-Type": "application/zip"},
+        )
+        self.assertEqual(status, 400, data)
+        self.assertIn("a.bin: binary", data["error"])
+        truncated = self.sample()[:40]
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads?name=broken.zip", raw=truncated, headers={"Content-Type": "application/zip"}
+        )
+        self.assertEqual(status, 400, data)
+        self.assertIn("not a valid ZIP archive", data["error"])
+
+    def test_zip_limits(self):
+        from unittest import mock
+
+        from radixnet import archive as archive_module
+
+        big = self.archive([("a.txt", "x" * 100 + "\n"), ("b.txt", "y" * 100 + "\n")])
+        with mock.patch.object(archive_module, "MAX_UNPACKED_BYTES", 150), mock.patch.object(
+            self.service, "unpack_archive", wraps=self.service.unpack_archive
+        ):
+            with mock.patch("radixnet.api.extract_texts", lambda data, name: archive_module.extract_texts(data, name, max_bytes=150)):
+                status, data, _ = self.client.request(
+                    "POST", "/api/uploads?name=big.zip", raw=big, headers={"Content-Type": "application/zip"}
+                )
+        self.assertEqual(status, 400, data)
+        self.assertIn("limit is 150", data["error"])
+        many = self.archive([(f"f{i}.txt", "line\n") for i in range(5)])
+        with mock.patch("radixnet.api.extract_texts", lambda data, name: archive_module.extract_texts(data, name, max_entries=3)):
+            status, data, _ = self.client.request(
+                "POST", "/api/uploads?name=many.zip", raw=many, headers={"Content-Type": "application/zip"}
+            )
+        self.assertEqual(status, 400, data)
+        self.assertIn("5 entries", data["error"])
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_train_on_an_unpacked_archive(self):
+        status, data, _ = self.client.request(
+            "POST", "/api/uploads?name=sample.zip", raw=self.sample(), headers={"Content-Type": "application/zip"}
+        )
+        self.assertEqual(status, 201, data)
+        names = [u["name"] for u in data["uploads"] if u["name"].endswith(".txt")]
+        status, data, _ = self.client.post("/api/train", {"files": names, "epochs": 1, "batch_size": 8})
+        self.assertEqual(status, 202, data)
+        job = wait_job(self.client)
+        self.assertEqual(job["state"], "done", job)
+        status, data, _ = self.client.get("/api/status")
+        self.assertEqual(data["trained_texts"], 7)
+
+    def test_flat_names_are_safe(self):
+        from radixnet.archive import flat_name
+
+        self.assertEqual(flat_name("My Data (v2).zip", "../../etc/passwd"), "My Data (v2)__etc__passwd")
+        self.assertEqual(flat_name("/tmp/dir/a.zip", "x\\y\\z.txt"), "a__x__y__z.txt")
+        self.assertEqual(flat_name("a.ZIP", "./notes.txt"), "a__notes.txt")
+        long = flat_name("a.zip", "x" * 300 + ".txt")
+        self.assertLessEqual(len(long), 128)
+        self.assertTrue(long.endswith(".txt"))
+        self.assertNotEqual(long, flat_name("a.zip", "y" * 300 + ".txt"))

@@ -77,7 +77,7 @@ class TestTrainConfig(unittest.TestCase):
             {
                 "epochs": 5, "lr": 0.05, "act_lr": 0.005, "batch_size": 256, "clip": 5.0,
                 "auto_compress": True, "shuffle": True, "checkpoint_every": 0, "verbose": False,
-                "lr_schedule": None, "act_lr_schedule": None,
+                "lr_schedule": None, "act_lr_schedule": None, "reverse_schedule": False,
             },
         )
         cfg.validate()

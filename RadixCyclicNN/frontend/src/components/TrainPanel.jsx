@@ -36,6 +36,7 @@ export default function TrainPanel({ status }) {
   const [lrSchedule, setLrSchedule] = useState("");
   const [actLrSchedule, setActLrSchedule] = useState("");
   const [presetName, setPresetName] = useState("");
+  const [reverseSchedule, setReverseSchedule] = useState(false);
   const [presets, setPresets] = useState([]);
   const [scheduleHelp, setScheduleHelp] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -99,6 +100,7 @@ export default function TrainPanel({ status }) {
           epochs: parseInteger(epochs, 5),
           lr: parseNumber(lr, 0.05),
           act_lr: parseNumber(actLr, 0.005),
+          reverse_schedule: reverseSchedule,
         });
         if (!alive) return;
         setPreview(data && typeof data === "object" ? data : null);
@@ -113,7 +115,7 @@ export default function TrainPanel({ status }) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [scheduled, lrSchedule, actLrSchedule, epochs, lr, actLr]);
+  }, [scheduled, lrSchedule, actLrSchedule, epochs, lr, actLr, reverseSchedule]);
 
   // Refresh the stored history once a job reaches a terminal state.
   const jobState = job ? job.state : null;
@@ -150,6 +152,7 @@ export default function TrainPanel({ status }) {
         act_lr: parseNumber(actLr, 0.005),
         ...(scheduled && lrSchedule.trim() ? { lr_schedule: lrSchedule.trim() } : {}),
         ...(scheduled && actLrSchedule.trim() ? { act_lr_schedule: actLrSchedule.trim() } : {}),
+        ...(scheduled && reverseSchedule ? { reverse_schedule: true } : {}),
         batch_size: parseInteger(batchSize, 256),
         auto_compress: autoCompress,
       }),
@@ -265,6 +268,12 @@ export default function TrainPanel({ status }) {
               disabled={running}
             />
           </div>
+          <CheckField
+            label="Reverse the schedule (play it backwards: the last epoch's rates come first, so a ramp up becomes a ramp down)"
+            checked={reverseSchedule}
+            onChange={setReverseSchedule}
+            disabled={running}
+          />
           <p className="muted">
             Variables and functions: {helpNames}; helpers <code>linear(a, b)</code>, <code>geometric(a, b)</code>,{" "}
             <code>cosine(a, b)</code>, <code>step(a, factor, every)</code>, <code>warmup(a, b, n)</code>;{" "}

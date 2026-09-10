@@ -331,6 +331,7 @@ class TrainConfig:
     verbose: bool = False
     lr_schedule: str | None = None      # graph function of the epoch for lr (section 18); None = constant
     act_lr_schedule: str | None = None  # same for act_lr; may use `lr`, the epoch's learning rate
+    reverse_schedule: bool = False      # play the schedules backwards: the last epoch's rates first
     def rates(self) -> list[tuple[float, float]]   # (lr, act_lr) of every epoch; validate() evaluates them all
 
 class RadixNet:
@@ -520,7 +521,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/graph?limit=150` | | `{"nodes": [{"id","label","count","activation","z","a","b","h","k"}], "edges": [{"source","target","weight","count","prob","cost"}]}` — top-`limit` alive nodes by count plus START/END, edges among them |
 | GET `/api/history` | | `{"history": model.history}` |
 | GET `/api/uploads` | | `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` — text files kept in the server's `upload_dir` (`--upload-dir`, default `uploads`; endpoints answer 400 when no directory is configured) |
-| POST `/api/uploads` | JSON `{"name","content"}` or `{"files": [{"name","content"}, ...]}`; or `multipart/form-data` (every part with a filename); or any other body with `?name=<file>` (raw text) | 201 `{"uploads": [record + "replaced": bool]}`. Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
+| POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are unpacked by `archive.extract_texts` (section 20): one upload `<zip>__<dir>__<file>` per text entry, the archive itself is not kept, `archives[]` summarises entries / extracted / skipped (path + reason); 400 when nothing usable was inside or the entry / size limits are exceeded. Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
 | POST `/api/uploads/delete` | `{"name"}` | `{"deleted": name}` (404 when missing) |
 
 `/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
@@ -715,7 +716,9 @@ and the helpers `linear(a, b)`, `geometric(a, b)`, `cosine(a, b)`, `step(a, fact
 Every value must be a finite number `>= 0`; anything else is a `ScheduleError` (a `ValueError`, so the API answers
 400 and the CLI exits 1) naming the epoch.
 
-`preview_points(lr_schedule, act_lr_schedule, epochs, lr, act_lr)` gives `[{"epoch", "lr", "act_lr"}]`: the
+`preview_points(lr_schedule, act_lr_schedule, epochs, lr, act_lr, reverse=False)` gives `[{"epoch", "lr", "act_lr"}]`
+(`reverse` plays the list backwards, keeping each epoch's `lr` / `act_lr` pair together - the "Reverse the schedule"
+checkbox, `--reverse-schedule`, `reverse_schedule`): the
 activation schedule sees the learning rate *of the same epoch* as `lr`, so `lr / 10` follows whatever curve the
 learning rate has. `TrainConfig.rates()` uses it; `RadixNet.train` reads `(lr, act_lr) = rates[k]` per epoch and
 stamps both on the epoch record (`"lr"`, `"act_lr"`), so the history shows what was actually used. `PRESETS`
@@ -778,3 +781,22 @@ dijkstra there), `strength` on `/api/2nrl` and `/api/feedback`, `reward` on `/ap
 totals. Frontend: `ModelSelector` in the header (bound to `status.kind`, `POST /api/model/select`), the status bar
 shows the kind and reward totals, the Predict tab shows K / beam fields and the two tables, the Train tab hides the
 rate fields, Generate and 2NRL get a strength field.
+
+## 20. ZIP uploads (`archive.py`) — archives unpacked on the server
+
+`extract_texts(data, archive_name, max_entries=10_000, max_bytes=256 MiB) -> (extracted, skipped)` opens the bytes
+with `zipfile`, refuses archives over the entry limit or whose declared sizes exceed the byte limit (and counts the
+bytes actually read against the same limit, so a lying header cannot get past it), and walks the entries: directories,
+`__MACOSX` metadata, `._*` / `.DS_Store` / `Thumbs.db`, nested archives, encrypted entries, binary content (a NUL byte
+in the first 8 KB), unreadable and empty entries are reported as `Skipped(path, reason)`; the rest become
+`Extracted(name, path, text, bytes)` with the text decoded as UTF-8 (BOM dropped, undecodable bytes replaced).
+`flat_name(archive, path)` builds `<archive stem>__<dir>__<file>` from safe characters only - an entry path never
+touches the file system - and shortens over-long names to 128 characters with the extension kept and a short hash of
+the full path appended. `is_zip(name, data)` decides by the magic bytes alone, so a `.zip` that is really text is
+stored as text and a ZIP under any name is unpacked.
+
+API: `Fields.upload_files()` now yields text (`content`) or bytes (`content_base64`, multipart parts, raw bodies);
+`ModelService.upload_bytes` routes bytes to `unpack_archive` (one ordinary `upload()` per extracted entry, records
+carry `archive` / `entry`) or to a text upload. CLI: `read_texts` (every `--data` / `--good` / `--bad` / `--corpus`
+file) unpacks a ZIP in memory, one text per line or - with `--whole-file` - one per entry. Frontend: the upload picker
+sends `.zip` files as multipart bytes (`api.uploadFile`) and shows what was unpacked and what was skipped.

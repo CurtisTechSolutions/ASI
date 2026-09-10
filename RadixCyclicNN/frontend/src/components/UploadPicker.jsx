@@ -3,15 +3,33 @@ import { api } from "../api.js";
 import { asArray, fmtBytes, fmtInt, fmtTime } from "../util.js";
 import Alert from "./Alert.jsx";
 
-const ACCEPT = ".txt,.md,.csv,.tsv,.json,.jsonl,.log,.text,.py,text/*";
+const ACCEPT = ".txt,.md,.csv,.tsv,.json,.jsonl,.log,.text,.py,.zip,text/*,application/zip";
+
+/** ZIP archives go up as bytes and are unpacked on the server; everything else is read as text. */
+function isArchive(file) {
+  const type = String(file.type || "").toLowerCase();
+  return /\.zip$/i.test(file.name) || type === "application/zip" || type === "application/x-zip-compressed";
+}
+
+function describeArchive(archive) {
+  const skipped = Array.isArray(archive.skipped) ? archive.skipped : [];
+  const detail = skipped
+    .slice(0, 3)
+    .map((s) => `${s.path} (${s.reason})`)
+    .join(", ");
+  const more = skipped.length > 3 ? `, … ${skipped.length - 3} more` : "";
+  const files = `${archive.extracted} text file${archive.extracted === 1 ? "" : "s"}`;
+  return `Unpacked ${archive.name}: ${files}${skipped.length ? `, ${skipped.length} skipped (${detail}${more})` : ""}.`;
+}
 
 /**
  * Text files kept in the server's upload directory (GET /api/uploads), with a
  * checkbox per file so a panel can train on a selection of them.
  *
  * Files are uploaded from the file input or by dropping them onto the box:
- * the browser reads each file as text and POSTs {name, content} to
- * /api/uploads, so the server needs no multipart parsing for the UI.
+ * the browser reads each text file and POSTs {name, content} to /api/uploads;
+ * a ZIP archive is sent as multipart bytes and unpacked on the server, every
+ * text file inside becoming its own upload (named <zip>__<dir>__<file>).
  *
  * Props: selected (array of upload names), onChange(names), disabled, title, hint.
  */
@@ -65,14 +83,14 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
     setNotice(null);
     const added = [];
     const failures = [];
+    const notes = [];
     for (let i = 0; i < files.length; i += 1) {
       const file = files[i];
       setUploading(`${i + 1} / ${files.length}: ${file.name}`);
       try {
-        const content = await file.text();
-        const data = await api.upload(file.name, content);
-        const record = asArray(data && data.uploads)[0];
-        if (record && record.name) added.push(record.name);
+        const data = isArchive(file) ? await api.uploadFile(file) : await api.upload(file.name, await file.text());
+        for (const record of asArray(data && data.uploads)) if (record && record.name) added.push(record.name);
+        for (const archive of asArray(data && data.archives)) if (archive && archive.name) notes.push(describeArchive(archive));
       } catch (err) {
         failures.push(`${file.name}: ${err.message}`);
       }
@@ -81,7 +99,8 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
     await refresh();
     if (added.length > 0) onChange(Array.from(new Set([...chosen, ...added])));
     if (failures.length > 0) setError(failures.join("\n"));
-    else setNotice(`Uploaded ${added.length} file${added.length === 1 ? "" : "s"}.`);
+    const summary = `Uploaded ${added.length} file${added.length === 1 ? "" : "s"}.`;
+    setNotice(failures.length > 0 && notes.length === 0 ? null : [summary, ...notes].join(" "));
   }
 
   async function remove(name) {
@@ -152,7 +171,8 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
         }}
       />
       <p className="muted">
-        {hint || "Drop text files here or press Upload. Each non-blank line is one training text."}
+        {hint || "Drop text files or ZIP archives here or press Upload. Each non-blank line is one training text."}
+        {" ZIP archives are unpacked on the server: every text file inside becomes an upload."}
         {uploadDir ? ` Stored on the server in ${uploadDir}.` : ""}
       </p>
       {uploading ? <p className="muted">Uploading {uploading}…</p> : null}

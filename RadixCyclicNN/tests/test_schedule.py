@@ -218,6 +218,20 @@ class TestParseAndPreview(unittest.TestCase):
         # without a learning-rate schedule, lr is the constant base rate
         self.assertTrue(close([p["act_lr"] for p in preview_points(None, "lr / 10", 2, 0.3, 0.005)], [0.03, 0.03]))
 
+    def test_reverse_plays_the_schedule_backwards(self):
+        forward = preview_points("linear(lr0, 5 * lr0)", "lr / 10", 5, 0.1, 0.005)
+        backward = preview_points("linear(lr0, 5 * lr0)", "lr / 10", 5, 0.1, 0.005, reverse=True)
+        self.assertEqual([p["epoch"] for p in backward], [1, 2, 3, 4, 5])
+        self.assertTrue(close([p["lr"] for p in backward], [0.5, 0.4, 0.3, 0.2, 0.1]))
+        self.assertTrue(close([p["act_lr"] for p in backward], [0.05, 0.04, 0.03, 0.02, 0.01]))
+        self.assertEqual([(p["lr"], p["act_lr"]) for p in backward], [(p["lr"], p["act_lr"]) for p in reversed(forward)])
+        self.assertEqual(preview_points(None, None, 3, 0.1, 0.01, reverse=True), preview_points(None, None, 3, 0.1, 0.01))
+        self.assertEqual(preview_points("lr0", None, 0, 0.1, 0.01, reverse=True), [])
+        cfg = TrainConfig(epochs=4, lr=0.1, act_lr=0.01, lr_schedule="warmup(lr0 / 10, lr0, 3)", reverse_schedule=True)
+        cfg.validate()
+        self.assertTrue(close([r[0] for r in cfg.rates()], [0.1, 0.1 * 2 / 3 + 0.01 / 3, 0.1 / 3 + 0.01 * 2 / 3, 0.01]))
+        self.assertIn("reverse_schedule", cfg.to_dict())
+
     def test_preview_points_errors(self):
         with self.assertRaises(ScheduleError):
             preview_points("lr0 - 1", None, 3, 0.05, 0.005)
@@ -380,7 +394,7 @@ class TestApi(unittest.TestCase):
             {"lr_schedule": "linear(lr0, 5 * lr0)", "act_lr_schedule": "lr / 10", "epochs": 5, "lr": 0.1, "act_lr": 0.005},
         )
         self.assertEqual(status, 200, data)
-        self.assertEqual(set(data), {"lr_schedule", "act_lr_schedule", "epochs", "lr", "act_lr", "points"})
+        self.assertEqual(set(data), {"lr_schedule", "act_lr_schedule", "epochs", "lr", "act_lr", "reverse_schedule", "points"})
         self.assertEqual((data["lr_schedule"], data["act_lr_schedule"], data["epochs"]), ("linear(lr0, 5 * lr0)", "lr / 10", 5))
         self.assertEqual([p["epoch"] for p in data["points"]], [1, 2, 3, 4, 5])
         self.assertTrue(close([p["lr"] for p in data["points"]], [0.1, 0.2, 0.3, 0.4, 0.5]))
@@ -423,6 +437,25 @@ class TestApi(unittest.TestCase):
         self.assertEqual(done["state"], "done", done)
         self.assertTrue(close([r["lr"] for r in done["history"]], [0.1, 0.2, 0.4, 0.8]))
         self.assertTrue(close([r["act_lr"] for r in done["history"]], [0.01, 0.02, 0.04, 0.08]))
+        status, data, _ = self.client.post(
+            "/api/train",
+            {"texts": CORPUS[:12], "epochs": 4, "lr": 0.1, "act_lr": 0.005, "batch_size": 8,
+             "lr_schedule": "geometric(lr0, 8 * lr0)", "act_lr_schedule": "lr / 10", "reverse_schedule": True},
+        )
+        self.assertEqual(status, 202, data)
+        done = wait_for_job(self.client)
+        self.assertTrue(close([r["lr"] for r in done["history"]], [0.8, 0.4, 0.2, 0.1]))
+        self.assertTrue(close([r["act_lr"] for r in done["history"]], [0.08, 0.04, 0.02, 0.01]))
+
+    def test_preview_reverse(self):
+        status, data, _ = self.client.post(
+            "/api/schedule/preview", {"lr_schedule": "linear(lr0, 3 * lr0)", "epochs": 3, "lr": 0.1, "reverse_schedule": True},
+        )
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data["reverse_schedule"])
+        self.assertTrue(close([p["lr"] for p in data["points"]], [0.3, 0.2, 0.1]))
+        status, data, _ = self.client.post("/api/schedule/preview", {"lr_schedule": "lr0", "reverse_schedule": "yes"})
+        self.assertEqual(status, 400)
 
     def test_train_rejects_a_bad_schedule_without_starting_a_job(self):
         status, before, _ = self.client.get("/api/job")
@@ -466,6 +499,9 @@ class TestCli(unittest.TestCase):
                          ("linear(lr0, 4 * lr0)", "lr / 10", 4, 0.1, 0.005))
         self.assertTrue(close([p["lr"] for p in doc["points"]], [0.1, 0.2, 0.3, 0.4]))
         self.assertTrue(close([p["act_lr"] for p in doc["points"]], [0.01, 0.02, 0.03, 0.04]))
+        doc = self.run_json("schedule", "--epochs", 4, "--lr", 0.1, "--lr-schedule", "linear(lr0, 4 * lr0)", "--reverse-schedule")
+        self.assertTrue(doc["reverse_schedule"])
+        self.assertTrue(close([p["lr"] for p in doc["points"]], [0.4, 0.3, 0.2, 0.1]))
         proc = self.run_cli("schedule", "--epochs", 4, "--lr-schedule", "linear(lr0, 4 * lr0)", json_mode=False)
         self.assertIn("lr graph", proc.stdout)
         bars = [line.split()[2] for line in proc.stdout.splitlines() if line.strip()[:1].isdigit()]
@@ -497,6 +533,12 @@ class TestCli(unittest.TestCase):
             self.assertTrue(close([r["lr"] for r in doc["records"]], [0.1, 0.2, 0.4]))
             self.assertTrue(close([r["act_lr"] for r in doc["records"]], [0.01, 0.02, 0.04]))
             self.assertTrue(os.path.exists(model))
+            doc = self.run_json(
+                "train", "--data", os.path.join(ROOT, "data", "sample_corpus.txt"), "--epochs", 3, "--batch-size", 8,
+                "--lr", 0.1, "--lr-schedule", "lr0 * 2 ** i", "--reverse-schedule", model=os.path.join(tmp, "rev.json"),
+            )
+            self.assertTrue(doc["config"]["reverse_schedule"])
+            self.assertTrue(close([r["lr"] for r in doc["records"]], [0.4, 0.2, 0.1]))
             proc = self.run_cli(
                 "train", "--data", os.path.join(ROOT, "data", "sample_corpus.txt"), "--epochs", 2, "--batch-size", 8,
                 "--lr-schedule", "linear(lr0, 3 * lr0)", model=model, json_mode=False,

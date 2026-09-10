@@ -145,8 +145,8 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 
 | Command | Main options |
 |---|---|
-| `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out` |
-| `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
+| `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
+| `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
 | `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; count model: `--k 5` (top K and bottom K continuations), `--beam N` |
 | `generate` | `--count`, `--max-length`, `--mode`, `--temperature` |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
@@ -176,11 +176,11 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/status` | model statistics (with the active `kind`), current job, available backends, model path |
 | `GET /api/model` | `{"kind", "label", "kinds": [{"kind","label","description"}], "model_path", "paths", "in_memory"}` |
 | `POST /api/model/select` | `{"kind": "radix"\|"count"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
-| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
+| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
-| `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
+| `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
 | `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` |
-| `POST /api/uploads` | upload text files: JSON `{"name","content"}` or `{"files": [{"name","content"}, ...]}`, `multipart/form-data` (`curl -F file=@corpus.txt`), or a raw body with `?name=corpus.txt` -> `{"uploads": [...]}` (201) |
+| `POST /api/uploads` | upload text files or ZIP archives: JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`, `multipart/form-data` (`curl -F file=@corpus.zip`), or a raw body with `?name=corpus.zip` -> `{"uploads": [...], "archives": [{"name","entries","extracted","skipped": [{"path","reason"}]}]}` (201). A ZIP is unpacked on the server: every text entry becomes the upload `<zip>__<dir>__<file>`; directories, `__MACOSX` / system files, nested archives, encrypted, binary and empty entries are skipped; more than 10 000 entries or 256 MB unpacked is refused |
 | `POST /api/uploads/delete` | `{"name"}` |
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
@@ -227,8 +227,9 @@ Checkpoints (save / restore / load / reset) and a Graph view of the most
 visited nodes.
 
 Training files: drop text files onto the Train panel (or press "Upload
-files…"); the browser reads them and sends them to `POST /api/uploads`, the
-server keeps them in its `--upload-dir`, and the list lets you tick which files
+files…"); the browser reads them and sends them to `POST /api/uploads` (a
+`.zip` goes up as bytes and is unpacked on the server into one upload per text
+file inside), the server keeps them in its `--upload-dir`, and the list lets you tick which files
 to train on, one text per line or each file as one text. The same picker feeds
 the 2NRL (bad / good files) and Evolve (corpus files) panels.
 
@@ -389,7 +390,10 @@ Variables: `epoch` (1-based), `i` (0-based), `epochs`, `t` (0 at the first
 epoch, 1 at the last), `lr0` (the base rate: `--lr` or `--act-lr`), `act_lr0`
 and, for the activation schedule, `lr` (the epoch's learning rate).  Functions:
 `sin cos tan exp log log2 log10 sqrt pow abs floor ceil round min max tanh
-clamp`, constants `pi`, `e`.  Expressions are validated against a whitelist
+clamp`, constants `pi`, `e`.  The "Reverse the schedule" checkbox
+(`--reverse-schedule`, `reverse_schedule`) plays a schedule backwards - the
+last epoch's rates come first, so a ramp up becomes a ramp down and a warm-up
+a cool-down.  Expressions are validated against a whitelist
 (no names, attributes, strings or calls outside that list), and every value
 must be finite and non-negative - a bad expression is rejected before training
 starts.  `python -m radixnet schedule --epochs 6 --lr-schedule 'linear(lr0, 4 * lr0)' --act-lr-schedule 'lr / 10'`
