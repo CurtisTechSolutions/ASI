@@ -56,6 +56,12 @@ services:
       RADIXNET_RESUME: ${RADIXNET_RESUME:-0}
       RADIXNET_MODEL: /data/model.json
       RADIXNET_CHECKPOINT_DIR: /data/checkpoints
+      # Ollama for the /api/ollama endpoints: an Ollama on the host by default,
+      # or http://ollama:11434 with `--profile ollama`.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      RADIXNET_OLLAMA_MODEL: ${RADIXNET_OLLAMA_MODEL:-llama3.2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${RADIXNET_PORT:-8000}:8000"
     # SIGINT = Ctrl-C for the CLI: the server stops a running job cleanly on the way out.
@@ -195,6 +201,21 @@ services:
     depends_on:
       - api
 
+  # ---- a local LLM for the Ollama panel (docker compose --profile ollama up -d)
+  # Start with `OLLAMA_HOST=http://ollama:11434 docker compose --profile ollama up -d`
+  # so the API talks to this container instead of an Ollama on the host, then
+  # pull a model once: `docker compose exec ollama ollama pull llama3.2`.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    container_name: radixnet-ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    restart: unless-stopped
+
 volumes:
   radixnet-data:
   frontend-node-modules:
+  ollama-models:

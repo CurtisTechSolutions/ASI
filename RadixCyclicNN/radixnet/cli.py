@@ -809,6 +809,158 @@ def cmd_bench(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+def _ollama_client(args: argparse.Namespace) -> Any:
+    from .ollama import OllamaClient
+
+    try:
+        return OllamaClient(args.url, args.ollama_model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def cmd_ollama_models(args: argparse.Namespace, console: Console) -> dict:
+    from .ollama import OllamaError
+
+    client = _ollama_client(args)
+    try:
+        models = client.models()
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([("ollama", client.url), ("default model", client.model)])
+    console.say()
+    if models:
+        console.table(("name", "bytes", "modified"), [[m.get("name"), m.get("size"), m.get("modified_at")] for m in models])
+    else:
+        console.say("no models installed (pull one with `ollama pull llama3.2`)")
+    return {"url": client.url, "model": client.model, "models": models}
+
+
+def cmd_ollama_corpus(args: argparse.Namespace, console: Console) -> dict:
+    from .ollama import OllamaError, corpus_from_prompt
+
+    client = _ollama_client(args)
+    console.pairs([
+        ("ollama", f"{client.model} at {client.url}"),
+        ("prompt", quote(clip(args.prompt, 60))),
+        ("style", args.style),
+        ("lines", args.lines),
+    ])
+    try:
+        texts = corpus_from_prompt(client, args.prompt, lines=args.lines, style=args.style, model=client.model)
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    if not texts:
+        raise CliError(f"Ollama model {client.model!r} returned no usable lines")
+    console.say()
+    for i, line in enumerate(texts, 1):
+        console.say(f"{i:3d}  {line}")
+    doc: dict[str, Any] = {
+        "url": client.url, "model": client.model, "prompt": args.prompt, "style": args.style,
+        "lines": len(texts), "texts": texts, "out": None, "trained": None,
+    }
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(texts) + "\n")
+        console.say()
+        console.say(f"wrote {len(texts)} lines to {args.out}")
+        doc["out"] = args.out
+    if args.train:
+        model, origin = open_model(args, console, required=False)
+        target = args.model_out or args.model
+        console.say()
+        console.pairs([
+            ("model", origin.describe()),
+            ("backend", backend_label(model)),
+            ("training", f"epochs={args.epochs} lr={args.lr} batch={args.batch_size}"),
+            ("output", target),
+        ])
+        console.say()
+        printer = EpochPrinter(console)
+        stop = threading.Event()
+        records, interrupted = run_interruptible(
+            lambda: model.train(
+                texts, epochs=args.epochs, lr=args.lr, batch_size=args.batch_size, progress=printer, stop_event=stop,
+            ),
+            stop, console, "epoch",
+        )
+        saved = _finish_training(console, model, target, interrupted, printer, "epoch")
+        doc["trained"] = {
+            "model": origin.to_dict(), "out": target, "epochs": records, "interrupted": interrupted,
+            "saved": saved, "stats": model.stats(),
+        }
+    return doc
+
+
+def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
+    from .ollama import OllamaError, adversarial_review
+
+    client = _ollama_client(args)
+    texts: list[str] | None = None
+    if args.text:
+        texts = list(args.text)
+    elif args.data:
+        texts = read_texts([args.data], what="reviewable")
+    model = origin = None
+    if texts is None or args.apply_two_nrl:
+        model, origin = open_model(args, console, required=texts is None)
+    if texts is not None:
+        source = f"{len(texts)} given texts"
+    else:
+        source = f"{args.count} samples from {origin.describe()}" + (f" continuing {quote(args.prefix)}" if args.prefix else "")
+    console.pairs([("ollama", f"{client.model} at {client.url}"), ("source", source), ("threshold", args.threshold)])
+    try:
+        result = adversarial_review(
+            model, client, count=args.count, prefix=args.prefix, max_length=args.max_length,
+            temperature=args.temperature, texts=texts, threshold=args.threshold, context=args.context,
+            ollama_model=client.model, seed=args.seed,
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    console.say()
+    rows = [[r["rating"], r["verdict"], quote(clip(r["text"], 50)), clip(r["critique"], 60)] for r in result["reviews"]]
+    console.table(("rating", "verdict", "text", "critique"), rows)
+    console.say()
+    console.say(
+        f"{len(result['reviews'])} texts: mean rating {fmt(result['mean_rating'])}, pass rate {fmt(result['pass_rate'])}, "
+        f"{len(result['bad'])} bad / {len(result['good'])} good"
+    )
+    doc: dict[str, Any] = dict(result)
+    doc["two_nrl"] = None
+    if args.apply_two_nrl:
+        bad = list(result["bad"])
+        good = list(result["good"])
+        if args.good:
+            good.extend(read_texts([args.good], what="good"))
+        if not bad:
+            raise CliError("nothing failed the review, so there is no garbage for the negative phase")
+        if not good:
+            raise CliError("no text passed the review and no --good file was given for the positive phase")
+        out = args.out or args.model
+        console.say()
+        console.pairs([
+            ("2NRL", f"{len(bad)} bad -> invert -> {len(good)} good"),
+            ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
+            ("positive", f"epochs={args.pos_epochs} lr={args.pos_lr} act_lr={args.pos_lr / 10}"),
+            ("output", out),
+        ])
+        console.say()
+        printer = EpochPrinter(console, phased=True)
+        stop = threading.Event()
+        two, interrupted = run_interruptible(
+            lambda: model.two_nrl(
+                bad, good, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
+                pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size,
+            ),
+            stop, console, "epoch",
+        )
+        saved = _finish_training(console, model, out, interrupted, printer, "epoch")
+        doc["two_nrl"] = {
+            "bad_texts": len(bad), "good_texts": len(good), "negative": two["negative"], "positive": two["positive"],
+            "inverted": two["inverted"], "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+        }
+    return doc
+
+
 def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     try:
         from . import api
@@ -828,6 +980,8 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         "backend": args.backend,
         "device": args.device,
         "seed": effective_seed(args),
+        "ollama_url": args.ollama_url,
+        "ollama_model": args.ollama_model,
         "version": __version__,
     }
     console.pairs([
@@ -837,6 +991,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         ("uploads", args.upload_dir),
         ("frontend", frontend_dir + ("" if doc["frontend_built"] else " (not built: run `npm install && npm run build` in frontend/)")),
         ("backend", args.backend + (f" on {args.device}" if args.device else "")),
+        ("ollama", f"{args.ollama_model or '$RADIXNET_OLLAMA_MODEL'} at {args.ollama_url or '$OLLAMA_HOST'}"),
     ])
     console.say("press Ctrl-C to stop")
     if console.json_mode:
@@ -844,7 +999,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     api.run_server(
         host=args.host, port=args.port, model_path=args.model, checkpoint_dir=args.checkpoint_dir,
         frontend_dir=frontend_dir, backend=args.backend, device=args.device, seed=effective_seed(args),
-        upload_dir=args.upload_dir,
+        upload_dir=args.upload_dir, ollama_url=args.ollama_url, ollama_model=args.ollama_model,
     )
     return None
 
@@ -1104,6 +1259,70 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs", type=pos_int, default=3, help="training epochs to time")
     p.set_defaults(handler=cmd_bench)
 
+    # ollama ---------------------------------------------------------------
+    from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
+
+    p = command(
+        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review",
+        "Talk to an Ollama server (https://ollama.com).  `corpus` turns a prompt into training lines, correct\n"
+        "or deliberately garbage (the two halves of 2NRL), and can train on them; `review` lets the LLM\n"
+        "adversarially rate the network's own samples (or given texts) from 0 to 10 and, with --2nrl,\n"
+        "feeds the failed ones back as garbage and the passed ones as correct data.\n"
+        f"Usage: {PROG} [global options] ollama [--url URL] [--ollama-model NAME] <action> [options]",
+    )
+    p.add_argument("--url", metavar="URL", help=f"Ollama base URL (default: $OLLAMA_HOST or {ollama_default_url})")
+    p.add_argument("--ollama-model", metavar="NAME",
+                   help=f"Ollama model name (default: $RADIXNET_OLLAMA_MODEL or {ollama_default_model})")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS",
+                   help="seconds to wait for one Ollama answer (default: 120)")
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+
+    a = actions.add_parser("models", help="list the models installed in Ollama",
+                           description="List the models installed in the Ollama server.", formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_ollama_models)
+
+    a = actions.add_parser(
+        "corpus", help="turn a prompt into training lines (optionally train on them)",
+        description="Ask the LLM for lines of text about --prompt: one short sentence per line, either correct\n"
+                    "(--style good) or deliberately wrong (--style garbage, for the 2NRL negative phase).\n"
+                    "--out writes them to a file, --train trains the model on them and saves it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--prompt", required=True, metavar="TEXT", help="what the lines should be about / how they should read")
+    a.add_argument("--lines", type=pos_int, default=20, help="number of lines to ask for")
+    a.add_argument("--style", choices=("good", "garbage"), default="good",
+                   help="correct text, or deliberately wrong text for the 2NRL negative phase")
+    a.add_argument("--out", metavar="FILE", help="also write the lines to FILE (one per line; usable as --data / --bad / --good)")
+    a.add_argument("--train", action="store_true", help="train the model on the lines and save it")
+    a.add_argument("--epochs", type=nonneg_int, default=10, help="training epochs with --train")
+    a.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train (a prompt corpus is small, so it is high)")
+    a.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step with --train")
+    a.add_argument("--model-out", metavar="PATH", help="where to save the trained model (default: --model)")
+    a.set_defaults(handler=cmd_ollama_corpus)
+
+    a = actions.add_parser(
+        "review", help="adversarial LLM review / rating of the network's output",
+        description="The LLM plays the harsh critic: every sample the network generates (or every given text)\n"
+                    "gets a rating from 0 to 10, a pass/fail verdict against --threshold and a one-sentence\n"
+                    "critique.  With --2nrl the failed texts become the negative phase and the passed texts\n"
+                    "(plus --good) the positive phase of a 2NRL pass, after which the model is saved.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--count", type=pos_int, default=8, help="samples to draw from the model")
+    a.add_argument("--prefix", default="", metavar="TEXT", help="continue this prefix instead of generating from scratch")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per sample")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature")
+    a.add_argument("--text", action="append", metavar="TEXT", help="review this text instead of sampling (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="review the texts of FILE (one per line) instead of sampling")
+    a.add_argument("--threshold", type=nonneg_float, default=6.0, help="ratings at or above this pass")
+    a.add_argument("--context", metavar="TEXT", help="extra context for the reviewer (e.g. what the model was trained on)")
+    a.add_argument("--2nrl", dest="apply_two_nrl", action="store_true",
+                   help="afterwards run 2NRL: failed texts as garbage, passed texts (+ --good) as correct data, then save")
+    a.add_argument("--good", metavar="FILE", help="extra correct texts for the 2NRL positive phase (one per line)")
+    _add_two_nrl_options(a, neg_epochs=3, pos_epochs=3, batch_size=4)
+    a.add_argument("--out", metavar="PATH", help="where to save the model after --2nrl (default: --model)")
+    a.set_defaults(handler=cmd_ollama_review)
+
     # serve ----------------------------------------------------------------
     p = command(
         "serve", "start the HTTP JSON API (and serve the React frontend)",
@@ -1117,6 +1336,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--checkpoint-dir", default=DEFAULT_CHECKPOINT_DIR, metavar="DIR", help="checkpoint directory of the API")
     p.add_argument("--upload-dir", default="uploads", metavar="DIR",
                    help="directory for training files uploaded through the API / frontend (default: uploads)")
+    p.add_argument("--ollama-url", metavar="URL",
+                   help=f"Ollama base URL for the /api/ollama endpoints (default: $OLLAMA_HOST or {ollama_default_url})")
+    p.add_argument("--ollama-model", metavar="NAME",
+                   help=f"default Ollama model for the /api/ollama endpoints (default: $RADIXNET_OLLAMA_MODEL or {ollama_default_model})")
     p.set_defaults(handler=cmd_serve)
     return parser
 

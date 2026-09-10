@@ -570,3 +570,66 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * Dijkstra uses `heapq` with `(cost, tie_counter, node_id, chars)` tuples and a `best` dict; `max_expansions` guard.
 * Training re-uses transition arrays across epochs unless `structure_version` changed.
 * `bench` reports numbers; `PythonBackend` should reach roughly 100k+ transitions/sec on a modern CPU for small fan-outs.
+
+---
+
+## 16. Ollama integration (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
+
+Two ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
+
+1. **Corpus from a prompt** — the LLM is asked for *N* lines about a prompt, either correct (`style="good"`) or
+   deliberately wrong (`style="garbage"`): exactly the two inputs of 2NRL. The lines can be trained on, saved as an
+   upload, or written to a file.
+2. **Adversarial review** — the LLM plays the harsh critic: every sample the network generates (or any given text)
+   gets a rating 0–10, a pass/fail verdict against a threshold and a one-sentence critique. Failed texts become 2NRL
+   garbage, passed texts (plus an optional corpus) the fine-tune pass: an external discriminator for the GAN loop.
+
+```python
+DEFAULT_URL   = $OLLAMA_HOST (Ollama's own variable; "host:port" without scheme accepted) or "http://127.0.0.1:11434"
+DEFAULT_MODEL = $RADIXNET_OLLAMA_MODEL or "llama3.2"
+DEFAULT_TIMEOUT = 120.0
+
+class OllamaError(Exception)          # unreachable / HTTP error / unusable answer; readable message
+class OllamaClient(url=None, model=None, timeout=None)
+    .url .model .timeout
+    .models() -> list[dict]           # GET /api/tags -> [{"name","size","modified_at","details"}]
+    .available() -> bool
+    .generate(prompt, *, system=None, model=None, json_mode=False, options=None, timeout=None) -> str
+                                      # POST /api/generate {model, prompt, system, stream: false, format: "json"?, options}
+    .chat(messages, *, model=None, json_mode=False, options=None, timeout=None) -> str   # POST /api/chat
+
+def parse_lines(text, limit=None) -> list[str]        # strips numbering / bullets / quotes, drops blanks, fences, duplicates
+def corpus_from_prompt(client, prompt, lines=20, style="good", model=None) -> list[str]
+def review_texts(client, texts, *, context=None, model=None, threshold=6.0, batch=20) -> list[dict]
+    # JSON-mode prompt; each entry {"index","text","rating": 0..10 | None,"verdict": "pass"|"fail"|"unrated","critique"}
+    # verdict recomputed from the rating; blank texts fail as "empty output" without asking the LLM
+def sample_texts(model, count, prefix="", max_length=60, temperature=1.0, seed=None) -> list[str]
+def adversarial_review(model, client, *, count=8, prefix="", max_length=60, temperature=1.0, texts=None,
+                       threshold=6.0, context=None, ollama_model=None, seed=None) -> dict
+    # {"source": "model"|"given", "model", "threshold", "texts", "reviews", "mean_rating", "pass_rate",
+    #  "good": passed texts, "bad": failed + unrated texts}
+```
+
+CLI: `radixnet [globals] ollama [--url URL] [--ollama-model NAME] [--timeout S] <action>`:
+
+| action | options | behaviour |
+|---|---|---|
+| `models` | | list installed models |
+| `corpus` | `--prompt TEXT`, `--lines 20`, `--style good\|garbage`, `--out FILE`, `--train`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | prints the lines; writes / trains on them |
+| `review` | `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--text ...` / `--data FILE`, `--threshold 6`, `--context`, `--2nrl`, `--good FILE`, 2NRL options, `--out` | table of ratings + summary; `--2nrl` runs failed→invert→passed and saves |
+
+`serve --ollama-url --ollama-model` set the API defaults.
+
+API (`ollama_url` / `ollama_model` on `ModelService` / `create_server`; `/api/status` gains `"ollama": {"url","model"}`):
+
+| method & path | body | response |
+|---|---|---|
+| GET `/api/ollama/models?url=` | | 200 always: `{"available", "url", "model", "models": [...], "error": null\|str}` |
+| POST `/api/ollama/corpus` | `{prompt, lines=20, style="good", model?, url?, timeout?, save_as?: upload name, train=false, epochs, lr, act_lr, batch_size}` | `{"prompt","style","model","url","lines","texts","upload": record\|null,"job": job\|null}`; 202 when a train job started; 400 bad input; 409 job running; 502 Ollama failure |
+| POST `/api/ollama/review` | `{count=8, prefix="", max_length=60, temperature=1, texts?\|text?, threshold=6, context?, model?, url?, apply="none"\|"2nrl", good?, good_text?, good_files?, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size}` | `adversarial_review` result + `"url"` + `"job"`; `apply="2nrl"` starts a 2NRL job with bad = failed+unrated and good = passed + given (400 when either set is empty) |
+
+Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from a prompt" (generate → train / save as upload / hold as 2NRL bad or good) and "Adversarial review" (ratings table, summary, apply as 2NRL with extra good files).
+
+Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
+
+Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, configurable failures) and `/api/chat`.

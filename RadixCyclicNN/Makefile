@@ -36,6 +36,12 @@ NAME        ?= latest
 HOST        ?= 127.0.0.1
 PORT        ?= 8000
 CHARS       ?= 50000
+OLLAMA_URL  ?=
+OLLAMA_MODEL ?=
+PROMPT      ?= short true sentences about animals and the weather
+LINES       ?= 20
+STYLE       ?= good
+THRESHOLD   ?= 6
 COMPOSE     ?= docker compose
 GPU_COMPOSE ?= $(COMPOSE) -f docker-compose.yml -f docker-compose.gpu.yml
 ALL_PROFILES := --profile auto --profile dev --profile evolve --profile tools
@@ -53,7 +59,8 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
 
 .PHONY: help install install-gpu check test train resume predict generate score 2nrl invert compress \
         evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
-        frontend-dev docker-build up up-auto up-dev up-gpu down logs shell docker-train docker-evolve \
+        frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
+        docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
 help: ## Show this help
@@ -126,6 +133,24 @@ demo: ## Train on the sample corpus, then predict, generate and score
 	$(MAKE) generate
 	$(MAKE) score
 
+##@ Ollama (local LLM: corpus from a prompt, adversarial review)
+OLLAMA_FLAGS := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),) $(if $(OLLAMA_MODEL),--ollama-model $(OLLAMA_MODEL),)
+
+ollama-models: ## List the models installed in Ollama (OLLAMA_URL / OLLAMA_MODEL override $$OLLAMA_HOST / $$RADIXNET_OLLAMA_MODEL)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) models
+
+ollama-corpus: ## Ask Ollama for LINES lines about PROMPT (STYLE=good|garbage), write them to ollama-$(STYLE).txt and train on them
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) corpus --prompt "$(PROMPT)" --lines $(LINES) --style $(STYLE) --out ollama-$(STYLE).txt --train --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH)
+
+ollama-garbage: ## Ask Ollama for LINES deliberately wrong lines about PROMPT and write them to ollama-garbage.txt (no training)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) corpus --prompt "$(PROMPT)" --lines $(LINES) --style garbage --out ollama-garbage.txt
+
+ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pass at THRESHOLD)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD)
+
+ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
+
 ##@ Serve (local)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)
 	$(RADIXNET) $(GLOBAL) serve --host $(HOST) --port $(PORT) --checkpoint-dir $(CKPT_DIR) --upload-dir $(UPLOAD_DIR)
@@ -154,6 +179,9 @@ up-dev: ## API + Vite dev server with hot reload on http://localhost:5173 (foreg
 
 up-gpu: ## Build with torch and start the API with the host's NVIDIA GPUs
 	$(GPU_COMPOSE) up -d --build api
+
+up-ollama: ## Start the API plus an Ollama container (pull a model once: docker compose exec ollama ollama pull llama3.2)
+	OLLAMA_HOST=http://ollama:11434 $(COMPOSE) --profile ollama up -d
 
 down: ## Stop the stack (all profiles); the data volume is kept
 	$(COMPOSE) $(ALL_PROFILES) down

@@ -54,6 +54,17 @@ from .checkpoint import CheckpointManager
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .model import RadixNet, TrainConfig
+from .ollama import (
+    DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
+    DEFAULT_URL as OLLAMA_DEFAULT_URL,
+    STYLES as OLLAMA_STYLES,
+    OllamaClient,
+    OllamaError,
+    adversarial_review,
+    corpus_from_prompt,
+    normalise_url,
+    sample_texts,
+)
 from .search import PathResult
 
 __all__ = [
@@ -215,11 +226,15 @@ class ModelService:
         keep: int = 5,
         quiet: bool = False,
         upload_dir: str | None = None,
+        ollama_url: str | None = None,
+        ollama_model: str | None = None,
     ) -> None:
         self.model_path = os.path.abspath(model_path) if model_path else None
         self.checkpoint_dir = os.path.abspath(checkpoint_dir) if checkpoint_dir else None
         self.upload_dir = os.path.abspath(upload_dir) if upload_dir else None
         self._upload_lock = threading.Lock()
+        self.ollama_url = normalise_url(ollama_url or OLLAMA_DEFAULT_URL)
+        self.ollama_model = (ollama_model or OLLAMA_DEFAULT_MODEL).strip() or OLLAMA_DEFAULT_MODEL
         self.backend_name = backend
         self.device = device
         self.seed = int(seed)
@@ -438,6 +453,7 @@ class ModelService:
             model_path=self.model_path,
             checkpoint_dir=self.checkpoint_dir,
             upload_dir=self.upload_dir,
+            ollama={"url": self.ollama_url, "model": self.ollama_model},
         )
         return stats
 
@@ -603,6 +619,22 @@ class ModelService:
             else:
                 texts.extend(line for line in blob.splitlines() if line.strip())
         return texts
+
+    # -- Ollama (local LLM) --------------------------------------------------
+
+    def ollama_client(self, url: str | None = None, model: str | None = None, timeout: float | None = None) -> OllamaClient:
+        """A client for the request's Ollama overrides, falling back to the server defaults."""
+        try:
+            return OllamaClient(url or self.ollama_url, model or self.ollama_model, timeout)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+
+    def sample_texts(
+        self, count: int, prefix: str = "", max_length: int = 60, temperature: float = 1.0, seed: int | None = None
+    ) -> list[str]:
+        """``count`` stochastic texts from the model (held under the lock only while sampling)."""
+        with self.session() as model:
+            return sample_texts(model, count, prefix=prefix, max_length=max_length, temperature=temperature, seed=seed)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -958,9 +990,9 @@ def _r_status(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.status()
 
 
-def _r_train(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    texts = _texts_and_files(svc, f, "texts", "text", "files", whole_file=f.flag("whole_file", False))
-    config = TrainConfig(
+def _train_config(f: Fields) -> TrainConfig:
+    """The optional training settings of a request body, defaults from :class:`TrainConfig`."""
+    return TrainConfig(
         epochs=f.integer("epochs", TrainConfig.epochs, minimum=0),
         lr=f.number("lr", TrainConfig.lr, minimum=0.0),
         act_lr=f.number("act_lr", TrainConfig.act_lr, minimum=0.0),
@@ -970,7 +1002,11 @@ def _r_train(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         shuffle=f.flag("shuffle", TrainConfig.shuffle),
         checkpoint_every=f.integer("checkpoint_every", TrainConfig.checkpoint_every, minimum=0),
     )
-    return 202, {"job": svc.start_train(texts, config)}
+
+
+def _r_train(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    texts = _texts_and_files(svc, f, "texts", "text", "files", whole_file=f.flag("whole_file", False))
+    return 202, {"job": svc.start_train(texts, _train_config(f))}
 
 
 def _r_job(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1116,6 +1152,108 @@ def _r_upload_delete(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.delete_upload(f.text("name"))
 
 
+def _ollama_client(svc: ModelService, f: Fields) -> OllamaClient:
+    return svc.ollama_client(f.text("url", None), f.text("model", None), f.number("timeout", None, minimum=1.0))
+
+
+def _r_ollama_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    url = (q.get("url") or [None])[0]
+    client = svc.ollama_client(url or None)
+    error = None
+    try:
+        models = client.models()
+    except OllamaError as exc:
+        models, error = [], str(exc)
+    return 200, {
+        "available": error is None,
+        "url": client.url,
+        "model": client.model,
+        "models": [
+            {"name": m.get("name"), "size": m.get("size"), "modified_at": m.get("modified_at"), "details": m.get("details")}
+            for m in models
+        ],
+        "error": error,
+    }
+
+
+def _r_ollama_corpus(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    prompt = f.text("prompt")
+    lines = f.integer("lines", 20, minimum=1)
+    style = f.text("style", "good").strip().lower()
+    if style not in OLLAMA_STYLES:
+        raise ApiError(400, f"'style' must be one of {', '.join(OLLAMA_STYLES)} (got {style!r})")
+    train = f.flag("train", False)
+    client = _ollama_client(svc, f)
+    if train:
+        svc._ensure_idle()  # do not spend an LLM call on a request that cannot start a job
+    try:
+        texts = corpus_from_prompt(client, prompt, lines=lines, style=style, model=client.model)
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    if not texts:
+        raise ApiError(502, f"Ollama model {client.model!r} returned no usable lines")
+    result: dict[str, Any] = {
+        "prompt": prompt, "style": style, "model": client.model, "url": client.url,
+        "lines": len(texts), "texts": texts, "upload": None, "job": None,
+    }
+    save_as = f.text("save_as", None)
+    if save_as:
+        result["upload"] = svc.upload(save_as, "\n".join(texts) + "\n")
+    if train:
+        result["job"] = svc.start_train(texts, _train_config(f))
+        return 202, result
+    return 200, result
+
+
+def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    given = f.texts_optional("texts", "text")
+    apply = f.text("apply", "none").strip().lower()
+    if apply not in ("none", "2nrl"):
+        raise ApiError(400, f"'apply' must be 'none' or '2nrl' (got {apply!r})")
+    client = _ollama_client(svc, f)
+    threshold = f.number("threshold", 6.0, minimum=0.0)
+    if apply == "2nrl":
+        svc._ensure_idle()
+    if given:
+        samples, source = given, "given"
+    else:
+        samples = svc.sample_texts(
+            f.integer("count", 8, minimum=1), prefix=f.text("prefix", ""),
+            max_length=f.integer("max_length", 60, minimum=0), temperature=f.number("temperature", 1.0, minimum=0.0),
+            seed=f.integer("seed", None),
+        )
+        source = "model"
+    try:
+        result = adversarial_review(
+            None, client, texts=samples, threshold=threshold, context=f.text("context", None), ollama_model=client.model,
+        )
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    result["source"] = source
+    result["url"] = client.url
+    result["job"] = None
+    if apply != "2nrl":
+        return 200, result
+    bad = list(result["bad"])
+    good = list(result["good"]) + f.texts_optional("good", "good_text")
+    good_files = f.names("good_files")
+    if good_files:
+        good.extend(svc.upload_texts(good_files, whole_file=f.flag("whole_file", False)))
+    if not bad:
+        raise ApiError(400, "nothing failed the review, so there is no garbage for the negative phase")
+    if not good:
+        raise ApiError(400, "no text passed the review and no good texts were given for the positive phase")
+    result["job"] = svc.start_two_nrl(
+        bad, good,
+        neg_epochs=f.integer("neg_epochs", 3, minimum=0),
+        pos_epochs=f.integer("pos_epochs", 3, minimum=0),
+        neg_lr=f.number("neg_lr", 0.05, minimum=0.0),
+        pos_lr=f.number("pos_lr", 0.01, minimum=0.0),
+        **_train_overrides(f),
+    )
+    return 202, result
+
+
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats, current job, backend availability, paths"),
@@ -1142,6 +1280,11 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload, "upload text files: JSON {name, content} | {files: [...]}, multipart/form-data, or a raw body with ?name="),
     ("POST", "/api/uploads/delete", _r_upload_delete, "delete an uploaded file: {name}"),
+    ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
+    ("POST", "/api/ollama/corpus", _r_ollama_corpus,
+     "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
+    ("POST", "/api/ollama/review", _r_ollama_review,
+     "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, good, good_files}"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}
@@ -1494,18 +1637,22 @@ def create_server(
     seed: int = 0,
     quiet: bool = False,
     upload_dir: str | None = None,
+    ollama_url: str | None = None,
+    ollama_model: str | None = None,
 ) -> tuple[RadixNetHTTPServer, ModelService]:
     """Build (and bind) the server; ``port=0`` picks a free port.
 
     ``model_path`` is loaded when it exists and is the default target of
     ``POST /api/save``; ``checkpoint_dir`` enables the checkpoint endpoints;
     ``upload_dir`` enables the upload endpoints (training files kept on the
-    server); ``frontend_dir`` is the built React app.  ``quiet`` silences the
-    per-request log lines (stderr).
+    server); ``frontend_dir`` is the built React app; ``ollama_url`` /
+    ``ollama_model`` are the defaults of the ``/api/ollama/*`` endpoints
+    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted).  ``quiet``
+    silences the per-request log lines (stderr).
     """
     service = ModelService(
         model_path=model_path, checkpoint_dir=checkpoint_dir, backend=backend, device=device,
-        seed=seed, quiet=quiet, upload_dir=upload_dir,
+        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model,
     )
     server = RadixNetHTTPServer((host, port), service, frontend_dir=frontend_dir, quiet=quiet)
     return server, service
@@ -1522,11 +1669,14 @@ def run_server(
     seed: int = 0,
     quiet: bool = False,
     upload_dir: str | None = None,
+    ollama_url: str | None = None,
+    ollama_model: str | None = None,
 ) -> None:
     """Serve until ``KeyboardInterrupt``; a running job is stopped on the way out."""
     server, service = create_server(
         host, port, model_path=model_path, checkpoint_dir=checkpoint_dir, frontend_dir=frontend_dir,
         backend=backend, device=device, seed=seed, quiet=quiet, upload_dir=upload_dir,
+        ollama_url=ollama_url, ollama_model=ollama_model,
     )
     if not quiet:
         sys.stderr.write(f"radixnet API listening on {server.url} (Ctrl-C to stop)\n")

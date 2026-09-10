@@ -79,6 +79,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
 | `make serve PORT=8000` | API + prebuilt frontend |
+| `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
@@ -114,6 +115,7 @@ make down          # stop everything, keep the volume
 | `evolve` | `evolve` | `radixnet evolve --generations 0` with its own discriminator and checkpoint directory; writes `/data/model.json` when stopped |
 | `test`, `bench` | `tools` | unit tests / benchmark inside the image |
 | `frontend-dev` | `dev` | Node container running `npm run dev` with `/api` proxied to the `api` service |
+| `ollama` | `ollama` | the official `ollama/ollama` image with a model volume; `make up-ollama` starts it with the API pointed at it (`OLLAMA_HOST=http://ollama:11434`), then `docker compose exec ollama ollama pull llama3.2` once |
 
 Settings come from the environment or a `.env` file (`cp .env.example .env`):
 `RADIXNET_PORT`, `RADIXNET_BACKEND`, `WITH_TORCH`, `RADIXNET_RESUME`,
@@ -148,7 +150,8 @@ Global options (before or after the command): `--model PATH` (default
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`) |
+| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
+| `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -167,6 +170,9 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` |
 | `POST /api/uploads` | upload text files: JSON `{"name","content"}` or `{"files": [{"name","content"}, ...]}`, `multipart/form-data` (`curl -F file=@corpus.txt`), or a raw body with `?name=corpus.txt` -> `{"uploads": [...]}` (201) |
 | `POST /api/uploads/delete` | `{"name"}` |
+| `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
+| `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
+| `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}` |
 | `POST /api/generate` | `{"count","max_length","mode","temperature"}` -> `{"samples": [{"text","cost","path"}]}` |
@@ -209,6 +215,45 @@ the 2NRL (bad / good files) and Evolve (corpus files) panels.
 make frontend-install && make frontend-build   # rebuild dist
 make serve                                     # then make frontend-dev in another shell for hot reload
 ```
+
+## Ollama: corpus from a prompt, adversarial review
+
+The network can be hooked into a local LLM served by [Ollama](https://ollama.com)
+(standard library only; nothing to install on the Python side). Two uses:
+
+* **Corpus from a prompt** — Ollama writes *N* lines about a prompt, either
+  correct (`--style good`) or deliberately wrong (`--style garbage`): the two
+  halves of 2NRL. The lines can be trained on directly, written to a file, or
+  kept as an upload.
+* **Adversarial review / rating** — Ollama plays the harsh critic: every sample
+  the network generates (or any text you give it) gets a rating from 0 to 10,
+  a pass/fail verdict against a threshold and a one-sentence critique. With
+  `--2nrl` the failed samples become the negative phase and the passed ones
+  (plus a corpus) the positive phase, so an external LLM discriminator drives
+  the self-upgrade.
+
+```bash
+ollama pull llama3.2                                    # once, on the machine running Ollama
+python -m radixnet ollama models
+python -m radixnet ollama corpus --prompt "short true sentences about the sea" --lines 30 --train
+python -m radixnet ollama corpus --prompt "short true sentences about the sea" --style garbage --out garbage.txt
+python -m radixnet ollama review --count 8 --threshold 6
+python -m radixnet ollama review --count 8 --2nrl --good data/sample_corpus.txt
+python -m radixnet ollama review --text "the cat sat on the mat" --text "mat the on sat cat the"
+```
+
+`--url` / `--ollama-model` (or `OLLAMA_HOST` / `RADIXNET_OLLAMA_MODEL` in the
+environment) select the server (default `http://127.0.0.1:11434`) and model
+(default `llama3.2`). `make ollama-models`, `ollama-corpus`, `ollama-garbage`,
+`ollama-review` and `ollama-2nrl` wrap the same commands (`PROMPT`, `LINES`,
+`STYLE`, `COUNT`, `THRESHOLD`, `OLLAMA_URL`, `OLLAMA_MODEL`).
+
+The API exposes the same through `GET /api/ollama/models`, `POST /api/ollama/corpus`
+and `POST /api/ollama/review` (see the table above), and the frontend's Ollama
+tab wraps them: generate a corpus and train on it / save it as an upload, or
+review the model's samples and apply the verdicts as a 2NRL job. In Docker the
+API reaches an Ollama on the host through `host.docker.internal`; `make up-ollama`
+starts an Ollama container next to the API instead (`OLLAMA_HOST=http://ollama:11434`).
 
 ## Checkpoints, saving, loading
 
