@@ -33,6 +33,7 @@ from .backend import Backend, get_backend
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import END, START, RadixCyclicGraph
 from .search import PathResult, dijkstra_predict, sample_walk
+from .schedule import preview_points
 
 __all__ = ["TrainConfig", "RadixNet", "UNKNOWN_PROB", "MODEL_FORMAT", "MODEL_FORMAT_VERSION"]
 
@@ -112,11 +113,28 @@ class TrainConfig:
     checkpoint_every: int = 0
     """Checkpoint every N epochs when a manager is given (0 = off)."""
     verbose: bool = False
+    lr_schedule: str | None = None
+    """Graph function of the epoch for ``lr`` (see :mod:`radixnet.schedule`), e.g. ``"linear(lr0, 4 * lr0)"``."""
+    act_lr_schedule: str | None = None
+    """Graph function of the epoch for ``act_lr``; may use ``lr`` (the epoch's learning rate), e.g. ``"lr / 10"``."""
+
+    def rates(self) -> list[tuple[float, float]]:
+        """``(lr, act_lr)`` for every epoch of this config, schedules applied (constant when none are set)."""
+        if self.lr_schedule is None and self.act_lr_schedule is None:
+            return [(self.lr, self.act_lr)] * self.epochs
+        points = preview_points(self.lr_schedule, self.act_lr_schedule, self.epochs, self.lr, self.act_lr)
+        return [(p["lr"], p["act_lr"]) for p in points]
 
     def validate(self) -> None:
         """Raise ``ValueError`` for values that cannot be trained with."""
         if self.epochs < 0:
             raise ValueError(f"epochs must be >= 0, got {self.epochs}")
+        for name in ("lr_schedule", "act_lr_schedule"):
+            expression = getattr(self, name)
+            if expression is not None and not isinstance(expression, str):
+                raise ValueError(f"{name} must be a string expression or None, got {type(expression).__name__}")
+        if self.lr_schedule is not None or self.act_lr_schedule is not None:
+            self.rates()  # parses both expressions and evaluates every epoch: a ScheduleError is a ValueError
         if self.batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {self.batch_size}")
         for name in ("lr", "act_lr"):
@@ -261,8 +279,10 @@ class RadixNet:
         parents_all: list[int] = []
         positions_all: list[int] = []
         arrays_version = -1
-        for _ in range(cfg.epochs):
+        rates = cfg.rates()  # (lr, act_lr) per epoch: the schedules are graph functions of the epoch
+        for k in range(cfg.epochs):
             t0 = time.perf_counter()
+            lr, act_lr = rates[k]
             if graph.structure_version != observed_version:
                 # a merge (or an external structural change) moved edge ids
                 transitions, observed_version = self._observe(texts, count=False)
@@ -286,7 +306,7 @@ class RadixNet:
             for start in range(0, n, bs):
                 batch_p = parents[start : start + bs]
                 batch_q = positions[start : start + bs]
-                loss_sum += backend.step(state, batch_p, batch_q, cfg.lr, cfg.act_lr, cfg.clip) * len(batch_p)
+                loss_sum += backend.step(state, batch_p, batch_q, lr, act_lr, cfg.clip) * len(batch_p)
             weights, params = backend.finalize(state)
             graph.apply_csr_weights(csr, weights)
             graph.apply_node_params(params)
@@ -307,6 +327,8 @@ class RadixNet:
                 "transitions": n,
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,
+                "lr": lr,
+                "act_lr": act_lr,
             }
             if phase is not None:
                 record["phase"] = phase

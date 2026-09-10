@@ -77,6 +77,7 @@ class TestTrainConfig(unittest.TestCase):
             {
                 "epochs": 5, "lr": 0.05, "act_lr": 0.005, "batch_size": 256, "clip": 5.0,
                 "auto_compress": True, "shuffle": True, "checkpoint_every": 0, "verbose": False,
+                "lr_schedule": None, "act_lr_schedule": None,
             },
         )
         cfg.validate()
@@ -136,7 +137,7 @@ class TestTrain(unittest.TestCase):
         self.assertEqual(model.history, records)
         keys = {
             "epoch", "loss", "perplexity", "nodes", "edges", "trigrams", "compression_ratio",
-            "merges", "transitions", "seconds", "skipped_short",
+            "merges", "transitions", "seconds", "skipped_short", "lr", "act_lr",
         }
         for i, rec in enumerate(records, 1):
             self.assertEqual(set(rec), keys)

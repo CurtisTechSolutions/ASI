@@ -71,6 +71,9 @@ export const api = {
   health: () => get("/api/health"),
   status: () => get("/api/status"),
   train: (body) => post("/api/train", body),
+  /** Learning-rate schedules: what an expression may use (presets, variables, functions) and a per-epoch preview. */
+  schedule: () => get("/api/schedule"),
+  schedulePreview: (body) => post("/api/schedule/preview", body),
   job: () => get("/api/job"),
   stopJob: () => post("/api/job/stop"),
   predict: (body) => post("/api/predict", body),

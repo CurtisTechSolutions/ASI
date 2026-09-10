@@ -24,6 +24,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
+| Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
 | CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `frontend/` (Vite + React, prebuilt `dist` is served by the API). |
@@ -141,7 +142,8 @@ Global options (before or after the command): `--model PATH` (default
 
 | Command | Main options |
 |---|---|
-| `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out` |
+| `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out` |
+| `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
 | `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|sample`, `--to-end`, `--step-penalty`, `--temperature` |
 | `generate` | `--count`, `--max-length`, `--mode`, `--temperature` |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
@@ -169,7 +171,9 @@ at a time, and mutating requests answer 409 while it runs.
 |---|---|
 | `GET /api/health` | `{"ok": true, "version"}` |
 | `GET /api/status` | model statistics, current job, available backends, model path |
-| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `batch_size`, `auto_compress` -> `{"job": {...}}` |
+| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
+| `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
+| `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
 | `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` |
 | `POST /api/uploads` | upload text files: JSON `{"name","content"}` or `{"files": [{"name","content"}, ...]}`, `multipart/form-data` (`curl -F file=@corpus.txt`), or a raw body with `?name=corpus.txt` -> `{"uploads": [...]}` (201) |
 | `POST /api/uploads/delete` | `{"name"}` |
@@ -329,6 +333,35 @@ API: `POST /api/codegen/start` (job), `GET /api/codegen/history`,
 no training) and `POST /api/codegen/run` (sandbox only). The frontend's Code
 tab drives all of it: problems (typed or uploaded), live attempt / problem /
 round records, a "try a problem" box and a sandbox runner.
+
+## Learning-rate schedules (graph functions)
+
+The learning rate and the activation learning rate can grow (or shrink) from
+epoch to epoch.  A schedule is a small expression of the epoch that the model
+evaluates once per epoch - a *graph function* - given with `--lr-schedule` /
+`--act-lr-schedule` (CLI), `lr_schedule` / `act_lr_schedule` (API) or the
+schedule block of the Train tab, which draws the curve while you type.
+
+| Expression | Meaning |
+|---|---|
+| `linear(lr0, 4 * lr0)` | ramp linearly from the base rate to four times it |
+| `geometric(lr0, 4 * lr0)` | same, by a constant factor per epoch |
+| `cosine(lr0, 4 * lr0)` | a smooth S-shaped rise |
+| `step(lr0, 1.5, 2)` | multiply by 1.5 every two epochs |
+| `lr0 * 1.25 ** i` | compound growth of 25 % per epoch |
+| `warmup(lr0 / 10, lr0, 3)` | warm up over three epochs, then hold |
+| `0.1 if epoch < 3 else 0.5` | a conditional |
+| `lr / 10` (activation schedule) | a tenth of whatever the learning rate is that epoch |
+
+Variables: `epoch` (1-based), `i` (0-based), `epochs`, `t` (0 at the first
+epoch, 1 at the last), `lr0` (the base rate: `--lr` or `--act-lr`), `act_lr0`
+and, for the activation schedule, `lr` (the epoch's learning rate).  Functions:
+`sin cos tan exp log log2 log10 sqrt pow abs floor ceil round min max tanh
+clamp`, constants `pi`, `e`.  Expressions are validated against a whitelist
+(no names, attributes, strings or calls outside that list), and every value
+must be finite and non-negative - a bad expression is rejected before training
+starts.  `python -m radixnet schedule --epochs 6 --lr-schedule 'linear(lr0, 4 * lr0)' --act-lr-schedule 'lr / 10'`
+prints the rates with a bar graph; `python -m radixnet schedule` lists the presets.
 
 ## Checkpoints, saving, loading
 

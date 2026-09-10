@@ -182,8 +182,9 @@ class Console:
 _Column = tuple[str, int, str]
 
 EPOCH_COLUMNS: tuple[_Column, ...] = (
-    ("epoch", 5, ">"), ("loss", 9, ">"), ("ppl", 10, ">"), ("nodes", 7, ">"), ("edges", 7, ">"),
-    ("trigrams", 8, ">"), ("ratio", 6, ">"), ("merges", 6, ">"), ("transitions", 11, ">"), ("seconds", 8, ">"),
+    ("epoch", 5, ">"), ("loss", 9, ">"), ("ppl", 10, ">"), ("lr", 7, ">"), ("act_lr", 7, ">"), ("nodes", 7, ">"),
+    ("edges", 7, ">"), ("trigrams", 8, ">"), ("ratio", 6, ">"), ("merges", 6, ">"), ("transitions", 11, ">"),
+    ("seconds", 8, ">"),
 )
 PHASE_COLUMN: _Column = ("phase", 8, "<")
 GENERATION_COLUMNS: tuple[_Column, ...] = (
@@ -196,9 +197,9 @@ EPOCH_HEADERS = tuple(name for name, _, _ in EPOCH_COLUMNS)
 def epoch_row(record: dict) -> list[Any]:
     """Table cells of one epoch record in :data:`EPOCH_COLUMNS` order."""
     return [
-        record.get("epoch"), record.get("loss"), record.get("perplexity"), record.get("nodes"),
-        record.get("edges"), record.get("trigrams"), record.get("compression_ratio"), record.get("merges"),
-        record.get("transitions"), record.get("seconds"),
+        record.get("epoch"), record.get("loss"), record.get("perplexity"), record.get("lr"), record.get("act_lr"),
+        record.get("nodes"), record.get("edges"), record.get("trigrams"), record.get("compression_ratio"),
+        record.get("merges"), record.get("transitions"), record.get("seconds"),
     ]
 
 
@@ -519,15 +520,27 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
     config = TrainConfig(
         epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size,
         auto_compress=not args.no_compress, checkpoint_every=every,
+        lr_schedule=args.lr_schedule, act_lr_schedule=args.act_lr_schedule,
     )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
     out = args.out or args.model
     chars = sum(len(t) for t in texts)
+    schedule_note = ""
+    if config.lr_schedule or config.act_lr_schedule:
+        rates = config.rates()
+        schedule_note = (
+            f" lr_schedule={config.lr_schedule or '-'} act_lr_schedule={config.act_lr_schedule or '-'}"
+            + (f" (lr {fmt(rates[0][0])} -> {fmt(rates[-1][0])}, act_lr {fmt(rates[0][1])} -> {fmt(rates[-1][1])})" if rates else "")
+        )
     console.pairs([
         ("model", origin.describe()),
         ("backend", backend_label(model)),
         ("data", f"{len(texts)} texts, {chars} chars from {', '.join(args.data)}"),
         ("config", f"epochs={config.epochs} lr={config.lr} act_lr={config.act_lr} batch={config.batch_size} "
-                   f"compress={'yes' if config.auto_compress else 'no'}"),
+                   f"compress={'yes' if config.auto_compress else 'no'}" + schedule_note),
         ("checkpoints", f"{manager.directory} every {every} epoch(s), keep {manager.keep}" if manager else "off"),
         ("output", out),
     ])
@@ -665,6 +678,46 @@ def cmd_two_nrl(args: argparse.Namespace, console: Console) -> dict:
         "interrupted": interrupted,
         "saved": saved,
         "stats": model.stats(),
+    }
+
+
+def cmd_schedule(args: argparse.Namespace, console: Console) -> dict:
+    """Preview learning-rate schedules: a table of the rates per epoch and a bar graph of the shape."""
+    from .schedule import ScheduleError, describe, preview_points
+
+    info = describe()
+    if not args.lr_schedule and not args.act_lr_schedule:
+        console.say("Presets (use them as --lr-schedule / --act-lr-schedule expressions):")
+        console.table(("preset", "lr", "act_lr", "description"),
+                      [[p["name"], p["lr"], p["act_lr"], p["description"]] for p in info["presets"]])
+        console.say()
+        console.say("variables: " + ", ".join(info["variables"]) + " · constants: " + ", ".join(info["constants"]))
+        console.say("functions: " + ", ".join(info["functions"]))
+        for line in info["helpers"]:
+            console.say("  " + line)
+        return {"presets": info["presets"], "variables": info["variables"], "functions": info["functions"], "helpers": info["helpers"]}
+    try:
+        points = preview_points(args.lr_schedule, args.act_lr_schedule, args.epochs, args.lr, args.act_lr)
+    except ScheduleError as exc:
+        raise CliError(str(exc)) from exc
+    width = 30
+    top_lr = max((p["lr"] for p in points), default=0.0) or 1.0
+    top_act = max((p["act_lr"] for p in points), default=0.0) or 1.0
+    rows = [
+        [p["epoch"], p["lr"], "#" * max(1, round(width * p["lr"] / top_lr)) if p["lr"] > 0 else "",
+         p["act_lr"], "#" * max(1, round(width * p["act_lr"] / top_act)) if p["act_lr"] > 0 else ""]
+        for p in points
+    ]
+    console.pairs([
+        ("lr", f"{args.lr} -> {args.lr_schedule or 'constant'}"),
+        ("act_lr", f"{args.act_lr} -> {args.act_lr_schedule or 'constant'}"),
+        ("epochs", args.epochs),
+    ])
+    console.say()
+    console.table(("epoch", "lr", "lr graph", "act_lr", "act_lr graph"), rows)
+    return {
+        "lr_schedule": args.lr_schedule, "act_lr_schedule": args.act_lr_schedule, "epochs": args.epochs,
+        "lr": args.lr, "act_lr": args.act_lr, "points": points,
     }
 
 
@@ -1314,6 +1367,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="learning rate for edge weights and node states")
     p.add_argument("--act-lr", type=nonneg_float, default=TrainConfig.act_lr,
                    help="learning rate for the activation parameters a, b, h, k")
+    p.add_argument("--lr-schedule", metavar="EXPR",
+                   help="graph function of the epoch for the learning rate, e.g. 'linear(lr0, 4 * lr0)', 'lr0 * 1.25 ** i', "
+                        "'warmup(lr0 / 10, lr0, 3)' (variables: epoch, i, epochs, t, lr0; see `radixnet schedule --help`)")
+    p.add_argument("--act-lr-schedule", metavar="EXPR",
+                   help="graph function of the epoch for the activation learning rate; may use lr (the epoch's rate), e.g. 'lr / 10'")
     p.add_argument("--batch-size", type=pos_int, default=TrainConfig.batch_size, help="transitions per backend step")
     p.add_argument("--no-compress", action="store_true", help="do not merge unary chains after each epoch")
     _add_checkpoint_options(p, "epoch")
@@ -1373,6 +1431,23 @@ def build_parser() -> argparse.ArgumentParser:
     _add_two_nrl_options(p, neg_epochs=3, pos_epochs=3, batch_size=TrainConfig.batch_size)
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_two_nrl)
+
+    # schedule -------------------------------------------------------------
+    p = command(
+        "schedule", "preview a learning-rate schedule (graph function of the epoch)",
+        "Evaluate --lr-schedule / --act-lr-schedule expressions for --epochs epochs and print the rate\n"
+        "of every epoch with a bar graph of the shape.  Without expressions the presets, variables and\n"
+        "functions are listed.  Variables: epoch (1-based), i (0-based), epochs, t (0 at the first epoch,\n"
+        "1 at the last), lr0 (the base rate), act_lr0, and - for the activation schedule - lr (the\n"
+        "epoch's learning rate).  Helpers: linear(a, b), geometric(a, b), cosine(a, b),\n"
+        "step(a, factor, every), warmup(a, b, n); plus sin cos exp log sqrt min max clamp ... and pi, e.",
+    )
+    p.add_argument("--lr-schedule", metavar="EXPR", help="learning-rate expression, e.g. 'linear(lr0, 4 * lr0)'")
+    p.add_argument("--act-lr-schedule", metavar="EXPR", help="activation learning-rate expression, e.g. 'lr / 10'")
+    p.add_argument("--epochs", type=nonneg_int, default=10, help="epochs to preview")
+    p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="base learning rate (lr0)")
+    p.add_argument("--act-lr", type=nonneg_float, default=TrainConfig.act_lr, help="base activation learning rate (act_lr0)")
+    p.set_defaults(handler=cmd_schedule)
 
     # feedback -------------------------------------------------------------
     p = command(

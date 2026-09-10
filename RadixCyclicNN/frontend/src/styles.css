@@ -1123,3 +1123,26 @@ ul.ratings code {
 .badge.down {
   color: #dc2626;
 }
+
+/* learning-rate schedule block of the Train panel */
+fieldset.schedule {
+  border: 1px solid var(--border, #d9d9e3);
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem 0.7rem;
+  margin: 0.4rem 0 0.8rem;
+  min-width: 0;
+}
+
+fieldset.schedule legend {
+  padding: 0 0.4rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+fieldset.schedule code {
+  font-size: 0.85em;
+}
+
+.schedule-preview {
+  margin-top: 0.4rem;
+}

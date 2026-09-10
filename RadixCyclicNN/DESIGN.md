@@ -326,6 +326,9 @@ class TrainConfig:
     shuffle: bool = True           # shuffle transitions each epoch (seeded)
     checkpoint_every: int = 0      # epochs; 0 = off
     verbose: bool = False
+    lr_schedule: str | None = None      # graph function of the epoch for lr (section 18); None = constant
+    act_lr_schedule: str | None = None  # same for act_lr; may use `lr`, the epoch's learning rate
+    def rates(self) -> list[tuple[float, float]]   # (lr, act_lr) of every epoch; validate() evaluates them all
 
 class RadixNet:
     def __init__(self, seed: int = 0, backend: str = "auto", device: str | None = None)
@@ -695,3 +698,25 @@ problems as table rows and round summaries. API: `POST /api/codegen/start` (job 
 model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). Frontend: the
 "Code" tab. Tests (`tests/test_codegen.py`) use a fake Ollama whose teacher answers come from a scripted queue and whose
 judge rejects programs containing `BAD_ANSWER`.
+
+## 18. Learning-rate schedules (`schedule.py`) — rates as graph functions of the epoch
+
+`Schedule(expression)` parses an expression with `ast.parse(mode="eval")`, walks the tree and rejects every node
+that is not a number, a name from the whitelist, an arithmetic / comparison / boolean operator, a conditional
+expression or a call of a whitelisted function; integer literals are rewritten to floats so `2 ** 100000000`
+overflows (`OverflowError -> ScheduleError`) instead of allocating a huge integer. The compiled code object is
+evaluated with an empty `__builtins__` and an environment holding `epoch` (1-based), `i` (0-based), `epochs`, `t`
+(`i / (epochs - 1)`, 0 for a single epoch), `lr0` (the schedule's own base rate), `act_lr0`, `lr` (the epoch's
+learning rate, for the activation schedule), the constants `pi` / `e`, the `math` functions listed in `FUNCTIONS`
+and the helpers `linear(a, b)`, `geometric(a, b)`, `cosine(a, b)`, `step(a, factor, every)`, `warmup(a, b, n)`.
+Every value must be a finite number `>= 0`; anything else is a `ScheduleError` (a `ValueError`, so the API answers
+400 and the CLI exits 1) naming the epoch.
+
+`preview_points(lr_schedule, act_lr_schedule, epochs, lr, act_lr)` gives `[{"epoch", "lr", "act_lr"}]`: the
+activation schedule sees the learning rate *of the same epoch* as `lr`, so `lr / 10` follows whatever curve the
+learning rate has. `TrainConfig.rates()` uses it; `RadixNet.train` reads `(lr, act_lr) = rates[k]` per epoch and
+stamps both on the epoch record (`"lr"`, `"act_lr"`), so the history shows what was actually used. `PRESETS`
+(constant, linear / exponential / cosine ramps to 4x, step, 25 % compound growth, warm-up, "activation follows
+lr / 10") feed the CLI listing, `GET /api/schedule` and the preset select of the Train tab; `POST
+/api/schedule/preview` is what the tab's live chart calls (debounced) while an expression is typed. CLI:
+`radixnet schedule` (table + `#` bar graph, or the preset listing) and `train --lr-schedule / --act-lr-schedule`.

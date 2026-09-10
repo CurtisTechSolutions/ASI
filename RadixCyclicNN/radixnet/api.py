@@ -76,6 +76,9 @@ from .ollama import (
     normalise_url,
     sample_texts,
 )
+from .schedule import ScheduleError
+from .schedule import describe as describe_schedules
+from .schedule import preview_points
 from .search import PathResult
 
 __all__ = [
@@ -1131,6 +1134,8 @@ def _train_config(f: Fields) -> TrainConfig:
         epochs=f.integer("epochs", TrainConfig.epochs, minimum=0),
         lr=f.number("lr", TrainConfig.lr, minimum=0.0),
         act_lr=f.number("act_lr", TrainConfig.act_lr, minimum=0.0),
+        lr_schedule=f.text("lr_schedule", "").strip() or None,
+        act_lr_schedule=f.text("act_lr_schedule", "").strip() or None,
         batch_size=f.integer("batch_size", TrainConfig.batch_size, minimum=1),
         clip=f.number("clip", TrainConfig.clip),
         auto_compress=f.flag("auto_compress", TrainConfig.auto_compress),
@@ -1142,6 +1147,27 @@ def _train_config(f: Fields) -> TrainConfig:
 def _r_train(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     texts = _texts_and_files(svc, f, "texts", "text", "files", whole_file=f.flag("whole_file", False))
     return 202, {"job": svc.start_train(texts, _train_config(f))}
+
+
+def _r_schedule(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, describe_schedules()
+
+
+def _r_schedule_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The per-epoch rates a pair of schedule expressions gives (the graph the frontend draws)."""
+    lr_schedule = f.text("lr_schedule", "").strip() or None
+    act_lr_schedule = f.text("act_lr_schedule", "").strip() or None
+    epochs = f.integer("epochs", TrainConfig.epochs, minimum=0)
+    lr = f.number("lr", TrainConfig.lr, minimum=0.0)
+    act_lr = f.number("act_lr", TrainConfig.act_lr, minimum=0.0)
+    try:
+        points = preview_points(lr_schedule, act_lr_schedule, epochs, lr, act_lr)
+    except ScheduleError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return 200, {
+        "lr_schedule": lr_schedule, "act_lr_schedule": act_lr_schedule, "epochs": epochs, "lr": lr, "act_lr": act_lr,
+        "points": points,
+    }
 
 
 def _r_job(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1544,7 +1570,11 @@ def _r_codegen_run(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats, current job, backend availability, paths"),
-    ("POST", "/api/train", _r_train, "start a training job: {texts | text, epochs, lr, act_lr, batch_size, auto_compress}"),
+    ("POST", "/api/train", _r_train,
+     "start a training job: {texts | text | files, epochs, lr, act_lr, lr_schedule, act_lr_schedule, batch_size, auto_compress}"),
+    ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
+    ("POST", "/api/schedule/preview", _r_schedule_preview,
+     "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr} -> {points}"),
     ("GET", "/api/job", _r_job, "status of the current / last job"),
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict, "continue a prefix: {prefix, length, mode, to_end, step_penalty, temperature, max_length (optional cap; default none)}"),
