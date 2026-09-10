@@ -94,4 +94,8 @@ export const api = {
   /** Upload one text file (read in the browser); the server keeps it under its upload directory. */
   upload: (name, content) => post("/api/uploads", { name, content }),
   deleteUpload: (name) => post("/api/uploads/delete", { name }),
+  /** Ollama (see OllamaPanel). `url` optionally overrides the server's configured Ollama URL. */
+  ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
+  ollamaCorpus: (body) => post("/api/ollama/corpus", body),
+  ollamaReview: (body) => post("/api/ollama/review", body),
 };

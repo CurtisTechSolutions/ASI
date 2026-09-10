@@ -7,6 +7,7 @@ import GeneratePanel from "./components/GeneratePanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import EvolvePanel from "./components/EvolvePanel.jsx";
+import OllamaPanel from "./components/OllamaPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
@@ -17,6 +18,7 @@ const TABS = [
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
   { id: "evolve", label: "Evolve", Component: EvolvePanel },
+  { id: "ollama", label: "Ollama", Component: OllamaPanel },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];

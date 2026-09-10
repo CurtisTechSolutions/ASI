@@ -775,3 +775,135 @@ pre.sample {
 .uploads td.text {
   word-break: break-all;
 }
+
+/* ---- Ollama panel ---- */
+/* Full-width card in the two-column panel grid (connection settings above the form / result rows). */
+.card.wide {
+  grid-column: 1 / -1;
+}
+
+/* Cards after a full-width card are grid cells; the grid gap already separates them. */
+.card.wide ~ .card {
+  margin-top: 0;
+}
+
+.actions .note {
+  align-self: center;
+}
+
+/* Generated corpus lines: numbered, monospace, selectable (the numbers are not copied). */
+.lines {
+  margin: 0 0 10px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.lines .line {
+  display: flex;
+  gap: 10px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lines .line:last-child {
+  border-bottom: none;
+}
+
+.lines .n {
+  flex: none;
+  min-width: 2.5em;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+
+.lines .t {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Lines held as 2NRL data. */
+.chips.held {
+  margin-top: 8px;
+}
+
+.chip.bad {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.chip.good {
+  background: var(--ok-bg);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.chip button.link {
+  font-size: 13px;
+  padding: 0 0 0 6px;
+  color: inherit;
+}
+
+/* Review table: rating bar, verdicts, wrapping text columns. */
+.rating {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rating-bar {
+  width: 56px;
+  height: 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--chip);
+  overflow: hidden;
+}
+
+.rating-bar i {
+  display: block;
+  height: 100%;
+  background: var(--muted);
+}
+
+.rating-bar.pass i {
+  background: var(--ok);
+}
+
+.rating-bar.fail i {
+  background: var(--danger);
+}
+
+.badge.pass {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.badge.fail {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.badge.unrated {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+table.data td.wrap {
+  text-align: left;
+  white-space: normal;
+  word-break: break-word;
+  min-width: 180px;
+}
+
+/* Summary pills reused from the status bar may wrap inside a card. */
+.chips .stat {
+  white-space: normal;
+}
