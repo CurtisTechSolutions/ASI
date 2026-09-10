@@ -3,9 +3,9 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Score, 2NRL, Evolve, Ollama, Checkpoints, Graph.
+Panels: Train, Predict, Generate, Score, 2NRL, Evolve, Ollama, Code, Checkpoints, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
-evolve) are polled via `/api/job` every second and can be stopped from the UI.
+evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
 The Ollama panel talks to a local Ollama server through the API
 (`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`).
@@ -14,6 +14,16 @@ trained on, saved as an upload or held as 2NRL data, and it acts as an
 adversarial reviewer that rates samples from the model so the failed ones can
 be fed back through 2NRL. The Ollama URL and model default to the server's
 settings (`ollama` in `/api/status`) and can be overridden per request.
+
+The Code panel drives the code-generation loop (`POST /api/codegen/start`,
+`GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run`).
+Problems typed one per line or read from uploaded `.txt` / `.json` / `.jsonl`
+files are solved by an Ollama teacher and by the model; every program runs in
+the sandbox, is style-checked and optionally judged by Ollama, and the outcome
+rewards or punishes the model through 2NRL. The panel shows round summaries, a
+problem table and an attempt feed live from the `codegen` job (and the stored
+history of earlier runs), solves a single problem without training, and runs
+pasted code in the sandbox. Only the teacher and the judge need Ollama.
 
 ## Development
 

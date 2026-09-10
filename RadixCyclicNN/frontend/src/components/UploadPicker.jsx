@@ -3,7 +3,7 @@ import { api } from "../api.js";
 import { asArray, fmtBytes, fmtInt, fmtTime } from "../util.js";
 import Alert from "./Alert.jsx";
 
-const ACCEPT = ".txt,.md,.csv,.tsv,.json,.log,.text,text/*";
+const ACCEPT = ".txt,.md,.csv,.tsv,.json,.jsonl,.log,.text,.py,text/*";
 
 /**
  * Text files kept in the server's upload directory (GET /api/uploads), with a

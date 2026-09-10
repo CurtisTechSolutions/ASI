@@ -98,4 +98,9 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /** Code generation (see CodeGenPanel): sandbox runs, an Ollama teacher / judge and 2NRL rewards. */
+  codegenStart: (body) => post("/api/codegen/start", body),
+  codegenHistory: () => get("/api/codegen/history"),
+  codegenSolve: (body) => post("/api/codegen/solve", body),
+  codegenRun: (body) => post("/api/codegen/run", body),
 };

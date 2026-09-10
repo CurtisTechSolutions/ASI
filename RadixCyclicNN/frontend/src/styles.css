@@ -907,3 +907,143 @@ table.data td.wrap {
 .chips .stat {
   white-space: normal;
 }
+
+/* ---- Code panel (CodeGenPanel) ---- */
+/* Settings rows that fit as many fields per line as the card allows (one column on phones). */
+.row.auto {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 18px;
+}
+
+.card h4 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+}
+
+/* Source badges (the model or the Ollama teacher) are outlined to set them apart from the verdict badges. */
+.badge.model,
+.badge.ollama {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.badge.model {
+  color: var(--accent);
+}
+
+.badge.ollama {
+  color: var(--warn);
+}
+
+ul.rounds {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+ul.rounds li {
+  margin-bottom: 2px;
+}
+
+/* Problem rows expand to their final code and issues. */
+table.data tr.clickable {
+  cursor: pointer;
+}
+
+table.data tr.clickable:hover td {
+  background: var(--chip);
+}
+
+table.data tr.detail td {
+  text-align: left;
+  white-space: normal;
+  background: var(--input-bg);
+}
+
+/* Programs and their output. */
+pre.code,
+pre.output {
+  margin: 4px 0 8px;
+  padding: 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+pre.code {
+  white-space: pre;
+  tab-size: 4;
+}
+
+pre.output {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+}
+
+ul.issues {
+  margin: 2px 0 8px;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.critique {
+  margin: 4px 0 8px;
+  font-size: 13px;
+}
+
+.error-text {
+  color: var(--danger);
+}
+
+/* Attempt feed: one collapsible entry per attempt record, newest first. */
+details.attempt {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+}
+
+details.attempt summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+
+details.attempt summary::-webkit-details-marker {
+  display: none;
+}
+
+details.attempt summary::before {
+  content: "▸";
+  color: var(--muted);
+}
+
+details.attempt[open] summary::before {
+  content: "▾";
+}
+
+details.attempt summary .issue {
+  flex-basis: 100%;
+  word-break: break-word;
+}
+
+/* Solve results: one block per attempt. */
+.attempt-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}

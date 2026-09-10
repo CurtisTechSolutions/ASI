@@ -8,6 +8,15 @@ const POLL_MS = 2000;
 function progressSummary(job) {
   const p = job && job.progress;
   if (!p || typeof p !== "object") return "";
+  if (p.kind === "attempt") {
+    const outcome = p.correct ? "correct" : p.runs ? "rejected" : "error";
+    return `${p.phase} · ${p.problem} attempt ${fmtInt(p.attempt)} [${p.source}] · ${outcome}`;
+  }
+  if (p.kind === "problem") {
+    const outcome = p.correct ? `solved by ${p.solved_by}` : "failed";
+    return `${p.phase} · ${p.problem} · ${outcome}${p.action ? ` · ${p.action}` : ""}`;
+  }
+  if (p.kind === "round") return `${p.phase} round ${fmtInt(p.round)} · ${fmtInt(p.solved)}/${fmtInt(p.problems)} solved`;
   if (p.generation !== undefined) return `gen ${fmtInt(p.generation)} · gap ${fmtNum(p.gap, 3)}`;
   if (p.epoch !== undefined) {
     const phase = p.phase ? `${p.phase} ` : "";
