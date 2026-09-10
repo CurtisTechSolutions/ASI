@@ -51,7 +51,14 @@ export default function PredictPanel() {
         <h2>Predict</h2>
         <TextField label="Prefix" value={prefix} onChange={setPrefix} placeholder="the quick br" />
         <div className="row">
-          <NumberField label="Length" hint="chars to emit" value={length} onChange={setLength} min={1} step={1} />
+          <NumberField
+            label="Length"
+            hint="at least this many chars; the path runs to its natural end, no cap"
+            value={length}
+            onChange={setLength}
+            min={0}
+            step={1}
+          />
           <SelectField
             label="Mode"
             value={mode}

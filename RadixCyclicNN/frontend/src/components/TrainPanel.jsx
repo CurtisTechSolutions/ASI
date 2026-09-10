@@ -5,6 +5,7 @@ import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, split
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import LineChart from "./LineChart.jsx";
+import UploadPicker from "./UploadPicker.jsx";
 import { CheckField, NumberField, TextArea } from "./Fields.jsx";
 
 const MAX_ROWS = 300;
@@ -16,6 +17,8 @@ const MAX_ROWS = 300;
  */
 export default function TrainPanel({ status }) {
   const [text, setText] = useState("");
+  const [files, setFiles] = useState([]);
+  const [wholeFile, setWholeFile] = useState(false);
   const [epochs, setEpochs] = useState("5");
   const [lr, setLr] = useState("0.05");
   const [actLr, setActLr] = useState("0.005");
@@ -51,14 +54,15 @@ export default function TrainPanel({ status }) {
   async function handleStart(event) {
     event.preventDefault();
     const texts = splitLines(text);
-    if (texts.length === 0) {
-      setFormError("Enter at least one training text (one per line).");
+    if (texts.length === 0 && files.length === 0) {
+      setFormError("Enter at least one training text (one per line) or select uploaded files.");
       return;
     }
     setFormError(null);
     await start(() =>
       api.train({
-        texts,
+        ...(texts.length > 0 ? { texts } : {}),
+        ...(files.length > 0 ? { files, whole_file: wholeFile } : {}),
         epochs: parseInteger(epochs, 5),
         lr: parseNumber(lr, 0.05),
         act_lr: parseNumber(actLr, 0.005),
@@ -86,6 +90,19 @@ export default function TrainPanel({ status }) {
           rows={10}
           disabled={running}
           placeholder={"the quick brown fox jumps over the lazy dog\nhello world"}
+        />
+        <UploadPicker
+          selected={files}
+          onChange={setFiles}
+          disabled={running}
+          title="Training files"
+          hint="Upload text files and tick the ones to train on (in addition to the texts above)."
+        />
+        <CheckField
+          label="Treat each selected file as one text (instead of one text per line)"
+          checked={wholeFile}
+          onChange={setWholeFile}
+          disabled={running || files.length === 0}
         />
         <div className="row">
           <NumberField label="Epochs" value={epochs} onChange={setEpochs} min={1} step={1} disabled={running} />

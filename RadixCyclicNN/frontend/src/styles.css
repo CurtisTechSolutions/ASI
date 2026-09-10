@@ -749,3 +749,29 @@ pre.sample {
     padding: 10px;
   }
 }
+
+/* ---- uploaded training files (UploadPicker) ---- */
+.uploads {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.uploads.dragging {
+  border-color: var(--accent);
+  background: rgba(124, 58, 237, 0.06);
+}
+
+.uploads h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.uploads .table-wrap {
+  margin-top: 8px;
+}
+
+.uploads td.text {
+  word-break: break-all;
+}

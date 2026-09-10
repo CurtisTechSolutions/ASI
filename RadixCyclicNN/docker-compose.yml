@@ -50,6 +50,8 @@ services:
       - /app/frontend/dist
       - --checkpoint-dir
       - /data/checkpoints
+      - --upload-dir
+      - /data/uploads
     environment:
       RADIXNET_RESUME: ${RADIXNET_RESUME:-0}
       RADIXNET_MODEL: /data/model.json

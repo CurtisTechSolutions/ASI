@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
+import UploadPicker from "./UploadPicker.jsx";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import LineChart from "./LineChart.jsx";
@@ -12,6 +13,7 @@ const MAX_ROWS = 200;
 /** GAN-style self-upgrade loop: start / stop, live chart of gap and fake score, latest sample. */
 export default function EvolvePanel({ status }) {
   const [corpus, setCorpus] = useState("");
+  const [corpusFiles, setCorpusFiles] = useState([]);
   const [samples, setSamples] = useState("8");
   const [realPerGeneration, setRealPerGeneration] = useState("8");
   const [maxLength, setMaxLength] = useState("40");
@@ -48,14 +50,15 @@ export default function EvolvePanel({ status }) {
   async function handleStart(event) {
     event.preventDefault();
     const texts = splitLines(corpus);
-    if (texts.length === 0) {
-      setFormError("Enter a corpus of real texts (one per line).");
+    if (texts.length === 0 && corpusFiles.length === 0) {
+      setFormError("Enter a corpus of real texts (one per line) or select uploaded files.");
       return;
     }
     setFormError(null);
     await start(() =>
       api.evolveStart({
-        corpus: texts,
+        ...(texts.length > 0 ? { corpus: texts } : {}),
+        ...(corpusFiles.length > 0 ? { corpus_files: corpusFiles } : {}),
         generations: generations.trim() === "" ? null : parseInteger(generations, 0),
         samples: parseInteger(samples, 8),
         real_per_generation: parseInteger(realPerGeneration, 8),
@@ -103,6 +106,13 @@ export default function EvolvePanel({ status }) {
           rows={8}
           disabled={running}
           placeholder={"the quick brown fox jumps over the lazy dog\nhello world"}
+        />
+        <UploadPicker
+          selected={corpusFiles}
+          onChange={setCorpusFiles}
+          disabled={running}
+          title="Corpus files"
+          hint="Uploaded files used as the real corpus (in addition to the texts above)."
         />
         <div className="row">
           <NumberField

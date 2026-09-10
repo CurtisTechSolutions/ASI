@@ -822,6 +822,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         "model": args.model,
         "model_exists": os.path.isfile(args.model),
         "checkpoint_dir": args.checkpoint_dir,
+        "upload_dir": args.upload_dir,
         "frontend_dir": frontend_dir,
         "frontend_built": os.path.isfile(os.path.join(frontend_dir, "index.html")),
         "backend": args.backend,
@@ -833,6 +834,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         ("serving", doc["url"]),
         ("model", args.model + ("" if doc["model_exists"] else " (new; created on first save)")),
         ("checkpoints", args.checkpoint_dir),
+        ("uploads", args.upload_dir),
         ("frontend", frontend_dir + ("" if doc["frontend_built"] else " (not built: run `npm install && npm run build` in frontend/)")),
         ("backend", args.backend + (f" on {args.device}" if args.device else "")),
     ])
@@ -842,6 +844,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     api.run_server(
         host=args.host, port=args.port, model_path=args.model, checkpoint_dir=args.checkpoint_dir,
         frontend_dir=frontend_dir, backend=args.backend, device=args.device, seed=effective_seed(args),
+        upload_dir=args.upload_dir,
     )
     return None
 
@@ -995,7 +998,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--prefix", required=True, metavar="TEXT", help="text to continue")
     p.add_argument("--length", type=nonneg_int, default=20, help="characters to emit (dijkstra: minimum)")
-    p.add_argument("--max-length", type=nonneg_int, metavar="N", help="hard cap on emitted characters (default: 2 x --length)")
+    p.add_argument("--max-length", type=nonneg_int, metavar="N",
+                   help="optional hard cap on emitted characters (default: no limit; dijkstra returns the whole cheapest path)")
     p.add_argument("--mode", choices=MODES, default="dijkstra", help="search strategy")
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
@@ -1111,6 +1115,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frontend-dir", metavar="DIR",
                    help="built frontend directory (default: frontend/dist here, or the one next to the package)")
     p.add_argument("--checkpoint-dir", default=DEFAULT_CHECKPOINT_DIR, metavar="DIR", help="checkpoint directory of the API")
+    p.add_argument("--upload-dir", default="uploads", metavar="DIR",
+                   help="directory for training files uploaded through the API / frontend (default: uploads)")
     p.set_defaults(handler=cmd_serve)
     return parser
 

@@ -85,15 +85,15 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make docker-reload` / `docker-export` / `docker-clean` | reload `/data/model.json` into the running API / copy the model out / remove containers and the volume |
 | `make clean` / `make clean-all` | remove caches / also models, checkpoints and `node_modules` |
 
-Defaults: `MODEL=model.json DATA=data/sample_corpus.txt GARBAGE=data/sample_garbage.txt CKPT_DIR=checkpoints EPOCHS=10 LR=0.5 BATCH=4 BACKEND=auto PORT=8000`.
+Defaults: `MODEL=model.json DATA=data/sample_corpus.txt GARBAGE=data/sample_garbage.txt CKPT_DIR=checkpoints UPLOAD_DIR=uploads EPOCHS=10 LR=0.5 BATCH=4 BACKEND=auto PORT=8000`.
 
 ## Docker Compose
 
 The image builds the frontend with Node, then ships a slim Python runtime with
 zero dependencies (`WITH_TORCH=1` adds torch). The container runs the `radixnet`
-CLI; the model, discriminator and checkpoints live in the named volume
-`radixnet-data` (mounted at `/data`), corpora are bind-mounted read-only from
-`./data`.
+CLI; the model, discriminator, checkpoints and files uploaded through the
+frontend (`/data/uploads`) live in the named volume `radixnet-data` (mounted at
+`/data`), corpora are bind-mounted read-only from `./data`.
 
 ```bash
 make up            # docker compose up -d api        -> http://localhost:8000 (API + frontend)
@@ -148,7 +148,7 @@ Global options (before or after the command): `--model PATH` (default
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir` |
+| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`) |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -163,14 +163,17 @@ at a time, and mutating requests answer 409 while it runs.
 |---|---|
 | `GET /api/health` | `{"ok": true, "version"}` |
 | `GET /api/status` | model statistics, current job, available backends, model path |
-| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` + `epochs`, `lr`, `act_lr`, `batch_size`, `auto_compress` -> `{"job": {...}}` |
+| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `batch_size`, `auto_compress` -> `{"job": {...}}` |
+| `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` |
+| `POST /api/uploads` | upload text files: JSON `{"name","content"}` or `{"files": [{"name","content"}, ...]}`, `multipart/form-data` (`curl -F file=@corpus.txt`), or a raw body with `?name=corpus.txt` -> `{"uploads": [...]}` (201) |
+| `POST /api/uploads/delete` | `{"name"}` |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}` |
 | `POST /api/generate` | `{"count","max_length","mode","temperature"}` -> `{"samples": [{"text","cost","path"}]}` |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
-| `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` -> job |
+| `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
-| `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, ...}` -> job |
+| `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, ...}` -> job |
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` / `{"path"}` / `{"seed"}` |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, probability and cost |
@@ -191,10 +194,16 @@ curl -X POST localhost:8000/api/evolve/stop
 
 `frontend/` is a Vite + React app (React, ReactDOM, Vite only). The prebuilt
 `frontend/dist` is committed and served by the API, so nothing needs npm to use
-it. Panels: status bar (live statistics and job progress), Train, Predict (path
-with per-step costs), Generate, Score, 2NRL, Evolve (live chart of the
-discriminator gap), Checkpoints (save / restore / load / reset) and a Graph view
-of the most visited nodes.
+it. Panels: status bar (live statistics and job progress), Train (texts and/or
+uploaded files), Predict (path with per-step costs), Generate, Score, 2NRL,
+Evolve (live chart of the discriminator gap), Checkpoints (save / restore /
+load / reset) and a Graph view of the most visited nodes.
+
+Training files: drop text files onto the Train panel (or press "Upload
+files…"); the browser reads them and sends them to `POST /api/uploads`, the
+server keeps them in its `--upload-dir`, and the list lets you tick which files
+to train on, one text per line or each file as one text. The same picker feeds
+the 2NRL (bad / good files) and Evolve (corpus files) panels.
 
 ```bash
 make frontend-install && make frontend-build   # rebuild dist

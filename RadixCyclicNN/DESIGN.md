@@ -291,22 +291,23 @@ class PathResult:   # attributes: text: str, labels: list[str], node_ids: list[i
                     # step_costs: list[float], expanded: int, reached_end: bool, full_text: str (set by RadixNet)
                     # to_dict() -> JSON-serialisable
 
-def dijkstra_predict(graph, start_node: int, start_offset: int, min_chars: int, max_chars: int,
+def dijkstra_predict(graph, start_node: int, start_offset: int, min_chars: int, max_chars: int | None = None,
                      step_penalty: float = 0.0, to_end: bool = False, max_expansions: int = 200_000) -> PathResult
     # State = (node_id, chars_emitted). Emission of a non-start, non-sentinel node n: len(labels[n]) - 2 chars;
     # the start node emits len(label) - (start_offset + 3) chars (its deterministic remainder; 0 if START).
     # Edge cost = cost from graph.child_costs(p) + step_penalty. Standard Dijkstra with heapq and a best-cost
-    # dict keyed by state; states with chars_emitted >= max_chars are not expanded further.
+    # dict keyed by state; max_chars is an OPTIONAL cap (None = no limit on emitted characters): states with
+    # chars_emitted >= max_chars are not expanded further and the text is truncated to it.
     # Goal: if to_end: reaching END. Else: the first popped state with chars_emitted >= min_chars (Dijkstra pops
     # in cost order, so it is the cheapest such path); reaching END before min_chars is also accepted as a goal.
     # Fallback: if no goal is reached (dead end / expansion cap), return the popped state with the most emitted
     # chars (ties -> lowest cost) — never raise. Text is decoded with Decoder.decode_path(include_context=False)
-    # and truncated to max_chars.
+    # and truncated to max_chars when a cap was given.
 
-def sample_walk(graph, start_node: int, start_offset: int, max_chars: int, temperature: float = 1.0,
+def sample_walk(graph, start_node: int, start_offset: int, max_chars: int | None, temperature: float = 1.0,
                 rng: random.Random | None = None, stop_at_end: bool = True) -> PathResult
     # Stochastic walk: at each node sample a child from softmax(scores / temperature). cost = sum of -log p.
-    # Stops at END, at max_chars, or at a node without children.
+    # Stops at END, at max_chars (None = no limit), or at a node without children.
 ```
 
 ---
@@ -357,7 +358,8 @@ class RadixNet:
 
     def predict(self, prefix: str, length: int = 20, mode: str = "dijkstra", step_penalty: float = 0.0,
                 temperature: float = 1.0, to_end: bool = False, max_length: int | None = None) -> PathResult
-        # mode: "dijkstra" (default; shortest path, min_chars=length, max_chars=max_length or length*2) | "sample"
+        # mode: "dijkstra" (default; shortest path, min_chars=length, max_chars=max_length — None = NO cap on the
+        #       emitted characters, the whole cheapest path is returned) | "sample" (walks until END or length chars)
         # PathResult.text is the CONTINUATION only; result.full_text = prefix + text.
 
     def generate(self, max_length: int = 60, mode: str = "sample", temperature: float = 1.0, count: int = 1,
@@ -469,7 +471,7 @@ output only, one JSON document on stdout).
 | `info` | | stats + history tail |
 | `checkpoints` | `--dir DIR`, `--restore NAME --out PATH` | list / restore |
 | `bench` | `--chars N`, `--epochs` | training transitions/sec + chars/sec, predictions/sec, Dijkstra expansions/sec |
-| `serve` | `--host 127.0.0.1 --port 8000 --frontend-dir frontend/dist --checkpoint-dir checkpoints` | starts the API |
+| `serve` | `--host 127.0.0.1 --port 8000 --frontend-dir frontend/dist --checkpoint-dir checkpoints --upload-dir uploads` | starts the API |
 
 Exit codes: 0 ok, 1 error (message on stderr). Every command supports `--json`.
 
@@ -510,6 +512,11 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/checkpoints/restore` | `{"name"}` | stats |
 | GET `/api/graph?limit=150` | | `{"nodes": [{"id","label","count","activation","z","a","b","h","k"}], "edges": [{"source","target","weight","count","prob","cost"}]}` — top-`limit` alive nodes by count plus START/END, edges among them |
 | GET `/api/history` | | `{"history": model.history}` |
+| GET `/api/uploads` | | `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` — text files kept in the server's `upload_dir` (`--upload-dir`, default `uploads`; endpoints answer 400 when no directory is configured) |
+| POST `/api/uploads` | JSON `{"name","content"}` or `{"files": [{"name","content"}, ...]}`; or `multipart/form-data` (every part with a filename); or any other body with `?name=<file>` (raw text) | 201 `{"uploads": [record + "replaced": bool]}`. Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
+| POST `/api/uploads/delete` | `{"name"}` | `{"deleted": name}` (404 when missing) |
+
+`/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
 | GET `/` and other paths | | serves `frontend_dir` if it exists (SPA fallback to `index.html`, correct mime types, no path traversal), else a minimal built-in HTML page explaining how to build the frontend |
 
 `create_server(host, port, model_path=None, checkpoint_dir=None, frontend_dir=None, backend="auto", device=None, seed=0) -> (server, service)`

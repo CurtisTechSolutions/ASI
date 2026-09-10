@@ -4,6 +4,7 @@ import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
+import UploadPicker from "./UploadPicker.jsx";
 import { NumberField, TextArea } from "./Fields.jsx";
 
 function PhaseTable({ title, rows }) {
@@ -51,6 +52,8 @@ function PhaseTable({ title, rows }) {
 export default function TwoNRLPanel({ status }) {
   const [bad, setBad] = useState("");
   const [good, setGood] = useState("");
+  const [badFiles, setBadFiles] = useState([]);
+  const [goodFiles, setGoodFiles] = useState([]);
   const [negEpochs, setNegEpochs] = useState("3");
   const [posEpochs, setPosEpochs] = useState("3");
   const [negLr, setNegLr] = useState("0.05");
@@ -68,15 +71,17 @@ export default function TwoNRLPanel({ status }) {
     event.preventDefault();
     const badTexts = splitLines(bad);
     const goodTexts = splitLines(good);
-    if (badTexts.length === 0 || goodTexts.length === 0) {
-      setFormError("Provide at least one bad text and one good text (one per line).");
+    if ((badTexts.length === 0 && badFiles.length === 0) || (goodTexts.length === 0 && goodFiles.length === 0)) {
+      setFormError("Provide bad texts and good texts: type them (one per line) or select uploaded files for each.");
       return;
     }
     setFormError(null);
     await start(() =>
       api.twoNrl({
-        bad: badTexts,
-        good: goodTexts,
+        ...(badTexts.length > 0 ? { bad: badTexts } : {}),
+        ...(goodTexts.length > 0 ? { good: goodTexts } : {}),
+        ...(badFiles.length > 0 ? { bad_files: badFiles } : {}),
+        ...(goodFiles.length > 0 ? { good_files: goodFiles } : {}),
         neg_epochs: parseInteger(negEpochs, 3),
         pos_epochs: parseInteger(posEpochs, 3),
         neg_lr: parseNumber(negLr, 0.05),
@@ -129,6 +134,20 @@ export default function TwoNRLPanel({ status }) {
           rows={6}
           disabled={running}
           placeholder={"the quick brown fox jumps over the lazy dog"}
+        />
+        <UploadPicker
+          selected={badFiles}
+          onChange={setBadFiles}
+          disabled={running}
+          title="Bad files"
+          hint="Uploaded files used as garbage in the negative phase."
+        />
+        <UploadPicker
+          selected={goodFiles}
+          onChange={setGoodFiles}
+          disabled={running}
+          title="Good files"
+          hint="Uploaded files used as correct data in the positive phase."
         />
         <div className="row">
           <NumberField

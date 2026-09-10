@@ -78,7 +78,7 @@ def _build_result(
     node_ids: list[int],
     step_costs: list[float],
     start_offset: int,
-    max_chars: int,
+    max_chars: int | None,
     expanded: int,
     include_context: bool | None,
 ) -> PathResult:
@@ -91,7 +91,7 @@ def _build_result(
     # sentinels are stripped by id: a real node may carry the label "<s>" or "</s>"
     real = [lab for n, lab in zip(node_ids, labels) if n != START and n != END]
     text = _DECODER.decode_path(real, offset, include_context, skip_sentinels=False)
-    if max_chars >= 0:
+    if max_chars is not None and max_chars >= 0:
         text = text[:max_chars]
     return PathResult(
         text=text,
@@ -109,7 +109,7 @@ def dijkstra_predict(
     start_node: int,
     start_offset: int,
     min_chars: int,
-    max_chars: int,
+    max_chars: int | None = None,
     step_penalty: float = 0.0,
     to_end: bool = False,
     max_expansions: int = 200_000,
@@ -117,7 +117,9 @@ def dijkstra_predict(
 ) -> PathResult:
     """Cheapest path from ``(start_node, start_offset)`` emitting ``>= min_chars``.
 
-    States with ``chars_emitted >= max_chars`` are not expanded.  Goal: with
+    ``max_chars`` is an optional hard cap: states with ``chars_emitted >=
+    max_chars`` are not expanded and the text is truncated to it; ``None``
+    (the default) means no limit - the whole cheapest path is returned.  Goal: with
     ``to_end`` the END node; otherwise the first popped state with at least
     ``min_chars`` emitted (Dijkstra pops in cost order, so it is the cheapest
     such path) - reaching END earlier also counts.  If no goal is reachable
@@ -129,7 +131,7 @@ def dijkstra_predict(
     """
     if step_penalty < 0:
         raise ValueError("step_penalty must be >= 0 (Dijkstra needs non-negative costs)")
-    if max_chars < min_chars:
+    if max_chars is not None and max_chars < min_chars:
         max_chars = min_chars
     labels = graph.labels
     child_costs = graph.child_costs
@@ -161,7 +163,7 @@ def dijkstra_predict(
             fallback, fb_chars, fb_cost = key, chars, cost
         if expanded >= max_expansions:
             break
-        if chars >= max_chars:
+        if max_chars is not None and chars >= max_chars:
             continue
         for c, _e, ec in child_costs(node):
             nchars = chars if c == END else chars + len(labels[c]) - _OV
@@ -193,7 +195,7 @@ def sample_walk(
     graph: RadixCyclicGraph,
     start_node: int,
     start_offset: int,
-    max_chars: int,
+    max_chars: int | None,
     temperature: float = 1.0,
     rng: random.Random | None = None,
     stop_at_end: bool = True,
@@ -202,7 +204,8 @@ def sample_walk(
     """Stochastic walk sampling each child from ``softmax(scores / temperature)``.
 
     Stops at END (if ``stop_at_end``), once ``max_chars`` characters were
-    emitted, or at a node without children.  ``temperature == 0`` is greedy
+    emitted (``None`` = no limit: only END or a dead end stops the walk), or
+    at a node without children.  ``temperature == 0`` is greedy
     (argmax); negative temperatures are rejected.  ``rng`` defaults to the
     graph's own seeded generator.  ``cost`` / ``step_costs`` are the model's
     ``-log p`` of each chosen edge (temperature 1), comparable with
@@ -221,7 +224,7 @@ def sample_walk(
     step_costs: list[float] = []
     steps = 0
     while True:
-        if (node == END and stop_at_end) or chars >= max_chars:
+        if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
         costs = child_costs(node)
         if not costs:

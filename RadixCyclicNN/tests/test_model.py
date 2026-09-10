@@ -334,11 +334,13 @@ class TestPredict(unittest.TestCase):
         self.assertEqual(model.predict("zzzo", length=6).text, " world")  # "o w" matched on "o"
         self.assertEqual(model.predict("he", length=9).text, "llo world")  # label starts with "he"
         self.assertEqual(model.predict("he", length=9).full_text, "hello world")
-        self.assertEqual(model.predict("he", length=2).text, "llo ")  # up to 2 * length characters
+        self.assertEqual(model.predict("he", length=2).text, "llo world")  # no cap: the whole cheapest path
         self.assertEqual(model.predict("he", length=2, max_length=2).text, "ll")
+        self.assertEqual(model.predict("he", length=2, max_length=4).text, "llo ")
         # nothing matches: the model starts over from START (full text, prefix kept)
         r = model.predict("qqq", length=5)
-        self.assertEqual(r.text, "hello worl")  # truncated to max_length = 2 * length
+        self.assertEqual(r.text, "hello world")  # not truncated without max_length
+        self.assertEqual(model.predict("qqq", length=5, max_length=10).text, "hello worl")
         r = model.predict("qqq", length=5, max_length=20)
         self.assertEqual(r.text, "hello world")
         self.assertEqual(r.full_text, "qqqhello world")
@@ -353,7 +355,10 @@ class TestPredict(unittest.TestCase):
         self.assertEqual(model.predict("h", length=0, mode="sample").text, "")
         self.assertEqual(model.predict("h", length=3, max_length=1, mode="sample").text, "e")
         self.assertEqual(model.predict("h", length=3, max_length=3).text, "ell")
-        self.assertEqual(model.predict("he", length=2).text, "llo ")
+        self.assertEqual(model.predict("he", length=2, max_length=4).text, "llo ")
+        # without max_length the shortest path is returned whole (no cap on emitted characters)
+        self.assertEqual(model.predict("he", length=2).text, "llo world")
+        self.assertEqual(model.predict("h", length=1).text, "ello world")
         for prefix in ("h", "he", "xxlo", "zzzo", "hello", "qqq", ""):
             for length in (0, 1, 2, 5):
                 for max_length in (None, 0, 1, 3, 10):
@@ -361,10 +366,14 @@ class TestPredict(unittest.TestCase):
                         with self.subTest(prefix=prefix, length=length, max_length=max_length, mode=mode):
                             r = model.predict(prefix, length=length, max_length=max_length, mode=mode)
                             if mode == "dijkstra":
-                                cap = max(length, max_length if max_length is not None else 2 * length)
+                                # no cap without max_length, except that length 0 still emits nothing
+                                cap = (0 if length == 0 else None) if max_length is None else max(length, max_length)
                             else:
                                 cap = max_length if max_length is not None else length
-                            self.assertLessEqual(len(r.text), cap)
+                            if cap is None:
+                                self.assertLessEqual(len(r.text), len("hello world"))
+                            else:
+                                self.assertLessEqual(len(r.text), cap)
                             self.assertEqual(r.full_text, prefix + r.text)
 
     def test_texts_containing_sentinel_labels(self):

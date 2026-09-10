@@ -37,6 +37,8 @@ import math
 import mimetypes
 import os
 import sys
+import email.parser
+import email.policy
 import threading
 import time
 import traceback
@@ -212,9 +214,12 @@ class ModelService:
         seed: int = 0,
         keep: int = 5,
         quiet: bool = False,
+        upload_dir: str | None = None,
     ) -> None:
         self.model_path = os.path.abspath(model_path) if model_path else None
         self.checkpoint_dir = os.path.abspath(checkpoint_dir) if checkpoint_dir else None
+        self.upload_dir = os.path.abspath(upload_dir) if upload_dir else None
+        self._upload_lock = threading.Lock()
         self.backend_name = backend
         self.device = device
         self.seed = int(seed)
@@ -432,6 +437,7 @@ class ModelService:
             backends=self.backends,
             model_path=self.model_path,
             checkpoint_dir=self.checkpoint_dir,
+            upload_dir=self.upload_dir,
         )
         return stats
 
@@ -539,6 +545,64 @@ class ModelService:
         self._ensure_idle()
         model = manager.load(name, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
+
+    # -- uploads (training corpora kept on the server) -----------------------
+
+    def _require_uploads(self) -> str:
+        if not self.upload_dir:
+            raise ApiError(400, "uploads are disabled: start the server with --upload-dir (create_server(upload_dir=...))")
+        os.makedirs(self.upload_dir, exist_ok=True)
+        return self.upload_dir
+
+    def _upload_path(self, name: str) -> str:
+        return os.path.join(self._require_uploads(), sanitize_upload_name(name))
+
+    def uploads(self) -> dict:
+        """Every uploaded file with its size and non-blank line count."""
+        root = self._require_uploads()
+        with self._upload_lock:
+            names = sorted(n for n in os.listdir(root) if os.path.isfile(os.path.join(root, n)) and not n.endswith(".part"))
+            records = [_upload_record(root, name) for name in names]
+        return {"uploads": records, "upload_dir": root}
+
+    def upload(self, name: str, content: str) -> dict:
+        """Store ``content`` as the upload ``name`` (UTF-8; an existing file of that name is replaced)."""
+        path = self._upload_path(name)
+        with self._upload_lock:
+            replaced = os.path.isfile(path)
+            part = path + ".part"
+            with open(part, "w", encoding="utf-8", newline="") as fh:
+                fh.write(content)
+            os.replace(part, path)
+            record = _upload_record(os.path.dirname(path), os.path.basename(path))
+        record["replaced"] = replaced
+        self._log(f"upload {record['name']} ({record['bytes']} bytes, {record['lines']} lines)")
+        return record
+
+    def delete_upload(self, name: str) -> dict:
+        path = self._upload_path(name)
+        with self._upload_lock:
+            if not os.path.isfile(path):
+                raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
+            os.remove(path)
+        return {"deleted": os.path.basename(path)}
+
+    def upload_texts(self, names: list[str], whole_file: bool = False) -> list[str]:
+        """Training texts read from uploads: one per non-blank line, or each file as one text."""
+        texts: list[str] = []
+        for name in names:
+            path = self._upload_path(name)
+            with self._upload_lock:
+                if not os.path.isfile(path):
+                    raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    blob = fh.read()
+            if whole_file:
+                if blob.strip():
+                    texts.append(blob)
+            else:
+                texts.extend(line for line in blob.splitlines() if line.strip())
+        return texts
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -737,6 +801,133 @@ class Fields:
             raise ApiError(400, f"'{list_name}' contains no texts")
         return texts
 
+    def texts_optional(self, list_name: str, text_name: str) -> list[str]:
+        """Like :meth:`texts`, but absent or empty inputs give ``[]`` instead of 400."""
+        if not self.present(list_name) and not self.present(text_name):
+            return []
+        try:
+            return self.texts(list_name, text_name)
+        except ApiError as exc:
+            if exc.message.endswith("contains no texts"):
+                return []
+            raise
+
+    def names(self, name: str) -> list[str]:
+        """An optional list of non-empty strings (upload names); absent -> ``[]``."""
+        value = self._lookup(name)
+        if value is _MISSING:
+            return []
+        if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+            raise self._bad(name, "a list of non-empty strings", value)
+        return list(value)
+
+    def upload_files(self) -> list[tuple[str, str]]:
+        """``{name, content}`` or ``{files: [{name, content}, ...]}`` -> ``[(name, content), ...]``."""
+        files = self._lookup("files")
+        if files is _MISSING:
+            return [(self.text("name"), self.text("content"))]
+        if not isinstance(files, list) or not files:
+            raise self._bad("files", "a non-empty list of {name, content} objects", files)
+        result = []
+        for i, item in enumerate(files):
+            if not isinstance(item, dict):
+                raise ApiError(400, f"'files[{i}]' must be an object with 'name' and 'content'")
+            entry = Fields(item)
+            result.append((entry.text("name"), entry.text("content")))
+        return result
+
+
+_UPLOAD_NAME_CHARS = frozenset("._- +@()")
+MAX_UPLOAD_NAME = 128
+
+
+def sanitize_upload_name(name: str) -> str:
+    """A safe file name inside the upload directory (base name only, no traversal, no odd characters)."""
+    base = os.path.basename(str(name).replace("\\", "/")).strip()
+    base = "".join(ch if ch.isalnum() or ch in _UPLOAD_NAME_CHARS else "_" for ch in base).strip(" .")
+    if not base or base in (".", ".."):
+        raise ApiError(400, f"invalid upload name {name!r}")
+    return base[:MAX_UPLOAD_NAME]
+
+
+def _upload_record(root: str, name: str) -> dict:
+    path = os.path.join(root, name)
+    info = os.stat(path)
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        blob = fh.read()
+    return {
+        "name": name,
+        "bytes": info.st_size,
+        "chars": len(blob),
+        "lines": sum(1 for line in blob.splitlines() if line.strip()),
+        "modified": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(timespec="milliseconds"),
+    }
+
+
+def _decode_text(data: bytes) -> str:
+    """Bytes of an uploaded text file -> ``str`` (UTF-8, BOM dropped, undecodable bytes replaced)."""
+    return data.decode("utf-8-sig", errors="replace")
+
+
+def _multipart_files(body: bytes, content_type: str) -> list[dict]:
+    """File parts of a ``multipart/form-data`` body (``curl -F file=@corpus.txt``)."""
+    prologue = b"Content-Type: " + content_type.encode("latin-1", errors="replace") + b"\r\nMIME-Version: 1.0\r\n\r\n"
+    try:
+        message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(prologue + body)
+    except Exception as exc:  # noqa: BLE001 - the parser's errors are not worth distinguishing
+        raise ApiError(400, f"malformed multipart/form-data body: {exc}") from exc
+    if not message.is_multipart():
+        raise ApiError(400, "malformed multipart/form-data body (missing boundary?)")
+    files = []
+    for part in message.iter_parts():
+        filename = part.get_filename()
+        if not filename:
+            continue  # plain form fields are ignored
+        payload = part.get_payload(decode=True) or b""
+        files.append({"name": filename, "content": _decode_text(payload)})
+    if not files:
+        raise ApiError(400, "multipart body contains no file parts (use -F file=@corpus.txt)")
+    return files
+
+
+def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]]) -> dict:
+    """Body of ``POST /api/uploads`` in any accepted form, normalised to the JSON form.
+
+    * ``application/json``: ``{name, content}`` or ``{files: [{name, content}, ...]}``
+    * ``multipart/form-data``: every part with a file name
+    * anything else (``text/plain``, ``--data-binary @file``): the raw body, named by ``?name=``
+    """
+    kind = content_type.split(";", 1)[0].strip().lower()
+    names = [n for n in query.get("name", []) if n.strip()]
+    if kind == "multipart/form-data":
+        return {"files": _multipart_files(body, content_type)}
+    if kind == "application/json" or (kind == "" and not names):
+        return parse_body(body)
+    if not names:
+        raise ApiError(400, "raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})")
+    return {"files": [{"name": names[0], "content": _decode_text(body)}]}
+
+
+def _texts_and_files(
+    svc: ModelService, fields: Fields, list_name: str, text_name: str, files_name: str, whole_file: bool = False
+) -> list[str]:
+    """Texts given inline and/or read from uploaded files; at least one text is required."""
+    names = fields.names(files_name)
+    texts = fields.texts_optional(list_name, text_name)
+    if names:
+        texts.extend(svc.upload_texts(names, whole_file=whole_file))
+    if not texts:
+        if names:
+            raise ApiError(400, f"'{files_name}' contains no texts")
+        if fields.present(list_name) or fields.present(text_name):
+            raise ApiError(400, f"'{list_name}' contains no texts")
+        raise ApiError(
+            400,
+            f"missing field '{list_name}' (list of strings), '{text_name}' (string, one text per line)"
+            f" or '{files_name}' (list of upload names)",
+        )
+    return texts
+
 
 def _train_overrides(fields: Fields) -> dict:
     """Optional :class:`TrainConfig` fields shared by the 2NRL phases (only those given)."""
@@ -768,7 +959,7 @@ def _r_status(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _r_train(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    texts = f.texts("texts", "text")
+    texts = _texts_and_files(svc, f, "texts", "text", "files", whole_file=f.flag("whole_file", False))
     config = TrainConfig(
         epochs=f.integer("epochs", TrainConfig.epochs, minimum=0),
         lr=f.number("lr", TrainConfig.lr, minimum=0.0),
@@ -818,8 +1009,9 @@ def _r_score(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _r_two_nrl(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    bad = f.texts("bad", "bad_text")
-    good = f.texts("good", "good_text")
+    whole_file = f.flag("whole_file", False)
+    bad = _texts_and_files(svc, f, "bad", "bad_text", "bad_files", whole_file=whole_file)
+    good = _texts_and_files(svc, f, "good", "good_text", "good_files", whole_file=whole_file)
     job = svc.start_two_nrl(
         bad, good,
         neg_epochs=f.integer("neg_epochs", 3, minimum=0),
@@ -840,7 +1032,7 @@ def _r_compress(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _r_evolve_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    corpus = f.texts("corpus", "corpus_text")
+    corpus = _texts_and_files(svc, f, "corpus", "corpus_text", "corpus_files", whole_file=f.flag("whole_file", False))
     generations = f.integer("generations", None, minimum=0)
     d = EvolveConfig
     config = EvolveConfig(
@@ -912,13 +1104,25 @@ def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.history()
 
 
+def _r_uploads(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.uploads()
+
+
+def _r_upload(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 201, {"uploads": [svc.upload(name, content) for name, content in f.upload_files()]}
+
+
+def _r_upload_delete(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.delete_upload(f.text("name"))
+
+
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats, current job, backend availability, paths"),
     ("POST", "/api/train", _r_train, "start a training job: {texts | text, epochs, lr, act_lr, batch_size, auto_compress}"),
     ("GET", "/api/job", _r_job, "status of the current / last job"),
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
-    ("POST", "/api/predict", _r_predict, "continue a prefix: {prefix, length, mode, to_end, step_penalty, temperature}"),
+    ("POST", "/api/predict", _r_predict, "continue a prefix: {prefix, length, mode, to_end, step_penalty, temperature, max_length (optional cap; default none)}"),
     ("POST", "/api/generate", _r_generate, "sample texts from START: {count, max_length, mode, temperature}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
@@ -935,6 +1139,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
     ("GET", "/api/graph", _r_graph, "top nodes by visit count and the edges among them (?limit=150)"),
     ("GET", "/api/history", _r_history, "the model's training history"),
+    ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
+    ("POST", "/api/uploads", _r_upload, "upload text files: JSON {name, content} | {files: [...]}, multipart/form-data, or a raw body with ?name="),
+    ("POST", "/api/uploads/delete", _r_upload_delete, "delete an uploaded file: {name}"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}
@@ -1109,8 +1316,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._send_json(405, {"error": f"method {method} is not allowed for {path}; use {allow}"}, method, allow=allow)
         service = self.server.service
         try:
-            fields = Fields(parse_body(body) if lookup == "POST" else {})
-            status, payload = fn(service, fields, parse_qs(query, keep_blank_values=True))
+            params = parse_qs(query, keep_blank_values=True)
+            if lookup == "POST" and path == "/api/uploads":
+                fields = Fields(_upload_body(body, self.headers.get("Content-Type", ""), params))
+            else:
+                fields = Fields(parse_body(body) if lookup == "POST" else {})
+            status, payload = fn(service, fields, params)
         except ApiError as exc:
             status, payload = exc.status, {"error": exc.message}
         except FileNotFoundError as exc:
@@ -1282,17 +1493,19 @@ def create_server(
     device: str | None = None,
     seed: int = 0,
     quiet: bool = False,
+    upload_dir: str | None = None,
 ) -> tuple[RadixNetHTTPServer, ModelService]:
     """Build (and bind) the server; ``port=0`` picks a free port.
 
     ``model_path`` is loaded when it exists and is the default target of
     ``POST /api/save``; ``checkpoint_dir`` enables the checkpoint endpoints;
-    ``frontend_dir`` is the built React app.  ``quiet`` silences the
+    ``upload_dir`` enables the upload endpoints (training files kept on the
+    server); ``frontend_dir`` is the built React app.  ``quiet`` silences the
     per-request log lines (stderr).
     """
     service = ModelService(
         model_path=model_path, checkpoint_dir=checkpoint_dir, backend=backend, device=device,
-        seed=seed, quiet=quiet,
+        seed=seed, quiet=quiet, upload_dir=upload_dir,
     )
     server = RadixNetHTTPServer((host, port), service, frontend_dir=frontend_dir, quiet=quiet)
     return server, service
@@ -1308,11 +1521,12 @@ def run_server(
     device: str | None = None,
     seed: int = 0,
     quiet: bool = False,
+    upload_dir: str | None = None,
 ) -> None:
     """Serve until ``KeyboardInterrupt``; a running job is stopped on the way out."""
     server, service = create_server(
         host, port, model_path=model_path, checkpoint_dir=checkpoint_dir, frontend_dir=frontend_dir,
-        backend=backend, device=device, seed=seed, quiet=quiet,
+        backend=backend, device=device, seed=seed, quiet=quiet, upload_dir=upload_dir,
     )
     if not quiet:
         sys.stderr.write(f"radixnet API listening on {server.url} (Ctrl-C to stop)\n")

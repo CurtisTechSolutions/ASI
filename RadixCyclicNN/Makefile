@@ -14,6 +14,7 @@ MODEL       ?= model.json
 DATA        ?= data/sample_corpus.txt
 GARBAGE     ?= data/sample_garbage.txt
 CKPT_DIR    ?= checkpoints
+UPLOAD_DIR  ?= uploads
 BACKEND     ?= auto
 DEVICE      ?=
 SEED        ?= 0
@@ -126,8 +127,8 @@ demo: ## Train on the sample corpus, then predict, generate and score
 	$(MAKE) score
 
 ##@ Serve (local)
-serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT
-	$(RADIXNET) $(GLOBAL) serve --host $(HOST) --port $(PORT) --checkpoint-dir $(CKPT_DIR)
+serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)
+	$(RADIXNET) $(GLOBAL) serve --host $(HOST) --port $(PORT) --checkpoint-dir $(CKPT_DIR) --upload-dir $(UPLOAD_DIR)
 
 frontend-install: ## Install the frontend dependencies (npm)
 	cd frontend && npm install --no-audit --no-fund

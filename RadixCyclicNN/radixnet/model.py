@@ -407,14 +407,15 @@ class RadixNet:
         """Continue ``prefix``.
 
         ``"dijkstra"`` returns the cheapest path emitting at least ``length``
-        characters (or reaching END; ``to_end`` forces END), bounded by
-        ``max_length`` (default ``2 * length``).  ``"sample"`` walks
-        stochastically for up to ``length`` (or ``max_length``) characters.
+        characters (or reaching END; ``to_end`` forces END).  There is no
+        limit on the emitted characters unless ``max_length`` is given, in
+        which case the continuation is capped there.  ``"sample"`` walks
+        stochastically until END or ``length`` (or ``max_length``) characters.
         ``result.text`` is the continuation only; ``result.full_text`` is
         ``prefix + text``.  When only a partial trigram of the prefix could be
         matched, the unmatched remainder of that trigram opens the
-        continuation; the continuation as a whole (lead included) never
-        exceeds the character cap.
+        continuation; a cap, when given, applies to the continuation as a
+        whole (lead included).
         """
         if not isinstance(prefix, str):
             raise TypeError("prefix must be a string")
@@ -429,17 +430,26 @@ class RadixNet:
         node, offset, matched = self._locate(prefix)
         lead = "" if node == START or matched >= _W else graph.labels[node][offset + matched : offset + _W]
         want = max(0, length - len(lead))
+        cap: int | None
         if mode == "dijkstra":
-            cap = max(length, max_length if max_length is not None else length * 2)
+            if max_length is None and length == 0:
+                cap = 0  # "emit nothing" stays empty even without a cap
+                max_chars = 0
+            elif max_length is None:
+                cap = None  # no limit: the whole cheapest path is returned
+                max_chars = None
+            else:
+                cap = max(length, max_length)
+                max_chars = max(want, cap - len(lead))
             result = dijkstra_predict(
-                graph, node, offset, min_chars=want, max_chars=max(want, cap - len(lead)),
+                graph, node, offset, min_chars=want, max_chars=max_chars,
                 step_penalty=step_penalty, to_end=to_end,
             )
         else:
             cap = max_length if max_length is not None else length
             result = sample_walk(graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature)
         if lead:
-            result.text = (lead + result.text)[:cap]
+            result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
         result.full_text = prefix + result.text
         return result
 
