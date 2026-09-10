@@ -208,8 +208,10 @@ curl -X POST localhost:8000/api/evolve/stop
 `frontend/dist` is committed and served by the API, so nothing needs npm to use
 it. Panels: status bar (live statistics and job progress), Train (texts and/or
 uploaded files), Predict (path with per-step costs), Generate, Score, 2NRL,
-Evolve (live chart of the discriminator gap), Checkpoints (save / restore /
-load / reset) and a Graph view of the most visited nodes.
+Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
+adversarial review), Code (code generation with the sandbox and the judge),
+Checkpoints (save / restore / load / reset) and a Graph view of the most
+visited nodes.
 
 Training files: drop text files onto the Train panel (or press "Upload
 files…"); the browser reads them and sends them to `POST /api/uploads`, the
@@ -312,7 +314,11 @@ The sandbox runs each program with `python -I` in a scratch directory with an
 empty environment, memory (`--memory-mb`), CPU and file-size limits, a wall-clock
 `--sandbox-timeout`, and, where `unshare` can create a network namespace, no
 network. That contains accidents, not a hostile program; run generated code
-inside the Docker image when the problems or the models are untrusted.
+inside the Docker image when the problems or the models are untrusted. Every
+result reports `network_isolated`; inside a Docker container the default
+seccomp policy prevents the per-program namespace, so there the container's
+own network is the boundary (give the `api` service no network it should not
+have).
 
 API: `POST /api/codegen/start` (job), `GET /api/codegen/history`,
 `POST /api/codegen/solve` (solve one problem with the model or the teacher,

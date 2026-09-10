@@ -11,3 +11,6 @@ discriminator*.json.gz
 model-from-docker.json
 .env
 uploads/
+codegen-report.json
+ollama-good.txt
+ollama-garbage.txt
