@@ -1,0 +1,8 @@
+{"id": "hello", "prompt": "Print the text hello, world exactly, followed by a newline.", "expected_output": "hello, world"}
+{"id": "count", "prompt": "Print the numbers 1 to 5, one per line.", "expected_output": "1\n2\n3\n4\n5"}
+{"id": "add", "prompt": "Define a function add(a, b) that returns a + b, then print add(2, 3).", "expected_output": "5", "tests": "assert add(2, 3) == 5\nassert add(-1, 1) == 0"}
+{"id": "sum100", "prompt": "Print the sum of the integers from 1 to 100.", "expected_output": "5050"}
+{"id": "even", "prompt": "Define a function is_even(n) that returns True for even numbers, then print is_even(4) and is_even(7) on separate lines.", "expected_output": "True\nFalse", "tests": "assert is_even(0) and not is_even(3)"}
+{"id": "fib", "prompt": "Print the first 10 Fibonacci numbers, starting with 0 and 1, separated by single spaces on one line.", "expected_output": "0 1 1 2 3 5 8 13 21 34"}
+{"id": "reverse", "prompt": "Reverse the string radix and print the result.", "expected_output": "xidar"}
+{"id": "largest", "prompt": "Print the largest number in the list [3, 9, 2, 7].", "expected_output": "9"}

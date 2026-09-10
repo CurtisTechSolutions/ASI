@@ -1,0 +1,12 @@
+# One programming problem per line. Lines starting with # are ignored.
+# Use with: python -m radixnet codegen --problems data/sample_problems.txt
+Print the text hello, world exactly, followed by a newline.
+Print the numbers 1 to 5, one per line.
+Define a function add(a, b) that returns a + b, then print add(2, 3).
+Print the sum of the integers from 1 to 100.
+Define a function is_even(n) that returns True for even numbers, then print is_even(4) and is_even(7) on separate lines.
+Print the first 10 Fibonacci numbers, starting with 0 and 1, separated by single spaces on one line.
+Reverse the string radix and print the result.
+Print the largest number in the list [3, 9, 2, 7].
+Define a function count_vowels(text) and print count_vowels("programming").
+Print the multiplication table of 3 from 3 x 1 to 3 x 5, one product per line.

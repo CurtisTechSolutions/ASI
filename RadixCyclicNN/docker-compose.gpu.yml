@@ -1,0 +1,35 @@
+# GPU override: build the image with torch and hand every NVIDIA GPU to the
+# services that train.  Needs the NVIDIA Container Toolkit on the host; the
+# image grows by a few GB (CUDA wheels).  `--backend auto` then picks torch on
+# CUDA automatically; force it with RADIXNET_BACKEND=torch.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm bench
+
+x-gpu: &gpu
+  build:
+    args:
+      WITH_TORCH: "1"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  api:
+    <<: *gpu
+  autoevolve:
+    build:
+      args:
+        WITH_TORCH: "1"
+  train:
+    <<: *gpu
+  evolve:
+    <<: *gpu
+  test:
+    <<: *gpu
+  bench:
+    <<: *gpu
