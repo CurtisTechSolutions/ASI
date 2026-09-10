@@ -633,3 +633,64 @@ Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from
 Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
 
 Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, configurable failures) and `/api/chat`.
+
+---
+
+## 17. Code generation (`codegen.py`) — sandbox, Ollama judge, 2NRL rewards
+
+`problem -> Python program -> sandbox -> judge -> 2NRL`, in two semi-supervised phases over one problem list:
+
+* **teacher**: the Ollama model (`CodeGenConfig.teacher_model`, default `gemma4`, env `RADIXNET_CODEGEN_MODEL`) writes a
+  program (`teacher_generate`), the sandbox runs it, failures / rejections go back to the teacher (`teacher_fix`, up to
+  `teacher_attempts` programs), the judge confirms. Learning: `two_nrl(bad=[texts of the wrong attempts], good=[text of the
+  correct one])` — wrong answers first, then invert, then the correct answer.
+* **model**: the network continues `model_prompt.format(problem)` (default `"{problem}\n"`) into code — attempt 0 by the
+  cheapest path (`predict(mode="dijkstra", to_end=True)`), later attempts sampled — up to `model_attempts`; each attempt is
+  run and judged; the loop stops at the first correct one; with `fallback_teacher` the teacher supplies the correct answer
+  when the network never succeeds. Learning as above (all wrong attempts punished, the correct one rewarded).
+
+The training text of an answer is `solution_text(problem, code) = prompt + "\n" + code + "\n"`, so the prefix the network
+continues in phase 2 is exactly what it learned in phase 1.
+
+```python
+Problem(id, prompt, tests=None, expected_output=None); parse_problems(items); parse_problem_file(text, ext); load_problems(path)
+    # .txt one prompt per line (# comments) | .jsonl objects | .json list or {"problems": [...]}; ids default to p1, p2, ...
+Sandbox(python=None, timeout=10.0, memory_mb=256, cpu_seconds=None, isolate_network=True)
+    .run(code, tests=None, expected_output=None, stdin="") -> RunResult(ok, exit_code, stdout, stderr, error, timed_out,
+        seconds, expected_ok, network_isolated)
+    # python -I -B, scratch cwd, empty environment, RLIMIT_AS / RLIMIT_CPU / RLIMIT_FSIZE set inside the child before
+    # runpy runs the script, wall-clock timeout, `unshare -rn` when it works (probed once); never raises for a bad program.
+check_style(code) -> StyleReport(ok, syntax_ok, pep8_ok, naming_ok, issues)
+    # W191 tabs, E111 indentation, E501 > 79, W291/W293 trailing whitespace, W292 final newline, E302 two blank lines
+    # before top-level defs; N801 CapWords classes, N802 snake_case functions, N803 arguments, N806 variables
+    # (UPPER_CASE constants and CapWords aliases allowed)
+extract_code(text)            # the longest ```python block, else the text
+judge_with_ollama(client, problem, code, run, style, model=None) -> {"task","pep8","naming","score","issues","critique"}
+    # JSON-mode adversarial reviewer prompt with the task, program, execution result and the objective style report
+decide(run, style, llm, strictness) -> Verdict(correct, runs, task, pep8, naming, score, issues, critique, judged_by)
+    # correct = runs and expected_ok is not False and task is not False and (lenient or pep8 and naming and style.ok)
+    # task: False when the program fails or the stdout differs; the LLM's answer when asked; True with matching
+    # expected output; None (counts as ok) when nothing can judge it. judged_by: sandbox | tests | ollama | none
+CodeGenConfig(teacher_model, judge_model, phases=("teacher","model"), rounds=1, teacher_attempts=3, model_attempts=4,
+    first_attempt_dijkstra=True, temperature=1.0, max_length=800, strictness="strict", use_judge=True,
+    fallback_teacher=True, twonrl_per="problem"|"round", replay=True, replay_limit=64, teacher_prompt=None,
+    model_prompt="{problem}\n", neg_epochs=2, pos_epochs=3, neg_lr=0.5, pos_lr=0.1, batch_size=4, checkpoint_every=0)
+CodeGenTrainer(model, client, sandbox=None, config=None, external=None)
+    .evaluate(problem, code, source, index) -> Attempt      # sandbox + style + (if it runs and use_judge) the LLM judge
+    .solve_with_teacher / .generate_with_model / .solve_with_model
+    .learn(bad, good) -> {"bad","good","action": "2nrl"|"reward"|"punish"|None,"neg_loss","pos_loss"}
+        # bad and good: two_nrl; only good: train (reward); only bad: train + invert (punish);
+        # replay adds up to replay_limit earlier correct texts to every positive phase
+    .run(problems, progress=None, stop_event=None, checkpoint_manager=None) -> [problem and round records]
+        # progress also receives attempt records: kinds "attempt", "problem", "round"; twonrl_per decides whether
+        # learn() runs after each problem or once per phase-round; checkpoints every checkpoint_every problems
+    # `external` is a context-manager factory entered around sandbox runs and LLM calls; the API passes
+    # ModelService.pause_lock so readers are served while a program runs or the teacher thinks.
+```
+
+CLI `codegen --problems FILE` (section 11 of the README lists the options); the `ProblemPrinter` prints attempts as notes,
+problems as table rows and round summaries. API: `POST /api/codegen/start` (job "codegen"; problems from `problems`,
+`problems_text`, `problem_files` uploads), `GET /api/codegen/history`, `POST /api/codegen/solve` (one problem with the
+model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). Frontend: the
+"Code" tab. Tests (`tests/test_codegen.py`) use a fake Ollama whose teacher answers come from a scripted queue and whose
+judge rejects programs containing `BAD_ANSWER`.

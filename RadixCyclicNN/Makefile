@@ -42,6 +42,9 @@ PROMPT      ?= short true sentences about animals and the weather
 LINES       ?= 20
 STYLE       ?= good
 THRESHOLD   ?= 6
+PROBLEMS    ?= data/sample_problems.jsonl
+PHASE       ?= both
+CODEGEN_MODEL ?= gemma4
 COMPOSE     ?= docker compose
 GPU_COMPOSE ?= $(COMPOSE) -f docker-compose.yml -f docker-compose.gpu.yml
 ALL_PROFILES := --profile auto --profile dev --profile evolve --profile tools
@@ -60,6 +63,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
 .PHONY: help install install-gpu check test train resume predict generate score 2nrl invert compress \
         evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
+        codegen codegen-teacher codegen-model \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -150,6 +154,18 @@ ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pa
 
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
+
+##@ Code generation (sandbox + Ollama judge + 2NRL rewards)
+codegen: ## Solve PROBLEMS with the teacher (CODEGEN_MODEL) and then the model (PHASE=both|teacher|model), 2NRL after every problem
+	$(RADIXNET) $(GLOBAL) codegen --problems $(PROBLEMS) --phase $(PHASE) --teacher-model $(CODEGEN_MODEL) $(OLLAMA_FLAGS_URL) --checkpoint-dir $(CKPT_DIR) --report codegen-report.json
+
+codegen-teacher: ## Phase 1 only: Ollama writes and fixes the solutions, the network learns them (wrong attempts as garbage)
+	$(MAKE) codegen PHASE=teacher
+
+codegen-model: ## Phase 2 only: the network writes the solutions, punished / rewarded by the sandbox and the judge
+	$(MAKE) codegen PHASE=model
+
+OLLAMA_FLAGS_URL := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),)
 
 ##@ Serve (local)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)

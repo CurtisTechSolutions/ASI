@@ -80,6 +80,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
+| `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
@@ -152,6 +153,7 @@ Global options (before or after the command): `--model PATH` (default
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
+| `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -173,6 +175,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
 | `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
+| `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_model", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}` |
+| `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
+| `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
+| `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}` |
 | `POST /api/generate` | `{"count","max_length","mode","temperature"}` -> `{"samples": [{"text","cost","path"}]}` |
@@ -254,6 +260,65 @@ tab wraps them: generate a corpus and train on it / save it as an upload, or
 review the model's samples and apply the verdicts as a 2NRL job. In Docker the
 API reaches an Ollama on the host through `host.docker.internal`; `make up-ollama`
 starts an Ollama container next to the API instead (`OLLAMA_HOST=http://ollama:11434`).
+
+## Code generation: sandbox, Ollama judge, 2NRL rewards
+
+`radixnet codegen` turns the network into a code generator trained by
+reinforcement: programs are run in a sandbox, judged, and every attempt feeds
+2NRL, wrong answers as the negative phase before the correct answer as the
+positive phase.
+
+```
+problem -> Python program -> sandbox run -> judge (PEP 8, naming, runs, task) -> punish / reward (2NRL)
+```
+
+Two semi-supervised phases over the same problem list (`--phase both`, the default):
+
+1. **teacher** — an Ollama model (`--teacher-model`, default `gemma4`) writes a
+   solution; the sandbox runs it; on an error or a rejected verdict the teacher
+   is asked to fix it (up to `--teacher-attempts`); the judge confirms the
+   result. The network then learns the concatenated question + answer, with
+   every wrong attempt as 2NRL garbage first.
+2. **model** — the network itself continues each problem prompt into code
+   (first the cheapest path, then samples, up to `--model-attempts`). A program
+   that errors or is judged wrong is punished (negative phase) and the loop
+   tries again; a correct one is rewarded (positive phase). When the network
+   never succeeds the teacher supplies the answer for the reward
+   (`--no-fallback-teacher` disables that).
+
+Correctness needs all of: the program runs in the sandbox (exit 0, no timeout),
+its stdout matches `expected_output` and its appended `tests` pass when the
+problem has them, the judge says the task is accomplished, and (`--strictness
+strict`) both the objective PEP 8 / naming checker (indentation, line length,
+whitespace, blank lines, snake_case / CapWords / UPPER_CASE) and the judge accept
+the formatting and naming. `--strictness lenient` needs only "runs" and "task".
+
+```bash
+ollama pull gemma4
+python -m radixnet codegen --problems data/sample_problems.jsonl                   # teacher, then model
+python -m radixnet codegen --problems data/sample_problems.txt --phase model --rounds 3
+python -m radixnet codegen --problems problems.jsonl --twonrl-per round --report report.json
+make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both
+```
+
+Problem files: one prompt per line (`.txt`, `#` comments), or `.json` / `.jsonl`
+objects `{"id", "prompt", "tests", "expected_output"}` (`data/sample_problems.*`).
+`--twonrl-per problem` (default) applies 2NRL after every problem, `round` once
+per pass over all attempts; `--no-replay` stops earlier correct solutions from
+being added to every positive phase; `--report FILE` writes all records and the
+solutions. Ctrl-C stops after the current problem and saves.
+
+The sandbox runs each program with `python -I` in a scratch directory with an
+empty environment, memory (`--memory-mb`), CPU and file-size limits, a wall-clock
+`--sandbox-timeout`, and, where `unshare` can create a network namespace, no
+network. That contains accidents, not a hostile program; run generated code
+inside the Docker image when the problems or the models are untrusted.
+
+API: `POST /api/codegen/start` (job), `GET /api/codegen/history`,
+`POST /api/codegen/solve` (solve one problem with the model or the teacher,
+no training) and `POST /api/codegen/run` (sandbox only). The frontend's Code
+tab drives all of it: problems (typed or uploaded), live attempt / problem /
+round records, a "try a problem" box and a sandbox runner.
 
 ## Checkpoints, saving, loading
 

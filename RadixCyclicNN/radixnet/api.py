@@ -51,6 +51,17 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from . import __version__
 from .backend import describe_backends
 from .checkpoint import CheckpointManager
+from .codegen import (
+    PHASES as CODEGEN_PHASES,
+    CodeGenConfig,
+    CodeGenTrainer,
+    Problem,
+    Sandbox,
+    check_style,
+    decide,
+    parse_problem_file,
+    parse_problems,
+)
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .model import RadixNet, TrainConfig
@@ -248,6 +259,7 @@ class ModelService:
         self._job: Job | None = None
         self._job_ids = itertools.count(1)
         self._evolve_history: list[dict] = []
+        self._codegen_history: list[dict] = []
         self._discriminator: RadixNet | None = None
         self._discriminator_seed: int | None = None
         if self.model_path and os.path.isfile(self.model_path):
@@ -635,6 +647,48 @@ class ModelService:
         """``count`` stochastic texts from the model (held under the lock only while sampling)."""
         with self.session() as model:
             return sample_texts(model, count, prefix=prefix, max_length=max_length, temperature=temperature, seed=seed)
+
+    # -- code generation (sandbox + Ollama judge + 2NRL) ---------------------
+
+    def read_upload(self, name: str) -> str:
+        """Content of one uploaded file (404 when missing)."""
+        path = self._upload_path(name)
+        with self._upload_lock:
+            if not os.path.isfile(path):
+                raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+
+    @contextlib.contextmanager
+    def pause_lock(self) -> Iterator[None]:
+        """Release the model lock around slow external work inside a job (sandbox runs, LLM calls).
+
+        Mutating requests are still refused while the job runs (409), so only
+        readers get in; the lock is re-acquired before the job touches the
+        model again.
+        """
+        self._lock.release()
+        try:
+            yield
+        finally:
+            self._lock.acquire()
+
+    def start_codegen(self, problems: list[Problem], config: CodeGenConfig, client: OllamaClient, sandbox: Sandbox) -> dict:
+        """Start a ``codegen`` job: teacher / model phases over ``problems`` with 2NRL rewards."""
+        config.validate()
+        manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+
+        def work(job: Job) -> None:
+            trainer = CodeGenTrainer(self.model, client, sandbox, config, external=self.pause_lock)
+            trainer.run(
+                problems, progress=self._progress(job, self._codegen_history), stop_event=job.stop_event,
+                checkpoint_manager=manager,
+            )
+
+        return self._start_job("codegen", work)
+
+    def codegen_history(self) -> dict:
+        return {"history": list(self._codegen_history)}
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1254,6 +1308,158 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 202, result
 
 
+def _problems_from(svc: ModelService, f: Fields) -> list[Problem]:
+    """``problems`` (strings / objects), ``problems_text`` (one per line) and ``problem_files`` (uploads)."""
+    items: list[Any] = []
+    raw = f._body.get("problems")
+    if raw is not None:
+        if not isinstance(raw, list):
+            raise ApiError(400, "'problems' must be a list of strings or {prompt, tests, expected_output} objects")
+        items.extend(raw)
+    text = f.text("problems_text", None)
+    if text:
+        items.extend(line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+    for name in f.names("problem_files"):
+        content = svc.read_upload(name)
+        try:
+            items.extend(p.to_dict() for p in parse_problem_file(content, os.path.splitext(name)[1]))
+        except ValueError as exc:
+            raise ApiError(400, f"upload {name!r}: {exc}") from exc
+    if not items:
+        raise ApiError(
+            400, "missing 'problems' (list of strings / objects), 'problems_text' (one per line) or 'problem_files' (upload names)"
+        )
+    try:
+        return parse_problems(items)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+
+
+def _codegen_config(f: Fields) -> CodeGenConfig:
+    d = CodeGenConfig()
+    raw_phases = f._body.get("phases", f._body.get("phase"))
+    if raw_phases is None:
+        phases: tuple[str, ...] = d.phases
+    elif isinstance(raw_phases, str):
+        phases = CODEGEN_PHASES if raw_phases.strip().lower() == "both" else (raw_phases.strip().lower(),)
+    elif isinstance(raw_phases, list) and all(isinstance(p, str) for p in raw_phases):
+        phases = tuple(p.strip().lower() for p in raw_phases)
+    else:
+        raise ApiError(400, "'phases' must be 'both', 'teacher', 'model' or a list of those")
+    teacher_model = f.text("teacher_model", None) or f.text("model", None) or d.teacher_model
+    config = CodeGenConfig(
+        teacher_model=teacher_model,
+        judge_model=f.text("judge_model", None),
+        phases=phases,
+        rounds=f.integer("rounds", d.rounds, minimum=1),
+        teacher_attempts=f.integer("teacher_attempts", d.teacher_attempts, minimum=1),
+        model_attempts=f.integer("model_attempts", d.model_attempts, minimum=1),
+        first_attempt_dijkstra=f.flag("first_attempt_dijkstra", d.first_attempt_dijkstra),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        max_length=f.integer("max_length", d.max_length, minimum=1),
+        strictness=f.text("strictness", d.strictness).strip().lower(),
+        use_judge=f.flag("judge", d.use_judge),
+        fallback_teacher=f.flag("fallback_teacher", d.fallback_teacher),
+        twonrl_per=f.text("twonrl_per", d.twonrl_per).strip().lower(),
+        replay=f.flag("replay", d.replay),
+        replay_limit=f.integer("replay_limit", d.replay_limit, minimum=0),
+        teacher_prompt=f.text("teacher_prompt", None),
+        model_prompt=f.text("model_prompt", d.model_prompt),
+        neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
+        pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
+        neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
+        pos_lr=f.number("pos_lr", d.pos_lr, minimum=0.0),
+        batch_size=f.integer("batch_size", d.batch_size, minimum=1),
+        checkpoint_every=f.integer("checkpoint_every", d.checkpoint_every, minimum=0),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _sandbox_from(f: Fields) -> Sandbox:
+    return Sandbox(
+        timeout=f.number("sandbox_timeout", 10.0, minimum=0.1),
+        memory_mb=f.integer("memory_mb", 256, minimum=0),
+        isolate_network=f.flag("network_isolation", True),
+    )
+
+
+def _r_codegen_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    problems = _problems_from(svc, f)
+    config = _codegen_config(f)
+    client = svc.ollama_client(f.text("url", None), config.teacher_model, f.number("timeout", None, minimum=1.0))
+    sandbox = _sandbox_from(f)
+    job = svc.start_codegen(problems, config, client, sandbox)
+    return 202, {
+        "job": job, "problems": [p.id for p in problems], "config": config.to_dict(),
+        "sandbox": {"timeout": sandbox.timeout, "memory_mb": sandbox.memory_mb, "network_isolated": sandbox.network_isolated},
+    }
+
+
+def _r_codegen_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.codegen_history()
+
+
+def _r_codegen_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = f._body.get("problem")
+    if raw is None:
+        raise ApiError(400, "missing field 'problem' (a string or {prompt, tests, expected_output})")
+    try:
+        problem = Problem.from_any(raw, 1)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    source = f.text("source", "model").strip().lower()
+    if source not in ("model", "teacher"):
+        raise ApiError(400, f"'source' must be 'model' or 'teacher' (got {source!r})")
+    count = f.integer("attempts", 1, minimum=1)
+    config = _codegen_config(f)
+    config.teacher_attempts = count
+    config.model_attempts = count
+    config.fallback_teacher = False
+    client = svc.ollama_client(f.text("url", None), config.teacher_model, f.number("timeout", None, minimum=1.0))
+    sandbox = _sandbox_from(f)
+    try:
+        if source == "model":
+            with svc.session() as model:
+                trainer = CodeGenTrainer(model, client, sandbox, config)
+                codes = [trainer.generate_with_model(problem, i) for i in range(count)]
+            attempts = []
+            for i, code in enumerate(codes):  # sandbox and judge run without the model lock
+                attempt = trainer.evaluate(problem, code, "model", i)
+                attempts.append(attempt)
+                if attempt.verdict.correct:
+                    break
+        else:
+            trainer = CodeGenTrainer(None, client, sandbox, config)
+            attempts = trainer.solve_with_teacher(problem, None, "teacher", 0)
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    return 200, {
+        "problem": problem.to_dict(), "source": source, "attempts": [a.to_dict() for a in attempts],
+        "correct": any(a.verdict.correct for a in attempts), "sandbox": {"network_isolated": sandbox.network_isolated},
+    }
+
+
+def _r_codegen_run(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    code = f.text("code")
+    if not code.strip():
+        raise ApiError(400, "'code' is empty")
+    if not code.endswith("\n"):
+        code += "\n"
+    strictness = f.text("strictness", "strict").strip().lower()
+    sandbox = _sandbox_from(f)
+    run = sandbox.run(code, tests=f.text("tests", None), expected_output=f.text("expected_output", None), stdin=f.text("stdin", ""))
+    style = check_style(code)
+    try:
+        verdict = decide(run, style, None, strictness)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return 200, {"run": run.to_dict(), "style": style.to_dict(), "verdict": verdict.to_dict()}
+
+
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats, current job, backend availability, paths"),
@@ -1285,6 +1491,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
     ("POST", "/api/ollama/review", _r_ollama_review,
      "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, good, good_files}"),
+    ("POST", "/api/codegen/start", _r_codegen_start,
+     "start a codegen job: {problems | problems_text | problem_files, phases: both|teacher|model, rounds, teacher_model, ...}"),
+    ("GET", "/api/codegen/history", _r_codegen_history, "attempt / problem / round records of all codegen runs"),
+    ("POST", "/api/codegen/solve", _r_codegen_solve,
+     "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
+    ("POST", "/api/codegen/run", _r_codegen_run, "run a program in the sandbox: {code, tests, expected_output, sandbox_timeout, memory_mb}"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}

@@ -284,6 +284,48 @@ class GenerationPrinter(_RowPrinter):
         self.row(values + [sample], _compact(f"generation {record.get('generation')}", pairs[1:] + [("sample", sample)]))
 
 
+PROBLEM_COLUMNS: tuple[_Column, ...] = (
+    ("phase", 7, "<"), ("round", 5, ">"), ("problem", 12, "<"), ("attempts", 8, ">"), ("result", 7, "<"),
+    ("by", 6, "<"), ("action", 6, "<"), ("neg_loss", 8, ">"), ("pos_loss", 8, ">"), ("seconds", 8, ">"),
+)
+
+
+class ProblemPrinter(_RowPrinter):
+    """``progress`` callback for :meth:`CodeGenTrainer.run`: attempts as notes, problems as rows."""
+
+    __slots__ = ("attempts",)
+
+    def __init__(self, console: Console) -> None:
+        super().__init__(console, PROBLEM_COLUMNS)
+        self.attempts = 0
+
+    def __call__(self, record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "attempt":
+            self.attempts += 1
+            status = "correct" if record.get("correct") else ("runs but rejected" if record.get("runs") else "error")
+            detail = record.get("error") or (record.get("issues") or [""])[0]
+            score = f" score={fmt(record.get('score'))}" if record.get("score") is not None else ""
+            self.console.note(
+                f"    {record.get('problem')} attempt {record.get('attempt')} [{record.get('source')}] {status}{score}"
+                + (f": {clip(str(detail), 80)}" if detail else "")
+            )
+        elif kind == "problem":
+            values = [
+                record.get("phase"), record.get("round"), clip(str(record.get("problem")), 12), record.get("attempts"),
+                "correct" if record.get("correct") else "failed", record.get("solved_by") or "-",
+                record.get("action") or "-", record.get("neg_loss"), record.get("pos_loss"), record.get("seconds"),
+            ]
+            pairs = list(zip([c[0] for c in PROBLEM_COLUMNS], values))
+            self.row(values, _compact(f"problem {record.get('problem')}", pairs))
+        elif kind == "round":
+            learned = f", 2NRL per round: {record.get('action')}" if record.get("action") else ""
+            self.console.note(
+                f"round {record.get('round')} [{record.get('phase')}]: {record.get('solved')}/{record.get('problems')} solved, "
+                f"{record.get('model_solved')} by the model{learned}"
+            )
+
+
 # --------------------------------------------------------------------------
 # Ctrl-C handling for long-running work
 # --------------------------------------------------------------------------
@@ -809,6 +851,80 @@ def cmd_bench(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
+    from .codegen import PHASES, CodeGenConfig, CodeGenTrainer, Sandbox, load_problems
+    from .ollama import OllamaClient, OllamaError
+
+    try:
+        problems = load_problems(args.problems)
+    except (OSError, ValueError) as exc:
+        raise CliError(f"cannot load problems from {args.problems}: {exc}") from exc
+    phases = PHASES if args.phase == "both" else (args.phase,)
+    manager = checkpoint_manager(args)
+    config = CodeGenConfig(
+        teacher_model=args.teacher_model or CodeGenConfig().teacher_model, judge_model=args.judge_model, phases=phases,
+        rounds=args.rounds, teacher_attempts=args.teacher_attempts, model_attempts=args.model_attempts,
+        first_attempt_dijkstra=not args.sample_first, temperature=args.temperature, max_length=args.max_length,
+        strictness=args.strictness, use_judge=not args.no_judge, fallback_teacher=not args.no_fallback_teacher,
+        twonrl_per=args.twonrl_per, replay=not args.no_replay, teacher_prompt=args.teacher_prompt,
+        model_prompt=args.model_prompt if args.model_prompt is not None else CodeGenConfig().model_prompt,
+        neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
+        batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager),
+    )
+    try:
+        config.validate()
+        client = OllamaClient(args.url, config.teacher_model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    sandbox = Sandbox(timeout=args.sandbox_timeout, memory_mb=args.memory_mb, isolate_network=not args.no_network_isolation)
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("backend", backend_label(model)),
+        ("problems", f"{len(problems)} from {args.problems}"),
+        ("phases", " -> ".join(phases) + f", {config.rounds} round(s)"),
+        ("teacher", f"{config.teacher_model} at {client.url}"),
+        ("judge", (config.judge_model or config.teacher_model) if config.use_judge else "off (sandbox, expected output and tests only)"),
+        ("attempts", f"teacher={config.teacher_attempts} model={config.model_attempts}"
+                     + ("" if config.fallback_teacher else ", no teacher fallback")),
+        ("sandbox", f"timeout={sandbox.timeout:g}s memory={sandbox.memory_mb}MB network="
+                    + ("isolated" if sandbox.network_isolated else "NOT isolated")),
+        ("2NRL", f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
+                 f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}, {config.strictness}"),
+        ("output", out),
+    ])
+    console.say()
+    printer = ProblemPrinter(console)
+    stop = threading.Event()
+    trainer = CodeGenTrainer(model, client, sandbox, config)
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.run(problems, progress=printer, stop_event=stop, checkpoint_manager=manager),
+            stop, console, "problem",
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    saved = _finish_training(console, model, out, interrupted, printer, "problem")
+    problem_records = [r for r in records if r.get("kind") == "problem"]
+    solved = sum(1 for r in problem_records if r["correct"])
+    by_model = sum(1 for r in problem_records if r["model_solved"])
+    console.say(
+        f"{solved}/{len(problem_records)} problem runs solved ({by_model} by the model); "
+        f"{len(trainer.solved)} of {len(problems)} problems have a correct solution"
+    )
+    doc = {
+        "model": origin.to_dict(), "out": out, "problems": [p.to_dict() for p in problems], "config": config.to_dict(),
+        "records": records, "attempts": printer.attempts, "solved": solved, "model_solved": by_model,
+        "solutions": trainer.solved, "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+    }
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump({k: doc[k] for k in ("problems", "config", "records", "solutions", "solved", "model_solved")}, fh, indent=2)
+        console.say(f"wrote report to {args.report}")
+    return doc
+
+
 def _ollama_client(args: argparse.Namespace) -> Any:
     from .ollama import OllamaClient
 
@@ -1258,6 +1374,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chars", type=pos_int, default=20000, help="characters of synthetic training text")
     p.add_argument("--epochs", type=pos_int, default=3, help="training epochs to time")
     p.set_defaults(handler=cmd_bench)
+
+    # codegen --------------------------------------------------------------
+    from .codegen import DEFAULT_TEACHER_MODEL as codegen_default_model
+
+    p = command(
+        "codegen", "generate Python programs, run them in a sandbox, judge them with Ollama, reward / punish with 2NRL",
+        "Semi-supervised code generation over a list of problems.  Phase `teacher`: an Ollama model writes\n"
+        "each solution, the sandbox runs it, the teacher fixes failures and the judge (the LLM plus an\n"
+        "objective PEP 8 / naming check) confirms it; the network learns question + answer with every wrong\n"
+        "attempt as 2NRL garbage before the correct one.  Phase `model`: the network writes the solutions\n"
+        "itself; errors and rejected programs are punished (negative phase), correct ones rewarded (positive\n"
+        "phase), the teacher supplies the answer when the network never succeeds.  Ctrl-C stops after the\n"
+        "current problem and saves.",
+    )
+    p.add_argument("--problems", required=True, metavar="FILE",
+                   help="one prompt per line, or .json / .jsonl objects {id, prompt, tests, expected_output}")
+    p.add_argument("--phase", choices=("both", "teacher", "model"), default="both",
+                   help="teacher: Ollama writes the solutions; model: the network writes them; both: teacher, then model")
+    p.add_argument("--rounds", type=pos_int, default=1, help="passes over the problem list (each pass runs the chosen phases)")
+    p.add_argument("--teacher-model", metavar="NAME",
+                   help=f"Ollama model that writes, fixes and judges (default: $RADIXNET_CODEGEN_MODEL or {codegen_default_model})")
+    p.add_argument("--judge-model", metavar="NAME", help="a different Ollama model for judging (default: the teacher model)")
+    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one Ollama answer (default: 120)")
+    p.add_argument("--teacher-attempts", type=pos_int, default=3, help="programs the teacher may try per problem (first + fixes)")
+    p.add_argument("--model-attempts", type=pos_int, default=4, help="programs the network may try per problem before the teacher steps in")
+    p.add_argument("--sample-first", action="store_true",
+                   help="sample the network's first attempt too (default: the first attempt is the cheapest path)")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the network's attempts")
+    p.add_argument("--max-length", type=pos_int, default=800, help="characters the network may generate per attempt")
+    p.add_argument("--strictness", choices=("strict", "lenient"), default="strict",
+                   help="strict: runs + task + PEP 8 + naming; lenient: runs + task")
+    p.add_argument("--no-judge", action="store_true", help="no LLM judge: correctness from the sandbox, expected output and tests only")
+    p.add_argument("--no-fallback-teacher", action="store_true", help="in the model phase, never ask the teacher for the correct answer")
+    p.add_argument("--twonrl-per", choices=("problem", "round"), default="problem",
+                   help="apply 2NRL after every problem, or once per round over all attempts")
+    p.add_argument("--no-replay", action="store_true", help="do not add earlier correct solutions to every positive phase")
+    p.add_argument("--teacher-prompt", metavar="TEXT", help="extra instructions for the teacher (phase 1 prompt)")
+    p.add_argument("--model-prompt", metavar="TEMPLATE",
+                   help="prefix template the network continues into code; {problem} is the prompt (default: '{problem}' then a newline)")
+    p.add_argument("--sandbox-timeout", type=_float_at_least(0.1), default=10.0, help="seconds a program may run")
+    p.add_argument("--memory-mb", type=nonneg_int, default=256, help="memory limit of a program (0 = unlimited)")
+    p.add_argument("--no-network-isolation", action="store_true", help="do not run programs in a separate network namespace")
+    group = p.add_argument_group("2NRL options")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (punish) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (reward) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase (activation parameters use a tenth)")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
+    _add_checkpoint_options(p, "problem")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (problems, config, records, solutions)")
+    p.set_defaults(handler=cmd_codegen)
 
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
