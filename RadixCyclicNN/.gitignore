@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+frontend/node_modules/
+checkpoints/
+/model.json
+/model.json.gz
+/*.json.gz
+.pytest_cache/
