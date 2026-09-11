@@ -440,6 +440,30 @@ class Evolver:
 
 ---
 
+### 9.1 Failure handling: train on failures, blatantly fail on purpose, then invert
+
+`EvolveConfig.blatant_mode` (`none | fail_invert | activation | state`), `blatant_margin` (1.0) and `blatant_boost`
+(4.0). Each generation the discriminator's per-char scores give every fake a gap `g = real_mean - score`; fakes with
+`g > 0` are failures, those with `g > blatant_margin` are blatant.
+
+* `fail_invert` - `RadixNet.two_nrl(bad=failures, good=real, bad_weights=[min(boost, 1 + g / margin)])`: the
+  negative phase runs one pass per distinct weight (heaviest first) with `lr = w * neg_lr` and
+  `act_lr = w * TrainConfig.act_lr`, so the worse a failure the harder the model is trained to reproduce it (the
+  activation parameters `a, b, h, k` included); records carry `"weight"`. Then the ordinary `invert()` and the
+  positive pass on real texts. No failures: `reward(real)` only, nothing inverted. `CountRewardNet.two_nrl` scales its
+  penalties by the same weights.
+* `activation` / `state` - `model.invert_paths(failures, mode, amounts=[min(1, g / (2 * margin))])`:
+  `GraphModel._paths_of` walks (registering if needed) each text; because an edge score `w * f_p * f_c` only changes
+  sign when exactly one endpoint changes, every *other* node of the path is chosen (the parity that covers the most
+  edges, a shared node takes the largest amount) and `RadixCyclicGraph.flip_nodes({node: amount}, mode)` applies
+  `value *= 1 - 2 * amount` to `a` (or `z`): 1 = sign flip, 0.5 = zero, less = attenuation; `version` bumps so the
+  cost cache refreshes. Blatant fakes leave the 2NRL garbage set (`worst`); an empty set means the positive pass only.
+  The count model penalises the path's edges by `2 * strength * amount` instead.
+
+Generation records add `failures`, `blatant`, `flipped` (nodes / edges changed by the local variant), `boost_mean` /
+`boost_max` (weights, or amounts) `twonrl` and `mode`; the CLI table shows `fails / blatant / boost`, the Evolve tab a
+select with the four modes, the margin and the max boost, and the same columns.
+
 ## 10. `checkpoint.py`
 
 ```python

@@ -20,9 +20,10 @@ from dataclasses import dataclass
 from .encoding import WINDOW
 from .model import GraphModel, RadixNet
 
-__all__ = ["EvolveConfig", "Evolver"]
+__all__ = ["BLATANT_MODES", "EvolveConfig", "Evolver"]
 
 ProgressFn = Callable[[dict], None]
+BLATANT_MODES = ("none", "fail_invert", "activation", "state")
 
 
 @dataclass
@@ -45,9 +46,36 @@ class EvolveConfig:
     checkpoint_every: int = 0
     """Checkpoint the generator every N generations (0 = off)."""
     seed: int = 0
+    blatant_mode: str = "none"
+    """How failed fakes (scored below the real texts by the discriminator) drive the generator's update:
+
+    * ``"none"``: the worst half of the fakes is ordinary 2NRL garbage (uniform ``neg_lr``).
+    * ``"fail_invert"``: *train on failures, blatantly fail on purpose, then invert the model* - every failed fake
+      is trained on in the negative phase with its learning rates (weights, states and the activation parameters)
+      multiplied by ``min(blatant_boost, 1 + g / blatant_margin)`` where ``g`` is how far (per-char log-prob) below
+      the real texts it scored, so the worse the response the more the activation functions update; then the whole
+      model is inverted (what it now does confidently becomes what it confidently avoids) and fine-tuned on real
+      texts.  The count model penalises the failures with the same multipliers instead (no inversion).
+    * ``"activation"`` / ``"state"``: the local variant - no negative pass; every other node on a failed fake's path
+      has its activation amplitude (or trained node value) moved toward its negation by ``min(1, g / (2 *
+      blatant_margin))`` (a slight attenuation for a slightly worse fake, a neutralised path at the margin, a full
+      inversion at twice the margin).  Fakes beyond the margin are *blatant* and leave the 2NRL garbage set, so when
+      every bad fake was blatant the generation skips the negative pass and the global inversion altogether.
+    """
+    blatant_margin: float = 1.0
+    """Per-char log-prob below the real texts at which a fake counts as blatant (``fail_invert``: the multiplier
+    reaches 2 here; local modes: the path is neutralised here and fully inverted at twice this)."""
+    blatant_boost: float = 4.0
+    """``fail_invert``: the largest learning-rate multiplier a failure can get."""
 
     def validate(self) -> None:
         """Raise ``ValueError`` for values the loop cannot run with."""
+        if self.blatant_mode not in BLATANT_MODES:
+            raise ValueError(f"blatant_mode must be one of {', '.join(BLATANT_MODES)}, got {self.blatant_mode!r}")
+        if not (self.blatant_margin >= 0):
+            raise ValueError(f"blatant_margin must be >= 0, got {self.blatant_margin}")
+        if not (self.blatant_boost >= 1):
+            raise ValueError(f"blatant_boost must be >= 1, got {self.blatant_boost}")
         if self.samples < 1:
             raise ValueError(f"samples must be >= 1, got {self.samples}")
         if self.real_per_generation < 1:
@@ -117,17 +145,65 @@ class Evolver:
         )
         fake_scores = [disc.score(f)["per_char"] for f in fakes]
         real_scores = [disc.score(r)["per_char"] for r in real]
+        fake_mean = statistics.fmean(fake_scores) if fake_scores else None
+        real_mean = statistics.fmean(real_scores) if real_scores else None
         worst: list[str] = []
         if fakes:
             cut = statistics.median(fake_scores)
             worst = [f for f, s in zip(fakes, fake_scores) if s <= cut] or [fakes[0]]
-        result = self.generator.two_nrl(
-            bad=worst, good=real, neg_epochs=cfg.neg_epochs, pos_epochs=cfg.pos_epochs,
-            neg_lr=cfg.neg_lr, pos_lr=cfg.pos_lr, batch_size=cfg.batch_size,
-        )
-        positive = result["positive"]
-        fake_mean = statistics.fmean(fake_scores) if fake_scores else None
-        real_mean = statistics.fmean(real_scores) if real_scores else None
+        # failures: fakes the critic scores below the real texts, each with its gap g (per-char log-prob)
+        blatant: list[str] = []
+        failures: list[str] = []
+        gaps: list[float] = []
+        flipped = 0
+        boost_mean = 0.0
+        boost_max = 0.0
+        mode = cfg.blatant_mode
+        if mode != "none" and real_mean is not None and cfg.blatant_margin > 0:
+            for fake, score in zip(fakes, fake_scores):
+                gap = real_mean - score
+                if gap <= 0:
+                    continue
+                failures.append(fake)
+                gaps.append(gap)
+                if gap > cfg.blatant_margin:
+                    blatant.append(fake)
+        twonrl = False
+        if mode == "fail_invert" and not failures:
+            worst = []  # nothing scored below the real texts: no failure to train on, so no negative pass
+        if mode == "fail_invert" and failures:
+            # train on the failures - blatantly fail on purpose: the worse the fake, the larger its learning rates -
+            # then invert the model and fine-tune on real texts
+            weights = [min(cfg.blatant_boost, 1.0 + gap / cfg.blatant_margin) for gap in gaps]
+            result = self.generator.two_nrl(
+                bad=failures, good=real, neg_epochs=cfg.neg_epochs, pos_epochs=cfg.pos_epochs,
+                neg_lr=cfg.neg_lr, pos_lr=cfg.pos_lr, batch_size=cfg.batch_size, bad_weights=weights,
+            )
+            positive = result["positive"]
+            worst = failures
+            twonrl = True
+            boost_mean = statistics.fmean(weights)
+            boost_max = max(weights)
+        else:
+            if mode in ("activation", "state") and failures:
+                # the local variant: move every other node of a failed path toward its negation, the worse the more
+                amounts = [min(1.0, gap / (2.0 * cfg.blatant_margin)) for gap in gaps]
+                outcome = self.generator.invert_paths(failures, mode=mode, amounts=amounts)
+                flipped = outcome["flipped"]
+                boost_mean = outcome["amount_mean"]
+                boost_max = max(amounts)
+                blatant_set = set(blatant)
+                worst = [f for f in worst if f not in blatant_set]
+            if worst:
+                result = self.generator.two_nrl(
+                    bad=worst, good=real, neg_epochs=cfg.neg_epochs, pos_epochs=cfg.pos_epochs,
+                    neg_lr=cfg.neg_lr, pos_lr=cfg.pos_lr, batch_size=cfg.batch_size,
+                )
+                positive = result["positive"]
+                twonrl = True
+            else:
+                # nothing left for the negative pass: only the fine-tune pass on real texts, no inversion
+                positive = self.generator.reward(real, epochs=cfg.pos_epochs, lr=cfg.pos_lr, batch_size=cfg.batch_size)
         self.generation += 1
         g = self.generator.graph
         record = {
@@ -142,6 +218,13 @@ class Evolver:
             "sample": fakes[0] if fakes else "",
             "fakes": len(fakes),
             "worst": len(worst),
+            "failures": len(failures),
+            "blatant": len(blatant),
+            "flipped": flipped,
+            "boost_mean": boost_mean,
+            "boost_max": boost_max,
+            "twonrl": twonrl,
+            "mode": mode,
             "seconds": time.perf_counter() - t0,
         }
         self.history.append(record)

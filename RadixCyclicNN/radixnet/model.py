@@ -25,7 +25,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -171,6 +171,21 @@ class TrainConfig:
 _CONFIG_FIELDS = frozenset(f.name for f in dataclasses.fields(TrainConfig))
 
 
+def _weight_groups(texts: Iterable[str] | str, weights: Sequence[float]) -> list[tuple[float, list[str]]]:
+    """``[(weight, texts)]`` grouping texts of equal (3-decimal) weight, heaviest first; zero weights are dropped."""
+    items = [texts] if isinstance(texts, str) else list(texts)
+    values = [float(w) for w in weights]
+    if len(values) != len(items):
+        raise ValueError(f"bad_weights has {len(values)} entries for {len(items)} texts")
+    groups: dict[float, list[str]] = {}
+    for text, weight in zip(items, values):
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"bad_weights must be finite and >= 0, got {weight}")
+        if weight > 0:
+            groups.setdefault(round(weight, 3), []).append(text)
+    return sorted(groups.items(), key=lambda item: -item[0])
+
+
 def _resolve_config(config: TrainConfig | None, overrides: dict) -> TrainConfig:
     """Merge keyword overrides into ``config`` (or the defaults) and validate."""
     cfg = TrainConfig() if config is None else config
@@ -235,6 +250,45 @@ class GraphModel:
 
     def invert(self) -> None:
         raise NotImplementedError
+
+    def invert_paths(self, texts, mode: str = "activation", amounts=None, **options) -> dict:
+        """Failures: make the paths of ``texts`` unlikely locally, each by ``amounts[i]`` (0..1, default 1 = fully).
+
+        See the kinds; returns ``{"texts", "flipped", "unit", "mode", "amount_mean"}``.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def _amounts(texts: list[str], amounts) -> list[float]:
+        """Per-text update amounts in ``[0, 1]``: one number for all, a sequence aligned with ``texts``, or 1."""
+        if amounts is None:
+            return [1.0] * len(texts)
+        if isinstance(amounts, (int, float)):
+            values = [float(amounts)] * len(texts)
+        else:
+            values = [float(v) for v in amounts]
+            if len(values) != len(texts):
+                raise ValueError(f"amounts has {len(values)} entries for {len(texts)} texts")
+        for v in values:
+            if not (0.0 <= v <= 1.0):
+                raise ValueError(f"amounts must lie in [0, 1], got {v}")
+        return values
+
+    def _paths_of(self, texts: list[str]) -> list[list[int]]:
+        """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""
+        graph = self.graph
+        paths: list[list[int]] = []
+        for text in texts:
+            grams = self.encoder.encode(text)
+            if not grams:
+                continue
+            path = graph.node_path(grams)
+            if path is None:
+                graph.observe_sequence(grams, count=False)
+                path = graph.node_path(grams)
+            if path:
+                paths.append(path)
+        return paths
 
     def stats(self) -> dict:
         raise NotImplementedError
@@ -713,6 +767,48 @@ class RadixNet(GraphModel):
         """Flip every edge weight and activation amplitude (``graph.invert()``)."""
         self.graph.invert()
 
+    def invert_paths(self, texts: Iterable[str] | str, mode: str = "activation", amounts=None, **options) -> dict:
+        """Failures: move the activation (``a``) or the trained node value (``z``) of the nodes on their paths toward
+        their negation - fully (amount 1: a sign flip) or partly (``amounts``: the worse the text, the larger).
+
+        The local counterpart of 2NRL's global :meth:`invert`: only nodes the
+        failed texts run through change, so those transitions become unlikely
+        without touching the rest of the network - no negative training pass,
+        no inversion of everything learned so far.  An edge's score
+        ``w * f_p * f_c`` only changes sign when exactly one of its endpoints
+        flips, so every *other* node of a path is updated (the parity that
+        covers the most edges); a node shared by several texts takes the
+        largest amount.  Amount 1 negates a value, 0.5 zeroes it (the path
+        becomes neutral), smaller amounts attenuate it.  A text the structure
+        cannot walk yet is registered first (nothing counted).  Two full
+        flips of the same node cancel out, so use it for texts that are
+        clearly wrong.  Returns ``{"texts", "flipped", "unit": "nodes",
+        "mode", "amount_mean"}``.
+        """
+        texts, _ = self._clean_texts(texts)
+        values = self._amounts(texts, amounts)
+        chosen: dict[int, float] = {}
+        for path, amount in zip(self._paths_of(texts), values):
+            real = [n for n in path if n > END]
+            if not real or amount <= 0:
+                continue
+            best: tuple[int, set[int]] | None = None
+            for parity in (0, 1):
+                candidate = {n for i, n in enumerate(real) if i % 2 == parity}
+                state = set(chosen) | candidate
+                gain = sum(1 for a, b in zip(path, path[1:]) if (a in state) != (b in state))
+                if best is None or gain > best[0]:
+                    best = (gain, candidate)
+            for n in best[1]:
+                chosen[n] = max(chosen.get(n, 0.0), amount)
+        flipped = self.graph.flip_nodes(chosen, mode)
+        self.meta["path_inversions"] = self.meta.get("path_inversions", 0) + flipped
+        applied = [v for v in values if v > 0]
+        return {
+            "texts": len(texts), "flipped": flipped, "unit": "nodes", "mode": mode,
+            "amount_mean": sum(applied) / len(applied) if applied else 0.0,
+        }
+
 
     def two_nrl(
         self,
@@ -726,12 +822,19 @@ class RadixNet(GraphModel):
         checkpoint_manager=None,
         stop_event: threading.Event | None = None,
         strength: float | None = None,
+        bad_weights: Sequence[float] | None = None,
         **overrides,
     ) -> dict:
         """2NRL: train on ``bad``, invert, fine-tune on ``good``.
 
-        ``strength`` is accepted for interface parity with the count / reward
-        model and ignored here.
+        ``bad_weights`` (one per bad text, ``>= 0``) scale the negative
+        phase per text: a text of weight ``w`` is trained with ``w * neg_lr``
+        for weights and states and ``w * act_lr`` for the activation
+        parameters, so the worse a failure the harder the model is pushed to
+        reproduce it - to *blatantly fail on purpose* - before the inversion
+        turns that into avoidance.  Texts of equal weight share a pass; the
+        negative records carry ``"weight"``.  ``strength`` is accepted for
+        interface parity with the count / reward model and ignored here.
 
         The negative phase uses ``neg_lr``; the positive phase uses ``pos_lr``
         for weights and states and ``pos_lr / 10`` for the activation
@@ -749,10 +852,27 @@ class RadixNet(GraphModel):
             raise TypeError(
                 f"two_nrl sets {', '.join(reserved)} per phase; use neg_epochs/pos_epochs/neg_lr/pos_lr"
             )
-        negative = self.train(
-            bad, epochs=neg_epochs, lr=neg_lr, progress=progress,
-            checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="negative", **overrides,
-        )
+        if bad_weights is None:
+            negative = self.train(
+                bad, epochs=neg_epochs, lr=neg_lr, progress=progress,
+                checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="negative", **overrides,
+            )
+        else:
+            negative = []
+            act_lr = overrides.pop("act_lr", None)
+            base_act_lr = TrainConfig.act_lr if act_lr is None else act_lr
+            for weight, group in _weight_groups(bad, bad_weights):
+                if stop_event is not None and stop_event.is_set():
+                    break
+                records = self.train(
+                    group, epochs=neg_epochs, lr=neg_lr * weight, act_lr=base_act_lr * weight,
+                    checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="negative", **overrides,
+                )
+                for record in records:
+                    record["weight"] = weight
+                    if progress is not None:
+                        progress(record)
+                negative.extend(records)
         self.invert()
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):

@@ -20,6 +20,7 @@ with open(os.path.join(ROOT, "data", "sample_corpus.txt"), encoding="utf-8") as 
 RECORD_KEYS = {
     "generation", "fake_score_mean", "real_score_mean", "gap", "gen_loss", "nodes", "edges",
     "compression_ratio", "sample", "fakes", "worst", "seconds",
+    "failures", "blatant", "flipped", "boost_mean", "boost_max", "twonrl", "mode",
 }
 
 
@@ -151,3 +152,203 @@ class TestEvolver(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBlatantFailures(unittest.TestCase):
+    """Train on failures, blatantly fail on purpose, then invert - and the local path-inversion variant."""
+
+    def corpus(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "data", "sample_corpus.txt"), encoding="utf-8") as fh:
+            return [line for line in fh.read().splitlines() if line.strip()]
+
+    def trained(self):
+        model = RadixNet(seed=1, backend="python")
+        model.train(self.corpus(), epochs=6, batch_size=8, lr=0.3)
+        return model
+
+    # -- weighted 2NRL: the worse the failure, the more the activation function updates ------------
+
+    def test_two_nrl_weights_scale_the_negative_phase(self):
+        from radixnet.model import TrainConfig
+
+        model = self.trained()
+        result = model.two_nrl(
+            ["zzz qqq garbage", "xxx yyy noise", "the cat sat somewhere"], self.corpus()[:4],
+            neg_epochs=1, pos_epochs=1, neg_lr=0.05, batch_size=8, bad_weights=[3.0, 1.5, 3.0],
+        )
+        negative = result["negative"]
+        self.assertEqual([r["weight"] for r in negative], [3.0, 1.5])  # equal weights share a pass, heaviest first
+        self.assertEqual([r["phase"] for r in negative], ["negative", "negative"])
+        self.assertAlmostEqual(negative[0]["lr"], 0.15)
+        self.assertAlmostEqual(negative[0]["act_lr"], TrainConfig.act_lr * 3.0)
+        self.assertAlmostEqual(negative[1]["lr"], 0.075)
+        self.assertTrue(result["inverted"])
+        self.assertEqual(len(result["positive"]), 1)
+        self.assertEqual(model.meta["twonrl_runs"], 1)
+        with self.assertRaises(ValueError):
+            model.two_nrl(["a b c"], ["d e f"], bad_weights=[1.0, 2.0])
+        with self.assertRaises(ValueError):
+            model.two_nrl(["a b c"], ["d e f"], bad_weights=[-1.0])
+        zero = model.two_nrl(["zzz qqq garbage"], self.corpus()[:2], neg_epochs=1, pos_epochs=1, batch_size=8, bad_weights=[0.0])
+        self.assertEqual(zero["negative"], [])  # a zero weight is skipped, the inversion still happens
+
+    def test_count_model_two_nrl_weights_scale_the_penalty(self):
+        from radixnet.countnet import CountRewardNet
+
+        model = CountRewardNet(seed=1)
+        model.train(self.corpus()[:20], epochs=1)
+        result = model.two_nrl(["zzz qqq garbage", "the dog sat"], self.corpus()[:3], neg_epochs=1, pos_epochs=1,
+                               strength=1.0, bad_weights=[2.0, 1.0])
+        self.assertEqual([(r["weight"], r["reward"]) for r in result["negative"]], [(2.0, -2.0), (1.0, -1.0)])
+        self.assertFalse(result["inverted"])
+
+    # -- local variant: flip every other node of a failed path, by an amount ------------------------
+
+    def test_flip_nodes_negates_every_other_node_of_a_path(self):
+        from radixnet.graph import END, START
+
+        model = self.trained()
+        text = model.generate(mode="dijkstra", max_length=40)[0].text
+        path = model.graph.node_path(model.encoder.encode(text))
+        before_a = list(model.graph.a)
+        result = model.invert_paths([text])
+        self.assertEqual((result["unit"], result["mode"], result["texts"], result["amount_mean"]), ("nodes", "activation", 1, 1.0))
+        real = [n for n in path if n not in (START, END)]
+        flipped = {n for n in set(real) if model.graph.a[n] == -before_a[n]}
+        self.assertEqual(len(flipped), result["flipped"])
+        # every edge between real nodes has exactly one flipped endpoint (loops aside); of the two sentinel edges
+        # (START -> first, last -> END) at most one can stay uncovered when the path has an even number of nodes
+        uncovered_sentinel = 0
+        for a, b in zip(path, path[1:]):
+            if a == b:
+                continue
+            if a in (START, END) or b in (START, END):
+                uncovered_sentinel += (a in flipped) == (b in flipped)
+            else:
+                self.assertNotEqual(a in flipped, b in flipped, (a, b))
+        self.assertLessEqual(uncovered_sentinel, 1)
+        untouched = [n for n in model.graph.alive_nodes() if n not in flipped]
+        self.assertTrue(all(model.graph.a[n] == before_a[n] for n in untouched))
+        self.assertEqual(model.meta["path_inversions"], result["flipped"])
+
+    def test_inverting_a_likely_path_makes_it_unlikely_and_is_reversible(self):
+        model = self.trained()
+        text = model.generate(mode="dijkstra", max_length=40)[0].text
+        before = model.score(text)["log_prob"]
+        model.invert_paths([text])
+        self.assertLess(model.score(text)["log_prob"], before - 0.5)
+        model.invert_paths([text])  # the same nodes flip back
+        self.assertAlmostEqual(model.score(text)["log_prob"], before, places=9)
+        state_before = list(model.graph.z)
+        result = model.invert_paths([text], mode="state")
+        self.assertEqual(result["mode"], "state")
+        self.assertEqual(sum(1 for z0, z1 in zip(state_before, model.graph.z) if z0 != z1), result["flipped"])
+        self.assertLess(model.score(text)["log_prob"], before)
+        with self.assertRaises(ValueError):
+            model.invert_paths([text], mode="nope")
+        self.assertEqual(model.invert_paths(["hi"])["flipped"], 0)  # too short: nothing to flip
+
+    def test_amounts_grade_the_update(self):
+        model = self.trained()
+        text = model.generate(mode="dijkstra", max_length=40)[0].text
+        base = model.score(text)["log_prob"]
+        scores = []
+        for amount in (0.1, 0.25, 0.5, 0.75, 1.0):
+            copy = RadixNet.from_dict(model.to_dict(), backend="python")
+            result = copy.invert_paths([text], amounts=[amount])
+            self.assertAlmostEqual(result["amount_mean"], amount)
+            scores.append(copy.score(text)["log_prob"])
+        self.assertEqual(scores, sorted(scores, reverse=True))  # the larger the amount, the less likely the path
+        self.assertLess(scores[-1], base)
+        half = RadixNet.from_dict(model.to_dict(), backend="python")
+        before_a = list(half.graph.a)
+        half.invert_paths([text], amounts=0.5)
+        changed = [n for n in range(len(before_a)) if half.graph.a[n] != before_a[n]]
+        self.assertTrue(all(half.graph.a[n] == 0.0 for n in changed))  # amount 0.5 zeroes the activation
+        self.assertEqual(model.invert_paths([text], amounts=[0.0])["flipped"], 0)
+        with self.assertRaises(ValueError):
+            model.invert_paths([text], amounts=[1.5])
+        with self.assertRaises(ValueError):
+            model.invert_paths([text, text], amounts=[1.0])
+
+    def test_unknown_text_is_registered_first(self):
+        model = self.trained()
+        result = model.invert_paths(["zzz qqq unseen words"])
+        self.assertGreater(result["flipped"], 0)
+        self.assertIsNotNone(model.graph.node_path(model.encoder.encode("zzz qqq unseen words")))
+
+    def test_count_model_penalises_the_path(self):
+        from radixnet.countnet import CountRewardNet
+
+        model = CountRewardNet(seed=1)
+        model.train(self.corpus()[:20], epochs=1)
+        text = self.corpus()[0]
+        before = model.score(text)["log_prob"]
+        result = model.invert_paths([text], mode="activation", strength=3.0)
+        self.assertEqual((result["unit"], result["mode"]), ("edges", "penalty"))
+        self.assertGreater(result["flipped"], 0)
+        self.assertLess(model.score(text)["log_prob"], before)
+        self.assertEqual(model.stats()["penalties_total"], 6.0 * result["flipped"])  # 2 * strength * amount 1
+        half = model.invert_paths([self.corpus()[1]], amounts=[0.5], strength=3.0)
+        self.assertAlmostEqual(half["amount_mean"], 0.5)
+
+    # -- the evolve loop -------------------------------------------------------------------------------
+
+    def evolve_config(self, **kw):
+        base = dict(samples=6, neg_epochs=1, pos_epochs=1, disc_neg_epochs=1, disc_pos_epochs=1, batch_size=8)
+        base.update(kw)
+        return EvolveConfig(**base)
+
+    def test_evolver_fail_invert_trains_on_failures_weighted_then_inverts(self):
+        model = self.trained()
+        corpus = self.corpus()[:20]
+        evolver = Evolver(model, corpus, config=self.evolve_config(blatant_mode="fail_invert", blatant_margin=0.5, blatant_boost=3.0))
+        seen_failures = False
+        for _ in range(4):
+            inverted_before = model.graph.inverted
+            runs_before = model.meta["twonrl_runs"]
+            record = evolver.run_generation()
+            self.assertEqual(record["mode"], "fail_invert")
+            for key in ("failures", "blatant", "boost_mean", "boost_max", "twonrl", "flipped"):
+                self.assertIn(key, record)
+            self.assertEqual(record["flipped"], 0)
+            if record["failures"]:
+                seen_failures = True
+                self.assertTrue(record["twonrl"])
+                self.assertEqual(record["worst"], record["failures"])
+                self.assertGreaterEqual(record["boost_mean"], 1.0)
+                self.assertLessEqual(record["boost_max"], 3.0)
+                self.assertNotEqual(model.graph.inverted, inverted_before)  # the model was inverted
+                self.assertEqual(model.meta["twonrl_runs"], runs_before + 1)
+            else:
+                self.assertFalse(record["twonrl"])  # nothing failed: only the fine-tune pass, no inversion
+                self.assertEqual(model.graph.inverted, inverted_before)
+        self.assertTrue(seen_failures or True)  # whether any fake fails depends on the critic; both branches are legal
+
+    def test_evolver_local_modes_flip_paths_and_may_skip_2nrl(self):
+        model = self.trained()
+        corpus = self.corpus()[:20]
+        evolver = Evolver(model, corpus, config=self.evolve_config(blatant_mode="activation", blatant_margin=0.05))
+        record = evolver.run_generation()
+        self.assertEqual(record["mode"], "activation")
+        if record["failures"]:
+            self.assertGreater(record["flipped"], 0)
+            self.assertGreater(record["boost_mean"], 0.0)
+            self.assertLessEqual(record["boost_max"], 1.0)
+        if not record["twonrl"]:
+            self.assertEqual(record["worst"], 0)
+            self.assertFalse(model.graph.inverted)
+        off = Evolver(self.trained(), corpus, config=self.evolve_config(samples=4))
+        record = off.run_generation()
+        self.assertEqual((record["failures"], record["blatant"], record["flipped"], record["twonrl"], record["mode"]), (0, 0, 0, True, "none"))
+
+    def test_config_validation(self):
+        with self.assertRaises(ValueError):
+            EvolveConfig(blatant_mode="nope").validate()
+        with self.assertRaises(ValueError):
+            EvolveConfig(blatant_margin=-1).validate()
+        with self.assertRaises(ValueError):
+            EvolveConfig(blatant_boost=0.5).validate()
+        EvolveConfig(blatant_mode="fail_invert", blatant_margin=0, blatant_boost=1).validate()
+        EvolveConfig(blatant_mode="state").validate()

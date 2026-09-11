@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
@@ -38,6 +38,7 @@ from .model import (
     TrainConfig,
     _resolve_config,
     _utc_now,
+    _weight_groups,
 )
 from .search import PathResult, sample_walk
 
@@ -358,18 +359,33 @@ class CountRewardNet(GraphModel):
         checkpoint_manager=None,
         stop_event: threading.Event | None = None,
         strength: float | None = 1.0,
+        bad_weights: Sequence[float] | None = None,
         **overrides,
     ) -> dict:
         """2NRL for the count model: penalise ``bad`` (``neg_epochs`` passes), then count + reward ``good``.
 
         Nothing is inverted: a penalty already makes a path unlikely.
         ``neg_lr`` / ``pos_lr`` are accepted for interface parity and ignored;
-        the magnitude per pass is ``strength``.
+        the magnitude per pass is ``strength``, scaled per text by
+        ``bad_weights`` when given (the worse a failure, the larger its penalty).
         """
         reserved = sorted({"epochs", "lr", "act_lr"} & set(overrides))
         if reserved:
             raise TypeError(f"two_nrl sets {', '.join(reserved)} per phase; use neg_epochs/pos_epochs")
-        negative = self.punish(bad, epochs=neg_epochs, strength=strength, progress=progress, stop_event=stop_event, **overrides)
+        base = 1.0 if strength is None else float(strength)
+        if bad_weights is None:
+            negative = self.punish(bad, epochs=neg_epochs, strength=base, progress=progress, stop_event=stop_event, **overrides)
+        else:
+            negative = []
+            for weight, group in _weight_groups(bad, bad_weights):
+                if stop_event is not None and stop_event.is_set():
+                    break
+                records = self.punish(group, epochs=neg_epochs, strength=base * weight, stop_event=stop_event, **overrides)
+                for record in records:
+                    record["weight"] = weight
+                    if progress is not None:
+                        progress(record)
+                negative.extend(records)
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
             positive = self.reward(good, epochs=pos_epochs, strength=strength, progress=progress, stop_event=stop_event, **overrides)
@@ -382,6 +398,37 @@ class CountRewardNet(GraphModel):
     def invert(self) -> None:
         """Flip the sign of every reward."""
         self.graph.invert()
+
+    def invert_paths(
+        self, texts: Iterable[str] | str, mode: str = "activation", amounts=None, strength: float = 2.0, **options
+    ) -> dict:
+        """Failures: there is no activation to flip here, so every edge of a text's path loses ``strength * 2 * amount``
+        reward (amount 1, the default, is a full ``2 * strength`` penalty; the worse the text, the larger).
+
+        Returns ``{"texts", "flipped", "unit": "edges", "mode": "penalty", "amount_mean"}``.
+        """
+        texts, _ = self._clean_texts(texts)
+        values = self._amounts(texts, amounts)
+        graph = self.graph
+        penalties: dict[int, float] = {}
+        for path, amount in zip(self._paths_of(texts), values):
+            penalty = abs(float(strength)) * 2.0 * amount
+            if penalty <= 0:
+                continue
+            for p, c in zip(path, path[1:]):
+                e = graph.children[p].get(c)
+                if e is not None:
+                    penalties[e] = max(penalties.get(e, 0.0), penalty)
+        touched = 0
+        for e, penalty in penalties.items():
+            touched += graph.add_reward([e], -penalty)
+            self.meta["penalties_total"] += penalty
+        self.meta["feedback_passes"] += 1 if touched else 0
+        applied = [v for v in values if v > 0]
+        return {
+            "texts": len(texts), "flipped": touched, "unit": "edges", "mode": "penalty",
+            "amount_mean": sum(applied) / len(applied) if applied else 0.0,
+        }
 
     # -- prediction ----------------------------------------------------------
 

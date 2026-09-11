@@ -475,6 +475,38 @@ class RadixCyclicGraph:
         self.inverted = not self.inverted
         self.version += 1
 
+    def flip_nodes(self, nodes: Iterable[int] | dict[int, float], mode: str = "activation", amount: float = 1.0) -> int:
+        """Move the activation amplitude ``a`` (``mode="activation"``) or the state ``z`` (``"state"``) of nodes toward
+        their negation: ``value *= 1 - 2 * amount``.
+
+        ``amount`` 1 is a full sign flip, 0.5 zeroes the value (the node's
+        transitions become neutral), a small amount only attenuates it - so
+        the update can grow with how bad a path was.  ``nodes`` may be a
+        ``{node: amount}`` mapping for per-node amounts.  A node's activation
+        sign enters the score ``w * f_p * f_c`` of every edge into and out of
+        it, so flipping every other node of a path makes that path's
+        transitions as unlikely as they were likely - a local counterpart of
+        :meth:`invert`, which flips the whole network.  ``"state"`` scales the
+        trained node value instead (the same thing while ``h`` and ``k`` are
+        0).  Sentinels, dead and unknown ids and zero amounts are ignored;
+        returns how many nodes changed.
+        """
+        if mode not in ("activation", "state"):
+            raise ValueError(f"mode must be 'activation' or 'state', got {mode!r}")
+        target = self.a if mode == "activation" else self.z
+        alive = self.alive
+        items = nodes.items() if isinstance(nodes, dict) else ((n, amount) for n in set(nodes))
+        changed = 0
+        for n, amt in items:
+            amt = float(amt)
+            if n <= END or n >= len(target) or not alive[n] or amt <= 0:
+                continue
+            target[n] *= 1.0 - 2.0 * amt
+            changed += 1
+        if changed:
+            self.version += 1
+        return changed
+
     # -- scores / probabilities / costs --------------------------------------
 
     def child_scores(self, p: int) -> list[tuple[int, float]]:

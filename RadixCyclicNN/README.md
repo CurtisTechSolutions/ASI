@@ -153,7 +153,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
-| `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
+| `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
@@ -196,7 +196,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
-| `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, ...}` -> job |
+| `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` |
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (and `reward` for the count model) |
@@ -400,6 +400,27 @@ a cool-down.  Expressions are validated against a whitelist
 must be finite and non-negative - a bad expression is rejected before training
 starts.  `python -m radixnet schedule --epochs 6 --lr-schedule 'linear(lr0, 4 * lr0)' --act-lr-schedule 'lr / 10'`
 prints the rates with a bar graph; `python -m radixnet schedule` lists the presets.
+
+## Evolve: train on failures, blatantly fail on purpose, then invert
+
+The evolve loop (Evolve tab, `evolve`, `POST /api/evolve/start`) can treat the
+generator's failures dynamically instead of feeding the worst half of its
+samples to a uniform 2NRL pass.  A *failure* is a fake the discriminator
+scores below the real texts; `g`, how far below (per-char log-prob), is how
+bad it is.
+
+| `blatant_mode` | What happens each generation |
+|---|---|
+| `none` (default) | the worst half of the fakes is 2NRL garbage with the plain `neg_lr` |
+| `fail_invert` | **train on every failure with learning rates multiplied by `1 + g / margin`** (weights, node states and the activation parameters alike, capped at `blatant_boost`) - the worse the response, the more the activation functions update, so the model *blatantly fails on purpose* - **then invert the model**, turning what it now does confidently into what it confidently avoids, and fine-tune on real texts. Nothing failed: only the fine-tune pass, no inversion. The count model applies the same multipliers to its penalties instead. |
+| `activation` / `state` | the local variant: no negative pass; every other node on a failed path has its activation amplitude (or trained node value `z`) moved toward its negation by `g / (2 · margin)` - a slight attenuation for a slightly worse fake, a neutralised path at the margin, a full sign flip at twice it - so only that path's transitions turn unlikely. Fakes beyond the margin are *blatant* and leave the 2NRL garbage set; when every bad fake was blatant the generation skips the negative pass and the global inversion. |
+
+`blatant_margin` (default 1.0 nats per character) is where a failure counts
+as blatant; `blatant_boost` (default 4) caps the multiplier.  Generation
+records and the Evolve tab's table show `failures`, `blatant`, the mean
+boost / amount and whether a 2NRL pass ran.  Outside the loop the same
+primitives are available directly: `RadixNet.two_nrl(bad, good,
+bad_weights=[...])` and `model.invert_paths(texts, mode, amounts)`.
 
 ## Checkpoints, saving, loading
 

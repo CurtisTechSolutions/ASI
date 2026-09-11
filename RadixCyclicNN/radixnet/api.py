@@ -1518,6 +1518,9 @@ def _r_evolve_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         batch_size=f.integer("batch_size", d.batch_size, minimum=1),
         checkpoint_every=f.integer("checkpoint_every", d.checkpoint_every, minimum=0),
         seed=f.integer("seed", d.seed),
+        blatant_mode=f.text("blatant_mode", d.blatant_mode),
+        blatant_margin=f.number("blatant_margin", d.blatant_margin, minimum=0.0),
+        blatant_boost=f.number("blatant_boost", d.blatant_boost, minimum=1.0),
     )
     return 202, {"job": svc.start_evolve(corpus, generations, config)}
 
@@ -1893,7 +1896,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "learn from rated texts: {good (thumbs up), bad (thumbs down), ...} -> 2NRL when both, reward on good alone, punish (negative phase + invert) on bad alone"),
     ("POST", "/api/invert", _r_invert, "invert the network"),
     ("POST", "/api/compress", _r_compress, "merge unary chains"),
-    ("POST", "/api/evolve/start", _r_evolve_start, "start the GAN-style loop: {corpus | corpus_text, generations, samples, ...}"),
+    ("POST", "/api/evolve/start", _r_evolve_start,
+     "start the GAN-style loop: {corpus | corpus_text | corpus_files, generations, samples, ..., blatant_mode: none | "
+     "fail_invert | activation | state, blatant_margin, blatant_boost}"),
     ("POST", "/api/evolve/stop", _r_evolve_stop, "stop the evolve job"),
     ("GET", "/api/evolve/history", _r_evolve_history, "generation records of all evolve runs"),
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),

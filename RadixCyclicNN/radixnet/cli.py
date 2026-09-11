@@ -30,7 +30,7 @@ from typing import Any, NoReturn, TextIO, TypeVar
 from . import __version__
 from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
-from .gan import EvolveConfig, Evolver
+from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 
@@ -194,6 +194,7 @@ EPOCH_COLUMNS: tuple[_Column, ...] = (
 PHASE_COLUMN: _Column = ("phase", 8, "<")
 GENERATION_COLUMNS: tuple[_Column, ...] = (
     ("gen", 5, ">"), ("fake", 8, ">"), ("real", 8, ">"), ("gap", 8, ">"), ("gen_loss", 8, ">"),
+    ("fails", 5, ">"), ("blatant", 7, ">"), ("boost", 6, ">"),
     ("nodes", 7, ">"), ("edges", 7, ">"), ("ratio", 6, ">"), ("seconds", 8, ">"), ("sample", 0, "<"),
 )
 EPOCH_HEADERS = tuple(name for name, _, _ in EPOCH_COLUMNS)
@@ -282,8 +283,9 @@ class GenerationPrinter(_RowPrinter):
     def __call__(self, record: dict) -> None:
         values = [
             record.get("generation"), record.get("fake_score_mean"), record.get("real_score_mean"),
-            record.get("gap"), record.get("gen_loss"), record.get("nodes"), record.get("edges"),
-            record.get("compression_ratio"), record.get("seconds"),
+            record.get("gap"), record.get("gen_loss"), record.get("failures"), record.get("blatant"),
+            record.get("boost_mean"), record.get("nodes"), record.get("edges"), record.get("compression_ratio"),
+            record.get("seconds"),
         ]
         sample = quote(clip(str(record.get("sample", "")), 40))
         pairs = list(zip([c[0] for c in GENERATION_COLUMNS], values))
@@ -917,6 +919,7 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
         neg_lr=args.neg_lr, pos_lr=args.pos_lr, disc_neg_epochs=args.disc_neg_epochs,
         disc_pos_epochs=args.disc_pos_epochs, batch_size=args.batch_size, checkpoint_every=every,
         seed=effective_seed(args),
+        blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
     )
     evolver = Evolver(generator, corpus, discriminator, config)
     generations = args.generations or None
@@ -1605,6 +1608,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="discriminator positive-phase epochs")
     _add_two_nrl_options(p, neg_epochs=EvolveConfig.neg_epochs, pos_epochs=EvolveConfig.pos_epochs,
                          batch_size=EvolveConfig.batch_size)
+    group = p.add_argument_group("failures")
+    group.add_argument("--blatant-mode", choices=BLATANT_MODES, default=EvolveConfig.blatant_mode,
+                       help="how failed fakes drive the update: none = the worst half is uniform 2NRL garbage; "
+                            "fail_invert = train on every failure with learning rates scaled by how bad it is (blatantly "
+                            "fail on purpose), then invert the model and fine-tune on real texts; activation / state = "
+                            "no negative pass, move the activation amplitude / trained value of every other node on a "
+                            "failed path toward its negation, the worse the more (blatant fakes skip 2NRL entirely)")
+    group.add_argument("--blatant-margin", type=nonneg_float, default=EvolveConfig.blatant_margin, metavar="NATS",
+                       help="per-char log-prob below the real texts at which a fake is blatant (fail_invert: the "
+                            "learning-rate multiplier reaches 2 here)")
+    group.add_argument("--blatant-boost", type=nonneg_float, default=EvolveConfig.blatant_boost, metavar="X",
+                       help="fail_invert: the largest learning-rate multiplier a failure can get")
     _add_checkpoint_options(p, "generation")
     p.add_argument("--out", metavar="PATH", help="where to save the generator (default: --model)")
     p.set_defaults(handler=cmd_evolve)
