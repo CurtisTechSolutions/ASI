@@ -392,6 +392,21 @@ class ZipUploadTests(unittest.TestCase):
         self.assertIn("5 entries", data["error"])
         self.assertEqual(os.listdir(self.dir), [])
 
+    def test_no_limit_by_default(self):
+        from radixnet import archive as archive_module
+
+        self.assertIsNone(archive_module.MAX_ARCHIVE_ENTRIES)
+        self.assertIsNone(archive_module.MAX_UNPACKED_BYTES)
+        from radixnet import api as api_module
+
+        self.assertIsNone(api_module.MAX_UPLOAD_BYTES)
+        many = self.archive([(f"src/pkg{i // 100}/file{i}.go", f"package p{i}\n\nfunc F{i}() {{}}\n") for i in range(12_000)])
+        status, data = self.upload_zip("go-master.zip", many)
+        self.assertEqual(status, 201, data)
+        record = data["uploads"][0]
+        self.assertEqual((record["name"], record["files"], record["lines"]), ("go-master.zip", 12_000, 24_000))
+        self.assertEqual(len(self.service.upload_texts(["go-master.zip"])), 24_000)
+
     def test_train_and_two_nrl_unpack_the_archive_behind_the_scenes(self):
         status, data = self.upload_zip("sample.zip")
         self.assertEqual(status, 201, data)

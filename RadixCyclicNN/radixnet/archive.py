@@ -9,11 +9,12 @@ its text entries become ordinary text files / texts.  Rules:
 * directories, ``__MACOSX`` metadata, ``._*`` / ``.DS_Store`` files, nested
   archives, encrypted entries, binary files (a NUL byte in the first 8 KB)
   and empty files are skipped, each with a reason;
-* the archive is rejected (``ValueError``) when it holds more than
-  :data:`MAX_ARCHIVE_ENTRIES` entries or would unpack to more than
-  :data:`MAX_UNPACKED_BYTES` - the declared sizes are checked first and the
-  bytes actually read are counted again, so a lying header cannot get past
-  the limit.
+* there is no size limit by default (:data:`MAX_ARCHIVE_ENTRIES` and
+  :data:`MAX_UNPACKED_BYTES` are ``None``): a source tree with tens of
+  thousands of files is fine.  A caller that wants a cap passes
+  ``max_entries`` / ``max_bytes`` to :func:`extract_texts`; then the
+  declared sizes are checked first and the bytes actually read are counted
+  again, so a lying header cannot get past the limit.
 """
 
 from __future__ import annotations
@@ -35,10 +36,10 @@ __all__ = [
     "zip_texts_from_file",
 ]
 
-MAX_ARCHIVE_ENTRIES = 10_000
-"""An archive with more entries than this is rejected."""
-MAX_UNPACKED_BYTES = 256 * 1024 * 1024
-"""An archive whose entries add up to more than this (declared or actual) is rejected."""
+MAX_ARCHIVE_ENTRIES: int | None = None
+"""Default entry limit of :func:`extract_texts`: ``None`` = unlimited."""
+MAX_UNPACKED_BYTES: int | None = None
+"""Default unpacked-size limit of :func:`extract_texts`: ``None`` = unlimited."""
 TEXT_SNIFF_BYTES = 8192
 MAX_NAME = 128
 
@@ -114,20 +115,28 @@ def extract_texts(
     data: bytes,
     archive_name: str = "archive.zip",
     *,
-    max_entries: int = MAX_ARCHIVE_ENTRIES,
-    max_bytes: int = MAX_UNPACKED_BYTES,
+    max_entries: int | None = None,
+    max_bytes: int | None = None,
 ) -> tuple[list[Extracted], list[Skipped]]:
-    """The text entries of a ZIP archive held in ``data`` (see the module docstring for the rules)."""
+    """The text entries of a ZIP archive held in ``data`` (see the module docstring for the rules).
+
+    ``max_entries`` / ``max_bytes`` default to the module constants
+    (``None`` = no limit).
+    """
+    if max_entries is None:
+        max_entries = MAX_ARCHIVE_ENTRIES
+    if max_bytes is None:
+        max_bytes = MAX_UNPACKED_BYTES
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
         raise ValueError(f"not a valid ZIP archive ({exc})") from None
     with archive:
         infos = archive.infolist()
-        if len(infos) > max_entries:
+        if max_entries is not None and len(infos) > max_entries:
             raise ValueError(f"archive holds {len(infos)} entries; the limit is {max_entries}")
         declared = sum(info.file_size for info in infos if not info.is_dir())
-        if declared > max_bytes:
+        if max_bytes is not None and declared > max_bytes:
             raise ValueError(f"archive would unpack to {declared} bytes; the limit is {max_bytes}")
         extracted: list[Extracted] = []
         skipped: list[Skipped] = []
@@ -140,12 +149,12 @@ def extract_texts(
                 continue
             try:
                 with archive.open(info) as fh:
-                    payload = fh.read(max_bytes - used + 1)
+                    payload = fh.read() if max_bytes is None else fh.read(max_bytes - used + 1)
             except (RuntimeError, zipfile.BadZipFile, NotImplementedError, OSError) as exc:
                 skipped.append(Skipped(path, f"unreadable ({exc})"))
                 continue
             used += len(payload)
-            if used > max_bytes:
+            if max_bytes is not None and used > max_bytes:
                 raise ValueError(f"archive unpacks to more than {max_bytes} bytes")
             if b"\x00" in payload[:TEXT_SNIFF_BYTES]:
                 skipped.append(Skipped(path, "binary"))

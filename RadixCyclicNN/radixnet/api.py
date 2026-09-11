@@ -95,11 +95,15 @@ __all__ = [
     "create_server",
     "run_server",
     "MAX_BODY_BYTES",
+    "MAX_UPLOAD_BYTES",
     "DEFAULT_GRAPH_LIMIT",
 ]
 
 MAX_BODY_BYTES = 64 * 1024 * 1024
-"""Largest accepted request body (a training corpus can be big)."""
+"""Largest accepted JSON request body (a training corpus can be big)."""
+MAX_UPLOAD_BYTES: int | None = None
+"""Largest accepted ``POST /api/uploads`` body: ``None`` = no limit (a ZIP of a whole source tree is fine)."""
+_UPLOAD_PATH = "/api/uploads"
 
 DEFAULT_GRAPH_LIMIT = 150
 """Default number of top nodes returned by ``GET /api/graph``."""
@@ -2144,6 +2148,10 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     # -- plumbing ------------------------------------------------------------
 
+    def _is_upload_request(self) -> bool:
+        """``POST /api/uploads`` bodies (text files, ZIP archives) are not held to the JSON body limit."""
+        return self.command == "POST" and urlsplit(self.path).path.rstrip("/") == _UPLOAD_PATH
+
     def _read_body(self) -> bytes:
         """Consume the request body (always, so keep-alive connections stay in sync)."""
         if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -2159,9 +2167,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         except ValueError:
             self.close_connection = True
             raise ApiError(400, f"invalid Content-Length header {raw!r}") from None
-        if length > MAX_BODY_BYTES:
+        limit = MAX_UPLOAD_BYTES if self._is_upload_request() else MAX_BODY_BYTES
+        if limit is not None and length > limit:
             self.close_connection = True
-            raise ApiError(413, f"request body too large ({length} bytes; the limit is {MAX_BODY_BYTES})")
+            raise ApiError(413, f"request body too large ({length} bytes; the limit is {limit})")
         data = self.rfile.read(length) if length else b""
         if len(data) != length:
             self.close_connection = True

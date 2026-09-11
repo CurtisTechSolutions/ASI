@@ -545,7 +545,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/graph?limit=150` | | `{"nodes": [{"id","label","count","activation","z","a","b","h","k"}], "edges": [{"source","target","weight","count","prob","cost"}]}` — top-`limit` alive nodes by count plus START/END, edges among them |
 | GET `/api/history` | | `{"history": model.history}` |
 | GET `/api/uploads` | | `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` — text files kept in the server's `upload_dir` (`--upload-dir`, default `uploads`; endpoints answer 400 when no directory is configured) |
-| POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are validated by `archive.extract_texts` (section 20) and stored as one `.zip` upload whose record carries `archive: true`, `files` (text entries), `skipped` and the summed `lines` / `chars`; `archives[]` summarises entries / extracted / skipped (path + reason); 400 for a corrupt archive, one without a text entry, or one over the entry / size limits. Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
+| POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are validated by `archive.extract_texts` (section 20) and stored as one `.zip` upload whose record carries `archive: true`, `files` (text entries), `skipped` and the summed `lines` / `chars`; `archives[]` summarises entries / extracted / skipped (path + reason); 400 for a corrupt archive, one without a text entry, (no size limit: neither the body limit nor an entry limit applies to uploads). Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
 | POST `/api/uploads/delete` | `{"name"}` | `{"deleted": name}` (404 when missing) |
 
 `/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
@@ -808,9 +808,12 @@ rate fields, Generate and 2NRL get a strength field.
 
 ## 20. ZIP uploads (`archive.py`) — archives unpacked on the server
 
-`extract_texts(data, archive_name, max_entries=10_000, max_bytes=256 MiB) -> (extracted, skipped)` opens the bytes
-with `zipfile`, refuses archives over the entry limit or whose declared sizes exceed the byte limit (and counts the
-bytes actually read against the same limit, so a lying header cannot get past it), and walks the entries: directories,
+`extract_texts(data, archive_name, max_entries=None, max_bytes=None) -> (extracted, skipped)` opens the bytes
+with `zipfile` and walks the entries; there is no limit by default (`MAX_ARCHIVE_ENTRIES` / `MAX_UNPACKED_BYTES` are
+`None`, and `POST /api/uploads` is exempt from the 64 MB JSON body limit - `MAX_UPLOAD_BYTES` is `None`), so a whole
+source tree such as `go-master.zip` with 17 708 entries uploads and trains. A caller that passes limits gets the
+declared sizes checked first and the bytes actually read counted against the same limit, so a lying header cannot get
+past it. Entries: directories,
 `__MACOSX` metadata, `._*` / `.DS_Store` / `Thumbs.db`, nested archives, encrypted entries, binary content (a NUL byte
 in the first 8 KB), unreadable and empty entries are reported as `Skipped(path, reason)`; the rest become
 `Extracted(name, path, text, bytes)` with the text decoded as UTF-8 (BOM dropped, undecodable bytes replaced).
