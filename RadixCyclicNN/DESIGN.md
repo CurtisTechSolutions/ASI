@@ -832,3 +832,30 @@ per-file-version cache (`_archive_cache`, keyed by size + mtime, seeded at uploa
 `--data` / `--good` / `--bad` / `--corpus` file) unpacks a ZIP in memory, one text per line or - with `--whole-file` -
 one per entry. Frontend: the upload picker sends `.zip` files as multipart bytes (`api.uploadFile`), lists the
 archive as one row with a `ZIP · N files` badge and reports what it holds and what was ignored.
+
+## 21. Images as text (`vision.py`) — the Stable Diffusion encoder run backwards
+
+`encode_image(data, size=128, encoder="auto") -> {"text", "encoder", "width", "height", "latent_shape", "bytes",
+"chars", "source_size"}`: the image (any format Pillow reads) is converted to RGB and resized to `size x size` (a
+multiple of 8), the encoder turns it into a latent, the latent is quantised to one signed byte per number and packed
+as `img:<encoder>:<w>x<h>:<base64>` (`pack_text` / `parse_text`). `decode_text(text, encoder=None) -> {"png",
+"encoder", "width", "height", "bytes", "repaired"}` parses the header, strips junk from the base64 (a predicted text
+may contain anything), completes the padding, pads or truncates the payload to the latent size and runs the decoder.
+
+* `SDVaeEncoder` (`"sd"`) - `diffusers.AutoencoderKL.from_pretrained($RADIXNET_SD_VAE)` (default
+  `stabilityai/sd-vae-ft-mse`), loaded once per process on first use, on CUDA / MPS when torch sees one. Encode:
+  pixels to `[-1, 1]`, `vae.encode(x).latent_dist.mean * scaling_factor` (the deterministic inversion of the
+  generation step - no sampling noise), clamp to `[-LATENT_SCALE, LATENT_SCALE]` (4.0), scale to `[-127, 127]`,
+  round to int8: `4 x H/8 x W/8` bytes. Decode: bytes -> latent -> `vae.decode(z / scaling_factor).sample` ->
+  pixels. A failed load records `error`; `auto` then falls back to the stand-in and does not retry the download on
+  every image (`describe()` reports `sd_error`).
+* `TinyEncoder` (`"tiny"`) - Pillow only: an RGB thumbnail at `1/8` of the size (`3 x H/8 x W/8` bytes), upscaled
+  back on decode. Same reduction, same text format, so everything works without the diffusion weights.
+
+API: `GET /api/images` (`describe()`), `POST /api/images/encode` (a binary route like `/api/uploads`: multipart,
+raw body with a default name, or JSON `content_base64`; options from the query string or the JSON body: `size`,
+`encoder`, `train`, `save_as`, `epochs`, `lr`, `batch_size`; `train` starts a train job on the one text, `save_as`
+stores it as an upload so several images can be trained on together), `POST /api/images/decode`. CLI: `image info |
+encode | decode`. Frontend: the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image
+side by side with the original; train on it; save as upload; decode any pasted text such as a prediction).
+Dependencies: `pip install radixnet[images]` (pillow) or `radixnet[diffusion]` (pillow, torch, diffusers).

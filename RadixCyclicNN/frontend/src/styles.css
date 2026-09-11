@@ -1225,3 +1225,32 @@ fieldset.schedule code {
   font-size: 0.9rem;
   padding: 3px 12px;
 }
+
+/* Images tab */
+.image-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.6rem 0;
+}
+
+.image-row figure {
+  margin: 0;
+  max-width: 100%;
+}
+
+.image-row img {
+  display: block;
+  max-width: min(100%, 256px);
+  max-height: 256px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  image-rendering: auto;
+}
+
+.image-row figcaption {
+  font-size: 0.8rem;
+  color: var(--muted, #6b7280);
+  margin-top: 0.25rem;
+}

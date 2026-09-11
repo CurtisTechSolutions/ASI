@@ -13,6 +13,8 @@ dependencies = []
 
 [project.optional-dependencies]
 gpu = ["torch"]
+images = ["pillow"]
+diffusion = ["pillow", "torch", "diffusers"]
 
 [project.scripts]
 radixnet = "radixnet.cli:main"

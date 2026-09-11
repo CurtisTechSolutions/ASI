@@ -114,6 +114,20 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /** Images as text (see ImagesPanel): the Stable Diffusion VAE run backwards, quantised and base64-encoded. */
+  images: () => get("/api/images"),
+  imageEncode: (file, { size, encoder, train, saveAs } = {}) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const params = new URLSearchParams();
+    if (size) params.set("size", String(size));
+    if (encoder) params.set("encoder", String(encoder));
+    if (train) params.set("train", "true");
+    if (saveAs) params.set("save_as", String(saveAs));
+    const query = params.toString();
+    return post(`/api/images/encode${query ? `?${query}` : ""}`, form);
+  },
+  imageDecode: (text, encoder) => post("/api/images/decode", encoder ? { text, encoder } : { text }),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama teacher / judge and 2NRL rewards. */
   codegenStart: (body) => post("/api/codegen/start", body),
   codegenHistory: () => get("/api/codegen/history"),

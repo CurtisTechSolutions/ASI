@@ -801,6 +801,84 @@ def cmd_schedule(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_image_info(args: argparse.Namespace, console: Console) -> dict:
+    from .vision import describe
+
+    info = describe()
+    console.pairs([
+        ("pillow", info["pillow"]),
+        ("torch", info["torch"]),
+        ("diffusers", info["diffusers"]),
+        ("sd vae", info["sd_model"] + (" (loaded)" if info["sd_loaded"] else "")),
+        ("sd error", info["sd_error"] or "-"),
+        ("auto picks", info["auto"] or "nothing: pip install pillow"),
+        ("default size", info["default_size"]),
+        ("text format", info["text_format"]),
+    ])
+    return info
+
+
+def cmd_image_encode(args: argparse.Namespace, console: Console) -> dict:
+    from .vision import VisionError, encode_image
+
+    if not os.path.isfile(args.file):
+        raise CliError(f"image file not found: {args.file}")
+    with open(args.file, "rb") as fh:
+        data = fh.read()
+    try:
+        result = encode_image(data, size=args.size, encoder=args.encoder)
+    except VisionError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([
+        ("file", args.file),
+        ("encoder", result["encoder"]),
+        ("size", f"{result['width']}x{result['height']} (source {result['source_size'][0]}x{result['source_size'][1]})"),
+        ("latent", " x ".join(str(v) for v in result["latent_shape"]) + f" = {result['bytes']} bytes"),
+        ("text", f"{result['chars']} chars"),
+    ])
+    console.say()
+    console.say(result["text"])
+    result["file"] = args.file
+    result["out"] = None
+    result["trained"] = None
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(result["text"] + "\n")
+        result["out"] = args.out
+        console.say()
+        console.say(f"text written to {args.out}")
+    if args.train:
+        model, origin = open_model(args, console, required=False)
+        out = args.model_out or args.model
+        console.say()
+        console.say(f"training {origin.describe()} on the encoded text: epochs={args.epochs} lr={args.lr} batch={args.batch_size}")
+        records = model.train([result["text"]], epochs=args.epochs, lr=args.lr, batch_size=args.batch_size)
+        saved = save_model(model, out)
+        result["trained"] = {"epochs": len(records), "loss": records[-1]["loss"] if records else None, "saved": saved, "kind": model.kind}
+        console.say(f"trained {len(records)} epoch(s); saved to {out}")
+    return result
+
+
+def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
+    from .vision import VisionError, decode_text
+
+    text = args.text if args.text is not None else read_text_file(args.data)
+    try:
+        result = decode_text(text, encoder=args.encoder)
+    except VisionError as exc:
+        raise CliError(str(exc)) from exc
+    with open(args.out, "wb") as fh:
+        fh.write(result.pop("png"))
+    result["out"] = args.out
+    console.pairs([
+        ("encoder", result["encoder"]),
+        ("size", f"{result['width']}x{result['height']}"),
+        ("repaired", result["repaired"]),
+        ("written", args.out),
+    ])
+    return result
+
+
 def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     """Learn from rated texts: 2NRL when both kinds are given, reward on good alone, punish on bad alone."""
     good = list(args.good_text or [])
@@ -1551,6 +1629,47 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="base learning rate (lr0)")
     p.add_argument("--act-lr", type=nonneg_float, default=TrainConfig.act_lr, help="base activation learning rate (act_lr0)")
     p.set_defaults(handler=cmd_schedule)
+
+    # image ----------------------------------------------------------------
+    p = command(
+        "image", "images as text: the Stable Diffusion VAE run backwards, quantised, base64-encoded",
+        "Encode an image into a text the network can train on and predict: the Stable Diffusion VAE's\n"
+        "encoder (the inverse of image generation) turns it into a 4 x H/8 x W/8 latent, every number\n"
+        "becomes one signed byte and the bytes become base64 - `img:sd:128x128:AAAA...`.  `decode` runs the\n"
+        "forward process again (text -> latent -> VAE decoder -> PNG).  Needs pillow; the sd encoder also\n"
+        "needs torch + diffusers and the VAE weights ($RADIXNET_SD_VAE, default stabilityai/sd-vae-ft-mse);\n"
+        "without them a thumbnail stand-in with the same 8x reduction is used (--encoder tiny / auto).",
+    )
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+    a = actions.add_parser("info", help="which encoders are available", description="Report the image encoders and their dependencies.",
+                           formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_image_info)
+    a = actions.add_parser(
+        "encode", help="encode an image file as text (optionally train on it)",
+        description="Encode FILE as text.  --out writes the text to a file; --train trains the model on it and saves.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", metavar="FILE", help="image file (PNG, JPEG, WebP, ... whatever Pillow reads)")
+    a.add_argument("--size", type=pos_int, default=128, help="resize to SIZE x SIZE (a multiple of 8) before encoding")
+    a.add_argument("--encoder", choices=("auto", "sd", "tiny"), default="auto", help="the encoder (auto = sd when it loads)")
+    a.add_argument("--out", metavar="PATH", help="write the encoded text to this file")
+    a.add_argument("--train", action="store_true", help="train the model on the encoded text, then save it")
+    a.add_argument("--epochs", type=nonneg_int, default=3, help="training epochs with --train")
+    a.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train (one long text, so it is high)")
+    a.add_argument("--batch-size", type=pos_int, default=8, help="batch size with --train")
+    a.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
+    a.set_defaults(handler=cmd_image_encode)
+    a = actions.add_parser(
+        "decode", help="decode an encoded or predicted text back to a PNG",
+        description="Turn `img:<encoder>:<w>x<h>:<base64>` back into an image (a cut-off tail is padded).",
+        formatter_class=_HelpFormatter,
+    )
+    source = a.add_mutually_exclusive_group(required=True)
+    source.add_argument("--text", metavar="TEXT", help="the encoded text")
+    source.add_argument("--data", metavar="FILE", help="a file holding the encoded text")
+    a.add_argument("--encoder", choices=("sd", "tiny"), help="override the encoder named in the text")
+    a.add_argument("--out", required=True, metavar="PNG", help="where to write the image")
+    a.set_defaults(handler=cmd_image_decode)
 
     # feedback -------------------------------------------------------------
     p = command(

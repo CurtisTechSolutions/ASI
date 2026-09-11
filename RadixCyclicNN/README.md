@@ -24,6 +24,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
+| Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
@@ -159,6 +160,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
+| `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
@@ -185,6 +187,9 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
 | `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
+| `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
+| `POST /api/images/encode` | an image as multipart (`curl -F file=@photo.png`), a raw body, or JSON `{"name","content_base64"}` + `?size=128&encoder=auto\|sd\|tiny&train=true&save_as=photo.txt` (train settings `epochs`, `lr`, `batch_size`) -> `{"text","encoder","width","height","latent_shape","bytes","chars","source_size","name","upload","job"}` (202 with a train job) |
+| `POST /api/images/decode` | `{"text", "encoder"}` -> `{"png_base64","encoder","width","height","bytes","repaired"}` (a cut-off or rambling prediction is padded / truncated) |
 | `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_model", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}` |
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
@@ -400,6 +405,38 @@ a cool-down.  Expressions are validated against a whitelist
 must be finite and non-negative - a bad expression is rejected before training
 starts.  `python -m radixnet schedule --epochs 6 --lr-schedule 'linear(lr0, 4 * lr0)' --act-lr-schedule 'lr / 10'`
 prints the rates with a bar graph; `python -m radixnet schedule` lists the presets.
+
+## Images: the Stable Diffusion encoder, base64, the model
+
+Stable Diffusion generates a picture by *decoding* a latent - a `4 x H/8 x
+W/8` block of numbers - with its VAE.  The Images tab (and `radixnet image`,
+`POST /api/images/encode`) runs that process backwards: the same VAE's
+encoder turns an image into its compressed latent (the deterministic latent
+mean, 48 times fewer numbers than the RGB pixels), every number becomes one
+signed byte and the bytes become base64.  The result is a text,
+
+```
+img:sd:128x128:AAECAwQFBgcICQoLDA0ODxAREhMUFRYX…
+```
+
+which the trigram network trains on, scores, continues and generates like any
+other text.  `decode` runs the forward process again (base64 -> latent -> VAE
+decoder -> PNG), so an encoded image or a **predicted** text can be looked at;
+a prediction whose base64 tail is cut off or garbled is repaired (padded or
+truncated) first.
+
+```bash
+pip install pillow torch diffusers            # the real encoder (weights: $RADIXNET_SD_VAE, default stabilityai/sd-vae-ft-mse)
+python -m radixnet image encode photo.jpg --size 128 --train --epochs 3      # text on stdout, model trained on it
+python -m radixnet predict --prefix 'img:sd:128x128:' --length 800 --json | python -c 'import json,sys; print(json.load(sys.stdin)["full_text"])' > guess.txt
+python -m radixnet image decode --data guess.txt --out guess.png
+```
+
+Without the diffusion weights (or `torch` / `diffusers`) the `tiny` stand-in
+- an RGB thumbnail at 1/8 of the size, the same reduction - keeps the format,
+the API, the CLI and the tab working; `auto` (the default) picks `sd` when it
+loads.  Sizes are squares that are multiples of 8 (64 .. 512); 128 gives a
+4 x 16 x 16 latent, 1 024 bytes, about 1 400 characters of text.
 
 ## Evolve: train on failures, blatantly fail on purpose, then invert
 

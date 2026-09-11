@@ -85,6 +85,10 @@ from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
 from .search import PathResult
+from .vision import VisionError
+from .vision import decode_text as decode_image_text
+from .vision import describe as describe_vision
+from .vision import encode_image
 
 __all__ = [
     "ApiError",
@@ -104,6 +108,8 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_UPLOAD_BYTES: int | None = None
 """Largest accepted ``POST /api/uploads`` body: ``None`` = no limit (a ZIP of a whole source tree is fine)."""
 _UPLOAD_PATH = "/api/uploads"
+_BINARY_ROUTES = {"/api/uploads": None, "/api/images/encode": "image"}
+"""POST routes whose bodies may be raw bytes or multipart (value: the default name of a raw body, None = required)."""
 
 DEFAULT_GRAPH_LIMIT = 150
 """Default number of top nodes returned by ``GET /api/graph``."""
@@ -1293,8 +1299,8 @@ def _multipart_files(body: bytes, content_type: str) -> list[dict]:
     return files
 
 
-def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]]) -> dict:
-    """Body of ``POST /api/uploads`` in any accepted form, normalised to the JSON form.
+def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]], default_name: str | None = None) -> dict:
+    """Body of ``POST /api/uploads`` (and the image encoder) in any accepted form, normalised to the JSON form.
 
     * ``application/json``: ``{name, content | content_base64}`` or ``{files: [...]}``
     * ``multipart/form-data``: every part with a file name (bytes: text files or ZIP archives)
@@ -1304,10 +1310,12 @@ def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]]) ->
     names = [n for n in query.get("name", []) if n.strip()]
     if kind == "multipart/form-data":
         return {"files": _multipart_files(body, content_type)}
-    if kind == "application/json" or (kind == "" and not names):
+    if kind == "application/json" or (kind == "" and not names and default_name is None):
         return parse_body(body)
     if not names:
-        raise ApiError(400, "raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})")
+        if default_name is None:
+            raise ApiError(400, "raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})")
+        names = [default_name]
     return {"files": [{"name": names[0], "data": body}]}
 
 
@@ -1596,6 +1604,63 @@ def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 def _r_uploads(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.uploads()
+
+
+def _option(f: Fields, q: dict, name: str, default: Any) -> Any:
+    """A request option from the JSON body when there is one, else from the query string (multipart / raw bodies)."""
+    if f.present(name):
+        return f._lookup(name)
+    values = q.get(name)
+    return values[0] if values else default
+
+
+def _r_images(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, describe_vision()
+
+
+def _r_image_encode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Image bytes (multipart, raw or JSON content_base64) -> the encoded text; optionally saved as an upload and trained on."""
+    files = f.upload_files()
+    name, payload = files[0]
+    if not isinstance(payload, bytes):
+        raise ApiError(400, "send the image as bytes: multipart/form-data, a raw body, or JSON {name, content_base64}")
+    try:
+        size = int(_option(f, q, "size", 0) or 0) or None
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "'size' must be an integer") from exc
+    encoder = str(_option(f, q, "encoder", "auto") or "auto")
+    raw_train = _option(f, q, "train", False)
+    train = raw_train if isinstance(raw_train, bool) else str(raw_train).strip().lower() in ("1", "true", "yes", "on")
+    save_as = _option(f, q, "save_as", None)
+    if train:
+        svc._ensure_idle()
+    try:
+        result = encode_image(payload, size=size or 128, encoder=encoder)
+    except VisionError as exc:
+        raise ApiError(400, str(exc)) from exc
+    result.update(name=name, upload=None, job=None)
+    if save_as:
+        result["upload"] = svc.upload(str(save_as), result["text"] + "\n")
+    if train:
+        config = TrainConfig(
+            epochs=int(_option(f, q, "epochs", 3)), lr=float(_option(f, q, "lr", 0.5)),
+            act_lr=float(_option(f, q, "act_lr", TrainConfig.act_lr)), batch_size=int(_option(f, q, "batch_size", 8)),
+        )
+        result["job"] = svc.start_train([result["text"]], config)
+        return 202, result
+    return 200, result
+
+
+def _r_image_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    text = f.text("text")
+    encoder = f.text("encoder", None) or None
+    try:
+        result = decode_image_text(text, encoder=encoder)
+    except VisionError as exc:
+        raise ApiError(400, str(exc)) from exc
+    png = result.pop("png")
+    result["png_base64"] = base64.b64encode(png).decode("ascii")
+    return 200, result
 
 
 def _r_upload(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1918,6 +1983,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "upload text files or ZIP archives (a ZIP is one upload; its text files are unpacked on the server when it is "
      "used): JSON {name, content | content_base64} | {files: [...]}, multipart/form-data, or a raw body with ?name="),
     ("POST", "/api/uploads/delete", _r_upload_delete, "delete an uploaded file: {name}"),
+    ("GET", "/api/images", _r_images, "the image encoders: Pillow / torch / diffusers availability, the configured VAE, what auto picks"),
+    ("POST", "/api/images/encode", _r_image_encode,
+     "encode an image as text (the Stable Diffusion VAE run backwards, quantised, base64): multipart / raw / JSON "
+     "{name, content_base64} + ?size=128&encoder=auto|sd|tiny&train=true&save_as=NAME -> {text, encoder, latent_shape, ...}"),
+    ("POST", "/api/images/decode", _r_image_decode,
+     "decode an encoded or predicted text back to an image: {text, encoder} -> {png_base64, width, height, repaired}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
@@ -2104,8 +2175,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         service = self.server.service
         try:
             params = parse_qs(query, keep_blank_values=True)
-            if lookup == "POST" and path == "/api/uploads":
-                fields = Fields(_upload_body(body, self.headers.get("Content-Type", ""), params))
+            if lookup == "POST" and path in _BINARY_ROUTES:
+                fields = Fields(_upload_body(body, self.headers.get("Content-Type", ""), params, _BINARY_ROUTES[path]))
             else:
                 fields = Fields(parse_body(body) if lookup == "POST" else {})
             status, payload = fn(service, fields, params)

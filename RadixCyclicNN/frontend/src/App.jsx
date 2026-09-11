@@ -10,6 +10,7 @@ import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import EvolvePanel from "./components/EvolvePanel.jsx";
 import OllamaPanel from "./components/OllamaPanel.jsx";
 import CodeGenPanel from "./components/CodeGenPanel.jsx";
+import ImagesPanel from "./components/ImagesPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
@@ -22,6 +23,7 @@ const TABS = [
   { id: "evolve", label: "Evolve", Component: EvolvePanel },
   { id: "ollama", label: "Ollama", Component: OllamaPanel },
   { id: "code", label: "Code", Component: CodeGenPanel },
+  { id: "images", label: "Images", Component: ImagesPanel },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];
