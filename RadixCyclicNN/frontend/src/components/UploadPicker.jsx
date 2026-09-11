@@ -19,7 +19,8 @@ function describeArchive(archive) {
     .join(", ");
   const more = skipped.length > 3 ? `, … ${skipped.length - 3} more` : "";
   const files = `${archive.extracted} text file${archive.extracted === 1 ? "" : "s"}`;
-  return `Unpacked ${archive.name}: ${files}${skipped.length ? `, ${skipped.length} skipped (${detail}${more})` : ""}.`;
+  const ignored = skipped.length ? `; ${skipped.length} entr${skipped.length === 1 ? "y" : "ies"} ignored (${detail}${more})` : "";
+  return `${archive.name} holds ${files}${ignored}.`;
 }
 
 /**
@@ -28,8 +29,9 @@ function describeArchive(archive) {
  *
  * Files are uploaded from the file input or by dropping them onto the box:
  * the browser reads each text file and POSTs {name, content} to /api/uploads;
- * a ZIP archive is sent as multipart bytes and unpacked on the server, every
- * text file inside becoming its own upload (named <zip>__<dir>__<file>).
+ * a ZIP archive is sent as multipart bytes and kept as one upload - the
+ * list shows the .zip itself - and the server unpacks its text files behind
+ * the scenes whenever the archive is selected for training.
  *
  * Props: selected (array of upload names), onChange(names), disabled, title, hint.
  */
@@ -172,7 +174,7 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
       />
       <p className="muted">
         {hint || "Drop text files or ZIP archives here or press Upload. Each non-blank line is one training text."}
-        {" ZIP archives are unpacked on the server: every text file inside becomes an upload."}
+        {" A ZIP archive stays one entry; the text files inside it are unpacked on the server when you use it."}
         {uploadDir ? ` Stored on the server in ${uploadDir}.` : ""}
       </p>
       {uploading ? <p className="muted">Uploading {uploading}…</p> : null}
@@ -205,7 +207,17 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
                       aria-label={`use ${u.name}`}
                     />
                   </td>
-                  <td className="text">{u.name}</td>
+                  <td className="text">
+                    {u.name}
+                    {u.archive ? (
+                      <span
+                        className="badge zip"
+                        title={`ZIP archive: ${fmtInt(u.files)} text file${u.files === 1 ? "" : "s"} inside${u.skipped ? `, ${fmtInt(u.skipped)} other entr${u.skipped === 1 ? "y" : "ies"} ignored` : ""}${u.error ? ` · ${u.error}` : ""}`}
+                      >
+                        ZIP · {fmtInt(u.files)} file{u.files === 1 ? "" : "s"}
+                      </span>
+                    ) : null}
+                  </td>
                   <td>{fmtInt(u.lines)}</td>
                   <td>{fmtBytes(u.bytes)}</td>
                   <td>{fmtTime(u.modified)}</td>

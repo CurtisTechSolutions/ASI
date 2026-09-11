@@ -253,6 +253,7 @@ class ModelService:
         self.checkpoint_dir = os.path.abspath(checkpoint_dir) if checkpoint_dir else None
         self.upload_dir = os.path.abspath(upload_dir) if upload_dir else None
         self._upload_lock = threading.Lock()
+        self._archive_cache: dict[str, tuple[tuple[int, int], dict]] = {}  # path -> ((size, mtime_ns), summary)
         self.ollama_url = normalise_url(ollama_url or OLLAMA_DEFAULT_URL)
         self.ollama_model = (ollama_model or OLLAMA_DEFAULT_MODEL).strip() or OLLAMA_DEFAULT_MODEL
         self.backend_name = backend
@@ -736,12 +737,50 @@ class ModelService:
         return os.path.join(self._require_uploads(), sanitize_upload_name(name))
 
     def uploads(self) -> dict:
-        """Every uploaded file with its size and non-blank line count."""
+        """Every uploaded file with its size and non-blank line count (an archive counts the lines of its text entries)."""
         root = self._require_uploads()
         with self._upload_lock:
             names = sorted(n for n in os.listdir(root) if os.path.isfile(os.path.join(root, n)) and not n.endswith(".part"))
-            records = [_upload_record(root, name) for name in names]
+            records = [self._record(root, name) for name in names]
         return {"uploads": records, "upload_dir": root}
+
+    def _archive_info(self, path: str) -> dict:
+        """What a ZIP upload holds - text entries with their line counts, skipped entries - cached per file version."""
+        st = os.stat(path)
+        key = (st.st_size, st.st_mtime_ns)
+        cached = self._archive_cache.get(path)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        with open(path, "rb") as fh:
+            data = fh.read()
+        try:
+            extracted, skipped = extract_texts(data, os.path.basename(path))
+            info = _archive_summary(extracted, skipped)
+        except ValueError as exc:
+            info = _archive_summary([], [], error=str(exc))
+        self._archive_cache[path] = (key, info)
+        return info
+
+    def _record(self, root: str, name: str) -> dict:
+        """The listing record of one upload; a ZIP archive reports its text entries instead of its own bytes as text."""
+        path = os.path.join(root, name)
+        if not _is_archive_file(path):
+            return _upload_record(root, name)
+        info = self._archive_info(path)
+        st = os.stat(path)
+        record = {
+            "name": name,
+            "bytes": st.st_size,
+            "chars": info["chars"],
+            "lines": info["lines"],
+            "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="milliseconds"),
+            "archive": True,
+            "files": info["files"],
+            "skipped": len(info["skipped"]),
+        }
+        if info["error"]:
+            record["error"] = info["error"]
+        return record
 
     def upload(self, name: str, content: str) -> dict:
         """Store ``content`` as the upload ``name`` (UTF-8; an existing file of that name is replaced)."""
@@ -758,33 +797,45 @@ class ModelService:
         return record
 
     def upload_bytes(self, name: str, data: bytes) -> dict:
-        """A binary upload: a ZIP archive is unpacked into text uploads, anything else is stored as UTF-8 text.
+        """A binary upload: a ZIP archive is kept as one upload, anything else is stored as UTF-8 text.
 
         Returns ``{"uploads": [records], "archives": [summary]}`` (``archives``
         only for an archive).
         """
         if is_zip(name, data):
-            return self.unpack_archive(name, data)
+            return self.store_archive(name, data)
         return {"uploads": [self.upload(name, _decode_text(data))]}
 
-    def unpack_archive(self, name: str, data: bytes) -> dict:
-        """Unpack the text entries of a ZIP archive into the upload directory (the archive itself is not kept).
+    def store_archive(self, name: str, data: bytes) -> dict:
+        """Keep a ZIP archive as a single upload; its text entries are unpacked in memory whenever it is used.
 
-        Every entry becomes the upload ``<archive stem>__<dir>__<file>``;
-        directories, metadata, nested archives, encrypted, binary and empty
-        entries are skipped and listed with a reason; an archive over the
-        entry or size limits is refused (400).
+        The archive is validated first: one over the entry or size limits, a
+        corrupt one, or one without a single text entry is refused (400).
+        Directories, metadata, nested archives, encrypted, binary and empty
+        entries are ignored and listed with a reason in the summary.
         """
-        self._require_uploads()
+        root = self._require_uploads()
         archive_name = sanitize_upload_name(name)
+        if not archive_name.lower().endswith(".zip"):
+            archive_name += ".zip"
         try:
             extracted, skipped = extract_texts(data, archive_name)
         except ValueError as exc:
             raise ApiError(400, f"{archive_name}: {exc}") from exc
-        records = [self.upload(entry.name, entry.text) for entry in extracted]
-        for record, entry in zip(records, extracted):
-            record["archive"] = archive_name
-            record["entry"] = entry.path
+        if not extracted:
+            reasons = "; ".join(f"{item.path}: {item.reason}" for item in skipped[:8])
+            raise ApiError(400, f"{archive_name} holds no text files to train on" + (f" ({reasons})" if reasons else " (it is empty)"))
+        path = os.path.join(root, archive_name)
+        with self._upload_lock:
+            replaced = os.path.isfile(path)
+            part = path + ".part"
+            with open(part, "wb") as fh:
+                fh.write(data)
+            os.replace(part, path)
+            st = os.stat(path)
+            self._archive_cache[path] = ((st.st_size, st.st_mtime_ns), _archive_summary(extracted, skipped))
+            record = self._record(root, archive_name)
+        record["replaced"] = replaced
         summary = {
             "name": archive_name,
             "bytes": len(data),
@@ -792,8 +843,8 @@ class ModelService:
             "extracted": len(extracted),
             "skipped": [item.to_dict() for item in skipped],
         }
-        self._log(f"unpacked {archive_name}: {len(extracted)} text file(s), {len(skipped)} skipped")
-        return {"uploads": records, "archives": [summary]}
+        self._log(f"upload {archive_name} ({len(data)} bytes; {len(extracted)} text file(s) inside, {len(skipped)} skipped)")
+        return {"uploads": [record], "archives": [summary]}
 
     def delete_upload(self, name: str) -> dict:
         path = self._upload_path(name)
@@ -801,23 +852,40 @@ class ModelService:
             if not os.path.isfile(path):
                 raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
             os.remove(path)
+            self._archive_cache.pop(path, None)
         return {"deleted": os.path.basename(path)}
 
+    def upload_entries(self, name: str) -> list[tuple[str, str]]:
+        """``[(file name, text)]`` of an upload: one pair for a text file, one per text entry of a ZIP archive.
+
+        Archives are unpacked in memory here, behind the scenes: the upload
+        directory only ever holds the ``.zip`` itself.
+        """
+        path = self._upload_path(name)
+        with self._upload_lock:
+            if not os.path.isfile(path):
+                raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
+            with open(path, "rb") as fh:
+                data = fh.read()
+        base = os.path.basename(path)
+        if is_zip(base, data):
+            try:
+                extracted, _skipped = extract_texts(data, base)
+            except ValueError as exc:
+                raise ApiError(400, f"{base}: {exc}") from exc
+            return [(entry.path, entry.text) for entry in extracted]
+        return [(base, _decode_text(data))]
+
     def upload_texts(self, names: list[str], whole_file: bool = False) -> list[str]:
-        """Training texts read from uploads: one per non-blank line, or each file as one text."""
+        """Training texts read from uploads: one per non-blank line, or each file (archive entry) as one text."""
         texts: list[str] = []
         for name in names:
-            path = self._upload_path(name)
-            with self._upload_lock:
-                if not os.path.isfile(path):
-                    raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    blob = fh.read()
-            if whole_file:
-                if blob.strip():
-                    texts.append(blob)
-            else:
-                texts.extend(line for line in blob.splitlines() if line.strip())
+            for _entry, blob in self.upload_entries(name):
+                if whole_file:
+                    if blob.strip():
+                        texts.append(blob)
+                else:
+                    texts.extend(line for line in blob.splitlines() if line.strip())
         return texts
 
     # -- Ollama (local LLM) --------------------------------------------------
@@ -839,13 +907,8 @@ class ModelService:
     # -- code generation (sandbox + Ollama judge + 2NRL) ---------------------
 
     def read_upload(self, name: str) -> str:
-        """Content of one uploaded file (404 when missing)."""
-        path = self._upload_path(name)
-        with self._upload_lock:
-            if not os.path.isfile(path):
-                raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                return fh.read()
+        """Content of one uploaded file (404 when missing); the text entries of an archive joined by blank lines."""
+        return "\n\n".join(text for _entry, text in self.upload_entries(name))
 
     @contextlib.contextmanager
     def pause_lock(self) -> Iterator[None]:
@@ -1159,6 +1222,31 @@ def sanitize_upload_name(name: str) -> str:
     if not base or base in (".", ".."):
         raise ApiError(400, f"invalid upload name {name!r}")
     return base[:MAX_UPLOAD_NAME]
+
+
+def _is_archive_file(path: str) -> bool:
+    """Whether an upload on disk is a ZIP archive (by its magic bytes)."""
+    try:
+        with open(path, "rb") as fh:
+            return is_zip(path, fh.read(4))
+    except OSError:
+        return False
+
+
+def _archive_summary(extracted: list, skipped: list, error: str | None = None) -> dict:
+    """Counts of a ZIP upload's text entries and its skipped entries (what the listing shows)."""
+    entries = [
+        {"path": e.path, "bytes": e.bytes, "lines": sum(1 for line in e.text.splitlines() if line.strip())}
+        for e in extracted
+    ]
+    return {
+        "files": len(entries),
+        "entries": entries,
+        "skipped": [item.to_dict() for item in skipped],
+        "lines": sum(e["lines"] for e in entries),
+        "chars": sum(len(e.text) for e in extracted),
+        "error": error,
+    }
 
 
 def _upload_record(root: str, name: str) -> dict:
@@ -1514,8 +1602,7 @@ def _r_upload(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         else:
             uploads.append(svc.upload(name, payload))
     if not uploads:
-        reasons = "; ".join(f"{item['path']}: {item['reason']}" for a in archives for item in a["skipped"][:8])
-        raise ApiError(400, "no text files to keep: " + (reasons or "the archive is empty"))
+        raise ApiError(400, "nothing was uploaded")
     body: dict[str, Any] = {"uploads": uploads}
     if archives:
         body["archives"] = archives
@@ -1640,11 +1727,12 @@ def _problems_from(svc: ModelService, f: Fields) -> list[Problem]:
     if text:
         items.extend(line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#"))
     for name in f.names("problem_files"):
-        content = svc.read_upload(name)
-        try:
-            items.extend(p.to_dict() for p in parse_problem_file(content, os.path.splitext(name)[1]))
-        except ValueError as exc:
-            raise ApiError(400, f"upload {name!r}: {exc}") from exc
+        for entry, content in svc.upload_entries(name):  # a ZIP upload contributes every text entry it holds
+            try:
+                items.extend(p.to_dict() for p in parse_problem_file(content, os.path.splitext(entry)[1]))
+            except ValueError as exc:
+                where = f"upload {name!r}" if entry == name else f"upload {name!r} ({entry})"
+                raise ApiError(400, f"{where}: {exc}") from exc
     if not items:
         raise ApiError(
             400, "missing 'problems' (list of strings / objects), 'problems_text' (one per line) or 'problem_files' (upload names)"
@@ -1818,8 +1906,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload,
-     "upload text files or ZIP archives (unpacked on the server): JSON {name, content | content_base64} | {files: [...]}, "
-     "multipart/form-data, or a raw body with ?name="),
+     "upload text files or ZIP archives (a ZIP is one upload; its text files are unpacked on the server when it is "
+     "used): JSON {name, content | content_base64} | {files: [...]}, multipart/form-data, or a raw body with ?name="),
     ("POST", "/api/uploads/delete", _r_upload_delete, "delete an uploaded file: {name}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,

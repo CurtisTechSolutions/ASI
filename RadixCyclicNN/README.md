@@ -179,8 +179,8 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
-| `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` |
-| `POST /api/uploads` | upload text files or ZIP archives: JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`, `multipart/form-data` (`curl -F file=@corpus.zip`), or a raw body with `?name=corpus.zip` -> `{"uploads": [...], "archives": [{"name","entries","extracted","skipped": [{"path","reason"}]}]}` (201). A ZIP is unpacked on the server: every text entry becomes the upload `<zip>__<dir>__<file>`; directories, `__MACOSX` / system files, nested archives, encrypted, binary and empty entries are skipped; more than 10 000 entries or 256 MB unpacked is refused |
+| `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"} (+ `archive`, `files`, `skipped` for a ZIP)], "upload_dir"}` |
+| `POST /api/uploads` | upload text files or ZIP archives: JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`, `multipart/form-data` (`curl -F file=@corpus.zip`), or a raw body with `?name=corpus.zip` -> `{"uploads": [...], "archives": [{"name","entries","extracted","skipped": [{"path","reason"}]}]}` (201). A ZIP stays one upload (its record carries `archive: true`, `files`, `skipped` and the summed `lines`); whenever it is selected the server unpacks its text entries in memory. Directories, `__MACOSX` / system files, nested archives, encrypted, binary and empty entries are ignored; an archive with no text entry, more than 10 000 entries or 256 MB unpacked is refused |
 | `POST /api/uploads/delete` | `{"name"}` |
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
@@ -228,8 +228,9 @@ visited nodes.
 
 Training files: drop text files onto the Train panel (or press "Upload
 files…"); the browser reads them and sends them to `POST /api/uploads` (a
-`.zip` goes up as bytes and is unpacked on the server into one upload per text
-file inside), the server keeps them in its `--upload-dir`, and the list lets you tick which files
+`.zip` goes up as bytes and stays one entry in the list; the server unpacks the
+text files inside it behind the scenes whenever it is used), the server keeps
+them in its `--upload-dir`, and the list lets you tick which files
 to train on, one text per line or each file as one text. The same picker feeds
 the 2NRL (bad / good files) and Evolve (corpus files) panels.
 

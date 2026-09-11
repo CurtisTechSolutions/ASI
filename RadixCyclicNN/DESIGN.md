@@ -521,7 +521,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/graph?limit=150` | | `{"nodes": [{"id","label","count","activation","z","a","b","h","k"}], "edges": [{"source","target","weight","count","prob","cost"}]}` — top-`limit` alive nodes by count plus START/END, edges among them |
 | GET `/api/history` | | `{"history": model.history}` |
 | GET `/api/uploads` | | `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` — text files kept in the server's `upload_dir` (`--upload-dir`, default `uploads`; endpoints answer 400 when no directory is configured) |
-| POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are unpacked by `archive.extract_texts` (section 20): one upload `<zip>__<dir>__<file>` per text entry, the archive itself is not kept, `archives[]` summarises entries / extracted / skipped (path + reason); 400 when nothing usable was inside or the entry / size limits are exceeded. Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
+| POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are validated by `archive.extract_texts` (section 20) and stored as one `.zip` upload whose record carries `archive: true`, `files` (text entries), `skipped` and the summed `lines` / `chars`; `archives[]` summarises entries / extracted / skipped (path + reason); 400 for a corrupt archive, one without a text entry, or one over the entry / size limits. Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
 | POST `/api/uploads/delete` | `{"name"}` | `{"deleted": name}` (404 when missing) |
 
 `/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
@@ -796,7 +796,12 @@ the full path appended. `is_zip(name, data)` decides by the magic bytes alone, s
 stored as text and a ZIP under any name is unpacked.
 
 API: `Fields.upload_files()` now yields text (`content`) or bytes (`content_base64`, multipart parts, raw bodies);
-`ModelService.upload_bytes` routes bytes to `unpack_archive` (one ordinary `upload()` per extracted entry, records
-carry `archive` / `entry`) or to a text upload. CLI: `read_texts` (every `--data` / `--good` / `--bad` / `--corpus`
-file) unpacks a ZIP in memory, one text per line or - with `--whole-file` - one per entry. Frontend: the upload picker
-sends `.zip` files as multipart bytes (`api.uploadFile`) and shows what was unpacked and what was skipped.
+`ModelService.upload_bytes` routes bytes to `store_archive` (validate, then keep the `.zip` as a single upload - the
+upload directory never holds unpacked entries) or to a text upload. Every consumer of uploads goes through
+`upload_entries(name) -> [(file, text)]`, which unpacks an archive in memory on demand: `upload_texts` (train / 2NRL /
+evolve / feedback files), `read_upload`, and the codegen `problem_files` reader (each entry parsed by its own
+extension). The listing (`_record`) reports an archive's text-entry count, ignored entries and summed lines from a
+per-file-version cache (`_archive_cache`, keyed by size + mtime, seeded at upload time). CLI: `read_texts` (every
+`--data` / `--good` / `--bad` / `--corpus` file) unpacks a ZIP in memory, one text per line or - with `--whole-file` -
+one per entry. Frontend: the upload picker sends `.zip` files as multipart bytes (`api.uploadFile`), lists the
+archive as one row with a `ZIP · N files` badge and reports what it holds and what was ignored.
