@@ -218,7 +218,8 @@ curl -X POST localhost:8000/api/evolve/stop
 `frontend/` is a Vite + React app (React, ReactDOM, Vite only). The prebuilt
 `frontend/dist` is committed and served by the API, so nothing needs npm to use
 it. Panels: status bar (live statistics and job progress), Train (texts and/or
-uploaded files), Predict (path with per-step costs), Generate (with thumbs
+uploaded files), Predict (path with per-step costs and a Like button that
+rewards the shown text - a thumbs-up feedback job), Generate (with thumbs
 up / thumbs down ratings: "Train on ratings" runs 2NRL on them, thumbs down as
 the negative phase, thumbs up as the positive phase), Score, 2NRL,
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,

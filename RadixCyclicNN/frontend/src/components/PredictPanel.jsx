@@ -1,13 +1,33 @@
 import { Fragment, useState } from "react";
 import { api } from "../api.js";
-import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
+import { useJob } from "../hooks/useJob.js";
+import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
+import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
+/** A thumbs-up that rewards one predicted text (prefix + continuation). */
+function LikeButton({ text, liked, disabled, onLike, label, compact = false }) {
+  const empty = !String(text ?? "").trim();
+  return (
+    <button
+      type="button"
+      className={`rate up${liked ? " active" : ""}`}
+      aria-pressed={liked}
+      aria-label={label}
+      title={liked ? "Rewarded" : "Like: reward this text (a positive-phase pass / +reward on its path)"}
+      disabled={empty || disabled || liked}
+      onClick={() => onLike(text)}
+    >
+      👍{compact ? "" : liked ? " Liked" : " Like"}
+    </button>
+  );
+}
+
 /** One of the top-K / bottom-K continuations of the count / reward model. */
-function PathTable({ title, hint, paths, prefix }) {
+function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike }) {
   return (
     <div className="paths">
       <h3>{title}</h3>
@@ -23,21 +43,35 @@ function PathTable({ title, hint, paths, prefix }) {
                 <th>probability</th>
                 <th>cost</th>
                 <th>END</th>
+                <th>like</th>
               </tr>
             </thead>
             <tbody>
-              {paths.map((p, i) => (
-                <tr key={i}>
-                  <td>{i + 1}</td>
-                  <td className="text">
-                    <span className="prefix">{prefix}</span>
-                    <span className="continuation">{String(p.continuation ?? "")}</span>
-                  </td>
-                  <td>{fmtNum(p.probability, 4)}</td>
-                  <td>{fmtNum(p.cost, 3)}</td>
-                  <td>{p.reached_end === undefined ? "–" : yesNo(p.reached_end)}</td>
-                </tr>
-              ))}
+              {paths.map((p, i) => {
+                const text = String(p.full_text ?? `${prefix}${p.continuation ?? ""}`);
+                return (
+                  <tr key={i}>
+                    <td>{i + 1}</td>
+                    <td className="text">
+                      <span className="prefix">{prefix}</span>
+                      <span className="continuation">{String(p.continuation ?? "")}</span>
+                    </td>
+                    <td>{fmtNum(p.probability, 4)}</td>
+                    <td>{fmtNum(p.cost, 3)}</td>
+                    <td>{p.reached_end === undefined ? "–" : yesNo(p.reached_end)}</td>
+                    <td>
+                      <LikeButton
+                        text={text}
+                        liked={liked.has(text)}
+                        disabled={likeDisabled}
+                        onLike={onLike}
+                        label={`like ${title.toLowerCase().split(" ")[0]} continuation ${i + 1}`}
+                        compact
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -51,6 +85,10 @@ function PathTable({ title, hint, paths, prefix }) {
  * walk. The count / reward model: a beam search that returns the K most
  * likely and the K least likely continuations in one prediction (plus
  * sampling).
+ *
+ * A "Like" button rewards a result: it starts a feedback job with the text
+ * (prefix + continuation) as a thumbs-up - a positive-phase pass for
+ * RadixNet, a traversal plus reward on the path for the count model.
  */
 export default function PredictPanel({ status }) {
   const [prefix, setPrefix] = useState("");
@@ -64,8 +102,23 @@ export default function PredictPanel({ status }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const [liked, setLiked] = useState(() => new Set());
+  const [lastLiked, setLastLiked] = useState(null);
+  const { job, running, busy, error: jobError, start, clearError } = useJob("feedback");
 
   const countKind = Boolean(status && status.kind === "count");
+  const likeDisabled = busy || running || jobIsRunning(status);
+
+  async function like(text) {
+    const trimmed = String(text ?? "");
+    if (!trimmed.trim() || likeDisabled) return;
+    setLastLiked(null);
+    const started = await start(() => api.feedback({ good: [trimmed], ...(countKind ? { strength: 1 } : {}) }));
+    if (started) {
+      setLiked((prev) => new Set([...prev, trimmed]));
+      setLastLiked(trimmed);
+    }
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -87,6 +140,7 @@ export default function PredictPanel({ status }) {
       }
       const data = await api.predict(body);
       setResult(data && typeof data === "object" ? data : {});
+      setLastLiked(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -103,6 +157,7 @@ export default function PredictPanel({ status }) {
   const bottom = asArray(result && result.bottom);
   const resultIsCount = Boolean(result && (result.kind === "count" || Array.isArray(result.top)));
   const shownPrefix = result ? String(result.prefix ?? prefix) : prefix;
+  const fullText = result ? String(result.full_text ?? `${shownPrefix}${result.continuation ?? ""}`) : "";
 
   return (
     <>
@@ -187,6 +242,27 @@ export default function PredictPanel({ status }) {
               <span className="prefix">{shownPrefix}</span>
               <span className="continuation">{String(result.continuation ?? "")}</span>
             </p>
+            <div className="like-row">
+              <LikeButton
+                text={fullText}
+                liked={liked.has(fullText)}
+                disabled={likeDisabled}
+                onLike={like}
+                label="like this prediction"
+              />
+              <span className="muted">
+                {countKind
+                  ? "Rewards the shown text: one traversal and +1 reward on every edge of its path."
+                  : "Rewards the shown text: a positive-phase training pass (thumbs up)."}
+              </span>
+            </div>
+            {job ? (
+              <JobStatus job={job} emptyText="" />
+            ) : null}
+            {lastLiked !== null && job && job.state === "done" ? (
+              <p className="muted">Rewarded: {JSON.stringify(lastLiked.length > 80 ? `${lastLiked.slice(0, 80)}…` : lastLiked)}</p>
+            ) : null}
+            <Alert message={jobError} onDismiss={clearError} />
             <dl className="kv">
               <dt>cost</dt>
               <dd>{fmtNum(result.cost, 4)}</dd>
@@ -214,12 +290,18 @@ export default function PredictPanel({ status }) {
                   hint="No complete continuation was found."
                   paths={top}
                   prefix={shownPrefix}
+                  liked={liked}
+                  likeDisabled={likeDisabled}
+                  onLike={like}
                 />
                 <PathTable
                   title={`Bottom ${bottom.length} (least likely)`}
                   hint="No other continuation of that length exists (every path found is already in the top list)."
                   paths={bottom}
                   prefix={shownPrefix}
+                  liked={liked}
+                  likeDisabled={likeDisabled}
+                  onLike={like}
                 />
               </>
             ) : null}

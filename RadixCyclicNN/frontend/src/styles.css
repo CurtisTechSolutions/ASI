@@ -1211,3 +1211,17 @@ fieldset.schedule code {
   color: #1d4ed8;
   white-space: nowrap;
 }
+
+/* like button under a prediction */
+.like-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.2rem 0 0.6rem;
+}
+
+.like-row button.rate {
+  font-size: 0.9rem;
+  padding: 3px 12px;
+}
