@@ -25,7 +25,7 @@ export default function GeneratePanel({ status }) {
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
   const feedback = useJob("feedback");
-  const { ratings, rate, ratingOf, remove, clear } = useRatings();
+  const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -126,7 +126,14 @@ export default function GeneratePanel({ status }) {
         )}
       </div>
 
-      <RatingsCard ratings={ratings} onClear={clear} onRemove={remove} feedback={feedback} status={status} />
+      <RatingsCard
+        ratings={ratings}
+        onClear={clear}
+        onRemove={remove}
+        onMark={setMark}
+        feedback={feedback}
+        status={status}
+      />
     </>
   );
 }

@@ -179,16 +179,18 @@ def _whole_text(result: PathResult, prefix: str) -> PathResult:
     return result
 
 
-def _weight_groups(texts: Iterable[str] | str, weights: Sequence[float]) -> list[tuple[float, list[str]]]:
+def _weight_groups(
+    texts: Iterable[str] | str, weights: Sequence[float], name: str = "weights"
+) -> list[tuple[float, list[str]]]:
     """``[(weight, texts)]`` grouping texts of equal (3-decimal) weight, heaviest first; zero weights are dropped."""
     items = [texts] if isinstance(texts, str) else list(texts)
     values = [float(w) for w in weights]
     if len(values) != len(items):
-        raise ValueError(f"bad_weights has {len(values)} entries for {len(items)} texts")
+        raise ValueError(f"{name} has {len(values)} entries for {len(items)} texts")
     groups: dict[float, list[str]] = {}
     for text, weight in zip(items, values):
         if not math.isfinite(weight) or weight < 0:
-            raise ValueError(f"bad_weights must be finite and >= 0, got {weight}")
+            raise ValueError(f"{name} must be finite and >= 0, got {weight}")
         if weight > 0:
             groups.setdefault(round(weight, 3), []).append(text)
     return sorted(groups.items(), key=lambda item: -item[0])
@@ -918,6 +920,7 @@ class RadixNet(GraphModel):
         stop_event: threading.Event | None = None,
         strength: float | None = None,
         bad_weights: Sequence[float] | None = None,
+        good_weights: Sequence[float] | None = None,
         **overrides,
     ) -> dict:
         """2NRL: train on ``bad``, invert, fine-tune on ``good``.
@@ -927,8 +930,12 @@ class RadixNet(GraphModel):
         for weights and states and ``w * act_lr`` for the activation
         parameters, so the worse a failure the harder the model is pushed to
         reproduce it - to *blatantly fail on purpose* - before the inversion
-        turns that into avoidance.  Texts of equal weight share a pass; the
-        negative records carry ``"weight"``.  ``strength`` is accepted for
+        turns that into avoidance.  ``good_weights`` does the same for the
+        positive phase (``w * pos_lr``, ``w * pos_lr / 10``): a rating, not a
+        thumbs up, so a text rated 9 out of 10 is learned nine tenths as hard
+        as a perfect one and a barely-acceptable text barely moves the
+        network.  Texts of equal weight share a pass, heaviest first, and
+        their records carry ``"weight"``.  ``strength`` is accepted for
         interface parity with the count / reward model and ignored here.
 
         The negative phase uses ``neg_lr``; the positive phase uses ``pos_lr``
@@ -956,7 +963,7 @@ class RadixNet(GraphModel):
             negative = []
             act_lr = overrides.pop("act_lr", None)
             base_act_lr = TrainConfig.act_lr if act_lr is None else act_lr
-            for weight, group in _weight_groups(bad, bad_weights):
+            for weight, group in _weight_groups(bad, bad_weights, "bad_weights"):
                 if stop_event is not None and stop_event.is_set():
                     break
                 records = self.train(
@@ -971,10 +978,24 @@ class RadixNet(GraphModel):
         self.invert()
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
-            positive = self.train(
-                good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, progress=progress,
-                checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
-            )
+            if good_weights is None:
+                positive = self.train(
+                    good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, progress=progress,
+                    checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
+                )
+            else:
+                for weight, group in _weight_groups(good, good_weights, "good_weights"):
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    records = self.train(
+                        group, epochs=pos_epochs, lr=pos_lr * weight, act_lr=pos_lr / 10 * weight,
+                        checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
+                    )
+                    for record in records:
+                        record["weight"] = weight
+                        if progress is not None:
+                            progress(record)
+                    positive.extend(records)
         self.meta["twonrl_runs"] += 1
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)
@@ -987,15 +1008,28 @@ class RadixNet(GraphModel):
         *,
         epochs: int = 3,
         lr: float = 0.1,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         strength: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs up: a positive-phase pass over ``texts`` (``act_lr = lr / 10``); records carry ``phase="positive"``."""
-        return self.train(
-            texts, epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive", progress=progress, stop_event=stop_event,
-            **overrides,
+        """Thumbs up: a positive-phase pass over ``texts`` (``act_lr = lr / 10``); records carry ``phase="positive"``.
+
+        ``weights`` (one per text, ``>= 0``) turns the thumbs up into a
+        rating: a text of weight ``w`` is learned with ``w * lr`` and
+        ``w * lr / 10``, so how good a text is decides how much of it the
+        network keeps.  Texts of equal weight share a pass (heaviest first)
+        and their records carry ``"weight"``; a weight of 0 is skipped.
+        """
+        if weights is None:
+            return self.train(
+                texts, epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive", progress=progress,
+                stop_event=stop_event, **overrides,
+            )
+        return self._weighted_passes(
+            texts, weights, "weights", epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive",
+            progress=progress, stop_event=stop_event, **overrides,
         )
 
     def punish(
@@ -1004,15 +1038,59 @@ class RadixNet(GraphModel):
         *,
         epochs: int = 2,
         lr: float = 0.5,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         strength: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs down: a negative-phase pass over ``texts``, then the network is inverted (unless stopped)."""
-        records = self.train(texts, epochs=epochs, lr=lr, phase="negative", progress=progress, stop_event=stop_event, **overrides)
+        """Thumbs down: a negative-phase pass over ``texts``, then the network is inverted (unless stopped).
+
+        ``weights`` rates the failures the way :meth:`reward` rates the
+        successes: the worse a text, the larger its share of ``lr``.
+        """
+        if weights is None:
+            records = self.train(
+                texts, epochs=epochs, lr=lr, phase="negative", progress=progress, stop_event=stop_event, **overrides,
+            )
+        else:
+            act_lr = overrides.pop("act_lr", TrainConfig.act_lr)
+            records = self._weighted_passes(
+                texts, weights, "weights", epochs=epochs, lr=lr, act_lr=act_lr, phase="negative",
+                progress=progress, stop_event=stop_event, **overrides,
+            )
         if stop_event is None or not stop_event.is_set():
             self.invert()
+        return records
+
+    def _weighted_passes(
+        self,
+        texts: Iterable[str] | str,
+        weights: Sequence[float],
+        name: str,
+        *,
+        epochs: int,
+        lr: float,
+        act_lr: float,
+        phase: str,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """One pass per group of equally weighted texts, the learning rates scaled by the weight."""
+        records: list[dict] = []
+        for weight, group in _weight_groups(texts, weights, name):
+            if stop_event is not None and stop_event.is_set():
+                break
+            group_records = self.train(
+                group, epochs=epochs, lr=lr * weight, act_lr=act_lr * weight, phase=phase,
+                stop_event=stop_event, **overrides,
+            )
+            for record in group_records:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(group_records)
         return records
 
     # -- introspection -------------------------------------------------------

@@ -484,16 +484,29 @@ class CountRewardNet(GraphModel):
         *,
         epochs: int = 1,
         strength: float | None = 1.0,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         lr: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs up: ``epochs`` passes that traverse *and* reward (``+strength``) every path of ``texts``."""
-        cfg = _resolve_config(None, {"epochs": epochs, **overrides})
-        return self._passes(
-            texts, cfg, count=True, reward=abs(1.0 if strength is None else float(strength)), phase="positive",
-            progress=progress, stop_event=stop_event,
+        """Thumbs up: ``epochs`` passes that traverse *and* reward (``+strength``) every path of ``texts``.
+
+        ``weights`` (one per text, ``>= 0``) turns the thumbs up into a
+        rating: each path is rewarded by ``weight * strength``, so a text
+        rated 9 out of 10 adds nine tenths of what a perfect one adds.  Texts
+        of equal weight share a pass (heaviest first) and their records carry
+        ``"weight"``; a weight of 0 is skipped.
+        """
+        base = abs(1.0 if strength is None else float(strength))
+        if weights is None:
+            cfg = _resolve_config(None, {"epochs": epochs, **overrides})
+            return self._passes(
+                texts, cfg, count=True, reward=base, phase="positive", progress=progress, stop_event=stop_event,
+            )
+        return self._weighted_passes(
+            texts, weights, epochs=epochs, count=True, reward=base, phase="positive",
+            progress=progress, stop_event=stop_event, **overrides,
         )
 
     def punish(
@@ -502,17 +515,56 @@ class CountRewardNet(GraphModel):
         *,
         epochs: int = 1,
         strength: float | None = 1.0,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         lr: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs down: ``epochs`` passes that penalise (``-strength``) every path of ``texts``; no traversal is counted."""
-        cfg = _resolve_config(None, {"epochs": epochs, **overrides})
-        return self._passes(
-            texts, cfg, count=False, reward=-abs(1.0 if strength is None else float(strength)), phase="negative",
-            progress=progress, stop_event=stop_event,
+        """Thumbs down: ``epochs`` passes that penalise (``-strength``) every path of ``texts``; no traversal is counted.
+
+        ``weights`` rates the failures the way :meth:`reward` rates the
+        successes: each path is penalised by ``weight * strength``.
+        """
+        base = abs(1.0 if strength is None else float(strength))
+        if weights is None:
+            cfg = _resolve_config(None, {"epochs": epochs, **overrides})
+            return self._passes(
+                texts, cfg, count=False, reward=-base, phase="negative", progress=progress, stop_event=stop_event,
+            )
+        return self._weighted_passes(
+            texts, weights, epochs=epochs, count=False, reward=-base, phase="negative",
+            progress=progress, stop_event=stop_event, **overrides,
         )
+
+    def _weighted_passes(
+        self,
+        texts: Iterable[str] | str,
+        weights: Sequence[float],
+        *,
+        epochs: int,
+        count: bool,
+        reward: float,
+        phase: str,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """One pass per group of equally weighted texts, the reward / penalty scaled by the weight."""
+        cfg = _resolve_config(None, {"epochs": epochs, **overrides})
+        records: list[dict] = []
+        for weight, group in _weight_groups(texts, weights, "weights"):
+            if stop_event is not None and stop_event.is_set():
+                break
+            group_records = self._passes(
+                group, cfg, count=count, reward=reward * weight, phase=phase, stop_event=stop_event,
+            )
+            for record in group_records:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(group_records)
+        return records
 
     def two_nrl(
         self,
@@ -527,6 +579,7 @@ class CountRewardNet(GraphModel):
         stop_event: threading.Event | None = None,
         strength: float | None = 1.0,
         bad_weights: Sequence[float] | None = None,
+        good_weights: Sequence[float] | None = None,
         **overrides,
     ) -> dict:
         """2NRL for the count model: penalise ``bad`` (``neg_epochs`` passes), then count + reward ``good``.
@@ -534,7 +587,9 @@ class CountRewardNet(GraphModel):
         Nothing is inverted: a penalty already makes a path unlikely.
         ``neg_lr`` / ``pos_lr`` are accepted for interface parity and ignored;
         the magnitude per pass is ``strength``, scaled per text by
-        ``bad_weights`` when given (the worse a failure, the larger its penalty).
+        ``bad_weights`` when given (the worse a failure, the larger its
+        penalty) and by ``good_weights`` (the better a text, the larger its
+        reward - a rating, not a thumbs up).
         """
         reserved = sorted({"epochs", "lr", "act_lr"} & set(overrides))
         if reserved:
@@ -544,7 +599,7 @@ class CountRewardNet(GraphModel):
             negative = self.punish(bad, epochs=neg_epochs, strength=base, progress=progress, stop_event=stop_event, **overrides)
         else:
             negative = []
-            for weight, group in _weight_groups(bad, bad_weights):
+            for weight, group in _weight_groups(bad, bad_weights, "bad_weights"):
                 if stop_event is not None and stop_event.is_set():
                     break
                 records = self.punish(group, epochs=neg_epochs, strength=base * weight, stop_event=stop_event, **overrides)
@@ -555,7 +610,10 @@ class CountRewardNet(GraphModel):
                 negative.extend(records)
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
-            positive = self.reward(good, epochs=pos_epochs, strength=strength, progress=progress, stop_event=stop_event, **overrides)
+            positive = self.reward(
+                good, epochs=pos_epochs, strength=strength, weights=good_weights, progress=progress,
+                stop_event=stop_event, **overrides,
+            )
         self.meta["twonrl_runs"] += 1
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)

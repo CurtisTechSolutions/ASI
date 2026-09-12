@@ -1116,6 +1116,24 @@ ul.ratings code {
   white-space: nowrap;
 }
 
+/* The mark out of 10 next to a thumb: how good / how bad, not just which way. */
+label.mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+label.mark input {
+  width: 58px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+}
+
 .badge.up {
   color: #16a34a;
 }

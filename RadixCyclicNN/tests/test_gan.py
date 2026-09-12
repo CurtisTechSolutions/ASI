@@ -193,6 +193,56 @@ class TestBlatantFailures(unittest.TestCase):
         zero = model.two_nrl(["zzz qqq garbage"], self.corpus()[:2], neg_epochs=1, pos_epochs=1, batch_size=8, bad_weights=[0.0])
         self.assertEqual(zero["negative"], [])  # a zero weight is skipped, the inversion still happens
 
+    def test_two_nrl_good_weights_scale_the_positive_phase(self):
+        model = self.trained()
+        corpus = self.corpus()[:4]
+        result = model.two_nrl(
+            ["zzz qqq garbage"], corpus, neg_epochs=1, pos_epochs=1, neg_lr=0.05, pos_lr=0.02, batch_size=8,
+            good_weights=[1.0, 0.5, 1.0, 0.0],
+        )
+        positive = result["positive"]
+        self.assertEqual([r["weight"] for r in positive], [1.0, 0.5])  # equal marks share a pass, best first; 0 is skipped
+        self.assertEqual([r["phase"] for r in positive], ["positive", "positive"])
+        self.assertAlmostEqual(positive[0]["lr"], 0.02)
+        self.assertAlmostEqual(positive[0]["act_lr"], 0.002)
+        self.assertAlmostEqual(positive[1]["lr"], 0.01)
+        self.assertAlmostEqual(positive[1]["act_lr"], 0.001)
+        with self.assertRaises(ValueError) as caught:
+            model.two_nrl(["a b c"], ["d e f"], good_weights=[1.0, 2.0])
+        self.assertIn("good_weights", str(caught.exception))
+
+    def test_reward_and_punish_take_marks(self):
+        model = self.trained()
+        corpus = self.corpus()[:3]
+        records = model.reward(corpus, epochs=1, lr=0.2, batch_size=8, weights=[1.0, 0.25, 1.0])
+        self.assertEqual([r["weight"] for r in records], [1.0, 0.25])
+        self.assertAlmostEqual(records[0]["lr"], 0.2)
+        self.assertAlmostEqual(records[1]["lr"], 0.05)
+        self.assertAlmostEqual(records[1]["act_lr"], 0.005)
+        self.assertTrue(all(r["phase"] == "positive" for r in records))
+        inverted = model.graph.inverted
+        records = model.punish(["zzz qqq", "xxx yyy"], epochs=1, lr=0.4, batch_size=8, weights=[1.0, 0.5])
+        self.assertEqual([r["weight"] for r in records], [1.0, 0.5])
+        self.assertAlmostEqual(records[1]["lr"], 0.2)
+        self.assertTrue(all(r["phase"] == "negative" for r in records))
+        self.assertNotEqual(model.graph.inverted, inverted)  # punish still inverts afterwards
+        with self.assertRaises(ValueError):
+            model.reward(corpus, weights=[1.0])
+
+    def test_count_model_rewards_by_the_mark(self):
+        from radixnet.countnet import CountRewardNet
+
+        model = CountRewardNet(seed=1)
+        corpus = self.corpus()[:20]
+        model.train(corpus, epochs=1)
+        rewarded = model.reward(corpus[:2], epochs=1, strength=2.0, weights=[1.0, 0.5])
+        self.assertEqual([r["weight"] for r in rewarded], [1.0, 0.5])
+        self.assertEqual([r["phase"] for r in rewarded], ["positive", "positive"])
+        result = model.two_nrl(
+            ["zzz qqq garbage"], corpus[:2], neg_epochs=1, pos_epochs=1, strength=1.0, good_weights=[1.0, 0.25],
+        )
+        self.assertEqual([r["weight"] for r in result["positive"]], [1.0, 0.25])
+
     def test_count_model_two_nrl_weights_scale_the_penalty(self):
         from radixnet.countnet import CountRewardNet
 

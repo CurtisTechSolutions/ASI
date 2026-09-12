@@ -108,6 +108,36 @@ class ApiFeedbackTests(unittest.TestCase):
         status, data, _ = self.client.post("/api/feedback", {"good_files": ["missing.txt"]})
         self.assertEqual(status, 404, data)
 
+    def test_ratings_weight_what_is_learned(self):
+        status, data, _ = self.client.post("/api/feedback", {
+            "good": [CORPUS[0], CORPUS[1]], "good_ratings": [10, 5],
+            "bad": ["asdf qwer"], "bad_ratings": [8], **SETTINGS,
+        })
+        self.assertEqual(status, 202, data)
+        self.assertEqual(data["good_weights"], [1.0, 0.5])
+        self.assertEqual(data["bad_weights"], [0.8])
+        job = wait_job(self.client)
+        self.assertEqual(job["state"], "done", job)
+        weights = [r.get("weight") for r in job["history"] if r.get("phase") == "positive"]
+        self.assertEqual(weights, [1.0, 0.5])  # the better the mark, the larger the share of the learning rate
+        # 0..1 shares say the same thing
+        status, data, _ = self.client.post("/api/feedback", {"good": [CORPUS[0]], "good_weights": [0.25], **SETTINGS})
+        self.assertEqual(status, 202, data)
+        self.assertEqual(data["good_weights"], [0.25])
+        wait_job(self.client)
+
+    def test_rating_errors(self):
+        for body, expected in (
+            ({"good": [CORPUS[0]], "good_ratings": [1, 2]}, "1 text"),
+            ({"good": [CORPUS[0]], "good_ratings": ["nine"]}, "list of numbers"),
+            ({"good": [CORPUS[0]], "good_ratings": [-1]}, ">= 0"),
+            ({"good": [CORPUS[0]], "good_ratings": [10], "good_weights": [1]}, "not both"),
+        ):
+            with self.subTest(**body):
+                status, data, _ = self.client.post("/api/feedback", {**body, **SETTINGS})
+                self.assertEqual(status, 400, data)
+                self.assertIn(expected, data["error"])
+
 
 class CliFeedbackTests(unittest.TestCase):
     def setUp(self):
@@ -135,6 +165,18 @@ class CliFeedbackTests(unittest.TestCase):
         doc = self.run_cli("feedback", "--good", good, "--pos-epochs", "1")
         self.assertEqual((doc["action"], doc["positive"][-1]["phase"]), ("reward", "positive"))
         self.run_cli("feedback", expect=1)
+
+    def test_marks_scale_the_learning(self):
+        doc = self.run_cli("feedback", "--good-text", CORPUS[0], "--good-text", CORPUS[1], "--good-ratings", "10,5",
+                           "--pos-epochs", "1", "--pos-lr", "0.2")
+        self.assertEqual(doc["good_weights"], [1.0, 0.5])
+        self.assertEqual([r["weight"] for r in doc["positive"]], [1.0, 0.5])
+        self.assertAlmostEqual(doc["positive"][1]["lr"], 0.1)
+        doc = self.run_cli("feedback", "--bad-text", GARBAGE[0], "--bad-ratings", "4", "--neg-epochs", "1", "--neg-lr", "0.5")
+        self.assertEqual(doc["bad_weights"], [0.4])
+        self.assertAlmostEqual(doc["negative"][0]["lr"], 0.2)
+        self.run_cli("feedback", "--good-text", CORPUS[0], "--good-ratings", "10,5", expect=1)
+        self.run_cli("feedback", "--good-text", CORPUS[0], "--good-ratings", "11", expect=1)
 
 
 if __name__ == "__main__":

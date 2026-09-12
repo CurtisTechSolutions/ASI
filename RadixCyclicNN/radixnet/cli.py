@@ -335,6 +335,58 @@ class ProblemPrinter(_RowPrinter):
             )
 
 
+LESSON_COLUMNS: tuple[_Column, ...] = (
+    ("round", 5, ">"), ("exercise", 8, "<"), ("score", 6, ">"), ("gram", 6, ">"), ("spell", 6, ">"),
+    ("flu", 6, ">"), ("mark", 4, "<"), ("error", 12, "<"), ("sentence", 0, "<"),
+)
+
+
+class LessonPrinter(_RowPrinter):
+    """``progress`` callback for :meth:`TutorTrainer.run`: lessons as rows, rounds and the report card as notes."""
+
+    __slots__ = ("lessons", "corrections")
+
+    def __init__(self, console: Console) -> None:
+        super().__init__(console, LESSON_COLUMNS)
+        self.lessons = 0
+        self.corrections = 0
+
+    def __call__(self, record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "lesson":
+            self.lessons += 1
+            values = [
+                record.get("round"), clip(str(record.get("exercise")), 8), record.get("score"), record.get("grammar"),
+                record.get("spelling"), record.get("fluency"), "pass" if record.get("passed") else "fail",
+                clip(str(record.get("error") or "-"), 12),
+            ]
+            sentence = quote(clip(str(record.get("sentence", "")), 46))
+            pairs = list(zip([c[0] for c in LESSON_COLUMNS], values + [sentence]))
+            self.row(values + [sentence], _compact(f"lesson {record.get('exercise')}", pairs[2:]))
+            if not record.get("passed"):
+                self.corrections += 1
+                correction, comment = record.get("correction"), record.get("comment")
+                if correction:
+                    self.console.note(f"    correct: {quote(clip(str(correction), 80))}")
+                if comment:
+                    self.console.note(f"    teacher: {clip(str(comment), 100)}")
+        elif kind == "round":
+            weakest = ", ".join(record.get("weakest") or []) or "nothing"
+            learned = record.get("action") or "nothing to learn"
+            self.console.note(
+                f"round {record.get('round')}: {record.get('passed')}/{record.get('lessons')} passed, "
+                f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
+                f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
+            )
+        elif kind == "report":
+            self.console.note(
+                f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
+                f"mean {fmt(record.get('mean_score'))}"
+            )
+        elif kind == "note":
+            self.console.note(f"note: {record.get('message')}")
+
+
 # --------------------------------------------------------------------------
 # Ctrl-C handling for long-running work
 # --------------------------------------------------------------------------
@@ -947,6 +999,25 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
     return {"weights": config, "changed": changes, "saved": saved, "stats": stats}
 
 
+def _marks(raw: str | None, texts: list[str], option: str) -> list[float] | None:
+    """``--good-ratings 8,10,6`` -> one weight per text (mark / 10), in the order the texts were collected."""
+    if not raw:
+        return None
+    try:
+        marks = [float(part) for part in raw.replace(" ", "").split(",") if part]
+    except ValueError as exc:
+        raise CliError(f"{option} must be a comma-separated list of marks out of 10: {exc}") from exc
+    if len(marks) != len(texts):
+        raise CliError(f"{option} has {len(marks)} mark(s) for {len(texts)} text(s)")
+    if any(not (0.0 <= mark <= 10.0) for mark in marks):
+        raise CliError(f"{option} marks must lie between 0 and 10")
+    return [mark / 10.0 for mark in marks]
+
+
+def _marks_label(raw: str | None) -> str:
+    return ", ".join(part for part in (raw or "").replace(" ", "").split(",") if part)
+
+
 def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     """Learn from rated texts: 2NRL when both kinds are given, reward on good alone, punish on bad alone."""
     good = list(args.good_text or [])
@@ -959,6 +1030,8 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     bad = [t for t in bad if t.strip()]
     if not good and not bad:
         raise CliError("nothing to learn from: give --good / --good-text (thumbs up) and/or --bad / --bad-text (thumbs down)")
+    good_weights = _marks(args.good_ratings, good, "--good-ratings")
+    bad_weights = _marks(args.bad_ratings, bad, "--bad-ratings")
     action = "2nrl" if good and bad else ("reward" if good else "punish")
     model, origin = open_model(args, console, required=False)
     out = args.out or args.model
@@ -972,8 +1045,8 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
         ("model", origin.describe()),
         ("kind", kind_label(model)),
         ("backend", backend_label(model)),
-        ("thumbs up", f"{len(good)} texts"),
-        ("thumbs down", f"{len(bad)} texts"),
+        ("thumbs up", f"{len(good)} texts" + (f", marks {_marks_label(args.good_ratings)}/10" if good_weights else "")),
+        ("thumbs down", f"{len(bad)} texts" + (f", marks {_marks_label(args.bad_ratings)}/10" if bad_weights else "")),
         ("action", wording[action]),
         *_phase_pairs(model, args),
         ("output", out),
@@ -987,16 +1060,17 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
             return model.two_nrl(
                 bad, good, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
                 pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size, strength=args.strength,
+                bad_weights=bad_weights, good_weights=good_weights,
             )
         if action == "reward":
             records = model.reward(
                 good, epochs=args.pos_epochs, lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
-                progress=printer, stop_event=stop,
+                weights=good_weights, progress=printer, stop_event=stop,
             )
             return {"negative": [], "positive": records, "inverted": model.graph.inverted}
         records = model.punish(
             bad, epochs=args.neg_epochs, lr=args.neg_lr, batch_size=args.batch_size, strength=args.strength,
-            progress=printer, stop_event=stop,
+            weights=bad_weights, progress=printer, stop_event=stop,
         )
         return {"negative": records, "positive": [], "inverted": model.graph.inverted}
 
@@ -1005,6 +1079,7 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     console.say(f"action: {action}; inverted: {fmt(result['inverted'])}")
     return {
         "model": origin.to_dict(), "out": out, "action": action, "good_texts": len(good), "bad_texts": len(bad),
+        "good_weights": good_weights, "bad_weights": bad_weights,
         "negative": result["negative"], "positive": result["positive"], "inverted": result["inverted"],
         "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
@@ -1273,6 +1348,88 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
             json.dump({k: doc[k] for k in ("problems", "config", "records", "solutions", "solved", "model_solved")}, fh, indent=2)
+        console.say(f"wrote report to {args.report}")
+    return doc
+
+
+def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
+    from .ollama import OllamaClient, OllamaError
+    from .tutor import TutorConfig, TutorTrainer, report_card
+
+    manager = checkpoint_manager(args)
+    defaults = TutorConfig()
+    config = TutorConfig(
+        topic=args.topic, rounds=args.rounds, exercises=args.exercises, attempts=args.attempts, focus=args.focus,
+        level=args.level, words=args.words, tutor_model=args.tutor_model or defaults.tutor_model,
+        grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
+        temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
+        grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
+        teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
+        min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
+        pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
+        replay_limit=args.replay_limit, checkpoint_every=checkpoint_every(args, manager),
+    )
+    try:
+        config.validate()
+        client = OllamaClient(args.url, config.tutor_model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("backend", backend_label(model)),
+        ("topic", config.topic + (f", drilling {config.focus}" if config.focus else "")),
+        ("lessons", f"{config.rounds} round(s) x {config.exercises} exercise(s) x {config.attempts} attempt(s)"),
+        ("teacher", f"{config.tutor_model} at {client.url}"
+                    + (f", marked by {config.grader_model}" if config.grader_model else "")),
+        ("completion", f"{config.mode}, length={config.length}, max={config.max_length}"
+                       + (f", temperature={fmt(config.temperature)}" if config.mode == "sample" else "")),
+        ("marking", f"pass at {fmt(config.threshold)}/10, grammar weight {fmt(config.grammar_weight)}, "
+                    f"{config.batch} per call" + (", adapting to the weakest points" if config.adapt else "")),
+        ("2NRL", "off (--dry-run: the grades are reported, nothing is trained)" if args.dry_run else
+                 f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive "
+                 f"epochs={config.pos_epochs} lr={config.pos_lr}, batch={config.batch_size}, "
+                 f"garbage weight {fmt(config.min_weight)}..1"),
+        ("output", "not saved (--dry-run)" if args.dry_run else out),
+    ])
+    console.say()
+    printer = LessonPrinter(console)
+    stop = threading.Event()
+    trainer = TutorTrainer(model, client, config)
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.run(progress=printer, stop_event=stop, checkpoint_manager=manager), stop, console, "round",
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    saved = None
+    if args.dry_run:
+        if interrupted:
+            console.note(f"stopped after {printer.seen} lesson(s)")
+        console.say()
+    else:
+        saved = _finish_training(console, model, out, interrupted, printer, "lesson")
+    card = report_card(trainer.lessons)
+    console.say()
+    console.pairs([
+        ("lessons", f"{card['passed']}/{card['lessons']} passed"
+                    + (f" ({100 * card['pass_rate']:.0f}%)" if card["pass_rate"] is not None else "")),
+        ("mean score", f"{fmt(card['mean_score'])}/10"),
+        ("grammar", fmt(card["mean_grammar"])),
+        ("spelling", fmt(card["mean_spelling"])),
+        ("fluency", fmt(card["mean_fluency"])),
+        ("mistakes", ", ".join(f"{name} x{count}" for name, count in card["errors"].items()) or "none"),
+        ("weakest", ", ".join(card["weakest"]) or "-"),
+    ])
+    doc = {
+        "model": origin.to_dict(), "out": None if args.dry_run else out, "config": config.to_dict(),
+        "records": records, "lessons": [lesson.to_dict() for lesson in trainer.lessons], "report": card,
+        "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+    }
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump({k: doc[k] for k in ("config", "records", "lessons", "report")}, fh, indent=2)
         console.say(f"wrote report to {args.report}")
     return doc
 
@@ -1797,12 +1954,19 @@ def build_parser() -> argparse.ArgumentParser:
         "2NRL (train on the bad texts, invert, fine-tune on the good ones).  Only good: reward (a positive-phase\n"
         "pass).  Only bad: punish (a negative-phase pass, then the network is inverted so those texts become\n"
         "unlikely).  The count / reward model penalises / rewards the rated paths by --strength instead (no\n"
-        "inversion).  The same rule the frontend's Generate tab uses for its ratings.",
+        "inversion).  A rating is more than a thumb: --good-ratings / --bad-ratings give a mark out of 10 per\n"
+        "text and the network learns each one in proportion to it.  The same rule the frontend's Generate tab\n"
+        "uses for its ratings.",
     )
     p.add_argument("--good", metavar="FILE", help="thumbs-up texts, one per line")
     p.add_argument("--bad", metavar="FILE", help="thumbs-down texts, one per line")
     p.add_argument("--good-text", action="append", metavar="TEXT", help="a thumbs-up text (repeatable)")
     p.add_argument("--bad-text", action="append", metavar="TEXT", help="a thumbs-down text (repeatable)")
+    p.add_argument("--good-ratings", metavar="MARKS",
+                   help="how good each thumbs-up text is: comma-separated marks out of 10, one per text "
+                        "(--good-text first, then the lines of --good); 10 = the full learning rate, 0 skips it")
+    p.add_argument("--bad-ratings", metavar="MARKS",
+                   help="how bad each thumbs-down text is: comma-separated marks out of 10, one per text")
     group = p.add_argument_group("2NRL options")
     group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (punish) phase")
     group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (reward) phase")
@@ -1940,6 +2104,67 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.add_argument("--report", metavar="FILE", help="write a JSON report (problems, config, records, solutions)")
     p.set_defaults(handler=cmd_codegen)
+
+    # tutor ------------------------------------------------------------------
+    from .tutor import DEFAULT_TUTOR_MODEL as tutor_default_model, MODES as TUTOR_MODES, TWONRL_PER as TUTOR_TWONRL_PER
+
+    p = command(
+        "tutor", "automated English lessons: Ollama writes the prefix, the network completes it, Ollama marks it",
+        "The prediction process run without a human at the keyboard.  Each round an Ollama model writes\n"
+        "sentence openings about a topic (each drilling one point of grammar, each with its own model\n"
+        "answer), the network completes them with the prediction search, and the same LLM marks every\n"
+        "sentence as an English teacher: grammar, spelling and fluency out of 10, the worst mistake named,\n"
+        "one line of teaching and the sentence written out correctly.  Failed sentences become 2NRL garbage\n"
+        "- weighted by how bad the mark was - and the corrections the fine-tune pass, so the network is\n"
+        "taught the English it got wrong.  With --adapt (the default) the next round drills the mistakes\n"
+        "the last one made.  Ctrl-C stops after the current round and saves.",
+    )
+    p.add_argument("--topic", default="everyday life", metavar="TEXT", help="what the sentences are about")
+    p.add_argument("--rounds", type=pos_int, default=3, help="lesson rounds (each writes, completes and marks a new set of exercises)")
+    p.add_argument("--exercises", type=pos_int, default=5, help="sentence openings per round")
+    p.add_argument("--attempts", type=pos_int, default=1, help="completions the network writes per exercise (the first in --mode, the rest sampled)")
+    p.add_argument("--focus", metavar="TEXT", help="pin every exercise to one point of grammar, e.g. 'past tense'")
+    p.add_argument("--level", default="beginner", metavar="TEXT", help="how hard the exercises are (beginner, intermediate, ...)")
+    p.add_argument("--words", default="3 to 6", metavar="TEXT", help="how many words a prefix has")
+    p.add_argument("--tutor-model", metavar="NAME",
+                   help=f"Ollama model that sets and marks the exercises (default: $RADIXNET_TUTOR_MODEL or {tutor_default_model})")
+    p.add_argument("--grader-model", metavar="NAME", help="a different Ollama model for the marking (default: the tutor model)")
+    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one Ollama answer (default: 120)")
+    group = p.add_argument_group("completion options")
+    group.add_argument("--mode", choices=TUTOR_MODES, default="dijkstra", help="how the network completes a prefix")
+    group.add_argument("--length", type=nonneg_int, default=20, help="characters the completion should reach")
+    group.add_argument("--max-length", type=pos_int, default=80, help="cap on the completion")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature (--mode sample and the extra attempts)")
+    group.add_argument("--no-to-end", action="store_true", help="stop at --length instead of finishing the sentence at END")
+    group.add_argument("--beam", type=pos_int, metavar="N", help="beam width (--mode beam)")
+    group = p.add_argument_group("marking options")
+    group.add_argument("--threshold", type=nonneg_float, default=6.0, help="mark out of 10 a sentence must reach to pass")
+    group.add_argument("--grammar-weight", type=nonneg_float, default=0.6,
+                       help="share of the mark that is grammar; the rest is spelling and fluency")
+    group.add_argument("--batch", type=pos_int, default=10, help="sentences marked in one Ollama call")
+    group.add_argument("--no-adapt", action="store_true", help="do not drill the previous round's weakest points")
+    group.add_argument("--drills", type=nonneg_int, default=0,
+                       help="extra correct example sentences per round, added to the fine-tune pass")
+    group.add_argument("--no-teach-answer", action="store_true",
+                       help="a failed lesson learns only the correction, not the teacher's own model answer")
+    group.add_argument("--dry-run", action="store_true", help="set and mark the exercises but train nothing and save nothing")
+    group = p.add_argument_group("2NRL options")
+    group.add_argument("--twonrl-per", choices=TUTOR_TWONRL_PER, default="round", help="learn once per round, or after every lesson")
+    group.add_argument("--min-weight", type=nonneg_float, default=0.25,
+                       help="negative-phase weight of a near miss (a hopeless sentence always weighs 1)")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (garbage) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (correction) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase (activation parameters use a tenth)")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
+    group.add_argument("--strength", type=nonneg_float, help="count model: reward / penalty per pass (radix: ignored)")
+    group.add_argument("--no-replay", action="store_true", help="do not keep teaching earlier corrections")
+    group.add_argument("--replay-limit", type=nonneg_int, default=64, help="corrections kept for the replay (0 = no limit)")
+    _add_checkpoint_options(p, "round")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, lessons, report card)")
+    p.set_defaults(handler=cmd_tutor)
 
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url

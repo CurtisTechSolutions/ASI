@@ -132,6 +132,12 @@ export const api = {
     return post(`/api/images/encode${query ? `?${query}` : ""}`, form);
   },
   imageDecode: (text, encoder) => post("/api/images/decode", encoder ? { text, encoder } : { text }),
+  /** English lessons (see TutorPanel): Ollama writes the prefix, the network completes it, Ollama marks it. */
+  tutor: () => get("/api/tutor"),
+  tutorStart: (body) => post("/api/tutor/start", body),
+  tutorHistory: () => get("/api/tutor/history"),
+  /** One round of exercises, completions and grades without training (a dry run). */
+  tutorLesson: (body) => post("/api/tutor/lesson", body),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama teacher / judge and 2NRL rewards. */
   codegenStart: (body) => post("/api/codegen/start", body),
   codegenHistory: () => get("/api/codegen/history"),

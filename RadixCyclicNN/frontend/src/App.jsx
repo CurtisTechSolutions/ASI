@@ -10,6 +10,7 @@ import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import EvolvePanel from "./components/EvolvePanel.jsx";
 import OllamaPanel from "./components/OllamaPanel.jsx";
+import TutorPanel from "./components/TutorPanel.jsx";
 import CodeGenPanel from "./components/CodeGenPanel.jsx";
 import ImagesPanel from "./components/ImagesPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
@@ -26,6 +27,7 @@ const TABS = [
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
   { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
   { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
+  { id: "tutor", label: "Tutor", Component: TutorPanel, pythonOnly: true },
   { id: "code", label: "Code", Component: CodeGenPanel, pythonOnly: true },
   { id: "images", label: "Images", Component: ImagesPanel, pythonOnly: true },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },

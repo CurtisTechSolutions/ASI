@@ -86,6 +86,16 @@ from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
 from .search import PathResult
+from .tutor import (
+    DEFAULT_TUTOR_MODEL,
+    ERROR_TYPES as TUTOR_ERROR_TYPES,
+    MODES as TUTOR_MODES,
+    TWONRL_PER as TUTOR_TWONRL_PER,
+    Exercise,
+    TutorConfig,
+    TutorTrainer,
+    report_card,
+)
 from .vision import VisionError
 from .vision import decode_text as decode_image_text
 from .vision import describe as describe_vision
@@ -281,6 +291,7 @@ class ModelService:
         self._job_ids = itertools.count(1)
         self._evolve_history: list[dict] = []
         self._codegen_history: list[dict] = []
+        self._tutor_history: list[dict] = []
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
@@ -509,16 +520,23 @@ class ModelService:
         neg_lr: float = 0.05,
         pos_lr: float = 0.01,
         strength: float | None = None,
+        bad_weights: list[float] | None = None,
+        good_weights: list[float] | None = None,
         **overrides: Any,
     ) -> dict:
-        """Start a ``2nrl`` job (``overrides``: batch_size, auto_compress, clip, shuffle; ``strength``: count model)."""
+        """Start a ``2nrl`` job (``overrides``: batch_size, auto_compress, clip, shuffle; ``strength``: count model).
+
+        ``bad_weights`` / ``good_weights`` scale the two phases per text: how
+        bad a failure is and how good a text is, rather than one rate for all.
+        """
         TrainConfig(epochs=neg_epochs, lr=neg_lr, **overrides).validate()
         TrainConfig(epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, **overrides).validate()
 
         def work(job: Job) -> None:
             self.model.two_nrl(
                 bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
-                progress=self._progress(job), stop_event=job.stop_event, strength=strength, **overrides,
+                progress=self._progress(job), stop_event=job.stop_event, strength=strength,
+                bad_weights=bad_weights, good_weights=good_weights, **overrides,
             )
 
         return self._start_job("2nrl", work)
@@ -532,6 +550,8 @@ class ModelService:
         neg_lr: float = 0.5,
         pos_lr: float = 0.1,
         strength: float | None = None,
+        good_weights: list[float] | None = None,
+        bad_weights: list[float] | None = None,
         **overrides: Any,
     ) -> dict:
         """Start a ``feedback`` job from rated texts (thumbs up = ``good``, thumbs down = ``bad``).
@@ -540,7 +560,9 @@ class ModelService:
         ``punish``.  For RadixNet that is 2NRL (bad, invert, good), a
         positive-phase pass, or a negative-phase pass followed by an
         inversion; the count / reward model penalises and rewards the paths
-        by ``strength`` instead.
+        by ``strength`` instead.  ``good_weights`` / ``bad_weights`` (one per
+        text) turn the thumbs into ratings: each text is learned in
+        proportion to how good or bad it was rated.
         """
         action = feedback_action(good, bad)
         if action is None:
@@ -553,17 +575,18 @@ class ModelService:
             if action == "2nrl":
                 self.model.two_nrl(
                     bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
-                    progress=progress, stop_event=job.stop_event, strength=strength, **overrides,
+                    progress=progress, stop_event=job.stop_event, strength=strength,
+                    bad_weights=bad_weights, good_weights=good_weights, **overrides,
                 )
             elif action == "reward":
                 self.model.reward(
-                    good, epochs=pos_epochs, lr=pos_lr, strength=strength, progress=progress, stop_event=job.stop_event,
-                    **overrides,
+                    good, epochs=pos_epochs, lr=pos_lr, strength=strength, weights=good_weights, progress=progress,
+                    stop_event=job.stop_event, **overrides,
                 )
             else:
                 self.model.punish(
-                    bad, epochs=neg_epochs, lr=neg_lr, strength=strength, progress=progress, stop_event=job.stop_event,
-                    **overrides,
+                    bad, epochs=neg_epochs, lr=neg_lr, strength=strength, weights=bad_weights, progress=progress,
+                    stop_event=job.stop_event, **overrides,
                 )
 
         return self._start_job("feedback", work)
@@ -997,6 +1020,25 @@ class ModelService:
     def codegen_history(self) -> dict:
         return {"history": list(self._codegen_history)}
 
+    # -- English lessons (Ollama sets and marks the exercises) ---------------
+
+    def start_tutor(self, config: TutorConfig, client: OllamaClient) -> dict:
+        """Start a ``tutor`` job: rounds of prefix -> completion -> grade -> 2NRL."""
+        config.validate()
+        manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+
+        def work(job: Job) -> None:
+            trainer = TutorTrainer(self.model, client, config, external=self.pause_lock)
+            trainer.run(
+                progress=self._progress(job, self._tutor_history), stop_event=job.stop_event,
+                checkpoint_manager=manager,
+            )
+
+        return self._start_job("tutor", work)
+
+    def tutor_history(self) -> dict:
+        return {"history": list(self._tutor_history)}
+
     # -- lifecycle -----------------------------------------------------------
 
     def shutdown(self, timeout: float = 10.0) -> None:
@@ -1232,6 +1274,21 @@ class Fields:
                 return []
             raise
 
+    def weights(self, name: str, count: int, scale: float = 1.0) -> list[float] | None:
+        """An optional list of ``count`` non-negative numbers (per-text ratings), divided by ``scale``."""
+        value = self._lookup(name)
+        if value is _MISSING or value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+            raise ApiError(400, f"'{name}' must be a list of numbers")
+        if len(value) != count:
+            raise ApiError(400, f"'{name}' has {len(value)} entries for {count} text(s)")
+        numbers = [float(v) / scale for v in value]
+        for number in numbers:
+            if not (number >= 0.0) or number != number:  # NaN and negatives
+                raise ApiError(400, f"'{name}' must hold numbers >= 0 (got {number * scale})")
+        return numbers
+
     def names(self, name: str) -> list[str]:
         """An optional list of non-empty strings (upload names); absent -> ``[]``."""
         value = self._lookup(name)
@@ -1426,6 +1483,20 @@ def _r_status(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.status()
 
 
+def _ratings(f: Fields, side: str, texts: list[str]) -> list[float] | None:
+    """Per-text weights of one side: ``<side>_weights`` (0..1 shares) or ``<side>_ratings`` (marks out of 10).
+
+    A rating says *how* good or bad each text is, so the network learns a
+    9-out-of-10 text nine tenths as hard as a perfect one instead of treating
+    every thumbs up alike.
+    """
+    weights = f.weights(f"{side}_weights", len(texts))
+    ratings = f.weights(f"{side}_ratings", len(texts), scale=10.0)
+    if weights is not None and ratings is not None:
+        raise ApiError(400, f"give '{side}_weights' or '{side}_ratings', not both")
+    return weights if weights is not None else ratings
+
+
 def feedback_action(good: list[str], bad: list[str]) -> str | None:
     """What rated texts lead to: ``"2nrl"`` (both), ``"reward"`` (good only), ``"punish"`` (bad only), ``None``."""
     if good and bad:
@@ -1452,6 +1523,8 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         )
     overrides = _train_overrides(f)
     overrides.setdefault("batch_size", 4)  # rated sets are small
+    good_weights = _ratings(f, "good", good)
+    bad_weights = _ratings(f, "bad", bad)
     job = svc.start_feedback(
         good, bad,
         neg_epochs=f.integer("neg_epochs", 2, minimum=0),
@@ -1459,9 +1532,14 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         neg_lr=f.number("neg_lr", 0.5, minimum=0.0),
         pos_lr=f.number("pos_lr", 0.1, minimum=0.0),
         strength=f.number("strength", None, minimum=0.0),
+        good_weights=good_weights,
+        bad_weights=bad_weights,
         **overrides,
     )
-    return 202, {"job": job, "action": action, "good": len(good), "bad": len(bad)}
+    return 202, {
+        "job": job, "action": action, "good": len(good), "bad": len(bad),
+        "good_weights": good_weights, "bad_weights": bad_weights,
+    }
 
 
 def _train_config(f: Fields) -> TrainConfig:
@@ -1579,6 +1657,8 @@ def _r_two_nrl(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         neg_lr=f.number("neg_lr", 0.05, minimum=0.0),
         pos_lr=f.number("pos_lr", 0.01, minimum=0.0),
         strength=f.number("strength", None, minimum=0.0),
+        bad_weights=_ratings(f, "bad", bad),
+        good_weights=_ratings(f, "good", good),
         **_train_overrides(f),
     )
     return 202, {"job": job}
@@ -2034,6 +2114,107 @@ def _r_codegen_run(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, {"run": run.to_dict(), "style": style.to_dict(), "verdict": verdict.to_dict()}
 
 
+def _default_tutor_model(svc: ModelService) -> str:
+    """``RADIXNET_TUTOR_MODEL`` when it is set, else the model the server was started with."""
+    return os.environ.get("RADIXNET_TUTOR_MODEL", "").strip() or svc.ollama_model
+
+
+def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
+    """The tutoring settings of a request body, defaults from :class:`~radixnet.tutor.TutorConfig`."""
+    d = TutorConfig()
+    config = TutorConfig(
+        topic=f.text("topic", d.topic),
+        rounds=f.integer("rounds", d.rounds, minimum=1),
+        exercises=f.integer("exercises", d.exercises, minimum=1),
+        attempts=f.integer("attempts", d.attempts, minimum=1),
+        focus=f.text("focus", None) or None,
+        level=f.text("level", d.level),
+        words=f.text("words", d.words),
+        tutor_model=f.text("tutor_model", None) or f.text("model", None) or _default_tutor_model(svc),
+        grader_model=f.text("grader_model", None) or None,
+        mode=f.text("mode", d.mode).strip().lower(),
+        length=f.integer("length", d.length, minimum=0),
+        max_length=f.integer("max_length", d.max_length, minimum=1),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        to_end=f.flag("to_end", d.to_end),
+        beam=f.integer("beam", None, minimum=1),
+        threshold=f.number("threshold", d.threshold, minimum=0.0),
+        grammar_weight=f.number("grammar_weight", d.grammar_weight, minimum=0.0),
+        batch=f.integer("batch", d.batch, minimum=1),
+        adapt=f.flag("adapt", d.adapt),
+        drills=f.integer("drills", d.drills, minimum=0),
+        teach_answer=f.flag("teach_answer", d.teach_answer),
+        learn=f.flag("learn", d.learn),
+        twonrl_per=f.text("twonrl_per", d.twonrl_per).strip().lower(),
+        min_weight=f.number("min_weight", d.min_weight, minimum=0.0),
+        neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
+        pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
+        neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
+        pos_lr=f.number("pos_lr", d.pos_lr, minimum=0.0),
+        batch_size=f.integer("batch_size", d.batch_size, minimum=1),
+        strength=f.number("strength", None, minimum=0.0),
+        replay=f.flag("replay", d.replay),
+        replay_limit=f.integer("replay_limit", d.replay_limit, minimum=0),
+        checkpoint_every=f.integer("checkpoint_every", d.checkpoint_every, minimum=0),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """What the tutor can be asked for: the teacher model, the marking vocabulary and every default."""
+    return 200, {
+        "url": svc.ollama_url,
+        "model": _default_tutor_model(svc),
+        "env_model": DEFAULT_TUTOR_MODEL,
+        "error_types": list(TUTOR_ERROR_TYPES),
+        "modes": list(TUTOR_MODES),
+        "twonrl_per": list(TUTOR_TWONRL_PER),
+        "defaults": TutorConfig().to_dict(),
+    }
+
+
+def _r_tutor_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    config = _tutor_config(f, svc)
+    client = svc.ollama_client(f.text("url", None), config.tutor_model, f.number("timeout", None, minimum=1.0))
+    job = svc.start_tutor(config, client)
+    return 202, {"job": job, "config": config.to_dict(), "url": client.url}
+
+
+def _r_tutor_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.tutor_history()
+
+
+def _r_tutor_lesson(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """One round of lessons without training: exercises, completions, grades and the report card."""
+    config = _tutor_config(f, svc)
+    client = svc.ollama_client(f.text("url", None), config.tutor_model, f.number("timeout", None, minimum=1.0))
+    given = f.texts_optional("prefixes", "prefix")
+    trainer = TutorTrainer(None, client, config)
+    try:
+        if given:
+            exercises = [
+                Exercise(id=f"e{i + 1}", prefix=prefix, focus=config.focus or "")
+                for i, prefix in enumerate(given[: config.exercises])
+            ]
+        else:
+            exercises = trainer.set_exercises(1)
+        with svc.session() as model:  # the search runs under the lock, the LLM calls do not
+            trainer.model = model
+            lessons = [trainer.complete(ex, attempt) for ex in exercises for attempt in range(config.attempts)]
+        trainer.grade(lessons)
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    return 200, {
+        "source": "given" if given else "ollama", "model": client.model, "url": client.url,
+        "config": config.to_dict(), "exercises": [e.to_dict() for e in exercises],
+        "lessons": [lesson.to_dict() for lesson in lessons], "report": report_card(lessons),
+    }
+
+
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats (with the active kind), current job, backend availability, paths"),
@@ -2060,9 +2241,13 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
      "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
-    ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
+    ("POST", "/api/2nrl", _r_two_nrl,
+     "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "
+     "bad_weights | bad_ratings, good_weights | good_ratings (per text: how bad / how good)}"),
     ("POST", "/api/feedback", _r_feedback,
-     "learn from rated texts: {good (thumbs up), bad (thumbs down), ...} -> 2NRL when both, reward on good alone, punish (negative phase + invert) on bad alone"),
+     "learn from rated texts: {good (thumbs up), bad (thumbs down), good_ratings / bad_ratings (marks out of 10, "
+     "or good_weights / bad_weights as 0..1 shares), ...} -> 2NRL when both, reward on good alone, punish "
+     "(negative phase + invert) on bad alone; every text is learned in proportion to its rating"),
     ("POST", "/api/invert", _r_invert, "invert the network"),
     ("POST", "/api/compress", _r_compress, "merge unary chains"),
     ("POST", "/api/evolve/start", _r_evolve_start,
@@ -2103,6 +2288,17 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/codegen/solve", _r_codegen_solve,
      "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
     ("POST", "/api/codegen/run", _r_codegen_run, "run a program in the sandbox: {code, tests, expected_output, sandbox_timeout, memory_mb}"),
+    ("GET", "/api/tutor", _r_tutor,
+     "the English tutor: the default teacher model, the error types a completion is marked with, the completion "
+     "modes and every default setting"),
+    ("POST", "/api/tutor/start", _r_tutor_start,
+     "start a tutor job - Ollama writes the prefixes, the network completes them, Ollama marks the grammar and "
+     "the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, "
+     "drills, adapt, twonrl_per: round|lesson, min_weight, neg_epochs, pos_epochs, neg_lr, pos_lr, tutor_model, ...}"),
+    ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
+    ("POST", "/api/tutor/lesson", _r_tutor_lesson,
+     "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "
+     "threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}
