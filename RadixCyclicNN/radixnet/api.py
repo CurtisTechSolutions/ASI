@@ -69,6 +69,7 @@ from .codegen import (
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, path_probability
+from .dialogue import DEFAULT_SPEAKERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
@@ -641,6 +642,33 @@ class ModelService:
         with self.session() as model:
             results = model.generate(**options)
         return {"samples": [_sample_dict(r) for r in results]}
+
+    def converse(self, opening: str = "", turns: int = 6, partner: str | None = None, **options: Any) -> dict:
+        """The active model converses with itself, or with the model of another kind kept in memory (``partner``)."""
+        with self.session() as model:
+            other: GraphModel | None = None
+            if partner and partner.strip().lower() != model.kind:
+                try:
+                    kind = model_class(partner).kind
+                except ValueError as exc:
+                    raise ApiError(400, str(exc)) from exc
+                other = self._parked.get(kind)
+                if other is None:
+                    raise ApiError(
+                        400, f"no {kind} model in memory to converse with; select that kind once to load it"
+                    )
+            try:
+                spoken = model.converse(opening, turns, partner=other, **options)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+        speakers = list(options.get("speakers") or DEFAULT_SPEAKERS)
+        return {
+            "kind": model.kind,
+            "partner": other.kind if other is not None else None,
+            "speakers": speakers,
+            "turns": [t.to_dict() for t in spoken],
+            "count": len(spoken),
+        }
 
     def score(self, text: str) -> dict:
         with self.session() as model:
@@ -1516,6 +1544,26 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     )
 
 
+def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    partner = f.text("partner", None)
+    return 200, svc.converse(
+        opening=f.text("opening", ""),
+        turns=f.integer("turns", 6, minimum=0),
+        partner=partner or None,
+        mode=f.text("mode", "beam"),
+        max_length=f.integer("max_length", 60, minimum=0),
+        context=f.integer("context", 12, minimum=0),
+        temperature=f.number("temperature", 1.0, minimum=0.0),
+        k=f.integer("k", 5, minimum=1),
+        beam=f.integer("beam", None, minimum=1),
+        step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
+        seed=f.integer("seed", None),
+        speakers=f.names("speakers") or list(DEFAULT_SPEAKERS),
+        history=f.texts_optional("history", "history_text"),
+        avoid_repeats=f.flag("avoid_repeats", True),
+    )
+
+
 def _r_score(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.score(f.text("text"))
 
@@ -2007,6 +2055,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
      "dijkstra, temperature, seed, prefix, step_penalty, beam}"),
+    ("POST", "/api/converse", _r_converse,
+     "the model converses with itself - each reply is the prediction search picking up the end of the previous "
+     "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
+     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
     ("POST", "/api/feedback", _r_feedback,

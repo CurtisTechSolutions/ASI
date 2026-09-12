@@ -545,6 +545,13 @@ class GraphModel:
         )
         return [_whole_text(result, prefix) for result in found.top]
 
+    def converse(self, opening: str = "", turns: int = 6, **options):
+        """The model converses with itself: two voices, each reply the prediction search picking up the end of
+        the previous line (:func:`radixnet.dialogue.converse`; ``partner=`` lets another model answer)."""
+        from .dialogue import converse
+
+        return converse(self, opening, turns, **options)
+
     def _edge_log_prob(self, p: int, offset: int, c: int) -> float | None:
         """``log P(c | p)`` for the edge ``p -> c`` taken from ``p``'s trigram at ``offset``.
 

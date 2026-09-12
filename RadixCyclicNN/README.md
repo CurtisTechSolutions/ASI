@@ -24,6 +24,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
+| The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -151,6 +152,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N` |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
+| `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up |
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
@@ -198,6 +200,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
 | `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
+| `POST /api/converse` | `{"opening","turns": 6,"mode": "beam"\|"sample","context": 12,"max_length": 60,"k": 5,"beam","temperature","step_penalty","seed","speakers": ["A","B"],"history": [utterances so far],"partner": kind in memory,"avoid_repeats": true}` -> `{"kind","partner","speakers","count","turns": [{"index","speaker","text","context","reply","cost","probability","reached_end","fresh","given","repeat","candidates","skipped","labels","node_ids","step_costs"}]}`; `history` continues a conversation (only the new turns come back) |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
@@ -230,7 +233,10 @@ rewards the shown text - a thumbs-up feedback job), Generate (whole texts from
 the prediction search - beam: the K most likely complete texts, optionally
 continuing a prefix; sample; dijkstra - with thumbs up / thumbs down ratings:
 "Train on ratings" runs 2NRL on them, thumbs down as the negative phase, thumbs
-up as the positive phase), Score, 2NRL,
+up as the positive phase), Converse (the model talks to itself in a chat
+view: an opening line, turns, context, beam / sample, the two voices' names,
+the other kind in memory as the second voice; Continue extends the
+conversation, and turns are rated like samples), Score, 2NRL,
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Code (code generation with the sandbox and the judge),
 Checkpoints (save / restore / load / reset) and a Graph view of the most

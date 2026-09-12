@@ -32,6 +32,7 @@ from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
+from .dialogue import DEFAULT_SPEAKERS, transcript
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 
 __all__ = ["main", "build_parser", "CliError", "EXIT_OK", "EXIT_ERROR", "EXIT_ABORTED"]
@@ -682,6 +683,42 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         "prefix": args.prefix,
         "max_length": args.max_length,
         "temperature": args.temperature,
+    }
+
+
+def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
+    model, _ = open_model(args, console, required=True)
+    partner = None
+    if args.partner:
+        if not os.path.isfile(args.partner):
+            raise CliError(f"partner model file not found: {args.partner}")
+        partner = load_model(args.partner, backend=args.backend, device=args.device)
+    speakers = [name.strip() for name in args.speakers.split(",") if name.strip()] or list(DEFAULT_SPEAKERS)
+    turns = model.converse(
+        args.opening, args.turns, mode=args.mode, max_length=args.max_length, context=args.context,
+        temperature=args.temperature, k=args.k, beam=args.beam, step_penalty=args.step_penalty, seed=args.seed,
+        speakers=speakers, partner=partner, avoid_repeats=not args.allow_repeats,
+    )
+    for turn in turns:
+        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given), ("repeat", turn.repeat)) if on]
+        console.say(f"{turn.speaker}: {turn.text}")
+        detail = f"    cost {fmt(turn.cost)}  p {fmt(turn.probability)}"
+        if turn.context:
+            detail += f"  picked up {quote(turn.context)}"
+        if flags:
+            detail += f"  [{', '.join(flags)}]"
+        console.say(detail)
+    if not turns:
+        console.say("(nothing to say: train the model first)")
+    return {
+        "turns": [t.to_dict() for t in turns],
+        "count": len(turns),
+        "speakers": speakers,
+        "mode": args.mode,
+        "opening": args.opening,
+        "kind": model.kind,
+        "partner_kind": partner.kind if partner is not None else None,
+        "transcript": transcript(turns),
     }
 
 
@@ -1628,6 +1665,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
     p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
     p.set_defaults(handler=cmd_generate)
+
+    # converse -------------------------------------------------------------
+    p = command(
+        "converse", "the model converses with itself",
+        "Two voices take turns; every reply is the prediction search picking up the last words of the\n"
+        "previous line (--context characters, at a word boundary) and continuing them to the end of a\n"
+        "text.  beam speaks the most likely continuation the conversation has not heard yet; sample draws\n"
+        "stochastic walks.  When nothing follows, the context loses a word at a time and finally the voice\n"
+        "changes the subject with a fresh text.  --partner FILE lets a second model answer.",
+    )
+    p.add_argument("--opening", default="", metavar="TEXT", help="the first line, spoken as given (default: a fresh text)")
+    p.add_argument("--turns", type=nonneg_int, default=6, help="turns to generate")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="how a reply is found")
+    p.add_argument("--max-length", type=nonneg_int, default=60, help="characters a reply may add to its context")
+    p.add_argument("--context", type=nonneg_int, default=12, help="characters of the previous line a reply picks up")
+    p.add_argument("--k", type=pos_int, default=5, help="candidates considered per turn (beam: the K most likely)")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * k, 16))")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam: extra cost per edge")
+    p.add_argument("--speakers", default=",".join(DEFAULT_SPEAKERS), metavar="A,B", help="names of the voices")
+    p.add_argument("--partner", metavar="FILE", help="a second model file that speaks the second voice")
+    p.add_argument("--allow-repeats", action="store_true", help="do not skip continuations the conversation already heard")
+    p.set_defaults(handler=cmd_converse)
 
     # score ----------------------------------------------------------------
     p = command(

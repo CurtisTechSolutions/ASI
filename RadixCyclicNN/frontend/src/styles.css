@@ -1254,3 +1254,75 @@ fieldset.schedule code {
   color: var(--muted, #6b7280);
   margin-top: 0.25rem;
 }
+
+/* Converse tab: the model talking to itself */
+ol.dialogue {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+ol.dialogue li.turn {
+  display: flex;
+  flex-direction: column;
+  max-width: 88%;
+}
+
+ol.dialogue li.turn.b {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+ol.dialogue li.end {
+  height: 0;
+  margin: 0;
+}
+
+ol.dialogue .speaker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+ol.dialogue .bubble {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+ol.dialogue li.turn.a .bubble {
+  border-bottom-left-radius: 4px;
+}
+
+ol.dialogue li.turn.b .bubble {
+  border-bottom-right-radius: 4px;
+  background: rgba(47, 95, 216, 0.08);
+}
+
+ol.dialogue .bubble .context {
+  color: var(--muted);
+}
+
+ol.dialogue .meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+ol.dialogue li.rated.up .bubble {
+  border-left: 3px solid #16a34a;
+}
+
+ol.dialogue li.rated.down .bubble {
+  border-left: 3px solid #dc2626;
+}

@@ -266,6 +266,34 @@ class TestInference(unittest.TestCase):
         self.assertEqual(prefixed["prefix"], "the ")
         self.assertTrue(all(s["text"].startswith("the ") and s["full_text"] == s["text"] for s in prefixed["samples"]))
 
+    def test_converse(self):
+        doc = run_json("converse", "--opening", "the cat sat on the mat", "--turns", 4, model=MODEL)
+        self.assertEqual((doc["count"], doc["mode"], doc["kind"], doc["partner_kind"]), (5, "beam", "radix", None))
+        self.assertEqual((doc["opening"], doc["speakers"]), ("the cat sat on the mat", ["A", "B"]))
+        turns = doc["turns"]
+        self.assertTrue(turns[0]["given"])
+        self.assertEqual([t["speaker"] for t in turns], ["A", "B", "A", "B", "A"])
+        for previous, turn in zip(turns, turns[1:]):
+            if not turn["fresh"]:
+                words, wanted = previous["text"].split(), turn["context"].split()
+                self.assertTrue(any(words[j:j + len(wanted)] == wanted for j in range(len(words))), (words, wanted))
+                self.assertEqual(turn["text"], turn["context"] + turn["reply"])
+        self.assertEqual(doc["transcript"], "\n".join(f"{t['speaker']}: {t['text']}" for t in turns))
+        human = run_cli("converse", "--opening", "the cat sat on the mat", "--turns", 2, model=MODEL, json_mode=False).stdout
+        self.assertIn("A: the cat sat on the mat", human)
+        self.assertIn("[given]", human)
+        self.assertIn("B: ", human)
+        self.assertRegex(human, r"cost \S+\s+p \S+")
+        named = run_json("--seed", 5, "converse", "--turns", 3, "--mode", "sample", "--speakers", "cat, dog", model=MODEL)
+        self.assertEqual((named["speakers"], [t["speaker"] for t in named["turns"]]), (["cat", "dog"], ["cat", "dog", "cat"]))
+        again = run_json("--seed", 5, "converse", "--turns", 3, "--mode", "sample", "--speakers", "cat, dog", model=MODEL)
+        self.assertEqual(named["transcript"], again["transcript"])
+        partner = run_json("converse", "--turns", 3, "--partner", MODEL, "--allow-repeats", model=MODEL)
+        self.assertEqual((partner["partner_kind"], partner["count"]), ("radix", 3))
+        self.assertEqual(run_json("converse", "--turns", 0, model=MODEL)["turns"], [])
+        proc = run_cli("converse", "--partner", os.path.join(TMP.name, "missing.json"), model=MODEL, expect=1)
+        self.assertIn("partner model file not found", proc.stderr)
+
     def test_score(self):
         good = run_json("score", "--text", "the cat sat on the mat", model=MODEL)
         self.assertEqual(good["count"], 1)

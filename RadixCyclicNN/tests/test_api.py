@@ -545,6 +545,47 @@ class TestEndpoints(unittest.TestCase):
         status, data, _ = self.client.post("/api/generate", {"mode": "beam", "beam": 0})
         self.assertEqual(status, 400)
 
+    def test_converse(self):
+        status, data, _ = self.client.post("/api/converse", {"opening": "the cat sat on the mat", "turns": 4})
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["kind"], data["partner"], data["speakers"]), ("radix", None, ["A", "B"]))
+        self.assertEqual(data["count"], len(data["turns"]))
+        self.assertEqual(data["count"], 5)
+        turns = data["turns"]
+        self.assertEqual((turns[0]["speaker"], turns[0]["text"], turns[0]["given"]), ("A", "the cat sat on the mat", True))
+        for i, turn in enumerate(turns):
+            self.assertEqual(turn["index"], i)
+            self.assertEqual(turn["speaker"], "AB"[i % 2])
+            self.assertTrue({"text", "context", "reply", "cost", "probability", "fresh", "given", "repeat",
+                             "candidates", "skipped", "labels", "node_ids", "step_costs", "reached_end"} <= set(turn))
+            if i and not turn["fresh"]:
+                words, wanted = turns[i - 1]["text"].split(), turn["context"].split()
+                self.assertTrue(any(words[j:j + len(wanted)] == wanted for j in range(len(words))), (words, wanted))
+                self.assertEqual(turn["text"], turn["context"] + turn["reply"])
+        texts = [t["text"] for t in turns]
+        self.assertEqual(len(set(texts)), len(texts))
+        # continue: the history is picked up, indices and speakers carry on
+        status, more, _ = self.client.post("/api/converse", {"turns": 2, "history": texts, "speakers": ["me", "you"]})
+        self.assertEqual(status, 200, more)
+        self.assertEqual([(t["index"], t["speaker"]) for t in more["turns"]], [(5, "you"), (6, "me")])
+        self.assertEqual(more["speakers"], ["me", "you"])
+        status, sampled, _ = self.client.post("/api/converse", {"turns": 3, "mode": "sample", "seed": 3, "max_length": 20})
+        status2, sampled2, _ = self.client.post("/api/converse", {"turns": 3, "mode": "sample", "seed": 3, "max_length": 20})
+        self.assertEqual((status, status2), (200, 200))
+        self.assertEqual(sampled, sampled2)
+        self.assertEqual(sampled["count"], 3)
+        status, data, _ = self.client.post("/api/converse", {"turns": 0})
+        self.assertEqual((status, data["count"], data["turns"]), (200, 0, []))
+        # errors
+        for body in ({"mode": "nope"}, {"k": 0}, {"turns": -1}, {"partner": "nope"}, {"partner": "count"},
+                     {"speakers": ["", "B"]}, {"history": "not a list"}, {"opening": 5}):
+            with self.subTest(body=body):
+                status, data, _ = self.client.post("/api/converse", body)
+                self.assertEqual(status, 400, data)
+                self.assertIn("error", data)
+        status, data, _ = self.client.post("/api/converse", {"partner": "count"})
+        self.assertIn("in memory", data["error"])
+
     def test_score(self):
         status, good, _ = self.client.post("/api/score", {"text": CORPUS[0]})
         self.assertEqual(status, 200)

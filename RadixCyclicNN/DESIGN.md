@@ -48,6 +48,7 @@ RadixCyclicNN/
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
+    dialogue.py             Turn, converse - the model conversing with itself (section 22)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -503,6 +504,7 @@ output only, one JSON document on stdout).
 | `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
 | `score` | `--text` or `--data FILE` | log-prob per text |
+| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat); JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `transcript` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
 | `compress` | `--out` | compresses and saves, prints merges |
@@ -536,6 +538,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/job/stop` | | sets the stop event; returns job status |
 | POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
+| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()]}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned (section 22) |
 | POST `/api/score` | `{"text"}` | score dict |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
@@ -576,7 +579,9 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `StatusBar.jsx` — polls `/api/status` every 2s: nodes, edges, trigrams, compression ratio, inverted flag, backend/device, job state + latest progress.
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
 * `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
-* `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability.
+* `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`).
+* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`); Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat), and every turn has the thumbs.
+* `RatingsCard.jsx` — shared by Generate and Converse: `useRatings()` (one rating per distinct text, toggling), `RateButtons` (the thumbs pair) and the "Ratings → 2NRL" card (rated texts, the action that will run, epochs / learning rates / strength, Train on ratings → `POST /api/feedback` through the panel's `useJob("feedback")`, the job's phase table).
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
@@ -598,7 +603,8 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_checkpoint.py` — rotation, latest pointer, load_latest, resume.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
-* `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
+* `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
+* `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 
 ---
 
@@ -886,3 +892,36 @@ stores it as an upload so several images can be trained on together), `POST /api
 encode | decode`. Frontend: the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image
 side by side with the original; train on it; save as upload; decode any pasted text such as a prediction).
 Dependencies: `pip install radixnet[images]` (pillow) or `radixnet[diffusion]` (pillow, torch, diffusers).
+
+## 22. The model conversing with itself (`dialogue.py`) — replies are predictions picking up the last words
+
+`converse(model, opening="", turns=6, mode="beam", max_length=60, context=12, temperature=1.0, k=5, beam=None,
+step_penalty=0.0, seed=None, speakers=("A", "B"), history=(), partner=None, avoid_repeats=True) -> list[Turn]`
+(also `GraphModel.converse(opening, turns, **options)`). Two voices take turns; the voice of turn `i` is
+`speakers[i % len(speakers)]` and its model `model` for even `i`, `partner or model` for odd `i`, so the radix and
+the count model can talk to each other. A given `opening` is spoken as turn 0 (`given=True`, its cost is
+`-score(opening).log_prob`); `history` holds the utterances of a conversation being continued (indices and voices
+carry on, only the new turns are returned).
+
+Every reply is the prediction search run from the end of what was just said:
+
+1. `tail_context(previous, context)` — the last `context` characters of the previous line, cut forward to a word
+   boundary when a word straddles the cut ("t on the mat" → "on the mat"; a single long word keeps its tail).
+2. The context is *usable* when `_prefix_start` locates its last trigram whole (a node other than START and no
+   guessed partial-trigram lead). Then `predict(context, length=0, mode="beam", k, beam, to_end=True, max_length,
+   step_penalty)` offers the `k` most likely complete continuations (`"sample"`: one stochastic walk per draw, up to
+   `k` draws; `seed` gives the dialogue a private RNG). The first candidate that adds something (a non-empty
+   continuation) and, with `avoid_repeats`, is neither an utterance the conversation already heard nor an *echo*
+   (a piece of the previous line) is spoken: `text = context + continuation`.
+3. Nothing (new) follows, or the context is not usable → the context loses its last word (`_shorter`) and the
+   search runs again — what else could follow "on the"? — until it is empty.
+4. Still nothing → the voice changes the subject: the same search from START (`fresh=True`); when even that only
+   offers repeats the best repeat is spoken and flagged `repeat=True`. A voice with nothing at all to say (an
+   untrained model) ends the conversation early.
+
+A `Turn` records `index`, `speaker`, `text`, the `context` it picked up, the `reply` it added, `cost`,
+`probability` (`exp(-cost)`), `reached_end`, `fresh`, `given`, `repeat`, `candidates` (continuations offered) and
+`skipped` (rejected before the spoken one), plus the path (`labels`, `node_ids`, `step_costs`); `transcript(turns)`
+renders `speaker: text` lines. Beam conversations are deterministic and never repeat themselves; the CLI `converse`
+command, `POST /api/converse` (`ModelService.converse`, `partner` = another kind in memory) and the Converse tab
+expose it, and turns are rated with the same thumbs as generated samples (`RatingsCard.jsx`).

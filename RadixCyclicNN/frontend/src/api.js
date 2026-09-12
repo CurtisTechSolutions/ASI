@@ -85,6 +85,8 @@ export const api = {
   stopJob: () => post("/api/job/stop"),
   predict: (body) => post("/api/predict", body),
   generate: (body) => post("/api/generate", body),
+  /** The model converses with itself (or with the other kind in memory): turns of a dialogue. */
+  converse: (body) => post("/api/converse", body),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),
   /** Rated texts -> 2NRL (both kinds), reward (thumbs up only) or punish (thumbs down only). */
