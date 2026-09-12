@@ -763,9 +763,19 @@ whatever kind a file holds. `RadixNet.reward` / `punish` are the thumbs-up / thu
 pass; a negative-phase pass followed by `invert`) that the API, the CLI `feedback` command and the codegen trainer
 call instead of spelling the rule out themselves.
 
-`CountRewardGraph(RadixCyclicGraph)` keeps a third per-edge list, `edge_reward`, next to `edge_w` / `edge_count`,
-and derives every weight from the two tracked numbers: `weight(count, reward) = count_scale * log1p(count) +
-reward_scale * reward`. Every node is created with `a = 0, k = 1`, so the sine activation is the constant 1 and the
+`CountRewardGraph(RadixCyclicGraph)` keeps more per-edge lists next to `edge_w` / `edge_count`: `edge_reward` and
+`window_edge_count` (traversals inside a sliding window, a deque `_window` of the last `window` edge ids traversed
+anywhere in the graph, default 10 000), plus the global `total_traversals`. `observe_sequence(count=True)` is
+overridden to `record_traversals` (all time, window, total) and recompute the weights. The weight is the *dual
+frequency function* (`edge_weight`): with `C_p` / `W_p` the all-time / windowed traversals leaving the parent over
+its `deg` children and `s = 0.5`, `R_all = (count + s) / (C_p + s * deg)`, `R_recent = (window_count + s) /
+(W_p + s * deg)`, `weight = count_scale * log1p(count) + global_scale * log(R_all) + window_scale * log(R_recent) +
+reward_scale * reward` (defaults 0, 0.5, 0.5, 1: the geometric mean of the two shares, so when they agree the
+probability is the share) - the edge's share of its node's traversals, all time and recently, with the rewards. `recompute_weights()` walks every parent once (O(E)); `shares(p)` reports
+the two ratios per edge for the graph view; `configure(**scales, window=)` changes the function at run time (the
+window is trimmed when shrunk) and `weight_config()` describes it. `to_dict` stores the scales, `total_traversals`
+and the window's edge ids (remapped like the edges); `from_dict` rebuilds the window counts from them, and a file
+from before the dual function loads with `count_scale = 1, global_scale = window_scale = 0` so it behaves as it did. Every node is created with `a = 0, k = 1`, so the sine activation is the constant 1 and the
 base class's score `w * f_p * f_c` is the weight itself: `child_probs`, `child_costs`, Dijkstra, sampling, `split`
 (the new internal edge gets the node's count and reward 0) and `merge_child` (activation ratios are 1) work
 unchanged. `add_reward(edge_ids, amount)` and `recompute_weights()` keep `edge_w` in sync and bump `version` so the

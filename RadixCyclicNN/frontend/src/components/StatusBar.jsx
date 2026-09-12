@@ -104,6 +104,11 @@ export default function StatusBar({ onStatus }) {
           rewards <b>+{fmtNum(s.edge_reward_positive, 1)}</b> / <b>{fmtNum(s.edge_reward_negative, 1)}</b>
         </span>
       ) : null}
+      {s.kind === "count" ? (
+        <span className="stat" title="Traversals counted all time, and how many of them the sliding window still holds">
+          traversals <b>{fmtInt(s.total_traversals)}</b> · window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
+        </span>
+      ) : null}
       <span className={`stat job ${jobState}`}>
         job{" "}
         <b>

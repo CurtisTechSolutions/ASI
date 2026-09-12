@@ -879,6 +879,39 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
+    model, origin = open_model(args, console, required=True)
+    if model.kind != "count":
+        raise CliError(f"{args.model} holds a {model.kind} model; the weight function belongs to the count model (--kind count)")
+    options = {
+        "count_scale": args.count_scale, "global_scale": args.global_scale, "window_scale": args.window_scale,
+        "reward_scale": args.reward_scale, "window": args.window,
+    }
+    changes = {k: v for k, v in options.items() if v is not None}
+    saved = None
+    if changes:
+        try:
+            model.configure_weights(**changes)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        saved = save_model(model, args.out or args.model)
+    config = model.weight_config()
+    stats = model.stats()
+    console.pairs([
+        ("model", origin.describe()),
+        ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
+        ("count_scale", config["count_scale"]),
+        ("global_scale", config["global_scale"]),
+        ("window_scale", config["window_scale"]),
+        ("reward_scale", config["reward_scale"]),
+        ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        ("total traversals", stats["total_traversals"]),
+        ("changed", ", ".join(f"{k}={v}" for k, v in changes.items()) if changes else "nothing"),
+        ("saved", saved["path"] if saved else "-"),
+    ])
+    return {"weights": config, "changed": changes, "saved": saved, "stats": stats}
+
+
 def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     """Learn from rated texts: 2NRL when both kinds are given, reward on good alone, punish on bad alone."""
     good = list(args.good_text or [])
@@ -1061,7 +1094,12 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
         ("last loss", stats["last_loss"]),
         *([("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
                        f"{stats['feedback_passes']} feedback pass(es); edge rewards +{fmt(stats['edge_reward_positive'])} "
-                       f"/ {fmt(stats['edge_reward_negative'])}")] if model.kind == "count" else []),
+                       f"/ {fmt(stats['edge_reward_negative'])}"),
+           ("traversals", f"{stats['total_traversals']} total, {stats['window_traversals']} inside the sliding window "
+                          f"of {stats['window']}"),
+           ("weights", f"global_scale={fmt(stats['global_scale'])} window_scale={fmt(stats['window_scale'])} "
+                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])}")]
+          if model.kind == "count" else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -1670,6 +1708,24 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--encoder", choices=("sd", "tiny"), help="override the encoder named in the text")
     a.add_argument("--out", required=True, metavar="PNG", help="where to write the image")
     a.set_defaults(handler=cmd_image_decode)
+
+    # weights --------------------------------------------------------------
+    p = command(
+        "weights", "count model: show or change the dual frequency weight function",
+        "The count / reward model weighs an edge by its share of its node's traversals - all time and inside a\n"
+        "sliding window of the last --window traversals - plus its rewards:\n"
+        "  weight = global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward\n"
+        "         (+ count_scale * log(1 + count), off by default).\n"
+        "Without options the current function and the tracked totals are shown; with options the model is\n"
+        "changed, every weight recomputed and the model saved.",
+    )
+    p.add_argument("--count-scale", type=float, metavar="X", help="weight of log(1 + traversals)")
+    p.add_argument("--global-scale", type=float, metavar="X", help="weight of the all-time share log(R_all)")
+    p.add_argument("--window-scale", type=float, metavar="X", help="weight of the sliding-window share log(R_recent)")
+    p.add_argument("--reward-scale", type=float, metavar="X", help="weight of the rewards")
+    p.add_argument("--window", type=pos_int, metavar="N", help="traversals the sliding window remembers")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_weights)
 
     # feedback -------------------------------------------------------------
     p = command(

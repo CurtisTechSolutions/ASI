@@ -50,6 +50,64 @@ export default function TrainPanel({ status }) {
 
   const otherJobRunning = jobIsRunning(status) && !running;
   const countKind = Boolean(status && status.kind === "count");
+  const [weights, setWeights] = useState({ count_scale: "", global_scale: "", window_scale: "", reward_scale: "", window: "" });
+  const [weightsLoaded, setWeightsLoaded] = useState(false);
+  const [weightsBusy, setWeightsBusy] = useState(false);
+  const [weightsNotice, setWeightsNotice] = useState(null);
+  const [weightsError, setWeightsError] = useState(null);
+
+  // The count model's current weight function (once the status says the count model is active).
+  useEffect(() => {
+    if (!countKind || weightsLoaded) return undefined;
+    let alive = true;
+    api
+      .model()
+      .then((info) => {
+        if (!alive || !info || !info.weights) return;
+        const w = info.weights;
+        setWeights({
+          count_scale: String(w.count_scale ?? ""),
+          global_scale: String(w.global_scale ?? ""),
+          window_scale: String(w.window_scale ?? ""),
+          reward_scale: String(w.reward_scale ?? ""),
+          window: String(w.window ?? ""),
+        });
+        setWeightsLoaded(true);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [countKind, weightsLoaded]);
+
+  useEffect(() => {
+    if (!countKind) setWeightsLoaded(false);
+  }, [countKind]);
+
+  async function applyWeights() {
+    setWeightsBusy(true);
+    setWeightsError(null);
+    setWeightsNotice(null);
+    try {
+      const data = await api.modelWeights({
+        count_scale: parseNumber(weights.count_scale, 0),
+        global_scale: parseNumber(weights.global_scale, 0.5),
+        window_scale: parseNumber(weights.window_scale, 0.5),
+        reward_scale: parseNumber(weights.reward_scale, 1),
+        window: parseInteger(weights.window, 10000),
+      });
+      const w = data && data.weights ? data.weights : null;
+      setWeightsNotice(
+        w
+          ? `Applied: global ${w.global_scale}, window ${w.window_scale}, reward ${w.reward_scale}, count ${w.count_scale}; window of ${w.window} traversals. Every edge weight was recomputed.`
+          : "Applied.",
+      );
+    } catch (err) {
+      setWeightsError(err.message);
+    } finally {
+      setWeightsBusy(false);
+    }
+  }
   const scheduled = !countKind && (lrSchedule.trim() !== "" || actLrSchedule.trim() !== "");
 
   const loadHistory = useCallback(async () => {
@@ -290,6 +348,36 @@ export default function TrainPanel({ status }) {
             </div>
           ) : null}
         </fieldset>
+        {countKind ? (
+          <fieldset className="schedule">
+            <legend>Weight function (dual frequency + rewards)</legend>
+            <p className="muted">
+              An edge is weighed by its <b>share of its node's traversals</b> twice: over the whole history
+              (global) and inside a <b>sliding window</b> of the last N traversals seen anywhere in the graph
+              (recent) - each smoothed by 0.5 and compared against the node's total - plus its rewards:
+              <code> global_scale · log(R_all) + window_scale · log(R_recent) + reward_scale · reward</code>
+              {" "}(+ <code>count_scale · log(1 + traversals)</code>, off by default). Probabilities follow
+              <code> R_all^global · R_recent^window · e^reward</code>; with the default 0.5 / 0.5 that is the
+              geometric mean of the two shares, so when history and the window agree the probability is the share.
+            </p>
+            <div className="row">
+              <NumberField label="Global scale" hint="all-time share" value={weights.global_scale} onChange={(v) => setWeights({ ...weights, global_scale: v })} disabled={running || weightsBusy} />
+              <NumberField label="Window scale" hint="recent share" value={weights.window_scale} onChange={(v) => setWeights({ ...weights, window_scale: v })} disabled={running || weightsBusy} />
+              <NumberField label="Reward scale" value={weights.reward_scale} onChange={(v) => setWeights({ ...weights, reward_scale: v })} disabled={running || weightsBusy} />
+            </div>
+            <div className="row">
+              <NumberField label="Count scale" hint="log(1 + traversals), 0 = off" value={weights.count_scale} onChange={(v) => setWeights({ ...weights, count_scale: v })} disabled={running || weightsBusy} />
+              <NumberField label="Window" hint="traversals remembered" value={weights.window} onChange={(v) => setWeights({ ...weights, window: v })} min={1} step={1} disabled={running || weightsBusy} />
+            </div>
+            <div className="actions">
+              <button type="button" className="small" disabled={running || weightsBusy || otherJobRunning} onClick={applyWeights}>
+                {weightsBusy ? "Applying…" : "Apply weight function"}
+              </button>
+            </div>
+            {weightsNotice ? <p className="muted">{weightsNotice}</p> : null}
+            <Alert message={weightsError} onDismiss={() => setWeightsError(null)} />
+          </fieldset>
+        ) : null}
         <CheckField
           label="Auto-compress after each epoch"
           checked={autoCompress}

@@ -1,22 +1,33 @@
 """CountRewardNet - the count / reward model: a second algorithm on the same self-compressing graph.
 
-Every edge keeps two numbers: ``count`` - how many times a training pass
-traversed the path through it - and ``reward`` - the sum of the rewards (+)
-and penalties (-) it received from feedback (thumbs up / down, 2NRL, the
-code-generation judge, the adversarial review ...).  The edge weight is a
-fixed function of the two::
+Every edge keeps several numbers: ``count`` - how many times a training pass
+traversed the path through it, all time -, its traversals inside a *sliding
+window* of the last ``window`` traversals seen anywhere in the graph, and
+``reward`` - the sum of the rewards (+) and penalties (-) it received from
+feedback (thumbs up / down, 2NRL, the code-generation judge, the adversarial
+review ...).  The graph keeps the global totals (``total_traversals``,
+``window_traversals``).  The edge weight is a *dual frequency function*:
+each count is compared against the node the edge leaves, as a ratio, once
+over the whole history and once inside the window::
 
-    weight = count_scale * log(1 + count) + reward_scale * reward
+    R_all    = (count + 0.5) / (traversals leaving the node + 0.5 * children)
+    R_recent = the same ratio inside the sliding window
+    weight   = global_scale * log(R_all) + window_scale * log(R_recent)
+             + reward_scale * reward   (+ count_scale * log(1 + count), off by default)
+
+with ``global_scale = window_scale = 0.5`` by default (the geometric mean of
+the two shares: when history and the window agree, the probability is the
+share itself),
 
 and a parent's children are drawn by a softmax over those weights: every
 node's activation is the constant 1 (``a = 0, k = 1`` in the sine
 parameters), so the graph's edge score ``w * f_parent * f_child`` is the
-weight itself and ``P(child | parent) ∝ (1 + count) ** count_scale *
-exp(reward_scale * reward)``.  There is no gradient and no learning rate:
-training counts traversals, feedback moves rewards, ``invert`` flips the
-sign of every reward, and prediction is a beam search that returns the K most
-likely *and* the K least likely continuations of one prefix in a single call
-(:class:`~radixnet.beam.Prediction`).
+weight itself and ``P(child | parent) ∝ R_all ** global_scale * R_recent **
+window_scale * exp(reward_scale * reward)``.  There is no gradient and no
+learning rate: training counts traversals (and slides the window), feedback
+moves rewards, ``invert`` flips the sign of every reward, and prediction is a
+beam search that returns the K most likely *and* the K least likely
+continuations of one prefix in a single call (:class:`~radixnet.beam.Prediction`).
 """
 
 from __future__ import annotations
@@ -24,6 +35,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections import deque
 from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_B, DEFAULT_H
@@ -50,48 +62,178 @@ _MAX_LOG_PPL = 700.0
 
 
 class CountRewardGraph(RadixCyclicGraph):
-    """A :class:`RadixCyclicGraph` whose edge weights are ``count_scale * log(1 + count) + reward_scale * reward``.
+    """A :class:`RadixCyclicGraph` whose edge weights come from a *dual frequency function* plus rewards.
 
-    Activations are the constant 1 on every node, so the base class's scores,
-    probabilities, costs, Dijkstra / sampling walks, splits and merges all
-    work unchanged; only how a weight comes about differs.  ``edge_reward``
-    is a parallel list indexed by edge id like ``edge_w`` / ``edge_count``.
+    Every edge keeps several numbers: ``edge_count`` (all-time traversals),
+    ``window_edge_count`` (traversals inside the sliding window of the last
+    ``window`` traversals seen anywhere in the graph) and ``edge_reward``;
+    the graph keeps the global totals ``total_traversals`` and
+    ``window_traversals``.  The two frequencies are compared against the
+    *node* the edge leaves: with ``C_p`` / ``W_p`` the all-time / windowed
+    traversals leaving parent ``p`` over its ``deg`` children and the
+    smoothing ``s = 0.5``::
+
+        R_all    = (count + s) / (C_p + s * deg)          # the edge's share of the node's traversals, all time
+        R_recent = (window_count + s) / (W_p + s * deg)   # the same share inside the sliding window
+        weight   = count_scale * log(1 + count) + global_scale * log(R_all)
+                 + window_scale * log(R_recent) + reward_scale * reward
+
+    so ``P(child | parent) ∝ R_all ** global_scale * R_recent ** window_scale * exp(reward_scale * reward)``
+    (times ``(1 + count) ** count_scale``, off by default): what a node did
+    over its whole life and what it did recently, each as a ratio, decide
+    together.  The default scales ``0.5`` / ``0.5`` make that the geometric
+    mean of the two shares - when they agree the probability *is* the share;
+    raise one to trust history or recency more.  Activations are the constant 1 on every node, so the base
+    class's scores, probabilities, costs, Dijkstra / sampling walks, splits
+    and merges all work unchanged; only how a weight comes about differs.
     """
 
-    def __init__(self, seed: int = 0, count_scale: float = 1.0, reward_scale: float = 1.0) -> None:
+    SMOOTHING = 0.5
+
+    def __init__(
+        self,
+        seed: int = 0,
+        count_scale: float = 0.0,
+        reward_scale: float = 1.0,
+        global_scale: float = 0.5,
+        window_scale: float = 0.5,
+        window: int = 10_000,
+    ) -> None:
         self.count_scale = float(count_scale)
         self.reward_scale = float(reward_scale)
+        self.global_scale = float(global_scale)
+        self.window_scale = float(window_scale)
+        self.window = int(window)
+        if self.window < 1:
+            raise ValueError(f"window must be >= 1, got {window}")
         self.edge_reward: list[float] = []
+        self.window_edge_count: list[int] = []
+        self._window: deque[int] = deque()
+        self.total_traversals = 0
         super().__init__(seed)
+
+    # -- the tracked numbers -------------------------------------------------
+
+    @property
+    def window_traversals(self) -> int:
+        """Traversals currently inside the sliding window."""
+        return len(self._window)
+
+    def record_traversals(self, transitions: Iterable[tuple[int, int]]) -> int:
+        """Count traversals of the ``(parent, edge)`` transitions: all time, in the window and globally."""
+        window = self._window
+        wcount = self.window_edge_count
+        limit = self.window
+        n = 0
+        for _p, e in transitions:
+            window.append(e)
+            wcount[e] += 1
+            n += 1
+            if len(window) > limit:
+                old = window.popleft()
+                if old < len(wcount) and wcount[old] > 0:
+                    wcount[old] -= 1
+        self.total_traversals += n
+        return n
+
+    def observe_sequence(self, trigrams, count: bool = True) -> list[tuple[int, int]]:
+        transitions = super().observe_sequence(trigrams, count)
+        if count and transitions:
+            self.record_traversals(transitions)
+            self.recompute_weights()
+        return transitions
+
+    def configure(self, **options: float) -> dict:
+        """Change scales / the window size (``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``,
+        ``window``) and recompute every weight; returns :meth:`weight_config`."""
+        for name, value in options.items():
+            if name not in ("count_scale", "global_scale", "window_scale", "reward_scale", "window"):
+                raise ValueError(f"unknown weight option {name!r}")
+            if value is None:
+                continue
+            if name == "window":
+                size = int(value)
+                if size < 1:
+                    raise ValueError(f"window must be >= 1, got {value}")
+                self.window = size
+                while len(self._window) > size:
+                    old = self._window.popleft()
+                    if old < len(self.window_edge_count) and self.window_edge_count[old] > 0:
+                        self.window_edge_count[old] -= 1
+            else:
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError(f"{name} must be a finite number, got {value}")
+                setattr(self, name, number)
+        self.recompute_weights()
+        return self.weight_config()
+
+    def weight_config(self) -> dict:
+        return {
+            "function": "dual-frequency",
+            "count_scale": self.count_scale,
+            "global_scale": self.global_scale,
+            "window_scale": self.window_scale,
+            "reward_scale": self.reward_scale,
+            "window": self.window,
+            "smoothing": self.SMOOTHING,
+        }
 
     # -- the weight function -------------------------------------------------
 
-    def weight(self, count: float, reward: float) -> float:
-        """The edge weight function of the two tracked numbers."""
-        return self.count_scale * math.log1p(max(0.0, float(count))) + self.reward_scale * float(reward)
+    def edge_weight(
+        self, count: float, reward: float, parent_total: float, degree: int, window_count: float, window_total: float
+    ) -> float:
+        """The dual frequency function for one edge (see the class docstring)."""
+        s = self.SMOOTHING
+        count = max(0.0, float(count))
+        window_count = max(0.0, float(window_count))
+        degree = max(1, int(degree))
+        r_all = (count + s) / (max(0.0, float(parent_total)) + s * degree)
+        r_recent = (window_count + s) / (max(0.0, float(window_total)) + s * degree)
+        return (
+            self.count_scale * math.log1p(count)
+            + self.global_scale * math.log(r_all)
+            + self.window_scale * math.log(r_recent)
+            + self.reward_scale * float(reward)
+        )
+
+    def shares(self, p: int) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, share_all, share_recent)]`` of ``p``'s edges: each edge's ratio of the node's traversals."""
+        edges = list(self.children[p].items())
+        total = sum(self.edge_count[e] for _c, e in edges)
+        recent = sum(self.window_edge_count[e] for _c, e in edges)
+        return [
+            (c, e, self.edge_count[e] / total if total else 0.0, self.window_edge_count[e] / recent if recent else 0.0)
+            for c, e in edges
+        ]
 
     def recompute_weights(self) -> None:
-        """Write ``weight(count, reward)`` to every alive edge (after counts or scales changed)."""
-        ew, ec, er = self.edge_w, self.edge_count, self.edge_reward
-        weight = self.weight
-        for e, ok in enumerate(self.edge_alive):
-            if ok:
-                ew[e] = weight(ec[e], er[e])
+        """Write the dual frequency weight to every alive edge (after counts, rewards or scales changed)."""
+        ew, ec, er, wc = self.edge_w, self.edge_count, self.edge_reward, self.window_edge_count
+        weight = self.edge_weight
+        for p, ch in enumerate(self.children):
+            if not ch or not self.alive[p]:
+                continue
+            edges = list(ch.values())
+            degree = len(edges)
+            total = sum(ec[e] for e in edges)
+            recent = sum(wc[e] for e in edges)
+            for e in edges:
+                ew[e] = weight(ec[e], er[e], total, degree, wc[e], recent)
         self.version += 1
 
     def add_reward(self, edge_ids: Iterable[int], amount: float) -> int:
         """Add ``amount`` (negative = penalty) to the reward of every listed alive edge; returns how many."""
-        ew, ec, er = self.edge_w, self.edge_count, self.edge_reward
+        er = self.edge_reward
         alive = self.edge_alive
-        weight = self.weight
         touched = 0
         for e in edge_ids:
             if 0 <= e < len(er) and alive[e]:
                 er[e] += amount
-                ew[e] = weight(ec[e], er[e])
                 touched += 1
         if touched:
-            self.version += 1
+            self.recompute_weights()
         return touched
 
     def total_reward(self) -> tuple[float, float]:
@@ -115,7 +257,8 @@ class CountRewardGraph(RadixCyclicGraph):
     def _new_edge(self, p: int, c: int, count: int = 0) -> int:
         e = super()._new_edge(p, c, count)
         self.edge_reward.append(0.0)
-        self.edge_w[e] = self.weight(count, 0.0)
+        self.window_edge_count.append(0)
+        self.edge_w[e] = 0.0  # recompute_weights() gives it its real value once the pass is over
         return e
 
     def invert(self) -> None:
@@ -132,20 +275,32 @@ class CountRewardGraph(RadixCyclicGraph):
     def to_dict(self) -> dict:
         d = super().to_dict()
         rewards: list[float] = []
+        new_index: dict[int, int] = {}
         for old, ok in enumerate(self.alive):
             if ok:
                 for _c, e in self.children[old].items():
+                    new_index[e] = len(rewards)
                     rewards.append(self.edge_reward[e])
         d["edges"]["reward"] = rewards
-        d["weights"] = {"kind": "count-reward", "count_scale": self.count_scale, "reward_scale": self.reward_scale}
+        d["weights"] = {
+            **self.weight_config(),
+            "kind": "count-reward",
+            "total_traversals": self.total_traversals,
+            "window_events": [new_index[e] for e in self._window if e in new_index],
+        }
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "CountRewardGraph":
         g = super().from_dict(d)
         weights = d.get("weights") or {}
-        g.count_scale = float(weights.get("count_scale", 1.0))
+        legacy = "global_scale" not in weights  # files written before the dual frequency function
+        g.count_scale = float(weights.get("count_scale", 1.0 if legacy else 0.0))
         g.reward_scale = float(weights.get("reward_scale", 1.0))
+        g.global_scale = float(weights.get("global_scale", 0.0 if legacy else 0.5))
+        g.window_scale = float(weights.get("window_scale", 0.0 if legacy else 0.5))
+        g.window = max(1, int(weights.get("window", 10_000)))
+        g.total_traversals = int(weights.get("total_traversals", 0))
         rewards = d.get("edges", {}).get("reward")
         n = len(g.edge_w)
         if rewards is None:
@@ -154,6 +309,13 @@ class CountRewardGraph(RadixCyclicGraph):
             if len(rewards) != n:
                 raise ValueError("edge reward array has an inconsistent length")
             g.edge_reward = [float(v) for v in rewards]
+        g.window_edge_count = [0] * n
+        g._window = deque()
+        for e in weights.get("window_events", []):
+            e = int(e)
+            if 0 <= e < n:
+                g._window.append(e)
+                g.window_edge_count[e] += 1
         g.a = [0.0] * len(g.labels)
         g.k = [1.0] * len(g.labels)
         g.recompute_weights()
@@ -175,8 +337,8 @@ class CountRewardNet(GraphModel):
     format = COUNT_MODEL_FORMAT
     label = "Count / reward"
     description = (
-        "edge weight = log(1 + traversals) + rewards - penalties; no learning rate; "
-        "beam prediction with the top-K and bottom-K continuations"
+        "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, "
+        "plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K continuations"
     )
 
     def __init__(
@@ -184,11 +346,17 @@ class CountRewardNet(GraphModel):
         seed: int = 0,
         backend: str = "auto",
         device: str | None = None,
-        count_scale: float = 1.0,
+        count_scale: float = 0.0,
         reward_scale: float = 1.0,
+        global_scale: float = 0.5,
+        window_scale: float = 0.5,
+        window: int = 10_000,
     ) -> None:
         self.seed = int(seed)
-        self.graph = CountRewardGraph(seed=self.seed, count_scale=count_scale, reward_scale=reward_scale)
+        self.graph = CountRewardGraph(
+            seed=self.seed, count_scale=count_scale, reward_scale=reward_scale, global_scale=global_scale,
+            window_scale=window_scale, window=window,
+        )
         self.encoder = Encoder(_W)
         self.decoder = Decoder(_W)
         # no numeric learning rule runs, so the backend is only reported (python / cpu); backend / device are accepted
@@ -255,7 +423,7 @@ class CountRewardNet(GraphModel):
                     meta["rewards_total"] += reward * len(edges)
                 else:
                     meta["penalties_total"] += -reward * len(edges)
-            if count:
+            if count or reward:
                 graph.recompute_weights()
             loss = self._mean_cost(transitions)
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
@@ -399,6 +567,13 @@ class CountRewardNet(GraphModel):
         """Flip the sign of every reward."""
         self.graph.invert()
 
+    def configure_weights(self, **options: float) -> dict:
+        """Change the dual frequency function's scales / window (see :meth:`CountRewardGraph.configure`)."""
+        return self.graph.configure(**options)
+
+    def weight_config(self) -> dict:
+        return self.graph.weight_config()
+
     def invert_paths(
         self, texts: Iterable[str] | str, mode: str = "activation", amounts=None, strength: float = 2.0, **options
     ) -> dict:
@@ -530,6 +705,11 @@ class CountRewardNet(GraphModel):
             "edge_reward_negative": neg,
             "count_scale": g.count_scale,
             "reward_scale": g.reward_scale,
+            "global_scale": g.global_scale,
+            "window_scale": g.window_scale,
+            "window": g.window,
+            "total_traversals": g.total_traversals,
+            "window_traversals": g.window_traversals,
         }
 
     # -- persistence ---------------------------------------------------------

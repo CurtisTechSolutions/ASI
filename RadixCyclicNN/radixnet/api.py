@@ -444,6 +444,7 @@ class ModelService:
             "model_path": self.model_path_for(self.kind),
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
             "in_memory": sorted({self.kind, *self._parked}),
+            "weights": self.model.weight_config() if self.kind == "count" else None,
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -692,12 +693,33 @@ class ModelService:
         model = load_model(path, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
 
-    def reset(self, seed: int | None = None, kind: str | None = None) -> dict:
-        """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind)."""
+    def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
+        """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
+
+        ``options`` (count model only): ``count_scale``, ``global_scale``,
+        ``window_scale``, ``reward_scale``, ``window``.
+        """
         self._ensure_idle()
         cls = model_class(kind or self.kind)
-        model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device)
+        extra = {k: v for k, v in options.items() if v is not None}
+        if extra and cls.kind != "count":
+            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) apply to the count model only")
+        try:
+            model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, str(exc)) from exc
         return self._replace_model(model)
+
+    def configure_weights(self, **options: Any) -> dict:
+        """Change the count model's dual frequency function (400 for RadixNet); returns the config and stats."""
+        with self.mutating() as model:
+            if model.kind != "count":
+                raise ApiError(400, "the weight function can be configured on the count model only (select it first)")
+            try:
+                config = model.configure_weights(**{k: v for k, v in options.items() if v is not None})
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"weights": config, "stats": model.stats()}
 
     def _replace_model(self, model: GraphModel) -> dict:
         """Install ``model``; a model of another kind that was active is kept in memory (see :meth:`select_kind`)."""
@@ -1017,8 +1039,10 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     edge_w = graph.edge_w
     edge_count = graph.edge_count
     edge_reward = getattr(graph, "edge_reward", None)
+    shares_of = getattr(graph, "shares", None)
     edges = []
     for p in ids:
+        shares = {e: (all_, recent) for _c, e, all_, recent in shares_of(p)} if shares_of is not None else {}
         for c, e, cost in graph.child_costs(p):
             if c in chosen:
                 edge = {
@@ -1027,12 +1051,19 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
                 }
                 if edge_reward is not None:
                     edge["reward"] = edge_reward[e]
+                    edge["share"], edge["recent_share"] = shares.get(e, (0.0, 0.0))
+                    edge["recent_count"] = graph.window_edge_count[e]
                 edges.append(edge)
     edges.sort(key=lambda d: (d["source"], d["target"]))
-    return {
+    view = {
         "nodes": nodes, "edges": edges, "limit": limit,
         "total_nodes": graph.num_nodes(), "total_edges": graph.num_edges(),
     }
+    if edge_reward is not None:
+        view["total_traversals"] = graph.total_traversals
+        view["window_traversals"] = graph.window_traversals
+        view["window"] = graph.window
+    return view
 
 
 # ---------------------------------------------------------------------------
@@ -1556,8 +1587,22 @@ def _r_load(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.load(path)
 
 
+def _weight_options(f: Fields) -> dict:
+    return {
+        "count_scale": f.number("count_scale", None),
+        "global_scale": f.number("global_scale", None),
+        "window_scale": f.number("window_scale", None),
+        "reward_scale": f.number("reward_scale", None),
+        "window": f.integer("window", None, minimum=1),
+    }
+
+
 def _r_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.reset(f.integer("seed", None), kind=f.text("kind", None) or None)
+    return 200, svc.reset(f.integer("seed", None), kind=f.text("kind", None) or None, **_weight_options(f))
+
+
+def _r_model_weights(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.configure_weights(**_weight_options(f))
 
 
 def _r_model(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1972,7 +2017,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/evolve/history", _r_evolve_history, "generation records of all evolve runs"),
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
-    ("POST", "/api/reset", _r_reset, "replace the model with a fresh one: {seed, kind}"),
+    ("POST", "/api/reset", _r_reset,
+     "replace the model with a fresh one: {seed, kind, count model: count_scale, global_scale, window_scale, reward_scale, window}"),
+    ("POST", "/api/model/weights", _r_model_weights,
+     "count model: change the dual frequency function {count_scale, global_scale, window_scale, reward_scale, window} -> {weights, stats}"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),

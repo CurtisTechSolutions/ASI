@@ -151,6 +151,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; count model: `--k 5` (top K and bottom K continuations), `--beam N` |
 | `generate` | `--count`, `--max-length`, `--mode`, `--temperature` |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
+| `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
@@ -202,9 +203,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` |
-| `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` |
+| `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
+| `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
-| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (and `reward` for the count model) |
+| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
 | `GET /api/history` | training history |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
 
@@ -357,8 +359,8 @@ kind, so `load` always restores the right one.
 
 | | RadixNet (`radix`) | Count / reward (`count`) |
 |---|---|---|
-| edge weight | learned by the one-hop rule together with the per-node sine activations | `count_scale · log(1 + traversals) + reward_scale · reward`: two numbers per edge, no gradient, no learning rate |
-| training | epochs over mini-batches with `lr` / `act_lr` (and their schedules) | every epoch counts one more traversal of each text's path |
+| edge weight | learned by the one-hop rule together with the per-node sine activations | a **dual frequency function**: the edge's share of its node's traversals, all time (`R_all`) and inside a sliding window of the last N traversals (`R_recent`), plus rewards - `global_scale · log R_all + window_scale · log R_recent + reward_scale · reward` (+ an optional `count_scale · log(1 + traversals)`); no gradient, no learning rate |
+| training | epochs over mini-batches with `lr` / `act_lr` (and their schedules) | every epoch counts one more traversal of each text's path (all time, in the sliding window and in the global total) |
 | feedback (thumbs, 2NRL, codegen judge, adversarial review) | train on the bad texts, invert, fine-tune on the good ones | `punish`: reward −= `strength` on every edge of a bad path; `reward`: a traversal plus reward += `strength`; nothing is inverted |
 | `invert` | flips every weight and activation amplitude | flips the sign of every reward |
 | prediction | Dijkstra's cheapest path (or sampling) | a beam search that returns the **top K** (most likely) and **bottom K** (least likely) continuations of one prefix in one call; the best one is the prediction |
@@ -368,6 +370,29 @@ python -m radixnet --kind count train --data data/sample_corpus.txt --epochs 3  
 python -m radixnet --model model.count.json predict --prefix 'the quick' --length 10 --k 5
 python -m radixnet --model model.count.json feedback --good-text 'the quick brown fox' --bad-text 'zzz qqq' --strength 2
 ```
+
+**The count model's weight function** keeps several numbers per edge - its
+all-time traversals, its traversals inside a sliding window of the last
+`window` traversals seen anywhere in the graph (default 10 000), and its
+reward - together with the global totals.  Each count is compared against
+the node the edge leaves (the sum over the node's children, smoothed by 0.5),
+giving two ratios, and the weight is
+
+```
+R_all    = (count + 0.5) / (node traversals + 0.5 · children)      # what the node did, all time
+R_recent = (window count + 0.5) / (node window traversals + 0.5 · children)   # what it did recently
+weight   = global_scale · log R_all + window_scale · log R_recent + reward_scale · reward
+           (+ count_scale · log(1 + count), off by default)
+```
+
+so `P(child | node) ∝ R_all^global_scale · R_recent^window_scale · e^reward`;
+the default scales are 0.5 and 0.5 (the geometric mean of the two shares:
+when history and the window agree the probability is the share itself),
+so a text seen a thousand times last year and one seen ten times today can
+both win, and raising one scale trusts history or recency more.  The Train tab (count model) shows the scales and the window with an
+"Apply" button, `radixnet weights` does the same from the shell, and the
+status bar shows the traversal totals; the Graph tab's edge tooltips show
+each edge's all-time and recent share.
 
 The server keeps the model of each kind in memory: switching kinds parks the
 active model (unsaved work included) and brings the other one back, loading

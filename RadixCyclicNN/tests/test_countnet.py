@@ -40,12 +40,21 @@ def trained(epochs=2, seed=1):
 
 
 class TestWeightFunction(unittest.TestCase):
-    def test_weight_is_log_count_plus_reward(self):
-        g = CountRewardGraph(seed=0, count_scale=1.0, reward_scale=2.0)
-        self.assertAlmostEqual(g.weight(0, 0.0), 0.0)
-        self.assertAlmostEqual(g.weight(3, 0.0), math.log(4))
-        self.assertAlmostEqual(g.weight(3, -1.5), math.log(4) - 3.0)
-        self.assertAlmostEqual(g.weight(-5, 1.0), 2.0)  # a negative count counts as 0
+    """The dual frequency function: the edge's share of its node's traversals, all time and in the sliding window."""
+
+    def test_edge_weight_formula(self):
+        g = CountRewardGraph(seed=0, count_scale=0.0, global_scale=1.0, window_scale=1.0, reward_scale=2.0)
+        s = g.SMOOTHING
+        # 3 of the node's 4 traversals, 2 of its 2 recent ones, over 2 children, reward -1.5
+        expected = math.log((3 + s) / (4 + 2 * s)) + math.log((2 + s) / (2 + 2 * s)) + 2.0 * -1.5
+        self.assertAlmostEqual(g.edge_weight(3, -1.5, 4, 2, 2, 2), expected)
+        g.count_scale = 1.0
+        self.assertAlmostEqual(g.edge_weight(3, 0.0, 4, 2, 2, 2), math.log(4) + math.log((3 + s) / (4 + 2 * s)) + math.log((2 + s) / (2 + 2 * s)))
+        # nothing seen anywhere: every child of the node gets the same weight (uniform)
+        self.assertAlmostEqual(g.edge_weight(0, 0.0, 0, 3, 0, 0), g.edge_weight(0, 0.0, 0, 3, 0, 0))
+        self.assertEqual(g.weight_config()["function"], "dual-frequency")
+        with self.assertRaises(ValueError):
+            CountRewardGraph(seed=0, window=0)
 
     def test_activations_are_one_so_scores_are_weights(self):
         model = trained()
@@ -55,11 +64,15 @@ class TestWeightFunction(unittest.TestCase):
         for p in g.alive_nodes():
             for c, score in g.child_scores(p):
                 self.assertAlmostEqual(score, g.edge_w[g.children[p][c]])
+        # every stored weight is the dual frequency function of the tracked numbers
         for p in g.alive_nodes():
-            for c, e in g.children[p].items():
-                self.assertAlmostEqual(g.edge_w[e], g.weight(g.edge_count[e], g.edge_reward[e]))
+            edges = list(g.children[p].values())
+            total = sum(g.edge_count[e] for e in edges)
+            recent = sum(g.window_edge_count[e] for e in edges)
+            for e in edges:
+                self.assertAlmostEqual(g.edge_w[e], g.edge_weight(g.edge_count[e], g.edge_reward[e], total, len(edges), g.window_edge_count[e], recent))
 
-    def test_probabilities_follow_counts(self):
+    def test_probabilities_follow_the_shares(self):
         model = CountRewardNet(seed=0)
         model.train(["abx", "abx", "abx", "aby"], epochs=1)
         g = model.graph
@@ -68,11 +81,51 @@ class TestWeightFunction(unittest.TestCase):
         probs = dict(g.child_probs(parent))
         x = probs[node]
         y = probs[g.lookup("aby")[0]]
-        # (1 + 3) : (1 + 1) = 2 : 1
-        self.assertAlmostEqual(x / y, 2.0)
-        model.train(["abx", "abx", "abx", "aby"], epochs=1)  # counts double: (1 + 6) : (1 + 2)
+        # shares 3/4 and 1/4 (smoothed: 3.5/5 and 1.5/5), all time and recent alike; the default scales 0.5 + 0.5
+        # make the probability the (smoothed) share itself: 7 : 3
+        self.assertAlmostEqual(x / y, 3.5 / 1.5)
+        shares = {c: (a, r) for c, e, a, r in g.shares(parent)}
+        self.assertAlmostEqual(shares[node][0], 0.75)
+        self.assertAlmostEqual(shares[node][1], 0.75)
+        self.assertEqual((g.total_traversals, g.window_traversals), (8, 8))
+        model.train(["abx", "abx", "abx", "aby"], epochs=1)  # counts double: 6.5/9 vs 2.5/9
         probs = dict(g.child_probs(parent))
-        self.assertAlmostEqual(probs[node] / probs[g.lookup("aby")[0]], 7 / 3)
+        self.assertAlmostEqual(probs[node] / probs[g.lookup("aby")[0]], 6.5 / 2.5)
+        both = CountRewardNet(seed=0, global_scale=1.0, window_scale=1.0)  # both experts at full weight: the share squared
+        both.train(["abx", "abx", "abx", "aby"], epochs=1)
+        gb = both.graph
+        pb = dict(gb.child_probs(next(iter(gb.parents[gb.lookup("abx")[0]]))))
+        self.assertAlmostEqual(pb[gb.lookup("abx")[0]] / pb[gb.lookup("aby")[0]], (3.5 / 1.5) ** 2)
+        self.assertEqual(g.total_traversals, 16)
+
+    def test_sliding_window_forgets_old_traversals(self):
+        model = CountRewardNet(seed=0, window=4)
+        model.train(["abx"] * 6, epochs=1)  # 12 traversals: the window keeps the last 4
+        g = model.graph
+        self.assertEqual((g.total_traversals, g.window_traversals), (12, 4))
+        model.train(["aby"] * 2, epochs=1)  # 4 more: now only aby's traversals are inside the window
+        x = g.lookup("abx")[0]
+        y = g.lookup("aby")[0]
+        parent = next(iter(g.parents[x]))
+        shares = {c: (a, r) for c, e, a, r in g.shares(parent)}
+        self.assertAlmostEqual(shares[x][0], 0.75)  # all time: 6 of 8
+        self.assertAlmostEqual(shares[x][1], 0.0)   # recently: none
+        self.assertAlmostEqual(shares[y][1], 1.0)
+        probs = dict(g.child_probs(parent))
+        self.assertGreater(probs[y], probs[x])  # the recent share outweighs the all-time share here
+        self.assertEqual((g.total_traversals, g.window_traversals), (16, 4))
+        # the window can be resized on the fly; a wider one just keeps more of what comes next
+        config = model.configure_weights(window=2)
+        self.assertEqual((config["window"], g.window_traversals), (2, 2))
+        model.configure_weights(window_scale=0.0)
+        probs = dict(g.child_probs(parent))
+        self.assertGreater(probs[x], probs[y])  # without the recent term the all-time share decides
+        with self.assertRaises(ValueError):
+            model.configure_weights(nope=1)
+        with self.assertRaises(ValueError):
+            model.configure_weights(window=0)
+        with self.assertRaises(ValueError):
+            model.configure_weights(global_scale=float("nan"))
 
     def test_reward_and_penalty_move_odds_by_e(self):
         model = CountRewardNet(seed=0)
@@ -82,13 +135,15 @@ class TestWeightFunction(unittest.TestCase):
         y = g.lookup("aby")[0]
         parent = next(iter(g.parents[x]))
         self.assertAlmostEqual(dict(g.child_probs(parent))[x], 0.5)
-        model.reward(["abx"], strength=1.0)
+        before = dict(g.child_probs(parent))
+        model.reward(["abx"], strength=1.0)  # also counts a traversal: shares 2/3 vs 1/3 -> 2.5 : 1.5
         probs = dict(g.child_probs(parent))
-        self.assertAlmostEqual(probs[x] / probs[y], math.e * (1 + 2) / (1 + 1))  # reward also counts a traversal
-        model.punish(["abx"], strength=2.0)
+        self.assertAlmostEqual(probs[x] / probs[y], math.e * (2.5 / 1.5))
+        model.punish(["abx"], strength=2.0)  # no traversal: only the reward moves
         probs = dict(g.child_probs(parent))
-        self.assertAlmostEqual(probs[x] / probs[y], math.exp(-1.0) * 3 / 2)
-        self.assertEqual(g.edge_count[g.children[parent][x]], 2)  # penalties do not count traversals
+        self.assertAlmostEqual(probs[x] / probs[y], math.exp(-1.0) * (2.5 / 1.5))
+        self.assertEqual(g.edge_count[g.children[parent][x]], 2)
+        self.assertGreater(before[x], 0)
 
     def test_invert_flips_rewards_only(self):
         model = trained()
@@ -96,19 +151,42 @@ class TestWeightFunction(unittest.TestCase):
         g = model.graph
         counts = list(g.edge_count)
         rewards = list(g.edge_reward)
+        window = list(g._window)
         model.invert()
         self.assertTrue(g.inverted)
         self.assertEqual(g.edge_count, counts)
         self.assertEqual(g.edge_reward, [-r for r in rewards])
+        self.assertEqual(list(g._window), window)
         model.invert()
         self.assertFalse(g.inverted)
         self.assertEqual(g.edge_reward, rewards)
+
+    def test_window_state_survives_a_round_trip(self):
+        model = CountRewardNet(seed=1, window=7)
+        model.train(TEXTS, epochs=1)
+        model.reward([TEXTS[0]], strength=0.5)
+        again = model_from_dict(model.to_dict())
+        self.assertEqual((again.graph.window, again.graph.window_traversals, again.graph.total_traversals),
+                         (7, model.graph.window_traversals, model.graph.total_traversals))
+        self.assertEqual(again.weight_config(), model.weight_config())
+        self.assertEqual(again.stats(), model.stats())
+        self.assertEqual(again.predict("the cat", length=6, k=2).top[0].text, model.predict("the cat", length=6, k=2).top[0].text)
+
+    def test_legacy_files_keep_the_old_function(self):
+        model = CountRewardNet(seed=1)
+        model.train(TEXTS[:2], epochs=1)
+        d = model.to_dict()
+        d["graph"]["weights"] = {"kind": "count-reward", "count_scale": 1.0, "reward_scale": 1.0}  # a file from before
+        old = model_from_dict(d)
+        self.assertEqual((old.graph.count_scale, old.graph.global_scale, old.graph.window_scale), (1.0, 0.0, 0.0))
+        self.assertEqual(old.graph.window_traversals, 0)
 
     def test_invariants_and_compression(self):
         model = trained(epochs=3)
         model.graph.check_invariants(TEXTS, compressed=True)
         self.assertGreater(model.graph.compression_ratio(), 1.0)
         self.assertEqual(len(model.graph.edge_reward), len(model.graph.edge_w))
+        self.assertEqual(len(model.graph.window_edge_count), len(model.graph.edge_w))
 
 
 class TestTraining(unittest.TestCase):
@@ -403,6 +481,33 @@ class TestApi(unittest.TestCase):
         self.assertTrue(data["path"].endswith("model.count.json"))
         self.assertIsInstance(load_model(data["path"]), CountRewardNet)
 
+    def test_weight_function_endpoint(self):
+        self.select("count")
+        status, data, _ = self.client.get("/api/model")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["weights"]["function"], "dual-frequency")
+        self.client.post("/api/train", {"texts": TEXTS, "epochs": 1})
+        self.wait()
+        status, data, _ = self.client.post("/api/model/weights", {"window_scale": 2.0, "window": 20})
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["weights"]["window_scale"], data["weights"]["window"]), (2.0, 20))
+        self.assertEqual(data["stats"]["window"], 20)
+        self.assertLessEqual(data["stats"]["window_traversals"], 20)
+        self.assertGreater(data["stats"]["total_traversals"], 20)
+        status, graph, _ = self.client.get("/api/graph?limit=10")
+        self.assertIn("total_traversals", graph)
+        self.assertTrue(all({"share", "recent_share", "recent_count"} <= set(e) for e in graph["edges"]))
+        status, data, _ = self.client.post("/api/model/weights", {"window": 0})
+        self.assertEqual(status, 400)
+        status, data, _ = self.client.post("/api/reset", {"kind": "count", "window": 5, "global_scale": 0.5})
+        self.assertEqual((status, data["window"], data["global_scale"]), (200, 5, 0.5))
+        self.select("radix")
+        status, data, _ = self.client.post("/api/model/weights", {"window": 10})
+        self.assertEqual(status, 400)
+        self.assertIn("count model", data["error"])
+        status, data, _ = self.client.post("/api/reset", {"kind": "radix", "window": 10})
+        self.assertEqual(status, 400)
+
     def test_radix_ignores_beam_options_and_load_switches_kind(self):
         self.select("count")
         self.client.post("/api/train", {"texts": TEXTS[:2], "epochs": 1})
@@ -450,6 +555,13 @@ class TestCli(unittest.TestCase):
             doc = run_json("info", model=model)
             self.assertEqual(doc["stats"]["kind"], "count")
             self.assertGreater(doc["stats"]["rewards_total"], 0)
+            doc = run_json("weights", model=model)
+            self.assertEqual(doc["weights"]["function"], "dual-frequency")
+            self.assertEqual(doc["changed"], {})
+            doc = run_json("weights", "--window", 50, "--window-scale", 0.5, model=model)
+            self.assertEqual((doc["weights"]["window"], doc["weights"]["window_scale"]), (50, 0.5))
+            self.assertIsNotNone(doc["saved"])
+            self.assertEqual(load_model(model).weight_config()["window"], 50)
             # --kind on an existing file is only a note; the file's kind wins
             proc = run_cli("--kind", "radix", "info", model=model, json_mode=False)
             self.assertIn("kind", proc.stdout)
