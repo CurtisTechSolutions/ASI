@@ -56,6 +56,7 @@ RadixCyclicNN/
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
+    speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -136,6 +137,15 @@ class Decoder:
 ```
 
 Round-trip property: `Decoder().decode_trigrams(Encoder().encode(t)) == t` for all `len(t) >= 3`.
+
+```python
+def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired)
+```
+
+The tail shared by the *media* text formats (`img:...`, section 21, and `aud:...`, section 25): a base64 payload the
+network **predicted** is rarely clean, so characters outside the alphabet are dropped, a single dangling character
+goes with them, the padding is completed and `repaired` reports whether any of that changed the text. The payload is
+returned as it decodes; each format pads or truncates it to the length it needs.
 
 ---
 
@@ -581,6 +591,10 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/uploads` | | `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` — text files kept in the server's `upload_dir` (`--upload-dir`, default `uploads`; endpoints answer 400 when no directory is configured) |
 | POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are validated by `archive.extract_texts` (section 20) and stored as one `.zip` upload whose record carries `archive: true`, `files` (text entries), `skipped` and the summed `lines` / `chars`; `archives[]` summarises entries / extracted / skipped (path + reason); 400 for a corrupt archive, one without a text entry, (no size limit: neither the body limit nor an entry limit applies to uploads). Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
 | POST `/api/uploads/delete` | `{"name"}` | `{"deleted": name}` (404 when missing) |
+| GET `/api/speech` | | `speech.describe()`: the transcription backends and which one `auto` picks, ffmpeg, the microphone recorders, the codecs, the token and the text format (section 25) |
+| POST `/api/speech/transcribe` | audio bytes (a binary route like `/api/uploads`: multipart, a raw body named `speech`, or JSON `content_base64`) + `backend`, `language`, `asr_model`, `asr_url`, `transcript` from the query string or the JSON body | `{"transcript", "backend", "model", "language", "seconds", "name"}` |
+| POST `/api/speech/teach` | the same audio forms + `transcript` (what the browser dictated), `rate`, `codec`, `normalise`, `waveform`, `pair`, `token`, `unique`, `backend`, `language`, `asr_model`, `asr_url`, `train`, `epochs`, `lr`, `batch_size`, `save_as` | `{"token", "transcript", "asr", "audio", "texts", "chars", "pair", "name", "upload", "job"}`; 202 with a train job on the texts, `save_as` keeps them as one upload |
+| POST `/api/speech/decode` | `{"text", "codec"}` | `{"wav_base64", "codec", "rate", "channels", "samples", "seconds", "bytes", "repaired"}` — an encoded *or predicted* waveform as playable audio |
 
 `/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
 | GET `/` and other paths | | serves `frontend_dir` if it exists (SPA fallback to `index.html`, correct mime types, no path traversal), else a minimal built-in HTML page explaining how to build the frontend |
@@ -610,6 +624,15 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count, hover label).
 * `ScorePanel.jsx` — score a text.
+* `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
+  (`MediaRecorder`) and dictates the words at the same time (`SpeechRecognition`, the Web Speech API); `audio.js`
+  decodes the recording with the Web Audio API, mixes it to mono, resamples it to 16 kHz and writes a 16-bit PCM WAV,
+  so the server reads it with the standard library alone and never needs ffmpeg for a browser recording. The panel
+  shows the clip with a player and a peak meter, the transcript in an editable box (corrected by hand, or left empty
+  for the server's Whisper), the waveform rate / codec / pair / unique-token / normalise switches and the training
+  settings; "Teach the model" posts `/api/speech/teach` with `train`, "Preview the texts" the same request without it,
+  and the result card shows the token, the ASR backend, the waveform's size and every text. A third card decodes any
+  `aud:` text - including a prediction - back into audio through `/api/speech/decode` and plays it.
 
 Plain readable CSS, responsive (single column under 800px). No TypeScript.
 
@@ -630,6 +653,15 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
 * `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
+* `test_speech.py` — the text format (packing, the header found behind a token and before a transcript, repair of a
+  cut-off prediction), unique tokens, `speech_texts`, both codecs (mu-law beats linear 8-bit on quiet audio, byte
+  round trips), resampling / downmixing / normalising, every WAV sample format the reader accepts (PCM 8/16/24/32,
+  IEEE float 32/64, A-law, mu-law, WAVE_FORMAT_EXTENSIBLE) and the ffmpeg hand-off, the waveform round trip
+  (encode → text → WAV → the same tone), transcription (a given transcript, the auto order, fakes with the
+  openai-whisper / faster-whisper / OpenAI-server interfaces, the error when nothing is installed), `teach` (both
+  texts share the token, pair / shared token / transcript-only, a failing ASR still teaches the waveform, the model
+  learns and continues what was spoken), recording (no recorder, `arecord` called and its file read), the four API
+  routes in all three body forms and the CLI actions. Runs without a microphone, ffmpeg or any ASR backend.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the four endpoints and the CLI.
 
@@ -1265,7 +1297,7 @@ memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
 over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, the ollama corpus / review calls, images, codegen, schedule preview) answer 404 with a message
+endpoints (evolve, the ollama corpus / review calls, images, speech, codegen, schedule preview) answer 404 with a message
 naming the Python server.
 
 The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `go/server/tutor.go`): the
@@ -1448,3 +1480,85 @@ prefix. `describe()` reports both halves and the settings.
   `tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
   tutor, evolve and codegen hooks) and `tests/test_duo.py` (all three rules, the coverage gate, strict, learn,
   generate / predict, the count model as the positive half).
+
+---
+
+## 25. Teaching by talking (`speech.py`) — the transcript and the waveform behind one unique token
+
+One utterance becomes **two texts that start with the same token**, and both are trained on:
+
+```
+<speech:9f2a1c7d> the cat sat on the mat
+<speech:9f2a1c7d> aud:mu:8000x1:gOXv7NgqFBAYTePu7dwvFRAXPuHu7d82FhAWNt/t7uE+FxAVL9zt7uNNGBAU…
+```
+
+`utterance_token(payload, unique=True)` is `SPEECH_TOKEN` (`<speech>`) with a short blake2b digest of the waveform
+text folded in, so the token is unique to that utterance, deterministic (the same recording always gets the same
+one) and **identical in both texts**: in the cyclic graph the words and the sound leave the *same* node, which is
+what ties them together. `unique=False` falls back to the bare `<speech>` for every utterance (one entry node for
+all speech), and an explicit `token=` overrides both. The token can never collide with the graph's `<s>` / `</s>`
+sentinels (no 3-character window of `<speech…>` equals `<s>`).
+
+`speech_texts(token, transcript, audio_text, pair=False) -> list[str]` builds them: the transcript (whitespace
+collapsed) when there is one, the waveform text when there is one, and with `pair` a third text - the waveform
+followed by its transcript - so the prediction search can run from the sound straight into the words.
+
+### The waveform as text
+
+`encode_audio(data, rate=8000, codec="auto", normalise=False) -> {"text", "codec", "rate", "channels", "samples",
+"seconds", "bytes", "chars", "normalised", "source"}`: the audio is decoded, mixed down to mono, resampled (linear
+interpolation - the next step quantises to a byte anyway), optionally peak-normalised to 0.99, quantised to one byte
+per sample and packed as `aud:<codec>:<rate>x<channels>:<base64>` (`pack_text` / `parse_text`).
+
+* `"mu"` (the default) — mu-law companding, `sign(x)·ln(1 + 255|x|)/ln(256)` mapped onto 256 levels: the classic
+  8-bit speech quantisation (G.711, WaveNet). Its relative error stays at ~2 % of the amplitude from full scale down
+  to a whisper, where linear 8-bit is already at 38 %, and it is a *stable* code (encoding a decoded byte gives the
+  same byte back).
+* `"pcm8"` — plain linear 8-bit, one signed byte per sample.
+
+`parse_text` looks for the header **anywhere** in the text, because a spoken text carries its token first and a
+paired one its transcript last; the payload runs from the header to the next whitespace and its base64 is repaired
+with `encoding.repair_base64` (section 4). `decode_text(text, codec=None) -> {"wav", "codec", "rate", "channels",
+"samples", "seconds", "bytes", "repaired"}` turns an encoded - or **predicted** - text back into a 16-bit PCM WAV
+(`wav_bytes`), so what the graph says can be listened to.
+
+`load_audio(data)` reads RIFF/WAVE itself: PCM 8 (unsigned) / 16 / 24 / 32, IEEE float 32 / 64, A-law and mu-law
+(the G.711 expansion tables), `WAVE_FORMAT_EXTENSIBLE` resolved through its SubFormat tag, chunks walked in order
+with the odd-length padding, a streamed `data` chunk of declared size 0 read to the end. Anything else (MP3, M4A,
+WebM/Opus, Ogg, FLAC) goes through `ffmpeg` when it is installed (`$RADIXNET_FFMPEG` overrides the binary); without
+it the error names the format it recognised from the magic bytes and says what to install. The browser never needs
+it: the Speech tab converts its recording to WAV itself (section 13).
+
+### Speech to text
+
+`transcribe(data, backend="auto", text="", language=None, model=None, url=None) -> {"transcript", "backend",
+"model", "language", "seconds"}` with `ASR_BACKENDS = (auto, given, faster-whisper, whisper, server)`:
+
+* `given` — the transcript comes from the caller (the browser's Web Speech API, `--text`, the API's `transcript`).
+  Always available; it is why the feature works with nothing installed, and under `auto` it wins over everything.
+* `faster-whisper` / `whisper` — the two local Whisper packages, the model (`$RADIXNET_WHISPER_MODEL`, default
+  `base`) loaded once per process and kept; a failed load is recorded in `.error` and raised as a `SpeechError`.
+* `server` — any OpenAI-compatible `/v1/audio/transcriptions` endpoint (whisper.cpp's server, Speaches, ...) posted
+  to with a hand-built multipart body over `urllib`; `$RADIXNET_ASR_URL`, `$RADIXNET_ASR_MODEL`,
+  `$RADIXNET_ASR_KEY` / `$OPENAI_API_KEY`. `auto` only reaches for it when a URL is configured, so nothing ever
+  blocks on a network call that was not asked for.
+
+Audio that is not a WAV is converted with ffmpeg before it reaches a backend (16 kHz, what Whisper wants anyway).
+
+### The flow
+
+`teach(data, transcript="", *, backend, language, asr_model, asr_url, rate, codec, normalise, waveform, pair,
+token, unique) -> {"token", "transcript", "asr", "audio", "texts", "chars", "pair"}` is what the CLI, the API and
+the frontend all call: encode the waveform, transcribe when no transcript was given, derive the token from the
+waveform text, build the texts. **A failing transcription is recorded, not raised** (`asr.error`): the waveform on
+its own is still worth learning, so talking to a machine without an ASR backend still teaches it something.
+
+`record(seconds, rate=16000, recorder=None)` records from the default input device with whichever of `arecord`,
+`rec` / `sox` and `ffmpeg` (`-f alsa` / `-f avfoundation`) is installed; `recorders()` lists them and `describe()`
+reports everything the feature can reach.
+
+CLI: `speech info | transcribe | teach | listen | decode` (`listen` records first, then runs `teach`; `--train`
+trains on the texts and saves). API: `GET /api/speech`, `POST /api/speech/transcribe`, `POST /api/speech/teach`,
+`POST /api/speech/decode` (section 12). Frontend: the Speech tab (section 13). Dependencies: none for the waveform,
+the token and the browser's dictation; `pip install radixnet[speech]` (faster-whisper) or `radixnet[whisper]`
+(openai-whisper) for server-side transcription, ffmpeg for audio formats other than WAV.

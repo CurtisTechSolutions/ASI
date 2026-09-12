@@ -99,6 +99,12 @@ from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
 from .search import PathResult
+from .speech import DEFAULT_RATE as SPEECH_DEFAULT_RATE
+from .speech import SpeechError
+from .speech import decode_text as decode_speech_text
+from .speech import describe as describe_speech
+from .speech import teach as teach_speech
+from .speech import transcribe as transcribe_speech
 from .tutor import (
     DEFAULT_TUTOR_MODEL,
     ERROR_TYPES as TUTOR_ERROR_TYPES,
@@ -136,7 +142,12 @@ _FILTER_FIELDS = frozenset(f.name for f in dataclasses.fields(FilterConfig))
 """Request fields that configure the filter rather than the generation behind it."""
 
 _UPLOAD_PATH = "/api/uploads"
-_BINARY_ROUTES = {"/api/uploads": None, "/api/images/encode": "image"}
+_BINARY_ROUTES = {
+    "/api/uploads": None,
+    "/api/images/encode": "image",
+    "/api/speech/transcribe": "speech",
+    "/api/speech/teach": "speech",
+}
 """POST routes whose bodies may be raw bytes or multipart (value: the default name of a raw body, None = required)."""
 
 DEFAULT_GRAPH_LIMIT = 150
@@ -2162,6 +2173,23 @@ def _option(f: Fields, q: dict, name: str, default: Any) -> Any:
     return values[0] if values else default
 
 
+def _flag_option(f: Fields, q: dict, name: str, default: bool = False) -> bool:
+    """A boolean option from the JSON body or the query string (``?train=true``)."""
+    raw = _option(f, q, name, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _audio_bytes(f: Fields, what: str) -> tuple[str, bytes]:
+    """The one audio file of a request: multipart, a raw body or JSON ``content_base64``."""
+    files = f.upload_files()
+    name, payload = files[0]
+    if not isinstance(payload, bytes):
+        raise ApiError(400, f"send the {what} as bytes: multipart/form-data, a raw body, or JSON {{name, content_base64}}")
+    return name, payload
+
+
 def _r_images(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, describe_vision()
 
@@ -2177,8 +2205,7 @@ def _r_image_encode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     except (TypeError, ValueError) as exc:
         raise ApiError(400, "'size' must be an integer") from exc
     encoder = str(_option(f, q, "encoder", "auto") or "auto")
-    raw_train = _option(f, q, "train", False)
-    train = raw_train if isinstance(raw_train, bool) else str(raw_train).strip().lower() in ("1", "true", "yes", "on")
+    train = _flag_option(f, q, "train")
     save_as = _option(f, q, "save_as", None)
     if train:
         svc._ensure_idle()
@@ -2208,6 +2235,85 @@ def _r_image_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         raise ApiError(400, str(exc)) from exc
     png = result.pop("png")
     result["png_base64"] = base64.b64encode(png).decode("ascii")
+    return 200, result
+
+
+def _r_speech(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, describe_speech()
+
+
+def _r_speech_transcribe(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Speech to text: audio bytes -> the words, with the backend that did it."""
+    name, payload = _audio_bytes(f, "audio")
+    try:
+        result = transcribe_speech(
+            payload,
+            backend=str(_option(f, q, "backend", "auto") or "auto"),
+            text=str(_option(f, q, "transcript", "") or ""),
+            language=_option(f, q, "language", None) or None,
+            model=_option(f, q, "asr_model", None) or None,
+            url=_option(f, q, "asr_url", None) or None,
+        )
+    except SpeechError as exc:
+        raise ApiError(400, str(exc)) from exc
+    result["name"] = name
+    return 200, result
+
+
+def _r_speech_teach(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """One utterance -> the transcript and the waveform behind one unique token; optionally trained on."""
+    name, payload = _audio_bytes(f, "recording")
+    train = _flag_option(f, q, "train")
+    save_as = _option(f, q, "save_as", None)
+    try:
+        rate = int(_option(f, q, "rate", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "'rate' must be an integer") from exc
+    if train:
+        svc._ensure_idle()
+    try:
+        result = teach_speech(
+            payload,
+            transcript=str(_option(f, q, "transcript", "") or ""),
+            backend=str(_option(f, q, "backend", "auto") or "auto"),
+            language=_option(f, q, "language", None) or None,
+            asr_model=_option(f, q, "asr_model", None) or None,
+            asr_url=_option(f, q, "asr_url", None) or None,
+            rate=rate or SPEECH_DEFAULT_RATE,
+            codec=str(_option(f, q, "codec", "auto") or "auto"),
+            normalise=_flag_option(f, q, "normalise"),
+            waveform=_flag_option(f, q, "waveform", True),
+            pair=_flag_option(f, q, "pair"),
+            token=_option(f, q, "token", None) or None,
+            unique=_flag_option(f, q, "unique", True),
+        )
+    except SpeechError as exc:
+        raise ApiError(400, str(exc)) from exc
+    if train and not result["texts"]:
+        raise ApiError(400, "nothing to train on: the audio produced neither a transcript nor a waveform")
+    result.update(name=name, upload=None, job=None)
+    if save_as:
+        result["upload"] = svc.upload(str(save_as), "\n".join(result["texts"]) + "\n")
+    if train:
+        config = TrainConfig(
+            epochs=int(_option(f, q, "epochs", 3)), lr=float(_option(f, q, "lr", 0.5)),
+            act_lr=float(_option(f, q, "act_lr", TrainConfig.act_lr)), batch_size=int(_option(f, q, "batch_size", 8)),
+        )
+        result["job"] = svc.start_train(result["texts"], config)
+        return 202, result
+    return 200, result
+
+
+def _r_speech_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """An encoded - or predicted - waveform text back to a WAV file that can be played."""
+    text = f.text("text")
+    codec = f.text("codec", None) or None
+    try:
+        result = decode_speech_text(text, codec=codec)
+    except SpeechError as exc:
+        raise ApiError(400, str(exc)) from exc
+    wav = result.pop("wav")
+    result["wav_base64"] = base64.b64encode(wav).decode("ascii")
     return 200, result
 
 
@@ -2769,6 +2875,17 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "{name, content_base64} + ?size=128&encoder=auto|sd|tiny&train=true&save_as=NAME -> {text, encoder, latent_shape, ...}"),
     ("POST", "/api/images/decode", _r_image_decode,
      "decode an encoded or predicted text back to an image: {text, encoder} -> {png_base64, width, height, repaired}"),
+    ("GET", "/api/speech", _r_speech,
+     "the speech backends: faster-whisper / whisper / a transcription server, ffmpeg, the microphone recorders, "
+     "the waveform codecs and the unique token"),
+    ("POST", "/api/speech/transcribe", _r_speech_transcribe,
+     "speech to text: audio as multipart / a raw body / JSON {name, content_base64} (+ backend, language, "
+     "asr_model, asr_url, transcript) -> {transcript, backend, model, language, seconds}"),
+    ("POST", "/api/speech/teach", _r_speech_teach,
+     "teach the model an utterance: the same audio forms plus transcript, rate, codec, normalise, waveform, pair, "
+     "token, unique, train, save_as, epochs, lr, batch_size -> {token, transcript, asr, audio, texts, job, upload}"),
+    ("POST", "/api/speech/decode", _r_speech_decode,
+     "decode an encoded or predicted waveform text back to audio: {text, codec} -> {wav_base64, rate, seconds, repaired}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),

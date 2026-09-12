@@ -58,6 +58,38 @@ async function request(method, path, body) {
 const get = (path) => request("GET", path);
 const post = (path, body = {}) => request("POST", path, body);
 
+/** Blob / File -> base64, in chunks so a long recording cannot blow the argument stack. */
+async function toBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/**
+ * POST audio to one of the /api/speech endpoints. A transcript travels in a
+ * JSON body (any length, any character); without one the bytes go up as
+ * multipart with the options in the query string, so a big file is not
+ * base64-inflated.
+ */
+async function sendAudio(path, audio, options = {}) {
+  const name = audio && audio.name ? audio.name : "utterance.wav";
+  const entries = Object.entries(options).filter(([, value]) => value !== undefined && value !== null && value !== "");
+  if (options.transcript) {
+    const body = { name, content_base64: await toBase64(audio) };
+    for (const [key, value] of entries) body[key] = value;
+    return post(path, body);
+  }
+  const form = new FormData();
+  form.append("file", audio, name);
+  const params = new URLSearchParams();
+  for (const [key, value] of entries) params.set(key, String(value));
+  const query = params.toString();
+  return post(`${path}${query ? `?${query}` : ""}`, form);
+}
+
 /**
  * Normalise a job payload. Job-starting endpoints answer {"job": {...}}, while
  * GET /api/job and the stop endpoints answer with the job status itself; both
@@ -153,6 +185,17 @@ export const api = {
   tutorLesson: (body) => post("/api/tutor/lesson", body),
   /** Is ChatGPT usable on the server (its own OPENAI_API_KEY), and which models the key has. */
   chatgptModels: () => get("/api/chatgpt/models"),
+  /** Speech (see SpeechPanel): the transcript and the waveform of one utterance, behind one unique token. */
+  speech: () => get("/api/speech"),
+  /** Speech to text only. `audio` is a File or a Blob; `transcript` is what the browser already dictated. */
+  speechTranscribe: (audio, options = {}) => sendAudio("/api/speech/transcribe", audio, options),
+  /**
+   * Teach one utterance: the words and the waveform. Options: transcript, rate, codec, normalise,
+   * waveform, pair, token, unique, backend, language, train, epochs, lr, batch_size, save_as.
+   */
+  speechTeach: (audio, options = {}) => sendAudio("/api/speech/teach", audio, options),
+  /** An encoded - or predicted - `aud:...` text back to audio that can be played. */
+  speechDecode: (text, codec) => post("/api/speech/decode", codec ? { text, codec } : { text }),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama or ChatGPT teacher / judge and 2NRL rewards. */
   codegenStart: (body) => post("/api/codegen/start", body),
   codegenHistory: () => get("/api/codegen/history"),

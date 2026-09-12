@@ -29,6 +29,7 @@ and an optional GPU backend (torch) are built in.
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), and the round's mistakes become the next round's syllabus. |
 | Rewards follow the rating | `two_nrl(good_weights=)`, `reward(weights=)` and `punish(weights=)` (both models, Python and Go) scale every pass per text: a sentence marked 9 out of 10 is learned nine tenths as hard as a perfect one, a 0 is skipped. `/api/feedback` and `/api/2nrl` take `good_ratings` / `bad_ratings` (marks out of 10), the Ratings card a mark per rated text. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
+| Teach it by talking to it | `speech`, the Speech tab and `POST /api/speech/teach`: the browser records the microphone and dictates the words (Web Speech API; faster-whisper, openai-whisper or an OpenAI-compatible transcription server do it on the server side), and **one utterance becomes two texts behind the same unique token** - `<speech:9f2a1c7d> the cat sat on the mat` and `<speech:9f2a1c7d> aud:mu:8000x1:<base64>`, the waveform itself with every sample quantised to one mu-law byte. Both are trained on, so the words and the sound leave the same node of the graph; `speech decode` plays a predicted waveform back. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Go port of the count / reward model | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
@@ -66,6 +67,7 @@ python -m radixnet evolve --data data/sample_corpus.txt --generations 3 --batch-
 python -m radixnet negative blame --data data/sample_garbage.txt --reason gibberish --source review
 python -m radixnet negative why --text "the the the the cat"
 python -m radixnet negative filter --count 3        # the positive model writes, the negative one vetoes
+python -m radixnet speech listen --seconds 5 --train     # say something; it learns the words and the sound
 python -m radixnet serve      # API + frontend on http://127.0.0.1:8000
 ```
 
@@ -104,6 +106,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
 | `make chatgpt-models` / `chatgpt-ask PROMPT="..."` | ChatGPT (OpenAI): what `$OPENAI_API_KEY` may use, one question — the quickest check that ChatGPT can tutor |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-blame` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + blame the negative network, review + 2NRL |
+| `make speech-info` / `speech-teach AUDIO=clip.wav TRANSCRIPT="..."` / `speech-listen SECONDS=5` / `speech-decode TEXT="aud:…" AUDIO=out.wav` | speech: available backends, teach an audio file, record from the microphone and teach that, play a waveform text back |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
@@ -187,6 +190,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]` |
+| `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
@@ -221,6 +225,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
 | `POST /api/images/encode` | an image as multipart (`curl -F file=@photo.png`), a raw body, or JSON `{"name","content_base64"}` + `?size=128&encoder=auto\|sd\|tiny&train=true&save_as=photo.txt` (train settings `epochs`, `lr`, `batch_size`) -> `{"text","encoder","width","height","latent_shape","bytes","chars","source_size","name","upload","job"}` (202 with a train job) |
 | `POST /api/images/decode` | `{"text", "encoder"}` -> `{"png_base64","encoder","width","height","bytes","repaired"}` (a cut-off or rambling prediction is padded / truncated) |
+| `GET /api/speech` | `{"backends", "faster_whisper", "whisper", "whisper_model", "server_url", "server_model", "auto", "ffmpeg", "recorders", "codecs", "default_rate", "token", "token_example", "text_format", "formats"}` |
+| `POST /api/speech/transcribe` | audio as multipart (`curl -F file=@clip.wav`), a raw body, or JSON `{name, content_base64}`; options from the query string or the body (`backend`, `language`, `asr_model`, `asr_url`, `transcript`) -> `{"transcript", "backend", "model", "language", "seconds"}` |
+| `POST /api/speech/teach` | the same audio forms + `transcript` (what the browser dictated), `rate`, `codec`, `normalise`, `waveform`, `pair`, `token`, `unique`, `train`, `epochs`, `lr`, `batch_size`, `save_as` -> `{"token", "transcript", "asr", "audio", "texts", "chars", "pair", "upload", "job"}` (202 with a train job on the texts) |
+| `POST /api/speech/decode` | `{"text", "codec"}` -> `{"wav_base64", "codec", "rate", "samples", "seconds", "repaired"}` - an encoded or predicted waveform as playable audio |
 | `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_provider": "ollama"\|"chatgpt", "teacher_model", "judge_provider", "judge_model", "url", "judge_url", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", "blame" (the sandbox and the judge also teach the negative network), 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}`; an attempt's `source` and a verdict's `judged_by` name the provider (400 when `teacher_provider` is `chatgpt` and the server has no key) |
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", "teacher_provider", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
@@ -285,6 +293,8 @@ adversarial review), Tutor (automated English lessons: the settings, a dry run
 that marks without training, a chart of the marks per round, the report card
 with the mistakes, and every lesson with what the network wrote, the correction
 and the teacher's line), Code (code generation with the sandbox and the judge),
+Speech (record the microphone, the browser writes down what it hears, teach
+the words and the waveform),
 Checkpoints (save / restore / load / reset) and a Graph view of the most
 visited nodes.
 
@@ -669,6 +679,70 @@ the API, the CLI and the tab working; `auto` (the default) picks `sd` when it
 loads.  Sizes are squares that are multiples of 8 (64 .. 512); 128 gives a
 4 x 16 x 16 latent, 1 024 bytes, about 1 400 characters of text.
 
+## Speech: teach it by talking to it
+
+Say something and the network learns **two texts that start with the same
+unique token** - what you said and how it sounded:
+
+```
+<speech:9f2a1c7d> the cat sat on the mat
+<speech:9f2a1c7d> aud:mu:8000x1:gOXv7NgqFBAYTePu7dwvFRAXPuHu7d82FhAWNt/t7uE+FxAV…
+```
+
+The token is `<speech>` with a short digest of the recording folded in, so it
+is unique to that utterance, the same every time that recording comes back, and
+identical in both texts: in the cyclic graph the words and the waveform leave
+the **same node**, which is what ties them together. The waveform text is the
+recording itself - mixed to mono, resampled to 8 kHz and quantised to one
+mu-law byte per sample (G.711 / WaveNet's 256 levels, which keep ~2 % relative
+error from a shout down to a whisper where linear 8-bit is already at 38 %) -
+base64-encoded, so the trigram network trains on it, scores it, continues it
+and generates it like any other text. `speech decode` turns an encoded - or
+**predicted** - waveform back into a WAV file, so you can listen to what the
+graph thinks the sound is.
+
+**In the browser** (the Speech tab): press Record, talk, press Stop. The page
+records with `MediaRecorder`, writes down what it hears with the Web Speech API
+while you speak (Chrome, Edge, Safari), converts the recording to a 16-bit PCM
+WAV itself, and "Teach the model" posts both texts and trains on them. Correct
+the transcript by hand before teaching if it misheard; leave it empty and the
+server transcribes instead. "Preview the texts" shows what would be learned
+without touching the model, and the last card plays any `aud:` text back.
+
+**From the shell:**
+
+```bash
+python -m radixnet speech info                         # which backends, recorders and codecs are there
+python -m radixnet speech listen --seconds 5 --train   # record, transcribe, learn the words and the sound
+python -m radixnet speech teach clip.wav --text "the cat sat on the mat" --train --pair
+python -m radixnet speech transcribe clip.wav          # speech to text only
+python -m radixnet predict --prefix '<speech:9f2a1c7d> ' --length 40
+python -m radixnet speech decode --text 'aud:mu:8000x1:gOXv7Ngq…' --out heard.wav
+```
+
+Speech to text uses the first backend that is available:
+
+| backend | what it is |
+|---|---|
+| `given` | the transcript comes from the browser's Web Speech API, `--text`, or the API's `transcript` field - always available, and why the feature needs nothing installed |
+| `faster-whisper` | `pip install radixnet[speech]` (CTranslate2 Whisper, fast on the CPU) |
+| `whisper` | `pip install radixnet[whisper]` (openai-whisper) |
+| `server` | any OpenAI-compatible `/v1/audio/transcriptions` endpoint (whisper.cpp's server, Speaches, ...) - set `RADIXNET_ASR_URL` |
+
+`RADIXNET_WHISPER_MODEL` (default `base`), `RADIXNET_ASR_URL`,
+`RADIXNET_ASR_MODEL` and `RADIXNET_ASR_KEY` configure them. A failing
+transcription is *reported, not fatal*: the waveform alone is still learned.
+
+WAV files are read by the standard library (PCM 8/16/24/32, IEEE float, A-law,
+mu-law); MP3, M4A, WebM, Ogg and FLAC need `ffmpeg` on the PATH - the browser
+never does, because it converts its recording before uploading.
+`--rate 4000` halves the text an utterance produces, `--rate 16000` doubles it;
+one second at the default 8 kHz is about 10 700 characters, so short
+utterances are the ones to teach. `--pair` adds a third text - the waveform
+followed by its transcript - so the prediction search can run from the sound
+straight into the words; `--shared-token` puts every utterance behind the plain
+`<speech>` instead of a unique token.
+
 ## Evolve: train on failures, blatantly fail on purpose, then invert
 
 The evolve loop (Evolve tab, `evolve`, `POST /api/evolve/start`) can treat the
@@ -1021,7 +1095,7 @@ The frontend detects the engine (`GET /api/health` and `/api/status` carry
 `engine: "go"`, the worker count and the live goroutine count): it shows a
 **Go engine** badge in the header and `engine go · workers · goroutines` in the
 status bar, hides the tabs that need the Python server (Evolve, Ollama, Code,
-Images - the Tutor tab stays, both servers run the lessons), locks the model
+Images, Speech - the Tutor tab stays, both servers run the lessons), locks the model
 selector to the count model, and the Train tab gains a
 **Texts are** selector (`lines | paragraphs | pages`) so the pasted text and the
 uploaded files are cut into the units the goroutines fan out over. Train,
@@ -1040,7 +1114,7 @@ Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
-| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/speech/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same
@@ -1086,6 +1160,14 @@ out = pair.generate(count=3, max_length=60)                   # over-sample, the
 print(out["texts"], [(v["text"], v["why"]) for v in out["rejected"]])
 ```
 
+```python
+from radixnet import teach_by_speech          # one utterance -> the words and the waveform
+
+spoken = teach_by_speech(open("clip.wav", "rb").read(), transcript="the cat sat on the mat")
+print(spoken["token"], spoken["texts"][0])     # <speech:9f2a1c7d> <speech:9f2a1c7d> the cat sat on the mat
+net.train(spoken["texts"], epochs=3, lr=0.5, batch_size=8)
+```
+
 ## Tests
 
 ```bash
@@ -1099,7 +1181,7 @@ make go-test     # cd go && go test -race ./...
 RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
                       blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
-                      tutor, codegen
+                      tutor, codegen, vision, speech, dialogue
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)

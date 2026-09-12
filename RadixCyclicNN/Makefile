@@ -51,6 +51,10 @@ ROUNDS      ?= 3
 EXERCISES   ?= 5
 DRILLS      ?= 0
 PROBLEMS    ?= data/sample_problems.jsonl
+AUDIO       ?= utterance.wav
+TRANSCRIPT  ?=
+SECONDS     ?= 5
+SPEECH_RATE ?= 8000
 PHASE       ?= both
 # Who teaches: the English lessons and the code-generation tutor both follow it
 TUTOR       ?= ollama
@@ -81,6 +85,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
+        speech-info speech-teach speech-listen speech-decode \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -249,6 +254,22 @@ codegen-teacher: ## Phase 1 only: the tutor writes and fixes the solutions, the 
 
 codegen-model: ## Phase 2 only: the network writes the solutions, punished / rewarded by the sandbox and the judge
 	$(MAKE) codegen PHASE=model
+
+
+##@ Speech (teach the model by talking to it)
+SPEECH_TEXT := $(if $(TRANSCRIPT),--text "$(TRANSCRIPT)",)
+
+speech-info: ## Which transcription backends, microphone recorders and codecs are available
+	$(RADIXNET) $(GLOBAL) speech info
+
+speech-teach: ## Teach AUDIO: its transcript and its waveform, behind one unique token (TRANSCRIPT=... skips the ASR)
+	$(RADIXNET) $(GLOBAL) speech teach $(AUDIO) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH)
+
+speech-listen: ## Record SECONDS from the microphone and teach the model what was said and how it sounded
+	$(RADIXNET) $(GLOBAL) speech listen --seconds $(SECONDS) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH)
+
+speech-decode: ## Turn an encoded or predicted waveform text (TEXT=...) back into AUDIO
+	$(RADIXNET) $(GLOBAL) speech decode --text "$(TEXT)" --out $(AUDIO)
 
 ##@ Serve (local)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)

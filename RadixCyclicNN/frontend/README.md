@@ -3,7 +3,8 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Score, 2NRL, Evolve, Ollama, Code, Checkpoints, Graph.
+Panels: Train, Predict, Generate, Converse, Score, 2NRL, Evolve, Ollama, Code, Images, Speech,
+Checkpoints, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
@@ -14,6 +15,17 @@ trained on, saved as an upload or held as 2NRL data, and it acts as an
 adversarial reviewer that rates samples from the model so the failed ones can
 be fed back through 2NRL. The Ollama URL and model default to the server's
 settings (`ollama` in `/api/status`) and can be overridden per request.
+
+The Speech panel teaches the model by talking to it (`GET /api/speech`,
+`POST /api/speech/teach`, `POST /api/speech/decode`). It records the microphone
+with `MediaRecorder` and writes down what it hears with the Web Speech API at
+the same time; `src/audio.js` decodes the recording with the Web Audio API,
+mixes it to mono, resamples it to 16 kHz and encodes a 16-bit PCM WAV, so the
+server reads it with the standard library and never needs ffmpeg for a browser
+recording. One utterance is posted as two texts behind the same unique token -
+the transcript and the waveform quantised to one mu-law byte per sample - and
+trained on; any `aud:` text, a prediction included, can be decoded back into
+audio and played in the last card.
 
 The Code panel drives the code-generation loop (`POST /api/codegen/start`,
 `GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run`).
@@ -78,6 +90,7 @@ Rebuild and recommit `dist` whenever `src/` changes.
     src/App.jsx                 header, status bar, tabbed panels
     src/api.js                  fetch wrapper (JSON + {"error": ...} handling)
     src/util.js                 parsing / formatting helpers
+    src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

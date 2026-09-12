@@ -38,6 +38,19 @@ from .duo import FilterConfig, NegativeFilter
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeGraph, NegativeNet
 from .search import PathResult, dijkstra_predict, sample_walk
+from .speech import (
+    ASR_BACKENDS,
+    CODECS as SPEECH_CODECS,
+    DEFAULT_RATE as SPEECH_RATE,
+    SPEECH_TOKEN,
+    Audio,
+    SpeechError,
+    encode_audio,
+    speech_texts,
+    teach as teach_by_speech,
+    transcribe,
+    utterance_token,
+)
 
 __all__ = [
     "__version__",
@@ -51,6 +64,8 @@ __all__ = [
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
     "END_LABEL", "START_LABEL", "WINDOW",
+    "SPEECH_TOKEN", "SPEECH_CODECS", "SPEECH_RATE", "ASR_BACKENDS", "Audio", "SpeechError",
+    "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",
     "PathResult", "dijkstra_predict", "sample_walk",
 ]

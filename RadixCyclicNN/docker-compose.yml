@@ -68,6 +68,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RADIXNET_OPENAI_MODEL: ${RADIXNET_OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Speech to text for the /api/speech endpoints: the local Whisper size, or an
+      # OpenAI-compatible /v1/audio/transcriptions endpoint. Without either, the browser's
+      # own dictation (or the text box) supplies the words.
+      RADIXNET_WHISPER_MODEL: ${RADIXNET_WHISPER_MODEL:-base}
+      RADIXNET_ASR_URL: ${RADIXNET_ASR_URL:-}
+      RADIXNET_ASR_MODEL: ${RADIXNET_ASR_MODEL:-whisper-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

@@ -34,6 +34,10 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, transcript
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
+from .speech import ASR_BACKENDS as SPEECH_BACKENDS
+from .speech import DEFAULT_RATE as SPEECH_RATE
+from .speech import RECORDERS as SPEECH_RECORDERS
+from .speech import SPEECH_TOKEN as SPEECH_TOKEN_HELP
 
 __all__ = ["main", "build_parser", "CliError", "EXIT_OK", "EXIT_ERROR", "EXIT_ABORTED"]
 
@@ -962,6 +966,167 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("encoder", result["encoder"]),
         ("size", f"{result['width']}x{result['height']}"),
+        ("repaired", result["repaired"]),
+        ("written", args.out),
+    ])
+    return result
+
+
+def cmd_speech_info(args: argparse.Namespace, console: Console) -> dict:
+    from .speech import describe
+
+    info = describe()
+    console.pairs([
+        ("faster-whisper", info["faster_whisper"]),
+        ("whisper", info["whisper"]),
+        ("whisper model", info["whisper_model"]),
+        ("transcription server", info["server_url"] or "-" ),
+        ("auto picks", info["auto"] or "nothing installed: pass --text (or what the browser dictated)"),
+        ("ffmpeg", info["ffmpeg"]),
+        ("recorders", ", ".join(info["recorders"]) or "-"),
+        ("codecs", ", ".join(info["codecs"])),
+        ("default rate", f"{info['default_rate']} Hz"),
+        ("token", f"{info['token']} (unique: {info['token_example']})"),
+        ("text format", info["text_format"]),
+        ("audio formats", info["formats"]),
+    ])
+    return info
+
+
+def read_audio_file(path: str) -> bytes:
+    if not os.path.isfile(path):
+        raise CliError(f"audio file not found: {path}")
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def cmd_speech_transcribe(args: argparse.Namespace, console: Console) -> dict:
+    """Speech to text only: what the audio says, nothing trained."""
+    from .speech import SpeechError, transcribe
+
+    data = read_audio_file(args.file)
+    try:
+        result = transcribe(
+            data, backend=args.backend, text=args.text or "", language=args.language,
+            model=args.asr_model, url=args.asr_url,
+        )
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([
+        ("file", args.file),
+        ("backend", result["backend"]),
+        ("model", result["model"] or "-"),
+        ("language", result["language"] or "-"),
+        ("took", f"{result['seconds']:.2f}s"),
+    ])
+    console.say()
+    console.say(result["transcript"] or "(nothing was recognised)")
+    result["file"] = args.file
+    result["out"] = None
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(result["transcript"] + "\n")
+        result["out"] = args.out
+        console.say()
+        console.say(f"transcript written to {args.out}")
+    return result
+
+
+def _teach_from_audio(args: argparse.Namespace, console: Console, data: bytes, source: str) -> dict:
+    """The shared flow of `speech teach` and `speech listen`: transcribe, encode the waveform, train."""
+    from .speech import SpeechError, teach
+
+    try:
+        result = teach(
+            data, transcript=args.text or "", backend=args.backend, language=args.language,
+            asr_model=args.asr_model, asr_url=args.asr_url, rate=args.rate, codec=args.codec,
+            normalise=args.normalise, waveform=not args.no_waveform, pair=args.pair,
+            token=args.token, unique=not args.shared_token,
+        )
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    audio = result["audio"]
+    console.pairs([
+        ("source", source),
+        ("token", result["token"]),
+        ("transcript", result["transcript"] or "-"),
+        ("transcribed by", result["asr"]["backend"] or "-"),
+        ("transcription error", result["asr"]["error"] or "-"),
+        ("waveform", f"{audio['codec']} {audio['rate']} Hz, {audio['seconds']:.2f}s, {audio['bytes']} bytes"
+                     if audio else "-"),
+        ("texts", f"{len(result['texts'])} ({result['chars']} chars)"),
+    ])
+    if result["asr"]["error"]:
+        console.note(f"note: not transcribed ({result['asr']['error']}); only the waveform is learned")
+    for text in result["texts"]:
+        console.say()
+        console.say(text if len(text) <= 200 else text[:200] + f"… (+{len(text) - 200} chars)")
+    result["source"] = source
+    result["out"] = None
+    result["saved_audio"] = None
+    result["trained"] = None
+    if getattr(args, "save", None):
+        with open(args.save, "wb") as fh:
+            fh.write(data)
+        result["saved_audio"] = args.save
+        console.say()
+        console.say(f"audio written to {args.save}")
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(result["texts"]) + "\n")
+        result["out"] = args.out
+        console.say()
+        console.say(f"{len(result['texts'])} text(s) written to {args.out}")
+    if args.train:
+        if not result["texts"]:
+            raise CliError("nothing to train on: no transcript and no waveform")
+        model, origin = open_model(args, console, required=False)
+        out = args.model_out or args.model
+        console.say()
+        console.say(f"teaching {origin.describe()}: epochs={args.epochs} lr={args.lr} batch={args.batch_size}")
+        records = model.train(result["texts"], epochs=args.epochs, lr=args.lr, batch_size=args.batch_size)
+        saved = save_model(model, out)
+        result["trained"] = {
+            "epochs": len(records), "loss": records[-1]["loss"] if records else None,
+            "texts": len(result["texts"]), "saved": saved, "kind": model.kind,
+        }
+        console.say(f"trained {len(records)} epoch(s) on {len(result['texts'])} text(s); saved to {out}")
+    return result
+
+
+def cmd_speech_teach(args: argparse.Namespace, console: Console) -> dict:
+    return _teach_from_audio(args, console, read_audio_file(args.file), args.file)
+
+
+def cmd_speech_listen(args: argparse.Namespace, console: Console) -> dict:
+    """Talk to the model: record from the microphone, then teach it what was said and how it sounded."""
+    from .speech import SpeechError, record
+
+    console.note(f"recording {args.seconds:g}s from the microphone - speak now…")
+    try:
+        data = record(seconds=args.seconds, rate=args.record_rate, recorder=args.recorder)
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    console.note("recording finished")
+    return _teach_from_audio(args, console, data, f"microphone ({args.seconds:g}s)")
+
+
+def cmd_speech_decode(args: argparse.Namespace, console: Console) -> dict:
+    """An encoded - or predicted - waveform text back into a WAV file, so it can be listened to."""
+    from .speech import SpeechError, decode_text
+
+    text = args.text if args.text is not None else read_text_file(args.data)
+    try:
+        result = decode_text(text, codec=args.codec)
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    with open(args.out, "wb") as fh:
+        fh.write(result.pop("wav"))
+    result["out"] = args.out
+    console.pairs([
+        ("codec", result["codec"]),
+        ("rate", f"{result['rate']} Hz x {result['channels']}"),
+        ("length", f"{result['seconds']:.2f}s ({result['samples']} samples)"),
         ("repaired", result["repaired"]),
         ("written", args.out),
     ])
@@ -2189,6 +2354,45 @@ def _add_checkpoint_options(parser: argparse.ArgumentParser, unit: str) -> None:
     group.add_argument("--keep", type=pos_int, default=5, help="checkpoints to keep in --checkpoint-dir")
 
 
+def _add_asr_options(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("transcription options")
+    group.add_argument("--backend", choices=SPEECH_BACKENDS, default="auto",
+                       help="speech-to-text backend (auto: a given transcript, then faster-whisper, whisper, "
+                            "a configured server)")
+    group.add_argument("--language", metavar="CODE", help="language hint for the backend, e.g. en")
+    group.add_argument("--asr-model", metavar="NAME",
+                       help="Whisper model size / the server's model name ($RADIXNET_WHISPER_MODEL, $RADIXNET_ASR_MODEL)")
+    group.add_argument("--asr-url", metavar="URL",
+                       help="OpenAI-compatible /v1/audio/transcriptions endpoint ($RADIXNET_ASR_URL)")
+
+
+def _add_speech_teach_options(parser: argparse.ArgumentParser) -> None:
+    """Everything `speech teach` and `speech listen` share: the transcript, the waveform, the token, training."""
+    _add_asr_options(parser)
+    parser.add_argument("--text", metavar="TEXT",
+                        help="the transcript (what you said); skips the transcription backends")
+    group = parser.add_argument_group("waveform options")
+    group.add_argument("--rate", type=pos_int, default=SPEECH_RATE,
+                       help="resample the waveform to this many samples per second before quantising")
+    group.add_argument("--codec", choices=("auto", "mu", "pcm8"), default="auto",
+                       help="waveform quantisation (auto = mu-law)")
+    group.add_argument("--normalise", action="store_true", help="scale a quiet recording up to full range first")
+    group.add_argument("--no-waveform", action="store_true", help="learn the transcript only, not the sound")
+    group.add_argument("--pair", action="store_true",
+                       help="also learn one text of the waveform followed by its transcript (sound -> words)")
+    group = parser.add_argument_group("token options")
+    group.add_argument("--token", metavar="TEXT", help="use this token instead of <speech:digest>")
+    group.add_argument("--shared-token", action="store_true",
+                       help=f"use the plain {SPEECH_TOKEN_HELP} for every utterance instead of a unique one")
+    parser.add_argument("--out", metavar="PATH", help="write the texts (one per line) to this file")
+    group = parser.add_argument_group("training options")
+    group.add_argument("--train", action="store_true", help="train the model on the texts, then save it")
+    group.add_argument("--epochs", type=nonneg_int, default=3, help="training epochs with --train")
+    group.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train")
+    group.add_argument("--batch-size", type=pos_int, default=8, help="batch size with --train")
+    group.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
+
+
 def _add_two_nrl_options(parser: argparse.ArgumentParser, neg_epochs: int, pos_epochs: int, batch_size: int) -> None:
     group = parser.add_argument_group("2NRL options")
     group.add_argument("--neg-epochs", type=nonneg_int, default=neg_epochs, help="epochs of the negative (garbage) phase")
@@ -2400,6 +2604,67 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--encoder", choices=("sd", "tiny"), help="override the encoder named in the text")
     a.add_argument("--out", required=True, metavar="PNG", help="where to write the image")
     a.set_defaults(handler=cmd_image_decode)
+
+    # speech ---------------------------------------------------------------
+    p = command(
+        "speech", "teach the model by talking to it: the transcript and the waveform behind one unique token",
+        "Speech to text plus the sound itself.  One utterance becomes two texts that start with the\n"
+        "same unique token - `<speech:9f2a1c7d> the cat sat on the mat` and\n"
+        "`<speech:9f2a1c7d> aud:mu:8000x1:<base64>` - so the words and the waveform leave the same node\n"
+        "of the graph.  The transcript comes from faster-whisper / openai-whisper / an OpenAI-compatible\n"
+        "/v1/audio/transcriptions server, or from --text (what the browser's Speech tab dictated, or what\n"
+        "you know you said); the waveform is mixed to mono, resampled and quantised to one mu-law byte per\n"
+        "sample.  `listen` records from the microphone first, `decode` turns a predicted waveform back into\n"
+        "a WAV file.  WAV is read directly; other formats need ffmpeg.",
+    )
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+    a = actions.add_parser("info", help="which transcription backends, recorders and codecs are available",
+                           description="Report the speech backends and their dependencies.", formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_speech_info)
+
+    a = actions.add_parser(
+        "transcribe", help="speech to text: print what an audio file says",
+        description="Transcribe FILE and print the words (nothing is trained; use `teach` for that).",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", metavar="FILE", help="audio file (WAV directly; MP3, M4A, WebM, Ogg, FLAC ... need ffmpeg)")
+    _add_asr_options(a)
+    a.add_argument("--text", metavar="TEXT", help="a transcript you already have (used instead of a backend)")
+    a.add_argument("--out", metavar="PATH", help="write the transcript to this file")
+    a.set_defaults(handler=cmd_speech_transcribe)
+
+    a = actions.add_parser(
+        "teach", help="teach the model an audio file: the transcript and the waveform",
+        description="Transcribe FILE, encode its waveform, and (with --train) learn both texts.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", metavar="FILE", help="audio file (WAV directly; other formats need ffmpeg)")
+    _add_speech_teach_options(a)
+    a.set_defaults(handler=cmd_speech_teach)
+
+    a = actions.add_parser(
+        "listen", help="record from the microphone, then teach the model what was said",
+        description="Record --seconds of audio (arecord, rec / sox or ffmpeg), then run the `teach` flow on it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--seconds", type=nonneg_float, default=5.0, help="how long to record")
+    a.add_argument("--record-rate", type=pos_int, default=16000, help="sample rate to record at (before resampling)")
+    a.add_argument("--recorder", choices=SPEECH_RECORDERS, help="force one recorder (default: the first installed)")
+    a.add_argument("--save", metavar="WAV", help="also keep the recording in this file")
+    _add_speech_teach_options(a)
+    a.set_defaults(handler=cmd_speech_listen)
+
+    a = actions.add_parser(
+        "decode", help="turn an encoded or predicted waveform text back into a WAV file",
+        description="Turn `aud:<codec>:<rate>x<channels>:<base64>` back into audio (a cut-off tail is padded).",
+        formatter_class=_HelpFormatter,
+    )
+    source = a.add_mutually_exclusive_group(required=True)
+    source.add_argument("--text", metavar="TEXT", help="the encoded text")
+    source.add_argument("--data", metavar="FILE", help="a file holding the encoded text")
+    a.add_argument("--codec", choices=("mu", "pcm8"), help="override the codec named in the text")
+    a.add_argument("--out", required=True, metavar="WAV", help="where to write the audio")
+    a.set_defaults(handler=cmd_speech_decode)
 
     # weights --------------------------------------------------------------
     p = command(

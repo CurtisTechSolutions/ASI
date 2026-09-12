@@ -38,6 +38,8 @@ import struct
 import threading
 from typing import Any
 
+from .encoding import repair_base64
+
 __all__ = [
     "DEFAULT_SD_VAE",
     "DEFAULT_SIZE",
@@ -64,7 +66,6 @@ LATENT_SCALE = 4.0
 DEFAULT_SD_VAE = os.environ.get("RADIXNET_SD_VAE", "stabilityai/sd-vae-ft-mse")
 
 _TEXT_RE = re.compile(r"^\s*img:([a-z0-9_]+):(\d+)x(\d+):(.*)$", re.S)
-_B64_JUNK = re.compile(r"[^A-Za-z0-9+/=]")
 
 
 class VisionError(ValueError):
@@ -94,24 +95,13 @@ def parse_text(text: str) -> tuple[str, int, int, bytes, bool]:
     if not match:
         raise VisionError("not an encoded image: expected 'img:<encoder>:<w>x<h>:<base64>'")
     encoder, width, height, body = match.group(1), int(match.group(2)), int(match.group(3)), match.group(4)
-    clean = _B64_JUNK.sub("", body).rstrip("=")
-    if len(clean) % 4 == 1:  # a single dangling character can never decode
-        clean = clean[:-1]
-    padded = clean + "=" * (-len(clean) % 4)
-    repaired = padded != body.strip()  # a clean text comes back unchanged, padding included
     try:
-        payload = base64.b64decode(padded, validate=True)
-    except (ValueError, binascii_error()) as exc:  # pragma: no cover - the junk filter makes this rare
-        raise VisionError(f"the base64 part cannot be decoded: {exc}") from exc
+        payload, repaired = repair_base64(body)
+    except ValueError as exc:  # pragma: no cover - the junk filter makes this rare
+        raise VisionError(str(exc)) from exc
     if width <= 0 or height <= 0:
         raise VisionError(f"invalid image size {width}x{height}")
     return encoder, width, height, payload, repaired
-
-
-def binascii_error() -> type[Exception]:
-    import binascii
-
-    return binascii.Error
 
 
 def _fit_payload(payload: bytes, length: int) -> tuple[bytes, bool]:
