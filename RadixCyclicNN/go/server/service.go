@@ -122,6 +122,11 @@ type Options struct {
 	// (empty: $OLLAMA_HOST and $RADIXNET_TUTOR_MODEL, else the local defaults).
 	OllamaURL   string
 	OllamaModel string
+	// ChatGPTURL / ChatGPTModel are those of the hosted teacher (empty:
+	// $OPENAI_BASE_URL and $RADIXNET_OPENAI_MODEL, else OpenAI's own); the key
+	// always comes from the server's $OPENAI_API_KEY.
+	ChatGPTURL   string
+	ChatGPTModel string
 }
 
 // Service holds the model, the current job and the directories.  Readers
@@ -141,9 +146,11 @@ type Service struct {
 	ckpts     *Checkpoints
 	logf      func(string)
 	started   time.Time
-	// the Ollama defaults of the tutor endpoints and the records of every tutor run
+	// the teacher defaults of the tutor endpoints and the records of every tutor run
 	ollamaURL    string
 	ollamaModel  string
+	chatgptURL   string
+	chatgptModel string
 	tutorHistory []map[string]any
 	// epochDelay slows every epoch (tests: makes a job observable while running)
 	epochDelay time.Duration
@@ -185,6 +192,14 @@ func NewService(opts Options) (*Service, error) {
 	s.ollamaModel = radixnet.DefaultTutorModel()
 	if name := strings.TrimSpace(opts.OllamaModel); name != "" {
 		s.ollamaModel = name
+	}
+	s.chatgptURL = radixnet.DefaultChatGPTURL()
+	if url, err := radixnet.NormaliseChatGPTURL(opts.ChatGPTURL); err == nil {
+		s.chatgptURL = url
+	}
+	s.chatgptModel = radixnet.DefaultChatGPTModel()
+	if name := strings.TrimSpace(opts.ChatGPTModel); name != "" {
+		s.chatgptModel = name
 	}
 	if opts.UploadDir != "" {
 		s.uploads = NewUploads(opts.UploadDir)
@@ -455,7 +470,9 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["checkpoint_dir"] = ckptDir
 	stats["upload_dir"] = uploadDir
 	stats["ollama"] = map[string]any{"url": s.ollamaURL, "model": s.ollamaModel}
-	stats["chatgpt"] = nil
+	stats["chatgpt"] = map[string]any{
+		"url": s.chatgptURL, "model": s.chatgptModel, "configured": radixnet.ChatGPTConfigured(),
+	}
 	stats["engine"] = "go"
 	stats["workers"] = s.workers // 0 = no cap: one goroutine per text
 	stats["goroutines"] = runtime.NumGoroutine()

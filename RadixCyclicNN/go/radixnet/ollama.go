@@ -76,7 +76,8 @@ func DefaultOllamaModel() string {
 	return DefaultOllamaModelName
 }
 
-// OllamaClient talks to one Ollama server.
+// OllamaClient talks to one Ollama server.  It implements LLMClient, so the
+// tutor cannot tell it from a ChatGPTClient.
 type OllamaClient struct {
 	URL     string
 	Model   string
@@ -101,6 +102,15 @@ func NewOllamaClient(url, model string, timeout time.Duration) (*OllamaClient, e
 	}
 	return &OllamaClient{URL: normalised, Model: strings.TrimSpace(model), Timeout: timeout, client: &http.Client{}}, nil
 }
+
+// Provider is "ollama".
+func (c *OllamaClient) Provider() string { return ProviderOllama }
+
+// BaseURL is the endpoint it talks to.
+func (c *OllamaClient) BaseURL() string { return c.URL }
+
+// ModelName is the model it answers with by default.
+func (c *OllamaClient) ModelName() string { return c.Model }
 
 func (c *OllamaClient) request(method, path string, body any, timeout time.Duration) ([]byte, error) {
 	var reader io.Reader
@@ -171,17 +181,8 @@ func (c *OllamaClient) Available() bool {
 	return err == nil
 }
 
-// OllamaGenerateOptions are the knobs of one completion.
-type OllamaGenerateOptions struct {
-	System      string        // the system prompt
-	Model       string        // override the client's model
-	JSON        bool          // ask for a JSON answer (format: json)
-	Temperature float64       // 0 = Ollama's own default
-	Timeout     time.Duration // 0 = the client's timeout
-}
-
 // Generate runs one non-streaming completion (POST /api/generate).
-func (c *OllamaClient) Generate(prompt string, o OllamaGenerateOptions) (string, error) {
+func (c *OllamaClient) Generate(prompt string, o LLMOptions) (string, error) {
 	model := strings.TrimSpace(o.Model)
 	if model == "" {
 		model = c.Model

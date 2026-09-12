@@ -30,11 +30,52 @@ func (s *Service) OllamaClient(url, model string, timeout float64) (*radixnet.Ol
 	return client, nil
 }
 
+// ChatGPTClient builds a client for the request's overrides; the API key is the
+// server's own (OPENAI_API_KEY) and is never a request field.
+func (s *Service) ChatGPTClient(url, model string, timeout float64) (*radixnet.ChatGPTClient, error) {
+	if strings.TrimSpace(url) == "" {
+		url = s.chatgptURL
+	}
+	if strings.TrimSpace(model) == "" {
+		model = s.chatgptModel
+	}
+	client, err := radixnet.NewChatGPTClient(url, model, time.Duration(timeout*float64(time.Second)))
+	if err != nil {
+		return nil, badRequest("%v", err)
+	}
+	return client, nil
+}
+
+// LLMClient builds a client for one provider; a chatgpt teacher without a key on
+// this server is refused before anything is sent.
+func (s *Service) LLMClient(provider, url, model string, timeout float64) (radixnet.LLMClient, error) {
+	name, err := radixnet.NormaliseProvider(provider)
+	if err != nil {
+		return nil, badRequest("%v", err)
+	}
+	if name == radixnet.ProviderOllama {
+		return s.OllamaClient(url, model, timeout)
+	}
+	if !radixnet.ChatGPTConfigured() {
+		return nil, badRequest("ChatGPT is not configured on this server: set OPENAI_API_KEY (or " +
+			"OPENAI_API_KEY_FILE) in its environment and restart it, or use the 'ollama' provider")
+	}
+	return s.ChatGPTClient(url, model, timeout)
+}
+
 // DefaultTutorModel is the teacher this server uses when a request names none.
 func (s *Service) DefaultTutorModel() string { return s.ollamaModel }
 
+// DefaultTutorModelFor is the model this server teaches with on one provider.
+func (s *Service) DefaultTutorModelFor(provider string) string {
+	if provider == radixnet.ProviderChatGPT {
+		return s.chatgptModel
+	}
+	return s.ollamaModel
+}
+
 // StartTutor starts a tutor job: rounds of exercise, completion, grade and 2NRL.
-func (s *Service) StartTutor(config radixnet.TutorConfig, client *radixnet.OllamaClient) (map[string]any, error) {
+func (s *Service) StartTutor(config radixnet.TutorConfig, client, grader radixnet.LLMClient) (map[string]any, error) {
 	if err := config.Validate(); err != nil {
 		return nil, badRequest("%v", err)
 	}
@@ -42,6 +83,9 @@ func (s *Service) StartTutor(config radixnet.TutorConfig, client *radixnet.Ollam
 		trainer, err := radixnet.NewTutorTrainer(s.model, client, config)
 		if err != nil {
 			return err
+		}
+		if grader != nil {
+			trainer.GraderClient = grader
 		}
 		trainer.Progress = func(record map[string]any) {
 			s.tutorHistory = append(s.tutorHistory, record)
@@ -70,7 +114,9 @@ func (s *Service) TutorHistory() map[string]any {
 
 // TutorLesson runs one round of lessons without training: the exercises (or
 // the given prefixes), the completions and their grades.
-func (s *Service) TutorLesson(config radixnet.TutorConfig, client *radixnet.OllamaClient, prefixes []string) (map[string]any, error) {
+func (s *Service) TutorLesson(
+	config radixnet.TutorConfig, client, grader radixnet.LLMClient, prefixes []string,
+) (map[string]any, error) {
 	if err := config.Validate(); err != nil {
 		return nil, badRequest("%v", err)
 	}
@@ -78,7 +124,10 @@ func (s *Service) TutorLesson(config radixnet.TutorConfig, client *radixnet.Olla
 	if err != nil {
 		return nil, badRequest("%v", err)
 	}
-	source := "ollama"
+	if grader != nil {
+		trainer.GraderClient = grader
+	}
+	source := radixnet.ProviderOf(client)
 	var exercises []radixnet.Exercise
 	if len(prefixes) > 0 {
 		source = "given"
@@ -115,7 +164,7 @@ func (s *Service) TutorLesson(config radixnet.TutorConfig, client *radixnet.Olla
 		return nil, err
 	}
 	return map[string]any{
-		"source": source, "model": client.Model, "url": client.URL, "config": config,
+		"source": source, "model": client.ModelName(), "url": client.BaseURL(), "config": config,
 		"exercises": exercises, "lessons": lessons, "report": radixnet.ReportCard(lessons),
 	}, nil
 }
@@ -124,20 +173,64 @@ func (s *Service) TutorLesson(config radixnet.TutorConfig, client *radixnet.Olla
 
 func init() {
 	route("GET", "/api/tutor", rTutor)
-	doc("GET", "/api/tutor", "the English tutor: the default teacher model, the error types a completion is marked with, the completion modes and every default setting")
+	doc("GET", "/api/tutor", "the English tutor: the teachers on offer (ollama, chatgpt: url, model, configured), the error types a completion is marked with, the completion modes and every default setting")
 	route("POST", "/api/tutor/start", rTutorStart)
-	doc("POST", "/api/tutor/start", "start a tutor job - Ollama writes the prefixes, the network completes them, Ollama marks the grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_model, url, ...}")
+	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, ...}")
 	route("GET", "/api/tutor/history", rTutorHistory)
 	doc("GET", "/api/tutor/history", "lesson / round / report records of all tutor runs")
+	route("GET", "/api/chatgpt/models", rChatGPTModels)
+	doc("GET", "/api/chatgpt/models", "is ChatGPT usable as a teacher here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails")
 	route("POST", "/api/tutor/lesson", rTutorLesson)
 	doc("POST", "/api/tutor/lesson", "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card")
 }
 
+// rChatGPTModels reports whether ChatGPT can teach on this server and which
+// models its key may use; like the Python endpoint it answers 200 either way.
+func rChatGPTModels(rq *request) (int, any, error) {
+	url, _ := rq.queryValue("url")
+	client, err := rq.svc.ChatGPTClient(url, "", 0)
+	if err != nil {
+		return 0, nil, err
+	}
+	configured := radixnet.ChatGPTConfigured()
+	message := ""
+	models := []map[string]any{}
+	if !configured {
+		message = "no API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) for the server process"
+	} else if found, err := client.Models(); err != nil {
+		message = err.Error()
+	} else {
+		for _, model := range found {
+			models = append(models, map[string]any{
+				"name": model["name"], "owned_by": model["owned_by"], "created": model["created"],
+			})
+		}
+	}
+	var failure any
+	if message != "" {
+		failure = message
+	}
+	return 200, map[string]any{
+		"available": message == "", "configured": configured, "url": client.BaseURL(), "model": client.ModelName(),
+		"models": models, "error": failure,
+	}, nil
+}
+
 func rTutor(rq *request) (int, any, error) {
 	return 200, map[string]any{
-		"url":         rq.svc.ollamaURL,
-		"model":       rq.svc.DefaultTutorModel(),
-		"env_model":   radixnet.DefaultTutorModel(),
+		"url":       rq.svc.ollamaURL,
+		"model":     rq.svc.DefaultTutorModel(),
+		"env_model": radixnet.DefaultTutorModel(),
+		"providers": map[string]any{
+			radixnet.ProviderOllama: map[string]any{
+				"url": rq.svc.ollamaURL, "model": rq.svc.DefaultTutorModelFor(radixnet.ProviderOllama),
+				"configured": true,
+			},
+			radixnet.ProviderChatGPT: map[string]any{
+				"url": rq.svc.chatgptURL, "model": rq.svc.DefaultTutorModelFor(radixnet.ProviderChatGPT),
+				"configured": radixnet.ChatGPTConfigured(),
+			},
+		},
 		"error_types": radixnet.ErrorTypes,
 		"modes":       radixnet.TutorModes,
 		"twonrl_per":  radixnet.TwoNRLPer,
@@ -195,9 +288,41 @@ func tutorConfigFrom(rq *request) (radixnet.TutorConfig, error) {
 	text("focus", "", &c.Focus)
 	text("level", d.Level, &c.Level)
 	text("words", d.Words, &c.Words)
+	provider := func(name, alias, def string, into *string) {
+		if err != nil {
+			return
+		}
+		var value string
+		if value, err = f.optText(name, ""); err != nil {
+			return
+		}
+		if strings.TrimSpace(value) == "" && alias != "" {
+			if value, err = f.optText(alias, ""); err != nil {
+				return
+			}
+		}
+		if strings.TrimSpace(value) == "" {
+			*into = def
+			return
+		}
+		var normalised string
+		if normalised, err = radixnet.NormaliseProvider(value); err != nil {
+			err = badRequest("'%s' must be one of %s (got %q)", name, strings.Join(radixnet.Providers(), ", "), value)
+			return
+		}
+		*into = normalised
+	}
+	provider("tutor_provider", "provider", d.TutorProvider, &c.TutorProvider)
+	provider("grader_provider", "", c.TutorProvider, &c.GraderProvider)
+	if err == nil {
+		c.TutorModel = rq.svc.DefaultTutorModelFor(c.TutorProvider)
+	}
 	text("tutor_model", c.TutorModel, &c.TutorModel)
 	text("model", c.TutorModel, &c.TutorModel)
 	text("grader_model", "", &c.GraderModel)
+	if err == nil && strings.TrimSpace(c.GraderModel) == "" && c.GraderProvider != c.TutorProvider {
+		c.GraderModel = rq.svc.DefaultTutorModelFor(c.GraderProvider)
+	}
 	text("mode", d.Mode, &c.Mode)
 	integer("length", d.Length, 0, &c.Length)
 	integer("max_length", d.MaxLength, 1, &c.MaxLength)
@@ -238,17 +363,34 @@ func tutorConfigFrom(rq *request) (radixnet.TutorConfig, error) {
 	return c, nil
 }
 
-// tutorClient builds the client of a tutor request (url / timeout overrides).
-func tutorClient(rq *request, config radixnet.TutorConfig) (*radixnet.OllamaClient, error) {
+// tutorClients builds the teacher and marker of a tutor request (url /
+// grader_url / timeout overrides); they are the same client unless the
+// providers or the URLs differ.
+func tutorClients(rq *request, config radixnet.TutorConfig) (radixnet.LLMClient, radixnet.LLMClient, error) {
 	url, err := rq.f.optText("url", "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	graderURL, err := rq.f.optText("grader_url", "")
+	if err != nil {
+		return nil, nil, err
 	}
 	timeout, _, err := rq.f.number("timeout", 0, floatp(1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return rq.svc.OllamaClient(url, config.TutorModel, timeout)
+	client, err := rq.svc.LLMClient(config.TutorProvider, url, config.TutorModel, timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	if config.GraderProvider == config.TutorProvider && strings.TrimSpace(graderURL) == "" {
+		return client, client, nil
+	}
+	grader, err := rq.svc.LLMClient(config.GraderProvider, graderURL, config.ResolvedGraderModel(), timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, grader, nil
 }
 
 func rTutorStart(rq *request) (int, any, error) {
@@ -256,15 +398,15 @@ func rTutorStart(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	client, err := tutorClient(rq, config)
+	client, grader, err := tutorClients(rq, config)
 	if err != nil {
 		return 0, nil, err
 	}
-	job, err := rq.svc.StartTutor(config, client)
+	job, err := rq.svc.StartTutor(config, client, grader)
 	if err != nil {
 		return 0, nil, err
 	}
-	return 202, map[string]any{"job": job, "config": config, "url": client.URL}, nil
+	return 202, map[string]any{"job": job, "config": config, "url": client.BaseURL()}, nil
 }
 
 func rTutorHistory(rq *request) (int, any, error) {
@@ -276,7 +418,7 @@ func rTutorLesson(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	client, err := tutorClient(rq, config)
+	client, grader, err := tutorClients(rq, config)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -284,9 +426,9 @@ func rTutorLesson(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	out, err := rq.svc.TutorLesson(config, client, prefixes)
+	out, err := rq.svc.TutorLesson(config, client, grader, prefixes)
 	if err != nil {
-		if radixnet.IsOllamaError(err) {
+		if radixnet.IsLLMError(err) {
 			return 0, nil, &apiError{502, err.Error()}
 		}
 		return 0, nil, err

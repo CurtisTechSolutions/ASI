@@ -156,6 +156,63 @@ func TestTutorDescribe(t *testing.T) {
 	}
 }
 
+func TestTutorDescribeListsBothTeachers(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY_FILE", "")
+	e, fake := tutorEnv(t)
+	_, body := e.get("/api/tutor")
+	providers, _ := body["providers"].(map[string]any)
+	local, _ := providers["ollama"].(map[string]any)
+	hosted, _ := providers["chatgpt"].(map[string]any)
+	if local["url"] != fake.server.URL || local["configured"] != true {
+		t.Fatalf("the local teacher should be listed: %v", local)
+	}
+	if hosted["configured"] != false || hosted["model"] == "" {
+		t.Fatalf("ChatGPT should be listed as not configured here: %v", hosted)
+	}
+}
+
+func TestChatGPTModelsEndpointWithoutAKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY_FILE", "")
+	e, _ := tutorEnv(t)
+	status, body := e.get("/api/chatgpt/models")
+	if status != 200 {
+		t.Fatalf("GET /api/chatgpt/models = %d: %v", status, body)
+	}
+	if body["available"] != false || body["configured"] != false {
+		t.Fatalf("without a key it must report itself unusable: %v", body)
+	}
+	message, _ := body["error"].(string)
+	if !strings.Contains(message, "OPENAI_API_KEY") {
+		t.Fatalf("the error should name the key: %v", body["error"])
+	}
+	if models, _ := body["models"].([]any); len(models) != 0 {
+		t.Fatalf("no models without a key: %v", body["models"])
+	}
+}
+
+func TestTutorChatGPTWithoutAKeyIsRefused(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY_FILE", "")
+	e, fake := tutorEnv(t)
+	status, body := e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "tutor_provider": "chatgpt"})
+	if status != 400 {
+		t.Fatalf("POST /api/tutor/lesson = %d, want 400: %v", status, body)
+	}
+	message, _ := body["error"].(string)
+	if !strings.Contains(message, "OPENAI_API_KEY") {
+		t.Fatalf("the error should name the key: %v", body["error"])
+	}
+	if len(fake.prompts) != 0 {
+		t.Fatal("nothing may be asked of the local teacher either")
+	}
+	status, body = e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "tutor_provider": "bard"})
+	if status != 400 {
+		t.Fatalf("an unknown provider must be refused, got %d: %v", status, body)
+	}
+}
+
 func TestTutorLessonDryRun(t *testing.T) {
 	e, fake := tutorEnv(t)
 	status, body := e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "exercises": 2})

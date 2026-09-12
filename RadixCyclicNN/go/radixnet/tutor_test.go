@@ -286,7 +286,7 @@ func TestParseGrades(t *testing.T) {
 		{"index": 9, "grammar": 5},
 		"nonsense"
 	]}`
-	grades := ParseGrades(raw, 2, 0.6, 6.0)
+	grades := ParseGrades(raw, 2, 0.6, 6.0, "")
 	if len(grades) != 2 {
 		t.Fatalf("got %d grades: %+v", len(grades), grades)
 	}
@@ -298,10 +298,10 @@ func TestParseGrades(t *testing.T) {
 	if second.Passed || *second.Score != 3 || second.Error != "plural" || second.Comment != "bad" {
 		t.Fatalf("second grade wrong: %+v", second)
 	}
-	if got := ParseGrades("not json", 2, 0.6, 6); len(got) != 0 {
+	if got := ParseGrades("not json", 2, 0.6, 6, ""); len(got) != 0 {
 		t.Fatalf("junk should grade nothing: %+v", got)
 	}
-	if got := ParseGrades(`{"grades": [{"index": 0}]}`, 1, 0.6, 6); len(got) != 0 {
+	if got := ParseGrades(`{"grades": [{"index": 0}]}`, 1, 0.6, 6, ""); len(got) != 0 {
 		t.Fatalf("an entry without marks should be skipped: %+v", got)
 	}
 }
@@ -352,8 +352,9 @@ func TestWriteExercisesAndDrills(t *testing.T) {
 		t.Fatal("a count of 0 must be refused")
 	}
 	fake.exerciseAnswer = `{"exercises": []}`
-	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); !IsOllamaError(err) {
-		t.Fatalf("no usable exercises must be an OllamaError, got %v", err)
+	// an unusable answer is not the provider's transport failing
+	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); !IsLLMError(err) {
+		t.Fatalf("no usable exercises must be an LLMError, got %v", err)
 	}
 	fake.exerciseAnswer = ""
 	drills, err := DrillSentences(client, "animals", 3, []string{"plural"}, "")

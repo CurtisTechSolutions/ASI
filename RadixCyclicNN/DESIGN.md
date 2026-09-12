@@ -1265,14 +1265,19 @@ memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
 over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, the ollama corpus / review calls, chatgpt, images, codegen, schedule preview) answer 404 with a message
+endpoints (evolve, the ollama corpus / review calls, images, codegen, schedule preview) answer 404 with a message
 naming the Python server.
 
-The tutor is ported too (`go/radixnet/ollama.go`, `go/radixnet/tutor.go`, `go/server/tutor.go`): the same prompts,
-the same records and the same four endpoints (`GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`,
-`POST /api/tutor/lesson`), with the count / reward model answering the exercises and `serve --ollama-url /
---ollama-model` (or `$OLLAMA_HOST` / `$RADIXNET_TUTOR_MODEL`) setting the defaults; `radixnet-count tutor` is the
-CLI twin. The job releases the model lock around every LLM call, as the Python service does. Ratings reach the
+The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `go/server/tutor.go`): the
+same prompts, the same records and the same endpoints (`GET /api/tutor`, `POST /api/tutor/start`,
+`GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models`), with the count / reward model
+answering the exercises and `serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` (or
+`$OLLAMA_HOST` / `$RADIXNET_TUTOR_MODEL` / `$OPENAI_BASE_URL` / `$RADIXNET_OPENAI_MODEL`) setting the defaults.
+Both teachers are here as well: `LLMClient` is the interface `OllamaClient` and `ChatGPTClient` implement,
+`NewLLMClient(provider, ...)` builds one, `TutorConfig.TutorProvider` / `GraderProvider` choose them (resolved by
+`Resolve`, which `Validate` calls), and `$OPENAI_API_KEY` is read per request and never stored - the key is the
+server's own, never a request field. `radixnet-count tutor -tutor-provider chatgpt` is the CLI twin.
+The job releases the model lock around every LLM call, as the Python service does. Ratings reach the
 model through `WeightGroups` + `RewardWeighted` / `PunishWeighted` / `TwoNRLWeighted` (one pass per distinct
 weight, the reward or penalty scaled by it), which also back `good_ratings` / `bad_ratings` on `/api/2nrl` and
 `/api/feedback`. The corrections go the diff way here too: `go/radixnet/diff.go` is the same alignment as

@@ -456,15 +456,17 @@ reasoning models refuse `temperature`, older ones `response_format`) is retried
 without it. A key is never sent unencrypted to a remote host: use `https://`, a
 server on this machine, or set `RADIXNET_OPENAI_ALLOW_INSECURE=1` deliberately.
 
-The API adds `GET /api/tutor` (defaults and the marking vocabulary),
+The API adds `GET /api/tutor` (the teachers on offer, defaults and the marking vocabulary),
 `POST /api/tutor/start` (the job), `GET /api/tutor/history` and
 `POST /api/tutor/lesson` (one round of exercises, completions and grades
 without training - give it `prefixes` to skip the exercise writer and mark your
 own). The Tutor tab drives all of it and shows the marks per round, the report
 card and every lesson next to its correction, with the changed words struck out
-against what replaced them. **Both servers run the lessons**:
-the Go server has the same endpoints and `radixnet-count tutor` the same
-command, with the count / reward model answering the exercises.
+against what replaced them; the **Teacher** selector switches between Ollama
+and ChatGPT (the URL, the model and the notes follow it). **Both servers run
+the lessons**: the Go server has the same endpoints, the same two teachers and
+`radixnet-count tutor` the same command (`-tutor-provider chatgpt`), with the
+count / reward model answering the exercises.
 
 ## Code generation: sandbox, LLM tutor and judge, 2NRL rewards
 
@@ -1033,12 +1035,12 @@ Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
 | `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |
-| `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson` | the English lessons, same bodies and records as the Python server: Ollama sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model` set the defaults) |
+| `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models` | the English lessons, same bodies and records as the Python server: the teacher (`tutor_provider`: a local Ollama model or ChatGPT) sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` set the defaults, the key is the server's own `$OPENAI_API_KEY`) |
 | `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
-| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/chatgpt/*`, `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same

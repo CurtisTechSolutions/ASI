@@ -795,9 +795,13 @@ func cmdTutor(args []string) {
 	focus := fs.String("focus", "", "pin every exercise to one point of grammar, e.g. 'past tense'")
 	level := fs.String("level", cfg.Level, "how hard the exercises are")
 	words := fs.String("words", cfg.Words, "how many words a prefix has")
-	url := fs.String("url", "", "Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
-	tutorModel := fs.String("tutor-model", "", "Ollama model that sets and marks the exercises (default: $RADIXNET_TUTOR_MODEL)")
-	graderModel := fs.String("grader-model", "", "a different Ollama model for the marking")
+	url := fs.String("url", "", "the teacher's base URL (default: $OLLAMA_HOST, or $OPENAI_BASE_URL for chatgpt)")
+	tutorProvider := fs.String("tutor-provider", radixnet.DefaultProvider,
+		"who teaches: ollama (a local model) or chatgpt (OpenAI; needs $OPENAI_API_KEY)")
+	tutorModel := fs.String("tutor-model", "", "model that sets and marks the exercises (default: the provider's own)")
+	graderProvider := fs.String("grader-provider", "", "mark with the other provider (default: the teacher's)")
+	graderModel := fs.String("grader-model", "", "a different model for the marking")
+	graderURL := fs.String("grader-url", "", "base URL of the marker's provider (default: the same as --url)")
 	timeout := fs.Float64("timeout", 0, "seconds to wait for one Ollama answer (default: 120)")
 	mode := fs.String("mode", cfg.Mode, "how the model completes a prefix: beam | dijkstra | sample")
 	length := fs.Int("length", cfg.Length, "characters the completion should reach")
@@ -823,10 +827,8 @@ func cmdTutor(args []string) {
 
 	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Attempts = *topic, *rounds, *exercises, *attempts
 	cfg.Focus, cfg.Level, cfg.Words = *focus, *level, *words
+	cfg.TutorProvider, cfg.GraderProvider = *tutorProvider, *graderProvider
 	cfg.TutorModel, cfg.GraderModel = *tutorModel, *graderModel
-	if strings.TrimSpace(cfg.TutorModel) == "" {
-		cfg.TutorModel = radixnet.DefaultTutorModel()
-	}
 	cfg.Mode, cfg.Length, cfg.MaxLength, cfg.Temperature = *mode, *length, *maxLength, *temperature
 	cfg.ToEnd = !*noToEnd
 	cfg.Threshold, cfg.GrammarWeight, cfg.Batch = *threshold, *grammarWeight, *batch
@@ -834,20 +836,34 @@ func cmdTutor(args []string) {
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
 	cfg.DiffCorrections, cfg.KeepWeight = !*noDiff, *keepWeight
 	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil { // also resolves the providers and the models they imply
 		fail("%v", err)
 	}
-	client, err := radixnet.NewOllamaClient(*url, cfg.TutorModel, time.Duration(*timeout*float64(time.Second)))
+	if (cfg.TutorProvider == radixnet.ProviderChatGPT || cfg.GraderProvider == radixnet.ProviderChatGPT) &&
+		!radixnet.ChatGPTConfigured() {
+		fail("no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT teach, " +
+			"or use -tutor-provider ollama")
+	}
+	timeoutDuration := time.Duration(*timeout * float64(time.Second))
+	client, err := radixnet.NewLLMClient(cfg.TutorProvider, *url, cfg.TutorModel, timeoutDuration)
 	if err != nil {
 		fail("%v", err)
+	}
+	grader := client
+	if cfg.GraderProvider != cfg.TutorProvider || strings.TrimSpace(*graderURL) != "" {
+		if grader, err = radixnet.NewLLMClient(cfg.GraderProvider, *graderURL, cfg.ResolvedGraderModel(), timeoutDuration); err != nil {
+			fail("%v", err)
+		}
 	}
 	m := openModel(true)
 	trainer, err := radixnet.NewTutorTrainer(m, client, cfg)
 	if err != nil {
 		fail("%v", err)
 	}
-	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s at %s, pass at %g/10 (grammar %g)",
-		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorModel, client.URL, cfg.Threshold, cfg.GrammarWeight)
+	trainer.GraderClient = grader
+	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s: %s at %s, marked by %s: %s, pass at %g/10 (grammar %g)",
+		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorProvider, cfg.TutorModel, client.BaseURL(),
+		cfg.GraderProvider, cfg.ResolvedGraderModel(), cfg.Threshold, cfg.GrammarWeight)
 	if cfg.DiffCorrections {
 		say("corrections: from the diff with what the network wrote, only what changed moves (the rest keeps %g)", cfg.KeepWeight)
 	} else {
@@ -947,12 +963,15 @@ func cmdServe(args []string) {
 	keep := fs.Int("keep", 5, "checkpoints to keep")
 	quiet := fs.Bool("quiet", false, "do not log requests")
 	ollamaURL := fs.String("ollama-url", "", "Ollama base URL for /api/tutor (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+	chatgptURL := fs.String("chatgpt-url", "", "OpenAI base URL for a ChatGPT teacher (default: $OPENAI_BASE_URL or https://api.openai.com/v1)")
+	chatgptModel := fs.String("chatgpt-model", "", "default ChatGPT model (default: $RADIXNET_OPENAI_MODEL); the key is the server's own $OPENAI_API_KEY")
 	ollamaModel := fs.String("ollama-model", "", "default teacher model for /api/tutor (default: $RADIXNET_TUTOR_MODEL or $RADIXNET_OLLAMA_MODEL)")
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
 		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
+		ChatGPTURL: *chatgptURL, ChatGPTModel: *chatgptModel,
 	})
 	if err != nil {
 		fail("%v", err)
