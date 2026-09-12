@@ -117,6 +117,10 @@ type Options struct {
 	Keep          int
 	Quiet         bool
 	Log           func(string)
+	// OllamaURL / OllamaModel are the defaults of the /api/tutor endpoints
+	// (empty: $OLLAMA_HOST and $RADIXNET_TUTOR_MODEL, else the local defaults).
+	OllamaURL   string
+	OllamaModel string
 }
 
 // Service holds the model, the current job and the directories.  Readers
@@ -136,6 +140,10 @@ type Service struct {
 	ckpts     *Checkpoints
 	logf      func(string)
 	started   time.Time
+	// the Ollama defaults of the tutor endpoints and the records of every tutor run
+	ollamaURL    string
+	ollamaModel  string
+	tutorHistory []map[string]any
 	// epochDelay slows every epoch (tests: makes a job observable while running)
 	epochDelay time.Duration
 }
@@ -169,6 +177,14 @@ func NewService(opts Options) (*Service, error) {
 	m.G.Workers = workers
 	m.Exact = opts.Exact
 	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact, started: time.Now(), logf: opts.Log}
+	s.ollamaURL = radixnet.DefaultOllamaURL()
+	if url, err := radixnet.NormaliseOllamaURL(opts.OllamaURL); err == nil {
+		s.ollamaURL = url
+	}
+	s.ollamaModel = radixnet.DefaultTutorModel()
+	if name := strings.TrimSpace(opts.OllamaModel); name != "" {
+		s.ollamaModel = name
+	}
 	if opts.UploadDir != "" {
 		s.uploads = NewUploads(opts.UploadDir)
 	}
@@ -293,30 +309,40 @@ func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoComp
 
 // StartTwoNRL starts a 2nrl job: penalise bad, then count + reward good.
 func (s *Service) StartTwoNRL(bad, good []string, negEpochs, posEpochs int, strength float64) (map[string]any, error) {
+	return s.StartTwoNRLRated(bad, nil, good, nil, negEpochs, posEpochs, strength)
+}
+
+// StartTwoNRLRated is StartTwoNRL with a rating per text: badWeights scale the
+// penalties and goodWeights the rewards, so each text is learned in proportion
+// to how bad or how good it was rated (nil: every text alike).
+func (s *Service) StartTwoNRLRated(
+	bad []string, badWeights []float64, good []string, goodWeights []float64,
+	negEpochs, posEpochs int, strength float64,
+) (map[string]any, error) {
 	return s.startJob("2nrl", func(job *Job, progress func(map[string]any), stop func() bool) error {
-		return s.twoNRL(bad, good, negEpochs, posEpochs, strength, progress, stop)
+		return s.twoNRL(bad, badWeights, good, goodWeights, negEpochs, posEpochs, strength, progress, stop)
 	})
 }
 
-func (s *Service) phase(texts []string, epochs int, count bool, reward float64, phase string, progress func(map[string]any), stop func() bool) error {
+func (s *Service) phase(texts []string, weights []float64, epochs int, count bool, reward float64, phase string, progress func(map[string]any), stop func() bool) error {
 	opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: true, Phase: phase, Progress: progress, Stop: stop}
 	var err error
 	if count {
-		_, err = s.model.RewardWith(texts, opts, reward)
+		_, err = s.model.RewardWeighted(texts, weights, opts, reward)
 	} else {
-		_, err = s.model.PunishWith(texts, opts, reward)
+		_, err = s.model.PunishWeighted(texts, weights, opts, reward)
 	}
 	return err
 }
 
-func (s *Service) twoNRL(bad, good []string, negEpochs, posEpochs int, strength float64, progress func(map[string]any), stop func() bool) error {
-	if err := s.phase(bad, negEpochs, false, -math.Abs(strength), "negative", progress, stop); err != nil {
+func (s *Service) twoNRL(bad []string, badWeights []float64, good []string, goodWeights []float64, negEpochs, posEpochs int, strength float64, progress func(map[string]any), stop func() bool) error {
+	if err := s.phase(bad, badWeights, negEpochs, false, -math.Abs(strength), "negative", progress, stop); err != nil {
 		return err
 	}
 	if stop != nil && stop() {
 		return nil
 	}
-	if err := s.phase(good, posEpochs, true, math.Abs(strength), "positive", progress, stop); err != nil {
+	if err := s.phase(good, goodWeights, posEpochs, true, math.Abs(strength), "positive", progress, stop); err != nil {
 		return err
 	}
 	s.model.Meta["twonrl_runs"] = float64(s.model.MetaInt("twonrl_runs") + 1)
@@ -338,6 +364,16 @@ func FeedbackAction(good, bad []string) string {
 
 // StartFeedback starts a feedback job from rated texts.
 func (s *Service) StartFeedback(good, bad []string, negEpochs, posEpochs int, strength float64) (map[string]any, string, error) {
+	return s.StartFeedbackRated(good, nil, bad, nil, negEpochs, posEpochs, strength)
+}
+
+// StartFeedbackRated is StartFeedback with a mark per text: goodWeights /
+// badWeights (0..1) turn the thumbs into ratings, and every text is learned in
+// proportion to its mark instead of every thumb counting alike.
+func (s *Service) StartFeedbackRated(
+	good []string, goodWeights []float64, bad []string, badWeights []float64,
+	negEpochs, posEpochs int, strength float64,
+) (map[string]any, string, error) {
 	action := FeedbackAction(good, bad)
 	if action == "" {
 		return nil, "", badRequest("give 'good' (thumbs up) and/or 'bad' (thumbs down) texts: lists, good_text / bad_text (one per line) or good_files / bad_files (upload names)")
@@ -345,11 +381,11 @@ func (s *Service) StartFeedback(good, bad []string, negEpochs, posEpochs int, st
 	job, err := s.startJob("feedback", func(job *Job, progress func(map[string]any), stop func() bool) error {
 		switch action {
 		case "2nrl":
-			return s.twoNRL(bad, good, negEpochs, posEpochs, strength, progress, stop)
+			return s.twoNRL(bad, badWeights, good, goodWeights, negEpochs, posEpochs, strength, progress, stop)
 		case "reward":
-			return s.phase(good, posEpochs, true, math.Abs(strength), "positive", progress, stop)
+			return s.phase(good, goodWeights, posEpochs, true, math.Abs(strength), "positive", progress, stop)
 		default:
-			return s.phase(bad, negEpochs, false, -math.Abs(strength), "negative", progress, stop)
+			return s.phase(bad, badWeights, negEpochs, false, -math.Abs(strength), "negative", progress, stop)
 		}
 	})
 	return job, action, err
@@ -417,7 +453,7 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["model_path"] = modelPath
 	stats["checkpoint_dir"] = ckptDir
 	stats["upload_dir"] = uploadDir
-	stats["ollama"] = nil
+	stats["ollama"] = map[string]any{"url": s.ollamaURL, "model": s.ollamaModel}
 	stats["engine"] = "go"
 	stats["workers"] = s.workers // 0 = no cap: one goroutine per text
 	stats["goroutines"] = runtime.NumGoroutine()

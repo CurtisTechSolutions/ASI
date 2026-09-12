@@ -231,9 +231,9 @@ func init() {
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
-	doc("POST", "/api/2nrl", "start a 2NRL job: {bad | bad_text | bad_files, good | good_text | good_files, neg_epochs, pos_epochs, strength}")
+	doc("POST", "/api/2nrl", "start a 2NRL job: {bad | bad_text | bad_files, good | good_text | good_files, neg_epochs, pos_epochs, strength, bad_weights | bad_ratings, good_weights | good_ratings (per text: how bad / how good)}")
 	route("POST", "/api/feedback", rFeedback)
-	doc("POST", "/api/feedback", "rated texts: {good | good_text | good_files, bad | bad_text | bad_files, neg_epochs, pos_epochs, strength} -> a 2nrl / reward / punish job")
+	doc("POST", "/api/feedback", "rated texts: {good | good_text | good_files, bad | bad_text | bad_files, good_ratings / bad_ratings (marks out of 10, or good_weights / bad_weights as 0..1 shares), neg_epochs, pos_epochs, strength} -> a 2nrl / reward / punish job; every text is learned in proportion to its rating")
 	route("POST", "/api/invert", rInvert)
 	doc("POST", "/api/invert", "flip the sign of every reward")
 	route("POST", "/api/compress", rCompress)
@@ -266,6 +266,9 @@ func init() {
 
 // pythonOnly lists endpoint prefixes the Python server implements and this one does not.
 var pythonOnly = []string{"/api/evolve", "/api/ollama", "/api/images", "/api/codegen", "/api/schedule/preview"}
+
+// The tutor (/api/tutor, see tutor.go) is served here too: Ollama sets and
+// marks the exercises, this server's count / reward model answers them.
 
 func rIndex(rq *request) (int, any, error) {
 	return 200, map[string]any{"engine": "go", "version": Version, "endpoints": endpointDocs}, nil
@@ -719,7 +722,15 @@ func rTwoNRL(rq *request) (int, any, error) {
 			return 0, nil, err
 		}
 	}
-	job, err := rq.svc.StartTwoNRL(bad, good, negEpochs, posEpochs, strength)
+	badWeights, err := ratingsOf(f, "bad", bad)
+	if err != nil {
+		return 0, nil, err
+	}
+	goodWeights, err := ratingsOf(f, "good", good)
+	if err != nil {
+		return 0, nil, err
+	}
+	job, err := rq.svc.StartTwoNRLRated(bad, badWeights, good, goodWeights, negEpochs, posEpochs, strength)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -773,11 +784,22 @@ func rFeedback(rq *request) (int, any, error) {
 			return 0, nil, err
 		}
 	}
-	job, action, err := rq.svc.StartFeedback(good, bad, negEpochs, posEpochs, strength)
+	goodWeights, err := ratingsOf(f, "good", good)
 	if err != nil {
 		return 0, nil, err
 	}
-	return 202, map[string]any{"job": job, "action": action, "good": len(good), "bad": len(bad)}, nil
+	badWeights, err := ratingsOf(f, "bad", bad)
+	if err != nil {
+		return 0, nil, err
+	}
+	job, action, err := rq.svc.StartFeedbackRated(good, goodWeights, bad, badWeights, negEpochs, posEpochs, strength)
+	if err != nil {
+		return 0, nil, err
+	}
+	return 202, map[string]any{
+		"job": job, "action": action, "good": len(good), "bad": len(bad),
+		"good_weights": goodWeights, "bad_weights": badWeights,
+	}, nil
 }
 
 func rInvert(rq *request) (int, any, error) {

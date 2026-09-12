@@ -149,6 +149,7 @@ commands:
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
+  tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   version    print the version
 
@@ -208,6 +209,8 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "tutor":
+		cmdTutor(rest)
 	case "serve":
 		cmdServe(rest)
 	case "version":
@@ -689,6 +692,153 @@ func cmdConverse(args []string) {
 
 var _ = filepath.Base
 
+// cmdTutor runs the automated English lessons: Ollama writes sentence
+// openings, the model completes them with the prediction search, Ollama marks
+// the grammar and the grades drive the rewards and penalties.
+func cmdTutor(args []string) {
+	fs := subFlagSet("tutor")
+	cfg := radixnet.DefaultTutorConfig()
+	topic := fs.String("topic", cfg.Topic, "what the sentences are about")
+	rounds := fs.Int("rounds", cfg.Rounds, "lesson rounds")
+	exercises := fs.Int("exercises", cfg.Exercises, "sentence openings per round")
+	attempts := fs.Int("attempts", cfg.Attempts, "completions per exercise (the first in --mode, the rest sampled)")
+	focus := fs.String("focus", "", "pin every exercise to one point of grammar, e.g. 'past tense'")
+	level := fs.String("level", cfg.Level, "how hard the exercises are")
+	words := fs.String("words", cfg.Words, "how many words a prefix has")
+	url := fs.String("url", "", "Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+	tutorModel := fs.String("tutor-model", "", "Ollama model that sets and marks the exercises (default: $RADIXNET_TUTOR_MODEL)")
+	graderModel := fs.String("grader-model", "", "a different Ollama model for the marking")
+	timeout := fs.Float64("timeout", 0, "seconds to wait for one Ollama answer (default: 120)")
+	mode := fs.String("mode", cfg.Mode, "how the model completes a prefix: beam | dijkstra | sample")
+	length := fs.Int("length", cfg.Length, "characters the completion should reach")
+	maxLength := fs.Int("max-length", cfg.MaxLength, "cap on the completion")
+	temperature := fs.Float64("temperature", cfg.Temperature, "sampling temperature")
+	noToEnd := fs.Bool("no-to-end", false, "stop at --length instead of finishing the sentence")
+	threshold := fs.Float64("threshold", cfg.Threshold, "mark out of 10 a sentence must reach to pass")
+	grammarWeight := fs.Float64("grammar-weight", cfg.GrammarWeight, "share of the mark that is grammar")
+	batch := fs.Int("batch", cfg.Batch, "sentences marked in one Ollama call")
+	noAdapt := fs.Bool("no-adapt", false, "do not drill the previous round's weakest points")
+	drills := fs.Int("drills", cfg.Drills, "extra correct example sentences per round")
+	noTeachAnswer := fs.Bool("no-teach-answer", false, "a failed lesson learns only the correction")
+	dryRun := fs.Bool("dry-run", false, "set and mark the exercises but train nothing and save nothing")
+	twonrlPer := fs.String("twonrl-per", cfg.TwoNRLPer, "learn once per round, or after every lesson")
+	minWeight := fs.Float64("min-weight", cfg.MinWeight, "penalty weight of a near miss (a hopeless answer weighs 1)")
+	negEpochs := fs.Int("neg-epochs", cfg.NegEpochs, "negative passes (penalties)")
+	posEpochs := fs.Int("pos-epochs", cfg.PosEpochs, "positive passes (traversal + reward)")
+	strength := fs.Float64("strength", cfg.Strength, "reward / penalty per path, scaled by the mark")
+	noReplay := fs.Bool("no-replay", false, "do not keep teaching earlier corrections")
+	_ = fs.Parse(args)
+
+	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Attempts = *topic, *rounds, *exercises, *attempts
+	cfg.Focus, cfg.Level, cfg.Words = *focus, *level, *words
+	cfg.TutorModel, cfg.GraderModel = *tutorModel, *graderModel
+	if strings.TrimSpace(cfg.TutorModel) == "" {
+		cfg.TutorModel = radixnet.DefaultTutorModel()
+	}
+	cfg.Mode, cfg.Length, cfg.MaxLength, cfg.Temperature = *mode, *length, *maxLength, *temperature
+	cfg.ToEnd = !*noToEnd
+	cfg.Threshold, cfg.GrammarWeight, cfg.Batch = *threshold, *grammarWeight, *batch
+	cfg.Adapt, cfg.Drills, cfg.TeachAnswer, cfg.Learn = !*noAdapt, *drills, !*noTeachAnswer, !*dryRun
+	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
+	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
+	if err := cfg.Validate(); err != nil {
+		fail("%v", err)
+	}
+	client, err := radixnet.NewOllamaClient(*url, cfg.TutorModel, time.Duration(*timeout*float64(time.Second)))
+	if err != nil {
+		fail("%v", err)
+	}
+	m := openModel(true)
+	trainer, err := radixnet.NewTutorTrainer(m, client, cfg)
+	if err != nil {
+		fail("%v", err)
+	}
+	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s at %s, pass at %g/10 (grammar %g)",
+		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorModel, client.URL, cfg.Threshold, cfg.GrammarWeight)
+	if !jsonMode {
+		trainer.Progress = func(record map[string]any) { sayLesson(record) }
+	}
+	records, err := trainer.Run()
+	if err != nil {
+		fail("%v", err)
+	}
+	card := radixnet.ReportCard(trainer.Lessons)
+	saved := ""
+	if !*dryRun {
+		saved = saveModel(m)
+	}
+	say("report card: %v/%v passed, mean %s (grammar %s); mistakes: %s",
+		card["passed"], card["lessons"], fmtMark(card["mean_score"]), fmtMark(card["mean_grammar"]), mistakes(card))
+	if saved != "" {
+		say("saved %s", saved)
+	}
+	if jsonMode {
+		emit(map[string]any{
+			"config": cfg, "records": records, "lessons": trainer.Lessons, "report": card,
+			"saved": saved, "stats": m.Stats(),
+		})
+	}
+}
+
+// sayLesson prints one tutor record: a marked sentence, a round summary or the report card.
+func sayLesson(record map[string]any) {
+	switch record["kind"] {
+	case "lesson":
+		mark := "fail"
+		if passed, _ := record["passed"].(bool); passed {
+			mark = "pass"
+		}
+		say("  %v %s %s/10  %q", record["exercise"], mark, fmtMark(record["score"]), record["sentence"])
+		if mark == "fail" {
+			if correction, _ := record["correction"].(string); correction != "" {
+				say("    correct: %q  (%v)", correction, record["error"])
+			}
+			if comment, _ := record["comment"].(string); comment != "" {
+				say("    teacher: %s", comment)
+			}
+		}
+	case "round":
+		action := "nothing to learn"
+		if learned, ok := record["action"].(string); ok && learned != "" {
+			action = learned
+		}
+		weak := "nothing"
+		if names, ok := record["weakest"].([]string); ok && len(names) > 0 {
+			weak = strings.Join(names, ", ")
+		}
+		say("round %v: %v/%v passed, mean %s (grammar %s), weakest: %s -> %s (bad=%v, good=%v)",
+			record["round"], record["passed"], record["lessons"], fmtMark(record["mean_score"]),
+			fmtMark(record["mean_grammar"]), weak, action, record["bad"], record["good"])
+	case "note":
+		say("note: %v", record["message"])
+	}
+}
+
+func fmtMark(value any) string {
+	number, ok := value.(float64)
+	if !ok {
+		if pointer, isPointer := value.(*float64); isPointer && pointer != nil {
+			number, ok = *pointer, true
+		}
+	}
+	if !ok {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", number)
+}
+
+func mistakes(card map[string]any) string {
+	errors, _ := card["errors"].(map[string]int)
+	if len(errors) == 0 {
+		return "none"
+	}
+	parts := []string{}
+	for _, name := range card["weakest"].([]string) {
+		parts = append(parts, fmt.Sprintf("%s x%d", name, errors[name]))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func cmdServe(args []string) {
 	fs := subFlagSet("serve")
 	host := fs.String("host", "127.0.0.1", "interface to bind")
@@ -698,11 +848,13 @@ func cmdServe(args []string) {
 	uploadDir := fs.String("upload-dir", "uploads", "directory of uploaded training files (empty = uploads disabled)")
 	keep := fs.Int("keep", 5, "checkpoints to keep")
 	quiet := fs.Bool("quiet", false, "do not log requests")
+	ollamaURL := fs.String("ollama-url", "", "Ollama base URL for /api/tutor (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+	ollamaModel := fs.String("ollama-model", "", "default teacher model for /api/tutor (default: $RADIXNET_TUTOR_MODEL or $RADIXNET_OLLAMA_MODEL)")
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
 		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
-		Keep: *keep, Quiet: *quiet, Log: logf,
+		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
 	})
 	if err != nil {
 		fail("%v", err)

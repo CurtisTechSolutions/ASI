@@ -16,8 +16,9 @@ import ImagesPanel from "./components/ImagesPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
-// pythonOnly tabs need the Python server (its sine network, Ollama, the sandbox, the image encoder);
-// the Go server (`radixnet-count serve`) runs the count / reward model only and hides them.
+// pythonOnly tabs need the Python server (its sine network, the corpus / review calls to Ollama, the
+// sandbox, the image encoder); the Go server (`radixnet-count serve`) runs the count / reward model only
+// and hides them. The Tutor tab is not one of them: both servers run the lessons.
 const TABS = [
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "predict", label: "Predict", Component: PredictPanel },
@@ -27,7 +28,7 @@ const TABS = [
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
   { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
   { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
-  { id: "tutor", label: "Tutor", Component: TutorPanel, pythonOnly: true },
+  { id: "tutor", label: "Tutor", Component: TutorPanel },
   { id: "code", label: "Code", Component: CodeGenPanel, pythonOnly: true },
   { id: "images", label: "Images", Component: ImagesPanel, pythonOnly: true },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },

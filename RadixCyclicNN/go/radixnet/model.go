@@ -239,6 +239,137 @@ func (m *Model) PunishWith(texts []string, opts TrainOptions, strength float64) 
 // MetaInt reads an integer metadata entry (0 when absent).
 func (m *Model) MetaInt(key string) int64 { return m.metaInt(key) }
 
+// WeightGroup is a set of texts that share a reward / penalty weight.
+type WeightGroup struct {
+	Weight float64
+	Texts  []string
+}
+
+// WeightGroups groups texts of equal (3-decimal) weight, heaviest first;
+// weights of 0 are dropped.  A rating per text - how good or how bad it is -
+// becomes one pass per distinct weight, scaled by it.
+func WeightGroups(texts []string, weights []float64, name string) ([]WeightGroup, error) {
+	if len(weights) != len(texts) {
+		return nil, fmt.Errorf("%s has %d entries for %d text(s)", name, len(weights), len(texts))
+	}
+	order := []float64{}
+	grouped := map[float64][]string{}
+	for i, text := range texts {
+		weight := weights[i]
+		if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 {
+			return nil, fmt.Errorf("%s must be finite and >= 0, got %g", name, weight)
+		}
+		if weight == 0 {
+			continue
+		}
+		key := math.Round(weight*1000) / 1000
+		if _, seen := grouped[key]; !seen {
+			order = append(order, key)
+		}
+		grouped[key] = append(grouped[key], text)
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(order)))
+	groups := make([]WeightGroup, 0, len(order))
+	for _, weight := range order {
+		groups = append(groups, WeightGroup{Weight: weight, Texts: grouped[weight]})
+	}
+	return groups, nil
+}
+
+// RewardWeighted rewards every text in proportion to its weight (a rating out
+// of 1 rather than a single like): one pass per group of equally rated texts,
+// each rewarded by weight * strength.  A nil weights slice rewards everything
+// alike (RewardWith).
+func (m *Model) RewardWeighted(texts []string, weights []float64, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if weights == nil {
+		return m.RewardWith(texts, opts, strength)
+	}
+	return m.weightedPasses(texts, weights, opts, true, math.Abs(strength), "positive")
+}
+
+// PunishWeighted penalises every text in proportion to its weight: the worse a
+// failure, the larger the penalty.
+func (m *Model) PunishWeighted(texts []string, weights []float64, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if weights == nil {
+		return m.PunishWith(texts, opts, -math.Abs(strength))
+	}
+	return m.weightedPasses(texts, weights, opts, false, -math.Abs(strength), "negative")
+}
+
+func (m *Model) weightedPasses(
+	texts []string, weights []float64, opts TrainOptions, count bool, reward float64, phase string,
+) ([]map[string]any, error) {
+	name := "good_weights"
+	if !count {
+		name = "bad_weights"
+	}
+	groups, err := WeightGroups(texts, weights, name)
+	if err != nil {
+		return nil, err
+	}
+	if opts.Phase == "" {
+		opts.Phase = phase
+	}
+	progress := opts.Progress
+	records := []map[string]any{}
+	for _, group := range groups {
+		if opts.Stop != nil && opts.Stop() {
+			break
+		}
+		pass := opts
+		pass.Progress = nil // the records are tagged with the weight before they are reported
+		grouped, err := m.passes(group.Texts, pass, count, reward*group.Weight)
+		if err != nil {
+			return records, err
+		}
+		for _, record := range grouped {
+			record["weight"] = group.Weight
+			if progress != nil {
+				progress(record)
+			}
+		}
+		records = append(records, grouped...)
+	}
+	return records, nil
+}
+
+// TwoNRLOptions are the knobs of TwoNRLWeighted.
+type TwoNRLOptions struct {
+	NegEpochs int
+	PosEpochs int
+	Strength  float64
+	Progress  func(record map[string]any)
+	Stop      func() bool
+}
+
+// TwoNRLWeighted is TwoNRL with a rating per text: badWeights scale the
+// penalties (the worse a failure, the harder it is pushed away) and
+// goodWeights the rewards (the better a text, the more of it is kept).  A nil
+// slice weighs that side alike.
+func (m *Model) TwoNRLWeighted(
+	bad []string, badWeights []float64, good []string, goodWeights []float64, o TwoNRLOptions,
+) (*TwoNRLResult, error) {
+	strength := o.Strength
+	if strength <= 0 {
+		strength = 1.0
+	}
+	negOpts := TrainOptions{Epochs: o.NegEpochs, AutoCompress: true, Phase: "negative", Progress: o.Progress, Stop: o.Stop}
+	negative, err := m.PunishWeighted(bad, badWeights, negOpts, strength)
+	if err != nil {
+		return nil, err
+	}
+	var positive []map[string]any
+	if o.Stop == nil || !o.Stop() {
+		posOpts := TrainOptions{Epochs: o.PosEpochs, AutoCompress: true, Phase: "positive", Progress: o.Progress, Stop: o.Stop}
+		positive, err = m.RewardWeighted(good, goodWeights, posOpts, strength)
+		if err != nil {
+			return nil, err
+		}
+	}
+	m.metaAddInt("twonrl_runs", 1)
+	return &TwoNRLResult{Negative: negative, Positive: positive, Inverted: m.G.Inverted}, nil
+}
+
 // TwoNRLResult is the outcome of TwoNRL.
 type TwoNRLResult struct {
 	Negative []map[string]any `json:"negative"`
