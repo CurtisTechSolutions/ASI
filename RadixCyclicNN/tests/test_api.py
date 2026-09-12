@@ -520,6 +520,30 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual(data, data2)
         status, data, _ = self.client.post("/api/generate", {"count": 0})
         self.assertEqual((status, data), (200, {"samples": []}))
+        # beam: the K most likely complete texts from the prediction search
+        status, data, _ = self.client.post("/api/generate", {"count": 3, "mode": "beam", "max_length": 40, "beam": 24})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(len(data["samples"]), 3)
+        self.assertEqual(len({s["text"] for s in data["samples"]}), 3)
+        costs = [s["cost"] for s in data["samples"]]
+        self.assertEqual(costs, sorted(costs))
+        for sample in data["samples"]:
+            self.assertTrue({"text", "full_text", "cost", "probability", "path", "reached_end"} <= set(sample))
+            self.assertEqual(sample["full_text"], sample["text"])
+            self.assertTrue(sample["reached_end"] or len(sample["text"]) == 40, sample)
+            self.assertAlmostEqual(sample["probability"], math.exp(-sample["cost"]), places=9)
+        # every mode continues a prefix; the samples are whole texts
+        for mode in ("beam", "sample", "dijkstra"):
+            status, data, _ = self.client.post("/api/generate", {"count": 2, "mode": mode, "prefix": "the ", "max_length": 20})
+            self.assertEqual(status, 200, data)
+            self.assertEqual(len(data["samples"]), 1 if mode == "dijkstra" else 2)
+            for sample in data["samples"]:
+                self.assertTrue(sample["text"].startswith("the "), sample["text"])
+                self.assertEqual(sample["full_text"], sample["text"])
+        status, data, _ = self.client.post("/api/generate", {"mode": "nope"})
+        self.assertEqual(status, 400)
+        status, data, _ = self.client.post("/api/generate", {"mode": "beam", "beam": 0})
+        self.assertEqual(status, 400)
 
     def test_score(self):
         status, good, _ = self.client.post("/api/score", {"text": CORPUS[0]})

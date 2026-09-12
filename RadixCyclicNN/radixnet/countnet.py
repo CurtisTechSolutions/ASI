@@ -40,7 +40,7 @@ from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
-from .beam import Prediction, beam_predict, default_beam
+from .beam import Prediction
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import RadixCyclicGraph
 from .model import (
@@ -52,7 +52,6 @@ from .model import (
     _utc_now,
     _weight_groups,
 )
-from .search import PathResult, sample_walk
 
 __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
 
@@ -628,54 +627,13 @@ class CountRewardNet(GraphModel):
         ``to_end``, ``max_length`` and ``step_penalty`` mean what they mean for
         :meth:`RadixNet.predict`.
         """
-        if not isinstance(prefix, str):
-            raise TypeError("prefix must be a string")
-        if length < 0:
-            raise ValueError(f"length must be >= 0, got {length}")
-        if max_length is not None and max_length < 0:
-            raise ValueError(f"max_length must be >= 0, got {max_length}")
-        if k < 0:
-            raise ValueError(f"k must be >= 0, got {k}")
-        if beam is not None and beam < 1:
-            raise ValueError(f"beam must be >= 1, got {beam}")
+        self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
         if mode == "dijkstra":
             mode = "beam"
         if mode not in ("beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
-        graph = self.graph
-        node, offset, lead = self._prefix_start(prefix)
-        want = max(0, length - len(lead))
-        cap: int | None
-        if mode == "beam":
-            if max_length is None and length == 0:
-                cap, max_chars = 0, 0
-            elif max_length is None:
-                cap, max_chars = None, None
-            else:
-                cap = max(length, max_length)
-                max_chars = max(want, cap - len(lead))
-            top, bottom, expanded = beam_predict(
-                graph, node, offset, min_chars=want, k=k, beam=beam, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end,
-            )
-            width = default_beam(k) if beam is None else int(beam)
-        else:
-            cap = max_length if max_length is not None else length
-            walk = sample_walk(graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature)
-            top, bottom, expanded, width = [walk], [], walk.expanded, 0
-        for result in top + bottom:
-            if lead:
-                result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
-            result.full_text = prefix + result.text
-        best = top[0] if top else PathResult(text=lead if cap is None else lead[: cap or 0], labels=[graph.labels[node]], node_ids=[node])
-        if not top:
-            best.full_text = prefix + best.text
-        return Prediction(
-            text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
-            step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end, full_text=best.full_text,
-            top=top, bottom=bottom, k=k, beam=width, mode=mode,
-        )
+        return self._search(prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length)
 
     # -- introspection -------------------------------------------------------
 

@@ -366,13 +366,21 @@ class RadixNet:
     def predict(self, prefix: str, length: int = 20, mode: str = "dijkstra", step_penalty: float = 0.0,
                 temperature: float = 1.0, to_end: bool = False, max_length: int | None = None) -> PathResult
         # mode: "dijkstra" (default; shortest path, min_chars=length, max_chars=max_length — None = NO cap on the
-        #       emitted characters, the whole cheapest path is returned) | "sample" (walks until END or length chars)
+        #       emitted characters, the whole cheapest path is returned) | "beam" (beam.beam_predict with the same
+        #       goal: a Prediction = the best path plus the k most / least likely continuations, `k=5`, `beam=None`)
+        #       | "sample" (walks until END or length chars)
         # PathResult.text is the CONTINUATION only; result.full_text = prefix + text.
+        # "beam" and "sample" run through GraphModel._search (shared with CountRewardNet.predict); "dijkstra" is
+        # the exact single-path search.
 
     def generate(self, max_length: int = 60, mode: str = "sample", temperature: float = 1.0, count: int = 1,
-                 seed: int | None = None) -> list[PathResult]
-        # from (START, 0), decode with include_context=True; mode "dijkstra": single cheapest path to END
-        # (to_end=True, max_chars=max_length); mode "sample": `count` stochastic samples.
+                 seed: int | None = None, prefix: str = "", step_penalty: float = 0.0,
+                 beam: int | None = None) -> list[PathResult]
+        # The prediction search used for generation: from (START, 0) or from where `prefix` ends (_prefix_start),
+        # decode with include_context=True.  mode "beam": predict(prefix, length=0, mode="beam", k=count,
+        # to_end=True, max_length) -> its `top`, the `count` most likely DISTINCT complete texts, most likely
+        # first; "dijkstra": the single cheapest complete text; "sample": `count` stochastic walks.  Every result
+        # is a whole text: text == full_text == prefix + continuation (`_whole_text`).
 
     def score(self, text: str) -> dict
         # {"log_prob", "per_char": log_prob / max(1, len(text)), "chars", "transitions", "unknown_transitions"}
@@ -492,8 +500,8 @@ output only, one JSON document on stdout).
 | command | args | behaviour |
 |---|---|---|
 | `train` | `--data FILE [FILE...]` (one training text per line; `--whole-file` treats each file as one text), `--epochs`, `--lr`, `--act-lr`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume` (load latest checkpoint from dir first), `--out` (defaults to --model) | trains (loads --model first if it exists), prints per-epoch loss/perplexity/nodes/edges/compression, saves model |
-| `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|sample`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path |
-| `generate` | `--count`, `--max-length`, `--mode`, `--temperature` | prints samples |
+| `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
+| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
 | `score` | `--text` or `--data FILE` | log-prob per text |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
@@ -526,8 +534,8 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/train` | `{"texts": [...]}` or `{"text": "..."}` (split on newlines, blank lines dropped) + `"epochs","lr","act_lr","batch_size","auto_compress"` | `{"job": {...}}` (async) |
 | GET `/api/job` | | current/last job status |
 | POST `/api/job/stop` | | sets the stop event; returns job status |
-| POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}` |
-| POST `/api/generate` | `{"count","max_length","mode","temperature"}` | `{"samples": [{"text","cost","path"}]}` |
+| POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
+| POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
 | POST `/api/score` | `{"text"}` | score dict |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
@@ -567,8 +575,8 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 
 * `StatusBar.jsx` — polls `/api/status` every 2s: nodes, edges, trigrams, compression ratio, inverted flag, backend/device, job state + latest progress.
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
-* `PredictPanel.jsx` — prefix, length, mode (dijkstra/sample; beam for the count model with K / beam width), to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the count model's top-K / bottom-K tables. A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
-* `GeneratePanel.jsx` — count, max length, temperature, mode; list of samples with costs.
+* `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
+* `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability.
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
@@ -801,20 +809,29 @@ dearest complete paths are collected in bounded heaps, the top side stops early 
 k-th finished one, and the bottom side excludes anything that is in the top list. With `to_end` and no cap the
 bottom side is capped at about twice the longest top path so "least likely" stays comparable instead of cycling
 for hundreds of steps. `Prediction(PathResult)` is the best path plus `top`, `bottom`, `k`, `beam`, `mode`;
-`CountRewardNet.predict(prefix, length, mode="beam" | "sample", k=5, beam=None, ...)` applies the same partial-trigram
-lead and cap rules as `RadixNet.predict` to every returned path, so `result.text` / `full_text` keep working for the
-codegen trainer, the Ollama sampler and the evolve loop.
+`GraphModel._search(prefix, length, mode, k, beam, ...)` (model.py) wraps it for both models and applies the same
+partial-trigram lead and cap rules as the Dijkstra search to every returned path, so `result.text` / `full_text` keep
+working for the codegen trainer, the Ollama sampler and the evolve loop. `CountRewardNet.predict(prefix, length,
+mode="beam" | "sample", k=5, beam=None, ...)` is that search ("dijkstra" is an alias of beam there);
+`RadixNet.predict(..., mode="beam", k=5, beam=None)` runs it next to the exact Dijkstra mode. **Generation is the
+prediction search run to the end of a text**: `GraphModel.generate(mode="beam", count, max_length, prefix="",
+step_penalty, beam)` calls `predict(prefix, length=0, mode="beam", k=count, to_end=True, max_length=max_length)`
+and returns its `top` - the `count` most likely distinct complete texts, most likely first (with `k=1` it agrees
+with Dijkstra's cheapest complete text); "sample" and "dijkstra" run through the same engine, and every generated
+result is a whole text (`text == full_text == prefix + continuation`).
 
 API: `ModelService` holds the active model, a `_parked` dict with the other kinds' models, and `_path_kind`;
 `model_path_for(kind)` derives `<stem>.<kind><ext>` for the kinds the server path does not belong to. `GET /api/model`,
 `POST /api/model/select {kind}` (parks the active model, restores the parked / saved / fresh one; 409 while a job
-runs), `kind` on `POST /api/reset`, `k` / `beam` on `POST /api/predict` (ignored by RadixNet, `mode: "beam"` mapped to
-dijkstra there), `strength` on `/api/2nrl` and `/api/feedback`, `reward` on `/api/graph` edges, `kind` / `kinds` /
+runs), `kind` on `POST /api/reset`, `k` / `beam` on `POST /api/predict` (`mode: "beam"` for both models), `prefix` /
+`step_penalty` / `beam` and `mode: "beam"` on `POST /api/generate` (samples carry `full_text` and `probability`),
+`strength` on `/api/2nrl` and `/api/feedback`, `reward` on `/api/graph` edges, `kind` / `kinds` /
 `model_label` on `/api/status`. CLI: `--kind radix|count` (new models; `model.count.json` default), `predict --k /
---beam / --mode beam` with top / bottom tables, `--strength` on `2nrl` / `feedback`, `info` shows the kind and reward
-totals. Frontend: `ModelSelector` in the header (bound to `status.kind`, `POST /api/model/select`), the status bar
-shows the kind and reward totals, the Predict tab shows K / beam fields and the two tables, the Train tab hides the
-rate fields, Generate and 2NRL get a strength field.
+--beam / --mode beam` with top / bottom tables (both kinds), `generate --mode beam --prefix --step-penalty --beam`,
+`--strength` on `2nrl` / `feedback`, `info` shows the kind and reward totals. Frontend: `ModelSelector` in the
+header (bound to `status.kind`, `POST /api/model/select`), the status bar shows the kind and reward totals, the
+Predict tab shows K / beam fields and the two tables for a beam prediction, the Generate tab defaults to beam with a
+prefix field, the Train tab hides the rate fields, Generate and 2NRL get a strength field.
 
 ## 20. ZIP uploads (`archive.py`) — archives unpacked on the server
 

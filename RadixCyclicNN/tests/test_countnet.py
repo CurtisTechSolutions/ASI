@@ -508,16 +508,27 @@ class TestApi(unittest.TestCase):
         status, data, _ = self.client.post("/api/reset", {"kind": "radix", "window": 10})
         self.assertEqual(status, 400)
 
-    def test_radix_ignores_beam_options_and_load_switches_kind(self):
+    def test_radix_beam_prediction_and_load_switches_kind(self):
         self.select("count")
         self.client.post("/api/train", {"texts": TEXTS[:2], "epochs": 1})
         self.wait()
         status, data, _ = self.client.post("/api/save", {"path": os.path.join(self.tmp.name, "saved.count.json")})
         self.assertEqual(status, 200)
         self.select("radix")
+        self.client.post("/api/train", {"texts": TEXTS[:2], "epochs": 1})
+        self.wait()
+        # the radix model runs the same beam search: top / bottom K in one prediction
         status, p, _ = self.client.post("/api/predict", {"prefix": "the", "length": 3, "k": 3, "beam": 8, "mode": "beam"})
         self.assertEqual(status, 200, p)
         self.assertEqual(p["kind"], "radix")
+        self.assertEqual((p["mode"], p["k"], p["beam"]), ("beam", 3, 8))
+        self.assertTrue(1 <= len(p["top"]) <= 3, p)
+        self.assertLessEqual(len(p["bottom"]), 3)  # no path appears on both sides: a tiny graph leaves it empty
+        self.assertFalse({t["full_text"] for t in p["top"]} & {b["full_text"] for b in p["bottom"]})
+        self.assertEqual(p["continuation"], p["top"][0]["continuation"])
+        # dijkstra stays the exact single-path search without top / bottom
+        status, p, _ = self.client.post("/api/predict", {"prefix": "the", "length": 3, "k": 3, "mode": "dijkstra"})
+        self.assertEqual(status, 200, p)
         self.assertNotIn("top", p)
         status, data, _ = self.client.post("/api/load", {"path": os.path.join(self.tmp.name, "saved.count.json")})
         self.assertEqual(status, 200, data)

@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import signal
@@ -252,6 +253,18 @@ class TestInference(unittest.TestCase):
         self.assertEqual(len(cheapest["samples"]), 1)
         self.assertTrue(cheapest["samples"][0]["reached_end"])
         self.assertEqual(run_json("generate", "--count", 0, model=MODEL)["samples"], [])
+        beam = run_json("generate", "--mode", "beam", "--count", 3, "--max-length", 40, "--beam", 24, model=MODEL)
+        self.assertEqual((beam["count"], beam["mode"], beam["prefix"]), (3, "beam", ""))
+        self.assertEqual(len({s["text"] for s in beam["samples"]}), 3)
+        self.assertEqual([s["cost"] for s in beam["samples"]], sorted(s["cost"] for s in beam["samples"]))
+        for sample in beam["samples"]:
+            self.assertEqual(sample["full_text"], sample["text"])
+            self.assertTrue(sample["reached_end"] or len(sample["text"]) == 40, sample)
+            self.assertAlmostEqual(sample["probability"], math.exp(-sample["cost"]), places=9)
+        self.assertEqual(beam["samples"][0]["text"], cheapest["samples"][0]["text"])
+        prefixed = run_json("generate", "--mode", "beam", "--count", 2, "--prefix", "the ", "--max-length", 20, model=MODEL)
+        self.assertEqual(prefixed["prefix"], "the ")
+        self.assertTrue(all(s["text"].startswith("the ") and s["full_text"] == s["text"] for s in prefixed["samples"]))
 
     def test_score(self):
         good = run_json("score", "--text", "the cat sat on the mat", model=MODEL)
@@ -394,7 +407,7 @@ class TestOutputModes(unittest.TestCase):
         for word in ("prefix", "continuation", "full text", "cost", "path:", "label"):
             self.assertIn(word, predict)
         generate = run_cli("generate", "--count", 2, json_mode=False, model=MODEL).stdout
-        self.assertRegex(generate, r"#\s+cost\s+end\s+text")
+        self.assertRegex(generate, r"#\s+cost\s+prob\s+end\s+text")
         score = run_cli("score", "--text", "the cat sat on the mat", json_mode=False, model=MODEL).stdout
         self.assertRegex(score, r"log_prob\s+per_char\s+chars\s+transitions\s+unknown\s+text")
 

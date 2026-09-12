@@ -125,15 +125,16 @@ export default function PredictPanel({ status }) {
     setLoading(true);
     setError(null);
     try {
+      const effectiveMode = countKind && mode === "dijkstra" ? "beam" : mode;
       const body = {
         prefix,
         length: parseInteger(length, 20),
-        mode: countKind && mode === "dijkstra" ? "beam" : mode,
+        mode: effectiveMode,
         to_end: toEnd,
         step_penalty: parseNumber(stepPenalty, 0),
         temperature: parseNumber(temperature, 1),
       };
-      if (countKind) {
+      if (effectiveMode === "beam") {
         body.k = parseInteger(k, 5);
         const width = parseInteger(beam, 0);
         if (width > 0) body.beam = width;
@@ -155,7 +156,7 @@ export default function PredictPanel({ status }) {
   const offset = Math.max(0, path.length - stepCosts.length);
   const top = asArray(result && result.top);
   const bottom = asArray(result && result.bottom);
-  const resultIsCount = Boolean(result && (result.kind === "count" || Array.isArray(result.top)));
+  const resultIsCount = Boolean(result && Array.isArray(result.top));
   const shownPrefix = result ? String(result.prefix ?? prefix) : prefix;
   const fullText = result ? String(result.full_text ?? `${shownPrefix}${result.continuation ?? ""}`) : "";
 
@@ -177,13 +178,21 @@ export default function PredictPanel({ status }) {
             label="Mode"
             value={mode}
             onChange={setMode}
-            options={[
-              ["dijkstra", countKind ? "beam (top K and bottom K)" : "dijkstra (shortest path)"],
-              ["sample", "sample (stochastic)"],
-            ]}
+            options={
+              countKind
+                ? [
+                    ["dijkstra", "beam (top K and bottom K)"],
+                    ["sample", "sample (stochastic)"],
+                  ]
+                : [
+                    ["dijkstra", "dijkstra (shortest path)"],
+                    ["beam", "beam (top K and bottom K)"],
+                    ["sample", "sample (stochastic)"],
+                  ]
+            }
           />
         </div>
-        {countKind ? (
+        {mode === "beam" || (countKind && mode === "dijkstra") ? (
           <div className="row">
             <NumberField
               label="K"
@@ -223,10 +232,10 @@ export default function PredictPanel({ status }) {
             {loading ? "Predicting…" : "Predict"}
           </button>
         </div>
-        {countKind ? (
+        {mode === "beam" || (countKind && mode === "dijkstra") ? (
           <p className="muted">
-            Count / reward model: edge weight = log(1 + traversals) + rewards. The beam search returns the K most
-            likely continuations and the K least likely ones of the same length in one prediction.
+            The beam search returns the K most likely continuations and the K least likely ones of the same length
+            in one prediction; the same search generates whole texts on the Generate tab.
           </p>
         ) : null}
         <Alert message={error} onDismiss={() => setError(null)} />

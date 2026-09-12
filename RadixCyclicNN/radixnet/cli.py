@@ -616,11 +616,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         length=args.length, mode=mode, step_penalty=args.step_penalty, temperature=args.temperature,
         to_end=args.to_end, max_length=args.max_length,
     )
-    if model.kind == "count":
-        options.update(k=args.k, beam=args.beam)
-    elif mode == "beam":
-        console.note("note: 'beam' (top-K / bottom-K) belongs to the count model; using dijkstra")
-        mode = options["mode"] = "dijkstra"
+    options.update(k=args.k, beam=args.beam)
     result = model.predict(args.prefix, **options)
     console.pairs([
         ("model", kind_label(model)),
@@ -675,13 +671,15 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
     results = model.generate(
         max_length=args.max_length, mode=args.mode, temperature=args.temperature, count=args.count, seed=args.seed,
+        prefix=args.prefix, step_penalty=args.step_penalty, beam=args.beam,
     )
-    rows = [[i + 1, r.cost, r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
-    console.table(("#", "cost", "end", "text"), rows)
+    rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
+    console.table(("#", "cost", "prob", "end", "text"), rows)
     return {
-        "samples": [r.to_dict() for r in results],
+        "samples": [{**r.to_dict(), "probability": path_probability(r)} for r in results],
         "count": len(results),
         "mode": args.mode,
+        "prefix": args.prefix,
         "max_length": args.max_length,
         "temperature": args.temperature,
     }
@@ -1606,9 +1604,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-length", type=nonneg_int, metavar="N",
                    help="optional hard cap on emitted characters (default: no limit; dijkstra returns the whole cheapest path)")
     p.add_argument("--mode", choices=PREDICT_MODES, default="dijkstra",
-                   help="search strategy (beam = the count model's top-K / bottom-K search; dijkstra means beam there)")
-    p.add_argument("--k", type=nonneg_int, default=5, help="count model: continuations per side (top K and bottom K)")
-    p.add_argument("--beam", type=pos_int, metavar="N", help="count model: beam width (default: max(4k, 16))")
+                   help="search strategy: dijkstra = the exact cheapest path (the count model treats it as beam), "
+                        "beam = the top-K and bottom-K continuations, sample = one stochastic walk")
+    p.add_argument("--k", type=nonneg_int, default=5, help="beam: continuations per side (top K and bottom K)")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4k, 16))")
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
@@ -1616,14 +1615,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     # generate -------------------------------------------------------------
     p = command(
-        "generate", "generate texts from scratch",
-        "Generate texts from the start node: sample draws --count stochastic walks (--seed makes them\n"
-        "reproducible); dijkstra returns the single cheapest complete text.",
+        "generate", "generate whole texts with the prediction search",
+        "Generate texts from the start node, or continuing --prefix: beam runs the prediction search to the\n"
+        "end of a text and returns the --count most likely complete texts; sample draws --count stochastic\n"
+        "walks (--seed makes them reproducible); dijkstra returns the single cheapest complete text.",
     )
-    p.add_argument("--count", type=nonneg_int, default=1, help="number of samples (sample mode)")
-    p.add_argument("--max-length", type=nonneg_int, default=60, help="maximum characters per sample")
-    p.add_argument("--mode", choices=MODES, default="sample", help="generation strategy")
-    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="softmax temperature (0 = greedy)")
+    p.add_argument("--count", type=nonneg_int, default=1, help="texts to generate (beam: the K most likely)")
+    p.add_argument("--max-length", type=nonneg_int, default=60, help="maximum characters per text")
+    p.add_argument("--mode", choices=("beam", "sample", "dijkstra"), default="sample", help="generation strategy")
+    p.add_argument("--prefix", default="", metavar="TEXT", help="start every text with this (default: from START)")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
     p.set_defaults(handler=cmd_generate)
 
     # score ----------------------------------------------------------------

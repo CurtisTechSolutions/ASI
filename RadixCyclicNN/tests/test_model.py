@@ -13,6 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from radixnet.beam import Prediction  # noqa: E402
 from radixnet.encoding import Encoder  # noqa: E402
 from radixnet.graph import END, START  # noqa: E402
 from radixnet.model import UNKNOWN_PROB, RadixNet, TrainConfig  # noqa: E402
@@ -322,11 +323,41 @@ class TestPredict(unittest.TestCase):
         r = model.predict("the", length=0)
         self.assertEqual(r.full_text, "the" + r.text)
         with self.assertRaises(ValueError):
-            model.predict("the", mode="beam")
+            model.predict("the", mode="nope")
         with self.assertRaises(ValueError):
             model.predict("the", length=-1)
+        with self.assertRaises(ValueError):
+            model.predict("the", mode="beam", beam=0)
         with self.assertRaises(TypeError):
             model.predict(None)
+
+    def test_beam_mode_returns_top_and_bottom(self):
+        model = corpus_model(epochs=2)
+        found = model.predict("the quick brown", length=6, mode="beam", k=3)
+        self.assertIsInstance(found, Prediction)
+        self.assertEqual((found.mode, found.k, found.beam), ("beam", 3, 16))
+        self.assertTrue(1 <= len(found.top) <= 3)
+        self.assertTrue(1 <= len(found.bottom) <= 3)
+        self.assertEqual(found.text, found.top[0].text)
+        self.assertEqual(found.full_text, "the quick brown" + found.text)
+        self.assertTrue(found.text.startswith(" f"), found.text)
+        costs = [r.cost for r in found.top]
+        self.assertEqual(costs, sorted(costs))
+        self.assertLessEqual(found.top[0].cost, found.bottom[-1].cost)
+        for r in found.top + found.bottom:
+            self.assertTrue(len(r.text) >= 6 or r.reached_end, r.text)
+            self.assertEqual(r.full_text, "the quick brown" + r.text)
+        # the beam's best path agrees with Dijkstra on a corpus this small
+        exact = model.predict("the quick brown", length=6)
+        self.assertEqual(found.text, exact.text)
+        self.assertAlmostEqual(found.cost, exact.cost, places=9)
+        capped = model.predict("the quick brown", length=4, max_length=4, mode="beam", k=2, beam=8)
+        self.assertEqual(capped.beam, 8)
+        self.assertTrue(all(len(r.text) <= 4 for r in capped.top + capped.bottom))
+        # serialisable like every prediction
+        d = found.to_dict()
+        self.assertEqual(len(d["top"]), len(found.top))
+        self.assertEqual(d["mode"], "beam")
 
     def test_partial_match_prepends_guessed_characters(self):
         model = make_model()
@@ -417,9 +448,51 @@ class TestGenerate(unittest.TestCase):
         self.assertEqual(model.score(best.text)["unknown_transitions"], 0)
         self.assertEqual(model.generate(count=0), [])
         with self.assertRaises(ValueError):
-            model.generate(mode="beam")
+            model.generate(mode="nope")
         with self.assertRaises(ValueError):
             model.generate(count=-1)
+        with self.assertRaises(ValueError):
+            model.generate(mode="beam", beam=0)
+        with self.assertRaises(TypeError):
+            model.generate(prefix=None)
+
+    def test_beam_generation_is_the_prediction_search_to_end(self):
+        model = corpus_model(epochs=2)
+        texts = model.generate(mode="beam", count=3, max_length=40)
+        self.assertEqual(len(texts), 3)
+        self.assertEqual(len({t.text for t in texts}), 3)
+        costs = [t.cost for t in texts]
+        self.assertEqual(costs, sorted(costs))
+        for t in texts:
+            self.assertEqual(t.full_text, t.text)
+            self.assertEqual(t.node_ids[0], START)
+            self.assertTrue(t.reached_end or len(t.text) == 40, (t.text, t.reached_end))
+            self.assertLessEqual(len(t.text), 40)
+            self.assertEqual(model.score(t.text)["unknown_transitions"], 0)
+        # the most likely complete text is Dijkstra's cheapest complete text
+        (cheapest,) = model.generate(mode="dijkstra", count=3, max_length=40)
+        self.assertEqual(texts[0].text, cheapest.text)
+        self.assertAlmostEqual(texts[0].cost, cheapest.cost, places=9)
+        # a wider beam never loses the best text; count=1 is a single most likely text
+        (single,) = model.generate(mode="beam", count=1, max_length=40, beam=64)
+        self.assertEqual(single.text, texts[0].text)
+        self.assertEqual(model.generate(mode="beam", count=0), [])
+
+    def test_generation_continues_a_prefix(self):
+        model = corpus_model(epochs=2)
+        for mode in ("beam", "sample", "dijkstra"):
+            with self.subTest(mode=mode):
+                results = model.generate(mode=mode, count=2, max_length=30, prefix="the quick", seed=5)
+                self.assertEqual(len(results), 1 if mode == "dijkstra" else 2)
+                for r in results:
+                    self.assertTrue(r.text.startswith("the quick"), r.text)
+                    self.assertEqual(r.full_text, r.text)
+                    self.assertLessEqual(len(r.text), len("the quick") + 30)
+                    self.assertEqual(model.score(r.text)["unknown_transitions"], 0)
+        # a prefix the structure has never seen still yields the prefix itself
+        for r in model.generate(mode="beam", count=2, max_length=10, prefix="zzqx"):
+            self.assertTrue(r.text.startswith("zzqx"))
+        self.assertEqual(model.generate(mode="beam", count=2, max_length=0, prefix="the")[0].text, "the")
 
     def test_unseeded_generation_consumes_model_rng(self):
         a, b = corpus_model(epochs=1), corpus_model(epochs=1)

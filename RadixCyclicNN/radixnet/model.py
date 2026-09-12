@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from .backend import Backend, get_backend
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import END, START, RadixCyclicGraph
+from .beam import Prediction, beam_predict, default_beam
 from .search import PathResult, dijkstra_predict, sample_walk
 from .schedule import preview_points
 
@@ -169,6 +170,13 @@ class TrainConfig:
 
 
 _CONFIG_FIELDS = frozenset(f.name for f in dataclasses.fields(TrainConfig))
+
+
+def _whole_text(result: PathResult, prefix: str) -> PathResult:
+    """A generated result is a whole text: ``text`` becomes ``prefix + continuation`` (``full_text`` already is)."""
+    result.full_text = prefix + result.text
+    result.text = result.full_text
+    return result
 
 
 def _weight_groups(texts: Iterable[str] | str, weights: Sequence[float]) -> list[tuple[float, list[str]]]:
@@ -418,6 +426,71 @@ class GraphModel:
         lead = "" if node == START or matched >= _W else self.graph.labels[node][offset + matched : offset + _W]
         return node, offset, lead
 
+    # -- the prediction search (shared by every kind) ------------------------
+
+    @staticmethod
+    def _check_predict_args(prefix: str, length: int, max_length: int | None, k: int, beam: int | None) -> None:
+        if not isinstance(prefix, str):
+            raise TypeError("prefix must be a string")
+        if length < 0:
+            raise ValueError(f"length must be >= 0, got {length}")
+        if max_length is not None and max_length < 0:
+            raise ValueError(f"max_length must be >= 0, got {max_length}")
+        if k < 0:
+            raise ValueError(f"k must be >= 0, got {k}")
+        if beam is not None and beam < 1:
+            raise ValueError(f"beam must be >= 1, got {beam}")
+
+    def _search(
+        self,
+        prefix: str,
+        length: int,
+        mode: str,
+        k: int,
+        beam: int | None,
+        step_penalty: float,
+        temperature: float,
+        to_end: bool,
+        max_length: int | None,
+        rng: random.Random | None = None,
+    ) -> Prediction:
+        """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
+        continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
+        ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`."""
+        graph = self.graph
+        node, offset, lead = self._prefix_start(prefix)
+        want = max(0, length - len(lead))
+        cap: int | None
+        if mode == "beam":
+            if max_length is None and length == 0:
+                cap, max_chars = 0, 0
+            elif max_length is None:
+                cap, max_chars = None, None
+            else:
+                cap = max(length, max_length)
+                max_chars = max(want, cap - len(lead))
+            top, bottom, expanded = beam_predict(
+                graph, node, offset, min_chars=want, k=k, beam=beam, max_chars=max_chars,
+                step_penalty=step_penalty, to_end=to_end,
+            )
+            width = default_beam(k) if beam is None else int(beam)
+        else:
+            cap = max_length if max_length is not None else length
+            walk = sample_walk(graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng)
+            top, bottom, expanded, width = [walk], [], walk.expanded, 0
+        for result in top + bottom:
+            if lead:
+                result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
+            result.full_text = prefix + result.text
+        best = top[0] if top else PathResult(text=lead if cap is None else lead[: cap or 0], labels=[graph.labels[node]], node_ids=[node])
+        if not top:
+            best.full_text = prefix + best.text
+        return Prediction(
+            text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
+            step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end, full_text=best.full_text,
+            top=top, bottom=bottom, k=k, beam=width, mode=mode,
+        )
+
     # -- generation and scoring ----------------------------------------------
 
     def generate(
@@ -427,34 +500,50 @@ class GraphModel:
         temperature: float = 1.0,
         count: int = 1,
         seed: int | None = None,
+        prefix: str = "",
+        step_penalty: float = 0.0,
+        beam: int | None = None,
     ) -> list[PathResult]:
-        """Generate texts from START.
+        """Generate whole texts with the prediction search, from START or continuing ``prefix``.
 
-        ``"sample"`` draws ``count`` stochastic walks (``seed`` gives a private
-        RNG; otherwise the model's seeded RNG is consumed); ``"dijkstra"``
-        returns the single cheapest path to END, so the list has one entry.
+        * ``"beam"`` - the prediction search run to the end of a text: the
+          ``count`` most likely distinct complete texts (each at most
+          ``max_length`` characters), most likely first.  ``beam`` is the
+          beam width (default ``max(4 * count, 16)``), ``step_penalty`` the
+          extra cost per edge.
+        * ``"sample"`` - ``count`` stochastic walks (``seed`` gives a private
+          RNG; otherwise the model's seeded RNG is consumed).
+        * ``"dijkstra"`` - the single cheapest complete text (one entry).
+
+        Every result's ``text`` (and ``full_text``) is the whole text, prefix
+        included; ``probability`` is ``exp(-cost)``.
         """
         if max_length < 0:
             raise ValueError(f"max_length must be >= 0, got {max_length}")
         if count < 0:
             raise ValueError(f"count must be >= 0, got {count}")
+        if not isinstance(prefix, str):
+            raise TypeError("prefix must be a string")
         mode = (mode or "sample").lower()
-        if mode not in ("dijkstra", "sample"):
-            raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra' or 'sample'")
+        if mode not in ("beam", "dijkstra", "sample"):
+            raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
         if count == 0:
             return []
-        graph = self.graph
+        if mode == "sample":
+            rng = random.Random(seed) if seed is not None else None
+            results: list[PathResult] = []
+            for _ in range(count):
+                walk = self._search(prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng)
+                results.append(_whole_text(walk, prefix))
+            return results
         if mode == "dijkstra":
-            result = dijkstra_predict(graph, START, 0, min_chars=0, max_chars=max_length, to_end=True)
-            result.full_text = result.text
-            return [result]
-        rng = random.Random(seed) if seed is not None else None
-        results: list[PathResult] = []
-        for _ in range(count):
-            result = sample_walk(graph, START, 0, max_chars=max_length, temperature=temperature, rng=rng)
-            result.full_text = result.text
-            results.append(result)
-        return results
+            best = self.predict(prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length, step_penalty=step_penalty)
+            return [_whole_text(best, prefix)]
+        found = self.predict(
+            prefix, length=0, mode="beam", k=count, beam=beam, to_end=True, max_length=max_length,
+            step_penalty=step_penalty,
+        )
+        return [_whole_text(result, prefix) for result in found.top]
 
     def _edge_log_prob(self, p: int, offset: int, c: int) -> float | None:
         """``log P(c | p)`` for the edge ``p -> c`` taken from ``p``'s trigram at ``offset``.
@@ -711,13 +800,19 @@ class RadixNet(GraphModel):
         temperature: float = 1.0,
         to_end: bool = False,
         max_length: int | None = None,
+        k: int = 5,
+        beam: int | None = None,
     ) -> PathResult:
         """Continue ``prefix``.
 
         ``"dijkstra"`` returns the cheapest path emitting at least ``length``
         characters (or reaching END; ``to_end`` forces END).  There is no
         limit on the emitted characters unless ``max_length`` is given, in
-        which case the continuation is capped there.  ``"sample"`` walks
+        which case the continuation is capped there.  ``"beam"`` runs the
+        beam search of :mod:`radixnet.beam` with the same goal and returns a
+        :class:`~radixnet.beam.Prediction`: the best path plus the ``k`` most
+        likely (``top``) and the ``k`` least likely (``bottom``) continuations
+        - the search :meth:`generate` builds on.  ``"sample"`` walks
         stochastically until END or ``length`` (or ``max_length``) characters.
         ``result.text`` is the continuation only; ``result.full_text`` is
         ``prefix + text``.  When only a partial trigram of the prefix could be
@@ -725,36 +820,29 @@ class RadixNet(GraphModel):
         continuation; a cap, when given, applies to the continuation as a
         whole (lead included).
         """
-        if not isinstance(prefix, str):
-            raise TypeError("prefix must be a string")
-        if length < 0:
-            raise ValueError(f"length must be >= 0, got {length}")
-        if max_length is not None and max_length < 0:
-            raise ValueError(f"max_length must be >= 0, got {max_length}")
+        self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "dijkstra").lower()
-        if mode not in ("dijkstra", "sample"):
-            raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra' or 'sample'")
+        if mode not in ("dijkstra", "beam", "sample"):
+            raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra', 'beam' or 'sample'")
+        if mode != "dijkstra":
+            return self._search(prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length)
         graph = self.graph
         node, offset, lead = self._prefix_start(prefix)
         want = max(0, length - len(lead))
         cap: int | None
-        if mode == "dijkstra":
-            if max_length is None and length == 0:
-                cap = 0  # "emit nothing" stays empty even without a cap
-                max_chars = 0
-            elif max_length is None:
-                cap = None  # no limit: the whole cheapest path is returned
-                max_chars = None
-            else:
-                cap = max(length, max_length)
-                max_chars = max(want, cap - len(lead))
-            result = dijkstra_predict(
-                graph, node, offset, min_chars=want, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end,
-            )
+        if max_length is None and length == 0:
+            cap = 0  # "emit nothing" stays empty even without a cap
+            max_chars = 0
+        elif max_length is None:
+            cap = None  # no limit: the whole cheapest path is returned
+            max_chars = None
         else:
-            cap = max_length if max_length is not None else length
-            result = sample_walk(graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature)
+            cap = max(length, max_length)
+            max_chars = max(want, cap - len(lead))
+        result = dijkstra_predict(
+            graph, node, offset, min_chars=want, max_chars=max_chars,
+            step_penalty=step_penalty, to_end=to_end,
+        )
         if lead:
             result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
         result.full_text = prefix + result.text

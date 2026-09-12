@@ -148,8 +148,8 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 |---|---|
 | `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
-| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; count model: `--k 5` (top K and bottom K continuations), `--beam N` |
-| `generate` | `--count`, `--max-length`, `--mode`, `--temperature` |
+| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N` |
+| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
@@ -196,8 +196,8 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
-| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; count model: `mode: "beam"`, `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
-| `POST /api/generate` | `{"count","max_length","mode","temperature"}` -> `{"samples": [{"text","cost","path"}]}` |
+| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
+| `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
@@ -226,9 +226,11 @@ curl -X POST localhost:8000/api/evolve/stop
 `frontend/dist` is committed and served by the API, so nothing needs npm to use
 it. Panels: status bar (live statistics and job progress), Train (texts and/or
 uploaded files), Predict (path with per-step costs and a Like button that
-rewards the shown text - a thumbs-up feedback job), Generate (with thumbs
-up / thumbs down ratings: "Train on ratings" runs 2NRL on them, thumbs down as
-the negative phase, thumbs up as the positive phase), Score, 2NRL,
+rewards the shown text - a thumbs-up feedback job), Generate (whole texts from
+the prediction search - beam: the K most likely complete texts, optionally
+continuing a prefix; sample; dijkstra - with thumbs up / thumbs down ratings:
+"Train on ratings" runs 2NRL on them, thumbs down as the negative phase, thumbs
+up as the positive phase), Score, 2NRL,
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Code (code generation with the sandbox and the judge),
 Checkpoints (save / restore / load / reset) and a Graph view of the most

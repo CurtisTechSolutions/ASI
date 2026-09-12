@@ -615,11 +615,6 @@ class ModelService:
     def predict(self, prefix: str, **options: Any) -> dict:
         """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each)."""
         with self.session() as model:
-            if model.kind != "count":
-                options.pop("k", None)
-                options.pop("beam", None)
-                if options.get("mode") == "beam":
-                    options["mode"] = "dijkstra"
             result = model.predict(prefix, **options)
         payload = {
             "prefix": prefix,
@@ -642,6 +637,7 @@ class ModelService:
         return payload
 
     def generate(self, **options: Any) -> dict:
+        """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path."""
         with self.session() as model:
             results = model.generate(**options)
         return {"samples": [_sample_dict(r) for r in results]}
@@ -998,7 +994,9 @@ class ModelService:
 def _sample_dict(result: PathResult) -> dict:
     return {
         "text": result.text,
+        "full_text": result.full_text,
         "cost": result.cost,
+        "probability": path_probability(result),
         "path": list(result.labels),
         "node_ids": list(result.node_ids),
         "step_costs": list(result.step_costs),
@@ -1512,6 +1510,9 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         mode=f.text("mode", "sample"),
         temperature=f.number("temperature", 1.0, minimum=0.0),
         seed=f.integer("seed", None),
+        prefix=f.text("prefix", ""),
+        step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
+        beam=f.integer("beam", None, minimum=1),
     )
 
 
@@ -2001,9 +2002,11 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/job", _r_job, "status of the current / last job"),
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict,
-     "continue a prefix: {prefix, length, mode, to_end, step_penalty, temperature, max_length (optional cap; default none), "
-     "k, beam (count model: top-K and bottom-K continuations)}"),
-    ("POST", "/api/generate", _r_generate, "sample texts from START: {count, max_length, mode, temperature}"),
+     "continue a prefix: {prefix, length, mode: dijkstra | beam | sample, to_end, step_penalty, temperature, max_length "
+     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations)}"),
+    ("POST", "/api/generate", _r_generate,
+     "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
+     "dijkstra, temperature, seed, prefix, step_penalty, beam}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
     ("POST", "/api/feedback", _r_feedback,

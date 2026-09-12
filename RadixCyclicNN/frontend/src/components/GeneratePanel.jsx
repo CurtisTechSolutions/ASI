@@ -4,7 +4,7 @@ import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
-import { NumberField, SelectField } from "./Fields.jsx";
+import { NumberField, SelectField, TextField } from "./Fields.jsx";
 
 const ACTION_TEXT = {
   "2nrl": "2NRL: train on the thumbs-down texts, invert the network, fine-tune on the thumbs-up texts",
@@ -36,7 +36,8 @@ export default function GeneratePanel({ status }) {
   const [count, setCount] = useState("3");
   const [maxLength, setMaxLength] = useState("60");
   const [temperature, setTemperature] = useState("1.0");
-  const [mode, setMode] = useState("sample");
+  const [mode, setMode] = useState("beam");
+  const [prefix, setPrefix] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
@@ -65,6 +66,7 @@ export default function GeneratePanel({ status }) {
         max_length: parseInteger(maxLength, 60),
         temperature: parseNumber(temperature, 1),
         mode,
+        ...(prefix ? { prefix } : {}),
       });
       setSamples(asArray(data && data.samples));
     } catch (err) {
@@ -115,8 +117,14 @@ export default function GeneratePanel({ status }) {
     <>
       <form className="card" onSubmit={handleSubmit}>
         <h2>Generate</h2>
+        <p className="muted">
+          Whole texts from the prediction search: <b>beam</b> runs it to the end of a text and returns the K most
+          likely complete texts (from START, or continuing a prefix); <b>sample</b> draws stochastic walks;{" "}
+          <b>dijkstra</b> is the single cheapest text.
+        </p>
+        <TextField label="Prefix" hint="optional: every text starts with it" value={prefix} onChange={setPrefix} placeholder="the quick" />
         <div className="row">
-          <NumberField label="Count" value={count} onChange={setCount} min={1} step={1} />
+          <NumberField label="Count" hint="beam: the K most likely" value={count} onChange={setCount} min={1} step={1} />
           <NumberField label="Max length" value={maxLength} onChange={setMaxLength} min={1} step={1} />
         </div>
         <div className="row">
@@ -125,8 +133,9 @@ export default function GeneratePanel({ status }) {
             value={mode}
             onChange={setMode}
             options={[
+              ["beam", "beam (the K most likely texts)"],
               ["sample", "sample (stochastic)"],
-              ["dijkstra", "dijkstra (cheapest path to END)"],
+              ["dijkstra", "dijkstra (the single cheapest text)"],
             ]}
           />
           <NumberField
@@ -164,8 +173,8 @@ export default function GeneratePanel({ status }) {
                 <li key={i} className={rating ? `rated ${rating}` : ""}>
                   <pre className="sample">{textOf(s)}</pre>
                   <div className="meta">
-                    cost {fmtNum(s && s.cost, 3)} · {fmtInt(asArray(s && s.path).length)} path nodes ·{" "}
-                    {fmtInt(textOf(s).length)} chars
+                    cost {fmtNum(s && s.cost, 3)} · p {fmtNum(s && s.probability, 4)} ·{" "}
+                    {fmtInt(asArray(s && s.path).length)} path nodes · {fmtInt(textOf(s).length)} chars
                     <span className="rating">
                       <button
                         type="button"
