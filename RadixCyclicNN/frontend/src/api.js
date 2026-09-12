@@ -183,6 +183,8 @@ export const api = {
   tutorHistory: () => get("/api/tutor/history"),
   /** One round of exercises, completions and grades without training (a dry run). */
   tutorLesson: (body) => post("/api/tutor/lesson", body),
+  /** The lessons to run next, planned from a report card (the last run's own when none is sent). */
+  tutorPlan: (body) => post("/api/tutor/plan", body),
   /** Is ChatGPT usable on the server (its own OPENAI_API_KEY), and which models the key has. */
   chatgptModels: () => get("/api/chatgpt/models"),
   /** Speech (see SpeechPanel): the transcript and the waveform of one utterance, behind one unique token. */

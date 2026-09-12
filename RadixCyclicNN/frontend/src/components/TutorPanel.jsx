@@ -8,6 +8,7 @@ import LineChart from "./LineChart.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
 
 const MAX_ROWS = 200;
+const DEFAULT_PLAN_LESSONS = 3;
 const PROVIDER_LABELS = { ollama: "Ollama", chatgpt: "ChatGPT" };
 
 /** "Ollama" / "ChatGPT" for a provider name. */
@@ -154,6 +155,81 @@ function ReportCard({ card, title }) {
         <p className="muted">No mistakes were named.</p>
       )}
     </>
+  );
+}
+
+/** The lessons the teacher plans from a report card: what each one drills, at which weakness, and why. */
+function LessonPlanCard({ plan, onUse, onClear, disabled }) {
+  const lessons = asArray(plan && plan.lessons);
+  if (lessons.length === 0) return null;
+  const weak = asArray(plan.weak);
+  const by = plan.source === "report card" ? "the report card alone" : providerLabel(plan.source);
+  return (
+    <div className="card">
+      <div className="toolbar">
+        <h2>Lesson plan</h2>
+        <button type="button" className="small" onClick={onClear}>
+          Clear
+        </button>
+      </div>
+      <p className="muted">
+        The next lessons, written from the report card by <b>{by}</b>, for a <b>{String(plan.level || "beginner")}</b>{" "}
+        student. "Use this lesson" loads one into the settings above; press <b>Start lessons</b> to teach it.
+      </p>
+      {plan.summary ? <p>{String(plan.summary)}</p> : null}
+      {weak.length > 0 ? (
+        <div className="chips">
+          {weak.map((point) => (
+            <span className="stat" key={String(point.error)}>
+              {String(point.error)}{" "}
+              <b>
+                {fmtInt(point.count)}
+                {point.share === null || point.share === undefined ? "" : ` (${Math.round(point.share * 100)}%)`}
+              </b>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>the point of grammar</th>
+              <th>fixes</th>
+              <th>topic</th>
+              <th>exercises</th>
+              <th>why</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {lessons.map((lesson, i) => (
+              <tr key={i}>
+                <td>{i + 1}</td>
+                <td className="wrap">{String(lesson.focus || "–")}</td>
+                <td>
+                  <span className={`badge ${lesson.targets && lesson.targets !== "none" ? "fail" : "unrated"}`}>
+                    {String(lesson.targets || "none")}
+                  </span>
+                </td>
+                <td className="wrap">{String(lesson.topic || "–")}</td>
+                <td title="sentence openings, and the correct example sentences taught beside them">
+                  {fmtInt(lesson.exercises)}
+                  {lesson.drills ? <small> +{fmtInt(lesson.drills)} drills</small> : null}
+                </td>
+                <td className="wrap">{String(lesson.why || "–")}</td>
+                <td>
+                  <button type="button" className="small" disabled={disabled} onClick={() => onUse(lesson)}>
+                    Use this lesson
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -314,6 +390,7 @@ export default function TutorPanel({ status }) {
   const [threshold, setThreshold] = useState("6");
   const [grammarWeight, setGrammarWeight] = useState("0.6");
   const [drills, setDrills] = useState("0");
+  const [planCount, setPlanCount] = useState(String(DEFAULT_PLAN_LESSONS));
   const [adapt, setAdapt] = useState(true);
   const [teachAnswer, setTeachAnswer] = useState(true);
   const [twonrlPer, setTwonrlPer] = useState("round");
@@ -330,6 +407,9 @@ export default function TutorPanel({ status }) {
   const [prefixes, setPrefixes] = useState("");
   const [preview, setPreview] = useState(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+  const [plan, setPlan] = useState(null);
+  const [planBusy, setPlanBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
   const [formError, setFormError] = useState(null);
   const [serverHistory, setServerHistory] = useState([]);
   const [historyError, setHistoryError] = useState(null);
@@ -383,11 +463,13 @@ export default function TutorPanel({ status }) {
       return;
     }
     setFormError(null);
+    setNotice(null);
     await start(() =>
       api.tutorStart({
         ...settings(),
         rounds: parseInteger(rounds, 3),
         drills: parseInteger(drills, 0),
+        plan: parseInteger(planCount, DEFAULT_PLAN_LESSONS),
         twonrl_per: twonrlPer,
         diff_corrections: diffCorrections,
         blame,
@@ -426,12 +508,57 @@ export default function TutorPanel({ status }) {
     }
   }
 
+  /** Hand a report card back to the teacher and show the lessons it plans from it. */
+  async function handlePlan(card) {
+    if (!card) return;
+    setFormError(null);
+    setNotice(null);
+    setPlanBusy(true);
+    try {
+      const data = await api.tutorPlan({
+        ...settings(),
+        topic: topic.trim() || "everyday life",
+        drills: parseInteger(drills, 0),
+        count: Math.max(1, parseInteger(planCount, DEFAULT_PLAN_LESSONS)),
+        report: card,
+      });
+      setPlan((data && data.plan) || null);
+    } catch (err) {
+      setFormError(err.message);
+    } finally {
+      setPlanBusy(false);
+    }
+  }
+
+  /** Load one planned lesson into the settings above, ready to start. */
+  function usePlanLesson(lesson) {
+    const openings = asArray(lesson.prefixes).filter((p) => typeof p === "string" && p.trim());
+    if (lesson.topic) setTopic(String(lesson.topic));
+    setFocus(String(lesson.focus || ""));
+    if (plan && plan.level) setLevel(String(plan.level));
+    if (lesson.exercises) setExercises(String(lesson.exercises));
+    if (lesson.drills !== null && lesson.drills !== undefined) setDrills(String(lesson.drills));
+    if (openings.length > 0) setPrefixes(openings.join("\n"));
+    setFormError(null);
+    setNotice(
+      `Loaded "${lesson.focus || lesson.topic || "the lesson"}" into the settings: press Start lessons to teach it.`,
+    );
+    if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
   const jobHistory = asArray(job && job.history);
   const history = running || jobHistory.length > 0 ? jobHistory : serverHistory;
   const lessons = history.filter((r) => r && r.kind === "lesson");
   const roundRecords = history.filter((r) => r && r.kind === "round");
   const reports = history.filter((r) => r && r.kind === "report");
   const card = reports.length ? reports[reports.length - 1] : null;
+  const plans = history.filter((r) => r && r.kind === "plan");
+  const plannedByRun = plans.length ? plans[plans.length - 1] : null;
+  useEffect(() => {
+    if (plannedByRun) setPlan(plannedByRun); // a run that ended with a plan of its own shows it straight away
+  }, [plannedByRun]);
   const series = [
     {
       name: "mean score",
@@ -461,7 +588,9 @@ export default function TutorPanel({ status }) {
           that wrote the wrong character is penalised, the step that writes the right one is rewarded, and the
           words both sentences share keep what they earned. Sentences with no correction to align stay 2NRL
           garbage weighted by how bad the mark was; with <b>adapt</b> on, the next round drills the mistakes this
-          one made.
+          one made. At the end the report card goes back to the teacher, which writes the <b>lesson plan</b> that
+          repairs it — one point of grammar per lesson, worst mistake first — and any lesson of it can be loaded
+          into these settings and started.
         </p>
         <div className="row">
           <TextField
@@ -507,6 +636,15 @@ export default function TutorPanel({ status }) {
             hint="extra correct sentences per round"
             value={drills}
             onChange={setDrills}
+            min={0}
+            step={1}
+            disabled={running}
+          />
+          <NumberField
+            label="Plan"
+            hint="lessons planned at the end, 0 = off"
+            value={planCount}
+            onChange={setPlanCount}
             min={0}
             step={1}
             disabled={running}
@@ -717,6 +855,7 @@ export default function TutorPanel({ status }) {
           disabled={running}
           placeholder={"the children were\nevery morning she"}
         />
+        <Alert kind="ok" message={notice} onDismiss={() => setNotice(null)} />
         <Alert message={formError} onDismiss={() => setFormError(null)} />
         <Alert message={error} onDismiss={clearError} />
       </form>
@@ -734,6 +873,15 @@ export default function TutorPanel({ status }) {
             {preview.source === "given" ? " on your own prefixes" : ""}; nothing was trained and nothing was saved.
           </p>
           <ReportCard card={preview.report} title="Report card" />
+          <div className="actions">
+            <button
+              type="button"
+              disabled={running || planBusy || !preview.report || !preview.report.lessons}
+              onClick={() => handlePlan(preview.report)}
+            >
+              {planBusy ? "Planning…" : "Plan the next lessons"}
+            </button>
+          </div>
           <LessonTable rows={previewLessons} total={previewLessons.length} running={false} />
         </div>
       ) : null}
@@ -756,10 +904,22 @@ export default function TutorPanel({ status }) {
           />
         ) : null}
         <ReportCard card={card} title="Report card" />
+        {card ? (
+          <div className="actions">
+            <button type="button" disabled={running || planBusy} onClick={() => handlePlan(card)}>
+              {planBusy ? "Planning…" : "Plan the next lessons"}
+            </button>
+            <span className="muted">
+              The teacher reads the report card and writes the syllabus that repairs it, worst mistake first.
+            </span>
+          </div>
+        ) : null}
         <RoundTable rounds={roundRecords.slice(-MAX_ROWS)} />
         <h3>Every lesson</h3>
         <LessonTable rows={lessons.slice(-MAX_ROWS)} total={lessons.length} running={running} />
       </div>
+
+      <LessonPlanCard plan={plan} onUse={usePlanLesson} onClear={() => setPlan(null)} disabled={running} />
     </>
   );
 }

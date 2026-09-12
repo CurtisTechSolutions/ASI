@@ -118,6 +118,19 @@ func (f fields) number(name string, def float64, minimum *float64) (float64, boo
 	return n, true, nil
 }
 
+// mapping reads an optional JSON object field, such as a report card handed back to the tutor.
+func (f fields) mapping(name string) (map[string]any, error) {
+	v, ok := f.lookup(name)
+	if !ok || v == nil {
+		return nil, nil
+	}
+	object, isObject := v.(map[string]any)
+	if !isObject {
+		return nil, badRequest("'%s' must be an object (got %s %v)", name, jsonType(v), v)
+	}
+	return object, nil
+}
+
 // textsOptional: listName (list of strings) or textName (one text per line); absent -> nil.
 func (f fields) textsOptional(listName, textName string) ([]string, error) {
 	if v, ok := f.lookup(listName); ok {

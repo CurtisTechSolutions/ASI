@@ -694,6 +694,7 @@ type TutorConfig struct {
 	Batch         int     `json:"batch"`
 	Adapt         bool    `json:"adapt"`        // drill the previous round's weakest points
 	Drills        int     `json:"drills"`       // extra correct example sentences per round
+	Plan          int     `json:"plan"`         // lessons to plan from the final report card (0 = no plan)
 	TeachAnswer   bool    `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
 	Learn         bool    `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
 	// 2NRL
@@ -808,6 +809,9 @@ func (c *TutorConfig) Validate() error {
 	}
 	if c.Drills < 0 || c.ReplayLimit < 0 {
 		return fmt.Errorf("drills and replay_limit must be >= 0")
+	}
+	if c.Plan < 0 {
+		return fmt.Errorf("plan must be >= 0")
 	}
 	if c.NegEpochs < 0 || c.PosEpochs < 0 {
 		return fmt.Errorf("epochs must be >= 0")
@@ -1410,5 +1414,43 @@ func (t *TutorTrainer) Run() ([]map[string]any, error) {
 		summary[key] = value
 	}
 	t.emit(summary)
-	return append(records, summary), nil
+	rounds := len(records)
+	records = append(records, summary)
+	if t.Config.Plan > 0 && len(t.Lessons) > 0 && !t.stopped() {
+		plan, err := t.PlanNext(summary, t.Config.Plan)
+		if err != nil { // the lessons stand without a plan for the next ones
+			t.emit(map[string]any{"kind": "note", "message": "no lesson plan: " + err.Error()})
+			return records, nil
+		}
+		record := map[string]any{"kind": "plan", "rounds": rounds}
+		for key, value := range plan.Map() {
+			record[key] = value
+		}
+		t.emit(record)
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+// PlanNext is the next lessons, planned by the teacher from a report card - by
+// default the run's own.  The weaknesses of the card become the syllabus, each
+// lesson carrying the settings to run it with.
+func (t *TutorTrainer) PlanNext(card map[string]any, count int) (LessonPlan, error) {
+	cfg := t.Config
+	if card == nil {
+		card = ReportCard(t.Lessons)
+	}
+	if count < 1 {
+		count = DefaultPlanLessons
+	}
+	var plan LessonPlan
+	err := t.outside(func() error {
+		var err error
+		plan, err = PlanLessons(t.Client, card, PlanRequest{
+			Topic: cfg.Topic, Level: cfg.Level, Count: count, Exercises: cfg.Exercises, Drills: cfg.Drills,
+			Model: cfg.TutorModel,
+		})
+		return err
+	})
+	return plan, err
 }

@@ -64,7 +64,8 @@ RadixCyclicNN/
     llm.py                  provider layer: LLMClient / LLMError, make_client("ollama" | "chatgpt") (section 16)
     ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16.1)
     chatgpt.py              ChatGPT client over OpenAI's chat-completions API (section 16.2)
-    tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL (section 16.3)
+    tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL, and the lesson
+                            plan the report card at the end calls for (section 16.3)
     diff.py                 character diff of a sentence against its correction (section 16.4)
     codegen.py              code generation with a sandbox, an LLM judge and 2NRL rewards (section 17)
     cli.py                  argparse CLI
@@ -663,7 +664,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   learns and continues what was spoken), recording (no recorder, `arecord` called and its file read), the four API
   routes in all three body forms and the CLI actions. Runs without a microphone, ffmpeg or any ASR backend.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
-* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the four endpoints and the CLI.
+* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it, a run that ends with one); the five endpoints and the CLI.
 
 ---
 
@@ -832,11 +833,40 @@ def report_card(lessons) -> dict          # {"lessons","graded","passed","failed
                                           #  "mean_grammar","mean_spelling","mean_fluency","errors","weakest"}
 ```
 
+The report card at the end of a run is handed back to the teacher, which turns it into the syllabus of the
+lessons that follow:
+
+```python
+ERROR_FOCUS = {"agreement": "subject-verb agreement", "tense": "verb tenses", ...}   # what fixes each mistake
+LEVELS = ("beginner", "intermediate", "advanced");  DEFAULT_PLAN_LESSONS = 3
+STRONG_PASS_RATE = 0.8;  STRONG_SCORE = 8.0        # a card at or above both is ready for the next level
+
+@dataclass PlannedLesson:  focus, topic, why, targets, exercises, drills, prefixes
+@dataclass LessonPlan:     lessons, summary, level, topic, weak, source     # .targets == the mistakes it drills
+
+def focus_for(error) -> str               # ERROR_FOCUS[_error_type(error)], "" for "none" and the unknown
+def weak_points(card, limit=3) -> list    # [{"error","count","share","focus"}] worst first, ties alphabetically;
+                                          # reads a card that went through JSON (float counts, the teacher's wording)
+def next_level(level, card) -> str        # one step up LEVELS when the card is strong, else level
+def card_lines(card) -> list[str]         # the card as the teacher reads it (both languages word for word)
+def plan_from_card(card, *, topic, level, count=3, exercises=5, drills=0) -> LessonPlan
+    # no LLM: one lesson per weak point, worst first, why = "5 of 10 lessons (50%) were marked down for agreement.";
+    # a card with nothing to fix plans one lesson that keeps the topic at next_level(...)
+def plan_lessons(client, card, *, topic, level, count=3, exercises=5, drills=0, model=None) -> LessonPlan
+    # JSON mode: {"summary", "level", "lessons": [{"focus", "targets", "topic", "why"}]}; parse_plan tolerates
+    # {"plan": [...]}, bare lists, plain lines, "point" / "skill" instead of "focus", "reason" instead of "why",
+    # and a "targets" in the teacher's own words (_error_type maps it back; a focus alone implies it).
+    # plan_from_card is the floor: a weakness the answer skips takes the place of a lesson that drills nothing
+    # the card marked down (appended when there is none), and an answer that cannot be read - or that names no
+    # mistake and says nothing about the student - leaves that plan standing.  `source`: the provider, or
+    # "report card".  A card of no lessons is a ValueError.
+```
+
 `TutorConfig` (validated like every other config) holds the topic, `rounds`, `exercises`, `attempts`, `focus`,
 `level`, `words`, the two providers and their model names (`tutor_provider`, `tutor_model`, `grader_provider`,
 `grader_model`; `__post_init__` normalises the providers and fills in the models they imply, and
 `resolved_grader_model` is what the marking runs on), the completion settings (`mode`, `length`, `max_length`, `temperature`,
-`to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `teach_answer`,
+`to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `plan`, `teach_answer`,
 `learn`), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
 `min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`, `batch_size`, `strength`, `replay`, `replay_limit`,
 `checkpoint_every`).
@@ -864,7 +894,10 @@ Records: `{"kind": "lesson", round, exercise, prefix, focus, attempt, mode, cont
 spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds}` (`changes` is what
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
-`pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.
+`pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
+`plan = N` (`--plan N`, `POST /api/tutor/start {"plan": N}`) one more record closes the run:
+`{"kind": "plan", rounds, ...LessonPlan.to_dict()}`, from `TutorTrainer.plan(card=None, count=N)` — the run's own
+report card unless one is given.  A teacher that cannot plan costs only a `note`; the lessons stand.
 
 With `--blame` (`TutorTrainer(negative=...)`, `POST /api/tutor/start {"blame": true}`) every failed sentence of a
 round also teaches the **negative network** (section 24) why it failed: the mistake the teacher named is the reason,
@@ -873,16 +906,20 @@ changed are blamed. The round records then carry `negative_blamed`, `negative_ed
 
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
-the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons and the card.
+the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons, the card and
+the plan.  `--plan [N]` (default 3) prints the planned lessons as a table and the command that starts the first one.
 
 CLI flags for the teacher: `--tutor-provider ollama|chatgpt` (`--provider`), `--tutor-model`, `--grader-provider`,
 `--grader-model`, `--url`, `--grader-url`; a `chatgpt` teacher without `$OPENAI_API_KEY` stops before anything is
 sent.
 
-API: `GET /api/tutor` (defaults, error types, modes, and `providers` — each teacher's url, model and whether it is
-`configured`), `POST /api/tutor/start` (job), `GET /api/tutor/history`, `POST /api/tutor/lesson` (one round, no
-training; `prefixes` skips the exercise writer). All three take `tutor_provider` / `grader_provider` (and `url` /
-`grader_url`); a `chatgpt` teacher on a server without a key is refused with 400. The service releases the model
+API: `GET /api/tutor` (defaults, error types, modes, `levels`, `plan_lessons`, and `providers` — each teacher's url,
+model and whether it is `configured`), `POST /api/tutor/start` (job), `GET /api/tutor/history`,
+`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer) and `POST /api/tutor/plan`
+(`{report, count, topic, level, exercises, drills}` -> `{plan, source, provider, model, url, report}`; without
+`report` the card at the end of the last run — `ModelService.tutor_card()`, the last `"report"` record of the
+history — is used, and 400 says so when there is none). All of them take `tutor_provider` / `grader_provider` (and
+`url` / `grader_url`); a `chatgpt` teacher on a server without a key is refused with 400. The service releases the model
 lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
 teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with (ChatGPT: the server's
 `--chatgpt-model`).
@@ -892,10 +929,16 @@ Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpo
 key), the settings ("Teach corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
 per round, the report card with the mistake histogram, a table of rounds (with what the corrections moved) and one
 of every lesson (marks, mistake, what the network wrote, the correction, the changed words struck out against what
-replaced them, the teacher's line).
+replaced them, the teacher's line).  **Plan** (`POST /api/tutor/plan`) sits under each report card - the dry run's
+and the run's - and a **Lesson plan** card closes the tab: the summary, the weak points as pills, and a row per
+planned lesson (the point of grammar, the mistake it fixes, the topic, the exercises, why) with *Use this lesson*,
+which loads that lesson into the settings above (topic, focus, level, exercises, drills, any prefixes it came with)
+ready for **Start lessons**.  The **Plan** field of the form is the run's own `plan` setting, so a run that ends
+with a `"plan"` record shows it in the same card without asking again.
 
-Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule and answers drill requests; the
-parsers, the marking, the loop with a scripted model, the endpoints and the CLI), the ChatGPT teacher of
+Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, answers drill requests and
+plans the next lessons; the parsers, the marking, the planner, the loop with a scripted model, the endpoints and
+the CLI), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
 model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
 
@@ -1281,8 +1324,9 @@ the other's file with identical results; feedback, invert and weight changes mat
 covers the Go module (RNG vectors against CPython, exact summation, structure invariants, lazy weights against a
 full recompute, 1 vs 8 workers giving the same model, search / generation / conversation, gzip round trips).
 `TestGoTutorParity` runs both tutors against one fake Ollama: the calls the teacher receives (system and user
-prompts, in order), the marks, the report card and the resulting graph must all match, and a dry run on either side
-must change nothing.
+prompts, in order), the marks, the report card and the resulting graph must all match, a dry run on either side
+must change nothing, and with `--plan N` the report card is read out to the teacher in the same words and both
+sides come back with the same syllabus (lessons, targets, weak points, level, summary).
 
 ### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
 
@@ -1300,15 +1344,19 @@ over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `worke
 endpoints (evolve, the ollama corpus / review calls, images, speech, codegen, schedule preview) answer 404 with a message
 naming the Python server.
 
-The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `go/server/tutor.go`): the
-same prompts, the same records and the same endpoints (`GET /api/tutor`, `POST /api/tutor/start`,
-`GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models`), with the count / reward model
+The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `plan.go`,
+`go/server/tutor.go`): the same prompts, the same records and the same endpoints (`GET /api/tutor`,
+`POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `POST /api/tutor/plan`,
+`GET /api/chatgpt/models`), with the count / reward model
 answering the exercises and `serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` (or
 `$OLLAMA_HOST` / `$RADIXNET_TUTOR_MODEL` / `$OPENAI_BASE_URL` / `$RADIXNET_OPENAI_MODEL`) setting the defaults.
 Both teachers are here as well: `LLMClient` is the interface `OllamaClient` and `ChatGPTClient` implement,
 `NewLLMClient(provider, ...)` builds one, `TutorConfig.TutorProvider` / `GraderProvider` choose them (resolved by
 `Resolve`, which `Validate` calls), and `$OPENAI_API_KEY` is read per request and never stored - the key is the
-server's own, never a request field. `radixnet-count tutor -tutor-provider chatgpt` is the CLI twin.
+server's own, never a request field. `radixnet-count tutor -tutor-provider chatgpt` is the CLI twin, `-plan N`
+included; `plan.go` is `weak_points` / `plan_from_card` / `plan_lessons` word for word - the same system prompt,
+the same report card read out to the teacher, the same fallbacks and the same JSON - so the parity test drives both
+CLIs against one fake teacher and compares the plan they come back with.
 The job releases the model lock around every LLM call, as the Python service does. Ratings reach the
 model through `WeightGroups` + `RewardWeighted` / `PunishWeighted` / `TwoNRLWeighted` (one pass per distinct
 weight, the reward or penalty scaled by it), which also back `good_ratings` / `bad_ratings` on `/api/2nrl` and

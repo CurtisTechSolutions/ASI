@@ -389,6 +389,11 @@ class LessonPrinter(_RowPrinter):
                 f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
                 f"mean {fmt(record.get('mean_score'))}"
             )
+        elif kind == "plan":
+            self.console.note(
+                f"lesson plan ({record.get('source')}): {len(record.get('lessons') or [])} lesson(s) at "
+                f"{record.get('level')} level, drilling {', '.join(record.get('targets') or []) or 'nothing in particular'}"
+            )
         elif kind == "note":
             self.console.note(f"note: {record.get('message')}")
 
@@ -1883,6 +1888,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
+        plan=args.plan or 0,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
@@ -1922,6 +1928,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
                  f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive "
                  f"epochs={config.pos_epochs} lr={config.pos_lr}, batch={config.batch_size}, "
                  f"garbage weight {fmt(config.min_weight)}..1"),
+        ("plan", f"the teacher plans the next {config.plan} lesson(s) from the final report card"
+                 if config.plan else "no lesson plan (--plan N)"),
         ("output", "not saved (--dry-run)" if args.dry_run else out),
     ])
     console.say()
@@ -1959,15 +1967,33 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         ("mistakes", ", ".join(f"{name} x{count}" for name, count in card["errors"].items()) or "none"),
         ("weakest", ", ".join(card["weakest"]) or "-"),
     ])
+    plan = next((record for record in reversed(records) if record.get("kind") == "plan"), None)
+    if plan is not None:
+        console.say()
+        console.say(f"lesson plan ({plan['source']}): {plan['summary']}")
+        console.table(
+            ("#", "focus", "fixes", "topic", "exercises", "drills", "why"),
+            [
+                [i, lesson["focus"] or "-", lesson["targets"], lesson["topic"] or "-", lesson["exercises"],
+                 lesson["drills"], clip(str(lesson["why"] or "-"), 60)]
+                for i, lesson in enumerate(plan["lessons"], 1)
+            ],
+        )
+        first = plan["lessons"][0]
+        console.say(
+            f"run the first one: {PROG} tutor --topic {quote(first['topic'] or config.topic)}"
+            + (f" --focus {quote(first['focus'])}" if first["focus"] else "")
+            + f" --level {plan['level']} --exercises {first['exercises']}"
+        )
     doc = {
         "model": origin.to_dict(), "out": None if args.dry_run else out, "config": config.to_dict(),
         "records": records, "lessons": [lesson.to_dict() for lesson in trainer.lessons], "report": card,
-        "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+        "plan": plan, "interrupted": interrupted, "saved": saved, "stats": model.stats(),
         "negative": _save_negative(console, negative, negative_path(args)) if negative is not None else None,
     }
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
-            json.dump({k: doc[k] for k in ("config", "records", "lessons", "report")}, fh, indent=2)
+            json.dump({k: doc[k] for k in ("config", "records", "lessons", "report", "plan")}, fh, indent=2)
         console.say(f"wrote report to {args.report}")
     return doc
 def _save_negative(console: Console, negative: Any, path: str) -> dict:
@@ -3007,7 +3033,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_codegen)
 
     # tutor ------------------------------------------------------------------
-    from .tutor import DEFAULT_TUTOR_MODEL as tutor_default_model, MODES as TUTOR_MODES, TWONRL_PER as TUTOR_TWONRL_PER
+    from .tutor import (
+        DEFAULT_PLAN_LESSONS,
+        DEFAULT_TUTOR_MODEL as tutor_default_model,
+        MODES as TUTOR_MODES,
+        TWONRL_PER as TUTOR_TWONRL_PER,
+    )
 
     p = command(
         "tutor", "automated English lessons: the teacher writes the prefix, the network completes it and is marked",
@@ -3055,6 +3086,10 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-adapt", action="store_true", help="do not drill the previous round's weakest points")
     group.add_argument("--drills", type=nonneg_int, default=0,
                        help="extra correct example sentences per round, added to the fine-tune pass")
+    group.add_argument("--plan", type=nonneg_int, nargs="?", const=DEFAULT_PLAN_LESSONS, metavar="N",
+                       help="hand the report card at the end back to the teacher and print the next N lessons it "
+                            f"plans - one point of grammar each, worst mistake first (0 = off, default N: "
+                            f"{DEFAULT_PLAN_LESSONS})")
     group.add_argument("--no-teach-answer", action="store_true",
                        help="a failed lesson learns only the correction, not the teacher's own model answer")
     group.add_argument("--dry-run", action="store_true", help="set and mark the exercises but train nothing and save nothing")

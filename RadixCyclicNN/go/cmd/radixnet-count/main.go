@@ -813,6 +813,7 @@ func cmdTutor(args []string) {
 	batch := fs.Int("batch", cfg.Batch, "sentences marked in one Ollama call")
 	noAdapt := fs.Bool("no-adapt", false, "do not drill the previous round's weakest points")
 	drills := fs.Int("drills", cfg.Drills, "extra correct example sentences per round")
+	plan := fs.Int("plan", cfg.Plan, "hand the report card at the end back to the teacher and print the next N lessons it plans (0 = off)")
 	noTeachAnswer := fs.Bool("no-teach-answer", false, "a failed lesson learns only the correction")
 	dryRun := fs.Bool("dry-run", false, "set and mark the exercises but train nothing and save nothing")
 	noDiff := fs.Bool("no-diff-corrections", false, "learn a correction as two whole sentences instead of from its diff")
@@ -833,6 +834,7 @@ func cmdTutor(args []string) {
 	cfg.ToEnd = !*noToEnd
 	cfg.Threshold, cfg.GrammarWeight, cfg.Batch = *threshold, *grammarWeight, *batch
 	cfg.Adapt, cfg.Drills, cfg.TeachAnswer, cfg.Learn = !*noAdapt, *drills, !*noTeachAnswer, !*dryRun
+	cfg.Plan = *plan
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
 	cfg.DiffCorrections, cfg.KeepWeight = !*noDiff, *keepWeight
 	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
@@ -883,14 +885,48 @@ func cmdTutor(args []string) {
 	}
 	say("report card: %v/%v passed, mean %s (grammar %s); mistakes: %s",
 		card["passed"], card["lessons"], fmtMark(card["mean_score"]), fmtMark(card["mean_grammar"]), mistakes(card))
+	planned := lastRecord(records, "plan")
+	if planned != nil {
+		sayPlan(planned)
+	}
 	if saved != "" {
 		say("saved %s", saved)
 	}
 	if jsonMode {
 		emit(map[string]any{
 			"config": cfg, "records": records, "lessons": trainer.Lessons, "report": card,
-			"saved": saved, "stats": m.Stats(),
+			"plan": planned, "saved": saved, "stats": m.Stats(),
 		})
+	}
+}
+
+// lastRecord is the last record of one kind, or nil.
+func lastRecord(records []map[string]any, kind string) map[string]any {
+	for i := len(records) - 1; i >= 0; i-- {
+		if name, _ := records[i]["kind"].(string); name == kind {
+			return records[i]
+		}
+	}
+	return nil
+}
+
+// sayPlan prints the lessons the teacher planned from the report card.
+func sayPlan(record map[string]any) {
+	lessons, _ := record["lessons"].([]map[string]any)
+	say("lesson plan (%v): %v", record["source"], record["summary"])
+	for i, lesson := range lessons {
+		say("  %d. %v  [fixes %v, topic %v, %v exercise(s), %v drill(s)]  %v",
+			i+1, lesson["focus"], lesson["targets"], lesson["topic"], lesson["exercises"], lesson["drills"],
+			lesson["why"])
+	}
+	if len(lessons) > 0 {
+		first := lessons[0]
+		focus := ""
+		if text, _ := first["focus"].(string); text != "" {
+			focus = fmt.Sprintf(" --focus %q", text)
+		}
+		say("run the first one: radixnet-count tutor --topic %q%s --level %v --exercises %v",
+			first["topic"], focus, record["level"], first["exercises"])
 	}
 }
 
@@ -923,6 +959,15 @@ func sayLesson(record map[string]any) {
 		say("round %v: %v/%v passed, mean %s (grammar %s), weakest: %s -> %s (bad=%v, good=%v)",
 			record["round"], record["passed"], record["lessons"], fmtMark(record["mean_score"]),
 			fmtMark(record["mean_grammar"]), weak, action, record["bad"], record["good"])
+	case "plan":
+		lessons, _ := record["lessons"].([]map[string]any)
+		targets, _ := record["targets"].([]string)
+		drilling := "nothing in particular"
+		if len(targets) > 0 {
+			drilling = strings.Join(targets, ", ")
+		}
+		say("lesson plan (%v): %d lesson(s) at %v level, drilling %s",
+			record["source"], len(lessons), record["level"], drilling)
 	case "note":
 		say("note: %v", record["message"])
 	}

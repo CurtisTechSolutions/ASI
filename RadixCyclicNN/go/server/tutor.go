@@ -2,9 +2,10 @@ package server
 
 // The English tutor over HTTP: GET /api/tutor describes it, POST
 // /api/tutor/start runs rounds of prefix -> completion -> grade -> 2NRL as a
-// job, GET /api/tutor/history returns their records and POST /api/tutor/lesson
-// marks one round without training anything.  The Go twin of the Python
-// server's /api/tutor endpoints, answering the same JSON.
+// job, GET /api/tutor/history returns their records, POST /api/tutor/lesson
+// marks one round without training anything and POST /api/tutor/plan turns a
+// report card into the syllabus of the lessons that follow.  The Go twin of
+// the Python server's /api/tutor endpoints, answering the same JSON.
 
 import (
 	"fmt"
@@ -112,6 +113,44 @@ func (s *Service) TutorHistory() map[string]any {
 	return map[string]any{"history": history}
 }
 
+// TutorCard is the report card at the end of the last tutor run, or nil when
+// nothing has been marked yet.  A running job holds the write lock between
+// records, so the scan waits for it like any other reader.
+func (s *Service) TutorCard() map[string]any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := len(s.tutorHistory) - 1; i >= 0; i-- {
+		if kind, _ := s.tutorHistory[i]["kind"].(string); kind == "report" {
+			return s.tutorHistory[i]
+		}
+	}
+	return nil
+}
+
+// TutorPlan asks the teacher for the lessons to run next, given a report card:
+// one point of grammar each, aimed at the mistakes the marking found.
+func (s *Service) TutorPlan(
+	config radixnet.TutorConfig, client radixnet.LLMClient, card map[string]any, count int,
+) (map[string]any, error) {
+	if err := config.Validate(); err != nil {
+		return nil, badRequest("%v", err)
+	}
+	plan, err := radixnet.PlanLessons(client, card, radixnet.PlanRequest{
+		Topic: config.Topic, Level: config.Level, Count: count, Exercises: config.Exercises,
+		Drills: config.Drills, Model: config.TutorModel,
+	})
+	if err != nil {
+		if radixnet.IsLLMError(err) {
+			return nil, &apiError{502, err.Error()}
+		}
+		return nil, badRequest("%v", err)
+	}
+	return map[string]any{
+		"plan": plan.Map(), "source": plan.Source, "provider": radixnet.ProviderOf(client),
+		"model": client.ModelName(), "url": client.BaseURL(), "report": card,
+	}, nil
+}
+
 // TutorLesson runs one round of lessons without training: the exercises (or
 // the given prefixes), the completions and their grades.
 func (s *Service) TutorLesson(
@@ -182,6 +221,8 @@ func init() {
 	doc("GET", "/api/chatgpt/models", "is ChatGPT usable as a teacher here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails")
 	route("POST", "/api/tutor/lesson", rTutorLesson)
 	doc("POST", "/api/tutor/lesson", "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card")
+	route("POST", "/api/tutor/plan", rTutorPlan)
+	doc("POST", "/api/tutor/plan", "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, level, exercises, drills, tutor_model, url} -> {plan: {summary, level, weak, targets, lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, source}")
 }
 
 // rChatGPTModels reports whether ChatGPT can teach on this server and which
@@ -231,10 +272,12 @@ func rTutor(rq *request) (int, any, error) {
 				"configured": radixnet.ChatGPTConfigured(),
 			},
 		},
-		"error_types": radixnet.ErrorTypes,
-		"modes":       radixnet.TutorModes,
-		"twonrl_per":  radixnet.TwoNRLPer,
-		"defaults":    radixnet.DefaultTutorConfig(),
+		"error_types":  radixnet.ErrorTypes,
+		"modes":        radixnet.TutorModes,
+		"twonrl_per":   radixnet.TwoNRLPer,
+		"levels":       radixnet.Levels,
+		"plan_lessons": radixnet.DefaultPlanLessons,
+		"defaults":     radixnet.DefaultTutorConfig(),
 	}, nil
 }
 
@@ -335,6 +378,7 @@ func tutorConfigFrom(rq *request) (radixnet.TutorConfig, error) {
 	integer("batch", d.Batch, 1, &c.Batch)
 	flag("adapt", d.Adapt, &c.Adapt)
 	integer("drills", d.Drills, 0, &c.Drills)
+	integer("plan", d.Plan, 0, &c.Plan)
 	flag("teach_answer", d.TeachAnswer, &c.TeachAnswer)
 	flag("learn", d.Learn, &c.Learn)
 	text("twonrl_per", d.TwoNRLPer, &c.TwoNRLPer)
@@ -431,6 +475,39 @@ func rTutorLesson(rq *request) (int, any, error) {
 		if radixnet.IsLLMError(err) {
 			return 0, nil, &apiError{502, err.Error()}
 		}
+		return 0, nil, err
+	}
+	return 200, out, nil
+}
+
+func rTutorPlan(rq *request) (int, any, error) {
+	config, err := tutorConfigFrom(rq)
+	if err != nil {
+		return 0, nil, err
+	}
+	client, _, err := tutorClients(rq, config)
+	if err != nil {
+		return 0, nil, err
+	}
+	card, err := rq.f.mapping("report")
+	if err != nil {
+		return 0, nil, err
+	}
+	if card == nil {
+		if card = rq.svc.TutorCard(); card == nil {
+			return 0, nil, badRequest("no report card yet: run some lessons first, or send one as 'report'")
+		}
+	}
+	fallback := config.Plan
+	if fallback < 1 {
+		fallback = radixnet.DefaultPlanLessons
+	}
+	count, _, err := rq.f.integer("count", fallback, intp(1))
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.TutorPlan(config, client, card, count)
+	if err != nil {
 		return 0, nil, err
 	}
 	return 200, out, nil

@@ -347,6 +347,32 @@ class TestGoTutorParity(unittest.TestCase):
         for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
             self.assertLessEqual(abs(py_stats[key] - go_stats[key]), 1e-9, key)
 
+    def test_both_tutors_plan_the_same_next_lessons(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--dry-run", "--plan", 2)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_calls = self.calls()
+
+        # the report card is handed back to the teacher with the same words on both sides
+        self.assertEqual(len(py_calls), len(go_calls))
+        for i, (first, second) in enumerate(zip(py_calls, go_calls)):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        plan_prompts = [prompt for system, prompt in py_calls if "planning the next lessons" in system]
+        self.assertEqual(len(plan_prompts), 1)
+        self.assertIn("Lessons marked: 2", plan_prompts[0])
+
+        # and the same syllabus comes out
+        self.assertEqual(a["plan"]["lessons"], b["plan"]["lessons"])
+        self.assertEqual(a["plan"]["targets"], b["plan"]["targets"])
+        self.assertEqual(a["plan"]["weak"], b["plan"]["weak"])
+        self.assertEqual((a["plan"]["level"], a["plan"]["source"]), (b["plan"]["level"], b["plan"]["source"]))
+        self.assertEqual(a["plan"]["summary"], b["plan"]["summary"])
+        self.assertEqual(a["plan"]["lessons"][0]["targets"], "agreement")
+        self.assertEqual([r["kind"] for r in a["records"]], [r["kind"] for r in b["records"]])
+
     def test_dry_runs_agree_and_change_nothing(self):
         options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run")
         before = load_json(self.py_path)["graph"]["edges"]["reward"]

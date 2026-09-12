@@ -106,14 +106,17 @@ from .speech import describe as describe_speech
 from .speech import teach as teach_speech
 from .speech import transcribe as transcribe_speech
 from .tutor import (
+    DEFAULT_PLAN_LESSONS,
     DEFAULT_TUTOR_MODEL,
     ERROR_TYPES as TUTOR_ERROR_TYPES,
+    LEVELS as TUTOR_LEVELS,
     MODES as TUTOR_MODES,
     TWONRL_PER as TUTOR_TWONRL_PER,
     Exercise,
     TutorConfig,
     TutorTrainer,
     default_tutor_model,
+    plan_lessons,
     report_card,
 )
 from .vision import VisionError
@@ -1339,6 +1342,13 @@ class ModelService:
     def tutor_history(self) -> dict:
         return {"history": list(self._tutor_history)}
 
+    def tutor_card(self) -> dict | None:
+        """The report card at the end of the last tutor run, or ``None`` when nothing has been marked yet."""
+        for record in reversed(self._tutor_history):
+            if record.get("kind") == "report":
+                return dict(record)
+        return None
+
     # -- lifecycle -----------------------------------------------------------
 
     def shutdown(self, timeout: float = 10.0) -> None:
@@ -1542,6 +1552,15 @@ class Fields:
         if minimum is not None and value < minimum:
             raise ApiError(400, f"'{name}' must be >= {minimum} (got {value})")
         return float(value)
+
+    def mapping(self, name: str, default: Any = _MISSING) -> Any:
+        """A JSON object field, such as a report card handed back to the tutor."""
+        value = self._lookup(name)
+        if value is _MISSING:
+            return self._default(name, default, "object")
+        if not isinstance(value, dict):
+            raise self._bad(name, "an object", value)
+        return value
 
     def texts(self, list_name: str, text_name: str) -> list[str]:
         """``list_name`` (list of strings) or ``text_name`` (one text per line, blank lines dropped)."""
@@ -2709,6 +2728,7 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         batch=f.integer("batch", d.batch, minimum=1),
         adapt=f.flag("adapt", d.adapt),
         drills=f.integer("drills", d.drills, minimum=0),
+        plan=f.integer("plan", d.plan, minimum=0),
         teach_answer=f.flag("teach_answer", d.teach_answer),
         learn=f.flag("learn", d.learn),
         twonrl_per=f.text("twonrl_per", d.twonrl_per).strip().lower(),
@@ -2749,6 +2769,8 @@ def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         "error_types": list(TUTOR_ERROR_TYPES),
         "modes": list(TUTOR_MODES),
         "twonrl_per": list(TUTOR_TWONRL_PER),
+        "levels": list(TUTOR_LEVELS),
+        "plan_lessons": DEFAULT_PLAN_LESSONS,
         "defaults": TutorConfig().to_dict(),
     }
 
@@ -2788,6 +2810,29 @@ def _r_tutor_lesson(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         "source": "given" if given else config.tutor_provider, "model": client.model, "url": client.url,
         "config": config.to_dict(), "exercises": [e.to_dict() for e in exercises],
         "lessons": [lesson.to_dict() for lesson in lessons], "report": report_card(lessons),
+    }
+
+
+def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The lessons to run next: the teacher turns a report card into a syllabus of its weakest points."""
+    config = _tutor_config(f, svc)
+    client, _grader = _tutor_clients(svc, f, config)
+    card = f.mapping("report", None) or svc.tutor_card()
+    if card is None:
+        raise ApiError(400, "no report card yet: run some lessons first, or send one as 'report'")
+    count = f.integer("count", config.plan or DEFAULT_PLAN_LESSONS, minimum=1)
+    try:
+        plan = plan_lessons(
+            client, card, topic=config.topic, level=config.level, count=count, exercises=config.exercises,
+            drills=config.drills, model=config.tutor_model,
+        )
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except LLMError as exc:
+        raise ApiError(502, str(exc)) from exc
+    return 200, {
+        "plan": plan.to_dict(), "source": plan.source, "provider": config.tutor_provider,
+        "model": client.model, "url": client.url, "report": card,
     }
 
 
@@ -2916,6 +2961,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "
      "threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card"),
+    ("POST", "/api/tutor/plan", _r_tutor_plan,
+     "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, "
+     "level, exercises, drills, tutor_provider, tutor_model, url} -> {plan: {summary, level, weak, targets, "
+     "lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, source}"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}

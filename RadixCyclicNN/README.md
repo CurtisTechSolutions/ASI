@@ -27,6 +27,7 @@ and an optional GPU backend (torch) are built in.
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), and the round's mistakes become the next round's syllabus. |
+| The report card plans the next lessons | `tutor --plan N` / the Tutor tab's **Lesson plan** / `POST /api/tutor/plan` (both servers): the report card at the end of a run goes back to the teacher, which answers with the syllabus that repairs it - one point of grammar per lesson, the mistake of the card it targets, a topic, a line on why, and a level that goes up when the card is strong. The marks alone already plan it (a lesson per weak point, worst first); the teacher improves on that floor and never drops a weakness from it. Each lesson carries the settings to run it, so one click starts it. |
 | Rewards follow the rating | `two_nrl(good_weights=)`, `reward(weights=)` and `punish(weights=)` (both models, Python and Go) scale every pass per text: a sentence marked 9 out of 10 is learned nine tenths as hard as a perfect one, a 0 is skipped. `/api/feedback` and `/api/2nrl` take `good_ratings` / `bad_ratings` (marks out of 10), the Ratings card a mark per rated text. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Teach it by talking to it | `speech`, the Speech tab and `POST /api/speech/teach`: the browser records the microphone and dictates the words (Web Speech API; faster-whisper, openai-whisper or an OpenAI-compatible transcription server do it on the server side), and **one utterance becomes two texts behind the same unique token** - `<speech:9f2a1c7d> the cat sat on the mat` and `<speech:9f2a1c7d> aud:mu:8000x1:<base64>`, the waveform itself with every sample quantised to one mu-law byte. Both are trained on, so the words and the sound leave the same node of the graph; `speech decode` plays a predicted waveform back. |
@@ -102,7 +103,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make go-build` / `go-test` / `go-parity` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
-| `make tutor TOPIC="..." ROUNDS=5` / `tutor-dry` / `tutor-focus FOCUS="past tense"` | automated English lessons taught by `TUTOR=ollama\|chatgpt` (`TUTOR_MODEL`, `TUTOR_URL`) |
+| `make tutor TOPIC="..." ROUNDS=5` / `tutor-dry` / `tutor-focus FOCUS="past tense"` / `tutor-plan PLAN=3` | automated English lessons taught by `TUTOR=ollama\|chatgpt` (`TUTOR_MODEL`, `TUTOR_URL`); `tutor-plan` ends with the next lessons planned from the report card |
 | `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
 | `make chatgpt-models` / `chatgpt-ask PROMPT="..."` | ChatGPT (OpenAI): what `$OPENAI_API_KEY` may use, one question — the quickest check that ChatGPT can tutor |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-blame` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + blame the negative network, review + 2NRL |
@@ -191,7 +192,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]` |
 | `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
-| `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
+| `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
@@ -233,10 +234,11 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", "teacher_provider", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
-| `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "providers": {"ollama": {...}, "chatgpt": {"url","model","configured"}}, "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
-| `POST /api/tutor/start` | `{"blame" (teach the negative network why each sentence failed), "topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_provider": "ollama"\|"chatgpt", "tutor_model", "grader_provider", "grader_model", "url", "grader_url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
+| `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "providers": {"ollama": {...}, "chatgpt": {"url","model","configured"}}, "error_types", "modes", "twonrl_per", "levels", "plan_lessons", "defaults": {every setting}}` |
+| `POST /api/tutor/start` | `{"blame" (teach the negative network why each sentence failed), "topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_provider": "ollama"\|"chatgpt", "tutor_model", "grader_provider", "grader_model", "url", "grader_url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "plan" (lessons to plan from the final report card, 0 = none), "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"plan"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`), and the final `plan` record the lesson plan (see `POST /api/tutor/plan`) |
 | `GET /api/tutor/history` | `{"history": [lesson / round / report records of all tutor runs]}` |
 | `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"chatgpt"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (400 when `tutor_provider` is `chatgpt` and the server has no key, 502 when the teacher fails) |
+| `POST /api/tutor/plan` | the lessons a report card calls for: `{"report": {report card}` (default: the card at the end of the last run), `"count": 3, "topic", "level", "exercises", "drills", "tutor_provider", "tutor_model", "url"}` -> `{"plan": {"summary", "level", "topic", "source": "ollama"\|"chatgpt"\|"report card", "weak": [{"error","count","share","focus"}], "targets", "lessons": [{"focus","targets","topic","why","exercises","drills","prefixes"}]}, "source", "provider", "model", "report"}` (400 without a card, 502 when the teacher fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
 | `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
@@ -291,8 +293,10 @@ of everything the tutor has blamed with the journal of what it said),
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Tutor (automated English lessons: the settings, a dry run
 that marks without training, a chart of the marks per round, the report card
-with the mistakes, and every lesson with what the network wrote, the correction
-and the teacher's line), Code (code generation with the sandbox and the judge),
+with the mistakes, every lesson with what the network wrote, the correction
+and the teacher's line, and the lesson plan the teacher writes from the report
+card - each lesson loadable into the settings with one click), Code (code
+generation with the sandbox and the judge),
 Speech (record the microphone, the browser writes down what it hears, teach
 the words and the waveform),
 Checkpoints (save / restore / load / reset) and a Graph view of the most
@@ -414,21 +418,37 @@ points become the next round's syllabus - the teacher notices that the class
 keeps failing plurals and sets plural exercises - and `--drills N` asks for N
 extra correct example sentences about them, which join the fine-tune pass.
 
+5. **The next lesson plan.** `--plan N` hands the report card at the end of the
+   run back to the teacher, which writes the syllabus of the lessons that
+   follow: N lessons, each drilling one point of grammar, each naming the
+   mistake of the card it repairs, with a topic and a line on why it is being
+   taught, and a `level` that goes up when the card is strong (80% passed at 8
+   out of 10). The marks alone already imply a plan - one lesson per weak
+   point, worst first - and that is the floor: a weakness the teacher's plan
+   skips takes the place of a lesson that drills nothing the card marked down,
+   and an answer that cannot be read leaves the card's own plan standing
+   (`source` says which wrote it). Every lesson carries the settings to run it
+   with, so the Tutor tab can load one into the form and start it, and the CLI
+   prints the command for the first one.
+
 ```bash
 ollama pull llama3.2
 python -m radixnet tutor --topic "everyday life" --rounds 5 --exercises 5
 python -m radixnet tutor --topic "the sea" --focus "past tense" --drills 5 --threshold 7
 python -m radixnet tutor --topic animals --dry-run            # set and mark, train nothing
+python -m radixnet tutor --topic animals --rounds 3 --plan 3  # ... and plan the next three lessons
 python -m radixnet tutor --topic animals --rounds 3 --report lessons.json
 make tutor TOPIC="everyday life" ROUNDS=5
 make tutor-dry TOPIC="everyday life"
+make tutor-plan TOPIC="everyday life" PLAN=3
 ```
 
 Cost, per round: one call for the exercises, one per `--batch` marked
-sentences, and one more with `--drills`. `--tutor-model` (or
-`RADIXNET_TUTOR_MODEL`, else `RADIXNET_OLLAMA_MODEL`, else `llama3.2`) is the
-teacher, `--grader-model` lets a second model do the marking, and `--url` /
-`OLLAMA_HOST` picks the server. Ctrl-C stops after the current round and saves.
+sentences, and one more with `--drills`; `--plan` adds one for the whole run.
+`--tutor-model` (or `RADIXNET_TUTOR_MODEL`, else `RADIXNET_OLLAMA_MODEL`, else
+`llama3.2`) is the teacher, `--grader-model` lets a second model do the marking,
+and `--url` / `OLLAMA_HOST` picks the server. Ctrl-C stops after the current
+round and saves.
 
 ### Who teaches: a local model or ChatGPT
 
@@ -467,16 +487,19 @@ without it. A key is never sent unencrypted to a remote host: use `https://`, a
 server on this machine, or set `RADIXNET_OPENAI_ALLOW_INSECURE=1` deliberately.
 
 The API adds `GET /api/tutor` (the teachers on offer, defaults and the marking vocabulary),
-`POST /api/tutor/start` (the job), `GET /api/tutor/history` and
+`POST /api/tutor/start` (the job), `GET /api/tutor/history`,
 `POST /api/tutor/lesson` (one round of exercises, completions and grades
 without training - give it `prefixes` to skip the exercise writer and mark your
-own). The Tutor tab drives all of it and shows the marks per round, the report
-card and every lesson next to its correction, with the changed words struck out
-against what replaced them; the **Teacher** selector switches between Ollama
+own) and `POST /api/tutor/plan` (a report card in, the next lessons out; with
+no `report` the card at the end of the last run is used). The Tutor tab drives
+all of it and shows the marks per round, the report card and every lesson next
+to its correction, with the changed words struck out against what replaced
+them, then the lesson plan under it - "Use this lesson" loads one into the
+settings, ready to start; the **Teacher** selector switches between Ollama
 and ChatGPT (the URL, the model and the notes follow it). **Both servers run
 the lessons**: the Go server has the same endpoints, the same two teachers and
-`radixnet-count tutor` the same command (`-tutor-provider chatgpt`), with the
-count / reward model answering the exercises.
+`radixnet-count tutor` the same command (`-tutor-provider chatgpt`, `-plan N`),
+with the count / reward model answering the exercises.
 
 ## Code generation: sandbox, LLM tutor and judge, 2NRL rewards
 

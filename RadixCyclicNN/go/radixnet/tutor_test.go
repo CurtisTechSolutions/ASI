@@ -21,6 +21,7 @@ type fakeTeacher struct {
 	// answers replace the generated ones when set
 	exerciseAnswer string
 	gradeAnswer    string
+	planAnswer     string
 }
 
 var tutorCorpus = []string{"the cat sat on the mat", "the dogs run in the park", "the cat likes the mat"}
@@ -72,6 +73,8 @@ func newFakeTeacher(t *testing.T) *fakeTeacher {
 			kind = "grades"
 		case strings.Contains(system, "model sentences"):
 			kind = "drills"
+		case strings.Contains(system, "planning the next lessons"):
+			kind = "plan"
 		}
 		fake.prompts[kind] = append(fake.prompts[kind], prompt)
 		writeJSONBody(w, map[string]any{"model": body["model"], "response": fake.answer(kind, prompt, system), "done": true})
@@ -123,6 +126,25 @@ func (f *fakeTeacher) answer(kind, prompt, system string) string {
 			lines[i] = fmt.Sprintf("%d. the cat sat on the mat number %d", i+1, i)
 		}
 		return strings.Join(lines, "\n")
+	case "plan":
+		if f.planAnswer != "" {
+			return f.planAnswer
+		}
+		count := numberIn(system, `exactly (\d+) lessons`, 2)
+		pool := []map[string]any{
+			{"focus": "subject-verb agreement", "targets": "agreement", "topic": "animals",
+				"why": "Nearly every sentence lost marks here."},
+			{"focus": "plural nouns", "targets": "plural", "topic": "the market", "why": "Plurals were shaky."},
+			{"focus": "past tense", "targets": "tense", "topic": "yesterday", "why": "Tenses drifted."},
+		}
+		lessons := []map[string]any{}
+		for i := 0; i < count; i++ {
+			lessons = append(lessons, pool[i%len(pool)])
+		}
+		raw, _ := json.Marshal(map[string]any{
+			"summary": "The student writes verbs badly.", "level": "beginner", "lessons": lessons,
+		})
+		return string(raw)
 	}
 	return "unexpected request"
 }
