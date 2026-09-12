@@ -515,7 +515,9 @@ func scriptedTrainer(t *testing.T, fake *fakeTeacher, cfg TutorConfig) *TutorTra
 
 func TestTutorWeighsGarbageAndRewardsByTheMark(t *testing.T) {
 	fake := newFakeTeacher(t)
-	trainer := scriptedTrainer(t, fake, tutorConfig())
+	cfg := tutorConfig()
+	cfg.DiffCorrections = false // the whole-sentence path: the diff has a test of its own
+	trainer := scriptedTrainer(t, fake, cfg)
 	nine, one := 9.9, 1.0
 	exercise := Exercise{ID: "e1", Prefix: "the dogs run", Focus: "agreement", Answer: "the dogs run in the park"}
 	passed := &Lesson{Exercise: exercise, Continuation: "the park", Sentence: "the dogs run the park",
@@ -540,6 +542,47 @@ func TestTutorWeighsGarbageAndRewardsByTheMark(t *testing.T) {
 	}
 	if len(graded.BadWeights) != 1 || graded.BadWeights[0] <= trainer.Config.MinWeight {
 		t.Fatalf("a hopeless sentence should weigh more than the minimum: %v", graded.BadWeights)
+	}
+	if len(graded.Corrections) != 0 {
+		t.Fatalf("with the diff off, no correction is carried as a pair: %v", graded.Corrections)
+	}
+}
+
+// A corrected failure is taught as a correction: the sentence and the teacher's
+// version travel together, out of the whole-sentence lists.
+func TestTutorCarriesCorrectionsAsPairs(t *testing.T) {
+	fake := newFakeTeacher(t)
+	trainer := scriptedTrainer(t, fake, tutorConfig())
+	one := 1.0
+	exercise := Exercise{ID: "e1", Prefix: "the dogs run", Focus: "agreement", Answer: "the dogs run in the park"}
+	failed := &Lesson{Exercise: exercise, Continuation: "run run", Sentence: "the dogs run run run",
+		Grade: Grade{Score: &one, Error: "agreement", Correction: "the dogs run in the park"}}
+	uncorrected := &Lesson{Exercise: exercise, Continuation: "xx", Sentence: "the dogs run xx",
+		Grade: Grade{Score: &one, Error: "nonsense"}}
+	graded := trainer.TextsOf([]*Lesson{failed, uncorrected})
+	if len(graded.Corrections) != 1 || graded.Corrections[0].Wrong != "the dogs run run run" ||
+		graded.Corrections[0].Right != "the dogs run in the park" {
+		t.Fatalf("the corrected failure should travel as a pair: %v", graded.Corrections)
+	}
+	if graded.Corrections[0].Weight != trainer.WeightOf(failed.Grade) {
+		t.Fatalf("a correction carries the mark's weight: %v", graded.Corrections)
+	}
+	if want := []string{"the dogs run xx"}; !equalStrings(graded.Bad, want) {
+		t.Fatalf("only the uncorrected failure is whole-sentence garbage: %v", graded.Bad)
+	}
+	for _, text := range graded.Good {
+		if text == "the dogs run in the park" && len(graded.Corrections) == 1 {
+			continue // the teacher's model answer, which happens to be the same sentence
+		}
+		if text == "the dogs run run run" {
+			t.Fatalf("a diffed sentence must not be rewarded whole: %v", graded.Good)
+		}
+	}
+	if changes := trainer.ChangesOf(failed); len(changes) == 0 {
+		t.Fatal("the lesson record should carry what the teacher changed")
+	}
+	if changes := trainer.ChangesOf(uncorrected); len(changes) != 0 {
+		t.Fatalf("nothing was corrected, so nothing changed: %v", changes)
 	}
 }
 
@@ -653,8 +696,8 @@ func TestTutorDryRunLeavesTheModelAlone(t *testing.T) {
 	if records[0]["action"] != nil {
 		t.Fatalf("a dry run must not train: %v", records[0])
 	}
-	if records[0]["bad"].(int) == 0 {
-		t.Fatalf("a dry run still reports what it would punish: %v", records[0])
+	if records[0]["corrections"].(int) == 0 && records[0]["bad"].(int) == 0 {
+		t.Fatalf("a dry run still reports what it would have taught: %v", records[0])
 	}
 	after := model.Stats()
 	if after["epochs_total"] != before["epochs_total"] || after["twonrl_runs"] != before["twonrl_runs"] {
@@ -674,7 +717,7 @@ func TestTutorDrillsAndPerLessonLearning(t *testing.T) {
 	if record["drills"] != 3 || len(fake.prompts["drills"]) != 1 {
 		t.Fatalf("the drills were not written: %v", record)
 	}
-	if len(lessons) != 2 || record["bad"].(int) != 2 {
+	if len(lessons) != 2 || record["corrections"].(int) != 2 {
 		t.Fatalf("per-lesson learning should sum the lessons: %v", record)
 	}
 	if record["action"] == nil {

@@ -433,7 +433,8 @@ class TrainerTests(unittest.TestCase):
             self.assertIn(record["error"], (*ERROR_TYPES, "other"))
 
     def test_failed_sentences_are_weighted_garbage_and_corrections_are_taught(self):
-        trainer = TutorTrainer(trained_model(), self.client, self.config(threshold=9.5))
+        # the whole-sentence path; the diff has tests of its own
+        trainer = TutorTrainer(trained_model(), self.client, self.config(threshold=9.5, diff_corrections=False))
         exercise = Exercise("e1", "the dogs run", "agreement", "the dogs run in the park")
         good_lesson = Lesson(exercise, 0, "dijkstra", "the park", "the dogs run the park",
                              grade=Grade(9.9, 10, 10, 10, True, "none", "the dogs run the park"))
@@ -580,15 +581,48 @@ class TrainerTests(unittest.TestCase):
 
     def test_count_model_learns_too(self):
         model = trained_model(CountRewardNet)
-        trainer = TutorTrainer(model, self.client, self.config(threshold=9.5, strength=1.0))
+        trainer = TutorTrainer(model, self.client, self.config(threshold=9.5, strength=1.0, diff_corrections=False))
         record, _lessons = trainer.run_round(1)
         self.assertEqual(record["action"], "2nrl")
         self.assertGreater(model.stats()["twonrl_runs"], 0)
 
+    def test_a_correction_moves_only_the_words_it_changes(self):
+        model = trained_model(CountRewardNet)
+        trainer = TutorTrainer(model, self.client, self.config(threshold=9.5, strength=1.0, keep_weight=0.0))
+        record, lessons = trainer.run_round(1)
+        self.assertEqual(record["action"], "correct+reward")  # the diff, then the teacher's own English
+        self.assertEqual(record["corrections"], sum(1 for l in lessons if not l.grade.passed))
+        self.assertGreater(record["edits"], 0)
+        self.assertGreater(record["penalised"], 0)
+        self.assertGreater(record["rewarded"], 0)
+        # what the teacher changed rides along with the lesson, for the panel to show
+        changes = [l.changes for l in lessons if not l.grade.passed]
+        self.assertTrue(any(changes), "a failed lesson should say what the teacher changed")
+        for change in [c for spans in changes for c in spans]:
+            self.assertEqual(set(change), {"op", "wrong", "right"})
+        self.assertTrue(all(l.changes == [] for l in lessons if l.grade.passed))
+        # a failed sentence is no longer punished whole: the penalty is the few steps the diff blames
+        stats = model.stats()
+        self.assertGreater(stats["penalties_total"], 0)
+        self.assertLessEqual(stats["penalties_total"], record["penalised"] * 1.0)
+        self.assertEqual(record["bad"], 0)  # nothing went to 2NRL as whole-sentence garbage
+
+    def test_the_diff_can_be_turned_off(self):
+        model = trained_model(CountRewardNet)
+        trainer = TutorTrainer(model, self.client, self.config(threshold=9.5, diff_corrections=False))
+        lesson = Lesson(Exercise("e1", "the dogs run", "agreement", "the dogs run in the park"), 0, "dijkstra",
+                        "run run", "the dogs run run run",
+                        grade=Grade(1.0, 1, 1, 1, False, "agreement", "the dogs run in the park"))
+        self.assertEqual(trainer.corrections_of([lesson]), [])
+        bad, _weights, good, _rewards = trainer.texts_of([lesson])
+        self.assertEqual(bad, ["the dogs run run run"])  # the whole sentence is garbage again
+        self.assertIn("the dogs run in the park", good)
+
     def test_invalid_configuration_is_refused(self):
         for overrides in ({"topic": " "}, {"rounds": 0}, {"mode": "nope"}, {"twonrl_per": "hourly"},
                           {"threshold": 11}, {"grammar_weight": 2}, {"min_weight": -1}, {"batch": 0},
-                          {"exercises": 0}, {"attempts": 0}, {"neg_lr": -1}, {"batch_size": 0}):
+                          {"exercises": 0}, {"attempts": 0}, {"neg_lr": -1}, {"batch_size": 0},
+                          {"keep_weight": 1.5}, {"keep_weight": -0.1}):
             with self.subTest(**overrides):
                 with self.assertRaises(ValueError):
                     TutorTrainer(None, self.client, self.config(**overrides))

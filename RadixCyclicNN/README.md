@@ -24,7 +24,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
-| Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): Ollama writes sentence openings that drill a point of grammar, the network completes them with the prediction search, Ollama marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; failed sentences become 2NRL garbage weighted by how bad the mark was, corrections the fine-tune pass, and the round's mistakes become the next round's syllabus. |
+| Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): Ollama writes sentence openings that drill a point of grammar, the network completes them with the prediction search, Ollama marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), and the round's mistakes become the next round's syllabus. |
 | Rewards follow the rating | `two_nrl(good_weights=)`, `reward(weights=)` and `punish(weights=)` (both models, Python and Go) scale every pass per text: a sentence marked 9 out of 10 is learned nine tenths as hard as a perfect one, a 0 is skipped. `/api/feedback` and `/api/2nrl` take `good_ratings` / `bad_ratings` (marks out of 10), the Ratings card a mark per rated text. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
@@ -167,7 +167,8 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
-| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
+| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
+| `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
@@ -203,7 +204,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
 | `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
-| `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_model", "grader_model", "url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `comment`, a round the report card and what it taught |
+| `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_model", "grader_model", "url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
 | `GET /api/tutor/history` | `{"history": [lesson / round / report records of all tutor runs]}` |
 | `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (502 when Ollama fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
@@ -338,13 +339,33 @@ One **round** is:
    most of the mark: `score = grammar_weight * grammar + (1 - grammar_weight) *
    mean(spelling, fluency)`, `--grammar-weight 0.6` by default. A sentence
    passes at `--threshold` (6 out of 10).
-4. **The lesson learned.** Failed sentences are 2NRL garbage weighted by how
-   bad the mark was (`--min-weight` for a near miss, 1 for a hopeless answer);
-   the corrections, the model answers and the sentences that passed are the
-   fine-tune pass, weighted by how good the mark was - a sentence marked 9 gets
-   nine tenths of the learning rate, the teacher's own English the full rate.
-   Nothing is punished when the network wrote nothing: the prefix itself is
-   correct English.
+4. **The lesson learned.** A correction is taught *as a correction*. The
+   sentence the network wrote and the sentence the teacher wrote instead are
+   aligned character by character, and only the trigram nodes they disagree on
+   move: the step that wrote the struck-out character is penalised, the step
+   that writes the teacher's version is rewarded, and the words both sentences
+   share keep what they earned. Punishing a whole sentence for one wrong
+   plural taxed the trigrams that were right; this does not.
+
+   The rest is unchanged. The whole corrected sentence is still traversed -
+   it is correct English whatever the mistake was - and `--keep-weight` (0.25)
+   gives its unchanged words a smaller share of the reward (0 teaches the fix
+   alone, 1 rewards the whole sentence as before). A failure the teacher left
+   uncorrected is still 2NRL garbage weighted by how bad the mark was
+   (`--min-weight` for a near miss, 1 for a hopeless answer); the model
+   answers and the sentences that passed are still the fine-tune pass,
+   weighted by how good the mark was - a sentence marked 9 gets nine tenths of
+   the learning rate, the teacher's own English the full rate. Nothing is
+   punished when the network wrote nothing: the prefix itself is correct
+   English. `--no-diff-corrections` goes back to the whole-sentence way.
+
+   The same alignment is a command of its own, for a correction typed by hand:
+
+   ```bash
+   python -m radixnet correct --wrong "the cat sit on the mat" --right "the cat sits on the mat"
+   python -m radixnet correct --wrong "he go to school" --right "he goes to school" --dry-run
+   go/bin/radixnet-count correct --wrong "a apple a day" --right "an apple a day" --keep 0
+   ```
 
 The mistakes of a round add up to a **report card** (marks, pass rate, an error
 histogram and the weakest points). With `--adapt` (on by default) the weakest
@@ -373,7 +394,8 @@ The API adds `GET /api/tutor` (defaults and the marking vocabulary),
 `POST /api/tutor/lesson` (one round of exercises, completions and grades
 without training - give it `prefixes` to skip the exercise writer and mark your
 own). The Tutor tab drives all of it and shows the marks per round, the report
-card and every lesson next to its correction. **Both servers run the lessons**:
+card and every lesson next to its correction, with the changed words struck out
+against what replaced them. **Both servers run the lessons**:
 the Go server has the same endpoints and `radixnet-count tutor` the same
 command, with the count / reward model answering the exercises.
 

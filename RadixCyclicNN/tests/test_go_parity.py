@@ -201,6 +201,47 @@ class TestGoParity(unittest.TestCase):
         assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
         self.assertEqual(a_doc["weights"]["window_events"], b_doc["weights"]["window_events"])
 
+    def test_corrections_move_the_same_trigram_nodes(self):
+        """The tutor's correction: both sides align the sentences the same way and move the same edges."""
+        pairs = [
+            ("the cat sit on the mat", "the cat sits on the mat"),
+            ("the dogs run in the mat", "the dogs run in the park"),
+            ("a apple a day", "an apple a day"),
+            ("we was happy", "we were happy"),
+            ("the cat sat", "the cat sat on the mat"),
+            ("the mat on sat cat", "the cat sat on the mat"),
+            ("i have ate the bone", "i have eaten the bone"),
+            ("the cat sat on the mat", "the cat sat on the mat"),
+        ]
+        for wrong, right in pairs:  # the alignment itself, without a model
+            with self.subTest(wrong=wrong):
+                a = py("correct", "--wrong", wrong, "--right", right, "--dry-run", model=self.py_model)
+                b = go("correct", "--wrong", wrong, "--right", right, "--dry-run", model=self.go_model)
+                self.assertEqual(a["changes"], b["changes"])
+        py_path = os.path.join(TMP.name, "corr_py.count.json")
+        go_path = os.path.join(TMP.name, "corr_go.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.go_model, go_path)
+        for wrong, right in pairs:
+            a = py("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=py_path)
+            b = go("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=go_path)
+            for key in ("edits", "penalised", "rewarded", "kept", "wrong_chars", "right_chars", "changes"):
+                self.assertEqual(a[key], b[key], f"{key} for {wrong!r} -> {right!r}")
+            for key in ("penalty", "reward", "loss"):
+                self.assertLessEqual(abs(a[key] - b[key]), 1e-9, key)
+        a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertEqual(a_doc["nodes"]["labels"], b_doc["nodes"]["labels"])
+        self.assertEqual(a_doc["edges"]["reward"], b_doc["edges"]["reward"])
+        self.assertEqual(a_doc["edges"]["count"], b_doc["edges"]["count"])
+        self.assertEqual(a_doc["weights"]["window_events"], b_doc["weights"]["window_events"])
+        assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
+        a_stats = py("info", model=py_path)["stats"]
+        b_stats = go("info", model=go_path)["stats"]
+        for key in ("feedback_passes", "total_traversals", "window_traversals", "trained_texts"):
+            self.assertEqual(a_stats[key], b_stats[key], key)
+        for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
+            self.assertLessEqual(abs(a_stats[key] - b_stats[key]), 1e-9, key)
+
     def test_zip_corpus_streams_through_identically(self):
         """Both sides train from the same ZIP archive: Python unpacks it, Go streams it in chunks."""
         import io

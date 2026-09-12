@@ -27,7 +27,7 @@ import threading
 from collections.abc import Callable, Sequence
 from typing import Any, NoReturn, TextIO, TypeVar
 
-from . import __version__
+from . import __version__, diff
 from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
@@ -1085,6 +1085,56 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
+    """Teach one correction: only the trigram nodes the two sentences disagree on move."""
+    wrong, right = str(args.wrong or ""), str(args.right or "")
+    if not wrong.strip() and not right.strip():
+        raise CliError("nothing to correct: give --wrong (what the network wrote) and --right (what it should say)")
+    changes = diff.summary(wrong, right, limit=0)
+    if args.dry_run:
+        console.pairs([("wrong", wrong), ("right", right), ("changes", len(changes))])
+        _print_changes(console, changes)
+        return {"wrong": wrong, "right": right, "changes": changes, "dry_run": True}
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "correct"):
+        raise CliError(f"the {kind_label(model)} model cannot learn from a diff; use feedback instead")
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("kind", kind_label(model)),
+        ("wrong", wrong),
+        ("right", right),
+        ("weights", f"penalty {args.weight}, reward {args.reward}, keep {args.keep}, strength {args.strength}"),
+        ("output", out),
+    ])
+    moved = model.correct(
+        wrong, right, strength=args.strength, weight=args.weight, reward=args.reward, keep=args.keep,
+        count=not args.no_count,
+    )
+    _print_changes(console, changes)
+    console.say(
+        f"moved: {moved['penalised']} step(s) penalised, {moved['rewarded']} taught, "
+        f"{moved['kept']} kept at {args.keep}"
+    )
+    saved = save_model(model, out)
+    console.say(f"saved {out} ({saved['bytes']} bytes)")
+    return {
+        "model": origin.to_dict(), "out": out, "wrong": wrong, "right": right, **moved,
+        "changes": changes, "saved": saved, "stats": model.stats(),
+    }
+
+
+def _print_changes(console: Console, changes: list[dict]) -> None:
+    if not changes:
+        console.say("the two sentences are the same: nothing to teach")
+        return
+    console.say()
+    console.table(
+        ["change", "the network wrote", "the teacher wrote"],
+        [[change["op"], change["wrong"] or "-", change["right"] or "-"] for change in changes],
+    )
+
+
 def cmd_invert(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
     was = model.graph.inverted
@@ -1365,7 +1415,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
-        min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
+        diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
         replay_limit=args.replay_limit, checkpoint_every=checkpoint_every(args, manager),
     )
@@ -1387,6 +1437,9 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
                        + (f", temperature={fmt(config.temperature)}" if config.mode == "sample" else "")),
         ("marking", f"pass at {fmt(config.threshold)}/10, grammar weight {fmt(config.grammar_weight)}, "
                     f"{config.batch} per call" + (", adapting to the weakest points" if config.adapt else "")),
+        ("corrections", "from the diff with what the network wrote: only what changed moves"
+                        f" (the rest keeps {fmt(config.keep_weight)})" if config.diff_corrections
+                        else "as whole sentences (--no-diff-corrections)"),
         ("2NRL", "off (--dry-run: the grades are reported, nothing is trained)" if args.dry_run else
                  f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive "
                  f"epochs={config.pos_epochs} lr={config.pos_lr}, batch={config.batch_size}, "
@@ -1978,6 +2031,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_feedback)
 
+    # correct --------------------------------------------------------------
+    p = command(
+        "correct", "teach one correction: only what changed moves",
+        "Align what the network wrote (--wrong) with what it should have written (--right) character by\n"
+        "character and move only the trigram nodes the two disagree on: the steps that wrote the struck-out\n"
+        "characters are penalised, the steps that write the teacher's version are rewarded, and the words both\n"
+        "sentences share keep what they earned.  --keep gives the rest of the correction a smaller reward (1\n"
+        "is the old whole-sentence thumbs up, 0 teaches the fix alone).  This is what the tutor does with\n"
+        "every correction its teacher writes; --dry-run only shows the alignment.",
+    )
+    p.add_argument("--wrong", metavar="TEXT", required=True, help="what the network wrote")
+    p.add_argument("--right", metavar="TEXT", required=True, help="what it should have written")
+    p.add_argument("--strength", type=nonneg_float, default=1.0, help="magnitude of one unit of feedback")
+    p.add_argument("--weight", type=nonneg_float, default=1.0, help="how bad the attempt was: the penalty is strength x weight")
+    p.add_argument("--reward", type=nonneg_float, default=1.0, help="what the correction is worth")
+    p.add_argument("--keep", type=nonneg_float, default=0.25, help="what the unchanged part of the correction still earns")
+    p.add_argument("--no-count", action="store_true", help="do not traverse the correction (it is counted by default)")
+    p.add_argument("--dry-run", action="store_true", help="show the alignment without touching the model")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_correct)
+
     # invert / compress ----------------------------------------------------
     p = command("invert", "invert the network and save", "Flip every edge weight and activation amplitude, then save.")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
@@ -2149,6 +2223,13 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-teach-answer", action="store_true",
                        help="a failed lesson learns only the correction, not the teacher's own model answer")
     group.add_argument("--dry-run", action="store_true", help="set and mark the exercises but train nothing and save nothing")
+    group = p.add_argument_group("what a correction teaches")
+    group.add_argument("--no-diff-corrections", action="store_true",
+                       help="learn a correction as two whole sentences (the old way) instead of from its diff "
+                            "with what the network wrote")
+    group.add_argument("--keep-weight", type=nonneg_float, default=0.25,
+                       help="what the unchanged part of a correction still earns: 0 teaches the fix alone, "
+                            "1 rewards the whole corrected sentence")
     group = p.add_argument_group("2NRL options")
     group.add_argument("--twonrl-per", choices=TUTOR_TWONRL_PER, default="round", help="learn once per round, or after every lesson")
     group.add_argument("--min-weight", type=nonneg_float, default=0.25,

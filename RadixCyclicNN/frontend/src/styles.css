@@ -1353,3 +1353,35 @@ ol.dialogue li.rated.down .bubble {
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* what the teacher changed in a tutor lesson: struck out against what replaced it */
+.changes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.changes .change {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--chip);
+  font-size: 12px;
+}
+
+.changes del {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.changes ins {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+  text-decoration: none;
+}

@@ -51,9 +51,27 @@ function lessonRecord(lesson, index) {
     passed: Boolean(grade.passed),
     error: grade.error || "none",
     correction: grade.correction || "",
+    changes: asArray(lesson && lesson.changes),
     comment: grade.comment || "",
     graded_by: grade.graded_by || "ollama",
   };
+}
+
+/** What the teacher changed in one sentence: the struck-out text against what replaced it. */
+function Changes({ changes }) {
+  const items = asArray(changes).filter((c) => c && typeof c === "object");
+  if (items.length === 0) return <span className="muted">–</span>;
+  return (
+    <span className="changes">
+      {items.map((change, i) => (
+        <span key={i} className={`change ${String(change.op || "")}`} title={String(change.op || "")}>
+          {change.wrong ? <del>{String(change.wrong)}</del> : null}
+          {change.wrong && change.right ? " " : null}
+          {change.right ? <ins>{String(change.right)}</ins> : null}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 /** Marks, pass rate and the mistakes of a run, as pills and a small histogram. */
@@ -149,6 +167,7 @@ function LessonTable({ rows, total, running }) {
               <th>mistake</th>
               <th>the network wrote</th>
               <th>correct English</th>
+              <th>what changed</th>
               <th>the teacher says</th>
             </tr>
           </thead>
@@ -180,6 +199,9 @@ function LessonTable({ rows, total, running }) {
                   <td>{String(r.error ?? "–")}</td>
                   <td className="wrap">{String(r.sentence ?? "")}</td>
                   <td className="wrap">{String(r.correction ?? "")}</td>
+                  <td className="wrap">
+                    <Changes changes={r.changes} />
+                  </td>
                   <td className="wrap">{String(r.comment ?? "")}</td>
                 </tr>
               );
@@ -208,6 +230,7 @@ function RoundTable({ rounds }) {
               <th>grammar</th>
               <th>weakest</th>
               <th>2NRL</th>
+              <th>corrections</th>
               <th>garbage</th>
               <th>taught</th>
               <th>weight</th>
@@ -226,6 +249,15 @@ function RoundTable({ rounds }) {
                 <td>{fmtNum(r.mean_grammar, 2)}</td>
                 <td className="wrap">{asArray(r.weakest).join(", ") || "–"}</td>
                 <td>{r.action || "–"}</td>
+                <td title="corrections taught from their diff: steps penalised / taught">
+                  {r.corrections ? (
+                    <>
+                      {fmtInt(r.corrections)} <small>({fmtInt(r.penalised)}/{fmtInt(r.rewarded)})</small>
+                    </>
+                  ) : (
+                    "–"
+                  )}
+                </td>
                 <td>{fmtInt(r.bad)}</td>
                 <td>{fmtInt(r.good)}</td>
                 <td title="mean negative-phase weight: how badly the failed sentences failed">
@@ -267,6 +299,8 @@ export default function TutorPanel({ status }) {
   const [adapt, setAdapt] = useState(true);
   const [teachAnswer, setTeachAnswer] = useState(true);
   const [twonrlPer, setTwonrlPer] = useState("round");
+  const [diffCorrections, setDiffCorrections] = useState(true);
+  const [keepWeight, setKeepWeight] = useState("0.25");
   const [minWeight, setMinWeight] = useState("0.25");
   const [negEpochs, setNegEpochs] = useState("2");
   const [posEpochs, setPosEpochs] = useState("3");
@@ -336,6 +370,8 @@ export default function TutorPanel({ status }) {
         rounds: parseInteger(rounds, 3),
         drills: parseInteger(drills, 0),
         twonrl_per: twonrlPer,
+        diff_corrections: diffCorrections,
+        keep_weight: parseNumber(keepWeight, 0.25),
         min_weight: parseNumber(minWeight, 0.25),
         neg_epochs: parseInteger(negEpochs, 2),
         pos_epochs: parseInteger(posEpochs, 3),
@@ -400,8 +436,12 @@ export default function TutorPanel({ status }) {
           topic — one point of grammar each, and its own model answer — the network completes them with the
           prediction search, and the same model marks every sentence as an English teacher: grammar, spelling and
           fluency out of 10, the worst mistake named, one line of teaching and the sentence written out correctly.
-          Failed sentences become 2NRL garbage weighted by how bad the mark was, the corrections become the
-          fine-tune pass; with <b>adapt</b> on, the next round drills the mistakes this one made.
+          A correction is then taught <b>as a correction</b>: the sentence the network wrote and the teacher's
+          version are aligned character by character, and only the trigram nodes they disagree on move — the step
+          that wrote the wrong character is penalised, the step that writes the right one is rewarded, and the
+          words both sentences share keep what they earned. Sentences with no correction to align stay 2NRL
+          garbage weighted by how bad the mark was; with <b>adapt</b> on, the next round drills the mistakes this
+          one made.
         </p>
         <div className="row">
           <TextField
@@ -546,6 +586,24 @@ export default function TutorPanel({ status }) {
 
         <h3>What it learns</h3>
         <div className="row auto">
+          <div className="checks">
+            <CheckField
+              label="Teach corrections from the diff"
+              checked={diffCorrections}
+              onChange={setDiffCorrections}
+              disabled={running}
+            />
+          </div>
+          <NumberField
+            label="Unchanged words keep"
+            hint="0 = the fix alone, 1 = the whole sentence"
+            value={keepWeight}
+            onChange={setKeepWeight}
+            min={0}
+            max={1}
+            step={0.05}
+            disabled={running || !diffCorrections}
+          />
           <SelectField
             label="2NRL"
             value={twonrlPer}

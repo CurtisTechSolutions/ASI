@@ -215,7 +215,7 @@ func TestTutorLessonWithGivenPrefixes(t *testing.T) {
 
 func TestTutorStartAndHistory(t *testing.T) {
 	e, _ := tutorEnv(t)
-	before := e.svc.Model().MetaInt("twonrl_runs")
+	before := e.svc.Model().MetaInt("feedback_passes")
 	status, body := e.post("/api/tutor/start", map[string]any{
 		"topic": "animals", "rounds": 2, "exercises": 2, "threshold": 9.5, "drills": 2,
 		"neg_epochs": 1, "pos_epochs": 1,
@@ -251,8 +251,26 @@ func TestTutorStartAndHistory(t *testing.T) {
 	if errors, _ := last["errors"].(map[string]any); errors["agreement"] == nil {
 		t.Fatalf("the mistakes should be counted: %v", last["errors"])
 	}
-	if e.svc.Model().MetaInt("twonrl_runs") <= before {
+	if e.svc.Model().MetaInt("feedback_passes") <= before {
 		t.Fatal("the lessons should have taught the model")
+	}
+	// every failed lesson carries what the teacher changed, for the panel to show
+	changed := 0
+	for _, entry := range records {
+		record, _ := entry.(map[string]any)
+		if record["kind"] != "lesson" {
+			continue
+		}
+		if changes, _ := record["changes"].([]any); len(changes) > 0 {
+			changed++
+			first, _ := changes[0].(map[string]any)
+			if first["op"] == nil {
+				t.Fatalf("a change names what it did: %v", first)
+			}
+		}
+	}
+	if changed == 0 {
+		t.Fatal("the corrected lessons should say what changed")
 	}
 }
 

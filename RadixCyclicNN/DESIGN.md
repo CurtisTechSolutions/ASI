@@ -55,6 +55,7 @@ RadixCyclicNN/
     bench.py                benchmarks (chars/sec, predictions/sec)
     ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16)
     tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL (section 16.1)
+    diff.py                 character diff of a sentence against its correction (section 16.2)
     codegen.py              code generation with a sandbox, an Ollama judge and 2NRL rewards (section 17)
     cli.py                  argparse CLI
     api.py                  HTTP JSON API + static file serving
@@ -618,7 +619,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
-* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches 2NRL: weighted garbage, corrections and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the four endpoints and the CLI.
+* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the four endpoints and the CLI.
 
 ---
 
@@ -729,8 +730,9 @@ def report_card(lessons) -> dict          # {"lessons","graded","passed","failed
 `TutorConfig` (validated like every other config) holds the topic, `rounds`, `exercises`, `attempts`, `focus`,
 `level`, `words`, the two model names, the completion settings (`mode`, `length`, `max_length`, `temperature`,
 `to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `teach_answer`,
-`learn`) and the 2NRL settings (`twonrl_per`, `min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`,
-`batch_size`, `strength`, `replay`, `replay_limit`, `checkpoint_every`).
+`learn`), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
+`min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`, `batch_size`, `strength`, `replay`, `replay_limit`,
+`checkpoint_every`).
 
 `TutorTrainer(model, client, config, external=None).run(...)` per round:
 
@@ -738,18 +740,22 @@ def report_card(lessons) -> dict          # {"lessons","graded","passed","failed
    `adapt`).
 2. `complete` — `model.predict(exercise.cue, ...)` per attempt (attempt 0 in `mode`, later ones sampled).
 3. `grade` — one call per `batch` sentences.
-4. `texts_of` + `learn` — `bad` = the failed sentences with `weight_of(grade) = min_weight + (1 - min_weight) *
-   (threshold - score) / threshold` (1 for an unrated one); `good` = the sentences that passed with
-   `reward_of(grade) = score / 10`, plus the corrections, the model answers and the drill sentences at
-   `TEACHER_WEIGHT`. A text offered twice keeps its largest weight. Nothing is punished when the network wrote
-   nothing (the prefix itself is correct English). Both sides go into `two_nrl(bad_weights=, good_weights=)`, or
-   `reward(weights=)` / `punish(weights=)` when only one side exists. `learn=False` reports what it would have
-   taught and touches nothing.
+4. `corrections_of` + `texts_of` + `learn` — a failure the teacher corrected is a `Correction(wrong, right,
+   weight_of(grade))` taught by `model.correct` (section 16.2), not a whole sentence in `bad`; `weight_of(grade) =
+   min_weight + (1 - min_weight) * (threshold - score) / threshold` (1 for an unrated one). What is left is the old
+   split: `bad` = the failures with no correction to align, `good` = the sentences that passed with
+   `reward_of(grade) = score / 10`, plus the model answers and the drill sentences at `TEACHER_WEIGHT`. A text
+   offered twice keeps its largest weight. Nothing is punished when the network wrote nothing (the prefix itself is
+   correct English). Both sides go into `two_nrl(bad_weights=, good_weights=)`, or `reward(weights=)` /
+   `punish(weights=)` when only one side exists, and `action` names what ran ("correct+2nrl"). The corrections join
+   the replay buffer like any taught text. `diff_corrections=False` goes back to the whole-sentence way;
+   `learn=False` reports what it would have taught and touches nothing.
 
 Records: `{"kind": "lesson", round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
-spelling, fluency, passed, error, correction, comment, graded_by, probability, seconds}`, `{"kind": "round", ...}`
-(the report card plus `action`, `bad`, `good`, `neg_loss`, `pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a
-final `{"kind": "report", rounds, ...}`.
+spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds}` (`changes` is what
+the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
+...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
+`pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.
 
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
@@ -760,13 +766,47 @@ API: `GET /api/tutor` (defaults, error types, modes), `POST /api/tutor/start` (j
 model lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
 teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with.
 
-Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpoints) with the settings, "Dry run",
-a chart of the mean score and grammar per round, the report card with the mistake histogram, a table of rounds and
-one of every lesson (marks, mistake, what the network wrote, the correction, the teacher's line).
+Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpoints) with the settings ("Teach
+corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
+per round, the report card with the mistake histogram, a table of rounds (with what the corrections moved) and one
+of every lesson (marks, mistake, what the network wrote, the correction, the changed words struck out against what
+replaced them, the teacher's line).
 
 Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule and answers drill requests; the
 parsers, the marking, the loop with a scripted model, the endpoints and the CLI) and `go/radixnet/tutor_test.go` +
 `go/server/tutor_test.go` for the port.
+
+### 16.2 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
+
+A grade used to reach the graph as two verdicts on two whole sentences: the attempt was garbage, the correction was
+gospel. Most of a corrected sentence is however word for word what the network wrote - the teacher changes a tense,
+an article, a plural - so the whole-sentence penalty taxed the trigrams that were right.
+
+`diff.edits(wrong, right)` aligns the two character by character: the shared prefix and suffix are trimmed, the
+middle is aligned by a longest-common-subsequence walk (`MAX_CELLS` guards a pathological pair, which then counts as
+one change), neighbouring edits of one kind are merged, and an equal run shorter than a trigram between two changes
+is swallowed (`MIN_EQUAL_RUN`), because no trigram fits in such a gap - "mat" -> "park", not "m" -> "p" and "t" ->
+"rk". `changed_spans` returns the half-open rune ranges each side disagrees on; an insertion is an *empty* span at
+the position where the text belongs. The Go port (`go/radixnet/diff.go`) is the same algorithm with the same
+tie-breaks, and `tests/test_go_parity.py` compares the two on a set of sentence pairs.
+
+`CountRewardNet.correct(wrong, right, strength=, weight=, reward=, keep=, count=)` turns that alignment into edge
+updates. Both sentences join the structure first (observing one can split a node the other's path runs through), and
+then every step of a traced path is charged with the characters it *writes*: the first step with the whole of its
+node's label, a later one with everything past the two characters it overlaps its parent by, and the step into END
+with the position just past the last character - where a sentence that stopped too early went wrong (`_steps_over`).
+The steps of `wrong` charged with a changed character lose `strength * weight`; the steps of `right` charged with
+one gain `strength * reward` and the rest of the correction `keep` times as much (0 teaches the fix alone, 1 is the
+old whole-sentence thumbs up); an edge both sentences walk is rewarded, never penalised. `count` traverses the
+correction once, as a training pass does. One `add_reward` call per distinct amount, so the weights are recomputed
+three times at most. Returns `{edits, changes, penalised, rewarded, kept, penalty, reward, loss, wrong_chars,
+right_chars}`.
+
+CLI `radixnet correct --wrong ... --right ...` (and `radixnet-count correct`) teaches one correction by hand and
+`--dry-run` prints the alignment alone. Tests: `tests/test_countnet.py::TestCorrections` and
+`go/radixnet/correct_test.go` (the alignment rebuilds both sentences, only the differing steps move, `keep` spreads
+the rest, an early end blames the step into END, a run of corrections keeps the graph sound), plus the cross-language
+parity case.
 
 ---
 
@@ -1129,7 +1169,10 @@ the same records and the same four endpoints (`GET /api/tutor`, `POST /api/tutor
 CLI twin. The job releases the model lock around every LLM call, as the Python service does. Ratings reach the
 model through `WeightGroups` + `RewardWeighted` / `PunishWeighted` / `TwoNRLWeighted` (one pass per distinct
 weight, the reward or penalty scaled by it), which also back `good_ratings` / `bad_ratings` on `/api/2nrl` and
-`/api/feedback`.
+`/api/feedback`. The corrections go the diff way here too: `go/radixnet/diff.go` is the same alignment as
+`diff.py` and `Model.Correct` (`go/radixnet/correct.go`) the same edge updates, down to the tie-breaks, so the
+tutor parity test finds the same rewards on both sides; `radixnet-count correct` is the CLI twin of
+`radixnet correct`.
 
 Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; with `"go"` the Python-only tabs (Evolve, Ollama,
 Code, Images - the Tutor tab stays, both servers run the lessons) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar

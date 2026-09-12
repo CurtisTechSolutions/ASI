@@ -13,6 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from radixnet import diff  # noqa: E402
 from radixnet.beam import Prediction, beam_predict, default_beam, path_probability  # noqa: E402
 from radixnet.countnet import COUNT_MODEL_FORMAT, CountRewardGraph, CountRewardNet  # noqa: E402
 from radixnet.graph import END, START  # noqa: E402
@@ -587,6 +588,19 @@ class TestCli(unittest.TestCase):
             doc = run_json("info", model=model)
             self.assertEqual(doc["stats"]["kind"], "count")
             self.assertGreater(doc["stats"]["rewards_total"], 0)
+            # correct: the alignment alone, then the same correction taught to the model
+            doc = run_json("correct", "--wrong", "the quick brown fox jump", "--right", "the quick brown fox jumps",
+                           "--dry-run", model=model)
+            self.assertEqual(doc["changes"], [{"op": "insert", "wrong": "", "right": "s"}])
+            self.assertTrue(doc["dry_run"])
+            penalties = load_model(model).stats()["penalties_total"]
+            doc = run_json("correct", "--wrong", "the quick brown fox jump", "--right", "the quick brown fox jumps",
+                           "--keep", 0.0, model=model)
+            self.assertEqual((doc["penalised"], doc["rewarded"], doc["kept"]), (1, 1, 0))
+            self.assertEqual(doc["changes"], [{"op": "insert", "wrong": "", "right": "s"}])
+            self.assertGreater(load_model(model).stats()["penalties_total"], penalties)
+            proc = run_cli("correct", "--wrong", "a cat", "--right", "a cat", "--dry-run", model=model, json_mode=False)
+            self.assertIn("nothing to teach", proc.stdout)
             doc = run_json("weights", model=model)
             self.assertEqual(doc["weights"]["function"], "dual-frequency")
             self.assertEqual(doc["changed"], {})
@@ -599,6 +613,98 @@ class TestCli(unittest.TestCase):
             self.assertIn("kind", proc.stdout)
             self.assertIn("count", proc.stdout)
             self.assertIn("--kind radix applies to new models only", proc.stderr)
+
+
+class TestCorrections(unittest.TestCase):
+    """Learning from a diff: only the trigram nodes the two sentences disagree on move."""
+
+    PAIRS = [
+        ("the cat sit", "the cat sits"),
+        ("he go to school", "he goes to school"),
+        ("a apple a day", "an apple a day"),
+        ("the cats is hungry", "the cats are hungry"),
+        ("i have ate", "i have eaten"),
+        ("", "hello there"),
+        ("nothing to fix", "nothing to fix"),
+        ("she walk to the shop yesterday", "she walked to the shop yesterday"),
+        ("we was happy", "we were happy"),
+        ("the mat on sat cat", "the cat sat on the mat"),
+    ]
+
+    def test_the_edits_rebuild_both_sentences(self):
+        for wrong, right in self.PAIRS:
+            with self.subTest(wrong=wrong):
+                steps = diff.edits(wrong, right)
+                self.assertEqual("".join(e.wrong for e in steps), wrong)
+                self.assertEqual("".join(e.right for e in steps), right)
+                for before, after in zip(steps, steps[1:]):
+                    self.assertEqual((before.a1, before.b1), (after.a0, after.b0))  # end to end
+                    self.assertNotEqual(before.op, after.op)  # runs of one kind are merged
+                for step in steps:
+                    if step.op == "equal":
+                        self.assertEqual(step.wrong, step.right)
+
+    def test_a_change_is_named_and_placed(self):
+        self.assertEqual(diff.summary("nothing to fix", "nothing to fix"), [])
+        self.assertEqual(
+            diff.summary("the cats is hungry", "the cats are hungry"),
+            [{"op": "replace", "wrong": "is", "right": "are"}],
+        )
+        # an insertion is an empty span on the side that lacks the text, where it belongs
+        self.assertEqual(diff.changed_spans("the cat sit", "the cat sits"), ([(11, 11)], [(11, 12)]))
+
+    def test_only_the_difference_moves(self):
+        model = trained(epochs=2)
+        model.train(["the cat sits on the mat"], epochs=1)
+        wrong, right = "the cat sit on the mat", "the cat sits on the mat"
+        before = list(model.graph.edge_reward)
+        out = model.correct(wrong, right, strength=1.0, weight=1.0, reward=1.0, keep=0.0)
+        self.assertEqual((out["edits"], out["penalised"], out["rewarded"], out["kept"]), (1, 1, 1, 0))
+        moved = {
+            e: model.graph.edge_reward[e] - (before[e] if e < len(before) else 0.0)
+            for e in range(len(model.graph.edge_reward))
+            if abs(model.graph.edge_reward[e] - (before[e] if e < len(before) else 0.0)) > 1e-12
+        }
+        self.assertEqual(len(moved), 2)  # keep=0: the step that wrote the wrong character, and the right one
+        self.assertEqual(sorted(v > 0 for v in moved.values()), [False, True])
+        blamed = [e for e, delta in moved.items() if delta < 0]
+        self.assertEqual(blamed, model._steps_over(model.encoder.encode(wrong), len(wrong), [(11, 11)]))
+
+    def test_keep_spreads_a_smaller_reward_over_the_rest(self):
+        model = trained(epochs=2)
+        texts = model.meta["trained_texts"]
+        out = model.correct("the cat sat on the log", "the cat sat on the mat", keep=0.25)
+        self.assertGreater(out["kept"], 0)
+        self.assertGreater(out["reward"], 0)
+        self.assertGreater(out["penalty"], 0)
+        self.assertEqual(model.meta["trained_texts"] - texts, 1)  # the correction is traversed once
+        self.assertGreaterEqual(model.meta["feedback_passes"], 1)
+        again = model.correct("the cat sat on the mat", "the cat sat on the mat")
+        self.assertEqual((again["edits"], again["penalised"], again["rewarded"]), (0, 0, 0))
+
+    def test_a_sentence_that_stopped_too_early_blames_the_end(self):
+        model = trained(epochs=2)
+        model.train(["the cat sat on the mat"], epochs=1)
+        wrong, right = "the cat sat", "the cat sat on the mat"
+        out = model.correct(wrong, right, keep=0.0)
+        self.assertEqual(out["penalised"], 1)
+        grams = model.encoder.encode(wrong)
+        path = model.graph.node_path(grams)
+        end_edge = model.graph.children[path[-2]][END]
+        self.assertEqual(model._steps_over(grams, len(wrong), [(len(wrong), len(wrong))]), [end_edge])
+
+    def test_short_and_empty_sentences_are_safe(self):
+        model = trained(epochs=1)
+        for wrong, right in [("", ""), ("ab", "ab"), ("", "the cat sits"), ("the cat sits", "")]:
+            with self.subTest(wrong=wrong, right=right):
+                model.correct(wrong, right)
+        model.graph.check_invariants()
+
+    def test_a_run_of_corrections_keeps_the_graph_sound(self):
+        model = trained(epochs=2)
+        for i in range(12):
+            model.correct(f"the cat sit on the mat number {i}", f"the cat sits on the mat number {i}")
+            model.graph.check_invariants()
 
 
 if __name__ == "__main__":

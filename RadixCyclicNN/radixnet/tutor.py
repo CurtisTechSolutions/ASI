@@ -18,11 +18,16 @@ prediction process run end to end without a human:
    sentence of teaching, and — the part the network learns from — the
    *correction*: the same sentence written out in correct English, keeping
    the prefix word for word.
-4. **The lesson learned** — failed sentences are 2NRL garbage, the
-   corrections and the passed sentences are the fine-tune pass, and the
-   negative phase is weighted per sentence by how bad the grade was
-   (:meth:`TutorTrainer.learn`), so a hopeless answer is punished harder than
-   a near miss.
+4. **The lesson learned** — a correction is taught *as a correction*: the
+   sentence the network wrote and the sentence the teacher wrote instead are
+   aligned character by character (:mod:`radixnet.diff`), and only the
+   trigram nodes they disagree on move — the step that wrote the wrong
+   character is penalised, the step that writes the right one is rewarded,
+   and the words both sentences share keep what they earned
+   (:meth:`radixnet.countnet.CountRewardNet.correct`,
+   ``diff_corrections``).  Everything else is 2NRL as before: sentences with
+   no correction to diff are garbage weighted by how bad the mark was, the
+   passed sentences and the teacher's own English are the fine-tune pass.
 
 Grammar is what is being taught, so grammar is what the overall score mostly
 is: ``score = grammar_weight * grammar + (1 - grammar_weight) * mean(spelling,
@@ -50,6 +55,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import nullcontext
 from typing import Any
 
+from . import diff
 from .beam import path_probability
 from .ollama import DEFAULT_MODEL, OllamaClient, OllamaError, _loads_lenient, parse_lines
 
@@ -59,6 +65,7 @@ __all__ = [
     "TEACHER_WEIGHT",
     "MODES",
     "TWONRL_PER",
+    "Correction",
     "Exercise",
     "Grade",
     "Lesson",
@@ -376,13 +383,32 @@ class Lesson:
     def empty(self) -> bool:
         return not self.continuation.strip()
 
+    @property
+    def changes(self) -> list[dict]:
+        """What the teacher changed, span by span (empty when the sentence passed or was left uncorrected)."""
+        if self.grade.passed or not self.grade.correction.strip() or not self.sentence.strip():
+            return []
+        return diff.summary(self.sentence.strip(), self.grade.correction.strip())
+
     def to_dict(self) -> dict:
         return {
             "exercise": self.exercise.to_dict(), "attempt": self.attempt, "mode": self.mode,
             "continuation": self.continuation, "sentence": self.sentence, "cost": self.cost,
             "probability": self.probability, "reached_end": self.reached_end, "seconds": self.seconds,
-            "grade": self.grade.to_dict(),
+            "grade": self.grade.to_dict(), "changes": self.changes,
         }
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Correction:
+    """A sentence the network wrote, the sentence the teacher wrote instead, and how bad the mark was."""
+
+    wrong: str
+    right: str
+    weight: float = 1.0
+
+    def to_dict(self) -> dict:
+        return {"wrong": self.wrong, "right": self.right, "weight": self.weight}
 
 
 _GRADE_SYSTEM = (
@@ -573,6 +599,8 @@ class TutorConfig:
     # 2NRL
     learn: bool = True  # False: a dry run - the grades are reported, the network is left alone
     twonrl_per: str = "round"
+    diff_corrections: bool = True  # teach a correction from its diff with the sentence, not as two whole sentences
+    keep_weight: float = 0.25  # what the unchanged part of a correction still earns (1 = the whole sentence)
     min_weight: float = 0.25  # negative-phase weight of a near miss (a hopeless answer weighs 1)
     neg_epochs: int = 2
     pos_epochs: int = 3
@@ -609,6 +637,8 @@ class TutorConfig:
             raise ValueError("grammar_weight must lie in [0, 1]")
         if not (0.0 <= self.min_weight <= 1.0):
             raise ValueError("min_weight must lie in [0, 1]")
+        if not (0.0 <= self.keep_weight <= 1.0):
+            raise ValueError("keep_weight must lie in [0, 1]")
         if self.batch < 1:
             raise ValueError("batch must be >= 1")
         if self.drills < 0 or self.replay_limit < 0 or self.checkpoint_every < 0:
@@ -722,14 +752,48 @@ class TutorTrainer:
             return 0.0
         return max(0.0, min(1.0, grade.score / 10.0))
 
+    def diffs(self) -> bool:
+        """Is a correction taught from its diff (``diff_corrections``, and a model that can learn one)?"""
+        return bool(self.config.diff_corrections) and callable(getattr(self.model, "correct", None))
+
+    def corrections_of(self, lessons: Iterable[Lesson]) -> list[Correction]:
+        """The failed lessons a diff can teach: what the network wrote, what the teacher wrote, how bad it was.
+
+        A lesson that wrote nothing has no mistake to align, and one the
+        teacher left uncorrected has nothing to align it against; both go the
+        old way, through :meth:`texts_of`.
+        """
+        if not self.diffs():
+            return []
+        out: list[Correction] = []
+        seen: dict[tuple[str, str], int] = {}
+        for lesson in lessons:
+            grade = lesson.grade
+            if grade.passed or not lesson.continuation.strip() or not grade.correction.strip():
+                continue
+            pair = (lesson.sentence.strip(), grade.correction.strip())
+            weight = self.weight_of(grade)
+            if pair in seen:  # the same mistake twice (several attempts) keeps its worst mark
+                at = seen[pair]
+                if weight > out[at].weight:
+                    out[at] = Correction(*pair, weight)
+                continue
+            seen[pair] = len(out)
+            out.append(Correction(*pair, weight))
+        return out
+
     def texts_of(self, lessons: Iterable[Lesson]) -> tuple[list[str], list[float], list[str], list[float]]:
         """``(bad, bad_weights, good, good_weights)`` of graded lessons.
 
         Failures are garbage weighted by how bad the mark was; the sentences
         that passed are rewarded in proportion to their mark and the
-        teacher's own English at full weight.
+        teacher's own English at full weight.  With ``diff_corrections`` on,
+        a failure the teacher corrected is left out of both lists:
+        :meth:`corrections_of` hands it to the diff instead, which punishes
+        the words that were actually wrong rather than the whole sentence.
         """
         cfg = self.config
+        diffed = {(c.wrong, c.right) for c in self.corrections_of(lessons)}
         bad: list[str] = []
         bad_weights: list[float] = []
         good: list[tuple[str, float]] = []
@@ -738,6 +802,11 @@ class TutorTrainer:
             if grade.passed:
                 if lesson.sentence.strip():
                     good.append((lesson.sentence.strip(), self.reward_of(grade)))
+                continue
+            pair = (lesson.sentence.strip(), grade.correction.strip())
+            if pair in diffed:  # the diff teaches this one, sentence against correction
+                if cfg.teach_answer and lesson.exercise.answer.strip():
+                    good.append((lesson.exercise.answer.strip(), TEACHER_WEIGHT))
                 continue
             if lesson.continuation.strip():  # nothing written is nothing to punish - the prefix itself is correct
                 bad.append(lesson.sentence.strip())
@@ -749,12 +818,22 @@ class TutorTrainer:
         texts, weights = _merge_weighted(good)
         return bad, bad_weights, texts, weights
 
-    def learn(self, bad: list[str], bad_weights: list[float], good: list[str], good_weights: list[float] | None = None) -> dict:
-        """2NRL over one round (or one lesson): garbage weighted by how bad it was, corrections by how good.
+    def learn(
+        self,
+        bad: list[str],
+        bad_weights: list[float],
+        good: list[str],
+        good_weights: list[float] | None = None,
+        corrections: Sequence[Correction] = (),
+    ) -> dict:
+        """One set of grades: the corrections taught from their diffs, then 2NRL over whatever is left.
 
-        ``good_weights`` defaults to the full rate for every text (the
-        teacher's own English); replayed corrections are taught at the full
-        rate too.
+        Every :class:`Correction` moves only the trigram nodes its two
+        sentences disagree on (``diff_corrections``); the rest is the old
+        whole-sentence pass - garbage weighted by how bad it was, good
+        English by how good.  ``good_weights`` defaults to the full rate for
+        every text (the teacher's own English); replayed corrections are
+        taught at the full rate too.
         """
         cfg = self.config
         weights_of = dict(zip(good, good_weights)) if good_weights else {}
@@ -771,8 +850,29 @@ class TutorTrainer:
             "bad": len(bad), "good": len(good_all), "action": None, "neg_loss": None, "pos_loss": None,
             "mean_weight": statistics.fmean(bad_weights) if bad_weights else None,
             "mean_reward": statistics.fmean(good_all_weights) if good_all_weights else None,
+            "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
         }
+        actions: list[str] = []
+        for correction in corrections:
+            if self._stopped():
+                break
+            moved = self.model.correct(
+                correction.wrong, correction.right, strength=cfg.strength, weight=correction.weight,
+                reward=TEACHER_WEIGHT, keep=cfg.keep_weight,
+            )
+            result["corrections"] += 1
+            result["edits"] += int(moved.get("edits") or 0)
+            result["penalised"] += int(moved.get("penalised") or 0)
+            result["rewarded"] += int(moved.get("rewarded") or 0)
+            if moved.get("loss") is not None:
+                result["pos_loss"] = moved["loss"]
+            if correction.right not in self.replay_buffer:
+                self.replay_buffer.append(correction.right)
+        if result["corrections"]:
+            actions.append("correct")
         if not bad and not good_all:
+            result["action"] = "+".join(actions) or None
+            self._trim_replay()
             return result
         shared = {"batch_size": cfg.batch_size, "stop_event": self._stop}
         if bad and good_all:
@@ -781,24 +881,33 @@ class TutorTrainer:
                 pos_lr=cfg.pos_lr, strength=cfg.strength, bad_weights=bad_weights or None,
                 good_weights=good_all_weights or None, **shared,
             )
-            result.update(action="2nrl", neg_loss=_last_loss(outcome["negative"]), pos_loss=_last_loss(outcome["positive"]))
+            actions.append("2nrl")
+            result.update(neg_loss=_last_loss(outcome["negative"]), pos_loss=_last_loss(outcome["positive"]))
         elif good_all:
             records = self.model.reward(
                 good_all, epochs=cfg.pos_epochs, lr=cfg.pos_lr, strength=cfg.strength,
                 weights=good_all_weights or None, **shared,
             )
-            result.update(action="reward", pos_loss=_last_loss(records))
+            actions.append("reward")
+            result.update(pos_loss=_last_loss(records))
         else:
             records = self.model.punish(
                 bad, epochs=cfg.neg_epochs, lr=cfg.neg_lr, strength=cfg.strength, weights=bad_weights or None, **shared,
             )
-            result.update(action="punish", neg_loss=_last_loss(records))
+            actions.append("punish")
+            result.update(neg_loss=_last_loss(records))
+        result["action"] = "+".join(dict.fromkeys(actions)) or None
         for text in good:
             if text not in self.replay_buffer:
                 self.replay_buffer.append(text)
-        if cfg.replay_limit and len(self.replay_buffer) > cfg.replay_limit:
-            del self.replay_buffer[: len(self.replay_buffer) - cfg.replay_limit]
+        self._trim_replay()
         return result
+
+    def _trim_replay(self) -> None:
+        """Keep the replay buffer to ``replay_limit`` texts (0 = no limit)."""
+        limit = self.config.replay_limit
+        if limit and len(self.replay_buffer) > limit:
+            del self.replay_buffer[: len(self.replay_buffer) - limit]
 
     # -- driving ---------------------------------------------------------------
 
@@ -816,8 +925,12 @@ class TutorTrainer:
             "score": grade.score, "grammar": grade.grammar, "spelling": grade.spelling, "fluency": grade.fluency,
             "passed": grade.passed, "error": grade.error, "correction": _clip(grade.correction, 400),
             "comment": grade.comment, "graded_by": grade.graded_by, "probability": lesson.probability,
-            "seconds": lesson.seconds,
+            "seconds": lesson.seconds, "changes": self.changes_of(lesson),
         })
+
+    def changes_of(self, lesson: Lesson) -> list[dict]:
+        """What the teacher changed, span by span - ``[{"op", "wrong", "right"}]`` - or ``[]``."""
+        return lesson.changes
 
     def run_round(self, round_no: int, progress: ProgressFn | None = None) -> tuple[dict, list[Lesson]]:
         """One round: exercises, completions, grades, and the 2NRL they lead to."""
@@ -859,6 +972,7 @@ class TutorTrainer:
         """2NRL over the whole round, or lesson by lesson (the drill sentences are taught once either way)."""
         if not self.config.learn:  # a dry run: what would have been learned, without touching the network
             bad, bad_weights, good, good_weights = self.texts_of(lessons)
+            corrections = self.corrections_of(lessons)
             good, good_weights = _merge_weighted(
                 list(zip(good, good_weights)) + [(t, TEACHER_WEIGHT) for t in drills]
             )
@@ -866,13 +980,19 @@ class TutorTrainer:
                 "bad": len(bad), "good": len(good), "action": None, "neg_loss": None, "pos_loss": None,
                 "mean_weight": statistics.fmean(bad_weights) if bad_weights else None,
                 "mean_reward": statistics.fmean(good_weights) if good_weights else None,
+                "corrections": len(corrections),
+                "edits": sum(len(diff.summary(c.wrong, c.right, limit=0)) for c in corrections),
+                "penalised": 0, "rewarded": 0,
             }
         if self.config.twonrl_per != "lesson":
             bad, bad_weights, good, good_weights = self.texts_of(lessons)
-            return self.learn(bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills))
+            return self.learn(
+                bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills),
+                self.corrections_of(lessons),
+            )
         merged: dict[str, Any] = {
             "bad": 0, "good": 0, "action": None, "neg_loss": None, "pos_loss": None,
-            "mean_weight": None, "mean_reward": None,
+            "mean_weight": None, "mean_reward": None, "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
         }
         actions: list[str] = []
         bad_seen: list[float] = []
@@ -881,14 +1001,19 @@ class TutorTrainer:
             if self._stopped():
                 break
             bad, bad_weights, good, good_weights = self.texts_of([lesson])
-            outcome = self.learn(bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills))
+            outcome = self.learn(
+                bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills),
+                self.corrections_of([lesson]),
+            )
             drills = []
             bad_seen += bad_weights
             good_seen += good_weights
             if outcome["action"]:
-                actions.append(outcome["action"])
+                actions.extend(outcome["action"].split("+"))
             merged["bad"] += outcome["bad"]
             merged["good"] += outcome["good"]
+            for key in ("corrections", "edits", "penalised", "rewarded"):
+                merged[key] += outcome.get(key, 0)
             for key in ("neg_loss", "pos_loss"):
                 if outcome[key] is not None:
                     merged[key] = outcome[key]

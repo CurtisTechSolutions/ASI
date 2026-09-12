@@ -151,6 +151,7 @@ commands:
   score      log-probability of --text or every text of --data
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
+  correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
   invert     flip the sign of every reward
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
@@ -218,6 +219,8 @@ func main() {
 		cmdFeedback(rest)
 	case "2nrl":
 		cmdTwoNRL(rest)
+	case "correct":
+		cmdCorrect(rest)
 	case "invert":
 		cmdInvert(rest)
 	case "weights":
@@ -545,6 +548,71 @@ func cmdTwoNRL(args []string) {
 	}
 }
 
+func cmdCorrect(args []string) {
+	fs := subFlagSet("correct")
+	wrong := fs.String("wrong", "", "what the network wrote")
+	right := fs.String("right", "", "what it should have written")
+	strength := fs.Float64("strength", 1.0, "magnitude of one unit of feedback")
+	weight := fs.Float64("weight", 1.0, "how bad the attempt was: the penalty is strength x weight")
+	reward := fs.Float64("reward", 1.0, "what the correction is worth")
+	keep := fs.Float64("keep", 0.25, "what the unchanged part of the correction still earns")
+	noCount := fs.Bool("no-count", false, "do not traverse the correction (it is counted by default)")
+	dryRun := fs.Bool("dry-run", false, "show the alignment without touching the model")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*wrong) == "" && strings.TrimSpace(*right) == "" {
+		fail("correct needs --wrong (what the network wrote) and --right (what it should say)")
+	}
+	changes := radixnet.DiffSummary(*wrong, *right, 0)
+	if *dryRun {
+		sayChanges(*wrong, *right, changes)
+		if jsonMode {
+			emit(map[string]any{"wrong": *wrong, "right": *right, "changes": changes, "dry_run": true})
+		}
+		return
+	}
+	m := openModel(true)
+	moved, err := m.Correct(*wrong, *right, radixnet.CorrectOptions{
+		Strength: *strength, Weight: *weight, Reward: *reward, Keep: *keep, NoCount: *noCount,
+	})
+	if err != nil {
+		fail("%v", err)
+	}
+	sayChanges(*wrong, *right, changes)
+	say("moved: %d step(s) penalised, %d taught, %d kept at %g", moved.Penalised, moved.Rewarded, moved.Kept, *keep)
+	path := saveModel(m)
+	say("saved %s", path)
+	if jsonMode {
+		emit(map[string]any{
+			"wrong": *wrong, "right": *right, "changes": changes, "edits": moved.Edits,
+			"penalised": moved.Penalised, "rewarded": moved.Rewarded, "kept": moved.Kept,
+			"penalty": moved.Penalty, "reward": moved.Reward, "loss": moved.Loss,
+			"wrong_chars": moved.WrongChars, "right_chars": moved.RightChars,
+			"saved": path, "stats": m.Stats(),
+		})
+	}
+}
+
+// sayChanges prints what the teacher changed, span by span.
+func sayChanges(wrong, right string, changes []radixnet.Edit) {
+	say("wrong  %s", wrong)
+	say("right  %s", right)
+	if len(changes) == 0 {
+		say("the two sentences are the same: nothing to teach")
+		return
+	}
+	say("%-8s %-24s %s", "change", "the network wrote", "the teacher wrote")
+	for _, change := range changes {
+		say("%-8s %-24s %s", change.Op, dashIfEmpty(change.Wrong), dashIfEmpty(change.Right))
+	}
+}
+
+func dashIfEmpty(text string) string {
+	if text == "" {
+		return "-"
+	}
+	return text
+}
+
 func cmdInvert(args []string) {
 	fs := subFlagSet("invert")
 	_ = fs.Parse(args)
@@ -743,6 +811,8 @@ func cmdTutor(args []string) {
 	drills := fs.Int("drills", cfg.Drills, "extra correct example sentences per round")
 	noTeachAnswer := fs.Bool("no-teach-answer", false, "a failed lesson learns only the correction")
 	dryRun := fs.Bool("dry-run", false, "set and mark the exercises but train nothing and save nothing")
+	noDiff := fs.Bool("no-diff-corrections", false, "learn a correction as two whole sentences instead of from its diff")
+	keepWeight := fs.Float64("keep-weight", cfg.KeepWeight, "what the unchanged part of a correction still earns (0 = the fix alone)")
 	twonrlPer := fs.String("twonrl-per", cfg.TwoNRLPer, "learn once per round, or after every lesson")
 	minWeight := fs.Float64("min-weight", cfg.MinWeight, "penalty weight of a near miss (a hopeless answer weighs 1)")
 	negEpochs := fs.Int("neg-epochs", cfg.NegEpochs, "negative passes (penalties)")
@@ -762,6 +832,7 @@ func cmdTutor(args []string) {
 	cfg.Threshold, cfg.GrammarWeight, cfg.Batch = *threshold, *grammarWeight, *batch
 	cfg.Adapt, cfg.Drills, cfg.TeachAnswer, cfg.Learn = !*noAdapt, *drills, !*noTeachAnswer, !*dryRun
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
+	cfg.DiffCorrections, cfg.KeepWeight = !*noDiff, *keepWeight
 	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
 	if err := cfg.Validate(); err != nil {
 		fail("%v", err)
@@ -777,6 +848,11 @@ func cmdTutor(args []string) {
 	}
 	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s at %s, pass at %g/10 (grammar %g)",
 		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorModel, client.URL, cfg.Threshold, cfg.GrammarWeight)
+	if cfg.DiffCorrections {
+		say("corrections: from the diff with what the network wrote, only what changed moves (the rest keeps %g)", cfg.KeepWeight)
+	} else {
+		say("corrections: as whole sentences (--no-diff-corrections)")
+	}
 	if !jsonMode {
 		trainer.Progress = func(record map[string]any) { sayLesson(record) }
 	}

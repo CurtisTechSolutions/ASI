@@ -2146,6 +2146,8 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         teach_answer=f.flag("teach_answer", d.teach_answer),
         learn=f.flag("learn", d.learn),
         twonrl_per=f.text("twonrl_per", d.twonrl_per).strip().lower(),
+        diff_corrections=f.flag("diff_corrections", d.diff_corrections),
+        keep_weight=f.number("keep_weight", d.keep_weight, minimum=0.0),
         min_weight=f.number("min_weight", d.min_weight, minimum=0.0),
         neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
         pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
@@ -2294,7 +2296,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/tutor/start", _r_tutor_start,
      "start a tutor job - Ollama writes the prefixes, the network completes them, Ollama marks the grammar and "
      "the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, "
-     "drills, adapt, twonrl_per: round|lesson, min_weight, neg_epochs, pos_epochs, neg_lr, pos_lr, tutor_model, ...}"),
+     "drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, "
+     "neg_lr, pos_lr, tutor_model, ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "
