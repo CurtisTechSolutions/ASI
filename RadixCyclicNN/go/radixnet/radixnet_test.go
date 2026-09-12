@@ -19,6 +19,8 @@ func corpus(t *testing.T) []string {
 	return SplitTexts(string(raw), "lines", 0)
 }
 
+// trained builds a deterministic model: Exact counting (atomics) so the tests can compare numbers;
+// workers 0 means one goroutine per text.
 func trained(t *testing.T, epochs int, workers int) *Model {
 	t.Helper()
 	m, err := NewModel(1, DefaultGraphOptions())
@@ -27,6 +29,7 @@ func trained(t *testing.T, epochs int, workers int) *Model {
 	}
 	m.Workers = workers
 	m.G.Workers = workers
+	m.Exact = true
 	opts := DefaultTrainOptions()
 	opts.Epochs = epochs
 	if _, err := m.Train(corpus(t), opts); err != nil {
@@ -237,7 +240,7 @@ func TestLazyWeightsMatchFullRecompute(t *testing.T) {
 
 func TestWorkersDoNotChangeTheModel(t *testing.T) {
 	one := trained(t, 3, 1)
-	many := trained(t, 3, 8)
+	many := trained(t, 3, 0) // no cap: one goroutine per text
 	a, b := one.ToDoc().Graph, many.ToDoc().Graph
 	if !reflect.DeepEqual(a.Nodes.Labels, b.Nodes.Labels) || !reflect.DeepEqual(a.Nodes.Count, b.Nodes.Count) {
 		t.Fatal("node structure or counts differ between 1 and 8 workers")
@@ -418,6 +421,58 @@ func TestConverse(t *testing.T) {
 	empty, _ := NewModel(0, DefaultGraphOptions())
 	if turns, _ := empty.Converse("", opts); len(turns) != 0 {
 		t.Fatal("an untrained model has nothing to say")
+	}
+}
+
+// The default mode: one goroutine per text bumping shared counters with plain increments.  A collision
+// may lose an update, so the counts are compared with a tolerance; the structure, the window and the
+// weights' consistency with the counts are exact.  The race detector would (rightly) flag the plain
+// increments, so this test only runs without it.
+func TestRacyCountingStaysUsable(t *testing.T) {
+	if raceEnabled {
+		t.Skip("racy counting is a data race by design; skipped under the race detector")
+	}
+	exact := trained(t, 3, 0)
+	racy, err := NewModel(1, DefaultGraphOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	racy.Workers, racy.G.Workers, racy.Exact = 0, 0, false
+	if racy.Counting() != "racy" || exact.Counting() != "exact" {
+		t.Fatal("counting labels")
+	}
+	texts := corpus(t)
+	opts := DefaultTrainOptions()
+	opts.Epochs = 3
+	if _, err := racy.Train(texts, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := racy.G.CheckInvariants(texts, true); err != nil {
+		t.Fatal(err)
+	}
+	a, b := exact.ToDoc().Graph, racy.ToDoc().Graph
+	if !reflect.DeepEqual(a.Nodes.Labels, b.Nodes.Labels) || !reflect.DeepEqual(a.Edges.Src, b.Edges.Src) {
+		t.Fatal("the structure must not depend on the counting mode")
+	}
+	if !reflect.DeepEqual(a.Weights.WindowEvents, b.Weights.WindowEvents) || a.Weights.TotalTraversals != b.Weights.TotalTraversals {
+		t.Fatal("the sliding window is applied in order and stays exact")
+	}
+	var exactSum, racySum int64
+	for i := range a.Edges.Count {
+		exactSum += a.Edges.Count[i]
+		racySum += b.Edges.Count[i]
+		if b.Edges.Count[i] > a.Edges.Count[i] {
+			t.Fatalf("a racy count can only lose updates, never gain them (edge %d: %d > %d)", i, b.Edges.Count[i], a.Edges.Count[i])
+		}
+	}
+	if racySum < exactSum*9/10 {
+		t.Fatalf("too many lost updates: %d of %d traversals counted", racySum, exactSum)
+	}
+	// predictions still work and the weights are the function of whatever was counted
+	racy.G.Prepare()
+	p, err := racy.Predict("the cat", DefaultPredictOptions())
+	if err != nil || p.Text == "" {
+		t.Fatalf("predict on the racy model: %v %+v", err, p)
 	}
 }
 

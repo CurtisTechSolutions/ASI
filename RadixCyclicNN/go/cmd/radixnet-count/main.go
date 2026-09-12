@@ -20,14 +20,12 @@ import (
 
 const version = "0.1.0"
 
-// bom is the UTF-8 byte order mark some editors put in front of a text file.
-var bom = string([]byte{0xEF, 0xBB, 0xBF})
-
 var (
 	modelPath = "model.count.json"
 	jsonMode  bool
 	seedFlag  int64
-	workers   = runtime.NumCPU()
+	workers   = 0
+	exact     bool
 	outPath   string
 )
 
@@ -35,7 +33,8 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&modelPath, "model", modelPath, "model file to load / save (gzip when the name ends with .gz)")
 	fs.BoolVar(&jsonMode, "json", jsonMode, "print one JSON document instead of human-readable text")
 	fs.Int64Var(&seedFlag, "seed", seedFlag, "RNG seed for a new model and for sampling")
-	fs.IntVar(&workers, "workers", workers, "goroutines fanned out over texts and nodes")
+	fs.IntVar(&workers, "workers", workers, "cap on the goroutines fanned out over texts and nodes (0 = none: one goroutine per text)")
+	fs.BoolVar(&exact, "exact", exact, "count with atomic increments (no lost updates, reproducible); default: plain racy increments")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
 }
 
@@ -72,19 +71,36 @@ func say(format string, args ...any) {
 	}
 }
 
-func readTexts(paths []string, unit string, pageLines int) []string {
-	var texts []string
+// sourcesFor picks a streaming source per path: a ZIP archive (by its magic
+// bytes) streams entry by entry, a text file line by line; nothing is loaded whole.
+func sourcesFor(paths []string, unit string, pageLines int) radixnet.TextSource {
+	var sources radixnet.MultiSource
 	for _, p := range paths {
-		raw, err := os.ReadFile(p)
-		if err != nil {
+		if _, err := os.Stat(p); err != nil {
 			fail("%v", err)
 		}
-		texts = append(texts, radixnet.SplitTexts(strings.TrimPrefix(string(raw), bom), unit, pageLines)...)
+		sources = append(sources, radixnet.SourceForFile(p, unit, pageLines))
+	}
+	return sources
+}
+
+// readTexts collects the texts of files (for the commands that need a list: score, feedback, 2nrl).
+func readTexts(paths []string, unit string, pageLines int) []string {
+	texts, err := radixnet.CollectTexts(sourcesFor(paths, unit, pageLines))
+	if err != nil {
+		fail("%v", err)
 	}
 	if len(texts) == 0 {
 		fail("no texts found in %s", strings.Join(paths, ", "))
 	}
 	return texts
+}
+
+func configure(m *radixnet.Model) *radixnet.Model {
+	m.Workers = workers
+	m.G.Workers = workers
+	m.Exact = exact
+	return m
 }
 
 func openModel(required bool) *radixnet.Model {
@@ -94,8 +110,7 @@ func openModel(required bool) *radixnet.Model {
 		if err != nil {
 			fail("%s: %v", modelPath, err)
 		}
-		m.Workers = workers
-		return m
+		return configure(m)
 	}
 	if required {
 		fail("model file not found: %s (train one first with `radixnet-count train --data FILE`)", modelPath)
@@ -104,8 +119,7 @@ func openModel(required bool) *radixnet.Model {
 	if err != nil {
 		fail("%v", err)
 	}
-	m.Workers = workers
-	return m
+	return configure(m)
 }
 
 func saveModel(m *radixnet.Model) string {
@@ -125,7 +139,7 @@ func usage() {
 usage: radixnet-count [global options] <command> [options]
 
 commands:
-  train      count traversals of the texts of --data files (lines, paragraphs or pages)
+  train      count traversals of the texts of --data files (text or ZIP, any size; lines, paragraphs or pages)
   predict    top-K / bottom-K continuations of --prefix (beam) or a stochastic walk
   generate   whole texts from the prediction search (beam / sample / dijkstra)
   score      log-probability of --text or every text of --data
@@ -138,7 +152,7 @@ commands:
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   version    print the version
 
-global options (before or after the command): --model PATH --json --seed N --workers N --out PATH
+global options (before or after the command): --model PATH --json --seed N --workers N --exact --out PATH
 `, version)
 }
 
@@ -152,9 +166,11 @@ func main() {
 	fs.Usage = usage
 	args := os.Args[1:]
 	cmdIndex := 0
+	boolFlags := map[string]bool{"json": true, "exact": true}
 	for cmdIndex < len(args) && strings.HasPrefix(args[cmdIndex], "-") {
-		// consume "--flag value" or "--flag=value"
-		if strings.Contains(args[cmdIndex], "=") || args[cmdIndex] == "--json" || args[cmdIndex] == "-json" {
+		// consume "--flag value", "--flag=value" or a boolean "--flag"
+		name := strings.TrimLeft(args[cmdIndex], "-")
+		if strings.Contains(args[cmdIndex], "=") || boolFlags[name] {
 			cmdIndex++
 		} else {
 			cmdIndex += 2
@@ -219,6 +235,7 @@ func cmdTrain(args []string) {
 	unit := fs.String("split", "lines", "how a file is cut into texts, each handled by its own goroutine: lines | paragraphs | pages | file")
 	pageLines := fs.Int("page-lines", 50, "lines per page when a file has no form feeds (--split pages)")
 	epochs := fs.Int("epochs", 5, "passes over the texts")
+	chunk := fs.Int("chunk", radixnet.DefaultChunkSize, "texts streamed from the files per chunk (memory: one chunk + the graph, whatever the corpus size)")
 	noCompress := fs.Bool("no-compress", false, "do not merge unary chains after every epoch")
 	window := fs.Int("window", 0, "sliding window size for a NEW model (default 10000)")
 	globalScale := fs.Float64("global-scale", -1, "weight of log(all-time share) for a NEW model (default 0.5)")
@@ -229,7 +246,7 @@ func cmdTrain(args []string) {
 	if len(data) == 0 {
 		fail("train needs --data FILE")
 	}
-	texts := readTexts(data, *unit, *pageLines)
+	source := sourcesFor(data, *unit, *pageLines)
 	radixnet.Workers = workers
 	var m *radixnet.Model
 	if _, err := os.Stat(modelPath); err == nil {
@@ -256,25 +273,35 @@ func cmdTrain(args []string) {
 		if err != nil {
 			fail("%v", err)
 		}
-		m.Workers = workers
+		configure(m)
 	}
-	say("training on %d texts (%s) with %d goroutines, %d epoch(s)", len(texts), *unit, workers, *epochs)
-	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "seconds")
+	pool := "one goroutine per text"
+	if workers > 0 {
+		pool = fmt.Sprintf("%d goroutines", workers)
+	}
+	before := m.MetaInt("trained_texts")
+	say("training from %s (%s, chunks of %d texts): %s, %s counting, %d epoch(s)", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), *epochs)
+	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %6s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "chunks", "seconds")
 	opts := radixnet.DefaultTrainOptions()
 	opts.Epochs = *epochs
 	opts.AutoCompress = !*noCompress
+	opts.ChunkSize = *chunk
 	opts.Progress = func(r map[string]any) {
-		say("%5v %9.4f %10.3f %7v %7v %8v %6.2f %6v %11v %8.3f", r["epoch"], r["loss"], r["perplexity"], r["nodes"], r["edges"], r["trigrams"], r["compression_ratio"], r["merges"], r["transitions"], r["seconds"])
+		say("%5v %9.4f %10.3f %7v %7v %8v %6.2f %6v %11v %6v %8.3f", r["epoch"], r["loss"], r["perplexity"], r["nodes"], r["edges"], r["trigrams"], r["compression_ratio"], r["merges"], r["transitions"], r["chunks"], r["seconds"])
 	}
 	t0 := time.Now()
-	records, err := m.Train(texts, opts)
+	records, err := m.TrainSource(source, opts)
 	if err != nil {
 		fail("%v", err)
 	}
+	texts := int(m.MetaInt("trained_texts") - before)
+	if texts == 0 && len(records) == 0 {
+		fail("no texts found in %s", strings.Join(data, ", "))
+	}
 	path := saveModel(m)
-	say("saved %s (%d texts, %.2fs)", path, len(texts), time.Since(t0).Seconds())
+	say("saved %s (%d texts, %.2fs)", path, texts, time.Since(t0).Seconds())
 	if jsonMode {
-		emit(map[string]any{"records": records, "texts": len(texts), "split": *unit, "workers": workers, "saved": path, "stats": m.Stats()})
+		emit(map[string]any{"records": records, "texts": texts, "split": *unit, "chunk": *chunk, "workers": workers, "counting": m.Counting(), "saved": path, "stats": m.Stats()})
 	}
 }
 
@@ -621,7 +648,7 @@ func cmdConverse(args []string) {
 		if err != nil {
 			fail("partner model: %v", err)
 		}
-		p.Workers = workers
+		configure(p)
 		opts.Partner = p
 		partnerKind = "count"
 	}
@@ -674,7 +701,7 @@ func cmdServe(args []string) {
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
-		ModelPath: modelPath, Seed: seedFlag, Workers: workers, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
+		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf,
 	})
 	if err != nil {
@@ -695,7 +722,11 @@ func cmdServe(args []string) {
 	if origin != nil {
 		source = modelPath
 	}
-	logf(fmt.Sprintf("radixnet-count %s serving %s on http://%s (workers %d, frontend %s)", version, source, addr, workers, map[bool]string{true: dir, false: "none"}[dir != ""]))
+	pool := "one goroutine per text"
+	if workers > 0 {
+		pool = fmt.Sprintf("%d goroutines", workers)
+	}
+	logf(fmt.Sprintf("radixnet-count %s serving %s on http://%s (%s, %s counting, frontend %s)", version, source, addr, pool, map[bool]string{true: "exact", false: "racy"}[exact], map[bool]string{true: dir, false: "none"}[dir != ""]))
 	httpServer := &http.Server{Addr: addr, Handler: server.NewHandler(svc, dir, *quiet, logf), ReadHeaderTimeout: 30 * time.Second}
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fail("%v", err)

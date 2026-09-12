@@ -170,7 +170,7 @@ func (g *Graph) recomputeRow(p int) {
 func (g *Graph) RecomputeWeights() {
 	n := len(g.Labels)
 	workers := g.Workers
-	if n < 4096 || workers < 2 {
+	if n < 4096 || workers == 1 {
 		for p := 0; p < n; p++ {
 			g.recomputeRow(p)
 		}
@@ -297,7 +297,7 @@ func (g *Graph) ensureCosts() {
 			g.edgeCost[e] = lse - g.EdgeW[e]
 		}
 	}
-	if n < 4096 || g.Workers < 2 {
+	if n < 4096 || g.Workers == 1 {
 		for p := 0; p < n; p++ {
 			row(p)
 		}

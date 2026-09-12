@@ -6,30 +6,42 @@ import (
 	"sync"
 )
 
-// Workers is the default number of goroutines fanned out over texts and nodes
-// (runtime.NumCPU()); Model.Workers overrides it per model.
-var Workers = runtime.NumCPU()
+// Workers caps the goroutines fanned out over texts and nodes; 0 (the
+// default) means no cap: one goroutine per text, and a goroutine per small
+// block of nodes.  Model.Workers overrides it per model.
+var Workers = 0
 
-// parallelFor runs fn(i) for i in [0, n) on up to workers goroutines and waits.
-// Every index is handled exactly once; fn must only touch state that is safe
-// to share (its own slot of a result slice, atomic counters, read-only data).
+// NumCPU is the machine's logical CPU count (for the few places that need a number).
+var NumCPU = runtime.NumCPU()
+
+// parallelFor runs fn(i) for i in [0, n) and waits.  workers <= 0 spawns one
+// goroutine per index - as many as there are texts - otherwise a pool of that
+// size.  Every index is handled exactly once.  fn may write racily to shared
+// counters when the caller accepts lost updates (see Model.Exact); it must
+// never write to maps or append to shared slices, which the Go runtime does
+// not survive.
 func parallelFor(n, workers int, fn func(i int)) {
 	if n <= 0 {
 		return
 	}
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > n {
-		workers = n
-	}
-	if workers == 1 {
+	if workers == 1 || n == 1 {
 		for i := 0; i < n; i++ {
 			fn(i)
 		}
 		return
 	}
 	var wg sync.WaitGroup
+	if workers <= 0 || workers >= n {
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func(i int) {
+				defer wg.Done()
+				fn(i)
+			}(i)
+		}
+		wg.Wait()
+		return
+	}
 	next := make(chan int, workers*4)
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
@@ -48,17 +60,19 @@ func parallelFor(n, workers int, fn func(i int)) {
 }
 
 // parallelRanges splits [0, n) into contiguous chunks, one goroutine each, and
-// calls fn(lo, hi) for every chunk (used for node ranges of the recompute).
+// calls fn(lo, hi) for every chunk (node ranges of the recompute).  Without a
+// worker cap the chunks are small (64 nodes), so the goroutine count scales
+// with the graph.
 func parallelRanges(n, workers int, fn func(lo, hi int)) {
 	if n <= 0 {
 		return
 	}
-	if workers < 1 {
-		workers = 1
-	}
-	chunk := (n + workers - 1) / workers
-	if chunk < 256 {
-		chunk = 256
+	chunk := 64
+	if workers > 0 {
+		chunk = (n + workers - 1) / workers
+		if chunk < 256 {
+			chunk = 256
+		}
 	}
 	var wg sync.WaitGroup
 	for lo := 0; lo < n; lo += chunk {
@@ -86,7 +100,7 @@ func parallelRanges(n, workers int, fn func(lo, hi int)) {
 //     spaces;
 //   - "file": the whole content as one text (trailing newlines stripped).
 func SplitTexts(content, unit string, pageLines int) []string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.TrimPrefix(strings.ReplaceAll(content, "\r\n", "\n"), bom)
 	switch strings.ToLower(strings.TrimSpace(unit)) {
 	case "", "line", "lines":
 		var texts []string

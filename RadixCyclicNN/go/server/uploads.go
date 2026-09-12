@@ -6,9 +6,11 @@ package server
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +20,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
 
 const maxUploadName = 128
@@ -46,11 +50,9 @@ func SanitizeUploadName(name string) (string, error) {
 }
 
 // IsZip reports whether data starts with a ZIP signature (the bytes decide, not the name).
-func IsZip(data []byte) bool {
-	return bytes.HasPrefix(data, []byte("PK\x03\x04")) || bytes.HasPrefix(data, []byte("PK\x05\x06")) || bytes.HasPrefix(data, []byte("PK\x07\x08"))
-}
+func IsZip(data []byte) bool { return radixnet.IsZipMagic(data) }
 
-// Extracted is one text entry of an archive.
+// Extracted is one text entry of an archive held in memory (small JSON uploads).
 type Extracted struct {
 	Name  string
 	Path  string
@@ -59,24 +61,7 @@ type Extracted struct {
 }
 
 // Skipped is an archive entry that was not used, with the reason.
-type Skipped struct {
-	Path   string `json:"path"`
-	Reason string `json:"reason"`
-}
-
-var archiveSuffixes = []string{".zip", ".gz", ".tgz", ".tar", ".bz2", ".xz", ".7z", ".rar", ".jar"}
-
-func safePiece(text string) string {
-	var b strings.Builder
-	for _, ch := range text {
-		if unicode.IsLetter(ch) || unicode.IsDigit(ch) || strings.ContainsRune(uploadNameChars, ch) {
-			b.WriteRune(ch)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-	return strings.Trim(b.String(), " .")
-}
+type Skipped = radixnet.ZipSkip
 
 // FlatName is <archive stem>__<dir>__<file>: a flat, safe name for an entry.
 func FlatName(archiveName, entryPath string) string {
@@ -117,74 +102,45 @@ func FlatName(archiveName, entryPath string) string {
 	return name
 }
 
-func skipReason(f *zip.File) string {
-	path := strings.ReplaceAll(f.Name, "\\", "/")
-	base := path
-	if i := strings.LastIndex(strings.TrimRight(path, "/"), "/"); i >= 0 {
-		base = strings.TrimRight(path, "/")[i+1:]
-	}
-	if f.FileInfo().IsDir() || strings.HasSuffix(path, "/") {
-		return "directory"
-	}
-	if strings.HasPrefix(path, "__MACOSX/") || strings.Contains(path, "/__MACOSX/") {
-		return "macOS metadata"
-	}
-	if strings.HasPrefix(base, "._") || base == ".DS_Store" || base == "Thumbs.db" {
-		return "system file"
-	}
-	lower := strings.ToLower(base)
-	for _, suffix := range archiveSuffixes {
-		if strings.HasSuffix(lower, suffix) {
-			return "nested archive"
+func safePiece(text string) string {
+	var b strings.Builder
+	for _, ch := range text {
+		if unicode.IsLetter(ch) || unicode.IsDigit(ch) || strings.ContainsRune(uploadNameChars, ch) {
+			b.WriteRune(ch)
+		} else {
+			b.WriteRune('_')
 		}
 	}
-	if f.Flags&0x1 != 0 {
-		return "encrypted"
-	}
-	return ""
+	return strings.Trim(b.String(), " .")
 }
 
-// ExtractTexts returns the text entries of a ZIP archive and the skipped ones
-// (same rules as the Python archive module: directories, macOS metadata,
-// system files, nested archives, encrypted, binary and empty entries are skipped).
+// ExtractTexts returns the text entries of a ZIP archive held in memory (the
+// JSON upload forms); large archives take the streaming path instead.
 func ExtractTexts(data []byte, archiveName string) ([]Extracted, []Skipped, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("not a valid ZIP archive (%v)", err)
 	}
 	var extracted []Extracted
-	var skipped []Skipped
-	for _, f := range zr.File {
-		path := strings.ReplaceAll(f.Name, "\\", "/")
-		if reason := skipReason(f); reason != "" {
-			skipped = append(skipped, Skipped{path, reason})
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			skipped = append(skipped, Skipped{path, fmt.Sprintf("unreadable (%v)", err)})
-			continue
-		}
-		payload, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			skipped = append(skipped, Skipped{path, fmt.Sprintf("unreadable (%v)", err)})
-			continue
-		}
-		sniff := payload
-		if len(sniff) > 8192 {
-			sniff = sniff[:8192]
-		}
-		if bytes.IndexByte(sniff, 0) >= 0 {
-			skipped = append(skipped, Skipped{path, "binary"})
-			continue
+	var empty []string
+	skipped, err := radixnet.WalkZip(zr, func(path string, r io.Reader) error {
+		payload, rerr := io.ReadAll(r)
+		if rerr != nil {
+			return rerr
 		}
 		text := decodeText(payload)
 		if strings.TrimSpace(text) == "" {
-			skipped = append(skipped, Skipped{path, "empty"})
-			continue
+			empty = append(empty, path)
+			return nil
 		}
 		extracted = append(extracted, Extracted{Name: FlatName(archiveName, path), Path: path, Text: text, Bytes: len(payload)})
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, p := range empty {
+		skipped = append(skipped, Skipped{Path: p, Reason: "empty"})
 	}
 	return extracted, skipped, nil
 }
@@ -254,19 +210,33 @@ func (u *Uploads) path(name string) (string, error) {
 
 func isoMillis(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000-07:00") }
 
+// textRecord describes a text upload; lines and characters are counted by streaming the file.
 func textRecord(path string) (map[string]any, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(path)
+	fh, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	text := strings.ToValidUTF8(string(raw), "�")
+	defer fh.Close()
+	lines, chars := 0, 0
+	br := bufio.NewReaderSize(fh, 256<<10)
+	for {
+		line, rerr := br.ReadString('\n')
+		if len(line) > 0 {
+			chars += len([]rune(line))
+			if strings.TrimSpace(line) != "" {
+				lines++
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
 	return map[string]any{
-		"name": filepath.Base(path), "bytes": info.Size(), "chars": len([]rune(text)), "lines": countLines(text),
-		"modified": isoMillis(info.ModTime()),
+		"name": filepath.Base(path), "bytes": info.Size(), "chars": chars, "lines": lines, "modified": isoMillis(info.ModTime()),
 	}, nil
 }
 
@@ -277,16 +247,28 @@ func (u *Uploads) archiveInfo(path string, data []byte) archiveInfo {
 			return cached.info
 		}
 	}
-	if data == nil {
-		data, _ = os.ReadFile(path)
-	}
-	extracted, skipped, xerr := ExtractTexts(data, filepath.Base(path))
-	info := summarize(extracted, skipped)
-	if xerr != nil {
-		info.Error = xerr.Error()
-	}
+	info := inspectArchiveFile(path)
 	if st != nil {
 		u.cache[path] = archiveCache{st.Size(), st.ModTime(), info}
+	}
+	return info
+}
+
+// inspectArchiveFile streams an archive on disk: entry by entry, line by line,
+// so a multi-gigabyte upload is described without being held in memory.
+func inspectArchiveFile(path string) archiveInfo {
+	zr, err := radixnet.OpenZip(path)
+	if err != nil {
+		return archiveInfo{Entries: []map[string]any{}, Skipped: []Skipped{}, Error: err.Error()}
+	}
+	defer zr.Close()
+	zi, err := radixnet.InspectZip(&zr.Reader)
+	if err != nil {
+		return archiveInfo{Entries: []map[string]any{}, Skipped: []Skipped{}, Error: err.Error()}
+	}
+	info := archiveInfo{Entries: []map[string]any{}, Skipped: zi.Skipped, Lines: zi.Lines, Chars: zi.Chars, Files: len(zi.Entries)}
+	for _, e := range zi.Entries {
+		info.Entries = append(info.Entries, map[string]any{"path": e.Path, "bytes": e.Bytes, "lines": e.Lines})
 	}
 	return info
 }
@@ -394,38 +376,92 @@ func (u *Uploads) StoreText(name, content string) (map[string]any, error) {
 	return rec, nil
 }
 
-// StoreBytes stores a binary upload: a ZIP archive is kept whole (and
-// validated), anything else is stored as text.  Returns {"uploads", "archives"?}.
+// StoreBytes stores a binary upload held in memory (the JSON forms): a ZIP
+// archive is kept whole, anything else is stored as text.
 func (u *Uploads) StoreBytes(name string, data []byte) (map[string]any, error) {
-	if !IsZip(data) {
-		rec, err := u.StoreText(name, decodeText(data))
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"uploads": []map[string]any{rec}}, nil
-	}
+	return u.StoreStream(name, bytes.NewReader(data))
+}
+
+// StoreStream stores an upload from a stream without holding it in memory:
+// the bytes go straight to a .part file; the first four decide whether it is
+// a ZIP archive, which is then validated by streaming its entries (at least
+// one text entry, or 400) and kept whole under a .zip name.  Anything else is
+// a text file.  Returns {"uploads": [record], "archives": [summary]?}.
+func (u *Uploads) StoreStream(name string, r io.Reader) (map[string]any, error) {
 	root, err := u.ensureDir()
 	if err != nil {
 		return nil, err
 	}
-	archiveName, err := SanitizeUploadName(name)
+	safe, err := SanitizeUploadName(name)
 	if err != nil {
 		return nil, err
 	}
+	part, err := os.CreateTemp(root, ".upload-*.part")
+	if err != nil {
+		return nil, err
+	}
+	partName := part.Name()
+	cleanup := func() { _ = os.Remove(partName) }
+	head := make([]byte, 4)
+	n, herr := io.ReadFull(r, head)
+	if herr != nil && herr != io.EOF && herr != io.ErrUnexpectedEOF {
+		part.Close()
+		cleanup()
+		return nil, herr
+	}
+	head = head[:n]
+	size := int64(n)
+	if _, err := part.Write(head); err != nil {
+		part.Close()
+		cleanup()
+		return nil, err
+	}
+	if herr == nil {
+		copied, err := io.Copy(part, r)
+		if err != nil {
+			part.Close()
+			cleanup()
+			return nil, err
+		}
+		size += copied
+	}
+	if err := part.Close(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if !IsZip(head) {
+		// a text file: stored as it is (lines are repaired when read)
+		path := filepath.Join(root, safe)
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		_, statErr := os.Stat(path)
+		if err := os.Rename(partName, path); err != nil {
+			cleanup()
+			return nil, err
+		}
+		rec, err := textRecord(path)
+		if err != nil {
+			return nil, err
+		}
+		rec["replaced"] = statErr == nil
+		return map[string]any{"uploads": []map[string]any{rec}}, nil
+	}
+	archiveName := safe
 	if !strings.HasSuffix(strings.ToLower(archiveName), ".zip") {
 		archiveName += ".zip"
 	}
-	extracted, skipped, xerr := ExtractTexts(data, archiveName)
-	if xerr != nil {
-		return nil, &apiError{400, fmt.Sprintf("%s: %v", archiveName, xerr)}
+	info := inspectArchiveFile(partName)
+	if info.Error != "" {
+		cleanup()
+		return nil, &apiError{400, fmt.Sprintf("%s: %s", archiveName, info.Error)}
 	}
-	if len(extracted) == 0 {
+	if info.Files == 0 {
 		reasons := []string{}
-		for i, s := range skipped {
+		for i, sk := range info.Skipped {
 			if i >= 8 {
 				break
 			}
-			reasons = append(reasons, s.Path+": "+s.Reason)
+			reasons = append(reasons, sk.Path+": "+sk.Reason)
 		}
 		msg := archiveName + " holds no text files to train on"
 		if len(reasons) > 0 {
@@ -433,27 +469,28 @@ func (u *Uploads) StoreBytes(name string, data []byte) (map[string]any, error) {
 		} else {
 			msg += " (it is empty)"
 		}
+		cleanup()
 		return nil, &apiError{400, msg}
 	}
 	path := filepath.Join(root, archiveName)
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	_, statErr := os.Stat(path)
-	replaced := statErr == nil
-	if err := writeAtomic(path, data); err != nil {
+	if err := os.Rename(partName, path); err != nil {
+		cleanup()
 		return nil, err
 	}
 	if st, err := os.Stat(path); err == nil {
-		u.cache[path] = archiveCache{st.Size(), st.ModTime(), summarize(extracted, skipped)}
+		u.cache[path] = archiveCache{st.Size(), st.ModTime(), info}
 	}
 	rec, err := u.record(path)
 	if err != nil {
 		return nil, err
 	}
-	rec["replaced"] = replaced
-	skippedDocs := make([]Skipped, 0, len(skipped))
-	skippedDocs = append(skippedDocs, skipped...)
-	summary := map[string]any{"name": archiveName, "bytes": len(data), "entries": len(extracted) + len(skipped), "extracted": len(extracted), "skipped": skippedDocs}
+	rec["replaced"] = statErr == nil
+	skipped := make([]Skipped, 0, len(info.Skipped))
+	skipped = append(skipped, info.Skipped...)
+	summary := map[string]any{"name": archiveName, "bytes": size, "entries": info.Files + len(info.Skipped), "extracted": info.Files, "skipped": skipped}
 	return map[string]any{"uploads": []map[string]any{rec}, "archives": []map[string]any{summary}}, nil
 }
 
@@ -475,51 +512,45 @@ func (u *Uploads) Delete(name string) (map[string]any, error) {
 	return map[string]any{"deleted": filepath.Base(path)}, nil
 }
 
-// Entries returns (file name, text) pairs of an upload: one for a text file, one per text entry of a ZIP.
-func (u *Uploads) Entries(name string) ([][2]string, error) {
-	path, err := u.path(name)
-	if err != nil {
-		return nil, err
+// Source is a streaming text source over uploads: a ZIP archive streams its
+// text entries, a text file its lines; unit cuts them into texts (wholeFile:
+// every file / entry is one text).  Nothing is held in memory.
+func (u *Uploads) Source(names []string, unit string, pageLines int, wholeFile bool) (radixnet.TextSource, error) {
+	if wholeFile {
+		unit = "file"
 	}
-	u.mu.Lock()
-	data, readErr := os.ReadFile(path)
-	u.mu.Unlock()
-	if readErr != nil {
-		return nil, &apiError{404, fmt.Sprintf("no upload named %q", filepath.Base(path))}
-	}
-	base := filepath.Base(path)
-	if IsZip(data) {
-		extracted, _, xerr := ExtractTexts(data, base)
-		if xerr != nil {
-			return nil, &apiError{400, fmt.Sprintf("%s: %v", base, xerr)}
-		}
-		out := make([][2]string, 0, len(extracted))
-		for _, e := range extracted {
-			out = append(out, [2]string{e.Path, e.Text})
-		}
-		return out, nil
-	}
-	return [][2]string{{base, decodeText(data)}}, nil
-}
-
-// Texts reads training texts from uploads: split per the unit (lines by
-// default), or every file / archive entry as one text with wholeFile.
-func (u *Uploads) Texts(names []string, unit string, pageLines int, wholeFile bool) ([]string, error) {
-	var texts []string
+	var sources radixnet.MultiSource
 	for _, name := range names {
-		entries, err := u.Entries(name)
+		path, err := u.path(name)
 		if err != nil {
 			return nil, err
 		}
-		for _, entry := range entries {
-			if wholeFile {
-				if strings.TrimSpace(entry[1]) != "" {
-					texts = append(texts, entry[1])
-				}
-				continue
-			}
-			texts = append(texts, splitTexts(entry[1], unit, pageLines)...)
+		if _, err := os.Stat(path); err != nil {
+			return nil, &apiError{404, fmt.Sprintf("no upload named %q", filepath.Base(path))}
 		}
+		sources = append(sources, radixnet.SourceForFile(path, unit, pageLines))
+	}
+	return sources, nil
+}
+
+// Texts collects the texts of uploads (for the small rated sets of feedback / 2NRL).
+func (u *Uploads) Texts(names []string, unit string, pageLines int, wholeFile bool) ([]string, error) {
+	src, err := u.Source(names, unit, pageLines, wholeFile)
+	if err != nil {
+		return nil, err
+	}
+	texts, err := radixnet.CollectTexts(src)
+	if err != nil {
+		return nil, wrapSourceError(err)
 	}
 	return texts, nil
+}
+
+// wrapSourceError turns a streaming failure into a client error (a corrupt archive is a 400).
+func wrapSourceError(err error) error {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return err
+	}
+	return &apiError{400, err.Error()}
 }

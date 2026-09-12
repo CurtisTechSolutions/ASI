@@ -942,15 +942,18 @@ function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`)
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`),
 `json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`).
 
-Concurrency (`--workers`, default `runtime.NumCPU()`):
+Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
 
-* **Texts are the unit of work.** `SplitTexts(content, "lines" | "paragraphs" | "pages" | "file")` cuts a corpus;
-  pages are form-feed separated or every `--page-lines` lines. Encoding, tracing and counting fan one goroutine per
-  text out on a bounded pool (`parallelFor`).
-* **Counting is lock-free.** The counting pass traces every text through the frozen structure in parallel and bumps
-  `EdgeCount` / `Count` with `atomic.AddInt64`: no locks, no lost updates, so the result equals the sequential
-  run and the Python model exactly. The sliding window is applied afterwards in corpus order (its meaning *is*
-  the order of traversals).
+* **Texts are the unit of work.** `SplitTexts` / `StreamSplit` cut a corpus into lines, paragraphs, pages (form
+  feeds or every `--page-lines` lines) or one text per file. Encoding, tracing and counting fan **one goroutine per
+  text** out (`parallelFor` with workers 0 spawns per index; a positive cap gives a bounded pool).
+* **Counting is racy by design.** The counting pass traces every text of a chunk through the frozen structure in
+  parallel and bumps `EdgeCount` / `Count` with plain increments from all those goroutines; a collision on the same
+  counter loses an update, which is accepted (`Model.Exact` switches to `atomic.AddInt64`: no lost updates, the
+  result identical to the sequential run and to Python; `--exact` on the CLI and the server; the parity tests use
+  it). The race detector build tag (`race_on.go` / `race_off.go`) skips the racy test under `-race`. Measured on a
+  million-line corpus: 0.7 % of the traversals lost, and no speed-up over a small exact pool - the per-text
+  goroutines and the contended cache lines cost more than they save.
 * **Structure building is the one sequential phase.** Splits and merges reshape the shared trigram index and the
   adjacency maps; Go's runtime aborts on concurrent map writes, and a racy structure would not be reproducible.
   The walkable texts are detected in parallel (read lock) and only the novel ones are observed, in corpus order,
@@ -958,10 +961,26 @@ Concurrency (`--workers`, default `runtime.NumCPU()`):
   epochs never need the lock.
 * **Weights are lazy.** `RecordTraversals` and `AddReward` mark the parents whose rows changed; `Prepare()` (called
   by every cost reader) recomputes only those rows, or every row in parallel over the nodes after a structural
-  change (`parallelRanges`). Edge costs (`-log softmax`) are cached per version the same way. This removes the
-  Python implementation's per-text full recompute - the O(texts × edges) hot spot measured earlier.
+  change (`parallelRanges`, a goroutine per 64 nodes without a cap). Edge costs (`-log softmax`) are cached per
+  version the same way. This removes the Python implementation's per-text full recompute - the O(texts × edges)
+  hot spot measured earlier.
 * **Predictions run their two beams side by side** whenever the bottom cap is known up front; `ScoreAll` scores
   texts in parallel; the loss is a parallel reduction.
+
+Streaming and chunking (`source.go`): a `TextSource` yields texts in order and can be re-read for every pass -
+`SliceSource` (in memory), `FileSource` (line by line, any line length, BOM and invalid UTF-8 repaired),
+`ZipSource` (`archive/zip` opened from disk: the central directory only, entries streamed on demand through
+`WalkZip` with the Python module's skip rules and an 8 KB NUL sniff for binaries), `MultiSource`.
+`Model.passesSource` consumes a source in chunks of `TrainOptions.ChunkSize` texts (default 8192, `--chunk`,
+`chunk_size`): the structure pass walks the chunks once; every epoch re-streams them - encode, trace and count
+with one goroutine per text, the sliding window in corpus order, rewards per chunk - and accumulates per-edge
+traversal counts so the loss (`weightedCost`, Σ traversals × cost / total) needs no list of transitions. Memory is
+one chunk plus the graph: a million-line ZIP (39 MB unpacked) trained at a flat 90 MB peak RSS. The server's
+`POST /api/uploads` streams multipart parts and raw bodies into the upload directory (`Uploads.StoreStream`: the
+first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming its entries), the listing
+inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline texts and `Uploads.Source`
+(ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be parsed whole, are capped at
+512 MB.
 
 Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
 with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),

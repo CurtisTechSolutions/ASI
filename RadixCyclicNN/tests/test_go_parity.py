@@ -48,7 +48,9 @@ def tearDownModule():
 
 
 def go(*args, model, expect=0):
-    cmd = [BINARY, "--json", "--model", model, *[str(a) for a in args]]
+    # --exact: atomic counting, so the numbers are reproducible and comparable with Python
+    # (the default is one goroutine per text with plain, racy increments)
+    cmd = [BINARY, "--json", "--exact", "--model", model, *[str(a) for a in args]]
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
     if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
@@ -198,6 +200,38 @@ class TestGoParity(unittest.TestCase):
         a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
         assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
         self.assertEqual(a_doc["weights"]["window_events"], b_doc["weights"]["window_events"])
+
+    def test_zip_corpus_streams_through_identically(self):
+        """Both sides train from the same ZIP archive: Python unpacks it, Go streams it in chunks."""
+        import io
+        import zipfile
+
+        with open(CORPUS, encoding="utf-8") as fh:
+            lines = [l for l in fh.read().splitlines() if l.strip()]
+        third = len(lines) // 3
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("part1.txt", "\n".join(lines[:third]) + "\n")
+            z.writestr("more/part2.txt", "\n".join(lines[third:2 * third]) + "\n")
+            z.writestr("part3.txt", "\n".join(lines[2 * third:]) + "\n")
+            z.writestr("cover.png", b"\x89PNG\x00\x00")
+            z.writestr("__MACOSX/._part1.txt", b"meta")
+        archive = os.path.join(TMP.name, "corpus.zip")
+        with open(archive, "wb") as fh:
+            fh.write(buf.getvalue())
+        py_path = os.path.join(TMP.name, "zip_py.count.json")
+        go_path = os.path.join(TMP.name, "zip_go.count.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", archive, "--epochs", 2, model=py_path)
+        doc = go("--seed", 1, "train", "--data", archive, "--epochs", 2, "--chunk", 7, model=go_path)
+        self.assertEqual((doc["texts"], doc["chunk"], doc["records"][0]["chunks"]), (len(lines), 7, (len(lines) + 6) // 7))
+        a, b = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
+        self.assertEqual(a["edges"]["count"], b["edges"]["count"])
+        self.assertEqual(a["rng_state"], b["rng_state"])
+        self.assertEqual(a["weights"]["window_events"], b["weights"]["window_events"])
+        assert_close(self, a["edges"]["w"], b["edges"]["w"], 1e-12)
+        self.assertEqual(load_json(py_path)["meta"]["trained_texts"], load_json(go_path)["meta"]["trained_texts"])
+        # the same archive uploaded to the Python server style path and streamed by Go's server is covered below
 
     def test_go_specific_options(self):
         path = os.path.join(TMP.name, "paras.count.json")
@@ -371,6 +405,22 @@ class TestGoServer(unittest.TestCase):
         self.wait_job()
         status, later, _ = self.client.get("/api/status")
         self.assertEqual(later["trained_texts"] - after["trained_texts"], 3)
+        # a large archive streams in as a raw body and streams through training in chunks
+        big = io.BytesIO()
+        with zipfile.ZipFile(big, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            for part in range(3):
+                z.writestr(f"vol{part}.txt", "".join(f"the cat number {i % 53} sat on mat {(i * 7) % 61}\n" for i in range(8000)))
+        status, doc, _ = self.client.request(
+            "POST", "/api/uploads?name=big.zip", raw=big.getvalue(), headers={"Content-Type": "application/zip"},
+        )
+        self.assertEqual(status, 201, doc)
+        self.assertEqual((doc["uploads"][0]["files"], doc["uploads"][0]["lines"]), (3, 24000))
+        status, doc, _ = self.client.post("/api/train", {"files": ["big.zip"], "epochs": 1, "chunk_size": 4096})
+        self.assertEqual(status, 202, doc)
+        job = self.wait_job()
+        self.assertEqual((job["state"], job["history"][0]["chunks"]), ("done", 6))
+        status, final, _ = self.client.get("/api/status")
+        self.assertEqual(final["trained_texts"] - later["trained_texts"], 24000)
         # checkpoints in the Python manager's layout
         status, ck, _ = self.client.post("/api/checkpoints/save", {"tag": "manual"})
         self.assertEqual(status, 200, ck)
@@ -383,7 +433,7 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual([r["name"] for r in manager.list()], [ck["name"]])
         restored = manager.load(ck["name"])
         self.assertEqual(restored.kind, "count")
-        self.assertEqual(restored.stats()["epochs_total"], later["epochs_total"])
+        self.assertEqual(restored.stats()["epochs_total"], final["epochs_total"])
         status, doc, _ = self.client.post("/api/uploads/delete", {"name": "notes.txt"})
         self.assertEqual(status, 200)
 

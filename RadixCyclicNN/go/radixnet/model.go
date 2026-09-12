@@ -16,11 +16,19 @@ var logUnknown = math.Log(UnknownProb)
 const maxLogPerplexity = 700.0
 
 // Model is the count / reward model: a Graph plus training history and metadata.
+//
+// Training spawns one goroutine per text (Workers 0 = no cap).  The counters
+// are bumped with plain increments from all those goroutines at once: a data
+// race by design - two goroutines hitting the same edge in the same instant
+// can lose an update - accepted for speed.  Exact switches the increments to
+// atomics, which never lose an update and make the result identical to the
+// sequential run and to the Python implementation (the parity tests use it).
 type Model struct {
 	G       *Graph
 	History []map[string]any
 	Meta    map[string]any
 	Workers int
+	Exact   bool
 }
 
 // NewModel creates an untrained model.
@@ -44,11 +52,20 @@ func newModelWithGraph(g *Graph) *Model {
 // Kind is the model kind shared with the Python implementation.
 func (m *Model) Kind() string { return "count" }
 
+// workers is the goroutine cap: Model.Workers, else the package default (0 = unbounded).
 func (m *Model) workers() int {
 	if m.Workers > 0 {
 		return m.Workers
 	}
 	return Workers
+}
+
+// Counting reports how the counters are bumped: "racy" (plain increments, lost updates possible) or "exact" (atomic).
+func (m *Model) Counting() string {
+	if m.Exact {
+		return "exact"
+	}
+	return "racy"
 }
 
 // -- meta helpers -----------------------------------------------------------------------
@@ -158,6 +175,10 @@ func (m *Model) traceAll(grams [][]string) ([][]Transition, [][]int, error) {
 
 // -- training ------------------------------------------------------------------------------------
 
+// DefaultChunkSize is how many texts a pass takes from its source at a time:
+// the corpus never has to fit in memory, only one chunk (and the graph).
+const DefaultChunkSize = 8192
+
 // TrainOptions configure the passes over the texts.
 type TrainOptions struct {
 	Epochs       int
@@ -165,6 +186,8 @@ type TrainOptions struct {
 	Phase        string
 	Progress     func(record map[string]any)
 	Stop         func() bool
+	// ChunkSize is the number of texts streamed from the source per chunk (0 = DefaultChunkSize).
+	ChunkSize int
 }
 
 // DefaultTrainOptions mirror the Python defaults (5 epochs, compression after every epoch).
@@ -172,7 +195,13 @@ func DefaultTrainOptions() TrainOptions { return TrainOptions{Epochs: 5, AutoCom
 
 // Train counts one traversal of every text's path per epoch.
 func (m *Model) Train(texts []string, opts TrainOptions) ([]map[string]any, error) {
-	return m.passes(texts, opts, true, 0.0)
+	return m.passesSource(SliceSource(texts), opts, true, 0.0)
+}
+
+// TrainSource is Train over a streaming source (a massive ZIP archive, a file,
+// several of them): the source is re-read for every pass, chunk by chunk.
+func (m *Model) TrainSource(src TextSource, opts TrainOptions) ([]map[string]any, error) {
+	return m.passesSource(src, opts, true, 0.0)
 }
 
 // Reward (thumbs up): epochs passes that traverse and reward (+strength) every path.
@@ -233,25 +262,65 @@ func (m *Model) TwoNRL(bad, good []string, negEpochs, posEpochs int, strength fl
 }
 
 func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward float64) ([]map[string]any, error) {
+	return m.passesSource(SliceSource(texts), opts, count, reward)
+}
+
+// chunkEach streams a source in chunks of at most size texts (texts shorter
+// than a trigram are dropped and counted) and calls fn for every chunk.
+func chunkEach(src TextSource, size int, fn func(chunk []string) error) (texts, chars int64, skippedShort int, err error) {
+	if size <= 0 {
+		size = DefaultChunkSize
+	}
+	chunk := make([]string, 0, size)
+	err = src.Each(func(t string) error {
+		if runeLen(t) < Window {
+			skippedShort++
+			return nil
+		}
+		texts++
+		chars += int64(runeLen(t))
+		chunk = append(chunk, t)
+		if len(chunk) >= size {
+			if cerr := fn(chunk); cerr != nil {
+				return cerr
+			}
+			chunk = make([]string, 0, size)
+		}
+		return nil
+	})
+	if err == nil && len(chunk) > 0 {
+		err = fn(chunk)
+	}
+	return texts, chars, skippedShort, err
+}
+
+// passesSource runs opts.Epochs passes over a streaming source: first a
+// structure pass (chunk by chunk: the walkable texts are detected in parallel,
+// the novel ones observed in corpus order), then per epoch a counting pass
+// (one goroutine per text of a chunk traces it and bumps the counters), the
+// sliding window in corpus order, rewards, and the loss as the traversal-
+// weighted mean edge cost - so a corpus of any size streams through in chunks.
+func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, reward float64) ([]map[string]any, error) {
 	if opts.Epochs < 0 {
 		return nil, fmt.Errorf("epochs must be >= 0, got %d", opts.Epochs)
 	}
-	texts, skippedShort := cleanTexts(texts)
 	g := m.G
 	records := []map[string]any{}
-	grams := m.encodeAll(texts)
-	if count {
-		m.metaAddInt("trained_texts", int64(len(texts)))
-		chars := int64(0)
-		for _, t := range texts {
-			chars += int64(runeLen(t))
-		}
-		m.metaAddInt("trained_chars", chars)
+	chunkSize := opts.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
 	}
 	// build the structure first (no counting) and compress it, so every pass -
 	// the first included - walks the same transitions
-	if err := m.register(grams); err != nil {
+	nTexts, nChars, skippedShort, err := chunkEach(src, chunkSize, func(chunk []string) error {
+		return m.register(m.encodeAll(chunk))
+	})
+	if err != nil {
 		return nil, err
+	}
+	if count {
+		m.metaAddInt("trained_texts", nTexts)
+		m.metaAddInt("trained_chars", nChars)
 	}
 	pendingMerges := 0
 	if opts.AutoCompress {
@@ -259,44 +328,78 @@ func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward flo
 	}
 	for epoch := 0; epoch < opts.Epochs; epoch++ {
 		t0 := time.Now()
-		perText, paths, err := m.traceAll(grams)
+		traversed := make([]int64, len(g.EdgeW))
+		total := int64(0)
+		chunks := 0
+		_, _, _, err := chunkEach(src, chunkSize, func(chunk []string) error {
+			chunks++
+			perText, paths, err := m.traceAll(m.encodeAll(chunk))
+			if err != nil {
+				return err
+			}
+			if len(g.EdgeW) > len(traversed) { // a text needed a split after all: grow the per-epoch counters
+				grown := make([]int64, len(g.EdgeW))
+				copy(grown, traversed)
+				traversed = grown
+			}
+			edges := make([]int, 0, len(chunk)*8)
+			for _, tr := range perText {
+				for _, t := range tr {
+					edges = append(edges, t.E)
+				}
+			}
+			total += int64(len(edges))
+			bump := func(i int) {
+				for _, t := range perText[i] {
+					traversed[t.E]++
+				}
+				if count {
+					for _, t := range perText[i] {
+						g.EdgeCount[t.E]++
+					}
+					for _, n := range paths[i] {
+						g.Count[n]++
+					}
+				}
+			}
+			if m.Exact {
+				bump = func(i int) {
+					for _, t := range perText[i] {
+						atomic.AddInt64(&traversed[t.E], 1)
+					}
+					if count {
+						for _, t := range perText[i] {
+							atomic.AddInt64(&g.EdgeCount[t.E], 1)
+						}
+						for _, n := range paths[i] {
+							atomic.AddInt64(&g.Count[n], 1)
+						}
+					}
+				}
+			}
+			// one goroutine per text; plain increments race by design unless Exact
+			parallelFor(len(perText), m.workers(), bump)
+			if count {
+				g.RecordTraversals(edges) // the sliding window follows the corpus order
+			}
+			if reward != 0 {
+				g.AddReward(edges, reward)
+			}
+			return nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		total := 0
-		for _, tr := range perText {
-			total += len(tr)
-		}
-		edges := make([]int, 0, total)
-		for _, tr := range perText {
-			for _, t := range tr {
-				edges = append(edges, t.E)
-			}
-		}
-		if count {
-			// lock-free counting: atomic increments from the worker goroutines
-			parallelFor(len(perText), m.workers(), func(i int) {
-				for _, t := range perText[i] {
-					atomic.AddInt64(&g.EdgeCount[t.E], 1)
-				}
-				for _, n := range paths[i] {
-					atomic.AddInt64(&g.Count[n], 1)
-				}
-			})
-			// the sliding window follows the corpus order
-			g.RecordTraversals(edges)
-		}
 		if reward != 0 {
-			g.AddReward(edges, reward)
 			m.metaAddInt("feedback_passes", 1)
 			if reward > 0 {
-				m.metaAddFloat("rewards_total", reward*float64(len(edges)))
+				m.metaAddFloat("rewards_total", reward*float64(total))
 			} else {
-				m.metaAddFloat("penalties_total", -reward*float64(len(edges)))
+				m.metaAddFloat("penalties_total", -reward*float64(total))
 			}
 		}
 		g.Prepare()
-		loss := m.meanCost(edges)
+		loss := m.weightedCost(traversed, total)
 		merges := pendingMerges
 		pendingMerges = 0
 		if opts.AutoCompress {
@@ -313,6 +416,7 @@ func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward flo
 			"compression_ratio": g.CompressionRatio(),
 			"merges":            merges,
 			"transitions":       total,
+			"chunks":            chunks,
 			"seconds":           time.Since(t0).Seconds(),
 			"skipped_short":     skippedShort,
 			"traversed":         count,
@@ -333,39 +437,44 @@ func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward flo
 	return records, nil
 }
 
-// meanCost is the mean -log P of the traversed edges under the current weights (parallel reduction).
-func (m *Model) meanCost(edges []int) float64 {
-	if len(edges) == 0 {
+// weightedCost is the mean cost of the pass's traversals: every edge's cost
+// times how often the pass traversed it (a parallel reduction over the edges).
+func (m *Model) weightedCost(traversed []int64, total int64) float64 {
+	if total == 0 {
 		return 0
 	}
 	g := m.G
-	workers := m.workers()
-	if len(edges) < 4096 || workers < 2 {
-		total := 0.0
-		for _, e := range edges {
-			total += g.edgeCost[e]
+	n := len(traversed)
+	if n < 4096 || m.workers() == 1 {
+		sum := 0.0
+		for e, c := range traversed {
+			if c != 0 {
+				sum += float64(c) * g.edgeCost[e]
+			}
 		}
-		return total / float64(len(edges))
+		return sum / float64(total)
 	}
-	chunk := (len(edges) + workers - 1) / workers
-	partial := make([]float64, workers)
-	parallelFor(workers, workers, func(w int) {
-		lo := w * chunk
-		hi := lo + chunk
-		if hi > len(edges) {
-			hi = len(edges)
+	chunk := 4096
+	blocks := (n + chunk - 1) / chunk
+	partial := make([]float64, blocks)
+	parallelFor(blocks, m.workers(), func(b int) {
+		lo, hi := b*chunk, (b+1)*chunk
+		if hi > n {
+			hi = n
 		}
 		s := 0.0
-		for _, e := range edges[lo:hi] {
-			s += g.edgeCost[e]
+		for e := lo; e < hi; e++ {
+			if c := traversed[e]; c != 0 {
+				s += float64(c) * g.edgeCost[e]
+			}
 		}
-		partial[w] = s
+		partial[b] = s
 	})
-	total := 0.0
+	sum := 0.0
 	for _, s := range partial {
-		total += s
+		sum += s
 	}
-	return total / float64(len(edges))
+	return sum / float64(total)
 }
 
 // Invert flips the sign of every reward.
@@ -863,7 +972,8 @@ func (m *Model) Stats() map[string]any {
 		"compression_ratio":    g.CompressionRatio(),
 		"inverted":             g.Inverted,
 		"backend":              "go",
-		"device":               fmt.Sprintf("cpu x%d", m.workers()),
+		"device":               m.deviceLabel(),
+		"counting":             m.Counting(),
 		"epochs_total":         m.metaInt("epochs_total"),
 		"trained_chars":        m.metaInt("trained_chars"),
 		"trained_texts":        m.metaInt("trained_texts"),
@@ -883,6 +993,14 @@ func (m *Model) Stats() map[string]any {
 		"total_traversals":     g.TotalTraversals,
 		"window_traversals":    g.WindowTraversals(),
 	}
+}
+
+// deviceLabel describes the goroutine pool for stats: "cpu" with the cap or "cpu (one goroutine per text)".
+func (m *Model) deviceLabel() string {
+	if w := m.workers(); w > 0 {
+		return fmt.Sprintf("cpu x%d", w)
+	}
+	return "cpu (one goroutine per text)"
 }
 
 // SortedKeys is a small helper for deterministic output of maps.

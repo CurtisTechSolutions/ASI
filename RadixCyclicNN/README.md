@@ -27,7 +27,7 @@ and an optional GPU backend (torch) are built in.
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
-| Go port of the count / reward model | `go/`: the same model in Go with goroutines fanned out over the texts (lines, paragraphs or pages), lock-free atomic counting, parallel weight and cost recomputes and the two beams of a prediction side by side; model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
+| Go port of the count / reward model | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
@@ -547,22 +547,53 @@ python -m radixnet --model model.count.json info    # the Python side reads the 
 
 Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`,
 `weights`, `info`, `converse`, `serve`, `version`; global options `--model`,
-`--json`, `--seed`, `--workers N` (goroutines, default the CPU count), `--out`.
-Where the goroutines go:
+`--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
+none), `--exact` (atomic counting), `--out`. Where the goroutines go:
 
 | phase | concurrency |
 |---|---|
-| reading a corpus | `--split lines\|paragraphs\|pages\|file` decides what one text is (`--page-lines` cuts pages when a file has no form feeds); every text is one unit of work |
-| encoding, tracing texts through the structure, counting | one goroutine per text on a pool of `--workers`; counts are lock-free `atomic` increments, so the result is exactly the sequential one (and Python's) |
-| building the structure | the one sequential phase: node splits reshape a shared radix index; texts that already walk through the graph are detected in parallel and skipped |
-| the sliding window | applied in corpus order after the parallel pass (its semantics are the order of traversals) |
-| weights and edge costs | recomputed lazily, only the touched rows after feedback; a full recompute after structural changes runs in parallel over the nodes |
-| loss, scoring many texts | parallel reduction / one goroutine per text |
+| reading a corpus | `--split lines\|paragraphs\|pages\|file` decides what one text is (`--page-lines` cuts pages when a file has no form feeds); every text is one unit of work. Files and ZIP archives are **streamed**, never loaded whole: `--chunk N` (default 8192) texts at a time |
+| encoding, tracing texts through the structure, counting | **one goroutine per text** of a chunk (no pool unless `--workers N`); the counters are bumped with plain increments from all of them at once - racy by design, a collision loses an update. `--exact` uses atomic increments instead: no lost updates, the result identical to the sequential run and to Python |
+| building the structure | the one sequential phase: node splits reshape a shared radix index, and Go aborts the process on concurrent map writes, so this is not a race that can be ignored; texts that already walk through the graph are detected in parallel and skipped |
+| the sliding window | applied in corpus order after each chunk's parallel pass (its semantics are the order of traversals); exact in both modes |
+| weights and edge costs | recomputed lazily, only the touched rows after feedback; a full recompute after structural changes runs on a goroutine per 64 nodes |
+| loss, scoring many texts | parallel reductions / one goroutine per text; the loss is the traversal-weighted mean edge cost, so it needs no list of transitions |
 | prediction | the top and the bottom beam run side by side |
 
-The lazy weights remove the Python implementation's per-text full recompute:
-training 3,000 texts for 2 epochs takes 0.06 s in Go against 38 s in Python
-on this machine (30,000 texts: 0.45 s), with byte-identical results.
+Measured on this 4-core machine (2 epochs):
+
+| corpus | mode | time | peak RSS |
+|---|---|---|---|
+| 1,000,000 lines in a ZIP (39 MB unpacked) | one goroutine per text, racy | 17.2 s | 90 MB |
+| same | `--exact` | 15.7 s | 90 MB |
+| 30,000 lines | one goroutine per text, racy | 0.89 s | |
+| same | `--exact --workers 4` | 0.60 s | |
+| 3,000 lines, Python implementation | | 38 s | |
+
+Racy counting lost 0.7 % of the traversals on the million-line corpus and was
+not faster than a small exact pool here: spawning a goroutine per text and the
+cache-line contention on shared counters cost more than they save. It is the
+default because it was asked for; `--exact --workers 4` is the reproducible
+choice and the faster one on this hardware. The structure, the window and the
+weights' consistency with whatever was counted are exact in both modes.
+
+### Massive ZIP archives: streaming and chunking
+
+Nothing in the Go path holds a corpus in memory. The CLI streams `--data`
+files - a ZIP archive entry by entry (directories, macOS metadata, system
+files, nested archives, encrypted, binary and empty entries skipped like the
+Python `archive` module), a text file line by line, any line length - and the
+model consumes the stream in chunks of `--chunk` texts: the structure pass
+walks the chunks once (novel texts observed in corpus order, walkable ones
+skipped in parallel), every epoch re-streams the corpus chunk by chunk (one
+goroutine per text, the window in order, rewards per chunk) and the loss is
+computed from per-edge traversal counts, so memory is one chunk plus the
+graph whatever the archive's size. The server does the same: `POST
+/api/uploads` streams multipart parts and raw bodies straight into the upload
+directory (an archive is validated by streaming its entries; the JSON forms
+are capped at 512 MB), the listing inspects archives by streaming, and `POST
+/api/train` with `files` (plus the optional `chunk_size`) streams them through
+the job; the frontend needs no change.
 
 ### The Go HTTP server and the frontend
 
@@ -588,14 +619,14 @@ Checkpoints and Graph work unchanged.
 
 | endpoint | Go server |
 |---|---|
-| `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers`, `goroutines` |
-| `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress}` -> a job; learning rates are accepted and ignored |
+| `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers` (0 = one goroutine per text), `goroutines`, `counting` (`racy` \| `exact`) |
+| `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress, chunk_size}` -> a job; uploads stream through in chunks whatever their size; learning rates are accepted and ignored |
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
 | `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward) |
 | `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
-| `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives, unpacked in memory with the same rules |
+| `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
 | `/api/evolve/*`, `/api/ollama/*`, `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 

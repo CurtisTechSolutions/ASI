@@ -99,9 +99,10 @@ export default function App() {
           {engine === "go" ? (
             <span
               className="badge engine"
-              title="This API is served by the Go implementation of the count / reward model (radixnet-count serve): goroutines over the texts, lock-free counting"
+              title="This API is served by the Go implementation of the count / reward model (radixnet-count serve): a goroutine per text, counters bumped without locks (racy by default, --exact for reproducible counts)"
             >
-              Go engine{status && status.workers ? ` · ${status.workers} goroutines` : ""}
+              Go engine · {status && status.workers ? `${status.workers} goroutines` : "one goroutine per text"}
+              {status && status.counting === "racy" ? " · racy counting" : ""}
             </span>
           ) : null}
         </div>

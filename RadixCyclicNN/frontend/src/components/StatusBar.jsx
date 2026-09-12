@@ -93,8 +93,12 @@ export default function StatusBar({ onStatus }) {
         </b>
       </span>
       {s.engine === "go" ? (
-        <span className="stat" title="The Go server: goroutines fanned out over the texts, lock-free atomic counting">
-          engine <b>go</b> · workers <b>{fmtInt(s.workers)}</b> · goroutines <b>{fmtInt(s.goroutines)}</b>
+        <span
+          className="stat"
+          title="The Go server: one goroutine per text (or a capped pool), counters bumped without locks; racy counting may lose an update, exact uses atomics"
+        >
+          engine <b>go</b> · workers <b>{s.workers ? fmtInt(s.workers) : "∞"}</b> · goroutines <b>{fmtInt(s.goroutines)}</b>
+          {s.counting ? <> · counting <b>{String(s.counting)}</b></> : null}
         </span>
       ) : (
         <span className="stat" title="Optional accelerator availability on the server">

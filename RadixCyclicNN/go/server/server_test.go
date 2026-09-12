@@ -26,7 +26,7 @@ type env struct {
 func newEnv(t *testing.T, withDirs bool) *env {
 	t.Helper()
 	dir := t.TempDir()
-	opts := Options{ModelPath: filepath.Join(dir, "model.count.json"), Seed: 1, Workers: 4, Quiet: true}
+	opts := Options{ModelPath: filepath.Join(dir, "model.count.json"), Seed: 1, Workers: 0, Exact: true, Quiet: true}
 	if withDirs {
 		opts.UploadDir = filepath.Join(dir, "uploads")
 		opts.CheckpointDir = filepath.Join(dir, "ckpt")
@@ -128,6 +128,9 @@ func TestHealthStatusModel(t *testing.T) {
 		"backends", "model_path", "checkpoint_dir", "upload_dir", "engine", "workers", "total_traversals", "window_traversals", "window")
 	if st["kind"] != "count" || st["engine"] != "go" || st["job"] != nil || st["backends"].(map[string]any)["default"] != "go" {
 		t.Fatalf("status content: %v", st)
+	}
+	if st["counting"] != "exact" || st["workers"] != 0.0 || h["counting"] != "exact" {
+		t.Fatalf("counting / workers in status and health: %v %v", st["counting"], h["counting"])
 	}
 	status, m := e.get("/api/model")
 	if status != 200 || m["kind"] != "count" || len(m["kinds"].([]any)) != 1 || m["weights"] == nil {
@@ -640,7 +643,7 @@ func TestStaticAndErrors(t *testing.T) {
 		t.Fatalf("schedule stub: %d %v", status, doc)
 	}
 	// no frontend directory: a help page
-	svc, _ := NewService(Options{Seed: 1, Workers: 2, Quiet: true})
+	svc, _ := NewService(Options{Seed: 1, Workers: 2, Exact: true, Quiet: true})
 	ts := httptest.NewServer(NewHandler(svc, "", true, nil))
 	defer ts.Close()
 	resp, err := http.Get(ts.URL + "/")
@@ -656,5 +659,82 @@ func TestStaticAndErrors(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("no frontend, other path: %d", resp.StatusCode)
+	}
+}
+
+func TestStreamedArchiveUploadAndChunkedTraining(t *testing.T) {
+	e := newEnv(t, true)
+	// a multi-megabyte archive streamed as multipart: never buffered by the handler
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	total := 0
+	for part := 0; part < 4; part++ {
+		w, _ := zw.Create(fmt.Sprintf("book/chapter-%d.txt", part))
+		for i := 0; i < 15000; i++ {
+			fmt.Fprintf(w, "the cat number %d sat on mat %d\n", i%97, (i*7)%89)
+			total++
+		}
+	}
+	w, _ := zw.Create("cover.png")
+	w.Write([]byte("\x89PNG\x00\x00\x00"))
+	zw.Close()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "big.zip")
+	part.Write(buf.Bytes())
+	mw.Close()
+	status, doc, _ := e.do("POST", "/api/uploads", body.Bytes(), map[string]string{"Content-Type": mw.FormDataContentType()})
+	if status != 201 {
+		t.Fatalf("streamed upload: %d %v", status, doc)
+	}
+	rec := doc["uploads"].([]any)[0].(map[string]any)
+	if rec["archive"] != true || rec["files"] != 4.0 || rec["lines"] != float64(total) || rec["skipped"] != 1.0 {
+		t.Fatalf("record: %v", rec)
+	}
+	entries, _ := os.ReadDir(filepath.Join(e.dir, "uploads"))
+	for _, en := range entries {
+		if strings.HasSuffix(en.Name(), ".part") {
+			t.Fatalf("temporary file left behind: %s", en.Name())
+		}
+	}
+	// train from it in small chunks: the archive streams through the job
+	status, doc = e.post("/api/train", map[string]any{"files": []string{"big.zip"}, "epochs": 1, "chunk_size": 5000})
+	if status != 202 {
+		t.Fatalf("train from the archive: %d %v", status, doc)
+	}
+	job := e.waitJob()
+	if job["state"] != "done" {
+		t.Fatalf("job: %v", job)
+	}
+	recEpoch := job["history"].([]any)[0].(map[string]any)
+	if recEpoch["chunks"] != float64((total+4999)/5000) {
+		t.Fatalf("chunks: %v", recEpoch["chunks"])
+	}
+	_, st := e.get("/api/status")
+	if st["trained_texts"] != float64(total) {
+		t.Fatalf("trained_texts %v, want %d", st["trained_texts"], total)
+	}
+	// a raw-body archive without any text entry is refused and leaves nothing behind
+	var empty bytes.Buffer
+	ez := zip.NewWriter(&empty)
+	ew, _ := ez.Create("x.bin")
+	ew.Write([]byte{0, 1, 2})
+	ez.Close()
+	status, doc, _ = e.do("POST", "/api/uploads?name=nothing.zip", empty.Bytes(), map[string]string{"Content-Type": "application/zip"})
+	if status != 400 || !strings.Contains(doc["error"].(string), "no text files") {
+		t.Fatalf("empty archive: %d %v", status, doc)
+	}
+	status, doc, _ = e.do("POST", "/api/uploads?name=corrupt.zip", []byte("PK\x03\x04garbage"), map[string]string{"Content-Type": "application/zip"})
+	if status != 400 {
+		t.Fatalf("corrupt archive: %d %v", status, doc)
+	}
+	entries, _ = os.ReadDir(filepath.Join(e.dir, "uploads"))
+	if len(entries) != 1 {
+		t.Fatalf("upload dir must hold the one good archive, has %d entries", len(entries))
+	}
+	// chunk_size must be positive
+	status, doc = e.post("/api/train", map[string]any{"files": []string{"big.zip"}, "chunk_size": 0})
+	if status != 400 {
+		t.Fatalf("chunk_size 0: %d %v", status, doc)
 	}
 }

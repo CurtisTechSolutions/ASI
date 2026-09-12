@@ -111,6 +111,7 @@ type Options struct {
 	ModelPath     string
 	Seed          int64
 	Workers       int
+	Exact         bool
 	UploadDir     string
 	CheckpointDir string
 	Keep          int
@@ -127,6 +128,7 @@ type Service struct {
 	modelPath string
 	seed      int64
 	workers   int
+	exact     bool
 	jobMu     sync.Mutex
 	job       *Job
 	jobIDs    int
@@ -141,8 +143,8 @@ type Service struct {
 // NewService loads the model at opts.ModelPath when it exists, else creates a fresh one.
 func NewService(opts Options) (*Service, error) {
 	workers := opts.Workers
-	if workers < 1 {
-		workers = runtime.NumCPU()
+	if workers < 0 {
+		workers = 0
 	}
 	radixnet.Workers = workers
 	var m *radixnet.Model
@@ -165,7 +167,8 @@ func NewService(opts Options) (*Service, error) {
 	}
 	m.Workers = workers
 	m.G.Workers = workers
-	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, started: time.Now(), logf: opts.Log}
+	m.Exact = opts.Exact
+	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact, started: time.Now(), logf: opts.Log}
 	if opts.UploadDir != "" {
 		s.uploads = NewUploads(opts.UploadDir)
 	}
@@ -270,14 +273,20 @@ type TrainRequest struct {
 	AutoCompress bool
 }
 
-// StartTrain starts a train job.
+// StartTrain starts a train job over texts held in memory.
 func (s *Service) StartTrain(texts []string, epochs int, autoCompress bool) (map[string]any, error) {
+	return s.StartTrainSource(radixnet.SliceSource(texts), epochs, autoCompress, 0)
+}
+
+// StartTrainSource starts a train job over a streaming source (uploads of any
+// size stream through in chunks of chunkSize texts; 0 = the default).
+func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int) (map[string]any, error) {
 	if epochs < 0 {
 		return nil, badRequest("epochs must be >= 0, got %d", epochs)
 	}
 	return s.startJob("train", func(job *Job, progress func(map[string]any), stop func() bool) error {
-		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop}
-		_, err := s.model.Train(texts, opts)
+		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize}
+		_, err := s.model.TrainSource(src, opts)
 		return err
 	})
 }
@@ -410,8 +419,9 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["upload_dir"] = uploadDir
 	stats["ollama"] = nil
 	stats["engine"] = "go"
-	stats["workers"] = s.workers
+	stats["workers"] = s.workers // 0 = no cap: one goroutine per text
 	stats["goroutines"] = runtime.NumGoroutine()
+	stats["counting"] = map[bool]string{true: "exact", false: "racy"}[s.exact]
 	return stats, nil
 }
 
@@ -513,6 +523,7 @@ func (s *Service) Save(path string) (map[string]any, error) {
 func (s *Service) replaceModel(m *radixnet.Model) (map[string]any, error) {
 	m.Workers = s.workers
 	m.G.Workers = s.workers
+	m.Exact = s.exact
 	out, err := s.mutate(func(_ *radixnet.Model) (any, error) {
 		s.model = m
 		return m.Stats(), nil
@@ -754,4 +765,12 @@ func (s *Service) UploadTexts(names []string, unit string, pageLines int, wholeF
 		return nil, badRequest("uploads are disabled: start the server with --upload-dir")
 	}
 	return s.uploads.Texts(names, unit, pageLines, wholeFile)
+}
+
+// UploadSource is a streaming source over uploads (400 when uploads are disabled).
+func (s *Service) UploadSource(names []string, unit string, pageLines int, wholeFile bool) (radixnet.TextSource, error) {
+	if s.uploads == nil {
+		return nil, badRequest("uploads are disabled: start the server with --upload-dir")
+	}
+	return s.uploads.Source(names, unit, pageLines, wholeFile)
 }

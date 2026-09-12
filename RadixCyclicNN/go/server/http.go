@@ -217,7 +217,7 @@ func init() {
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, window}")
 	route("POST", "/api/train", rTrain)
-	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress}")
+	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
 	doc("GET", "/api/job", "status of the current / last job")
 	route("POST", "/api/job/stop", rJobStop)
@@ -272,7 +272,7 @@ func rIndex(rq *request) (int, any, error) {
 }
 
 func rHealth(rq *request) (int, any, error) {
-	return 200, map[string]any{"ok": true, "version": Version, "engine": "go", "workers": rq.svc.workers}, nil
+	return 200, map[string]any{"ok": true, "version": Version, "engine": "go", "workers": rq.svc.workers, "counting": map[bool]string{true: "exact", false: "racy"}[rq.svc.exact]}, nil
 }
 
 func rStatus(rq *request) (int, any, error) {
@@ -395,6 +395,56 @@ func splitOptions(f fields) (string, int, error) {
 	return unit, pageLines, nil
 }
 
+// trainSource is the streaming source of a training request: inline texts
+// (already in memory) followed by the selected uploads, which stream from
+// disk chunk by chunk however large they are.
+func trainSource(rq *request, unit string, pageLines int, wholeFile bool) (radixnet.TextSource, error) {
+	names, err := rq.f.names("files")
+	if err != nil {
+		return nil, err
+	}
+	var inline []string
+	if v, ok := rq.f.lookup("text"); ok && unit != "lines" {
+		blob, isStr := v.(string)
+		if !isStr {
+			return nil, badRequest("'text' must be a string (got %s %v)", jsonType(v), v)
+		}
+		inline = radixnet.SplitTexts(blob, unit, pageLines)
+		more, err := rq.f.textsOptional("texts", "\x00")
+		if err != nil {
+			return nil, err
+		}
+		inline = append(more, inline...)
+	} else if inline, err = rq.f.textsOptional("texts", "text"); err != nil {
+		return nil, err
+	}
+	if len(inline) == 0 && len(names) == 0 {
+		if rq.f.present("texts") || rq.f.present("text") {
+			return nil, badRequest("'texts' contains no texts")
+		}
+		return nil, badRequest("missing field 'texts' (list of strings), 'text' (string, one text per line) or 'files' (list of upload names)")
+	}
+	src := radixnet.MultiSource{radixnet.SliceSource(inline)}
+	if len(names) > 0 {
+		files, err := rq.svc.UploadSource(names, unit, pageLines, wholeFile)
+		if err != nil {
+			return nil, err
+		}
+		src = append(src, files)
+		// an archive of any size may still hold no usable text: probe the first text before starting a job
+		n := 0
+		if err := files.Each(func(string) error { n++; return errStop }); err != nil && !errors.Is(err, errStop) {
+			return nil, wrapSourceError(err)
+		}
+		if n == 0 && len(inline) == 0 {
+			return nil, badRequest("'files' contains no texts")
+		}
+	}
+	return src, nil
+}
+
+var errStop = errors.New("stop")
+
 func rTrain(rq *request) (int, any, error) {
 	wholeFile, err := rq.f.flag("whole_file", false)
 	if err != nil {
@@ -404,11 +454,15 @@ func rTrain(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	texts, err := textsAndFiles(rq, "texts", "text", "files", unit, pageLines, wholeFile)
+	src, err := trainSource(rq, unit, pageLines, wholeFile)
 	if err != nil {
 		return 0, nil, err
 	}
 	epochs, _, err := rq.f.integer("epochs", 5, intp(0))
+	if err != nil {
+		return 0, nil, err
+	}
+	chunkSize, _, err := rq.f.integer("chunk_size", 0, intp(1))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -425,7 +479,7 @@ func rTrain(rq *request) (int, any, error) {
 	if _, _, err := rq.f.integer("batch_size", 256, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	job, err := rq.svc.StartTrain(texts, epochs, autoCompress)
+	job, err := rq.svc.StartTrainSource(src, epochs, autoCompress, chunkSize)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -836,109 +890,66 @@ type uploadPayload struct {
 }
 
 func uploadFiles(rq *request) ([]uploadPayload, error) {
-	ct, _, _ := mime.ParseMediaType(rq.header.Get("Content-Type"))
-	if ct == "multipart/form-data" {
-		return rq.multipartFiles()
+	f := fields{}
+	if len(strings.TrimSpace(string(rq.body))) > 0 {
+		var body map[string]any
+		if err := json.Unmarshal(rq.body, &body); err != nil {
+			return nil, badRequest("request body is not a JSON object")
+		}
+		f.body = body
 	}
-	if ct == "application/json" || (ct == "" && len(rq.query["name"]) == 0) {
-		f := fields{}
-		if len(strings.TrimSpace(string(rq.body))) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(rq.body, &body); err != nil {
-				return nil, badRequest("request body is not a JSON object")
-			}
-			f.body = body
-		}
-		one := func(f fields) (uploadPayload, error) {
-			name, err := f.text("name", nil)
-			if err != nil {
-				return uploadPayload{}, err
-			}
-			if v, ok := f.lookup("content_base64"); ok {
-				s, isStr := v.(string)
-				if !isStr {
-					return uploadPayload{}, badRequest("'content_base64' must be a string")
-				}
-				data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
-				if err != nil {
-					return uploadPayload{}, badRequest("'content_base64' is not valid base64: %v", err)
-				}
-				return uploadPayload{name: name, data: data}, nil
-			}
-			content, err := f.text("content", nil)
-			if err != nil {
-				return uploadPayload{}, badRequest("missing field 'content' (string) or 'content_base64'")
-			}
-			return uploadPayload{name: name, text: &content}, nil
-		}
-		if v, ok := f.lookup("files"); ok {
-			items, isList := v.([]any)
-			if !isList || len(items) == 0 {
-				return nil, badRequest("'files' must be a non-empty list of {name, content | content_base64} objects")
-			}
-			out := make([]uploadPayload, 0, len(items))
-			for i, item := range items {
-				obj, isObj := item.(map[string]any)
-				if !isObj {
-					return nil, badRequest("'files[%d]' must be an object with 'name' and 'content' (or 'content_base64')", i)
-				}
-				p, err := one(fields{obj})
-				if err != nil {
-					return nil, err
-				}
-				out = append(out, p)
-			}
-			return out, nil
-		}
-		p, err := one(f)
+	one := func(f fields) (uploadPayload, error) {
+		name, err := f.text("name", nil)
 		if err != nil {
-			return nil, err
+			return uploadPayload{}, err
 		}
-		return []uploadPayload{p}, nil
+		if v, ok := f.lookup("content_base64"); ok {
+			s, isStr := v.(string)
+			if !isStr {
+				return uploadPayload{}, badRequest("'content_base64' must be a string")
+			}
+			data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+			if err != nil {
+				return uploadPayload{}, badRequest("'content_base64' is not valid base64: %v", err)
+			}
+			return uploadPayload{name: name, data: data}, nil
+		}
+		content, err := f.text("content", nil)
+		if err != nil {
+			return uploadPayload{}, badRequest("missing field 'content' (string) or 'content_base64'")
+		}
+		return uploadPayload{name: name, text: &content}, nil
 	}
-	names := rq.query["name"]
-	if len(names) == 0 || strings.TrimSpace(names[0]) == "" {
-		return nil, badRequest("raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})")
+	if v, ok := f.lookup("files"); ok {
+		items, isList := v.([]any)
+		if !isList || len(items) == 0 {
+			return nil, badRequest("'files' must be a non-empty list of {name, content | content_base64} objects")
+		}
+		out := make([]uploadPayload, 0, len(items))
+		for i, item := range items {
+			obj, isObj := item.(map[string]any)
+			if !isObj {
+				return nil, badRequest("'files[%d]' must be an object with 'name' and 'content' (or 'content_base64')", i)
+			}
+			p, err := one(fields{obj})
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, p)
+		}
+		return out, nil
 	}
-	return []uploadPayload{{name: names[0], data: rq.body}}, nil
+	p, err := one(f)
+	if err != nil {
+		return nil, err
+	}
+	return []uploadPayload{p}, nil
 }
 
+// rUpload is registered for the route table; POST /api/uploads is served by
+// Handler.streamUpload before the body would be buffered.
 func rUpload(rq *request) (int, any, error) {
-	if rq.svc.uploads == nil {
-		return 0, nil, badRequest("uploads are disabled: start the server with --upload-dir")
-	}
-	files, err := uploadFiles(rq)
-	if err != nil {
-		return 0, nil, err
-	}
-	uploads := []map[string]any{}
-	archives := []map[string]any{}
-	for _, file := range files {
-		if file.text != nil {
-			rec, err := rq.svc.uploads.StoreText(file.name, *file.text)
-			if err != nil {
-				return 0, nil, err
-			}
-			uploads = append(uploads, rec)
-			continue
-		}
-		result, err := rq.svc.uploads.StoreBytes(file.name, file.data)
-		if err != nil {
-			return 0, nil, err
-		}
-		uploads = append(uploads, result["uploads"].([]map[string]any)...)
-		if more, ok := result["archives"].([]map[string]any); ok {
-			archives = append(archives, more...)
-		}
-	}
-	if len(uploads) == 0 {
-		return 0, nil, badRequest("nothing was uploaded")
-	}
-	body := map[string]any{"uploads": uploads}
-	if len(archives) > 0 {
-		body["archives"] = archives
-	}
-	return 201, body, nil
+	return 0, nil, badRequest("uploads are handled by the streaming path")
 }
 
 func rUploadDelete(rq *request) (int, any, error) {
@@ -1053,19 +1064,22 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 		w.Header().Set("Allow", allow)
 		return writeJSON(w, 405, map[string]any{"error": fmt.Sprintf("method %s is not allowed for %s; use %s", r.Method, p, allow)}, r.Method)
 	}
-	var reader io.Reader = r.Body
-	if p != "/api/uploads" {
-		reader = io.LimitReader(r.Body, MaxBodyBytes+1)
+	if lookup == http.MethodPost && p == "/api/uploads" {
+		status, payload, err := h.streamUpload(r)
+		if err != nil {
+			return h.writeError(w, r, err)
+		}
+		return writeJSON(w, status, payload, r.Method)
 	}
-	body, err := io.ReadAll(reader)
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
 	if err != nil {
 		return writeJSON(w, 400, map[string]any{"error": "could not read the request body"}, r.Method)
 	}
-	if p != "/api/uploads" && len(body) > MaxBodyBytes {
+	if len(body) > MaxBodyBytes {
 		return writeJSON(w, 413, map[string]any{"error": fmt.Sprintf("request body larger than %d bytes", MaxBodyBytes)}, r.Method)
 	}
 	rq := &request{svc: h.svc, query: r.URL.Query(), body: body, header: r.Header}
-	if lookup == http.MethodPost && p != "/api/uploads" {
+	if lookup == http.MethodPost {
 		if len(strings.TrimSpace(string(body))) > 0 {
 			var parsed any
 			if err := json.Unmarshal(body, &parsed); err != nil {
@@ -1084,14 +1098,7 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 	}
 	status, payload, err := fn(rq)
 	if err != nil {
-		var ae *apiError
-		if errors.As(err, &ae) {
-			return writeJSON(w, ae.status, map[string]any{"error": ae.message}, r.Method)
-		}
-		if os.IsNotExist(err) {
-			return writeJSON(w, 404, map[string]any{"error": err.Error()}, r.Method)
-		}
-		return writeJSON(w, 400, map[string]any{"error": err.Error()}, r.Method)
+		return h.writeError(w, r, err)
 	}
 	if payload == nil {
 		return writeJSON(w, status, nil, r.Method)
@@ -1099,19 +1106,116 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 	return writeJSON(w, status, payload, r.Method)
 }
 
-func (rq *request) multipartFiles() ([]uploadPayload, error) {
-	_, params, err := mime.ParseMediaType(rq.header.Get("Content-Type"))
-	if err != nil || params["boundary"] == "" {
-		return nil, badRequest("malformed multipart/form-data body (missing boundary?)")
+func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) int {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return writeJSON(w, ae.status, map[string]any{"error": ae.message}, r.Method)
 	}
-	files, err := parseMultipart(rq.body, params["boundary"])
-	if err != nil {
-		return nil, badRequest("malformed multipart/form-data body: %v", err)
+	if os.IsNotExist(err) {
+		return writeJSON(w, 404, map[string]any{"error": err.Error()}, r.Method)
 	}
-	if len(files) == 0 {
-		return nil, badRequest("multipart body contains no file parts (use -F file=@corpus.txt)")
+	return writeJSON(w, 400, map[string]any{"error": err.Error()}, r.Method)
+}
+
+// MaxJSONUploadBytes caps the JSON upload forms (inline content); multipart and
+// raw uploads stream to disk and have no limit.
+const MaxJSONUploadBytes = 512 << 20
+
+// streamUpload handles POST /api/uploads without buffering: multipart file
+// parts and raw bodies stream straight into the upload directory (an archive
+// of any size), the JSON forms are parsed as before.
+func (h *Handler) streamUpload(r *http.Request) (int, any, error) {
+	if h.svc.uploads == nil {
+		return 0, nil, badRequest("uploads are disabled: start the server with --upload-dir")
 	}
-	return files, nil
+	ct, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	uploads := []map[string]any{}
+	archives := []map[string]any{}
+	add := func(result map[string]any) {
+		uploads = append(uploads, result["uploads"].([]map[string]any)...)
+		if more, ok := result["archives"].([]map[string]any); ok {
+			archives = append(archives, more...)
+		}
+	}
+	query := r.URL.Query()
+	switch {
+	case ct == "multipart/form-data":
+		if params["boundary"] == "" {
+			return 0, nil, badRequest("malformed multipart/form-data body (missing boundary?)")
+		}
+		mr, err := r.MultipartReader()
+		if err != nil {
+			return 0, nil, badRequest("malformed multipart/form-data body: %v", err)
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return 0, nil, badRequest("malformed multipart/form-data body: %v", err)
+			}
+			name := part.FileName()
+			if name == "" {
+				_, _ = io.Copy(io.Discard, part) // plain form fields are ignored
+				continue
+			}
+			result, err := h.svc.uploads.StoreStream(name, part)
+			if err != nil {
+				return 0, nil, err
+			}
+			add(result)
+		}
+		if len(uploads) == 0 {
+			return 0, nil, badRequest("multipart body contains no file parts (use -F file=@corpus.txt)")
+		}
+	case ct == "application/json" || (ct == "" && len(query["name"]) == 0):
+		body, err := io.ReadAll(io.LimitReader(r.Body, MaxJSONUploadBytes+1))
+		if err != nil {
+			return 0, nil, badRequest("could not read the request body")
+		}
+		if len(body) > MaxJSONUploadBytes {
+			return 0, nil, &apiError{413, fmt.Sprintf("JSON upload larger than %d bytes: send the file as multipart/form-data or a raw body, which stream", MaxJSONUploadBytes)}
+		}
+		rq := &request{svc: h.svc, query: query, body: body, header: r.Header}
+		files, err := uploadFiles(rq)
+		if err != nil {
+			return 0, nil, err
+		}
+		for _, file := range files {
+			if file.text != nil {
+				rec, err := h.svc.uploads.StoreText(file.name, *file.text)
+				if err != nil {
+					return 0, nil, err
+				}
+				uploads = append(uploads, rec)
+				continue
+			}
+			result, err := h.svc.uploads.StoreBytes(file.name, file.data)
+			if err != nil {
+				return 0, nil, err
+			}
+			add(result)
+		}
+	default:
+		names := query["name"]
+		if len(names) == 0 || strings.TrimSpace(names[0]) == "" {
+			return 0, nil, badRequest("raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})")
+		}
+		result, err := h.svc.uploads.StoreStream(names[0], r.Body)
+		if err != nil {
+			return 0, nil, err
+		}
+		add(result)
+	}
+	if len(uploads) == 0 {
+		return 0, nil, badRequest("nothing was uploaded")
+	}
+	body := map[string]any{"uploads": uploads}
+	if len(archives) > 0 {
+		body["archives"] = archives
+	}
+	return 201, body, nil
 }
 
 // -- static files -------------------------------------------------------------------------------------------
