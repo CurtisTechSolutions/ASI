@@ -183,6 +183,14 @@ func (m *Model) Reward(texts []string, epochs int, strength float64) ([]map[stri
 	return m.passes(texts, opts, true, math.Abs(strength))
 }
 
+// RewardWith is Reward with explicit pass options (progress / stop hooks, phase name).
+func (m *Model) RewardWith(texts []string, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if opts.Phase == "" {
+		opts.Phase = "positive"
+	}
+	return m.passes(texts, opts, true, math.Abs(strength))
+}
+
 // Punish (thumbs down): epochs passes that penalise (-strength) every path; no traversal is counted.
 func (m *Model) Punish(texts []string, epochs int, strength float64) ([]map[string]any, error) {
 	opts := DefaultTrainOptions()
@@ -190,6 +198,17 @@ func (m *Model) Punish(texts []string, epochs int, strength float64) ([]map[stri
 	opts.Phase = "negative"
 	return m.passes(texts, opts, false, -math.Abs(strength))
 }
+
+// PunishWith is Punish with explicit pass options (progress / stop hooks, phase name).
+func (m *Model) PunishWith(texts []string, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if opts.Phase == "" {
+		opts.Phase = "negative"
+	}
+	return m.passes(texts, opts, false, -math.Abs(strength))
+}
+
+// MetaInt reads an integer metadata entry (0 when absent).
+func (m *Model) MetaInt(key string) int64 { return m.metaInt(key) }
 
 // TwoNRLResult is the outcome of TwoNRL.
 type TwoNRLResult struct {

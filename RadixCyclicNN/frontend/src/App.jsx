@@ -15,6 +15,8 @@ import ImagesPanel from "./components/ImagesPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
+// pythonOnly tabs need the Python server (its sine network, Ollama, the sandbox, the image encoder);
+// the Go server (`radixnet-count serve`) runs the count / reward model only and hides them.
 const TABS = [
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "predict", label: "Predict", Component: PredictPanel },
@@ -22,13 +24,24 @@ const TABS = [
   { id: "converse", label: "Converse", Component: ConversePanel },
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
-  { id: "evolve", label: "Evolve", Component: EvolvePanel },
-  { id: "ollama", label: "Ollama", Component: OllamaPanel },
-  { id: "code", label: "Code", Component: CodeGenPanel },
-  { id: "images", label: "Images", Component: ImagesPanel },
+  { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
+  { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
+  { id: "code", label: "Code", Component: CodeGenPanel, pythonOnly: true },
+  { id: "images", label: "Images", Component: ImagesPanel, pythonOnly: true },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];
+
+/** The engine behind the API: "go" when the Go server answers, else "python". */
+export function engineOf(status, health) {
+  const fromStatus = status && typeof status.engine === "string" ? status.engine : null;
+  const fromHealth = health && typeof health.engine === "string" ? health.engine : null;
+  return fromStatus || fromHealth || "python";
+}
+
+function tabsFor(engine) {
+  return engine === "go" ? TABS.filter((t) => !t.pythonOnly) : TABS;
+}
 
 function tabFromHash() {
   const id = window.location.hash.replace(/^#/, "");
@@ -44,6 +57,10 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [tab, setTab] = useState(tabFromHash);
   const [version, setVersion] = useState(null);
+  const [health, setHealth] = useState(null);
+  const engine = engineOf(status, health);
+  const tabs = tabsFor(engine);
+  const activeTab = tabs.some((t) => t.id === tab) ? tab : tabs[0].id;
 
   useEffect(() => {
     const onHashChange = () => setTab(tabFromHash());
@@ -56,7 +73,9 @@ export default function App() {
     api
       .health()
       .then((h) => {
-        if (alive && h && h.version !== undefined) setVersion(String(h.version));
+        if (!alive || !h) return;
+        setHealth(h);
+        if (h.version !== undefined) setVersion(String(h.version));
       })
       .catch(() => {
         // The status bar reports connectivity; the version is cosmetic.
@@ -77,6 +96,14 @@ export default function App() {
         <div className="app-header-row">
           <h1>RadixCyclicNN</h1>
           <ModelSelector status={status} onStatus={setStatus} />
+          {engine === "go" ? (
+            <span
+              className="badge engine"
+              title="This API is served by the Go implementation of the count / reward model (radixnet-count serve): goroutines over the texts, lock-free counting"
+            >
+              Go engine{status && status.workers ? ` · ${status.workers} goroutines` : ""}
+            </span>
+          ) : null}
         </div>
         <p className="tagline">
           self-compressing cyclic graph · sine activation or count / reward edges · Dijkstra and top-K / bottom-K
@@ -87,14 +114,14 @@ export default function App() {
       <StatusBar onStatus={setStatus} />
 
       <nav className="tabs" role="tablist" aria-label="Panels">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
             role="tab"
-            aria-selected={tab === t.id}
+            aria-selected={activeTab === t.id}
             aria-controls={`panel-${t.id}`}
-            className={tab === t.id ? "active" : ""}
+            className={activeTab === t.id ? "active" : ""}
             onClick={() => selectTab(t.id)}
           >
             {t.label}
@@ -103,12 +130,12 @@ export default function App() {
       </nav>
 
       <main>
-        {TABS.map(({ id, Component, single }) => (
+        {tabs.map(({ id, Component, single }) => (
           <section
             key={id}
             id={`panel-${id}`}
             role="tabpanel"
-            hidden={tab !== id}
+            hidden={activeTab !== id}
             className={`panel${single ? " single" : ""}`}
           >
             <Component status={status} />
@@ -117,8 +144,8 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        RadixCyclicNN{version ? ` v${version}` : ""} · API {status ? "connected" : "unreachable"} · built with Vite +
-        React, no other dependencies.
+        RadixCyclicNN{version ? ` v${version}` : ""} · API {status ? "connected" : "unreachable"}
+        {engine === "go" ? " (Go server)" : ""} · built with Vite + React, no other dependencies.
       </footer>
     </div>
   );

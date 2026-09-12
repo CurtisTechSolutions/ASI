@@ -50,6 +50,10 @@ export default function TrainPanel({ status }) {
 
   const otherJobRunning = jobIsRunning(status) && !running;
   const countKind = Boolean(status && status.kind === "count");
+  const goEngine = Boolean(status && status.engine === "go");
+  // Go server: what one training text is (each text is handled by its own goroutine)
+  const [split, setSplit] = useState("lines");
+  const [pageLines, setPageLines] = useState("50");
   const [weights, setWeights] = useState({ count_scale: "", global_scale: "", window_scale: "", reward_scale: "", window: "" });
   const [weightsLoaded, setWeightsLoaded] = useState(false);
   const [weightsBusy, setWeightsBusy] = useState(false);
@@ -201,9 +205,12 @@ export default function TrainPanel({ status }) {
       return;
     }
     setFormError(null);
+    const goSplit = goEngine && split !== "lines";
     await start(() =>
       api.train({
-        ...(texts.length > 0 ? { texts } : {}),
+        // the Go server cuts the pasted text and the files into paragraphs / pages itself
+        ...(goSplit ? (text.trim() ? { text } : {}) : texts.length > 0 ? { texts } : {}),
+        ...(goEngine ? { split, ...(split === "pages" ? { page_lines: parseInteger(pageLines, 50) } : {}) } : {}),
         ...(files.length > 0 ? { files, whole_file: wholeFile } : {}),
         epochs: parseInteger(epochs, 5),
         lr: parseNumber(lr, 0.05),
@@ -244,13 +251,32 @@ export default function TrainPanel({ status }) {
         <h2>Train</h2>
         <TextArea
           label="Training texts"
-          hint="one per line"
+          hint={goEngine && split !== "lines" ? `cut into ${split} by the server` : "one per line"}
           value={text}
           onChange={setText}
           rows={10}
           disabled={running}
           placeholder={"the quick brown fox jumps over the lazy dog\nhello world"}
         />
+        {goEngine ? (
+          <div className="row">
+            <SelectField
+              label="Texts are"
+              hint="each text is one unit of work for the goroutines"
+              value={split}
+              onChange={setSplit}
+              disabled={running}
+              options={[
+                ["lines", "lines (one text per non-blank line)"],
+                ["paragraphs", "paragraphs (blank-line separated blocks)"],
+                ["pages", "pages (form feeds, or every N lines)"],
+              ]}
+            />
+            {split === "pages" ? (
+              <NumberField label="Lines per page" hint="when a file has no form feeds" value={pageLines} onChange={setPageLines} min={1} step={1} disabled={running} />
+            ) : null}
+          </div>
+        ) : null}
         <UploadPicker
           selected={files}
           onChange={setFiles}

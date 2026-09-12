@@ -969,3 +969,32 @@ weights (1e-12), predictions, generated texts, scores and conversation transcrip
 the other's file with identical results; feedback, invert and weight changes match too. `go test -race ./...`
 covers the Go module (RNG vectors against CPython, exact summation, structure invariants, lazy weights against a
 full recompute, 1 vs 8 workers giving the same model, search / generation / conversation, gzip round trips).
+
+### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
+
+`radixnet-count serve --port 8001 --frontend-dir frontend/dist --upload-dir uploads --checkpoint-dir checkpoints`
+runs `go/server`: `service.go` (the `Service` - model, `Job`, uploads, checkpoints; `startJob` runs the work on a
+goroutine holding the model's write lock and, in the progress hook, releases it between epochs so readers get a
+turn - the Python `_yield_to_readers`; one job at a time, 409 otherwise), `http.go` (the route table, typed body
+fields with the Python server's error messages, upload bodies as JSON / multipart / raw, static files with the SPA
+fallback and immutable caching of hashed assets, 404 / 405 / 413 like the Python handler), `uploads.go` (the
+upload directory, `ExtractTexts` with the same skip rules as `archive.py`, archives kept whole and unpacked in
+memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d>.json.gz`, `latest.json`,
+`index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
+additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
+over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
+endpoints (evolve, ollama, images, codegen, schedule preview) answer 404 with a message naming the Python server.
+
+Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; with `"go"` the Python-only tabs (Evolve, Ollama,
+Code, Images) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
+replaces the accelerator chips with `engine go · workers · goroutines` (`StatusBar.jsx`), and the Train tab
+(`TrainPanel.jsx`) offers **Texts are** `lines | paragraphs | pages` (+ lines per page): with paragraphs or pages
+the pasted text is sent whole as `text` together with `split`, and the server cuts it and the selected uploads.
+Everything else is unchanged: the panels only ever spoke the JSON contract.
+
+Tests: `go/server/server_test.go` (httptest: every endpoint, the job lifecycle with 409 and stop, readers answering
+while a job runs, uploads in all three body forms with a ZIP built in the test, training from uploads with and
+without `whole_file`, graph, save / load / reset, checkpoints in the Python layout, static files, the error shapes)
+and `tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `tests/test_api.py`, a
+model saved by the server loaded in Python with identical predictions, ZIP uploads, `split: paragraphs`, and the
+Python `CheckpointManager` reading the server's checkpoints).

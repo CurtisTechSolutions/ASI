@@ -211,5 +211,182 @@ class TestGoParity(unittest.TestCase):
         go("train", model=path, expect=1)  # --data is required
 
 
+class TestGoServer(unittest.TestCase):
+    """`radixnet-count serve` speaks the Python server's JSON contract for the count model: the frontend's
+    requests and the shapes the Python API tests assert on must be served the same way."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import time
+        from tests.test_api import Client
+
+        cls.tmp = tempfile.TemporaryDirectory(prefix="radixnet-go-server-")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            cls.port = sock.getsockname()[1]
+        cls.model = os.path.join(cls.tmp.name, "model.count.json")
+        cls.proc = subprocess.Popen(
+            [BINARY, "--model", cls.model, "--seed", "1", "--workers", "2", "serve", "--port", str(cls.port),
+             "--frontend-dir", os.path.join(ROOT, "frontend", "dist"), "--upload-dir", os.path.join(cls.tmp.name, "uploads"),
+             "--checkpoint-dir", os.path.join(cls.tmp.name, "ckpt"), "--quiet"],
+            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        cls.client = Client(f"http://127.0.0.1:{cls.port}")
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                status, doc, _ = cls.client.get("/api/health")
+                if status == 200 and doc.get("ok"):
+                    break
+            except Exception:  # noqa: BLE001 - not up yet
+                pass
+            if cls.proc.poll() is not None:
+                raise AssertionError("the Go server exited early:\n" + cls.proc.stderr.read())
+            time.sleep(0.05)
+        else:
+            cls.proc.kill()
+            raise AssertionError("the Go server did not come up")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        try:
+            cls.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            cls.proc.kill()
+        cls.tmp.cleanup()
+
+    def wait_job(self):
+        import time
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status, job, _ = self.client.get("/api/job")
+            self.assertEqual(status, 200)
+            if job and job["state"] != "running":
+                return job
+            time.sleep(0.05)
+        raise AssertionError("job did not finish")
+
+    def test_contract_matches_the_python_api(self):
+        from tests.test_api import CORPUS, EDGE_KEYS, JOB_KEYS, NODE_KEYS, PREDICT_KEYS, STATS_KEYS
+
+        status, health, _ = self.client.get("/api/health")
+        self.assertEqual((status, health["ok"], health["engine"]), (200, True, "go"))
+        status, st, _ = self.client.get("/api/status")
+        self.assertEqual(status, 200)
+        self.assertTrue(STATS_KEYS <= set(st), STATS_KEYS - set(st))
+        self.assertEqual((st["kind"], st["engine"], st["job"]), ("count", "go", None))
+        self.assertEqual([k["kind"] for k in st["kinds"]], ["count"])
+        # the frontend's Train tab: a job, polled until done
+        status, doc, _ = self.client.post("/api/train", {"texts": CORPUS, "epochs": 2, "lr": 0.5, "act_lr": 0.05, "batch_size": 4, "auto_compress": True})
+        self.assertEqual(status, 202, doc)
+        self.assertTrue(JOB_KEYS <= set(doc["job"]))
+        job = self.wait_job()
+        self.assertEqual((job["type"], job["state"], len(job["history"])), ("train", "done", 2))
+        status, st, _ = self.client.get("/api/status")
+        self.assertEqual((st["epochs_total"], st["trained_texts"]), (2, len(CORPUS)))
+        # the Predict tab (beam with K / beam width, plus the Like button's feedback)
+        status, p, _ = self.client.post("/api/predict", {"prefix": "the cat", "length": 8, "mode": "beam", "k": 3, "beam": 12})
+        self.assertEqual(status, 200, p)
+        self.assertTrue(PREDICT_KEYS <= set(p), PREDICT_KEYS - set(p))
+        self.assertTrue({"top", "bottom", "k", "beam", "mode"} <= set(p))
+        self.assertEqual(p["full_text"], "the cat" + p["continuation"])
+        # the same model file, loaded in Python, predicts the same thing
+        status, saved, _ = self.client.post("/api/save", {})
+        self.assertEqual(status, 200, saved)
+        own = load_model(saved["path"])
+        mine = own.predict("the cat", length=8, mode="beam", k=3, beam=12)
+        self.assertEqual([t["full_text"] for t in p["top"]], [r.full_text for r in mine.top])
+        self.assertLessEqual(abs(p["cost"] - mine.cost), 1e-9)
+        # Generate / Score / Converse tabs
+        status, g, _ = self.client.post("/api/generate", {"count": 3, "mode": "beam", "max_length": 40})
+        self.assertEqual((status, len(g["samples"])), (200, 3))
+        self.assertTrue({"text", "full_text", "cost", "probability", "path", "reached_end"} <= set(g["samples"][0]))
+        status, sc, _ = self.client.post("/api/score", {"text": CORPUS[0]})
+        self.assertEqual(status, 200)
+        self.assertEqual(set(sc), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions"})
+        status, c, _ = self.client.post("/api/converse", {"opening": CORPUS[0], "turns": 3})
+        self.assertEqual((status, c["count"], c["kind"]), (200, 4, "count"))
+        # thumbs on the Generate tab: a feedback job
+        status, fb, _ = self.client.post("/api/feedback", {"good": [g["samples"][0]["text"]], "bad": [g["samples"][1]["text"]], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1, "strength": 1})
+        self.assertEqual((status, fb["action"]), (202, "2nrl"), fb)
+        job = self.wait_job()
+        self.assertEqual((job["type"], job["state"]), ("feedback", "done"))
+        # Graph tab
+        status, graph, _ = self.client.get("/api/graph?limit=5")
+        self.assertEqual(status, 200)
+        self.assertTrue(NODE_KEYS <= set(graph["nodes"][0]))
+        self.assertTrue((EDGE_KEYS | {"reward", "share", "recent_share", "recent_count"}) <= set(graph["edges"][0]))
+        # model selector: the one kind, other kinds refused
+        status, m, _ = self.client.get("/api/model")
+        self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))
+        status, doc, _ = self.client.post("/api/model/select", {"kind": "radix"})
+        self.assertEqual(status, 400)
+        # Python-only tabs are told so; unknown endpoints and wrong methods behave like the Python server
+        status, doc, _ = self.client.get("/api/evolve/history")
+        self.assertEqual(status, 404)
+        self.assertIn("Go server", doc["error"])
+        status, doc, _ = self.client.get("/api/nope")
+        self.assertEqual(status, 404)
+        status, doc, headers = self.client.get("/api/predict")
+        self.assertEqual(status, 405)
+        self.assertIn("POST", headers.get("Allow", ""))
+        # the prebuilt frontend is served with the SPA fallback
+        status, body, headers = self.client.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        status, body, _ = self.client.request("GET", "/some/route")
+        self.assertEqual(status, 200)
+
+    def test_uploads_checkpoints_and_split(self):
+        import zipfile
+        import io
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("a/one.txt", "the cat sat on the mat\nthe cat ran to the door\n")
+            z.writestr("two.txt", "the dog sat on the log\n")
+            z.writestr("img.png", b"\x89PNG\x00\x00")
+        status, doc, _ = self.client.request(
+            "POST", "/api/uploads?name=corpus.zip", raw=buf.getvalue(), headers={"Content-Type": "application/zip"},
+        )
+        self.assertEqual(status, 201, doc)
+        record = doc["uploads"][0]
+        self.assertEqual((record["name"], record["archive"], record["files"], record["lines"]), ("corpus.zip", True, 2, 3))
+        status, doc, _ = self.client.post("/api/uploads", {"name": "notes.txt", "content": "para one line a\npara one line b\n\npara two\n"})
+        self.assertEqual(status, 201, doc)
+        status, listing, _ = self.client.get("/api/uploads")
+        self.assertEqual([u["name"] for u in listing["uploads"]], ["corpus.zip", "notes.txt"])
+        status, before, _ = self.client.get("/api/status")
+        # goroutines over paragraphs: the pasted text and the files are cut into paragraphs on the server
+        status, doc, _ = self.client.post("/api/train", {"text": "first para\ncontinues\n\nsecond para\n", "files": ["notes.txt"], "split": "paragraphs", "epochs": 1})
+        self.assertEqual(status, 202, doc)
+        self.wait_job()
+        status, after, _ = self.client.get("/api/status")
+        self.assertEqual(after["trained_texts"] - before["trained_texts"], 4)
+        status, doc, _ = self.client.post("/api/train", {"files": ["corpus.zip"], "epochs": 1})
+        self.assertEqual(status, 202, doc)
+        self.wait_job()
+        status, later, _ = self.client.get("/api/status")
+        self.assertEqual(later["trained_texts"] - after["trained_texts"], 3)
+        # checkpoints in the Python manager's layout
+        status, ck, _ = self.client.post("/api/checkpoints/save", {"tag": "manual"})
+        self.assertEqual(status, 200, ck)
+        self.assertTrue(ck["name"].startswith("ckpt-manual-") and ck["name"].endswith(".json.gz"))
+        status, listing, _ = self.client.get("/api/checkpoints")
+        self.assertEqual(listing["latest"]["name"], ck["name"])
+        from radixnet.checkpoint import CheckpointManager
+
+        manager = CheckpointManager(os.path.join(self.tmp.name, "ckpt"))
+        self.assertEqual([r["name"] for r in manager.list()], [ck["name"]])
+        restored = manager.load(ck["name"])
+        self.assertEqual(restored.kind, "count")
+        self.assertEqual(restored.stats()["epochs_total"], later["epochs_total"])
+        status, doc, _ = self.client.post("/api/uploads/delete", {"name": "notes.txt"})
+        self.assertEqual(status, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

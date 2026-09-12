@@ -83,6 +83,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make evolve GENERATIONS=3` / `make evolve-forever` | GAN-style self-upgrade loop |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
+| `make go-build` / `go-test` / `go-parity` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
 | `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
@@ -545,9 +546,9 @@ python -m radixnet --model model.count.json info    # the Python side reads the 
 ```
 
 Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`,
-`weights`, `info`, `converse`, `version`; global options `--model`, `--json`,
-`--seed`, `--workers N` (goroutines, default the CPU count), `--out`. Where the
-goroutines go:
+`weights`, `info`, `converse`, `serve`, `version`; global options `--model`,
+`--json`, `--seed`, `--workers N` (goroutines, default the CPU count), `--out`.
+Where the goroutines go:
 
 | phase | concurrency |
 |---|---|
@@ -562,6 +563,46 @@ goroutines go:
 The lazy weights remove the Python implementation's per-text full recompute:
 training 3,000 texts for 2 epochs takes 0.06 s in Go against 38 s in Python
 on this machine (30,000 texts: 0.45 s), with byte-identical results.
+
+### The Go HTTP server and the frontend
+
+`radixnet-count serve` is an HTTP server speaking the Python API's JSON
+contract for everything the count model supports, and it serves the same
+prebuilt frontend:
+
+```bash
+make go-serve PORT=8001           # go/bin/radixnet-count --model model.count.json serve --port 8001 \
+                                  #   --frontend-dir frontend/dist --upload-dir uploads --checkpoint-dir checkpoints
+open http://localhost:8001        # the React app, now backed by the Go model
+```
+
+The frontend detects the engine (`GET /api/health` and `/api/status` carry
+`engine: "go"`, the worker count and the live goroutine count): it shows a
+**Go engine** badge in the header and `engine go · workers · goroutines` in the
+status bar, hides the tabs that need the Python server (Evolve, Ollama, Code,
+Images), locks the model selector to the count model, and the Train tab gains a
+**Texts are** selector (`lines | paragraphs | pages`) so the pasted text and the
+uploaded files are cut into the units the goroutines fan out over. Train,
+Predict (with the Like button), Generate (with ratings), Converse, Score, 2NRL,
+Checkpoints and Graph work unchanged.
+
+| endpoint | Go server |
+|---|---|
+| `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers`, `goroutines` |
+| `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress}` -> a job; learning rates are accepted and ignored |
+| `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
+| `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
+| `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward) |
+| `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
+| `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
+| `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives, unpacked in memory with the same rules |
+| `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
+| `/api/evolve/*`, `/api/ollama/*`, `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+
+`tests/test_go_parity.py` also starts the Go server and checks its answers
+against the key sets the Python API tests assert on, loads the model it saves
+in Python, trains from a ZIP upload with `split: paragraphs`, and reads its
+checkpoints with the Python `CheckpointManager`.
 
 ## Python API
 

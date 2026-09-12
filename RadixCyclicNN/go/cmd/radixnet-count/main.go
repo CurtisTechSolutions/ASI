@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
+	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/server"
 )
 
 const version = "0.1.0"
@@ -133,6 +135,7 @@ commands:
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
+  serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   version    print the version
 
 global options (before or after the command): --model PATH --json --seed N --workers N --out PATH
@@ -189,6 +192,8 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "serve":
+		cmdServe(rest)
 	case "version":
 		if jsonMode {
 			emit(map[string]any{"version": version, "go": runtime.Version()})
@@ -656,3 +661,43 @@ func cmdConverse(args []string) {
 }
 
 var _ = filepath.Base
+
+func cmdServe(args []string) {
+	fs := subFlagSet("serve")
+	host := fs.String("host", "127.0.0.1", "interface to bind")
+	port := fs.Int("port", 8001, "TCP port")
+	frontendDir := fs.String("frontend-dir", "frontend/dist", "built frontend to serve at / (empty = API only)")
+	checkpointDir := fs.String("checkpoint-dir", "", "checkpoint directory (enables /api/checkpoints)")
+	uploadDir := fs.String("upload-dir", "uploads", "directory of uploaded training files (empty = uploads disabled)")
+	keep := fs.Int("keep", 5, "checkpoints to keep")
+	quiet := fs.Bool("quiet", false, "do not log requests")
+	_ = fs.Parse(args)
+	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
+	svc, err := server.NewService(server.Options{
+		ModelPath: modelPath, Seed: seedFlag, Workers: workers, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
+		Keep: *keep, Quiet: *quiet, Log: logf,
+	})
+	if err != nil {
+		fail("%v", err)
+	}
+	dir := *frontendDir
+	if dir != "" {
+		if st, statErr := os.Stat(filepath.Join(dir, "index.html")); statErr != nil || st.IsDir() {
+			logf(fmt.Sprintf("note: no frontend build at %s (serving the API and a help page only)", dir))
+			dir = ""
+		} else if abs, absErr := filepath.Abs(dir); absErr == nil {
+			dir = abs
+		}
+	}
+	addr := fmt.Sprintf("%s:%d", *host, *port)
+	origin, _ := os.Stat(modelPath)
+	source := "a fresh model"
+	if origin != nil {
+		source = modelPath
+	}
+	logf(fmt.Sprintf("radixnet-count %s serving %s on http://%s (workers %d, frontend %s)", version, source, addr, workers, map[bool]string{true: dir, false: "none"}[dir != ""]))
+	httpServer := &http.Server{Addr: addr, Handler: server.NewHandler(svc, dir, *quiet, logf), ReadHeaderTimeout: 30 * time.Second}
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fail("%v", err)
+	}
+}

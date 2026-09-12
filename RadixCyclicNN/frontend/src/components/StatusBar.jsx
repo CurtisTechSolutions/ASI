@@ -92,9 +92,15 @@ export default function StatusBar({ onStatus }) {
           {s.backend || "–"}/{s.device || "–"}
         </b>
       </span>
-      <span className="stat" title="Optional accelerator availability on the server">
-        torch {mark(backends.torch)} · cuda {mark(backends.cuda)} · mps {mark(backends.mps)}
-      </span>
+      {s.engine === "go" ? (
+        <span className="stat" title="The Go server: goroutines fanned out over the texts, lock-free atomic counting">
+          engine <b>go</b> · workers <b>{fmtInt(s.workers)}</b> · goroutines <b>{fmtInt(s.goroutines)}</b>
+        </span>
+      ) : (
+        <span className="stat" title="Optional accelerator availability on the server">
+          torch {mark(backends.torch)} · cuda {mark(backends.cuda)} · mps {mark(backends.mps)}
+        </span>
+      )}
       <span className="stat">
         epochs <b>{fmtInt(s.epochs_total)}</b> · 2NRL runs <b>{fmtInt(s.twonrl_runs)}</b> · last loss{" "}
         <b>{fmtNum(s.last_loss, 4)}</b>

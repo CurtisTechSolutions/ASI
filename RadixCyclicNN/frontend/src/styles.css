@@ -1326,3 +1326,12 @@ ol.dialogue li.rated.up .bubble {
 ol.dialogue li.rated.down .bubble {
   border-left: 3px solid #dc2626;
 }
+
+/* header badge of the Go server */
+.badge.engine {
+  background: rgba(47, 95, 216, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(47, 95, 216, 0.35);
+  font-weight: 600;
+  white-space: nowrap;
+}

@@ -60,7 +60,7 @@ export EPOCHS LR BATCH RADIXNET_PORT RADIXNET_BACKEND RADIXNET_CORPUS WITH_TORCH
 DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
-.PHONY: help install install-gpu check test go-build go-test go-parity train resume predict generate score 2nrl invert compress \
+.PHONY: help install install-gpu check test go-build go-test go-parity go-serve train resume predict generate score 2nrl invert compress \
         evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
         codegen codegen-teacher codegen-model \
@@ -97,6 +97,10 @@ go-test: ## Run the Go tests with the race detector
 
 go-parity: ## Cross-language parity of the Go port against the Python model
 	$(PY) -m unittest tests.test_go_parity -v
+
+MODEL_COUNT ?= model.count.json
+go-serve: go-build ## Serve the frontend from the Go count / reward model on http://HOST:PORT (uploads / checkpoints as for `serve`)
+	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
 
 ##@ Train / predict (local)
 train: ## Train on DATA (incremental: MODEL is loaded first if it exists), checkpointing into CKPT_DIR
