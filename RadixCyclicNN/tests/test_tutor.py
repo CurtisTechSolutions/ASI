@@ -487,6 +487,34 @@ class TrainerTests(unittest.TestCase):
         self.assertAlmostEqual(options["weights"][0], lessons[0].grade.score / 10)
         self.assertAlmostEqual(record["mean_reward"], lessons[0].grade.score / 10)
 
+    def test_replay_keeps_teaching_earlier_corrections(self):
+        model = ScriptedModel()
+        trainer = TutorTrainer(model, self.client, self.config())
+        trainer.learn(["bad one"], [1.0], ["the cat sat on the mat"], [0.7])
+        trainer.learn(["bad two"], [1.0], ["the dogs run in the park"], [1.0])
+        (_, _, first, _), (_, _, second, options) = model.calls
+        self.assertEqual(first, ["the cat sat on the mat"])
+        self.assertEqual(second, ["the dogs run in the park", "the cat sat on the mat"])
+        # this round's text keeps its mark, the replayed correction is taught at the full rate
+        self.assertEqual(options["good_weights"], [1.0, 1.0])
+        trainer = TutorTrainer(ScriptedModel(), self.client, self.config(replay=False))
+        trainer.learn(["bad one"], [1.0], ["the cat sat on the mat"], [1.0])
+        trainer.learn(["bad two"], [1.0], ["the dogs run in the park"], [1.0])
+        self.assertEqual(trainer.model.calls[1][2], ["the dogs run in the park"])  # replay off: only this round
+
+    def test_replay_limit_zero_means_no_limit(self):
+        texts = ["the cat sat on the mat", "the dogs run in the park", "the cat likes the mat"]
+        for limit, replayed in ((0, 2), (1, 1)):
+            with self.subTest(replay_limit=limit):
+                model = ScriptedModel()
+                trainer = TutorTrainer(model, self.client, self.config(replay_limit=limit))
+                for text in texts:
+                    trainer.learn(["garbage"], [1.0], [text], [1.0])
+                self.assertEqual(len(trainer.replay_buffer), len(texts) if limit == 0 else limit)
+                last = model.calls[-1][2]
+                self.assertEqual(last[0], texts[-1])  # this round's text first, then the replayed ones
+                self.assertEqual(len(last) - 1, replayed)
+
     def test_weight_of_grows_with_the_mistake(self):
         trainer = TutorTrainer(None, self.client, self.config(threshold=6.0, min_weight=0.25))
         near_miss = trainer.weight_of(Grade(score=5.0, passed=False))

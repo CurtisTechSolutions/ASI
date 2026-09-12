@@ -581,7 +581,7 @@ class TutorConfig:
     batch_size: int = 4
     strength: float | None = None  # count / reward model: magnitude of a penalty / reward
     replay: bool = True  # keep teaching earlier corrections
-    replay_limit: int = 64
+    replay_limit: int = 64  # how many of them to keep (0 = no limit)
     checkpoint_every: int = 0  # rounds
 
     def validate(self) -> None:
@@ -763,7 +763,8 @@ class TutorTrainer:
         )
         if cfg.replay:
             extra = [t for t in self.replay_buffer if t not in good_all]
-            extra = extra[-cfg.replay_limit :] if cfg.replay_limit else []
+            if cfg.replay_limit:  # 0 = no limit, as for the buffer itself
+                extra = extra[-cfg.replay_limit :]
             good_all += extra
             good_all_weights += [TEACHER_WEIGHT] * len(extra)
         result: dict[str, Any] = {

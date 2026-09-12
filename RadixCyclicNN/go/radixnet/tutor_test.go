@@ -543,6 +543,42 @@ func TestTutorWeighsGarbageAndRewardsByTheMark(t *testing.T) {
 	}
 }
 
+func TestTutorReplayKeepsTeachingEarlierCorrections(t *testing.T) {
+	fake := newFakeTeacher(t)
+	texts := []string{"the cat sat on the mat", "the dogs run in the park", "the cat likes the mat"}
+	// 0 = no limit (as for the buffer itself), 1 = only the most recent correction comes back
+	for _, tc := range []struct{ limit, replayed int }{{0, 2}, {1, 1}} {
+		cfg := tutorConfig()
+		cfg.ReplayLimit = tc.limit
+		cfg.NegEpochs, cfg.PosEpochs = 0, 0 // the bookkeeping is what is being tested, not the passes
+		trainer, err := NewTutorTrainer(tutorModel(t), fake.client(t), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var last map[string]any
+		for _, text := range texts {
+			last, err = trainer.Learn(Graded{
+				Bad: []string{"zzz garbage"}, BadWeights: []float64{1},
+				Good: []string{text}, GoodWeights: []float64{1},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		want := len(texts)
+		if tc.limit > 0 {
+			want = tc.limit
+		}
+		if len(trainer.replay) != want {
+			t.Errorf("limit %d: the buffer holds %d corrections, want %d", tc.limit, len(trainer.replay), want)
+		}
+		if got := last["good"].(int); got != tc.replayed+1 {
+			t.Errorf("limit %d: the last round taught %d texts, want %d (this round's plus the replayed)",
+				tc.limit, got, tc.replayed+1)
+		}
+	}
+}
+
 func TestTutorWeightAndRewardCurves(t *testing.T) {
 	fake := newFakeTeacher(t)
 	trainer := scriptedTrainer(t, fake, tutorConfig())
