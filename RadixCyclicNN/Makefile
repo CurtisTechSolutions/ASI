@@ -42,6 +42,11 @@ PROMPT      ?= short true sentences about animals and the weather
 LINES       ?= 20
 STYLE       ?= good
 THRESHOLD   ?= 6
+TOPIC       ?= everyday life
+FOCUS       ?= subject-verb agreement
+ROUNDS      ?= 3
+EXERCISES   ?= 5
+DRILLS      ?= 0
 PROBLEMS    ?= data/sample_problems.jsonl
 PHASE       ?= both
 CODEGEN_MODEL ?= gemma4
@@ -168,6 +173,18 @@ ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pa
 
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
+
+##@ Tutor (Ollama sets the exercise, the model answers, Ollama marks it)
+TUTOR_FLAGS := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),) $(if $(TUTOR_MODEL),--tutor-model $(TUTOR_MODEL),)
+
+tutor: ## English lessons about TOPIC: ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --drills $(DRILLS) --threshold $(THRESHOLD) --report tutor-report.json
+
+tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trained on
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds 1 --exercises $(EXERCISES) --threshold $(THRESHOLD) --dry-run
+
+tutor-focus: ## Lessons drilling one point of grammar: FOCUS="past tense"
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --focus "$(FOCUS)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD)
 
 ##@ Code generation (sandbox + Ollama judge + 2NRL rewards)
 codegen: ## Solve PROBLEMS with the teacher (CODEGEN_MODEL) and then the model (PHASE=both|teacher|model), 2NRL after every problem

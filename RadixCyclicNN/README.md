@@ -24,6 +24,8 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
+| Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): Ollama writes sentence openings that drill a point of grammar, the network completes them with the prediction search, Ollama marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; failed sentences become 2NRL garbage weighted by how bad the mark was, corrections the fine-tune pass, and the round's mistakes become the next round's syllabus. |
+| Rewards follow the rating | `two_nrl(good_weights=)`, `reward(weights=)` and `punish(weights=)` (both models, Python and Go) scale every pass per text: a sentence marked 9 out of 10 is learned nine tenths as hard as a perfect one, a 0 is skipped. `/api/feedback` and `/api/2nrl` take `good_ratings` / `bad_ratings` (marks out of 10), the Ratings card a mark per rated text. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
@@ -157,7 +159,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up |
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
-| `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
+| `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
 | `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
 | `info` | statistics and the training history tail |
@@ -165,6 +167,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
+| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
@@ -199,13 +202,17 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
+| `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
+| `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_model", "grader_model", "url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `comment`, a round the report card and what it taught |
+| `GET /api/tutor/history` | `{"history": [lesson / round / report records of all tutor runs]}` |
+| `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (502 when Ollama fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
 | `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
 | `POST /api/converse` | `{"opening","turns": 6,"mode": "beam"\|"sample","context": 12,"max_length": 60,"k": 5,"beam","temperature","step_penalty","seed","speakers": ["A","B"],"history": [utterances so far],"partner": kind in memory,"avoid_repeats": true}` -> `{"kind","partner","speakers","count","turns": [{"index","speaker","text","context","reply","cost","probability","reached_end","fresh","given","repeat","candidates","skipped","labels","node_ids","step_costs"}]}`; `history` continues a conversation (only the new turns come back) |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
-| `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr"}` (or `bad_files` / `good_files` upload names) -> job |
-| `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone |
+| `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr", "bad_weights" \| "bad_ratings", "good_weights" \| "good_ratings"}` (or `bad_files` / `good_files` upload names) -> job; the weights (0..1 shares) or ratings (marks out of 10) scale each phase per text |
+| `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "good_ratings": [10, 5], "bad_ratings": [...] (or "good_weights" / "bad_weights" as 0..1 shares), "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad", "good_weights", "bad_weights"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone. A rating is more than a like: each text is learned in proportion to its mark (10 = the full rate, 0 skips it) |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` |
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
@@ -238,9 +245,14 @@ continuing a prefix; sample; dijkstra - with thumbs up / thumbs down ratings:
 up as the positive phase), Converse (the model talks to itself in a chat
 view: an opening line, turns, context, beam / sample, the two voices' names,
 the other kind in memory as the second voice; Continue extends the
-conversation, and turns are rated like samples), Score, 2NRL,
+conversation, and turns are rated like samples; every rating carries a mark out
+of 10 - "how good" / "how bad" - and the network learns each text in proportion
+to it), Score, 2NRL,
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
-adversarial review), Code (code generation with the sandbox and the judge),
+adversarial review), Tutor (automated English lessons: the settings, a dry run
+that marks without training, a chart of the marks per round, the report card
+with the mistakes, and every lesson with what the network wrote, the correction
+and the teacher's line), Code (code generation with the sandbox and the judge),
 Checkpoints (save / restore / load / reset) and a Graph view of the most
 visited nodes.
 
@@ -295,6 +307,75 @@ tab wraps them: generate a corpus and train on it / save it as an upload, or
 review the model's samples and apply the verdicts as a 2NRL job. In Docker the
 API reaches an Ollama on the host through `host.docker.internal`; `make up-ollama`
 starts an Ollama container next to the API instead (`OLLAMA_HOST=http://ollama:11434`).
+
+## Tutor: automated English lessons
+
+`radixnet tutor` (and the Tutor tab, and `POST /api/tutor/start`) is the
+prediction process with nobody at the keyboard: the LLM sets the exercise, the
+network answers it, the LLM marks the answer, and the marks drive the learning.
+
+```
+topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
+```
+
+One **round** is:
+
+1. **The exercise.** The teacher writes `--exercises` sentence openings about
+   `--topic`, each drilling one point of English grammar (`focus`) and each
+   with its own model answer, so a lesson can teach even when the network says
+   nothing. `--focus "past tense"` pins every exercise to one point.
+2. **The completion.** The network continues each prefix with the ordinary
+   prediction search (`--mode dijkstra` - the cheapest path - `beam` or
+   `sample`; `--attempts N` asks for more than one answer, the extra ones
+   sampled). Exactly what the Predict tab does with a human-typed prefix.
+3. **The grade.** The same LLM marks every finished sentence as an English
+   teacher: grammar, spelling and fluency out of 10, the single worst mistake
+   named from a fixed list (`agreement`, `tense`, `article`, `preposition`,
+   `plural`, `pronoun`, `word-order`, `spelling`, `punctuation`, `vocabulary`,
+   `fragment`, `nonsense`, or `none`), one sentence of teaching, and the
+   **correction**: the same sentence written out in correct English, keeping
+   the prefix word for word. Grammar is what is being taught, so grammar is
+   most of the mark: `score = grammar_weight * grammar + (1 - grammar_weight) *
+   mean(spelling, fluency)`, `--grammar-weight 0.6` by default. A sentence
+   passes at `--threshold` (6 out of 10).
+4. **The lesson learned.** Failed sentences are 2NRL garbage weighted by how
+   bad the mark was (`--min-weight` for a near miss, 1 for a hopeless answer);
+   the corrections, the model answers and the sentences that passed are the
+   fine-tune pass, weighted by how good the mark was - a sentence marked 9 gets
+   nine tenths of the learning rate, the teacher's own English the full rate.
+   Nothing is punished when the network wrote nothing: the prefix itself is
+   correct English.
+
+The mistakes of a round add up to a **report card** (marks, pass rate, an error
+histogram and the weakest points). With `--adapt` (on by default) the weakest
+points become the next round's syllabus - the teacher notices that the class
+keeps failing plurals and sets plural exercises - and `--drills N` asks for N
+extra correct example sentences about them, which join the fine-tune pass.
+
+```bash
+ollama pull llama3.2
+python -m radixnet tutor --topic "everyday life" --rounds 5 --exercises 5
+python -m radixnet tutor --topic "the sea" --focus "past tense" --drills 5 --threshold 7
+python -m radixnet tutor --topic animals --dry-run            # set and mark, train nothing
+python -m radixnet tutor --topic animals --rounds 3 --report lessons.json
+make tutor TOPIC="everyday life" ROUNDS=5
+make tutor-dry TOPIC="everyday life"
+```
+
+Cost, per round: one Ollama call for the exercises, one per `--batch` marked
+sentences, and one more with `--drills`. `--tutor-model` (or
+`RADIXNET_TUTOR_MODEL`, else `RADIXNET_OLLAMA_MODEL`, else `llama3.2`) is the
+teacher, `--grader-model` lets a second model do the marking, and `--url` /
+`OLLAMA_HOST` picks the server. Ctrl-C stops after the current round and saves.
+
+The API adds `GET /api/tutor` (defaults and the marking vocabulary),
+`POST /api/tutor/start` (the job), `GET /api/tutor/history` and
+`POST /api/tutor/lesson` (one round of exercises, completions and grades
+without training - give it `prefixes` to skip the exercise writer and mark your
+own). The Tutor tab drives all of it and shows the marks per round, the report
+card and every lesson next to its correction. **Both servers run the lessons**:
+the Go server has the same endpoints and `radixnet-count tutor` the same
+command, with the count / reward model answering the exercises.
 
 ## Code generation: sandbox, Ollama judge, 2NRL rewards
 
@@ -541,6 +622,7 @@ go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.t
 go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
 go/bin/radixnet-count --model model.count.json generate --mode beam --count 5
 go/bin/radixnet-count --model model.count.json converse --opening "the cat sat on the mat"
+go/bin/radixnet-count --model model.count.json tutor --topic "everyday life" --rounds 3   # Ollama teaches it English
 go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 ```
@@ -611,11 +693,12 @@ The frontend detects the engine (`GET /api/health` and `/api/status` carry
 `engine: "go"`, the worker count and the live goroutine count): it shows a
 **Go engine** badge in the header and `engine go · workers · goroutines` in the
 status bar, hides the tabs that need the Python server (Evolve, Ollama, Code,
-Images), locks the model selector to the count model, and the Train tab gains a
+Images - the Tutor tab stays, both servers run the lessons), locks the model
+selector to the count model, and the Train tab gains a
 **Texts are** selector (`lines | paragraphs | pages`) so the pasted text and the
 uploaded files are cut into the units the goroutines fan out over. Train,
 Predict (with the Like button), Generate (with ratings), Converse, Score, 2NRL,
-Checkpoints and Graph work unchanged.
+Tutor, Checkpoints and Graph work unchanged.
 
 | endpoint | Go server |
 |---|---|
@@ -623,12 +706,13 @@ Checkpoints and Graph work unchanged.
 | `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress, chunk_size}` -> a job; uploads stream through in chunks whatever their size; learning rates are accepted and ignored |
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
 | `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
-| `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward) |
+| `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |
+| `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson` | the English lessons, same bodies and records as the Python server: Ollama sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model` set the defaults) |
 | `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
-| `/api/evolve/*`, `/api/ollama/*`, `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py` also starts the Go server and checks its answers
 against the key sets the Python API tests assert on, loads the model it saves
@@ -662,7 +746,7 @@ make go-test     # cd go && go test -race ./...
 ```
 RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
-                      checkpoint, bench, cli, api, ollama, codegen
+                      checkpoint, bench, cli, api, ollama, tutor, codegen
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)

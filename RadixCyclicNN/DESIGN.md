@@ -53,6 +53,9 @@ RadixCyclicNN/
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
     bench.py                benchmarks (chars/sec, predictions/sec)
+    ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16)
+    tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL (section 16.1)
+    codegen.py              code generation with a sandbox, an Ollama judge and 2NRL rewards (section 17)
     cli.py                  argparse CLI
     api.py                  HTTP JSON API + static file serving
   tests/                    unittest (run: `python -m unittest discover -s tests -v` from RadixCyclicNN/)
@@ -392,12 +395,22 @@ class RadixNet:
     def compress(self) -> int             # graph.compress()
 
     def two_nrl(self, bad: list[str], good: list[str], neg_epochs=3, pos_epochs=3, neg_lr=0.05, pos_lr=0.01,
-                progress=None, checkpoint_manager=None, stop_event=None) -> dict
+                progress=None, checkpoint_manager=None, stop_event=None,
+                bad_weights: list[float] | None = None, good_weights: list[float] | None = None) -> dict
         # phase 1: train(bad, epochs=neg_epochs, lr=neg_lr)                      -> "negative" records (phase="negative")
         # phase 2: invert()
         # phase 3: train(good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10) -> "positive" records (phase="positive")
         # records passed to progress carry "phase". returns {"negative": [...], "positive": [...], "inverted": graph.inverted}
         # meta["twonrl_runs"] += 1
+        # bad_weights / good_weights (>= 0, one per text) make each phase a *rating* rather than one rate for all:
+        # _weight_groups groups texts of equal (3-decimal) weight, heaviest first, drops zeros, and runs one pass per
+        # group with lr * w (and act_lr * w; the positive phase pos_lr/10 * w). Those records carry "weight".
+        # How bad a failure was decides how hard it is pushed away, how good a text was how much of it is kept.
+
+    def reward(self, texts, *, epochs=3, lr=0.1, weights=None, ...) -> list[dict]
+        # thumbs up: a positive-phase pass (act_lr = lr / 10); weights turn it into a mark out of 1 per text
+    def punish(self, texts, *, epochs=2, lr=0.5, weights=None, ...) -> list[dict]
+        # thumbs down: a negative-phase pass, then invert(); weights rate the failures the same way
 
     def stats(self) -> dict   # {"nodes","edges","trigrams","compression_ratio","inverted","backend","device",
                               #  "epochs_total","trained_chars","trained_texts","twonrl_runs","history_len","last_loss"}
@@ -605,6 +618,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches 2NRL: weighted garbage, corrections and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the four endpoints and the CLI.
 
 ---
 
@@ -679,6 +693,80 @@ Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from
 Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
 
 Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, configurable failures) and `/api/chat`.
+
+### 16.1 The tutor (`tutor.py`) — Ollama sets the exercise, the network answers, Ollama marks it
+
+The prediction process run without a human: `topic -> prefix (LLM) -> completion (the prediction search) -> grade
+(LLM) -> 2NRL`. The same client, one more loop.
+
+```python
+DEFAULT_TUTOR_MODEL = $RADIXNET_TUTOR_MODEL or DEFAULT_MODEL (ollama.py)
+ERROR_TYPES = ("none", "agreement", "tense", "article", "preposition", "plural", "pronoun", "word-order",
+               "spelling", "punctuation", "vocabulary", "fragment", "nonsense")   # "other" for anything else
+MODES = ("dijkstra", "beam", "sample");  TWONRL_PER = ("round", "lesson");  TEACHER_WEIGHT = 1.0
+
+def cue(prefix) -> str                    # the prefix with exactly one trailing space: what the search is given
+def overall_score(grammar, spelling, fluency, grammar_weight=0.6) -> float | None
+                                          # grammar_weight * grammar + (1 - grammar_weight) * mean(spelling, fluency)
+                                          # missing sub-marks drop out; grammar is taught, so grammar dominates
+
+@dataclass Exercise:  id, prefix, focus, answer        # .cue == cue(prefix)
+@dataclass Grade:     score, grammar, spelling, fluency, passed, error, correction, comment, graded_by
+@dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade
+
+def write_exercises(client, topic, count=5, *, focus=None, level="beginner", weak=(), words="3 to 6", model=None)
+    # JSON mode: {"exercises": [{"prefix", "focus", "answer"}]}; parse_exercises tolerates bare lists, plain lines,
+    # "opening" / "stem" instead of "prefix", trailing punctuation, duplicates and an answer without the prefix
+def drill_sentences(client, topic, count, *, weak=(), model=None) -> list[str]   # extra correct examples to imitate
+def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0.6, model=None, batch=10, external=None)
+    # one JSON call per batch: {"grades": [{"index","grammar","spelling","fluency","error","correction","comment"}]}
+    # empty completion -> failed without asking (graded_by="empty", the exercise's own answer as the correction);
+    # unreadable answer -> score None, graded_by="unrated", counted as a failure
+def report_card(lessons) -> dict          # {"lessons","graded","passed","failed","pass_rate","mean_score",
+                                          #  "mean_grammar","mean_spelling","mean_fluency","errors","weakest"}
+```
+
+`TutorConfig` (validated like every other config) holds the topic, `rounds`, `exercises`, `attempts`, `focus`,
+`level`, `words`, the two model names, the completion settings (`mode`, `length`, `max_length`, `temperature`,
+`to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `teach_answer`,
+`learn`) and the 2NRL settings (`twonrl_per`, `min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`,
+`batch_size`, `strength`, `replay`, `replay_limit`, `checkpoint_every`).
+
+`TutorTrainer(model, client, config, external=None).run(...)` per round:
+
+1. `set_exercises` — the teacher writes the openings (with the previous round's weakest points as the syllabus when
+   `adapt`).
+2. `complete` — `model.predict(exercise.cue, ...)` per attempt (attempt 0 in `mode`, later ones sampled).
+3. `grade` — one call per `batch` sentences.
+4. `texts_of` + `learn` — `bad` = the failed sentences with `weight_of(grade) = min_weight + (1 - min_weight) *
+   (threshold - score) / threshold` (1 for an unrated one); `good` = the sentences that passed with
+   `reward_of(grade) = score / 10`, plus the corrections, the model answers and the drill sentences at
+   `TEACHER_WEIGHT`. A text offered twice keeps its largest weight. Nothing is punished when the network wrote
+   nothing (the prefix itself is correct English). Both sides go into `two_nrl(bad_weights=, good_weights=)`, or
+   `reward(weights=)` / `punish(weights=)` when only one side exists. `learn=False` reports what it would have
+   taught and touches nothing.
+
+Records: `{"kind": "lesson", round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
+spelling, fluency, passed, error, correction, comment, graded_by, probability, seconds}`, `{"kind": "round", ...}`
+(the report card plus `action`, `bad`, `good`, `neg_loss`, `pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a
+final `{"kind": "report", rounds, ...}`.
+
+CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
+mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
+the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons and the card.
+
+API: `GET /api/tutor` (defaults, error types, modes), `POST /api/tutor/start` (job), `GET /api/tutor/history`,
+`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer). The service releases the
+model lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
+teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with.
+
+Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpoints) with the settings, "Dry run",
+a chart of the mean score and grammar per round, the report card with the mistake histogram, a table of rounds and
+one of every lesson (marks, mistake, what the network wrote, the correction, the teacher's line).
+
+Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule and answers drill requests; the
+parsers, the marking, the loop with a scripted model, the endpoints and the CLI) and `go/radixnet/tutor_test.go` +
+`go/server/tutor_test.go` for the port.
 
 ---
 
@@ -1002,10 +1090,20 @@ memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
 over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, ollama, images, codegen, schedule preview) answer 404 with a message naming the Python server.
+endpoints (evolve, the ollama corpus / review calls, images, codegen, schedule preview) answer 404 with a message
+naming the Python server.
+
+The tutor is ported too (`go/radixnet/ollama.go`, `go/radixnet/tutor.go`, `go/server/tutor.go`): the same prompts,
+the same records and the same four endpoints (`GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`,
+`POST /api/tutor/lesson`), with the count / reward model answering the exercises and `serve --ollama-url /
+--ollama-model` (or `$OLLAMA_HOST` / `$RADIXNET_TUTOR_MODEL`) setting the defaults; `radixnet-count tutor` is the
+CLI twin. The job releases the model lock around every LLM call, as the Python service does. Ratings reach the
+model through `WeightGroups` + `RewardWeighted` / `PunishWeighted` / `TwoNRLWeighted` (one pass per distinct
+weight, the reward or penalty scaled by it), which also back `good_ratings` / `bad_ratings` on `/api/2nrl` and
+`/api/feedback`.
 
 Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; with `"go"` the Python-only tabs (Evolve, Ollama,
-Code, Images) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
+Code, Images - the Tutor tab stays, both servers run the lessons) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
 replaces the accelerator chips with `engine go · workers · goroutines` (`StatusBar.jsx`), and the Train tab
 (`TrainPanel.jsx`) offers **Texts are** `lines | paragraphs | pages` (+ lines per page): with paragraphs or pages
 the pasted text is sent whole as `text` together with `split`, and the server cuts it and the selected uploads.
