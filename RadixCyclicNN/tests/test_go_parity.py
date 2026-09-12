@@ -47,19 +47,19 @@ def tearDownModule():
         TMP.cleanup()
 
 
-def go(*args, model, expect=0):
+def go(*args, model, expect=0, env=None):
     # --exact: atomic counting, so the numbers are reproducible and comparable with Python
     # (the default is one goroutine per text with plain, racy increments)
     cmd = [BINARY, "--json", "--exact", "--model", model, *[str(a) for a in args]]
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300, env=env)
     if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
     return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
-def py(*args, model):
+def py(*args, model, env=None):
     cmd = [sys.executable, "-m", "radixnet", "--json", "--model", model, *[str(a) for a in args]]
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600, env=env)
     if proc.returncode != 0:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stderr ---\n{proc.stderr}")
     return json.loads(proc.stdout)
@@ -243,6 +243,81 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(loaded.stats()["epochs_total"], 1)
         go("predict", "--prefix", "the", "--mode", "nope", model=path, expect=1)
         go("train", model=path, expect=1)  # --data is required
+
+
+class TestGoTutorParity(unittest.TestCase):
+    """One fake teacher, both tutors: the same prompts, the same marks, the same model afterwards."""
+
+    def setUp(self):
+        try:  # the fake Ollama of the tutor tests plays the English teacher for both sides
+            from test_tutor import start_fake
+        except ImportError:
+            from tests.test_tutor import start_fake
+        self.fake = start_fake(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_TUTOR_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "tutor_py.count.json")
+        self.go_path = os.path.join(TMP.name, "tutor_go.count.json")
+        for path in (self.py_path, self.go_path):
+            if os.path.exists(path):
+                os.remove(path)
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.py_path)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.go_path)
+
+    def calls(self):
+        """(system, prompt) of every Ollama call so far, so both sides' prompts can be compared."""
+        return [(body.get("system", ""), body.get("prompt", ""))
+                for _method, _path, body in self.fake.requests if body]
+
+    def test_both_tutors_ask_the_same_and_learn_the_same(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 2, "--exercises", 2, "--attempts", 1,
+                   "--mode", "beam", "--threshold", 9.5, "--drills", 2, "--neg-epochs", 1, "--pos-epochs", 1,
+                   "--strength", 1.0)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_calls = self.calls()
+
+        # the same conversation with the teacher: same system prompts, same exercises, same sentences to mark
+        self.assertEqual(len(py_calls), len(go_calls))
+        for i, (first, second) in enumerate(zip(py_calls, go_calls)):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        self.assertGreaterEqual(len(py_calls), 6)  # exercises + marking + drills, twice
+
+        # the same marks
+        self.assertEqual(a["report"]["lessons"], b["report"]["lessons"])
+        self.assertEqual(a["report"]["passed"], b["report"]["passed"])
+        self.assertEqual(a["report"]["errors"], b["report"]["errors"])
+        self.assertEqual(a["report"]["weakest"], b["report"]["weakest"])
+        self.assertLessEqual(abs(a["report"]["mean_score"] - b["report"]["mean_score"]), 1e-9)
+        self.assertEqual([l["sentence"] for l in a["lessons"]], [l["sentence"] for l in b["lessons"]])
+        self.assertEqual([l["grade"]["correction"] for l in a["lessons"]], [l["grade"]["correction"] for l in b["lessons"]])
+        self.assertEqual(len(a["lessons"]), 4)  # two rounds of two exercises
+
+        # and the same model: the grades reached the graph as the same rewards and penalties
+        py_doc, go_doc = load_json(self.py_path)["graph"], load_json(self.go_path)["graph"]
+        self.assertEqual(py_doc["edges"]["count"], go_doc["edges"]["count"])
+        assert_close(self, py_doc["edges"]["reward"], go_doc["edges"]["reward"], 1e-9)
+        assert_close(self, py_doc["edges"]["w"], go_doc["edges"]["w"], 1e-9)
+        py_stats, go_stats = a["stats"], b["stats"]
+        for key in ("twonrl_runs", "feedback_passes", "total_traversals", "nodes", "edges"):
+            self.assertEqual(py_stats[key], go_stats[key], key)
+        for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
+            self.assertLessEqual(abs(py_stats[key] - go_stats[key]), 1e-9, key)
+
+    def test_dry_runs_agree_and_change_nothing(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run")
+        before = load_json(self.py_path)["graph"]["edges"]["reward"]
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual([l["sentence"] for l in a["lessons"]], [l["sentence"] for l in b["lessons"]])
+        self.assertEqual(a["report"]["passed"], b["report"]["passed"])
+        self.assertIsNone(a["saved"])
+        self.assertEqual(b["saved"], "")
+        self.assertEqual(load_json(self.py_path)["graph"]["edges"]["reward"], before)
+        self.assertEqual(load_json(self.go_path)["graph"]["edges"]["reward"], before)
 
 
 class TestGoServer(unittest.TestCase):

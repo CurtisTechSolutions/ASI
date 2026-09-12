@@ -1076,6 +1076,9 @@ weights (1e-12), predictions, generated texts, scores and conversation transcrip
 the other's file with identical results; feedback, invert and weight changes match too. `go test -race ./...`
 covers the Go module (RNG vectors against CPython, exact summation, structure invariants, lazy weights against a
 full recompute, 1 vs 8 workers giving the same model, search / generation / conversation, gzip round trips).
+`TestGoTutorParity` runs both tutors against one fake Ollama: the calls the teacher receives (system and user
+prompts, in order), the marks, the report card and the resulting graph must all match, and a dry run on either side
+must change nothing.
 
 ### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
 

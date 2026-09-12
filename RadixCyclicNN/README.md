@@ -714,6 +714,11 @@ Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
 | `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
+`tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
+Ollama and asserts that they send the teacher the same prompts, get the same
+marks and leave the model in the same state, so the two implementations of the
+lessons cannot drift apart.
+
 `tests/test_go_parity.py` also starts the Go server and checks its answers
 against the key sets the Python API tests assert on, loads the model it saves
 in Python, trains from a ZIP upload with `split: paragraphs`, and reads its
