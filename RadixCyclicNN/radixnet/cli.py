@@ -1418,14 +1418,16 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
-    from .ollama import OllamaClient, OllamaError
-    from .tutor import TutorConfig, TutorTrainer, report_card
+    from .chatgpt import api_key_configured
+    from .llm import LLMError, make_client
+    from .tutor import TutorConfig, TutorTrainer, default_tutor_model, report_card
 
     manager = checkpoint_manager(args)
-    defaults = TutorConfig()
+    grader_provider = args.grader_provider or args.tutor_provider
     config = TutorConfig(
         topic=args.topic, rounds=args.rounds, exercises=args.exercises, attempts=args.attempts, focus=args.focus,
-        level=args.level, words=args.words, tutor_model=args.tutor_model or defaults.tutor_model,
+        level=args.level, words=args.words, tutor_provider=args.tutor_provider, grader_provider=grader_provider,
+        tutor_model=args.tutor_model or default_tutor_model(args.tutor_provider),
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
@@ -1434,9 +1436,18 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
         replay_limit=args.replay_limit, checkpoint_every=checkpoint_every(args, manager),
     )
+    if "chatgpt" in (config.tutor_provider, config.grader_provider) and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT teach, "
+            "or use --tutor-provider ollama"
+        )
     try:
         config.validate()
-        client = OllamaClient(args.url, config.tutor_model, args.timeout)
+        client = make_client(config.tutor_provider, args.url, config.tutor_model, args.timeout)
+        if config.grader_provider == config.tutor_provider and not args.grader_url:
+            grader_client = client
+        else:
+            grader_client = make_client(config.grader_provider, args.grader_url, config.resolved_grader_model, args.timeout)
     except ValueError as exc:
         raise CliError(str(exc)) from exc
     model, origin = open_model(args, console, required=False)
@@ -1446,8 +1457,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         ("backend", backend_label(model)),
         ("topic", config.topic + (f", drilling {config.focus}" if config.focus else "")),
         ("lessons", f"{config.rounds} round(s) x {config.exercises} exercise(s) x {config.attempts} attempt(s)"),
-        ("teacher", f"{config.tutor_model} at {client.url}"
-                    + (f", marked by {config.grader_model}" if config.grader_model else "")),
+        ("teacher", f"{config.tutor_provider}: {config.tutor_model} at {client.url}"),
+        ("marker", f"{config.grader_provider}: {config.resolved_grader_model} at {grader_client.url}"),
         ("completion", f"{config.mode}, length={config.length}, max={config.max_length}"
                        + (f", temperature={fmt(config.temperature)}" if config.mode == "sample" else "")),
         ("marking", f"pass at {fmt(config.threshold)}/10, grammar weight {fmt(config.grammar_weight)}, "
@@ -1464,12 +1475,12 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     console.say()
     printer = LessonPrinter(console)
     stop = threading.Event()
-    trainer = TutorTrainer(model, client, config)
+    trainer = TutorTrainer(model, client, config, grader_client=grader_client)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(progress=printer, stop_event=stop, checkpoint_manager=manager), stop, console, "round",
         )
-    except OllamaError as exc:
+    except LLMError as exc:
         raise CliError(str(exc)) from exc
     saved = None
     if args.dry_run:
@@ -2274,8 +2285,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .tutor import DEFAULT_TUTOR_MODEL as tutor_default_model, MODES as TUTOR_MODES, TWONRL_PER as TUTOR_TWONRL_PER
 
     p = command(
-        "tutor", "automated English lessons: Ollama writes the prefix, the network completes it, Ollama marks it",
-        "The prediction process run without a human at the keyboard.  Each round an Ollama model writes\n"
+        "tutor", "automated English lessons: the teacher writes the prefix, the network completes it and is marked",
+        "The prediction process run without a human at the keyboard.  Each round the teacher (a local\n"
+        "Ollama model, or ChatGPT with --tutor-provider chatgpt and $OPENAI_API_KEY set) writes\n"
         "sentence openings about a topic (each drilling one point of grammar, each with its own model\n"
         "answer), the network completes them with the prediction search, and the same LLM marks every\n"
         "sentence as an English teacher: grammar, spelling and fluency out of 10, the worst mistake named,\n"
@@ -2291,11 +2303,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--focus", metavar="TEXT", help="pin every exercise to one point of grammar, e.g. 'past tense'")
     p.add_argument("--level", default="beginner", metavar="TEXT", help="how hard the exercises are (beginner, intermediate, ...)")
     p.add_argument("--words", default="3 to 6", metavar="TEXT", help="how many words a prefix has")
+    p.add_argument("--tutor-provider", "--provider", dest="tutor_provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who teaches: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY; the lessons go to OpenAI)")
     p.add_argument("--tutor-model", metavar="NAME",
-                   help=f"Ollama model that sets and marks the exercises (default: $RADIXNET_TUTOR_MODEL or {tutor_default_model})")
-    p.add_argument("--grader-model", metavar="NAME", help="a different Ollama model for the marking (default: the tutor model)")
-    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
-    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one Ollama answer (default: 120)")
+                   help=f"model that sets and marks the exercises (default: $RADIXNET_TUTOR_MODEL or {tutor_default_model} "
+                        f"for ollama, $RADIXNET_OPENAI_MODEL or {chatgpt_default_model} for chatgpt)")
+    p.add_argument("--grader-provider", choices=PROVIDERS, help="mark with the other provider (default: the teacher's)")
+    p.add_argument("--grader-model", metavar="NAME", help="a different model for the marking (default: the tutor model)")
+    p.add_argument("--url", metavar="URL",
+                   help="the teacher's base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434 for ollama, "
+                        "$OPENAI_BASE_URL or https://api.openai.com/v1 for chatgpt)")
+    p.add_argument("--grader-url", metavar="URL", help="base URL of the marker's provider (default: the same as --url / its own default)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one LLM answer (default: 120)")
     group = p.add_argument_group("completion options")
     group.add_argument("--mode", choices=TUTOR_MODES, default="dijkstra", help="how the network completes a prefix")
     group.add_argument("--length", type=nonneg_int, default=20, help="characters the completion should reach")

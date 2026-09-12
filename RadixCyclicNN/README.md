@@ -24,7 +24,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
-| Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): Ollama writes sentence openings that drill a point of grammar, the network completes them with the prediction search, Ollama marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), and the round's mistakes become the next round's syllabus. |
+| Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), and the round's mistakes become the next round's syllabus. |
 | Rewards follow the rating | `two_nrl(good_weights=)`, `reward(weights=)` and `punish(weights=)` (both models, Python and Go) scale every pass per text: a sentence marked 9 out of 10 is learned nine tenths as hard as a perfect one, a 0 is skipped. `/api/feedback` and `/api/2nrl` take `good_ratings` / `bad_ratings` (marks out of 10), the Ratings card a mark per rated text. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
@@ -88,6 +88,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make go-build` / `go-test` / `go-parity` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
+| `make tutor TOPIC="..." ROUNDS=5` / `tutor-dry` / `tutor-focus FOCUS="past tense"` | automated English lessons taught by `TUTOR=ollama\|chatgpt` (`TUTOR_MODEL`, `TUTOR_URL`) |
 | `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the tutor and judge (`TUTOR=ollama\|chatgpt`, `CODEGEN_MODEL=gemma4`) and 2NRL rewards |
 | `make chatgpt-models` / `chatgpt-ask PROMPT="..."` | ChatGPT (OpenAI): what `$OPENAI_API_KEY` may use, one question — the quickest check that ChatGPT can tutor |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
@@ -131,7 +132,7 @@ Settings come from the environment or a `.env` file (`cp .env.example .env`):
 `RADIXNET_PORT`, `RADIXNET_BACKEND`, `WITH_TORCH`, `RADIXNET_RESUME`,
 `RADIXNET_CORPUS`, `EPOCHS`, `LR`, `BATCH`, `EVOLVE_SAMPLES`, `EVOLVE_MAX_LENGTH`,
 `EVOLVE_CHECKPOINT_EVERY`, `BENCH_CHARS`, `OLLAMA_HOST`, `RADIXNET_OLLAMA_MODEL`
-and — to let ChatGPT tutor in the Code tab — `OPENAI_API_KEY` (or
+and — to let ChatGPT teach in the Tutor and Code tabs — `OPENAI_API_KEY` (or
 `OPENAI_API_KEY_FILE` for a Docker secret), `RADIXNET_OPENAI_MODEL`,
 `OPENAI_BASE_URL`. The key is read from the `api` container's environment
 only; it never travels through the HTTP API.
@@ -172,7 +173,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, `--chatgpt-url`, `--chatgpt-model` (the key is the server's own `$OPENAI_API_KEY`) |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
-| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
+| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
@@ -210,10 +211,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", "teacher_provider", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
-| `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
-| `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_model", "grader_model", "url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
+| `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "providers": {"ollama": {...}, "chatgpt": {"url","model","configured"}}, "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
+| `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_provider": "ollama"\|"chatgpt", "tutor_model", "grader_provider", "grader_model", "url", "grader_url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
 | `GET /api/tutor/history` | `{"history": [lesson / round / report records of all tutor runs]}` |
-| `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (502 when Ollama fails) |
+| `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"chatgpt"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (400 when `tutor_provider` is `chatgpt` and the server has no key, 502 when the teacher fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
 | `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
 | `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
@@ -390,11 +391,47 @@ make tutor TOPIC="everyday life" ROUNDS=5
 make tutor-dry TOPIC="everyday life"
 ```
 
-Cost, per round: one Ollama call for the exercises, one per `--batch` marked
+Cost, per round: one call for the exercises, one per `--batch` marked
 sentences, and one more with `--drills`. `--tutor-model` (or
 `RADIXNET_TUTOR_MODEL`, else `RADIXNET_OLLAMA_MODEL`, else `llama3.2`) is the
 teacher, `--grader-model` lets a second model do the marking, and `--url` /
 `OLLAMA_HOST` picks the server. Ctrl-C stops after the current round and saves.
+
+### Who teaches: a local model or ChatGPT
+
+Every lesson is set and marked by an LLM, and `--tutor-provider` chooses which
+one — the same choice the code generator makes with `--teacher-provider`:
+
+| | `ollama` (default) | `chatgpt` |
+|---|---|---|
+| where | a local [Ollama](https://ollama.com) server | OpenAI's hosted API |
+| model | lessons: `--tutor-model`, default `$RADIXNET_TUTOR_MODEL` or `llama3.2`; codegen: `--teacher-model`, default `$RADIXNET_CODEGEN_MODEL` or `gemma4` | `--tutor-model` / `--teacher-model`, default `$RADIXNET_OPENAI_MODEL` or `gpt-4o-mini` |
+| endpoint | `--url`, else `$OLLAMA_HOST` or `http://127.0.0.1:11434` | `--url`, else `$OPENAI_BASE_URL` or `https://api.openai.com/v1` |
+| credentials | none | `$OPENAI_API_KEY`, or `$OPENAI_API_KEY_FILE` holding it |
+| privacy / cost | nothing leaves the machine, no cost | every exercise, every sentence the network writes and every generated program is sent to OpenAI and billed |
+
+```bash
+export OPENAI_API_KEY=sk-...
+python -m radixnet chatgpt models                                    # does the key work?
+python -m radixnet chatgpt ask --prompt "write one simple English sentence"
+python -m radixnet tutor --topic "everyday life" --tutor-provider chatgpt
+python -m radixnet tutor --topic animals --tutor-provider chatgpt --grader-provider ollama
+make tutor TOPIC="everyday life" TUTOR=chatgpt
+```
+
+The marking follows the teacher unless `--grader-provider` (and optionally
+`--grader-url` / `--grader-model`) names the other one, so ChatGPT can set the
+exercises and a local model mark them, or the other way round; every grade
+records which one gave it (`graded_by`). The key is only ever read from the
+environment of the process talking to OpenAI — it is never a request field, and
+never lands in a config, a record or a report.
+
+`$OPENAI_BASE_URL` also points the `chatgpt` provider at any OpenAI-compatible
+server (llama.cpp, vLLM, LM Studio, a gateway). Ollama's `options` are
+translated to the chat-completions fields, and a model that rejects one (the
+reasoning models refuse `temperature`, older ones `response_format`) is retried
+without it. A key is never sent unencrypted to a remote host: use `https://`, a
+server on this machine, or set `RADIXNET_OPENAI_ALLOW_INSECURE=1` deliberately.
 
 The API adds `GET /api/tutor` (defaults and the marking vocabulary),
 `POST /api/tutor/start` (the job), `GET /api/tutor/history` and
@@ -447,39 +484,23 @@ python -m radixnet codegen --problems problems.jsonl --twonrl-per round --report
 make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both
 ```
 
-### Who tutors: a local model or ChatGPT
+### Who tutors here
 
-`--teacher-provider` chooses which LLM writes, fixes and judges the solutions:
-
-| | `ollama` (default) | `chatgpt` |
-|---|---|---|
-| where | a local [Ollama](https://ollama.com) server | OpenAI's hosted API |
-| model | `--teacher-model`, default `$RADIXNET_CODEGEN_MODEL` or `gemma4` | `--teacher-model`, default `$RADIXNET_OPENAI_MODEL` or `gpt-4o-mini` |
-| endpoint | `--url`, else `$OLLAMA_HOST` or `http://127.0.0.1:11434` | `--url`, else `$OPENAI_BASE_URL` or `https://api.openai.com/v1` |
-| credentials | none | `$OPENAI_API_KEY`, or `$OPENAI_API_KEY_FILE` holding it |
-| privacy / cost | nothing leaves the machine, no cost | every problem statement and every generated program is sent to OpenAI and billed |
+`--teacher-provider ollama|chatgpt` picks the LLM that writes, fixes and judges
+the solutions, exactly as `--tutor-provider` does for the lessons
+([who teaches](#who-teaches-a-local-model-or-chatgpt)):
 
 ```bash
-export OPENAI_API_KEY=sk-...
-python -m radixnet chatgpt models                                                  # does the key work?
 python -m radixnet codegen --problems data/sample_problems.jsonl --teacher-provider chatgpt
 python -m radixnet codegen --problems problems.jsonl --teacher-provider chatgpt --judge-provider ollama
 make codegen PROBLEMS=data/sample_problems.jsonl TUTOR=chatgpt
 ```
 
-The judge follows the tutor unless `--judge-provider` (and optionally
-`--judge-url` / `--judge-model`) names the other one, so a ChatGPT tutor can be
-reviewed by a local model, or the other way round. Attempt records carry the
-provider that wrote them (`source`) and the one that judged them
-(`judged_by`), and `--report` / `/api/codegen/history` keep both — the API key
-itself is never part of a config, a record or a report.
-
-`$OPENAI_BASE_URL` also points the `chatgpt` provider at any OpenAI-compatible
-server (llama.cpp, vLLM, LM Studio, a gateway). Ollama's `options` are
-translated to the chat-completions fields, and a model that rejects one (the
-reasoning models refuse `temperature`, older ones `response_format`) is retried
-without it. A key is never sent unencrypted to a remote host: use `https://`, a
-server on this machine, or set `RADIXNET_OPENAI_ALLOW_INSECURE=1` deliberately.
+The judge follows the teacher unless `--judge-provider` (and optionally
+`--judge-url` / `--judge-model`) names the other one, so a ChatGPT teacher can
+be reviewed by a local model, or the other way round. Attempt records carry the
+provider that wrote them (`source`) and the one that judged them (`judged_by`),
+and `--report` / `/api/codegen/history` keep both.
 
 Problem files: one prompt per line (`.txt`, `#` comments), or `.json` / `.jsonl`
 objects `{"id", "prompt", "tests", "expected_output"}` (`data/sample_problems.*`).

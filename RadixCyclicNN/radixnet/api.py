@@ -103,6 +103,7 @@ from .tutor import (
     Exercise,
     TutorConfig,
     TutorTrainer,
+    default_tutor_model,
     report_card,
 )
 from .vision import VisionError
@@ -1070,13 +1071,15 @@ class ModelService:
 
     # -- English lessons (Ollama sets and marks the exercises) ---------------
 
-    def start_tutor(self, config: TutorConfig, client: OllamaClient) -> dict:
+    def start_tutor(self, config: TutorConfig, client: LLMClient, grader_client: LLMClient | None = None) -> dict:
         """Start a ``tutor`` job: rounds of prefix -> completion -> grade -> 2NRL."""
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
 
         def work(job: Job) -> None:
-            trainer = TutorTrainer(self.model, client, config, external=self.pause_lock)
+            trainer = TutorTrainer(
+                self.model, client, config, external=self.pause_lock, grader_client=grader_client,
+            )
             trainer.run(
                 progress=self._progress(job, self._tutor_history), stop_event=job.stop_event,
                 checkpoint_manager=manager,
@@ -2221,14 +2224,36 @@ def _r_codegen_run(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, {"run": run.to_dict(), "style": style.to_dict(), "verdict": verdict.to_dict()}
 
 
-def _default_tutor_model(svc: ModelService) -> str:
-    """``RADIXNET_TUTOR_MODEL`` when it is set, else the model the server was started with."""
+def _default_tutor_model(svc: ModelService, provider: str = "ollama") -> str:
+    """The model this server teaches with when a request names none.
+
+    Ollama: ``RADIXNET_TUTOR_MODEL`` when it is set, else the model the server
+    was started with.  ChatGPT: the server's own default
+    (``--chatgpt-model`` / ``$RADIXNET_OPENAI_MODEL``).
+    """
+    if provider == "chatgpt":
+        return svc.chatgpt_model
     return os.environ.get("RADIXNET_TUTOR_MODEL", "").strip() or svc.ollama_model
+
+
+def _tutor_clients(svc: ModelService, f: Fields, config: TutorConfig) -> tuple[LLMClient, LLMClient]:
+    """The teacher and marker clients of a tutor request (``url`` / ``grader_url`` override the server defaults)."""
+    timeout = f.number("timeout", None, minimum=1.0)
+    client = svc.llm_client(config.tutor_provider, f.text("url", None), config.tutor_model, timeout)
+    if config.grader_provider == config.tutor_provider and not f.text("grader_url", None):
+        return client, client
+    grader = svc.llm_client(config.grader_provider, f.text("grader_url", None), config.resolved_grader_model, timeout)
+    return client, grader
 
 
 def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
     """The tutoring settings of a request body, defaults from :class:`~radixnet.tutor.TutorConfig`."""
     d = TutorConfig()
+    tutor_provider = _provider_field(f, "tutor_provider", "provider", d.tutor_provider)
+    grader_provider = _provider_field(f, "grader_provider", None, tutor_provider)
+    grader_model = f.text("grader_model", None) or None
+    if grader_model is None and grader_provider != tutor_provider:
+        grader_model = _default_tutor_model(svc, grader_provider)
     config = TutorConfig(
         topic=f.text("topic", d.topic),
         rounds=f.integer("rounds", d.rounds, minimum=1),
@@ -2237,8 +2262,10 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         focus=f.text("focus", None) or None,
         level=f.text("level", d.level),
         words=f.text("words", d.words),
-        tutor_model=f.text("tutor_model", None) or f.text("model", None) or _default_tutor_model(svc),
-        grader_model=f.text("grader_model", None) or None,
+        tutor_provider=tutor_provider,
+        tutor_model=f.text("tutor_model", None) or f.text("model", None) or _default_tutor_model(svc, tutor_provider),
+        grader_provider=grader_provider,
+        grader_model=grader_model,
         mode=f.text("mode", d.mode).strip().lower(),
         length=f.integer("length", d.length, minimum=0),
         max_length=f.integer("max_length", d.max_length, minimum=1),
@@ -2274,11 +2301,19 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
 
 
 def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    """What the tutor can be asked for: the teacher model, the marking vocabulary and every default."""
+    """What the tutor can be asked for: the teachers on offer, the marking vocabulary and every default."""
     return 200, {
         "url": svc.ollama_url,
         "model": _default_tutor_model(svc),
         "env_model": DEFAULT_TUTOR_MODEL,
+        "providers": {
+            "ollama": {"url": svc.ollama_url, "model": _default_tutor_model(svc, "ollama"), "configured": True},
+            "chatgpt": {
+                "url": svc.chatgpt_url,
+                "model": _default_tutor_model(svc, "chatgpt"),
+                "configured": chatgpt_key_configured(),
+            },
+        },
         "error_types": list(TUTOR_ERROR_TYPES),
         "modes": list(TUTOR_MODES),
         "twonrl_per": list(TUTOR_TWONRL_PER),
@@ -2288,8 +2323,8 @@ def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 def _r_tutor_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     config = _tutor_config(f, svc)
-    client = svc.ollama_client(f.text("url", None), config.tutor_model, f.number("timeout", None, minimum=1.0))
-    job = svc.start_tutor(config, client)
+    client, grader = _tutor_clients(svc, f, config)
+    job = svc.start_tutor(config, client, grader_client=grader)
     return 202, {"job": job, "config": config.to_dict(), "url": client.url}
 
 
@@ -2300,9 +2335,9 @@ def _r_tutor_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 def _r_tutor_lesson(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     """One round of lessons without training: exercises, completions, grades and the report card."""
     config = _tutor_config(f, svc)
-    client = svc.ollama_client(f.text("url", None), config.tutor_model, f.number("timeout", None, minimum=1.0))
+    client, grader = _tutor_clients(svc, f, config)
     given = f.texts_optional("prefixes", "prefix")
-    trainer = TutorTrainer(None, client, config)
+    trainer = TutorTrainer(None, client, config, grader_client=grader)
     try:
         if given:
             exercises = [
@@ -2315,10 +2350,10 @@ def _r_tutor_lesson(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
             trainer.model = model
             lessons = [trainer.complete(ex, attempt) for ex in exercises for attempt in range(config.attempts)]
         trainer.grade(lessons)
-    except OllamaError as exc:
+    except LLMError as exc:
         raise ApiError(502, str(exc)) from exc
     return 200, {
-        "source": "given" if given else "ollama", "model": client.model, "url": client.url,
+        "source": "given" if given else config.tutor_provider, "model": client.model, "url": client.url,
         "config": config.to_dict(), "exercises": [e.to_dict() for e in exercises],
         "lessons": [lesson.to_dict() for lesson in lessons], "report": report_card(lessons),
     }
@@ -2401,13 +2436,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
     ("POST", "/api/codegen/run", _r_codegen_run, "run a program in the sandbox: {code, tests, expected_output, sandbox_timeout, memory_mb}"),
     ("GET", "/api/tutor", _r_tutor,
-     "the English tutor: the default teacher model, the error types a completion is marked with, the completion "
-     "modes and every default setting"),
+     "the English tutor: the teachers on offer (ollama, chatgpt: url, model, configured), the error types a "
+     "completion is marked with, the completion modes and every default setting"),
     ("POST", "/api/tutor/start", _r_tutor_start,
-     "start a tutor job - Ollama writes the prefixes, the network completes them, Ollama marks the grammar and "
-     "the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, "
-     "drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, "
-     "neg_lr, pos_lr, tutor_model, ...}"),
+     "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the "
+     "grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, "
+     "grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, "
+     "neg_epochs, pos_epochs, neg_lr, pos_lr, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
+     "grader_model, url, grader_url, ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "

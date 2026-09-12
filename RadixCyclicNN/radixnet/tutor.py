@@ -1,4 +1,4 @@
-"""Automated English lessons: Ollama sets the exercise, the network completes it, Ollama marks it.
+"""Automated English lessons: the tutor sets the exercise, the network completes it, the tutor marks it.
 
     topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
 
@@ -38,9 +38,16 @@ next one, and ``drills`` asks it for extra correct example sentences about
 them - a teacher noticing that the class keeps failing plurals and setting
 plural exercises.
 
+The teacher is a local Ollama model by default (``OLLAMA_HOST``,
+``RADIXNET_TUTOR_MODEL``) or ChatGPT (``tutor_provider="chatgpt"``, see
+:mod:`radixnet.chatgpt`, which needs ``OPENAI_API_KEY``); the marking follows
+the tutor unless ``grader_provider`` names the other one, so the lessons can
+be set by one and marked by the other.  A hosted tutor sends the topic, the
+exercises and everything the network writes to OpenAI, and costs money per
+call.
+
 Cost, per round: one call for the exercises, one per grading batch, one more
-when ``drills`` is on.  The Ollama endpoint and model follow the usual
-conventions (``OLLAMA_HOST``, ``RADIXNET_TUTOR_MODEL``).
+when ``drills`` is on.
 """
 
 from __future__ import annotations
@@ -57,11 +64,22 @@ from typing import Any
 
 from . import diff
 from .beam import path_probability
-from .ollama import DEFAULT_MODEL, OllamaClient, OllamaError, _loads_lenient, parse_lines
+from .llm import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    LLMClient,
+    LLMError,
+    default_model,
+    loads_lenient,
+    normalise_provider,
+    provider_of,
+)
+from .ollama import DEFAULT_MODEL, parse_lines
 
 __all__ = [
     "DEFAULT_TUTOR_MODEL",
     "ERROR_TYPES",
+    "PROVIDERS",
     "TEACHER_WEIGHT",
     "MODES",
     "TWONRL_PER",
@@ -72,6 +90,7 @@ __all__ = [
     "TutorConfig",
     "TutorTrainer",
     "cue",
+    "default_tutor_model",
     "drill_sentences",
     "grade_completions",
     "overall_score",
@@ -82,6 +101,12 @@ __all__ = [
 
 DEFAULT_TUTOR_MODEL = os.environ.get("RADIXNET_TUTOR_MODEL", "").strip() or DEFAULT_MODEL
 """Ollama model that sets and marks the exercises (``RADIXNET_TUTOR_MODEL``, else the Ollama default)."""
+
+
+def default_tutor_model(provider: str | None = None) -> str:
+    """The model a teacher uses when none is named: :data:`DEFAULT_TUTOR_MODEL` for Ollama, else the provider's own default."""
+    provider = normalise_provider(provider)
+    return DEFAULT_TUTOR_MODEL if provider == "ollama" else default_model(provider)
 
 ERROR_TYPES = (
     "none",
@@ -213,7 +238,7 @@ def parse_exercises(raw: str, count: int, round_no: int = 1) -> list[Exercise]:
     ``stem`` instead of ``prefix``, and a model answer that repeats the prefix
     or omits it.
     """
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     items: Any = None
     if isinstance(data, dict):
         for key in ("exercises", "prefixes", "items", "results"):
@@ -267,7 +292,7 @@ def parse_exercises(raw: str, count: int, round_no: int = 1) -> list[Exercise]:
 
 
 def write_exercises(
-    client: OllamaClient,
+    client: LLMClient,
     topic: str,
     count: int = 5,
     *,
@@ -304,7 +329,7 @@ def write_exercises(
     )
     exercises = parse_exercises(raw, count)
     if not exercises:
-        raise OllamaError(f"Ollama model {model or client.model!r} returned no usable exercises")
+        raise LLMError(f"the teacher model {model or client.model!r} returned no usable exercises")
     return exercises
 
 
@@ -317,7 +342,7 @@ _DRILL_SYSTEM = (
 
 
 def drill_sentences(
-    client: OllamaClient,
+    client: LLMClient,
     topic: str,
     count: int = 5,
     *,
@@ -354,7 +379,7 @@ class Grade:
     error: str = "none"  # one of ERROR_TYPES, or "other"
     correction: str = ""  # the whole sentence in correct English: what the network is taught
     comment: str = ""  # one sentence of teaching
-    graded_by: str = "ollama"  # "ollama" | "empty" (nothing to mark) | "unrated" (no usable answer)
+    graded_by: str = DEFAULT_PROVIDER  # the marking provider ("ollama" | "chatgpt"), "empty" (nothing to mark) or "unrated"
 
     def to_dict(self) -> dict:
         return {
@@ -428,9 +453,11 @@ _GRADE_SYSTEM = (
 )
 
 
-def _parse_grades(raw: str, count: int, grammar_weight: float, threshold: float) -> dict[int, Grade]:
+def _parse_grades(
+    raw: str, count: int, grammar_weight: float, threshold: float, graded_by: str = DEFAULT_PROVIDER
+) -> dict[int, Grade]:
     """``{index: Grade}`` for the entries of an LLM answer that could be understood."""
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     items: Any = None
     if isinstance(data, dict):
         for key in ("grades", "reviews", "results", "items", "marks"):
@@ -468,13 +495,13 @@ def _parse_grades(raw: str, count: int, grammar_weight: float, threshold: float)
             error=_error_type(item.get("error", item.get("error_type", item.get("mistake")))),
             correction=" ".join(str(correction or "").split()),
             comment=_clip(comment if isinstance(comment, str) else "", MAX_COMMENT_CHARS),
-            graded_by="ollama",
+            graded_by=graded_by,
         )
     return grades
 
 
 def grade_completions(
-    client: OllamaClient,
+    client: LLMClient,
     lessons: Sequence[Lesson],
     *,
     topic: str = "",
@@ -484,8 +511,12 @@ def grade_completions(
     batch: int = 10,
     temperature: float = 0.2,
     external: Callable[[], Any] | None = None,
+    graded_by: str | None = None,
 ) -> list[Lesson]:
     """Mark every lesson in place (``lesson.grade``) in batches of ``batch``; returns ``lessons``.
+
+    ``graded_by`` names the provider doing the marking (the client's own by
+    default) and ends up in every grade it gives.
 
     An empty completion is failed without asking (``graded_by="empty"``), with
     the teacher's model answer as the correction when the exercise has one; a
@@ -494,6 +525,7 @@ def grade_completions(
     """
     if batch < 1:
         raise ValueError("batch must be >= 1")
+    graded_by = graded_by or provider_of(client)
     system = _GRADE_SYSTEM.format(types=", ".join(f'"{t}"' for t in ERROR_TYPES), schema=_SCHEMA)
     hold = external or nullcontext
     for start in range(0, len(lessons), batch):
@@ -519,7 +551,7 @@ def grade_completions(
         )
         with hold():
             raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": temperature})
-        parsed = _parse_grades(raw, len(chunk), grammar_weight, threshold)
+        parsed = _parse_grades(raw, len(chunk), grammar_weight, threshold, graded_by)
         for i, lesson in asked:
             grade = parsed.get(i)
             if grade is None:
@@ -580,7 +612,9 @@ class TutorConfig:
     focus: str | None = None  # pin every exercise to one point of grammar
     level: str = "beginner"
     words: str = "3 to 6"  # how long a prefix the teacher writes
-    tutor_model: str = DEFAULT_TUTOR_MODEL
+    tutor_provider: str = DEFAULT_PROVIDER  # "ollama" | "chatgpt": who teaches
+    tutor_model: str = ""  # "" = the teacher provider's default model
+    grader_provider: str = ""  # "" = the teacher's provider
     grader_model: str | None = None  # a different model for the marking (default: the tutor model)
     # the completion
     mode: str = "dijkstra"
@@ -612,7 +646,27 @@ class TutorConfig:
     replay_limit: int = 64  # how many of them to keep (0 = no limit)
     checkpoint_every: int = 0  # rounds
 
+    def __post_init__(self) -> None:
+        """Resolve the providers and the model names they imply (so reports name the real model)."""
+        self.tutor_provider = normalise_provider(self.tutor_provider)
+        self.grader_provider = normalise_provider(self.grader_provider) if str(self.grader_provider).strip() else self.tutor_provider
+        if not str(self.tutor_model).strip():
+            self.tutor_model = default_tutor_model(self.tutor_provider)
+        if self.grader_model is not None and not str(self.grader_model).strip():
+            self.grader_model = None
+
+    @property
+    def resolved_grader_model(self) -> str:
+        """The model the marking runs on: ``grader_model``, else the teacher's model on the teacher's provider."""
+        if self.grader_model:
+            return self.grader_model
+        if self.grader_provider == self.tutor_provider:
+            return self.tutor_model
+        return default_tutor_model(self.grader_provider)
+
     def validate(self) -> None:
+        if self.tutor_provider not in PROVIDERS or self.grader_provider not in PROVIDERS:
+            raise ValueError(f"tutor_provider and grader_provider must be one of {', '.join(PROVIDERS)}")
         if not str(self.topic or "").strip():
             raise ValueError("topic must be a non-empty string")
         if self.rounds < 1:
@@ -662,6 +716,12 @@ ProgressFn = Callable[[dict], None]
 class TutorTrainer:
     """Runs the lessons: the LLM sets and marks the exercises, the network completes them and learns from the grades.
 
+    ``client`` is the teacher: any provider client (Ollama or ChatGPT).  The
+    marking shares it unless ``grader_client`` is given or the configuration
+    names a different ``grader_provider``, in which case a client for that
+    provider is built from the environment; every grade records which one
+    marked it.
+
     ``external`` is an optional zero-argument callable returning a context
     manager entered around the LLM calls; the API passes its lock-releasing
     one so the server stays responsive while the teacher thinks.
@@ -670,14 +730,22 @@ class TutorTrainer:
     def __init__(
         self,
         model: Any,
-        client: OllamaClient,
+        client: LLMClient,
         config: TutorConfig | None = None,
         external: Callable[[], Any] | None = None,
+        grader_client: LLMClient | None = None,
     ) -> None:
         self.model = model
         self.client = client
         self.config = config or TutorConfig()
         self.config.validate()
+        if grader_client is None and self.config.grader_provider != provider_of(client):
+            from .llm import make_client
+
+            grader_client = make_client(self.config.grader_provider, model=self.config.resolved_grader_model)
+        self.grader_client = grader_client if grader_client is not None else client
+        self.tutor_provider = provider_of(client)
+        self.grader_provider = provider_of(self.grader_client)
         self._external = external or nullcontext
         self.history: list[dict] = []
         self.lessons: list[Lesson] = []
@@ -723,8 +791,9 @@ class TutorTrainer:
         """Step 3: the teacher marks the completions (one call per :attr:`TutorConfig.batch`)."""
         cfg = self.config
         return grade_completions(
-            self.client, lessons, topic=cfg.topic, threshold=cfg.threshold, grammar_weight=cfg.grammar_weight,
-            model=cfg.grader_model or cfg.tutor_model, batch=cfg.batch, external=self._external,
+            self.grader_client, lessons, topic=cfg.topic, threshold=cfg.threshold, grammar_weight=cfg.grammar_weight,
+            model=cfg.resolved_grader_model, batch=cfg.batch, external=self._external,
+            graded_by=self.grader_provider,
         )
 
     # -- what a grade is worth -----------------------------------------------
@@ -956,7 +1025,7 @@ class TutorTrainer:
                     drills = drill_sentences(
                         self.client, cfg.topic, cfg.drills, weak=card["weakest"], model=cfg.tutor_model
                     )
-                except OllamaError as exc:  # the lesson stands without its drill sentences
+                except LLMError as exc:  # the lesson stands without its drill sentences
                     self._emit(progress, {"kind": "note", "round": round_no, "message": f"no drill sentences: {exc}"})
         learned = {} if self._stopped() else self._learn_lessons(lessons, drills)
         if cfg.adapt:

@@ -49,7 +49,10 @@ EXERCISES   ?= 5
 DRILLS      ?= 0
 PROBLEMS    ?= data/sample_problems.jsonl
 PHASE       ?= both
+# Who teaches: the English lessons and the code-generation tutor both follow it
 TUTOR       ?= ollama
+TUTOR_MODEL ?=
+TUTOR_URL   ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_URL),$(OLLAMA_URL))
 CHATGPT_MODEL ?=
 CHATGPT_URL ?=
 # blank for the chatgpt tutor: it then uses CHATGPT_MODEL, $$RADIXNET_OPENAI_MODEL or gpt-4o-mini
@@ -179,10 +182,11 @@ ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pa
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
 
-##@ Tutor (Ollama sets the exercise, the model answers, Ollama marks it)
-TUTOR_FLAGS := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),) $(if $(TUTOR_MODEL),--tutor-model $(TUTOR_MODEL),)
+##@ Tutor (the teacher sets the exercise, the model answers, the teacher marks it)
+TUTOR_FLAGS := --tutor-provider $(TUTOR) $(if $(TUTOR_URL),--url $(TUTOR_URL),) \
+               $(if $(TUTOR_MODEL),--tutor-model $(TUTOR_MODEL),)
 
-tutor: ## English lessons about TOPIC: ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
+tutor: ## English lessons about TOPIC (TUTOR=ollama|chatgpt teaches): ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --drills $(DRILLS) --threshold $(THRESHOLD) --report tutor-report.json
 
 tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trained on

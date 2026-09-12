@@ -754,13 +754,15 @@ class ChatGPTClient(url=None, model=None, timeout=None, *, api_key=None)
   `/v1/chat/completions`, recording the Authorization header, scripting tutor programs, judging by content and
   rejecting configurable fields or whole requests.
 
-### 16.3 The tutor (`tutor.py`) — Ollama sets the exercise, the network answers, Ollama marks it
+### 16.3 The tutor (`tutor.py`) — the teacher sets the exercise, the network answers, the teacher marks it
 
 The prediction process run without a human: `topic -> prefix (LLM) -> completion (the prediction search) -> grade
-(LLM) -> 2NRL`. The same client, one more loop.
+(LLM) -> 2NRL`. Any provider client, one more loop: the teacher is a local Ollama model or ChatGPT
+(`tutor_provider`), and the marking follows it unless `grader_provider` names the other one.
 
 ```python
 DEFAULT_TUTOR_MODEL = $RADIXNET_TUTOR_MODEL or DEFAULT_MODEL (ollama.py)
+default_tutor_model(provider) -> str      # DEFAULT_TUTOR_MODEL for ollama, the provider's own default otherwise
 ERROR_TYPES = ("none", "agreement", "tense", "article", "preposition", "plural", "pronoun", "word-order",
                "spelling", "punctuation", "vocabulary", "fragment", "nonsense")   # "other" for anything else
 MODES = ("dijkstra", "beam", "sample");  TWONRL_PER = ("round", "lesson");  TEACHER_WEIGHT = 1.0
@@ -772,13 +774,15 @@ def overall_score(grammar, spelling, fluency, grammar_weight=0.6) -> float | Non
 
 @dataclass Exercise:  id, prefix, focus, answer        # .cue == cue(prefix)
 @dataclass Grade:     score, grammar, spelling, fluency, passed, error, correction, comment, graded_by
+                      # graded_by: the marking provider ("ollama" | "chatgpt"), "empty" or "unrated"
 @dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade
 
 def write_exercises(client, topic, count=5, *, focus=None, level="beginner", weak=(), words="3 to 6", model=None)
     # JSON mode: {"exercises": [{"prefix", "focus", "answer"}]}; parse_exercises tolerates bare lists, plain lines,
     # "opening" / "stem" instead of "prefix", trailing punctuation, duplicates and an answer without the prefix
 def drill_sentences(client, topic, count, *, weak=(), model=None) -> list[str]   # extra correct examples to imitate
-def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0.6, model=None, batch=10, external=None)
+def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0.6, model=None, batch=10,
+                      external=None, graded_by=None)   # graded_by: the provider behind the client
     # one JSON call per batch: {"grades": [{"index","grammar","spelling","fluency","error","correction","comment"}]}
     # empty completion -> failed without asking (graded_by="empty", the exercise's own answer as the correction);
     # unreadable answer -> score None, graded_by="unrated", counted as a failure
@@ -787,13 +791,17 @@ def report_card(lessons) -> dict          # {"lessons","graded","passed","failed
 ```
 
 `TutorConfig` (validated like every other config) holds the topic, `rounds`, `exercises`, `attempts`, `focus`,
-`level`, `words`, the two model names, the completion settings (`mode`, `length`, `max_length`, `temperature`,
+`level`, `words`, the two providers and their model names (`tutor_provider`, `tutor_model`, `grader_provider`,
+`grader_model`; `__post_init__` normalises the providers and fills in the models they imply, and
+`resolved_grader_model` is what the marking runs on), the completion settings (`mode`, `length`, `max_length`, `temperature`,
 `to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `teach_answer`,
 `learn`), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
 `min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`, `batch_size`, `strength`, `replay`, `replay_limit`,
 `checkpoint_every`).
 
-`TutorTrainer(model, client, config, external=None).run(...)` per round:
+`TutorTrainer(model, client, config, external=None, grader_client=None).run(...)` per round — `client` is the
+teacher, the marking shares it unless `grader_client` is given or `grader_provider` names the other provider (then
+one is built from the environment), and every grade records which one marked it:
 
 1. `set_exercises` — the teacher writes the openings (with the previous round's weakest points as the syllabus when
    `adapt`).
@@ -820,20 +828,29 @@ CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
 the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons and the card.
 
-API: `GET /api/tutor` (defaults, error types, modes), `POST /api/tutor/start` (job), `GET /api/tutor/history`,
-`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer). The service releases the
-model lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
-teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with.
+CLI flags for the teacher: `--tutor-provider ollama|chatgpt` (`--provider`), `--tutor-model`, `--grader-provider`,
+`--grader-model`, `--url`, `--grader-url`; a `chatgpt` teacher without `$OPENAI_API_KEY` stops before anything is
+sent.
 
-Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpoints) with the settings ("Teach
-corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
+API: `GET /api/tutor` (defaults, error types, modes, and `providers` — each teacher's url, model and whether it is
+`configured`), `POST /api/tutor/start` (job), `GET /api/tutor/history`, `POST /api/tutor/lesson` (one round, no
+training; `prefixes` skips the exercise writer). All three take `tutor_provider` / `grader_provider` (and `url` /
+`grader_url`); a `chatgpt` teacher on a server without a key is refused with 400. The service releases the model
+lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
+teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with (ChatGPT: the server's
+`--chatgpt-model`).
+
+Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpoints) with a **Teacher** selector
+(Ollama or ChatGPT; the URL, the model placeholder and the notes follow it, and it says so when the server has no
+key), the settings ("Teach corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
 per round, the report card with the mistake histogram, a table of rounds (with what the corrections moved) and one
 of every lesson (marks, mistake, what the network wrote, the correction, the changed words struck out against what
 replaced them, the teacher's line).
 
 Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule and answers drill requests; the
-parsers, the marking, the loop with a scripted model, the endpoints and the CLI) and `go/radixnet/tutor_test.go` +
-`go/server/tutor_test.go` for the port.
+parsers, the marking, the loop with a scripted model, the endpoints and the CLI), the ChatGPT teacher of
+`tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
+model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
 
 ### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
 

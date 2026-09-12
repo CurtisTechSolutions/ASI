@@ -1,10 +1,12 @@
-"""Tests for ``radixnet.chatgpt``: the client, the ChatGPT tutor in codegen, its API endpoint and CLI.
+"""Tests for ``radixnet.chatgpt``: the client, ChatGPT as the English tutor and the codegen teacher, the API and the CLI.
 
 A fake OpenAI server (standard library) stands in for the real API: it answers
 ``/v1/models`` and ``/v1/chat/completions``, records every request with the
-Authorization header it arrived with, writes scripted programs for the tutor,
-judges programs by content (``BAD_ANSWER`` marks a wrong one) and can reject
-optional request fields the way a picky model does or fail outright.
+Authorization header it arrived with, plays the English teacher (exercise
+openings and marks, by the same rule as the fake Ollama of ``test_tutor``),
+writes scripted programs for the code-generation teacher, judges programs by
+content (``BAD_ANSWER`` marks a wrong one) and can reject optional request
+fields the way a picky model does or fail outright.
 """
 
 import json
@@ -41,13 +43,16 @@ from radixnet.codegen import (  # noqa: E402
 )
 from radixnet.llm import LLMError, default_model, make_client, normalise_provider, provider_of  # noqa: E402
 from radixnet.ollama import OllamaClient  # noqa: E402
+from radixnet.tutor import TutorConfig, TutorTrainer, default_tutor_model  # noqa: E402
 
 try:  # ``python -m unittest discover -s tests`` imports test modules as top-level modules
-    from test_api import start_server  # noqa: F401
+    from test_api import start_server, wait_for_job  # noqa: F401
     from test_codegen import start_fake as start_fake_ollama  # noqa: F401
+    from test_tutor import CORPUS, start_fake as start_fake_teacher  # noqa: F401
 except ImportError:
-    from tests.test_api import start_server  # noqa: F401
+    from tests.test_api import start_server, wait_for_job  # noqa: F401
     from tests.test_codegen import start_fake as start_fake_ollama  # noqa: F401
+    from tests.test_tutor import CORPUS, start_fake as start_fake_teacher  # noqa: F401
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HELLO = Problem("hello", "Print the word hello.", expected_output="hello")
@@ -117,7 +122,20 @@ class _Handler(BaseHTTPRequestHandler):
         messages = body.get("messages") or []
         system = " ".join(m.get("content", "") for m in messages if m.get("role") == "system")
         user = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
-        if body.get("response_format", {}).get("type") == "json_object":  # the judge
+        if "writing exercises" in system:  # the English teacher setting the exercises
+            count = int(re.search(r"exactly (\d+) entries", system).group(1)) if "entries" in system else 2
+            return json.dumps({"exercises": [EXERCISE_POOL[i % len(EXERCISE_POOL)] for i in range(count)]})
+        if "marking sentence completions" in system:  # ... and marking the answers
+            grades = []
+            for line in user.splitlines():
+                match = re.match(r"\[(\d+)\] <<(.*?)>>(.*)", line)
+                if match:
+                    grades.append({"index": int(match.group(1)), **_mark(match.group(2), match.group(3))})
+            return json.dumps({"grades": grades})
+        if "writing model sentences" in system:  # drill sentences
+            count = int(re.search(r"exactly (\d+) lines", system).group(1)) if "lines" in system else 3
+            return "\n".join(CORPUS[i % len(CORPUS)] for i in range(count))
+        if body.get("response_format", {}).get("type") == "json_object":  # the codegen judge
             match = re.search(r"```python\n(.*?)```", user, re.S)
             code = match.group(1) if match else ""
             task = "BAD_ANSWER" not in code
@@ -126,9 +144,26 @@ class _Handler(BaseHTTPRequestHandler):
                 "issues": [] if task else ["prints the wrong text"],
                 "critique": "fine" if task else "does not solve the task",
             })
-        if "Python programmer" in system:  # the tutor (a first program or a fix)
+        if "Python programmer" in system:  # the code-generation teacher (a first program or a fix)
             return self.server.solutions.pop(0) if self.server.solutions else '```python\nprint("hello")\n```'
         return f"answer to: {user.strip()}"
+
+
+EXERCISE_POOL = (
+    {"prefix": "the cat sat on", "focus": "prepositions of place", "answer": "the cat sat on the mat"},
+    {"prefix": "the dogs run", "focus": "subject-verb agreement", "answer": "the dogs run in the park"},
+)
+
+
+def _mark(prefix, continuation):
+    """The fake teacher's rule (the same as test_tutor's): only the corpus sentences are correct English."""
+    sentence = " ".join((prefix + continuation).split())
+    if sentence in CORPUS:
+        return {"grammar": 9, "spelling": 8, "fluency": 7, "error": "none",
+                "correction": sentence, "comment": "Well written."}
+    correction = next((t for t in CORPUS if t.startswith(prefix.strip())), prefix.strip() + " the mat")
+    return {"grammar": 2, "spelling": 3, "fluency": 1, "error": "agreement",
+            "correction": correction, "comment": "A plural subject takes a plural verb."}
 
 
 def _completion(content):
@@ -343,11 +378,85 @@ class ClientTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# the tutor
+# the English tutor
 # ---------------------------------------------------------------------------
 
 
-class TutorTests(unittest.TestCase):
+class EnglishTutorTests(unittest.TestCase):
+    """The lessons of ``radixnet.tutor`` taught by ChatGPT instead of a local model."""
+
+    def setUp(self):
+        self.fake = start_fake(self.addCleanup)
+        set_env(self, OPENAI_API_KEY=KEY)
+        self.client = ChatGPTClient(self.fake.url, "fake-gpt")
+
+    def model(self):
+        model = RadixNet(seed=7, backend="python")
+        model.train(CORPUS, epochs=6, lr=0.6, batch_size=4)
+        return model
+
+    def config(self, **overrides):
+        settings = dict(topic="animals", rounds=1, exercises=2, tutor_provider="chatgpt", tutor_model="fake-gpt",
+                        neg_epochs=1, pos_epochs=1, batch_size=4)
+        settings.update(overrides)
+        return TutorConfig(**settings)
+
+    def test_config_defaults_follow_the_provider(self):
+        config = TutorConfig(tutor_provider="openai")
+        self.assertEqual((config.tutor_provider, config.grader_provider), ("chatgpt", "chatgpt"))
+        self.assertEqual(config.tutor_model, chatgpt.DEFAULT_MODEL)
+        self.assertEqual(config.resolved_grader_model, chatgpt.DEFAULT_MODEL)
+        mixed = TutorConfig(tutor_provider="chatgpt", tutor_model="gpt-x", grader_provider="ollama")
+        self.assertEqual(mixed.resolved_grader_model, default_tutor_model("ollama"))
+        self.assertEqual(default_tutor_model("chatgpt"), chatgpt.DEFAULT_MODEL)
+        with self.assertRaises(ValueError):
+            TutorConfig(tutor_provider="bard")
+
+    def test_a_round_of_lessons_is_taught_by_chatgpt(self):
+        model = self.model()
+        before = model.stats()
+        trainer = TutorTrainer(model, self.client, self.config())
+        records = trainer.run()
+        self.assertEqual([r["kind"] for r in records], ["round", "report"])
+        lessons = [r for r in trainer.history if r["kind"] == "lesson"]
+        self.assertEqual(len(lessons), 2)
+        self.assertTrue(all(l["graded_by"] == "chatgpt" for l in lessons), lessons)
+        self.assertTrue(all(l["sentence"].startswith(l["prefix"]) for l in lessons))
+        self.assertGreater(model.stats()["epochs_total"], before["epochs_total"])
+        # the exercises and the marking are two calls to the same hosted model
+        systems = [b["messages"][0]["content"] for b in self.fake.bodies]
+        self.assertTrue(any("writing exercises" in text for text in systems))
+        self.assertTrue(any("marking sentence completions" in text for text in systems))
+        self.assertTrue(all(b["model"] == "fake-gpt" for b in self.fake.bodies))
+
+    def test_a_local_model_can_mark_a_chatgpt_teacher(self):
+        ollama_fake = start_fake_teacher(self.addCleanup)
+        grader = OllamaClient(ollama_fake.url, "fake:latest")
+        trainer = TutorTrainer(
+            self.model(), self.client, self.config(grader_provider="ollama"), grader_client=grader,
+        )
+        trainer.run()
+        lessons = [r for r in trainer.history if r["kind"] == "lesson"]
+        self.assertTrue(lessons)
+        self.assertTrue(all(l["graded_by"] == "ollama" for l in lessons), lessons)
+        # the exercises came from ChatGPT, the marking from the local model
+        self.assertTrue(any("writing exercises" in b["messages"][0]["content"] for b in self.fake.bodies))
+        self.assertFalse(any("marking sentence completions" in b["messages"][0]["content"] for b in self.fake.bodies))
+        self.assertTrue(any("marking sentence completions" in (r[2] or {}).get("system", "") for r in ollama_fake.requests
+                            if r[1] == "/api/generate"))
+
+    def test_failures_propagate_as_llm_errors(self):
+        self.fake.fail_with = 500
+        with self.assertRaises(LLMError):
+            TutorTrainer(self.model(), self.client, self.config()).run()
+
+
+# ---------------------------------------------------------------------------
+# the code-generation teacher
+# ---------------------------------------------------------------------------
+
+
+class CodeGenTeacherTests(unittest.TestCase):
     def setUp(self):
         self.fake = start_fake(self.addCleanup)
         set_env(self, OPENAI_API_KEY=KEY)
@@ -468,6 +577,43 @@ class ApiTests(unittest.TestCase):
         attempts = [r for r in history["history"] if r["kind"] == "attempt"]
         self.assertEqual([a["source"] for a in attempts], ["chatgpt", "chatgpt"])
 
+    def test_tutor_endpoint_lists_both_teachers(self):
+        status, data, _ = self.client.get("/api/tutor")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["providers"]["chatgpt"], {"url": self.fake.url + "/v1", "model": "fake-gpt", "configured": True})
+        self.assertTrue(data["providers"]["ollama"]["configured"])
+        self.assertEqual(data["defaults"]["tutor_provider"], "ollama")
+
+    def test_lesson_with_a_chatgpt_teacher(self):
+        self.service.model.train(CORPUS, epochs=6, lr=0.6, batch_size=4)
+        body = {"topic": "animals", "exercises": 2, "tutor_provider": "chatgpt"}
+        status, data, _ = self.client.post("/api/tutor/lesson", body)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["source"], "chatgpt")
+        self.assertEqual((data["model"], data["config"]["tutor_model"]), ("fake-gpt", "fake-gpt"))
+        self.assertEqual(len(data["lessons"]), 2)
+        self.assertTrue(all(l["grade"]["graded_by"] in ("chatgpt", "empty") for l in data["lessons"]), data["lessons"])
+
+    def test_tutor_job_with_a_chatgpt_teacher(self):
+        self.service.model.train(CORPUS, epochs=6, lr=0.6, batch_size=4)
+        body = {"topic": "animals", "rounds": 1, "exercises": 2, "tutor_provider": "openai",
+                "neg_epochs": 1, "pos_epochs": 1}
+        status, data, _ = self.client.post("/api/tutor/start", body)
+        self.assertEqual(status, 202, data)
+        self.assertEqual(data["config"]["tutor_provider"], "chatgpt")
+        self.assertEqual(data["config"]["tutor_model"], "fake-gpt")
+        job = wait_job(self.client)
+        self.assertEqual(job["state"], "done", job)
+        status, history, _ = self.client.get("/api/tutor/history")
+        self.assertTrue([r for r in history["history"] if r["kind"] == "lesson"])
+
+    def test_tutor_without_a_key_is_refused(self):
+        set_env(self, OPENAI_API_KEY=None)
+        status, data, _ = self.client.post("/api/tutor/lesson", {"topic": "animals", "tutor_provider": "chatgpt"})
+        self.assertEqual(status, 400, data)
+        self.assertIn("OPENAI_API_KEY", data["error"])
+        self.assertEqual(self.fake.requests, [])
+
     def test_bad_provider_and_missing_key_are_refused(self):
         status, data, _ = self.client.post("/api/codegen/solve", {"problem": "x", "teacher_provider": "bard"})
         self.assertEqual(status, 400, data)
@@ -529,6 +675,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["solved"], 1)
         self.assertEqual([r["solved_by"] for r in doc["records"] if r["kind"] == "problem"], ["chatgpt"])
         self.assertTrue(os.path.isfile(self.model))
+
+    def test_tutor_with_a_chatgpt_teacher(self):
+        corpus = os.path.join(self.dir, "corpus.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(CORPUS) + "\n")
+        self.run_cli("train", "--data", corpus, "--epochs", "6", "--lr", "0.6", "--batch-size", "4")
+        doc = self.run_cli("tutor", "--topic", "animals", "--rounds", "1", "--exercises", "2",
+                           "--tutor-provider", "chatgpt", "--neg-epochs", "1", "--pos-epochs", "1")
+        self.assertEqual(doc["config"]["tutor_provider"], "chatgpt")
+        self.assertEqual(doc["config"]["tutor_model"], "fake-gpt")
+        self.assertEqual(doc["report"]["lessons"], 2)
+        self.assertTrue(all(l["grade"]["graded_by"] in ("chatgpt", "empty") for l in doc["lessons"]), doc["lessons"])
+
+    def test_tutor_without_a_key_stops_before_asking(self):
+        self.assertIsNone(self.run_cli("tutor", "--topic", "animals", "--tutor-provider", "chatgpt",
+                                       expect=1, key=None))
+        self.assertEqual(self.fake.requests, [])
 
     def test_codegen_without_a_key_stops_before_asking(self):
         problems = os.path.join(self.dir, "problems.txt")

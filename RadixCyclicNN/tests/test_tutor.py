@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import CountRewardNet, RadixNet  # noqa: E402
+from radixnet.llm import LLMError  # noqa: E402
 from radixnet.ollama import OllamaClient, OllamaError  # noqa: E402
 from radixnet.search import PathResult  # noqa: E402
 from radixnet.tutor import (  # noqa: E402
@@ -329,7 +330,7 @@ class TeacherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             write_exercises(self.client, "   ", 2)
         self.fake.exercise_response = json.dumps({"exercises": []})
-        with self.assertRaises(OllamaError):
+        with self.assertRaises(LLMError):  # an unusable answer is not the provider's transport failing
             write_exercises(self.client, "animals", 2)
         self.fake.fail_with = 500
         with self.assertRaises(OllamaError):

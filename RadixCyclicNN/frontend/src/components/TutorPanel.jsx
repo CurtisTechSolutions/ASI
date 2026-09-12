@@ -8,17 +8,33 @@ import LineChart from "./LineChart.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
 
 const MAX_ROWS = 200;
-const SLOW_NOTE = "Ollama is writing and marking the exercises; this can take a minute or two.";
+const PROVIDER_LABELS = { ollama: "Ollama", chatgpt: "ChatGPT" };
 
-/** Server-side Ollama defaults reported by /api/status as {"ollama": {"url", "model"}}. */
-function ollamaDefaults(status) {
-  const o = status && status.ollama && typeof status.ollama === "object" ? status.ollama : {};
-  return { url: typeof o.url === "string" ? o.url : "", model: typeof o.model === "string" ? o.model : "" };
+/** "Ollama" / "ChatGPT" for a provider name. */
+function providerLabel(provider) {
+  return PROVIDER_LABELS[provider] || PROVIDER_LABELS.ollama;
 }
 
-/** {"url", "model"} overrides: only fields that differ from the server defaults are sent. */
-function overridesOf(url, model, defaults) {
-  const out = {};
+const slowNote = (provider) => `${providerLabel(provider)} is writing and marking the exercises; this can take a minute or two.`;
+
+/**
+ * Server-side defaults of one teacher, reported by /api/status as
+ * {"ollama": {"url", "model"}, "chatgpt": {"url", "model", "configured"}}.
+ * `configured` is false when the server has no OPENAI_API_KEY.
+ */
+function providerDefaults(status, provider) {
+  const key = provider === "chatgpt" ? "chatgpt" : "ollama";
+  const o = status && status[key] && typeof status[key] === "object" ? status[key] : {};
+  return {
+    url: typeof o.url === "string" ? o.url : "",
+    model: typeof o.model === "string" ? o.model : "",
+    configured: key === "ollama" ? true : Boolean(o.configured),
+  };
+}
+
+/** {"tutor_provider", "url", "tutor_model"} overrides: only fields that differ from the server defaults are sent. */
+function overridesOf(provider, url, model, defaults) {
+  const out = { tutor_provider: provider };
   const value = String(url ?? "").trim();
   if (value && value !== defaults.url) out.url = value;
   const name = String(model ?? "").trim();
@@ -276,11 +292,13 @@ function RoundTable({ rounds }) {
 }
 
 /**
- * The prediction process with nobody at the keyboard: Ollama writes the prefixes, the network
- * completes them, Ollama marks the English and the grades drive 2NRL.
+ * The prediction process with nobody at the keyboard: the teacher (a local Ollama model or
+ * ChatGPT) writes the prefixes, the network completes them, the teacher marks the English and
+ * the grades drive 2NRL.
  */
 export default function TutorPanel({ status }) {
-  const defaults = ollamaDefaults(status);
+  const [provider, setProvider] = useState("ollama");
+  const defaults = providerDefaults(status, provider);
   const [url, setUrl] = useState("");
   const [model, setModel] = useState("");
   const [topic, setTopic] = useState("everyday life");
@@ -340,7 +358,7 @@ export default function TutorPanel({ status }) {
   /** The settings both the job and the dry run send. */
   function settings() {
     return {
-      ...overridesOf(url, model, defaults),
+      ...overridesOf(provider, url, model, defaults),
       topic: topic.trim(),
       ...(focus.trim() ? { focus: focus.trim() } : {}),
       level: level.trim() || "beginner",
@@ -432,9 +450,9 @@ export default function TutorPanel({ status }) {
       <form className="card" onSubmit={handleStart}>
         <h2>Tutor</h2>
         <p className="muted">
-          The Predict tab with nobody at the keyboard. Each round an Ollama model writes sentence openings about the
-          topic — one point of grammar each, and its own model answer — the network completes them with the
-          prediction search, and the same model marks every sentence as an English teacher: grammar, spelling and
+          The Predict tab with nobody at the keyboard. Each round the teacher ({providerLabel(provider)}) writes
+          sentence openings about the topic — one point of grammar each, and its own model answer — the network
+          completes them with the prediction search, and the same model marks every sentence as an English teacher: grammar, spelling and
           fluency out of 10, the worst mistake named, one line of teaching and the sentence written out correctly.
           A correction is then taught <b>as a correction</b>: the sentence the network wrote and the teacher's
           version are aligned character by character, and only the trigram nodes they disagree on move — the step
@@ -501,14 +519,31 @@ export default function TutorPanel({ status }) {
             disabled={running}
           />
         </div>
+        {provider === "chatgpt" && !defaults.configured ? (
+          <p className="muted issue">
+            This server has no OPENAI_API_KEY, so ChatGPT cannot teach yet: set it (or OPENAI_API_KEY_FILE) in the
+            server's environment and restart it.
+          </p>
+        ) : null}
         <div className="row">
+          <SelectField
+            label="Teacher"
+            hint="who sets and marks the exercises"
+            value={provider}
+            onChange={setProvider}
+            disabled={running}
+            options={[
+              ["ollama", "Ollama (local)"],
+              ["chatgpt", "ChatGPT (OpenAI)"],
+            ]}
+          />
           <TextField
-            label="Ollama URL"
+            label={`${providerLabel(provider)} URL`}
             hint="blank = the server default"
             value={url}
             onChange={setUrl}
             disabled={running}
-            placeholder={defaults.url || "http://127.0.0.1:11434"}
+            placeholder={defaults.url || (provider === "chatgpt" ? "https://api.openai.com/v1" : "http://127.0.0.1:11434")}
           />
           <TextField
             label="Teacher model"
@@ -516,7 +551,7 @@ export default function TutorPanel({ status }) {
             value={model}
             onChange={setModel}
             disabled={running}
-            placeholder={defaults.model || "llama3.2"}
+            placeholder={defaults.model || (provider === "chatgpt" ? "gpt-4o-mini" : "llama3.2")}
           />
         </div>
 
@@ -663,7 +698,7 @@ export default function TutorPanel({ status }) {
             {previewBusy ? "Marking…" : "Dry run (mark, do not train)"}
           </button>
         </div>
-        {previewBusy ? <p className="muted">{SLOW_NOTE}</p> : null}
+        {previewBusy ? <p className="muted">{slowNote(provider)}</p> : null}
         {otherJobRunning ? <p className="muted">Another job is running; wait for it to finish.</p> : null}
         <TextArea
           label="Own prefixes"
