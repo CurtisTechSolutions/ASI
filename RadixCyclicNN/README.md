@@ -88,7 +88,8 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make go-build` / `go-test` / `go-parity` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
-| `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
+| `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the tutor and judge (`TUTOR=ollama\|chatgpt`, `CODEGEN_MODEL=gemma4`) and 2NRL rewards |
+| `make chatgpt-models` / `chatgpt-ask PROMPT="..."` | ChatGPT (OpenAI): what `$OPENAI_API_KEY` may use, one question — the quickest check that ChatGPT can tutor |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
@@ -129,7 +130,11 @@ make down          # stop everything, keep the volume
 Settings come from the environment or a `.env` file (`cp .env.example .env`):
 `RADIXNET_PORT`, `RADIXNET_BACKEND`, `WITH_TORCH`, `RADIXNET_RESUME`,
 `RADIXNET_CORPUS`, `EPOCHS`, `LR`, `BATCH`, `EVOLVE_SAMPLES`, `EVOLVE_MAX_LENGTH`,
-`EVOLVE_CHECKPOINT_EVERY`, `BENCH_CHARS`.
+`EVOLVE_CHECKPOINT_EVERY`, `BENCH_CHARS`, `OLLAMA_HOST`, `RADIXNET_OLLAMA_MODEL`
+and — to let ChatGPT tutor in the Code tab — `OPENAI_API_KEY` (or
+`OPENAI_API_KEY_FILE` for a Docker secret), `RADIXNET_OPENAI_MODEL`,
+`OPENAI_BASE_URL`. The key is read from the `api` container's environment
+only; it never travels through the HTTP API.
 
 The API keeps its own in-memory model. Whatever the `train` or `evolve` service
 writes to `/data/model.json` appears in the API after `make docker-reload`
@@ -165,12 +170,13 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
+| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, `--chatgpt-url`, `--chatgpt-model` (the key is the server's own `$OPENAI_API_KEY`) |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
 | `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
+| `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
-| `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
+| `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -196,12 +202,13 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
 | `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
+| `GET /api/chatgpt/models?url=` | always 200: `{"available", "configured" (the server has a key), "url", "model", "models": [{"name","owned_by","created"}], "error"}`. The key is never a request field: it is the server's own `$OPENAI_API_KEY` |
 | `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
 | `POST /api/images/encode` | an image as multipart (`curl -F file=@photo.png`), a raw body, or JSON `{"name","content_base64"}` + `?size=128&encoder=auto\|sd\|tiny&train=true&save_as=photo.txt` (train settings `epochs`, `lr`, `batch_size`) -> `{"text","encoder","width","height","latent_shape","bytes","chars","source_size","name","upload","job"}` (202 with a train job) |
 | `POST /api/images/decode` | `{"text", "encoder"}` -> `{"png_base64","encoder","width","height","bytes","repaired"}` (a cut-off or rambling prediction is padded / truncated) |
-| `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_model", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}` |
+| `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_provider": "ollama"\|"chatgpt", "teacher_model", "judge_provider", "judge_model", "url", "judge_url", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}`; an attempt's `source` and a verdict's `judged_by` name the provider (400 when `teacher_provider` is `chatgpt` and the server has no key) |
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
-| `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
+| `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", "teacher_provider", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
 | `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
 | `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_model", "grader_model", "url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
@@ -399,7 +406,7 @@ against what replaced them. **Both servers run the lessons**:
 the Go server has the same endpoints and `radixnet-count tutor` the same
 command, with the count / reward model answering the exercises.
 
-## Code generation: sandbox, Ollama judge, 2NRL rewards
+## Code generation: sandbox, LLM tutor and judge, 2NRL rewards
 
 `radixnet codegen` turns the network into a code generator trained by
 reinforcement: programs are run in a sandbox, judged, and every attempt feeds
@@ -412,11 +419,12 @@ problem -> Python program -> sandbox run -> judge (PEP 8, naming, runs, task) ->
 
 Two semi-supervised phases over the same problem list (`--phase both`, the default):
 
-1. **teacher** — an Ollama model (`--teacher-model`, default `gemma4`) writes a
-   solution; the sandbox runs it; on an error or a rejected verdict the teacher
-   is asked to fix it (up to `--teacher-attempts`); the judge confirms the
-   result. The network then learns the concatenated question + answer, with
-   every wrong attempt as 2NRL garbage first.
+1. **teacher** — the tutor writes a solution; the sandbox runs it; on an error
+   or a rejected verdict the tutor is asked to fix it (up to
+   `--teacher-attempts`); the judge confirms the result. The network then
+   learns the concatenated question + answer, with every wrong attempt as 2NRL
+   garbage first. The tutor is a local Ollama model (`--teacher-model`,
+   default `gemma4`) or ChatGPT — see below.
 2. **model** — the network itself continues each problem prompt into code
    (first the cheapest path, then samples, up to `--model-attempts`). A program
    that errors or is judged wrong is punished (negative phase) and the loop
@@ -439,6 +447,40 @@ python -m radixnet codegen --problems problems.jsonl --twonrl-per round --report
 make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both
 ```
 
+### Who tutors: a local model or ChatGPT
+
+`--teacher-provider` chooses which LLM writes, fixes and judges the solutions:
+
+| | `ollama` (default) | `chatgpt` |
+|---|---|---|
+| where | a local [Ollama](https://ollama.com) server | OpenAI's hosted API |
+| model | `--teacher-model`, default `$RADIXNET_CODEGEN_MODEL` or `gemma4` | `--teacher-model`, default `$RADIXNET_OPENAI_MODEL` or `gpt-4o-mini` |
+| endpoint | `--url`, else `$OLLAMA_HOST` or `http://127.0.0.1:11434` | `--url`, else `$OPENAI_BASE_URL` or `https://api.openai.com/v1` |
+| credentials | none | `$OPENAI_API_KEY`, or `$OPENAI_API_KEY_FILE` holding it |
+| privacy / cost | nothing leaves the machine, no cost | every problem statement and every generated program is sent to OpenAI and billed |
+
+```bash
+export OPENAI_API_KEY=sk-...
+python -m radixnet chatgpt models                                                  # does the key work?
+python -m radixnet codegen --problems data/sample_problems.jsonl --teacher-provider chatgpt
+python -m radixnet codegen --problems problems.jsonl --teacher-provider chatgpt --judge-provider ollama
+make codegen PROBLEMS=data/sample_problems.jsonl TUTOR=chatgpt
+```
+
+The judge follows the tutor unless `--judge-provider` (and optionally
+`--judge-url` / `--judge-model`) names the other one, so a ChatGPT tutor can be
+reviewed by a local model, or the other way round. Attempt records carry the
+provider that wrote them (`source`) and the one that judged them
+(`judged_by`), and `--report` / `/api/codegen/history` keep both — the API key
+itself is never part of a config, a record or a report.
+
+`$OPENAI_BASE_URL` also points the `chatgpt` provider at any OpenAI-compatible
+server (llama.cpp, vLLM, LM Studio, a gateway). Ollama's `options` are
+translated to the chat-completions fields, and a model that rejects one (the
+reasoning models refuse `temperature`, older ones `response_format`) is retried
+without it. A key is never sent unencrypted to a remote host: use `https://`, a
+server on this machine, or set `RADIXNET_OPENAI_ALLOW_INSECURE=1` deliberately.
+
 Problem files: one prompt per line (`.txt`, `#` comments), or `.json` / `.jsonl`
 objects `{"id", "prompt", "tests", "expected_output"}` (`data/sample_problems.*`).
 `--twonrl-per problem` (default) applies 2NRL after every problem, `round` once
@@ -458,9 +500,14 @@ have).
 
 API: `POST /api/codegen/start` (job), `GET /api/codegen/history`,
 `POST /api/codegen/solve` (solve one problem with the model or the teacher,
-no training) and `POST /api/codegen/run` (sandbox only). The frontend's Code
-tab drives all of it: problems (typed or uploaded), live attempt / problem /
-round records, a "try a problem" box and a sandbox runner.
+no training) and `POST /api/codegen/run` (sandbox only); `teacher_provider`
+(and `judge_provider`) pick the tutor there too, and `GET /api/chatgpt/models`
+reports whether the server has a usable key. The server only ever uses **its
+own** `$OPENAI_API_KEY` — a key is never accepted as a request field — so set it
+in the environment of `radixnet serve` (or the `api` container) and restart it.
+The frontend's Code tab drives all of it: the tutor (Ollama or ChatGPT),
+problems (typed or uploaded), live attempt / problem / round records, a "try a
+problem" box and a sandbox runner.
 
 ## Two models: RadixNet and the count / reward model
 
@@ -790,7 +837,7 @@ Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
-| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/chatgpt/*`, `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same
@@ -829,7 +876,7 @@ make go-test     # cd go && go test -race ./...
 ```
 RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
-                      checkpoint, bench, cli, api, ollama, tutor, codegen
+                      checkpoint, bench, cli, api, llm, ollama, chatgpt, tutor, codegen
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)

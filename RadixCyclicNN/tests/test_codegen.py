@@ -31,7 +31,7 @@ from radixnet.codegen import (  # noqa: E402
     check_style,
     decide,
     extract_code,
-    judge_with_ollama,
+    judge_with_llm,
     load_problems,
     model_prefix,
     parse_problem_file,
@@ -364,16 +364,16 @@ class TeacherJudgeTests(unittest.TestCase):
     def test_judge(self):
         sandbox = Sandbox(timeout=3)
         run = sandbox.run(GOOD)
-        opinion = judge_with_ollama(self.client, HELLO, GOOD, run, check_style(GOOD))
+        opinion = judge_with_llm(self.client, HELLO, GOOD, run, check_style(GOOD))
         self.assertEqual((opinion["task"], opinion["pep8"], opinion["naming"], opinion["score"]), (True, True, True, 9.0))
         self.assertEqual(self.fake.requests[-1]["format"], "json")
         self.assertIn("stdout:\nhello", self.fake.requests[-1]["prompt"])
-        opinion = judge_with_ollama(self.client, HELLO, WRONG, sandbox.run(WRONG), check_style(WRONG))
+        opinion = judge_with_llm(self.client, HELLO, WRONG, sandbox.run(WRONG), check_style(WRONG))
         self.assertFalse(opinion["task"])
         self.assertEqual(opinion["issues"], ["prints the wrong text"])
         self.fake.fail_with = 500
         with self.assertRaises(OllamaError):
-            judge_with_ollama(self.client, HELLO, GOOD, run, check_style(GOOD))
+            judge_with_llm(self.client, HELLO, GOOD, run, check_style(GOOD))
 
 
 # ---------------------------------------------------------------------------

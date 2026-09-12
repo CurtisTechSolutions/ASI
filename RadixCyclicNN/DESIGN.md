@@ -53,10 +53,12 @@ RadixCyclicNN/
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
     bench.py                benchmarks (chars/sec, predictions/sec)
-    ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16)
-    tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL (section 16.1)
-    diff.py                 character diff of a sentence against its correction (section 16.2)
-    codegen.py              code generation with a sandbox, an Ollama judge and 2NRL rewards (section 17)
+    llm.py                  provider layer: LLMClient / LLMError, make_client("ollama" | "chatgpt") (section 16)
+    ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16.1)
+    chatgpt.py              ChatGPT client over OpenAI's chat-completions API (section 16.2)
+    tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL (section 16.3)
+    diff.py                 character diff of a sentence against its correction (section 16.4)
+    codegen.py              code generation with a sandbox, an LLM judge and 2NRL rewards (section 17)
     cli.py                  argparse CLI
     api.py                  HTTP JSON API + static file serving
   tests/                    unittest (run: `python -m unittest discover -s tests -v` from RadixCyclicNN/)
@@ -634,7 +636,23 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 
 ---
 
-## 16. Ollama integration (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
+## 16. LLM providers (`llm.py`, `ollama.py`, `chatgpt.py`) — a local model or ChatGPT
+
+Everything that asks an LLM a question — the code-generation tutor and its judge, the corpus and review helpers —
+takes a *client* and never looks at which provider it got:
+
+```python
+PROVIDERS = ("ollama", "chatgpt"); DEFAULT_PROVIDER = "ollama"
+class LLMError(Exception)             # the base of OllamaError and ChatGPTError: "the LLM did not work"
+class LLMClient(Protocol)             # .provider .url .model; .models() .available() .generate(...) .chat(...)
+normalise_provider(name) -> str       # "" -> "ollama"; aliases "openai" / "gpt" / "chat-gpt" -> "chatgpt"; else ValueError
+default_model(provider) / default_url(provider) -> str
+make_client(provider=None, url=None, model=None, timeout=None, api_key=None) -> LLMClient   # lazy imports
+provider_of(client) -> str            # the client's own label, "ollama" for anything unlabelled
+loads_lenient(raw) -> Any             # JSON from an LLM answer: tolerates code fences and prose around the object
+```
+
+### 16.1 Ollama (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
 
 Two ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
 
@@ -695,7 +713,48 @@ Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.intern
 
 Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, configurable failures) and `/api/chat`.
 
-### 16.1 The tutor (`tutor.py`) — Ollama sets the exercise, the network answers, Ollama marks it
+### 16.2 ChatGPT (`chatgpt.py`) — the hosted alternative, same interface
+
+```python
+DEFAULT_URL   = $OPENAI_BASE_URL (or $OPENAI_API_BASE) or "https://api.openai.com/v1"
+DEFAULT_MODEL = $RADIXNET_OPENAI_MODEL or "gpt-4o-mini"
+DEFAULT_TIMEOUT = 120.0
+
+normalise_url(url)                    # "host" -> "https://host/v1"; refuses a plain-http remote host unless
+                                      # RADIXNET_OPENAI_ALLOW_INSECURE is set (a key must not travel in clear)
+api_key(explicit=None) -> str | None   # explicit, else $OPENAI_API_KEY, else the content of $OPENAI_API_KEY_FILE
+api_key_configured(explicit=None) -> bool                      # never returns the key itself
+class ChatGPTError(LLMError)          # .status .code .param from the API's {"error": {...}} body
+class ChatGPTClient(url=None, model=None, timeout=None, *, api_key=None)
+    .provider = "chatgpt"; .url .model .timeout .configured
+    .models() -> [{"name","id","owned_by","created"}]          # GET /models, sorted by name
+    .available() -> bool                                       # false without a key: nothing is sent
+    .generate(prompt, *, system=None, model=None, json_mode=False, options=None, timeout=None) -> str
+    .chat(messages, *, ...) -> str                             # POST /chat/completions, non-streaming
+```
+
+* The key is read per request and never stored in a config, a job record, a report or `repr`; the HTTP API has no
+  field for it (the server uses its own `$OPENAI_API_KEY`).
+* Ollama's `options` are translated (`num_predict` / `max_tokens` -> `max_completion_tokens`, `temperature`, `top_p`,
+  `seed`, `stop`, the penalties; unknown names dropped); `json_mode` sends `response_format: {"type": "json_object"}`.
+* A 400 that blames an optional field (`unsupported_parameter` / `unsupported_value` / "Unrecognized request
+  argument", by `param` or by name in the message) drops that field and asks again, so the reasoning models (no
+  `temperature`) and older ones (no `response_format`) work without configuration. Every field is dropped at most
+  once, so the loop terminates.
+* `available()` / `models()` also accept any OpenAI-compatible server through `$OPENAI_BASE_URL`; a loopback endpoint
+  is never reached through the environment's proxy, the hosted API always is.
+* `serve --chatgpt-url --chatgpt-model` set the API defaults; `/api/status` gains
+  `"chatgpt": {"url","model","configured"}` and `GET /api/chatgpt/models?url=` answers 200 always with
+  `{"available","configured","url","model","models","error"}`.
+* CLI: `radixnet [globals] chatgpt [--url URL] [--chatgpt-model NAME] [--timeout S] models|ask --prompt TEXT
+  [--system TEXT] [--temperature 0.7] [--json]`.
+* Docker: the API container takes `OPENAI_API_KEY`, `RADIXNET_OPENAI_MODEL` and `OPENAI_BASE_URL` (empty key =
+  ChatGPT tutoring stays off and the Code tab says so).
+* Tests (`tests/test_chatgpt.py`) use a fake OpenAI server (stdlib `http.server`) answering `/v1/models` and
+  `/v1/chat/completions`, recording the Authorization header, scripting tutor programs, judging by content and
+  rejecting configurable fields or whole requests.
+
+### 16.3 The tutor (`tutor.py`) — Ollama sets the exercise, the network answers, Ollama marks it
 
 The prediction process run without a human: `topic -> prefix (LLM) -> completion (the prediction search) -> grade
 (LLM) -> 2NRL`. The same client, one more loop.
@@ -741,7 +800,7 @@ def report_card(lessons) -> dict          # {"lessons","graded","passed","failed
 2. `complete` — `model.predict(exercise.cue, ...)` per attempt (attempt 0 in `mode`, later ones sampled).
 3. `grade` — one call per `batch` sentences.
 4. `corrections_of` + `texts_of` + `learn` — a failure the teacher corrected is a `Correction(wrong, right,
-   weight_of(grade))` taught by `model.correct` (section 16.2), not a whole sentence in `bad`; `weight_of(grade) =
+   weight_of(grade))` taught by `model.correct` (section 16.4), not a whole sentence in `bad`; `weight_of(grade) =
    min_weight + (1 - min_weight) * (threshold - score) / threshold` (1 for an unrated one). What is left is the old
    split: `bad` = the failures with no correction to align, `good` = the sentences that passed with
    `reward_of(grade) = score / 10`, plus the model answers and the drill sentences at `TEACHER_WEIGHT`. A text
@@ -776,7 +835,7 @@ Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a ru
 parsers, the marking, the loop with a scripted model, the endpoints and the CLI) and `go/radixnet/tutor_test.go` +
 `go/server/tutor_test.go` for the port.
 
-### 16.2 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
+### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
 
 A grade used to reach the graph as two verdicts on two whole sentences: the attempt was garbage, the correction was
 gospel. Most of a corrected sentence is however word for word what the network wrote - the teacher changes a tense,
@@ -810,12 +869,13 @@ parity case.
 
 ---
 
-## 17. Code generation (`codegen.py`) — sandbox, Ollama judge, 2NRL rewards
+## 17. Code generation (`codegen.py`) — sandbox, LLM tutor and judge, 2NRL rewards
 
 `problem -> Python program -> sandbox -> judge -> 2NRL`, in two semi-supervised phases over one problem list:
 
-* **teacher**: the Ollama model (`CodeGenConfig.teacher_model`, default `gemma4`, env `RADIXNET_CODEGEN_MODEL`) writes a
-  program (`teacher_generate`), the sandbox runs it, failures / rejections go back to the teacher (`teacher_fix`, up to
+* **teacher**: the tutor (`CodeGenConfig.teacher_provider`, `"ollama"` by default with `teacher_model` `gemma4` / env
+  `RADIXNET_CODEGEN_MODEL`, or `"chatgpt"` with that provider's default model, section 16.2) writes a program
+  (`teacher_generate`), the sandbox runs it, failures / rejections go back to the tutor (`teacher_fix`, up to
   `teacher_attempts` programs), the judge confirms. Learning: `two_nrl(bad=[texts of the wrong attempts], good=[text of the
   correct one])` — wrong answers first, then invert, then the correct answer.
 * **model**: the network continues `model_prompt.format(problem)` (default `"{problem}\n"`) into code — attempt 0 by the
@@ -839,17 +899,27 @@ check_style(code) -> StyleReport(ok, syntax_ok, pep8_ok, naming_ok, issues)
     # before top-level defs; N801 CapWords classes, N802 snake_case functions, N803 arguments, N806 variables
     # (UPPER_CASE constants and CapWords aliases allowed)
 extract_code(text)            # the longest ```python block, else the text
-judge_with_ollama(client, problem, code, run, style, model=None) -> {"task","pep8","naming","score","issues","critique"}
+default_teacher_model(provider) -> str        # DEFAULT_TEACHER_MODEL for ollama, the provider's own default otherwise
+judge_with_llm(client, problem, code, run, style, model=None) -> {"task","pep8","naming","score","issues","critique"}
     # JSON-mode adversarial reviewer prompt with the task, program, execution result and the objective style report
-decide(run, style, llm, strictness) -> Verdict(correct, runs, task, pep8, naming, score, issues, critique, judged_by)
+decide(run, style, llm, strictness, judged_by=DEFAULT_PROVIDER) -> Verdict(correct, runs, task, pep8, naming, score,
+    issues, critique, judged_by)
     # correct = runs and expected_ok is not False and task is not False and (lenient or pep8 and naming and style.ok)
     # task: False when the program fails or the stdout differs; the LLM's answer when asked; True with matching
-    # expected output; None (counts as ok) when nothing can judge it. judged_by: sandbox | tests | ollama | none
-CodeGenConfig(teacher_model, judge_model, phases=("teacher","model"), rounds=1, teacher_attempts=3, model_attempts=4,
+    # expected output; None (counts as ok) when nothing can judge it.
+    # judged_by: sandbox | tests | ollama | chatgpt | none — an LLM verdict names the provider that gave it
+CodeGenConfig(teacher_provider="ollama", teacher_model="", judge_provider="", judge_model=None,
+    phases=("teacher","model"), rounds=1, teacher_attempts=3, model_attempts=4,
     first_attempt_dijkstra=True, temperature=1.0, max_length=800, strictness="strict", use_judge=True,
     fallback_teacher=True, twonrl_per="problem"|"round", replay=True, replay_limit=64, teacher_prompt=None,
     model_prompt="{problem}\n", neg_epochs=2, pos_epochs=3, neg_lr=0.5, pos_lr=0.1, batch_size=4, checkpoint_every=0)
-CodeGenTrainer(model, client, sandbox=None, config=None, external=None)
+    # __post_init__ normalises the providers (ValueError for anything else), fills teacher_model from the tutor's
+    # provider when blank and lets judge_provider default to the tutor's, so to_dict() / reports name the real models
+    .resolved_judge_model -> str          # judge_model, else the tutor's model (same provider) / that provider's default
+CodeGenTrainer(model, client, sandbox=None, config=None, external=None, judge_client=None)
+    # client is the tutor (any provider); the judge shares it unless judge_client is given or judge_provider names the
+    # other provider, in which case a client for it is built from the environment. Attempts are labelled with
+    # provider_of(client), verdicts with provider_of(judge_client), so a ChatGPT tutor can be judged by a local model.
     .evaluate(problem, code, source, index) -> Attempt      # sandbox + style + (if it runs and use_judge) the LLM judge
     .solve_with_teacher / .generate_with_model / .solve_with_model
     .learn(bad, good) -> {"bad","good","action": "2nrl"|"reward"|"punish"|None,"neg_loss","pos_loss"}
@@ -865,9 +935,13 @@ CodeGenTrainer(model, client, sandbox=None, config=None, external=None)
 CLI `codegen --problems FILE` (section 11 of the README lists the options); the `ProblemPrinter` prints attempts as notes,
 problems as table rows and round summaries. API: `POST /api/codegen/start` (job "codegen"; problems from `problems`,
 `problems_text`, `problem_files` uploads), `GET /api/codegen/history`, `POST /api/codegen/solve` (one problem with the
-model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). Frontend: the
-"Code" tab. Tests (`tests/test_codegen.py`) use a fake Ollama whose teacher answers come from a scripted queue and whose
-judge rejects programs containing `BAD_ANSWER`.
+model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). `start` and
+`solve` take `teacher_provider` / `judge_provider` (and `url` / `judge_url` / `teacher_model` / `judge_model`); a
+`chatgpt` tutor on a server without a key is refused with 400 before anything is sent. Frontend: the "Code" tab, whose
+**Teacher** selector switches the provider (model, URL, notes and badges follow it). Tests (`tests/test_codegen.py`)
+use a fake Ollama whose teacher answers come from a scripted queue and whose judge rejects programs containing
+`BAD_ANSWER`; `tests/test_chatgpt.py` runs the same loop against the fake OpenAI server, including a ChatGPT tutor
+judged by a local model.
 
 ## 18. Learning-rate schedules (`schedule.py`) — rates as graph functions of the epoch
 
@@ -1159,7 +1233,7 @@ memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
 over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, the ollama corpus / review calls, images, codegen, schedule preview) answer 404 with a message
+endpoints (evolve, the ollama corpus / review calls, chatgpt, images, codegen, schedule preview) answer 404 with a message
 naming the Python server.
 
 The tutor is ported too (`go/radixnet/ollama.go`, `go/radixnet/tutor.go`, `go/server/tutor.go`): the same prompts,

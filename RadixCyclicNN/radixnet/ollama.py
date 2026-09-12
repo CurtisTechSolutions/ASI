@@ -30,6 +30,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from .llm import LLMError, loads_lenient as _loads_lenient
+
 __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
@@ -65,12 +67,14 @@ DEFAULT_URL = _default_url()
 DEFAULT_MODEL = os.environ.get("RADIXNET_OLLAMA_MODEL", "").strip() or "llama3.2"
 
 
-class OllamaError(Exception):
+class OllamaError(LLMError):
     """Ollama is unreachable, answered an error, or returned something unusable."""
 
 
 class OllamaClient:
     """Minimal client for Ollama's HTTP API (``/api/tags``, ``/api/generate``, ``/api/chat``)."""
+
+    provider = "ollama"
 
     __slots__ = ("url", "model", "timeout")
 
@@ -242,28 +246,6 @@ _REVIEW_SYSTEM = (
     "\"verdict\": \"pass\" or \"fail\", \"critique\": \"<one sentence naming the worst flaw, or 'no flaw "
     "found'>\"}}, ...]}} with one entry per text, in the given order and with the given index."
 )
-
-
-def _loads_lenient(raw: str) -> Any:
-    """JSON from an LLM answer: tolerates code fences and prose around the object."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    try:
-        return json.loads(text)
-    except ValueError:
-        pass
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start, end = text.find(opener), text.rfind(closer)
-        if 0 <= start < end:
-            try:
-                return json.loads(text[start : end + 1])
-            except ValueError:
-                continue
-    return None
 
 
 def _parse_reviews(raw: str, count: int) -> dict[int, dict]:

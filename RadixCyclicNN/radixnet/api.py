@@ -55,6 +55,13 @@ from . import __version__
 from .archive import extract_texts, is_zip
 from .backend import describe_backends
 from .checkpoint import CheckpointManager
+from .chatgpt import (
+    DEFAULT_MODEL as CHATGPT_DEFAULT_MODEL,
+    DEFAULT_URL as CHATGPT_DEFAULT_URL,
+    ChatGPTClient,
+    api_key_configured as chatgpt_key_configured,
+)
+from .chatgpt import normalise_url as normalise_chatgpt_url
 from .codegen import (
     PHASES as CODEGEN_PHASES,
     CodeGenConfig,
@@ -63,11 +70,13 @@ from .codegen import (
     Sandbox,
     check_style,
     decide,
+    default_teacher_model,
     parse_problem_file,
     parse_problems,
 )
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
+from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
@@ -268,6 +277,8 @@ class ModelService:
         upload_dir: str | None = None,
         ollama_url: str | None = None,
         ollama_model: str | None = None,
+        chatgpt_url: str | None = None,
+        chatgpt_model: str | None = None,
         kind: str | None = None,
     ) -> None:
         self.model_path = os.path.abspath(model_path) if model_path else None
@@ -277,6 +288,8 @@ class ModelService:
         self._archive_cache: dict[str, tuple[tuple[int, int], dict]] = {}  # path -> ((size, mtime_ns), summary)
         self.ollama_url = normalise_url(ollama_url or OLLAMA_DEFAULT_URL)
         self.ollama_model = (ollama_model or OLLAMA_DEFAULT_MODEL).strip() or OLLAMA_DEFAULT_MODEL
+        self.chatgpt_url = normalise_chatgpt_url(chatgpt_url or CHATGPT_DEFAULT_URL)
+        self.chatgpt_model = (chatgpt_model or CHATGPT_DEFAULT_MODEL).strip() or CHATGPT_DEFAULT_MODEL
         self.backend_name = backend
         self.device = device
         self.seed = int(seed)
@@ -633,6 +646,7 @@ class ModelService:
             checkpoint_dir=self.checkpoint_dir,
             upload_dir=self.upload_dir,
             ollama={"url": self.ollama_url, "model": self.ollama_model},
+            chatgpt={"url": self.chatgpt_url, "model": self.chatgpt_model, "configured": chatgpt_key_configured()},
         )
         return stats
 
@@ -967,7 +981,7 @@ class ModelService:
                     texts.extend(line for line in blob.splitlines() if line.strip())
         return texts
 
-    # -- Ollama (local LLM) --------------------------------------------------
+    # -- LLM providers (local Ollama, hosted ChatGPT) -------------------------
 
     def ollama_client(self, url: str | None = None, model: str | None = None, timeout: float | None = None) -> OllamaClient:
         """A client for the request's Ollama overrides, falling back to the server defaults."""
@@ -975,6 +989,31 @@ class ModelService:
             return OllamaClient(url or self.ollama_url, model or self.ollama_model, timeout)
         except ValueError as exc:
             raise ApiError(400, str(exc)) from exc
+
+    def chatgpt_client(self, url: str | None = None, model: str | None = None, timeout: float | None = None) -> ChatGPTClient:
+        """A client for the request's ChatGPT overrides; the API key is the server's own (never a request field)."""
+        try:
+            return ChatGPTClient(url or self.chatgpt_url, model or self.chatgpt_model, timeout)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+
+    def llm_client(
+        self, provider: str | None = None, url: str | None = None, model: str | None = None, timeout: float | None = None
+    ) -> LLMClient:
+        """A client for ``provider`` (``"ollama"`` | ``"chatgpt"``); 400 when ChatGPT has no key on this server."""
+        try:
+            provider = normalise_provider(provider)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        if provider == "ollama":
+            return self.ollama_client(url, model, timeout)
+        if not chatgpt_key_configured():
+            raise ApiError(
+                400,
+                "ChatGPT is not configured on this server: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) in its "
+                "environment and restart it, or use the 'ollama' provider",
+            )
+        return self.chatgpt_client(url, model, timeout)
 
     def sample_texts(
         self, count: int, prefix: str = "", max_length: int = 60, temperature: float = 1.0, seed: int | None = None
@@ -1003,13 +1042,22 @@ class ModelService:
         finally:
             self._lock.acquire()
 
-    def start_codegen(self, problems: list[Problem], config: CodeGenConfig, client: OllamaClient, sandbox: Sandbox) -> dict:
+    def start_codegen(
+        self,
+        problems: list[Problem],
+        config: CodeGenConfig,
+        client: LLMClient,
+        sandbox: Sandbox,
+        judge_client: LLMClient | None = None,
+    ) -> dict:
         """Start a ``codegen`` job: teacher / model phases over ``problems`` with 2NRL rewards."""
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
 
         def work(job: Job) -> None:
-            trainer = CodeGenTrainer(self.model, client, sandbox, config, external=self.pause_lock)
+            trainer = CodeGenTrainer(
+                self.model, client, sandbox, config, external=self.pause_lock, judge_client=judge_client,
+            )
             trainer.run(
                 problems, progress=self._progress(job, self._codegen_history), stop_event=job.stop_event,
                 checkpoint_manager=manager,
@@ -1883,6 +1931,28 @@ def _r_ollama_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     }
 
 
+def _r_chatgpt_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Is ChatGPT usable as a tutor on this server, and which models does its key have?"""
+    url = (q.get("url") or [None])[0]
+    client = svc.chatgpt_client(url or None)
+    configured = chatgpt_key_configured()
+    error = None if configured else "no API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) for the server process"
+    models: list[dict] = []
+    if configured:
+        try:
+            models = client.models()
+        except LLMError as exc:
+            error = str(exc)
+    return 200, {
+        "available": error is None,
+        "configured": configured,
+        "url": client.url,
+        "model": client.model,
+        "models": [{"name": m.get("name"), "owned_by": m.get("owned_by"), "created": m.get("created")} for m in models],
+        "error": error,
+    }
+
+
 def _r_ollama_corpus(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     prompt = f.text("prompt")
     lines = f.integer("lines", 20, minimum=1)
@@ -1989,7 +2059,27 @@ def _problems_from(svc: ModelService, f: Fields) -> list[Problem]:
         raise ApiError(400, str(exc)) from exc
 
 
-def _codegen_config(f: Fields) -> CodeGenConfig:
+def _default_llm_model(svc: ModelService, provider: str) -> str:
+    """The model this server tutors / judges with when a request names none.
+
+    ChatGPT follows the server's own default (``--chatgpt-model`` /
+    ``$RADIXNET_OPENAI_MODEL``); Ollama keeps codegen's default
+    (``$RADIXNET_CODEGEN_MODEL``), which is deliberately not the model of the
+    ``/api/ollama/*`` endpoints.
+    """
+    return svc.chatgpt_model if provider == "chatgpt" else default_teacher_model("ollama")
+
+
+def _provider_field(f: Fields, name: str, alias: str | None, default: str) -> str:
+    """``"ollama"`` | ``"chatgpt"`` from a request field (``"openai"`` and ``"gpt"`` are accepted too)."""
+    raw = f.text(name, None) or (f.text(alias, None) if alias else None)
+    try:
+        return normalise_provider(raw) if raw else default
+    except ValueError as exc:
+        raise ApiError(400, f"'{name}' must be one of {', '.join(PROVIDERS)} (got {raw!r})") from exc
+
+
+def _codegen_config(svc: ModelService, f: Fields) -> CodeGenConfig:
     d = CodeGenConfig()
     raw_phases = f._body.get("phases", f._body.get("phase"))
     if raw_phases is None:
@@ -2000,10 +2090,17 @@ def _codegen_config(f: Fields) -> CodeGenConfig:
         phases = tuple(p.strip().lower() for p in raw_phases)
     else:
         raise ApiError(400, "'phases' must be 'both', 'teacher', 'model' or a list of those")
-    teacher_model = f.text("teacher_model", None) or f.text("model", None) or d.teacher_model
+    teacher_provider = _provider_field(f, "teacher_provider", "provider", d.teacher_provider)
+    judge_provider = _provider_field(f, "judge_provider", None, teacher_provider)
+    teacher_model = f.text("teacher_model", None) or f.text("model", None) or _default_llm_model(svc, teacher_provider)
+    judge_model = f.text("judge_model", None)
+    if judge_model is None and judge_provider != teacher_provider:
+        judge_model = _default_llm_model(svc, judge_provider)
     config = CodeGenConfig(
+        teacher_provider=teacher_provider,
         teacher_model=teacher_model,
-        judge_model=f.text("judge_model", None),
+        judge_provider=judge_provider,
+        judge_model=judge_model,
         phases=phases,
         rounds=f.integer("rounds", d.rounds, minimum=1),
         teacher_attempts=f.integer("teacher_attempts", d.teacher_attempts, minimum=1),
@@ -2033,6 +2130,16 @@ def _codegen_config(f: Fields) -> CodeGenConfig:
     return config
 
 
+def _codegen_clients(svc: ModelService, f: Fields, config: CodeGenConfig) -> tuple[LLMClient, LLMClient]:
+    """The tutor and judge clients of a codegen request (``url`` / ``judge_url`` override the server defaults)."""
+    timeout = f.number("timeout", None, minimum=1.0)
+    client = svc.llm_client(config.teacher_provider, f.text("url", None), config.teacher_model, timeout)
+    if config.judge_provider == config.teacher_provider and not f.text("judge_url", None):
+        return client, client
+    judge = svc.llm_client(config.judge_provider, f.text("judge_url", None), config.resolved_judge_model, timeout)
+    return client, judge
+
+
 def _sandbox_from(f: Fields) -> Sandbox:
     return Sandbox(
         timeout=f.number("sandbox_timeout", 10.0, minimum=0.1),
@@ -2043,10 +2150,10 @@ def _sandbox_from(f: Fields) -> Sandbox:
 
 def _r_codegen_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     problems = _problems_from(svc, f)
-    config = _codegen_config(f)
-    client = svc.ollama_client(f.text("url", None), config.teacher_model, f.number("timeout", None, minimum=1.0))
+    config = _codegen_config(svc, f)
+    client, judge = _codegen_clients(svc, f, config)
     sandbox = _sandbox_from(f)
-    job = svc.start_codegen(problems, config, client, sandbox)
+    job = svc.start_codegen(problems, config, client, sandbox, judge_client=judge)
     return 202, {
         "job": job, "problems": [p.id for p in problems], "config": config.to_dict(),
         "sandbox": {"timeout": sandbox.timeout, "memory_mb": sandbox.memory_mb, "network_isolated": sandbox.network_isolated},
@@ -2069,16 +2176,16 @@ def _r_codegen_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     if source not in ("model", "teacher"):
         raise ApiError(400, f"'source' must be 'model' or 'teacher' (got {source!r})")
     count = f.integer("attempts", 1, minimum=1)
-    config = _codegen_config(f)
+    config = _codegen_config(svc, f)
     config.teacher_attempts = count
     config.model_attempts = count
     config.fallback_teacher = False
-    client = svc.ollama_client(f.text("url", None), config.teacher_model, f.number("timeout", None, minimum=1.0))
+    client, judge = _codegen_clients(svc, f, config)
     sandbox = _sandbox_from(f)
     try:
         if source == "model":
             with svc.session() as model:
-                trainer = CodeGenTrainer(model, client, sandbox, config)
+                trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge)
                 codes = [trainer.generate_with_model(problem, i) for i in range(count)]
             attempts = []
             for i, code in enumerate(codes):  # sandbox and judge run without the model lock
@@ -2087,9 +2194,9 @@ def _r_codegen_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
                 if attempt.verdict.correct:
                     break
         else:
-            trainer = CodeGenTrainer(None, client, sandbox, config)
+            trainer = CodeGenTrainer(None, client, sandbox, config, judge_client=judge)
             attempts = trainer.solve_with_teacher(problem, None, "teacher", 0)
-    except OllamaError as exc:
+    except LLMError as exc:
         raise ApiError(502, str(exc)) from exc
     return 200, {
         "problem": problem.to_dict(), "source": source, "attempts": [a.to_dict() for a in attempts],
@@ -2284,8 +2391,11 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
     ("POST", "/api/ollama/review", _r_ollama_review,
      "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, good, good_files}"),
+    ("GET", "/api/chatgpt/models", _r_chatgpt_models,
+     "is ChatGPT usable as a tutor here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails"),
     ("POST", "/api/codegen/start", _r_codegen_start,
-     "start a codegen job: {problems | problems_text | problem_files, phases: both|teacher|model, rounds, teacher_model, ...}"),
+     "start a codegen job: {problems | problems_text | problem_files, phases: both|teacher|model, rounds, "
+     "teacher_provider: ollama|chatgpt, teacher_model, judge_provider, judge_model, ...}"),
     ("GET", "/api/codegen/history", _r_codegen_history, "attempt / problem / round records of all codegen runs"),
     ("POST", "/api/codegen/solve", _r_codegen_solve,
      "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
@@ -2661,6 +2771,8 @@ def create_server(
     upload_dir: str | None = None,
     ollama_url: str | None = None,
     ollama_model: str | None = None,
+    chatgpt_url: str | None = None,
+    chatgpt_model: str | None = None,
     kind: str | None = None,
 ) -> tuple[RadixNetHTTPServer, ModelService]:
     """Build (and bind) the server; ``port=0`` picks a free port.
@@ -2670,12 +2782,16 @@ def create_server(
     ``upload_dir`` enables the upload endpoints (training files kept on the
     server); ``frontend_dir`` is the built React app; ``ollama_url`` /
     ``ollama_model`` are the defaults of the ``/api/ollama/*`` endpoints
-    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted).  ``quiet``
-    silences the per-request log lines (stderr).
+    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted) and
+    ``chatgpt_url`` / ``chatgpt_model`` those of the ChatGPT provider
+    (``$OPENAI_BASE_URL`` / ``$RADIXNET_OPENAI_MODEL``; the key always comes
+    from the server's ``$OPENAI_API_KEY``).  ``quiet`` silences the
+    per-request log lines (stderr).
     """
     service = ModelService(
         model_path=model_path, checkpoint_dir=checkpoint_dir, backend=backend, device=device,
-        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
+        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model,
+        chatgpt_url=chatgpt_url, chatgpt_model=chatgpt_model, kind=kind,
     )
     server = RadixNetHTTPServer((host, port), service, frontend_dir=frontend_dir, quiet=quiet)
     return server, service
@@ -2694,13 +2810,16 @@ def run_server(
     upload_dir: str | None = None,
     ollama_url: str | None = None,
     ollama_model: str | None = None,
+    chatgpt_url: str | None = None,
+    chatgpt_model: str | None = None,
     kind: str | None = None,
 ) -> None:
     """Serve until ``KeyboardInterrupt``; a running job is stopped on the way out."""
     server, service = create_server(
         host, port, model_path=model_path, checkpoint_dir=checkpoint_dir, frontend_dir=frontend_dir,
         backend=backend, device=device, seed=seed, quiet=quiet, upload_dir=upload_dir,
-        ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
+        ollama_url=ollama_url, ollama_model=ollama_model, chatgpt_url=chatgpt_url, chatgpt_model=chatgpt_model,
+        kind=kind,
     )
     if not quiet:
         sys.stderr.write(f"radixnet API listening on {server.url} (Ctrl-C to stop)\n")

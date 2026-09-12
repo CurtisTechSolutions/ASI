@@ -18,12 +18,19 @@ settings (`ollama` in `/api/status`) and can be overridden per request.
 The Code panel drives the code-generation loop (`POST /api/codegen/start`,
 `GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run`).
 Problems typed one per line or read from uploaded `.txt` / `.json` / `.jsonl`
-files are solved by an Ollama teacher and by the model; every program runs in
-the sandbox, is style-checked and optionally judged by Ollama, and the outcome
-rewards or punishes the model through 2NRL. The panel shows round summaries, a
-problem table and an attempt feed live from the `codegen` job (and the stored
-history of earlier runs), solves a single problem without training, and runs
-pasted code in the sandbox. Only the teacher and the judge need Ollama.
+files are solved by a teacher and by the model; every program runs in the
+sandbox, is style-checked and optionally judged by the same teacher, and the
+outcome rewards or punishes the model through 2NRL. The **Teacher** selector
+picks who tutors — a local Ollama model or ChatGPT (`teacher_provider`) — and
+the model name, the URL and the notes follow it; attempt badges name the
+provider that wrote each program. ChatGPT needs an `OPENAI_API_KEY` in the
+server's environment (`chatgpt.configured` in `/api/status`, and
+`GET /api/chatgpt/models` for the models it may use); the panel says so when
+the key is missing, and a key is never sent from the browser. The panel shows
+round summaries, a problem table and an attempt feed live from the `codegen`
+job (and the stored history of earlier runs), solves a single problem without
+training, and runs pasted code in the sandbox. Only the teacher and the judge
+need an LLM.
 
 ## Development
 

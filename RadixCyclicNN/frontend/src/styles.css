@@ -925,9 +925,10 @@ table.data td.wrap {
   font-size: 13px;
 }
 
-/* Source badges (the model or the Ollama teacher) are outlined to set them apart from the verdict badges. */
+/* Source badges (the model, or the tutor that wrote the program) are outlined to set them apart from the verdict badges. */
 .badge.model,
-.badge.ollama {
+.badge.ollama,
+.badge.chatgpt {
   background: transparent;
   box-shadow: inset 0 0 0 1px currentColor;
 }
@@ -938,6 +939,10 @@ table.data td.wrap {
 
 .badge.ollama {
   color: var(--warn);
+}
+
+.badge.chatgpt {
+  color: var(--ok);
 }
 
 ul.rounds {

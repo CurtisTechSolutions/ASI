@@ -1329,8 +1329,9 @@ def cmd_bench(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
-    from .codegen import PHASES, CodeGenConfig, CodeGenTrainer, Sandbox, load_problems
-    from .ollama import OllamaClient, OllamaError
+    from .chatgpt import api_key_configured
+    from .codegen import PHASES, CodeGenConfig, CodeGenTrainer, Sandbox, default_teacher_model, load_problems
+    from .llm import LLMError, make_client
 
     try:
         problems = load_problems(args.problems)
@@ -1338,8 +1339,11 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         raise CliError(f"cannot load problems from {args.problems}: {exc}") from exc
     phases = PHASES if args.phase == "both" else (args.phase,)
     manager = checkpoint_manager(args)
+    judge_provider = args.judge_provider or args.teacher_provider
     config = CodeGenConfig(
-        teacher_model=args.teacher_model or CodeGenConfig().teacher_model, judge_model=args.judge_model, phases=phases,
+        teacher_provider=args.teacher_provider, judge_provider=judge_provider,
+        teacher_model=args.teacher_model or default_teacher_model(args.teacher_provider),
+        judge_model=args.judge_model, phases=phases,
         rounds=args.rounds, teacher_attempts=args.teacher_attempts, model_attempts=args.model_attempts,
         first_attempt_dijkstra=not args.sample_first, temperature=args.temperature, max_length=args.max_length,
         strictness=args.strictness, use_judge=not args.no_judge, fallback_teacher=not args.no_fallback_teacher,
@@ -1348,9 +1352,19 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
         batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager),
     )
+    providers = {config.teacher_provider} | ({config.judge_provider} if config.use_judge else set())
+    if "chatgpt" in providers and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT tutor, "
+            "or use --teacher-provider ollama"
+        )
     try:
         config.validate()
-        client = OllamaClient(args.url, config.teacher_model, args.timeout)
+        client = make_client(config.teacher_provider, args.url, config.teacher_model, args.timeout)
+        if config.judge_provider == config.teacher_provider and not args.judge_url:
+            judge_client = client
+        else:
+            judge_client = make_client(config.judge_provider, args.judge_url, config.resolved_judge_model, args.timeout)
     except ValueError as exc:
         raise CliError(str(exc)) from exc
     sandbox = Sandbox(timeout=args.sandbox_timeout, memory_mb=args.memory_mb, isolate_network=not args.no_network_isolation)
@@ -1361,8 +1375,9 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         ("backend", backend_label(model)),
         ("problems", f"{len(problems)} from {args.problems}"),
         ("phases", " -> ".join(phases) + f", {config.rounds} round(s)"),
-        ("teacher", f"{config.teacher_model} at {client.url}"),
-        ("judge", (config.judge_model or config.teacher_model) if config.use_judge else "off (sandbox, expected output and tests only)"),
+        ("teacher", f"{config.teacher_provider}: {config.teacher_model} at {client.url}"),
+        ("judge", f"{config.judge_provider}: {config.resolved_judge_model} at {judge_client.url}" if config.use_judge
+                  else "off (sandbox, expected output and tests only)"),
         ("attempts", f"teacher={config.teacher_attempts} model={config.model_attempts}"
                      + ("" if config.fallback_teacher else ", no teacher fallback")),
         ("sandbox", f"timeout={sandbox.timeout:g}s memory={sandbox.memory_mb}MB network="
@@ -1374,13 +1389,13 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
     console.say()
     printer = ProblemPrinter(console)
     stop = threading.Event()
-    trainer = CodeGenTrainer(model, client, sandbox, config)
+    trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(problems, progress=printer, stop_event=stop, checkpoint_manager=manager),
             stop, console, "problem",
         )
-    except OllamaError as exc:
+    except LLMError as exc:
         raise CliError(str(exc)) from exc
     saved = _finish_training(console, model, out, interrupted, printer, "problem")
     problem_records = [r for r in records if r.get("kind") == "problem"]
@@ -1639,6 +1654,61 @@ def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     return doc
 
 
+def _chatgpt_client(args: argparse.Namespace) -> Any:
+    from .chatgpt import ChatGPTClient, api_key_configured
+
+    if not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE, a file holding it) and try again"
+        )
+    try:
+        return ChatGPTClient(args.url, args.chatgpt_model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def cmd_chatgpt_models(args: argparse.Namespace, console: Console) -> dict:
+    from .chatgpt import ChatGPTError
+
+    client = _chatgpt_client(args)
+    try:
+        models = client.models()
+    except ChatGPTError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([("endpoint", client.url), ("default model", client.model), ("models", len(models))])
+    console.say()
+    if models:
+        console.table(("name", "owner", "created"), [[m["name"], m.get("owned_by"), _epoch(m.get("created"))] for m in models])
+    else:
+        console.say("the key has access to no models")
+    return {"url": client.url, "model": client.model, "models": models}
+
+
+def cmd_chatgpt_ask(args: argparse.Namespace, console: Console) -> dict:
+    from .chatgpt import ChatGPTError
+
+    client = _chatgpt_client(args)
+    console.pairs([("model", f"{client.model} at {client.url}"), ("prompt", quote(clip(args.prompt, 60)))])
+    console.say()
+    try:
+        answer = client.generate(
+            args.prompt, system=args.system, json_mode=args.json_answer, options={"temperature": args.temperature}
+        )
+    except ChatGPTError as exc:
+        raise CliError(str(exc)) from exc
+    console.say(answer.strip())
+    return {"url": client.url, "model": client.model, "prompt": args.prompt, "answer": answer}
+
+
+def _epoch(value: Any) -> Any:
+    """A unix timestamp as a date (anything else unchanged)."""
+    if isinstance(value, (int, float)) and value > 0:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(float(value), timezone.utc).strftime("%Y-%m-%d")
+    return value
+
+
 def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     try:
         from . import api
@@ -1661,6 +1731,9 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         "seed": effective_seed(args),
         "ollama_url": args.ollama_url,
         "ollama_model": args.ollama_model,
+        "chatgpt_url": args.chatgpt_url,
+        "chatgpt_model": args.chatgpt_model,
+        "chatgpt_configured": _chatgpt_configured(),
         "version": __version__,
     }
     console.pairs([
@@ -1671,6 +1744,8 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         ("frontend", frontend_dir + ("" if doc["frontend_built"] else " (not built: run `npm install && npm run build` in frontend/)")),
         ("backend", args.backend + (f" on {args.device}" if args.device else "")),
         ("ollama", f"{args.ollama_model or '$RADIXNET_OLLAMA_MODEL'} at {args.ollama_url or '$OLLAMA_HOST'}"),
+        ("chatgpt", f"{args.chatgpt_model or '$RADIXNET_OPENAI_MODEL'} at {args.chatgpt_url or '$OPENAI_BASE_URL'}"
+                    + (" (key set)" if doc["chatgpt_configured"] else " (no OPENAI_API_KEY: ChatGPT tutoring is off)")),
     ])
     console.say("press Ctrl-C to stop")
     if console.json_mode:
@@ -1679,9 +1754,15 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         host=args.host, port=args.port, model_path=args.model, checkpoint_dir=args.checkpoint_dir,
         frontend_dir=frontend_dir, backend=args.backend, device=args.device, seed=effective_seed(args),
         upload_dir=args.upload_dir, ollama_url=args.ollama_url, ollama_model=args.ollama_model,
-        kind=getattr(args, "kind", None),
+        chatgpt_url=args.chatgpt_url, chatgpt_model=args.chatgpt_model, kind=getattr(args, "kind", None),
     )
     return None
+
+
+def _chatgpt_configured() -> bool:
+    from .chatgpt import api_key_configured
+
+    return api_key_configured()
 
 
 # --------------------------------------------------------------------------
@@ -2127,12 +2208,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_bench)
 
     # codegen --------------------------------------------------------------
+    from .chatgpt import DEFAULT_MODEL as chatgpt_default_model, DEFAULT_URL as chatgpt_default_url
     from .codegen import DEFAULT_TEACHER_MODEL as codegen_default_model
+    from .llm import DEFAULT_PROVIDER, PROVIDERS
 
     p = command(
-        "codegen", "generate Python programs, run them in a sandbox, judge them with Ollama, reward / punish with 2NRL",
-        "Semi-supervised code generation over a list of problems.  Phase `teacher`: an Ollama model writes\n"
-        "each solution, the sandbox runs it, the teacher fixes failures and the judge (the LLM plus an\n"
+        "codegen", "generate Python programs, run them in a sandbox, judge them with an LLM, reward / punish with 2NRL",
+        "Semi-supervised code generation over a list of problems.  Phase `teacher`: the tutor (a local\n"
+        "Ollama model, or ChatGPT with --teacher-provider chatgpt and $OPENAI_API_KEY set) writes\n"
+        "each solution, the sandbox runs it, the tutor fixes failures and the judge (the LLM plus an\n"
         "objective PEP 8 / naming check) confirms it; the network learns question + answer with every wrong\n"
         "attempt as 2NRL garbage before the correct one.  Phase `model`: the network writes the solutions\n"
         "itself; errors and rejected programs are punished (negative phase), correct ones rewarded (positive\n"
@@ -2142,13 +2226,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--problems", required=True, metavar="FILE",
                    help="one prompt per line, or .json / .jsonl objects {id, prompt, tests, expected_output}")
     p.add_argument("--phase", choices=("both", "teacher", "model"), default="both",
-                   help="teacher: Ollama writes the solutions; model: the network writes them; both: teacher, then model")
+                   help="teacher: the tutor writes the solutions; model: the network writes them; both: teacher, then model")
     p.add_argument("--rounds", type=pos_int, default=1, help="passes over the problem list (each pass runs the chosen phases)")
+    p.add_argument("--teacher-provider", "--provider", dest="teacher_provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who tutors: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY; prompts and programs go to OpenAI)")
     p.add_argument("--teacher-model", metavar="NAME",
-                   help=f"Ollama model that writes, fixes and judges (default: $RADIXNET_CODEGEN_MODEL or {codegen_default_model})")
-    p.add_argument("--judge-model", metavar="NAME", help="a different Ollama model for judging (default: the teacher model)")
-    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
-    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one Ollama answer (default: 120)")
+                   help=f"model that writes, fixes and judges (default: $RADIXNET_CODEGEN_MODEL or {codegen_default_model} "
+                        f"for ollama, $RADIXNET_OPENAI_MODEL or {chatgpt_default_model} for chatgpt)")
+    p.add_argument("--judge-provider", choices=PROVIDERS, help="judge with the other provider (default: the tutor's)")
+    p.add_argument("--judge-model", metavar="NAME", help="a different model for judging (default: the teacher model)")
+    p.add_argument("--url", metavar="URL",
+                   help="the tutor's base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434 for ollama, "
+                        "$OPENAI_BASE_URL or https://api.openai.com/v1 for chatgpt)")
+    p.add_argument("--judge-url", metavar="URL", help="base URL of the judge's provider (default: the same as --url / its own default)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one LLM answer (default: 120)")
     p.add_argument("--teacher-attempts", type=pos_int, default=3, help="programs the teacher may try per problem (first + fixes)")
     p.add_argument("--model-attempts", type=pos_int, default=4, help="programs the network may try per problem before the teacher steps in")
     p.add_argument("--sample-first", action="store_true",
@@ -2247,6 +2338,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, lessons, report card)")
     p.set_defaults(handler=cmd_tutor)
 
+    # chatgpt ---------------------------------------------------------------
+    p = command(
+        "chatgpt", "query ChatGPT (OpenAI): check the key and models, ask one question",
+        "Talk to OpenAI's API, the hosted alternative to a local Ollama tutor.  `models` lists what the\n"
+        "key may use (and is the quickest check that tutoring will work), `ask` sends one prompt.\n"
+        "The key comes from $OPENAI_API_KEY (or $OPENAI_API_KEY_FILE) and is never printed or stored;\n"
+        "$OPENAI_BASE_URL points the client at any OpenAI-compatible server.\n"
+        f"Usage: {PROG} [global options] chatgpt [--url URL] [--chatgpt-model NAME] <action> [options]",
+    )
+    p.add_argument("--url", metavar="URL", help=f"OpenAI base URL (default: $OPENAI_BASE_URL or {chatgpt_default_url})")
+    p.add_argument("--chatgpt-model", metavar="NAME",
+                   help=f"model name (default: $RADIXNET_OPENAI_MODEL or {chatgpt_default_model})")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS",
+                   help="seconds to wait for one ChatGPT answer (default: 120)")
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+
+    a = actions.add_parser("models", help="list the models the API key can use",
+                           description="List the models the OpenAI API key has access to.", formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_chatgpt_models)
+
+    a = actions.add_parser(
+        "ask", help="send one prompt and print the answer",
+        description="Send one prompt to ChatGPT and print the answer: a quick check that the key, the model\n"
+                    "and the network path all work before pointing the code-generation tutor at it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--prompt", required=True, metavar="TEXT", help="the question to ask")
+    a.add_argument("--system", metavar="TEXT", help="system instruction sent before the prompt")
+    a.add_argument("--temperature", type=nonneg_float, default=0.7, help="sampling temperature (dropped when the model refuses it)")
+    a.add_argument("--json", dest="json_answer", action="store_true", help="ask for a JSON answer")
+    a.set_defaults(handler=cmd_chatgpt_ask)
+
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
 
@@ -2328,6 +2451,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"Ollama base URL for the /api/ollama endpoints (default: $OLLAMA_HOST or {ollama_default_url})")
     p.add_argument("--ollama-model", metavar="NAME",
                    help=f"default Ollama model for the /api/ollama endpoints (default: $RADIXNET_OLLAMA_MODEL or {ollama_default_model})")
+    p.add_argument("--chatgpt-url", metavar="URL",
+                   help=f"OpenAI base URL for the ChatGPT tutor (default: $OPENAI_BASE_URL or {chatgpt_default_url})")
+    p.add_argument("--chatgpt-model", metavar="NAME",
+                   help=f"default ChatGPT model (default: $RADIXNET_OPENAI_MODEL or {chatgpt_default_model}); "
+                        "the key always comes from the server's $OPENAI_API_KEY")
     p.set_defaults(handler=cmd_serve)
     return parser
 

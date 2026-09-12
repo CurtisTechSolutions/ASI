@@ -455,6 +455,7 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["checkpoint_dir"] = ckptDir
 	stats["upload_dir"] = uploadDir
 	stats["ollama"] = map[string]any{"url": s.ollamaURL, "model": s.ollamaModel}
+	stats["chatgpt"] = nil
 	stats["engine"] = "go"
 	stats["workers"] = s.workers // 0 = no cap: one goroutine per text
 	stats["goroutines"] = runtime.NumGoroutine()

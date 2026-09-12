@@ -1,12 +1,15 @@
-"""Code generation with a sandbox, an Ollama teacher / judge and 2NRL rewards.
+"""Code generation with a sandbox, an LLM teacher / judge and 2NRL rewards.
 
     problem -> Python program -> sandbox run -> judge -> 2NRL (punish / reward)
 
 Two semi-supervised phases over the same list of problems:
 
-* ``teacher`` — an Ollama model (default ``gemma4``) writes a solution, the
-  sandbox runs it, the teacher fixes what failed, and the judge (the same LLM
-  plus an objective PEP 8 / naming check) confirms it.  The network then
+* ``teacher`` — the tutor writes a solution, the sandbox runs it, the tutor
+  fixes what failed, and the judge (the same LLM plus an objective PEP 8 /
+  naming check) confirms it.  The tutor is a local Ollama model (default
+  ``gemma4``) or ChatGPT (``teacher_provider="chatgpt"``, see
+  :mod:`radixnet.chatgpt`); the judge follows the tutor unless
+  ``judge_provider`` names the other one.  The network then
   learns the concatenated question + answer: every wrong attempt is 2NRL
   garbage (negative phase), the correct one the fine-tune pass (positive
   phase) — wrong answers *before* the correct answer.
@@ -20,6 +23,10 @@ Correctness = the program runs in the sandbox (exit 0, no timeout), matches
 the expected output / passes the appended tests when the problem has them,
 is judged to accomplish the task, and (``strictness="strict"``) passes the
 PEP 8 formatting and naming checks of both the objective checker and the LLM.
+
+Privacy: a local tutor keeps everything on the machine; a ChatGPT tutor sends
+every problem statement and every generated program to OpenAI and bills the
+key it uses.
 
 Security: the sandbox runs *generated* code with ``python -I`` in a scratch
 directory with memory / CPU / file-size limits and, where ``unshare`` allows
@@ -44,11 +51,21 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from typing import Any
 
-from .ollama import OllamaClient, OllamaError, _loads_lenient
+from .llm import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    LLMClient,
+    LLMError,
+    default_model,
+    loads_lenient,
+    normalise_provider,
+    provider_of,
+)
 
 __all__ = [
     "DEFAULT_TEACHER_MODEL",
     "PHASES",
+    "PROVIDERS",
     "STRICTNESS",
     "Attempt",
     "CodeGenConfig",
@@ -60,8 +77,9 @@ __all__ = [
     "Verdict",
     "check_style",
     "decide",
+    "default_teacher_model",
     "extract_code",
-    "judge_with_ollama",
+    "judge_with_llm",
     "load_problems",
     "model_prefix",
     "parse_problem_file",
@@ -73,6 +91,13 @@ __all__ = [
 
 DEFAULT_TEACHER_MODEL = os.environ.get("RADIXNET_CODEGEN_MODEL", "").strip() or "gemma4"
 """Ollama model that writes, fixes and judges solutions (``RADIXNET_CODEGEN_MODEL`` overrides)."""
+
+
+def default_teacher_model(provider: str | None = None) -> str:
+    """The model a tutor uses when none is named: :data:`DEFAULT_TEACHER_MODEL` for Ollama, else the provider's own default."""
+    provider = normalise_provider(provider)
+    return DEFAULT_TEACHER_MODEL if provider == "ollama" else default_model(provider)
+
 
 PHASES = ("teacher", "model")
 STRICTNESS = ("strict", "lenient")
@@ -468,8 +493,8 @@ def _problem_block(problem: Problem) -> str:
     return text
 
 
-def teacher_generate(client: OllamaClient, problem: Problem, extra: str | None = None, model: str | None = None) -> str:
-    """Ask the teacher for a first program."""
+def teacher_generate(client: LLMClient, problem: Problem, extra: str | None = None, model: str | None = None) -> str:
+    """Ask the tutor (Ollama or ChatGPT) for a first program."""
     user = _problem_block(problem)
     if extra and extra.strip():
         user += f"\nAdditional instructions:\n{extra.strip()}\n"
@@ -478,9 +503,9 @@ def teacher_generate(client: OllamaClient, problem: Problem, extra: str | None =
 
 
 def teacher_fix(
-    client: OllamaClient, problem: Problem, attempt: "Attempt", extra: str | None = None, model: str | None = None
+    client: LLMClient, problem: Problem, attempt: "Attempt", extra: str | None = None, model: str | None = None
 ) -> str:
-    """Ask the teacher to correct a program that failed or was judged wrong."""
+    """Ask the tutor to correct a program that failed or was judged wrong."""
     user = _problem_block(problem)
     user += f"\nThis program is not acceptable yet:\n```python\n{attempt.code.rstrip()}\n```\n\nWhat went wrong:\n{attempt.feedback()}\n"
     if extra and extra.strip():
@@ -503,8 +528,8 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def judge_with_ollama(
-    client: OllamaClient, problem: Problem, code: str, run: RunResult, style: StyleReport, model: str | None = None
+def judge_with_llm(
+    client: LLMClient, problem: Problem, code: str, run: RunResult, style: StyleReport, model: str | None = None
 ) -> dict:
     """The LLM's opinion: ``{"task", "pep8", "naming", "score", "issues", "critique"}``."""
     user = _problem_block(problem)
@@ -518,9 +543,9 @@ def judge_with_ollama(
         user += f"\nThe appended tests {'passed' if run.ok else 'FAILED'}.\n"
     user += f"\nAutomated style check: {'no issues' if style.ok else '; '.join(style.issues[:8])}\n\nReturn the JSON now."
     raw = client.generate(user, system=JUDGE_SYSTEM, model=model, json_mode=True, options={"temperature": 0.1})
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     if not isinstance(data, dict):
-        raise OllamaError("the judge did not answer with a JSON object")
+        raise LLMError("the judge did not answer with a JSON object")
     task = _as_bool(data.get("task_accomplished", data.get("correct", data.get("task"))), False)
     score: float | None
     try:
@@ -551,14 +576,19 @@ class Verdict:
     score: float | None
     issues: list[str]
     critique: str
-    judged_by: str  # sandbox | tests | ollama | none
+    judged_by: str  # sandbox | tests | ollama | chatgpt | none
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
 
 
-def decide(run: RunResult, style: StyleReport, llm: dict | None, strictness: str = "strict") -> Verdict:
-    """Combine the sandbox result, the objective style report and the LLM's opinion into one verdict."""
+def decide(
+    run: RunResult, style: StyleReport, llm: dict | None, strictness: str = "strict", judged_by: str = DEFAULT_PROVIDER
+) -> Verdict:
+    """Combine the sandbox result, the objective style report and the LLM's opinion into one verdict.
+
+    ``judged_by`` names the provider behind ``llm`` and ends up in the verdict.
+    """
     if strictness not in STRICTNESS:
         raise ValueError(f"strictness must be one of {', '.join(STRICTNESS)}")
     runs = run.ok
@@ -572,7 +602,6 @@ def decide(run: RunResult, style: StyleReport, llm: dict | None, strictness: str
         judged_by = "sandbox"
     elif llm is not None:
         task = llm["task"]
-        judged_by = "ollama"
     elif run.expected_ok is True:
         task = True
         judged_by = "tests"
@@ -595,7 +624,7 @@ def decide(run: RunResult, style: StyleReport, llm: dict | None, strictness: str
 @dataclasses.dataclass(slots=True)
 class Attempt:
     index: int
-    source: str  # "ollama" | "model"
+    source: str  # the tutor's provider ("ollama" | "chatgpt") or "model"
     code: str
     text: str
     run: RunResult
@@ -614,7 +643,7 @@ class Attempt:
             parts.append("Its output differed from the expected output. Actual stdout:\n" + (self.run.stdout[-800:] or "(empty)"))
         if self.style.issues:
             parts.append("Style checker: " + "; ".join(self.style.issues[:8]))
-        if self.verdict.judged_by == "ollama" and self.verdict.task is False:
+        if self.verdict.judged_by in PROVIDERS and self.verdict.task is False:
             parts.append("Reviewer: the task is not accomplished. " + self.verdict.critique)
         elif self.verdict.critique:
             parts.append("Reviewer: " + self.verdict.critique)
@@ -637,8 +666,10 @@ class Attempt:
 
 @dataclasses.dataclass
 class CodeGenConfig:
-    teacher_model: str = DEFAULT_TEACHER_MODEL
-    judge_model: str | None = None
+    teacher_provider: str = DEFAULT_PROVIDER  # "ollama" | "chatgpt": who tutors
+    teacher_model: str = ""  # "" = the tutor provider's default model
+    judge_provider: str = ""  # "" = the tutor's provider
+    judge_model: str | None = None  # None = the tutor's model (same provider), else that provider's default
     phases: tuple[str, ...] = PHASES
     rounds: int = 1
     teacher_attempts: int = 3
@@ -661,7 +692,27 @@ class CodeGenConfig:
     batch_size: int = 4
     checkpoint_every: int = 0  # problems
 
+    def __post_init__(self) -> None:
+        """Resolve the providers and fill in the model names they imply (so reports name the real model)."""
+        self.teacher_provider = normalise_provider(self.teacher_provider)
+        self.judge_provider = normalise_provider(self.judge_provider) if str(self.judge_provider).strip() else self.teacher_provider
+        if not str(self.teacher_model).strip():
+            self.teacher_model = default_teacher_model(self.teacher_provider)
+        if self.judge_model is not None and not str(self.judge_model).strip():
+            self.judge_model = None
+
+    @property
+    def resolved_judge_model(self) -> str:
+        """The model the judge answers with: ``judge_model``, else the tutor's model on the tutor's provider."""
+        if self.judge_model:
+            return self.judge_model
+        if self.judge_provider == self.teacher_provider:
+            return self.teacher_model
+        return default_teacher_model(self.judge_provider)
+
     def validate(self) -> None:
+        if self.teacher_provider not in PROVIDERS or self.judge_provider not in PROVIDERS:
+            raise ValueError(f"teacher_provider and judge_provider must be one of {', '.join(PROVIDERS)}")
         if not self.phases or any(p not in PHASES for p in self.phases):
             raise ValueError(f"phases must be a non-empty subset of {', '.join(PHASES)}")
         if self.rounds < 1:
@@ -696,25 +747,39 @@ ProgressFn = Callable[[dict], None]
 class CodeGenTrainer:
     """Runs the teacher / model phases over problems and applies 2NRL rewards to the network.
 
+    ``client`` is the tutor: any provider client (Ollama or ChatGPT).  The
+    judge shares it unless ``judge_client`` is given or the configuration names
+    a different ``judge_provider``, in which case a client for that provider is
+    built from the environment.  Attempts are labelled with the provider that
+    produced and judged them.
+
     ``external`` is an optional zero-argument callable returning a context
     manager that is entered around slow external work (sandbox runs, LLM
     calls); the API uses it to release the model lock so the server stays
-    responsive while a program runs or the teacher thinks.
+    responsive while a program runs or the tutor thinks.
     """
 
     def __init__(
         self,
         model: Any,
-        client: OllamaClient,
+        client: LLMClient,
         sandbox: Sandbox | None = None,
         config: CodeGenConfig | None = None,
         external: Callable[[], Any] | None = None,
+        judge_client: LLMClient | None = None,
     ) -> None:
         self.model = model
         self.client = client
         self.sandbox = sandbox or Sandbox()
         self.config = config or CodeGenConfig()
         self.config.validate()
+        if judge_client is None and self.config.judge_provider != provider_of(client):
+            from .llm import make_client
+
+            judge_client = make_client(self.config.judge_provider, model=self.config.resolved_judge_model)
+        self.judge_client = judge_client if judge_client is not None else client
+        self.teacher_provider = provider_of(client)
+        self.judge_provider = provider_of(self.judge_client)
         self._external = external or nullcontext
         self.history: list[dict] = []
         self.replay_buffer: list[str] = []
@@ -739,10 +804,10 @@ class CodeGenTrainer:
         llm = None
         if run.ok and self.config.use_judge:
             with self._external():
-                llm = judge_with_ollama(
-                    self.client, problem, code, run, style, model=self.config.judge_model or self.config.teacher_model,
+                llm = judge_with_llm(
+                    self.judge_client, problem, code, run, style, model=self.config.resolved_judge_model,
                 )
-        verdict = decide(run, style, llm, self.config.strictness)
+        verdict = decide(run, style, llm, self.config.strictness, judged_by=self.judge_provider)
         return Attempt(
             index=index, source=source, code=code, text=solution_text(problem, code), run=run, style=style,
             verdict=verdict, seconds=time.perf_counter() - t0,
@@ -758,7 +823,7 @@ class CodeGenTrainer:
         with self._external():
             code = teacher_generate(self.client, problem, cfg.teacher_prompt, cfg.teacher_model)
         for i in range(cfg.teacher_attempts):
-            attempt = self.evaluate(problem, code, "ollama", start_index + i)
+            attempt = self.evaluate(problem, code, self.teacher_provider, start_index + i)
             attempts.append(attempt)
             self._emit_attempt(progress, phase, round_no, problem, attempt)
             if attempt.verdict.correct or i == cfg.teacher_attempts - 1 or self._stopped():
