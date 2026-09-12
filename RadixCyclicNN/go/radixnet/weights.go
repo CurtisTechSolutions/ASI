@@ -50,7 +50,10 @@ func (g *Graph) RecordTraversals(edges []int) int {
 		}
 	}
 	if g.windowHead > 4096 && g.windowHead > len(g.window)/2 {
-		g.window = append(g.window[:0:0], g.window[g.windowHead:]...)
+		// slide the live part down inside the same array: a counting pass over a
+		// huge corpus compacts millions of times and must not allocate here
+		n := copy(g.window, g.window[g.windowHead:])
+		g.window = g.window[:n]
 		g.windowHead = 0
 	}
 	g.TotalTraversals += int64(len(edges))
@@ -126,14 +129,14 @@ type Share struct {
 func (g *Graph) Shares(p int) []Share {
 	adj := &g.children[p]
 	var total, recent int64
-	for _, c := range adj.order {
-		e := adj.edge[c]
+	for i := range adj.order {
+		e := adj.edges[i]
 		total += atomic.LoadInt64(&g.EdgeCount[e])
 		recent += g.WindowEdgeCount[e]
 	}
 	out := make([]Share, 0, len(adj.order))
-	for _, c := range adj.order {
-		e := adj.edge[c]
+	for i, c := range adj.order {
+		e := adj.edges[i]
 		s := Share{Child: c, Edge: e}
 		if total > 0 {
 			s.All = float64(atomic.LoadInt64(&g.EdgeCount[e])) / float64(total)
@@ -153,14 +156,14 @@ func (g *Graph) recomputeRow(p int) {
 		return
 	}
 	var total, recent int64
-	for _, c := range adj.order {
-		e := adj.edge[c]
+	for i := range adj.order {
+		e := adj.edges[i]
 		total += g.EdgeCount[e]
 		recent += g.WindowEdgeCount[e]
 	}
 	degree := adj.size()
-	for _, c := range adj.order {
-		e := adj.edge[c]
+	for i := range adj.order {
+		e := adj.edges[i]
 		g.EdgeW[e] = g.EdgeWeight(float64(g.EdgeCount[e]), g.EdgeReward[e], float64(total), degree, float64(g.WindowEdgeCount[e]), float64(recent))
 	}
 }
@@ -282,18 +285,18 @@ func (g *Graph) ensureCosts() {
 			return
 		}
 		m := math.Inf(-1)
-		for _, c := range adj.order {
-			if w := g.EdgeW[adj.edge[c]]; w > m {
+		for i := range adj.order {
+			if w := g.EdgeW[adj.edges[i]]; w > m {
 				m = w
 			}
 		}
 		sum := 0.0
-		for _, c := range adj.order {
-			sum += math.Exp(g.EdgeW[adj.edge[c]] - m)
+		for i := range adj.order {
+			sum += math.Exp(g.EdgeW[adj.edges[i]] - m)
 		}
 		lse := m + math.Log(sum)
-		for _, c := range adj.order {
-			e := adj.edge[c]
+		for i := range adj.order {
+			e := adj.edges[i]
 			g.edgeCost[e] = lse - g.EdgeW[e]
 		}
 	}
@@ -328,7 +331,7 @@ func (g *Graph) ChildCosts(p int) []ChildCost {
 	adj := &g.children[p]
 	out := make([]ChildCost, len(adj.order))
 	for i, c := range adj.order {
-		e := adj.edge[c]
+		e := adj.edges[i]
 		out[i] = ChildCost{c, e, g.edgeCost[e]}
 	}
 	return out

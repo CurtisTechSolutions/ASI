@@ -217,7 +217,7 @@ func init() {
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, window}")
 	route("POST", "/api/train", rTrain)
-	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size}; uploads stream through in chunks, whatever their size")
+	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
 	doc("GET", "/api/job", "status of the current / last job")
 	route("POST", "/api/job/stop", rJobStop)
@@ -469,6 +469,14 @@ func rTrain(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	parallelParts, err := rq.f.flag("parallel_parts", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	inflight, _, err := rq.f.integer("inflight", 0, intp(1))
+	if err != nil {
+		return 0, nil, err
+	}
 	autoCompress, err := rq.f.flag("auto_compress", true)
 	if err != nil {
 		return 0, nil, err
@@ -482,7 +490,7 @@ func rTrain(rq *request) (int, any, error) {
 	if _, _, err := rq.f.integer("batch_size", 256, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	job, err := rq.svc.StartTrainSource(src, epochs, autoCompress, chunkSize)
+	job, err := rq.svc.StartTrainSource(src, epochs, autoCompress, chunkSize, parallelParts, inflight)
 	if err != nil {
 		return 0, nil, err
 	}

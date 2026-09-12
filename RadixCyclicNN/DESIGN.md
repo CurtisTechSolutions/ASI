@@ -1055,20 +1055,46 @@ Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
 * **Predictions run their two beams side by side** whenever the bottom cap is known up front; `ScoreAll` scores
   texts in parallel; the loss is a parallel reduction.
 
-Streaming and chunking (`source.go`): a `TextSource` yields texts in order and can be re-read for every pass -
-`SliceSource` (in memory), `FileSource` (line by line, any line length, BOM and invalid UTF-8 repaired),
-`ZipSource` (`archive/zip` opened from disk: the central directory only, entries streamed on demand through
-`WalkZip` with the Python module's skip rules and an 8 KB NUL sniff for binaries), `MultiSource`.
-`Model.passesSource` consumes a source in chunks of `TrainOptions.ChunkSize` texts (default 8192, `--chunk`,
-`chunk_size`): the structure pass walks the chunks once; every epoch re-streams them - encode, trace and count
-with one goroutine per text, the sliding window in corpus order, rewards per chunk - and accumulates per-edge
-traversal counts so the loss (`weightedCost`, Σ traversals × cost / total) needs no list of transitions. Memory is
-one chunk plus the graph: a million-line ZIP (39 MB unpacked) trained at a flat 90 MB peak RSS. The server's
-`POST /api/uploads` streams multipart parts and raw bodies into the upload directory (`Uploads.StoreStream`: the
-first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming its entries), the listing
-inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline texts and `Uploads.Source`
-(ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be parsed whole, are capped at
-512 MB.
+Streaming and chunking (`source.go`, `pipeline.go`): a `TextSource` yields texts in order and can be re-read for
+every pass - `SliceSource` (in memory), `FileSource` (line by line, any line length, BOM and invalid UTF-8
+repaired), `ZipSource` (`archive/zip` opened from disk: the central directory only, entries streamed on demand
+through `WalkZip` with the Python module's skip rules and an 8 KB NUL sniff for binaries), `MultiSource`. A source
+that has natural parts (archive entries, the files of a set) also implements `PartSource`, so the parts are opened
+once and streamed independently. `Model.passesSource` consumes them in chunks of `TrainOptions.ChunkSize` texts
+(default 8192, `--chunk`, `chunk_size`): the structure pass walks the chunks once; every epoch re-streams them -
+encode, trace and count with one goroutine per text, the sliding window in corpus order, rewards per chunk - and
+accumulates per-edge traversal counts so the loss (`weightedCost`, Σ traversals × cost / total) needs no list of
+transitions. A `sequencer` restores corpus order by (part, chunk index) for the two steps that are ordered by
+nature - observing novel texts and applying the window / rewards - while everything else runs in any order.
+
+The reader never waits for a chunk it spawned, but it does wait for a slot: `TrainOptions.Inflight` (`--inflight`,
+`inflight`; default two per CPU) bounds the chunks in flight, and a chunk holds its slot from the moment it is read
+until the sequencer has applied it - a finished chunk waiting for its turn costs the same memory as one being
+counted. Without that bound the reader outruns the counting: 1.7 GB on a 39 MB archive, 3.2 GB with `ParallelParts`
+(a reader goroutine per part, `--parallel-parts`, off by default), against 393 MB now - and that pile-up is what
+killed the server on a big upload. Parallel parts cannot share one pool, since the slots would all be taken by
+parts the sequencer cannot reach yet while the part it waits for cannot start, so each open part gets its own
+budget of chunks and only a window of parts is open at a time; permits are taken in part order, so the oldest
+unfinished part always holds one and the pipeline cannot stall. The second half of that failure is the collector: Go grows the heap to
+about twice the live set before collecting, so `ApplyMemoryLimit` (`memlimit.go`) sets `debug.SetMemoryLimit` to
+80 % of the process's cgroup limit (its own path in `/proc/self/cgroup`, v2 and v1) or of `MemAvailable` at startup
+(`--memlimit SIZE`, `--memlimit off`, `GOMEMLIMIT` wins), which trades speed for staying inside the box. Measured
+on a 113 MB corpus (10,703 files, 421 K nodes, 2.34 M edges, 426 MB live heap): 1452 MB peak RSS with no limit,
+1027 MB at a 1 GiB limit for the same wall time, 767 MB at 512 MiB with the collector running continuously (peak
+RSS runs above the limit itself: it counts the runtime's unreturned spans and the page cache of the files being
+read and written, while the anonymous memory stays inside it). Run inside a 1 GiB cgroup, the same training is
+killed by the OOM killer after 26.9 s without a limit and finishes in 32.5 s at 908 MiB with the detected one -
+the failure the user hit, and the fix. Saving and loading stream through the file (`encodeCompact` into the gzip /
+temp file, `json.Decoder` out of it), the adjacency lists are two parallel slices with a map index only past
+degree 16 (a Go map per node cost more than the rest of the graph), the sliding window compacts in place and the
+read buffers are pooled, all of which keep the allocation rate off the collector's back.
+
+The server's `POST /api/uploads` streams multipart parts and raw bodies into the upload directory
+(`Uploads.StoreStream`: the first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming
+its entries), the listing inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline
+texts and `Uploads.Source` (ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be
+parsed whole, are capped at 512 MB. `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status
+bar can show how close a run is to its ceiling.
 
 Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
 with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),

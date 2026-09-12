@@ -111,68 +111,6 @@ func (m *Model) encodeAll(texts []string) [][]string {
 	return grams
 }
 
-// register makes every text walkable: the walkable ones are detected in
-// parallel (read-only), the others are observed structurally in corpus order
-// (the one sequential phase: splits reshape a shared radix structure).
-func (m *Model) register(grams [][]string) error {
-	g := m.G
-	needs := make([]bool, len(grams))
-	parallelFor(len(grams), m.workers(), func(i int) {
-		if len(grams[i]) == 0 {
-			return
-		}
-		_, _, ok := g.Trace(grams[i])
-		needs[i] = !ok
-	})
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for i, need := range needs {
-		if need {
-			if _, err := g.observeLocked(grams[i], false); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// traceAll derives every text's transitions and node path from the frozen
-// structure in parallel; a text that cannot be walked is registered and traced
-// again (sequentially, under the lock).
-func (m *Model) traceAll(grams [][]string) ([][]Transition, [][]int, error) {
-	g := m.G
-	transitions := make([][]Transition, len(grams))
-	paths := make([][]int, len(grams))
-	failed := int32(0)
-	parallelFor(len(grams), m.workers(), func(i int) {
-		if len(grams[i]) == 0 {
-			return
-		}
-		tr, path, ok := g.TraceUnlocked(grams[i])
-		if ok {
-			transitions[i], paths[i] = tr, path
-		} else {
-			atomic.StoreInt32(&failed, 1)
-		}
-	})
-	if failed != 0 {
-		if err := m.register(grams); err != nil {
-			return nil, nil, err
-		}
-		for i := range grams {
-			if len(grams[i]) == 0 {
-				continue
-			}
-			tr, path, ok := g.Trace(grams[i])
-			if !ok {
-				return nil, nil, fmt.Errorf("internal error: text %d is not walkable after registration", i)
-			}
-			transitions[i], paths[i] = tr, path
-		}
-	}
-	return transitions, paths, nil
-}
-
 // -- training ------------------------------------------------------------------------------------
 
 // DefaultChunkSize is how many texts a pass takes from its source at a time:
@@ -188,6 +126,12 @@ type TrainOptions struct {
 	Stop         func() bool
 	// ChunkSize is the number of texts streamed from the source per chunk (0 = DefaultChunkSize).
 	ChunkSize int
+	// ParallelParts streams every part of the source (archive entries, files) on its own goroutine at
+	// once instead of in corpus order.
+	ParallelParts bool
+	// Inflight bounds the chunks being read, processed or waiting for their turn at once (0 = two per
+	// CPU): the memory ceiling of a pass is the graph plus Inflight chunks, whatever the corpus size.
+	Inflight int
 }
 
 // DefaultTrainOptions mirror the Python defaults (5 epochs, compression after every epoch).
@@ -396,41 +340,17 @@ func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward flo
 	return m.passesSource(SliceSource(texts), opts, count, reward)
 }
 
-// chunkEach streams a source in chunks of at most size texts (texts shorter
-// than a trigram are dropped and counted) and calls fn for every chunk.
-func chunkEach(src TextSource, size int, fn func(chunk []string) error) (texts, chars int64, skippedShort int, err error) {
-	if size <= 0 {
-		size = DefaultChunkSize
-	}
-	chunk := make([]string, 0, size)
-	err = src.Each(func(t string) error {
-		if runeLen(t) < Window {
-			skippedShort++
-			return nil
-		}
-		texts++
-		chars += int64(runeLen(t))
-		chunk = append(chunk, t)
-		if len(chunk) >= size {
-			if cerr := fn(chunk); cerr != nil {
-				return cerr
-			}
-			chunk = make([]string, 0, size)
-		}
-		return nil
-	})
-	if err == nil && len(chunk) > 0 {
-		err = fn(chunk)
-	}
-	return texts, chars, skippedShort, err
-}
-
-// passesSource runs opts.Epochs passes over a streaming source: first a
-// structure pass (chunk by chunk: the walkable texts are detected in parallel,
-// the novel ones observed in corpus order), then per epoch a counting pass
-// (one goroutine per text of a chunk traces it and bumps the counters), the
-// sliding window in corpus order, rewards, and the loss as the traversal-
-// weighted mean edge cost - so a corpus of any size streams through in chunks.
+// passesSource runs opts.Epochs passes over a streaming source with uncapped
+// fan-out: the reader never waits - every chunk of ChunkSize texts is
+// processed on its own goroutine and every text of a chunk on its own (with
+// ParallelParts every part of the source streams on its own goroutine too).
+// The only steps that wait are the two that are ordered by nature and run in
+// corpus order on a sequencer: the structure pass observes the novel texts (a
+// single writer: Go aborts on concurrent map writes) and the counting passes
+// apply the sliding window and the rewards.  The counters themselves are
+// bumped by the text goroutines, racily unless Exact.  Memory is the graph
+// plus at most Inflight chunks: the reader waits when that many are in
+// flight, which is what keeps a corpus of any size from piling up.
 func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, reward float64) ([]map[string]any, error) {
 	if opts.Epochs < 0 {
 		return nil, fmt.Errorf("epochs must be >= 0, got %d", opts.Epochs)
@@ -441,86 +361,155 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
+	parts, err := openParts(src)
+	if err != nil {
+		return nil, err
+	}
+	defer parts.Close()
+	workers := m.workers()
+
 	// build the structure first (no counting) and compress it, so every pass -
 	// the first included - walks the same transitions
-	nTexts, nChars, skippedShort, err := chunkEach(src, chunkSize, func(chunk []string) error {
-		return m.register(m.encodeAll(chunk))
+	var stats streamStats
+	seq := newSequencer(parts.Len())
+	err = runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &stats, seq, func(part, idx int, chunk []string) error {
+		grams := m.encodeAll(chunk)
+		novel := make([]bool, len(chunk))
+		parallelFor(len(chunk), workers, func(i int) {
+			_, _, ok := g.Trace(grams[i])
+			novel[i] = !ok
+		})
+		seq.submit(part, idx, func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			for i, n := range novel {
+				if n {
+					_, _ = g.observeLocked(grams[i], false)
+				}
+			}
+		})
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	seq.wait()
 	if count {
-		m.metaAddInt("trained_texts", nTexts)
-		m.metaAddInt("trained_chars", nChars)
+		m.metaAddInt("trained_texts", stats.texts)
+		m.metaAddInt("trained_chars", stats.chars)
 	}
 	pendingMerges := 0
 	if opts.AutoCompress {
 		pendingMerges = g.Compress()
 	}
+
 	for epoch := 0; epoch < opts.Epochs; epoch++ {
 		t0 := time.Now()
 		traversed := make([]int64, len(g.EdgeW))
-		total := int64(0)
-		chunks := 0
-		_, _, _, err := chunkEach(src, chunkSize, func(chunk []string) error {
-			chunks++
-			perText, paths, err := m.traceAll(m.encodeAll(chunk))
-			if err != nil {
-				return err
-			}
-			if len(g.EdgeW) > len(traversed) { // a text needed a split after all: grow the per-epoch counters
-				grown := make([]int64, len(g.EdgeW))
-				copy(grown, traversed)
-				traversed = grown
-			}
-			edges := make([]int, 0, len(chunk)*8)
-			for _, tr := range perText {
-				for _, t := range tr {
-					edges = append(edges, t.E)
-				}
-			}
-			total += int64(len(edges))
+		extra := map[int]int64{} // traversals of edges created by a late split (sequencer only)
+		var total int64
+		var chunks int64
+		var passStats streamStats
+		seq := newSequencer(parts.Len())
+		err := runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
+			atomic.AddInt64(&chunks, 1)
+			grams := m.encodeAll(chunk)
+			perText := make([][]Transition, len(chunk))
+			paths := make([][]int, len(chunk))
+			failed := make([]bool, len(chunk))
+			var anyFailed atomic.Bool
 			bump := func(i int) {
-				for _, t := range perText[i] {
+				tr, path, ok := g.Trace(grams[i])
+				if !ok {
+					failed[i] = true
+					anyFailed.Store(true)
+					return
+				}
+				perText[i], paths[i] = tr, path
+				if m.Exact {
+					for _, t := range tr {
+						atomic.AddInt64(&traversed[t.E], 1)
+					}
+					if count {
+						for _, t := range tr {
+							atomic.AddInt64(&g.EdgeCount[t.E], 1)
+						}
+						for _, n := range path {
+							atomic.AddInt64(&g.Count[n], 1)
+						}
+					}
+					return
+				}
+				// racy by design: plain increments from one goroutine per text
+				for _, t := range tr {
 					traversed[t.E]++
 				}
 				if count {
-					for _, t := range perText[i] {
+					for _, t := range tr {
 						g.EdgeCount[t.E]++
 					}
-					for _, n := range paths[i] {
+					for _, n := range path {
 						g.Count[n]++
 					}
 				}
 			}
-			if m.Exact {
-				bump = func(i int) {
-					for _, t := range perText[i] {
-						atomic.AddInt64(&traversed[t.E], 1)
-					}
-					if count {
-						for _, t := range perText[i] {
-							atomic.AddInt64(&g.EdgeCount[t.E], 1)
+			parallelFor(len(chunk), workers, bump)
+			seq.submit(part, idx, func() {
+				if anyFailed.Load() {
+					// a text that needs a split after all: observe it (single writer), trace and count it here
+					for i := range chunk {
+						if !failed[i] {
+							continue
 						}
-						for _, n := range paths[i] {
-							atomic.AddInt64(&g.Count[n], 1)
+						g.mu.Lock()
+						_, _ = g.observeLocked(grams[i], false)
+						g.mu.Unlock()
+						tr, path, ok := g.Trace(grams[i])
+						if !ok {
+							continue
+						}
+						perText[i], paths[i] = tr, path
+						for _, t := range tr {
+							if t.E < len(traversed) {
+								atomic.AddInt64(&traversed[t.E], 1)
+							} else {
+								extra[t.E]++
+							}
+							if count {
+								atomic.AddInt64(&g.EdgeCount[t.E], 1)
+							}
+						}
+						if count {
+							for _, n := range path {
+								atomic.AddInt64(&g.Count[n], 1)
+							}
 						}
 					}
 				}
-			}
-			// one goroutine per text; plain increments race by design unless Exact
-			parallelFor(len(perText), m.workers(), bump)
-			if count {
-				g.RecordTraversals(edges) // the sliding window follows the corpus order
-			}
-			if reward != 0 {
-				g.AddReward(edges, reward)
-			}
+				size := 0
+				for _, tr := range perText {
+					size += len(tr)
+				}
+				edges := make([]int, 0, size) // exactly once: a pass over a huge corpus builds millions of these
+				for _, tr := range perText {
+					for _, t := range tr {
+						edges = append(edges, t.E)
+					}
+				}
+				atomic.AddInt64(&total, int64(len(edges)))
+				if count {
+					g.RecordTraversals(edges) // the sliding window follows the corpus order
+				}
+				if reward != 0 {
+					g.AddReward(edges, reward)
+				}
+			})
 			return nil
 		})
 		if err != nil {
 			return nil, err
 		}
+		seq.wait()
 		if reward != 0 {
 			m.metaAddInt("feedback_passes", 1)
 			if reward > 0 {
@@ -530,7 +519,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			}
 		}
 		g.Prepare()
-		loss := m.weightedCost(traversed, total)
+		loss := m.weightedCost(traversed, extra, total)
 		merges := pendingMerges
 		pendingMerges = 0
 		if opts.AutoCompress {
@@ -547,9 +536,10 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			"compression_ratio": g.CompressionRatio(),
 			"merges":            merges,
 			"transitions":       total,
-			"chunks":            chunks,
+			"chunks":            int(chunks),
+			"parts":             parts.Len(),
 			"seconds":           time.Since(t0).Seconds(),
-			"skipped_short":     skippedShort,
+			"skipped_short":     int(stats.skippedShort),
 			"traversed":         count,
 			"reward":            reward,
 		}
@@ -570,12 +560,16 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 
 // weightedCost is the mean cost of the pass's traversals: every edge's cost
 // times how often the pass traversed it (a parallel reduction over the edges).
-func (m *Model) weightedCost(traversed []int64, total int64) float64 {
+func (m *Model) weightedCost(traversed []int64, extra map[int]int64, total int64) float64 {
 	if total == 0 {
 		return 0
 	}
 	g := m.G
 	n := len(traversed)
+	tail := 0.0
+	for e, c := range extra {
+		tail += float64(c) * g.edgeCost[e]
+	}
 	if n < 4096 || m.workers() == 1 {
 		sum := 0.0
 		for e, c := range traversed {
@@ -583,7 +577,7 @@ func (m *Model) weightedCost(traversed []int64, total int64) float64 {
 				sum += float64(c) * g.edgeCost[e]
 			}
 		}
-		return sum / float64(total)
+		return (sum + tail) / float64(total)
 	}
 	chunk := 4096
 	blocks := (n + chunk - 1) / chunk
@@ -601,7 +595,7 @@ func (m *Model) weightedCost(traversed []int64, total int64) float64 {
 		}
 		partial[b] = s
 	})
-	sum := 0.0
+	sum := tail
 	for _, s := range partial {
 		sum += s
 	}

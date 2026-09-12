@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -291,17 +292,17 @@ type TrainRequest struct {
 
 // StartTrain starts a train job over texts held in memory.
 func (s *Service) StartTrain(texts []string, epochs int, autoCompress bool) (map[string]any, error) {
-	return s.StartTrainSource(radixnet.SliceSource(texts), epochs, autoCompress, 0)
+	return s.StartTrainSource(radixnet.SliceSource(texts), epochs, autoCompress, 0, false, 0)
 }
 
 // StartTrainSource starts a train job over a streaming source (uploads of any
 // size stream through in chunks of chunkSize texts; 0 = the default).
-func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int) (map[string]any, error) {
+func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int, parallelParts bool, inflight int) (map[string]any, error) {
 	if epochs < 0 {
 		return nil, badRequest("epochs must be >= 0, got %d", epochs)
 	}
 	return s.startJob("train", func(job *Job, progress func(map[string]any), stop func() bool) error {
-		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize}
+		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize, ParallelParts: parallelParts, Inflight: inflight}
 		_, err := s.model.TrainSource(src, opts)
 		return err
 	})
@@ -458,6 +459,15 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["workers"] = s.workers // 0 = no cap: one goroutine per text
 	stats["goroutines"] = runtime.NumGoroutine()
 	stats["counting"] = map[bool]string{true: "exact", false: "racy"}[s.exact]
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	stats["heap_bytes"] = ms.HeapAlloc
+	stats["heap_sys_bytes"] = ms.Sys
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < math.MaxInt64 {
+		stats["memory_limit_bytes"] = limit
+	} else {
+		stats["memory_limit_bytes"] = nil
+	}
 	return stats, nil
 }
 

@@ -630,11 +630,13 @@ python -m radixnet --model model.count.json info    # the Python side reads the 
 Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`,
 `weights`, `info`, `converse`, `serve`, `version`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
-none), `--exact` (atomic counting), `--out`. Where the goroutines go:
+none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
+limit, 80 % of the machine or container by default), `--memprofile PATH`.
+Where the goroutines go:
 
 | phase | concurrency |
 |---|---|
-| reading a corpus | `--split lines\|paragraphs\|pages\|file` decides what one text is (`--page-lines` cuts pages when a file has no form feeds); every text is one unit of work. Files and ZIP archives are **streamed**, never loaded whole: `--chunk N` (default 8192) texts at a time |
+| reading a corpus | `--split lines\|paragraphs\|pages\|file` decides what one text is (`--page-lines` cuts pages when a file has no form feeds); every text is one unit of work. Files and ZIP archives are **streamed**, never loaded whole: `--chunk N` (default 8192) texts at a time, at most `--inflight N` chunks (default two per CPU) in flight, so the reader runs ahead but memory does not grow with the corpus; `--parallel-parts` reads every archive entry at once instead of in order |
 | encoding, tracing texts through the structure, counting | **one goroutine per text** of a chunk (no pool unless `--workers N`); the counters are bumped with plain increments from all of them at once - racy by design, a collision loses an update. `--exact` uses atomic increments instead: no lost updates, the result identical to the sequential run and to Python |
 | building the structure | the one sequential phase: node splits reshape a shared radix index, and Go aborts the process on concurrent map writes, so this is not a race that can be ignored; texts that already walk through the graph are detected in parallel and skipped |
 | the sliding window | applied in corpus order after each chunk's parallel pass (its semantics are the order of traversals); exact in both modes |
@@ -642,40 +644,94 @@ none), `--exact` (atomic counting), `--out`. Where the goroutines go:
 | loss, scoring many texts | parallel reductions / one goroutine per text; the loss is the traversal-weighted mean edge cost, so it needs no list of transitions |
 | prediction | the top and the bottom beam run side by side |
 
-Measured on this 4-core machine (2 epochs):
+Measured on this 4-core machine (2 epochs over a 39 MB corpus: 1,000,000
+lines in a ZIP of 10 entries):
 
-| corpus | mode | time | peak RSS |
-|---|---|---|---|
-| 1,000,000 lines in a ZIP (39 MB unpacked) | one goroutine per text, racy | 17.2 s | 90 MB |
-| same | `--exact` | 15.7 s | 90 MB |
-| 30,000 lines | one goroutine per text, racy | 0.89 s | |
-| same | `--exact --workers 4` | 0.60 s | |
-| 3,000 lines, Python implementation | | 38 s | |
+| mode | time | peak RSS |
+|---|---|---|
+| one goroutine per text, racy (the default) | 12.0 s | 393 MB |
+| `--exact --workers 4` | 6.6 s | 172 MB |
+| `--workers 1` | 14.2 s | 79 MB |
+| `--inflight 1` (one chunk at a time) | 11.2 s | 74 MB |
+| `--chunk 1024` | 10.2 s | 68 MB |
+| `--parallel-parts` (all 10 entries at once) | 11.6 s | 414 MB |
 
-Racy counting lost 0.7 % of the traversals on the million-line corpus and was
-not faster than a small exact pool here: spawning a goroutine per text and the
-cache-line contention on shared counters cost more than they save. It is the
-default because it was asked for; `--exact --workers 4` is the reproducible
-choice and the faster one on this hardware. The structure, the window and the
-weights' consistency with whatever was counted are exact in both modes.
+Racy counting lost 0.7 % of the traversals on that corpus and was not faster
+than a small exact pool: spawning a goroutine per text and the cache-line
+contention on shared counters cost more than they save. It is the default
+because it was asked for; `--exact --workers 4` is the reproducible choice and
+the faster one on this hardware. The structure, the window and the weights'
+consistency with whatever was counted are exact in both modes.
 
-### Massive ZIP archives: streaming and chunking
+### Massive ZIP archives: streaming, chunking and memory
 
 Nothing in the Go path holds a corpus in memory. The CLI streams `--data`
 files - a ZIP archive entry by entry (directories, macOS metadata, system
 files, nested archives, encrypted, binary and empty entries skipped like the
 Python `archive` module), a text file line by line, any line length - and the
-model consumes the stream in chunks of `--chunk` texts: the structure pass
-walks the chunks once (novel texts observed in corpus order, walkable ones
-skipped in parallel), every epoch re-streams the corpus chunk by chunk (one
-goroutine per text, the window in order, rewards per chunk) and the loss is
-computed from per-edge traversal counts, so memory is one chunk plus the
-graph whatever the archive's size. The server does the same: `POST
-/api/uploads` streams multipart parts and raw bodies straight into the upload
-directory (an archive is validated by streaming its entries; the JSON forms
-are capped at 512 MB), the listing inspects archives by streaming, and `POST
-/api/train` with `files` (plus the optional `chunk_size`) streams them through
-the job; the frontend needs no change.
+model consumes the stream in chunks of `--chunk` texts (default 8192): the
+structure pass walks the chunks once (novel texts observed in corpus order,
+walkable ones skipped in parallel), every epoch re-streams the corpus chunk by
+chunk (one goroutine per text, the window in order, rewards per chunk) and the
+loss is computed from per-edge traversal counts, so memory is the graph plus
+the chunks in flight whatever the archive's size.
+
+Uncapped goroutines need one bound to stay alive: how many chunks may be in
+flight at once. The reader spawns a goroutine per chunk and never waits for
+it, but it does wait for a free slot - `--inflight N`, two per CPU by default -
+and a chunk holds its slot from the moment it is read until the sequencer has
+applied it, because a finished chunk waiting for its turn occupies memory like
+any other. Without that bound the archive is read far faster than it is
+counted: earlier builds reached 1.7 GB on the 39 MB corpus, and 3.2 GB with
+`--parallel-parts` (a reader goroutine per archive entry, off by default,
+where each open part now gets its own slot budget and only a window of parts
+is open at a time). With the bound, memory is flat in the corpus size and set
+by `--chunk` x `--inflight`: the same corpus trains in 393 MB, or 74 MB with
+`--inflight 1`.
+
+The other half of the problem is the garbage collector, and it is what kills a
+server on a 240 MB archive. Go collects when the heap has grown to about twice
+what is live, so a run whose graph is a gigabyte asks the operating system for
+two - on a container with a hard limit that is an OOM kill rather than a
+collection. Every process therefore sets a **soft memory limit** at 80 % of
+its cgroup limit (or of the memory the machine has available) at startup,
+which makes the collector work harder as the heap approaches it instead of
+growing past it. `--memlimit 2GiB` sets it explicitly, `--memlimit off` turns
+it off, and `GOMEMLIMIT` in the environment wins over both. The server reports
+its heap and limit in `/api/status`, and the status bar shows `heap ... / ...`.
+
+Measured on a 113 MB corpus (10,703 files of the Go source tree, one epoch,
+421 K nodes and 2.34 M edges, 426 MB of live graph):
+
+| run | time | peak RSS |
+|---|---|---|
+| no limit | 31.1 s | 1452 MB |
+| `--memlimit 1GiB` | 30.3 s | 1027 MB |
+| `--memlimit 512MiB` (below what the graph needs) | 50.2 s | 767 MB |
+| **in a 1 GiB container**, `--memlimit off` | killed after 26.9 s | - |
+| **in a 1 GiB container**, the new default | 32.5 s | 908 MiB of the 1 GiB |
+
+The limit costs nothing until the heap approaches it, and only then trades
+speed for staying inside the box. Peak RSS runs above the limit itself because
+it also counts the runtime's unreturned pages and the page cache of the files
+being read and written; the anonymous memory stays inside it. As a rule of
+thumb the graph needs about three times the corpus text, so a 240 MB archive
+of compressed text wants several gigabytes: with the limit the process slows
+down and survives instead of being killed, but a corpus whose graph cannot fit
+has to be trained in parts.
+
+Saving and loading stream too: a model is encoded straight into its file
+(gzip when the name ends with `.gz`) and decoded straight out of it, so a
+100 MB model file never doubles in memory. If the graph itself does not fit in
+the limit, the collector will run continuously rather than grow - train a
+smaller corpus, or raise the limit.
+
+The server does the same everywhere: `POST /api/uploads` streams multipart
+parts and raw bodies straight into the upload directory (an archive is
+validated by streaming its entries; the JSON forms are capped at 512 MB), the
+listing inspects archives by streaming, and `POST /api/train` with `files`
+(plus the optional `chunk_size`, `inflight`, `parallel_parts`) streams them
+through the job; the frontend needs no change.
 
 ### The Go HTTP server and the frontend
 
@@ -702,8 +758,8 @@ Tutor, Checkpoints and Graph work unchanged.
 
 | endpoint | Go server |
 |---|---|
-| `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers` (0 = one goroutine per text), `goroutines`, `counting` (`racy` \| `exact`) |
-| `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress, chunk_size}` -> a job; uploads stream through in chunks whatever their size; learning rates are accepted and ignored |
+| `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers` (0 = one goroutine per text), `goroutines`, `counting` (`racy` \| `exact`), `heap_bytes`, `memory_limit_bytes` |
+| `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}` -> a job; uploads stream through in chunks whatever their size; learning rates are accepted and ignored |
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
 | `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |

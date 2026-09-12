@@ -185,8 +185,13 @@ func TestChunkedStreamingEqualsInMemoryTraining(t *testing.T) {
 			if d := r["loss"].(float64) - ref["loss"].(float64); d > 1e-9 || d < -1e-9 {
 				t.Fatalf("chunk %d epoch %d: loss %v vs %v", chunk, i, r["loss"], ref["loss"])
 			}
-			if r["chunks"].(int) != (len(texts)+chunk-1)/chunk {
-				t.Fatalf("chunk %d: %v chunks recorded", chunk, r["chunks"])
+			// chunks are cut per part: the three entries hold third, third and the rest of the texts
+			want := 0
+			for _, n := range []int{third, third, len(texts) - 2*third} {
+				want += (n + chunk - 1) / chunk
+			}
+			if r["chunks"].(int) != want || r["parts"].(int) != 5 {
+				t.Fatalf("chunk %d: %v chunks / %v parts recorded, want %d chunks of 5 parts", chunk, r["chunks"], r["parts"], want)
 			}
 		}
 	}
@@ -240,4 +245,87 @@ func TestLargeArchiveStreamsThroughInChunks(t *testing.T) {
 	if err != nil || p.Text == "" {
 		t.Fatalf("predict after streaming: %v %+v", err, p)
 	}
+}
+
+func TestManyPartsStreamConcurrentlyInOrder(t *testing.T) {
+	texts := corpus(t)
+	dir := t.TempDir()
+	// every text in its own archive entry: 60 parts streaming at once, order restored by the sequencer
+	entries := map[string]string{}
+	for i, text := range texts {
+		entries[fmt.Sprintf("e%03d.txt", i)] = text + "\n"
+	}
+	entries["zzz-binary.bin"] = "\x00\x01"
+	path := filepath.Join(dir, "parts.zip")
+	writeZip(t, path, entries)
+	reference := trained(t, 3, 0)
+	for _, mode := range []struct {
+		workers  int
+		parallel bool
+	}{{0, false}, {0, true}, {2, true}} {
+		workers := mode.workers
+		m, err := NewModel(1, DefaultGraphOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Exact, m.Workers, m.G.Workers = true, workers, workers
+		opts := DefaultTrainOptions()
+		opts.Epochs = 3
+		opts.ChunkSize = 4
+		opts.ParallelParts = mode.parallel
+		records, err := m.TrainSource(ZipSource{Path: path, Unit: "lines"}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, b := reference.ToDoc().Graph, m.ToDoc().Graph
+		a.Version, b.Version = 0, 0
+		if !reflect.DeepEqual(a.Nodes, b.Nodes) || !reflect.DeepEqual(a.Edges, b.Edges) || !reflect.DeepEqual(a.RngState, b.RngState) || !reflect.DeepEqual(a.Weights, b.Weights) {
+			t.Fatalf("workers %d: 60 concurrently streamed parts must give the in-memory model", workers)
+		}
+		if records[0]["parts"].(int) != len(texts)+1 || records[0]["chunks"].(int) != len(texts) {
+			t.Fatalf("workers %d: parts %v chunks %v", workers, records[0]["parts"], records[0]["chunks"])
+		}
+	}
+	// a MultiSource of a ZIP and a file keeps the order across sources
+	txt := filepath.Join(dir, "tail.txt")
+	os.WriteFile(txt, []byte(strings.Join(texts[len(texts)-5:], "\n")+"\n"), 0o644)
+	half := map[string]string{"a.txt": strings.Join(texts[:len(texts)-5], "\n") + "\n"}
+	writeZip(t, filepath.Join(dir, "head.zip"), half)
+	m, _ := NewModel(1, DefaultGraphOptions())
+	m.Exact = true
+	opts := DefaultTrainOptions()
+	opts.Epochs = 3
+	opts.ChunkSize = 9
+	if _, err := m.TrainSource(MultiSource{ZipSource{Path: filepath.Join(dir, "head.zip")}, FileSource{Path: txt}}, opts); err != nil {
+		t.Fatal(err)
+	}
+	a, b := reference.ToDoc().Graph, m.ToDoc().Graph
+	a.Version, b.Version = 0, 0
+	if !reflect.DeepEqual(a.Edges, b.Edges) || !reflect.DeepEqual(a.Weights.WindowEvents, b.Weights.WindowEvents) {
+		t.Fatal("a multi-source corpus must give the in-memory model")
+	}
+}
+
+func TestSequencerRestoresOrder(t *testing.T) {
+	seq := newSequencer(3)
+	var got []string
+	seq.submit(2, 0, func() { got = append(got, "2.0") })
+	seq.submit(0, 1, func() { got = append(got, "0.1") })
+	seq.submit(1, 0, func() { got = append(got, "1.0") })
+	seq.finishPart(1, 1)
+	seq.finishPart(2, 1)
+	if len(got) != 0 {
+		t.Fatalf("nothing may run before 0.0: %v", got)
+	}
+	seq.submit(0, 0, func() { got = append(got, "0.0") })
+	if !reflect.DeepEqual(got, []string{"0.0", "0.1"}) {
+		t.Fatalf("part 0 must run in order once 0.0 arrived: %v", got)
+	}
+	seq.finishPart(0, 2)
+	seq.wait()
+	if !reflect.DeepEqual(got, []string{"0.0", "0.1", "1.0", "2.0"}) {
+		t.Fatalf("order: %v", got)
+	}
+	empty := newSequencer(0)
+	empty.wait()
 }

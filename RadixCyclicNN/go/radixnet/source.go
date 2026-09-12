@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 // A TextSource streams the texts of a corpus in order.  Training re-reads it
@@ -196,7 +197,8 @@ func (s *splitter) finish() error {
 // invalid UTF-8 repaired) and feeds the splitter; memory stays O(one line).
 func streamLines(r io.Reader, unit string, pageLines int, emit func(string) error) error {
 	sp := newSplitter(unit, pageLines, emit)
-	br := bufio.NewReaderSize(r, 256<<10)
+	br := getReader(r)
+	defer putReader(br)
 	first := true
 	for {
 		line, err := br.ReadString('\n')
@@ -221,6 +223,21 @@ func streamLines(r io.Reader, unit string, pageLines int, emit func(string) erro
 		}
 	}
 	return sp.finish()
+}
+
+// readers pools the 256 KiB read buffers: an archive with thousands of
+// entries would otherwise allocate one per entry per pass.
+var readers = sync.Pool{New: func() any { return bufio.NewReaderSize(nil, 256<<10) }}
+
+func getReader(r io.Reader) *bufio.Reader {
+	br := readers.Get().(*bufio.Reader)
+	br.Reset(r)
+	return br
+}
+
+func putReader(br *bufio.Reader) {
+	br.Reset(nil)
+	readers.Put(br)
 }
 
 func isValidUTF8(s string) bool {
@@ -413,7 +430,8 @@ func InspectZip(zr *zip.Reader) (*ZipInfo, error) {
 	var emptyPaths []string
 	skipped, err := WalkZip(zr, func(path string, r io.Reader) error {
 		entry := ZipEntryInfo{Path: path}
-		br := bufio.NewReaderSize(r, 256<<10)
+		br := getReader(r)
+		defer putReader(br)
 		for {
 			line, rerr := br.ReadString('\n')
 			if len(line) > 0 {

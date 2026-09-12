@@ -33,37 +33,91 @@ const (
 
 type loc struct{ node, off int }
 
-// adjacency holds a node's out-edges: child -> edge id, plus the children in
-// insertion order (Python dict order), which decides the summation order of
-// the softmax and therefore keeps the numbers identical to the Python model.
+// adjacency holds a node's edges keyed by the node at the other end - child
+// -> edge id for the out-edges, parent -> edge id for the in-edges - in
+// insertion order (Python dict order, which decides the summation order of
+// the softmax and therefore keeps the numbers identical to the Python model).
+// Two parallel slices searched linearly cover the small degrees of almost
+// every node in a few dozen bytes; a node past adjacencyIndexAt entries (the
+// sentinels, hubs like " th") gets a map index too.  Go maps cost a few
+// hundred bytes each, which for millions of nodes was most of the graph.
 type adjacency struct {
-	order []int
-	edge  map[int]int
+	order []int       // node ids in insertion order
+	edges []int       // edge ids, parallel to order
+	idx   map[int]int // node id -> position, only past adjacencyIndexAt entries
+}
+
+// adjacencyIndexAt is the degree above which an adjacency keeps a map index.
+const adjacencyIndexAt = 16
+
+// find returns the position of node c, or -1.
+func (a *adjacency) find(c int) int {
+	if a.idx != nil {
+		if i, ok := a.idx[c]; ok {
+			return i
+		}
+		return -1
+	}
+	for i, x := range a.order {
+		if x == c {
+			return i
+		}
+	}
+	return -1
 }
 
 func (a *adjacency) get(c int) (int, bool) {
-	if a.edge == nil {
-		return 0, false
+	if i := a.find(c); i >= 0 {
+		return a.edges[i], true
 	}
-	e, ok := a.edge[c]
-	return e, ok
+	return 0, false
 }
 
+// set records edge e to / from node c, appending c when it is new.
 func (a *adjacency) set(c, e int) {
-	if a.edge == nil {
-		a.edge = make(map[int]int, 2)
+	if i := a.find(c); i >= 0 {
+		a.edges[i] = e
+		return
 	}
-	if _, ok := a.edge[c]; !ok {
-		a.order = append(a.order, c)
+	a.order = append(a.order, c)
+	a.edges = append(a.edges, e)
+	if a.idx != nil {
+		a.idx[c] = len(a.order) - 1
+	} else if len(a.order) > adjacencyIndexAt {
+		a.idx = make(map[int]int, 2*len(a.order))
+		for i, x := range a.order {
+			a.idx[x] = i
+		}
 	}
-	a.edge[c] = e
+}
+
+// unset drops node c; the last entry takes its slot, so the order of the
+// rest changes - fine for the parents, which have no order to keep (the
+// children are only ever cleared wholesale).
+func (a *adjacency) unset(c int) bool {
+	i := a.find(c)
+	if i < 0 {
+		return false
+	}
+	last := len(a.order) - 1
+	if i != last {
+		a.order[i], a.edges[i] = a.order[last], a.edges[last]
+		if a.idx != nil {
+			a.idx[a.order[i]] = i
+		}
+	}
+	a.order = a.order[:last]
+	a.edges = a.edges[:last]
+	if a.idx != nil {
+		delete(a.idx, c)
+	}
+	return true
 }
 
 func (a *adjacency) clear() {
 	a.order = a.order[:0]
-	for k := range a.edge {
-		delete(a.edge, k)
-	}
+	a.edges = a.edges[:0]
+	a.idx = nil
 }
 
 func (a *adjacency) size() int { return len(a.order) }
@@ -83,7 +137,7 @@ type Graph struct {
 	Count    []int64
 	Alive    []bool
 	children []adjacency
-	parents  []map[int]int
+	parents  []adjacency // in-edges: parent -> edge id (any order)
 
 	EdgeW      []float64
 	EdgeCount  []int64
@@ -170,7 +224,7 @@ func (g *Graph) newNode(label string, count int64) int {
 	g.Count = append(g.Count, count)
 	g.Alive = append(g.Alive, true)
 	g.children = append(g.children, adjacency{})
-	g.parents = append(g.parents, nil)
+	g.parents = append(g.parents, adjacency{})
 	g.nAliveNodes++
 	g.Version++
 	g.StructureVersion++
@@ -189,10 +243,7 @@ func (g *Graph) newEdge(p, c int, count int64) int {
 	g.EdgeReward = append(g.EdgeReward, 0.0)
 	g.WindowEdgeCount = append(g.WindowEdgeCount, 0)
 	g.children[p].set(c, e)
-	if g.parents[c] == nil {
-		g.parents[c] = make(map[int]int, 2)
-	}
-	g.parents[c][p] = e
+	g.parents[c].set(p, e)
 	g.nAliveEdges++
 	g.Version++
 	g.StructureVersion++
@@ -254,7 +305,7 @@ func (g *Graph) Children(p int) []Transition {
 	adj := &g.children[p]
 	out := make([]Transition, len(adj.order))
 	for i, c := range adj.order {
-		out[i] = Transition{c, adj.edge[c]}
+		out[i] = Transition{c, adj.edges[i]}
 	}
 	return out
 }
@@ -267,11 +318,7 @@ func (g *Graph) Degree(p int) int { return g.children[p].size() }
 
 // Parents lists the parent ids of c (any order).
 func (g *Graph) Parents(c int) []int {
-	out := make([]int, 0, len(g.parents[c]))
-	for p := range g.parents[c] {
-		out = append(out, p)
-	}
-	return out
+	return append([]int(nil), g.parents[c].order...)
 }
 
 // -- structural operations ----------------------------------------------------------
@@ -295,12 +342,12 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 	b := g.newNode(string(label[i:]), g.Count[a])
 	chA := &g.children[a]
 	chB := &g.children[b]
-	for _, c := range chA.order {
-		e := chA.edge[c]
+	for i, c := range chA.order {
+		e := chA.edges[i]
 		chB.set(c, e)
-		pc := g.parents[c]
-		delete(pc, a)
-		pc[b] = e
+		pc := &g.parents[c]
+		pc.unset(a)
+		pc.set(b, e)
 		g.EdgeParent[e] = b
 	}
 	chA.clear()
@@ -328,34 +375,28 @@ func (g *Graph) MergeChild(p int) bool {
 	if c == p || c == Start || c == End {
 		return false
 	}
-	pc := g.parents[c]
-	if len(pc) != 1 {
+	pc := &g.parents[c]
+	if pc.size() != 1 {
 		return false
 	}
 	lp := []rune(g.Labels[p])
 	lc := []rune(g.Labels[c])
 	shift := len(lp) - Overlap
-	e := ch.edge[c]
+	e := ch.edges[0]
 	ch.clear()
-	for k := range pc {
-		delete(pc, k)
-	}
+	pc.clear()
 	g.EdgeAlive[e] = false
 	g.nAliveEdges--
 	// activations are the constant 1: no rescale of the moved edges is needed
 	cc := &g.children[c]
-	for _, target := range cc.order {
-		e2 := cc.edge[target]
+	for i, target := range cc.order {
+		e2 := cc.edges[i]
 		if target == c {
 			target = p
 		}
-		pt := g.parents[target]
-		if pt == nil {
-			pt = make(map[int]int, 2)
-			g.parents[target] = pt
-		}
-		delete(pt, c)
-		pt[p] = e2
+		pt := &g.parents[target]
+		pt.unset(c)
+		pt.set(p, e2)
 		ch.set(target, e2)
 		g.EdgeParent[e2] = p
 	}
@@ -600,14 +641,14 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 	if n < 2 || !g.Alive[Start] || !g.Alive[End] || g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel {
 		return fmt.Errorf("sentinels missing or changed")
 	}
-	if len(g.parents[Start]) != 0 || g.children[End].size() != 0 {
+	if g.parents[Start].size() != 0 || g.children[End].size() != 0 {
 		return fmt.Errorf("START has parents or END has children")
 	}
 	aliveNodes := 0
 	seen := make(map[int]bool)
 	for p := 0; p < n; p++ {
 		if !g.Alive[p] {
-			if g.children[p].size() != 0 || len(g.parents[p]) != 0 {
+			if g.children[p].size() != 0 || g.parents[p].size() != 0 {
 				return fmt.Errorf("dead node %d still has edges", p)
 			}
 			continue
@@ -619,8 +660,8 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		if g.labelLen[p] != runeLen(g.Labels[p]) {
 			return fmt.Errorf("node %d has a stale label length", p)
 		}
-		for _, c := range g.children[p].order {
-			e := g.children[p].edge[c]
+		for i, c := range g.children[p].order {
+			e := g.children[p].edges[i]
 			if e < 0 || e >= m || !g.EdgeAlive[e] || seen[e] {
 				return fmt.Errorf("edge %d on %d->%d is invalid, dead or listed twice", e, p, c)
 			}
@@ -628,7 +669,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 			if !g.Alive[c] || c == Start || p == End {
 				return fmt.Errorf("edge %d->%d touches a dead node or a sentinel illegally", p, c)
 			}
-			if g.parents[c][p] != e {
+			if got, ok := g.parents[c].get(p); !ok || got != e {
 				return fmt.Errorf("edge %d->%d missing from parents", p, c)
 			}
 			if g.EdgeParent[e] != p {
@@ -641,7 +682,8 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 				}
 			}
 		}
-		for q, e := range g.parents[p] {
+		for i, q := range g.parents[p].order {
+			e := g.parents[p].edges[i]
 			if got, ok := g.children[q].get(p); !ok || got != e {
 				return fmt.Errorf("parents[%d] lists %d but children[%d] does not", p, q, q)
 			}
@@ -680,7 +722,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		for p := 2; p < n; p++ {
 			if g.Alive[p] && g.children[p].size() == 1 {
 				c := g.children[p].order[0]
-				if !(c == p || c <= End || len(g.parents[c]) != 1) {
+				if !(c == p || c <= End || g.parents[c].size() != 1) {
 					return fmt.Errorf("unary chain %d->%d survived compress", p, c)
 				}
 			}

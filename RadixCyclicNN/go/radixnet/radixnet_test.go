@@ -1,11 +1,13 @@
 package radixnet
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -560,5 +562,135 @@ func TestLegacyWeightsBlockDefaults(t *testing.T) {
 	}
 	if legacy.G.CountScale != 0.25 || legacy.G.WindowSize != 7 || legacy.G.GlobalScale != 0 {
 		t.Fatalf("partial legacy block: %+v", legacy.G.WeightConfig())
+	}
+}
+
+// A soft memory limit is the difference between a collection and an OOM kill.
+func TestParseSizeAndMemoryLimit(t *testing.T) {
+	cases := map[string]int64{"": 0, "1024": 1024, "2k": 2 << 10, "3MiB": 3 << 20, "1.5g": 1536 << 20, "off": -1, "none": -1}
+	for text, want := range cases {
+		got, err := ParseSize(text)
+		if err != nil || got != want {
+			t.Fatalf("ParseSize(%q) = %d, %v; want %d", text, got, err, want)
+		}
+	}
+	if _, err := ParseSize("later"); err == nil {
+		t.Fatal("ParseSize must reject a non-size")
+	}
+	if n, source := AvailableMemory(); n <= 0 || source == "" {
+		t.Fatalf("AvailableMemory() = %d, %q", n, source)
+	}
+	before := debug.SetMemoryLimit(-1)
+	defer debug.SetMemoryLimit(before)
+	if got := ApplyMemoryLimit(512<<20, DefaultMemoryFraction); got.Bytes != 512<<20 || got.Source != "flag" {
+		t.Fatalf("explicit limit: %+v", got)
+	}
+	if got := debug.SetMemoryLimit(-1); got != 512<<20 {
+		t.Fatalf("limit not applied: %d", got)
+	}
+	if got := ApplyMemoryLimit(-1, DefaultMemoryFraction); got.Bytes != 0 || got.String() != "no memory limit" {
+		t.Fatalf("off: %+v", got)
+	}
+	auto := ApplyMemoryLimit(0, DefaultMemoryFraction)
+	if auto.Bytes <= 0 || auto.Source == "" || !strings.Contains(auto.String(), "soft memory limit") {
+		t.Fatalf("auto limit: %+v", auto)
+	}
+	if total, _ := AvailableMemory(); auto.Bytes > total {
+		t.Fatalf("auto limit %d above the available %d", auto.Bytes, total)
+	}
+}
+
+// Saving streams: a model file is never held in memory, and what it holds is
+// byte for byte what the buffered encoder wrote.
+func TestSaveStreamsTheSameBytes(t *testing.T) {
+	m := trained(t, 2, 0)
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "m.json")
+	if err := m.Save(plain); err != nil {
+		t.Fatal(err)
+	}
+	want, err := marshalCompact(m.ToDoc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("streamed file differs from the buffered encoding (%d vs %d bytes)", len(got), len(want))
+	}
+	if n := len(got); n == 0 || got[n-1] == '\n' {
+		t.Fatal("the file must not end with the encoder's newline")
+	}
+	zipped := filepath.Join(dir, "m.json.gz")
+	if err := m.Save(zipped); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Load(zipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.G.NumEdges() != m.G.NumEdges() || back.G.TotalTraversals != m.G.TotalTraversals {
+		t.Fatal("the gzipped round trip lost counts")
+	}
+}
+
+// The adjacency lists are two parallel slices, with a map index only for the
+// high-degree nodes: the lookups must agree either side of that threshold.
+func TestAdjacencyKeepsOrderAndFindsEveryEntry(t *testing.T) {
+	var a adjacency
+	n := 4 * adjacencyIndexAt
+	for i := 0; i < n; i++ {
+		a.set(i*3, i*7)
+	}
+	if a.idx == nil {
+		t.Fatal("a high-degree adjacency must keep a map index")
+	}
+	if a.size() != n {
+		t.Fatalf("size %d, want %d", a.size(), n)
+	}
+	for i := 0; i < n; i++ {
+		if a.order[i] != i*3 || a.edges[i] != i*7 {
+			t.Fatalf("entry %d is %d -> %d", i, a.order[i], a.edges[i])
+		}
+		if e, ok := a.get(i * 3); !ok || e != i*7 {
+			t.Fatalf("get(%d) = %d, %v", i*3, e, ok)
+		}
+	}
+	if _, ok := a.get(1); ok {
+		t.Fatal("get must not invent an entry")
+	}
+	a.set(9, 99) // overwriting keeps the position
+	if e, _ := a.get(9); e != 99 || a.size() != n {
+		t.Fatalf("overwrite: %d entries, 9 -> %d", a.size(), e)
+	}
+	a.set(9, 3*7) // back to what the loop wrote
+	if !a.unset(0) || a.unset(0) {
+		t.Fatal("unset must remove exactly once")
+	}
+	if a.size() != n-1 {
+		t.Fatalf("size after unset: %d", a.size())
+	}
+	for i := 1; i < n; i++ {
+		if e, ok := a.get(i * 3); !ok || e != i*7 {
+			t.Fatalf("lost %d after unset: %d, %v", i*3, e, ok)
+		}
+	}
+	a.clear()
+	if a.size() != 0 || a.idx != nil {
+		t.Fatal("clear must empty the adjacency")
+	}
+	var small adjacency
+	small.set(5, 1)
+	small.set(6, 2)
+	if small.idx != nil {
+		t.Fatal("a small adjacency must not allocate a map")
+	}
+	if e, ok := small.get(6); !ok || e != 2 {
+		t.Fatalf("small get: %d, %v", e, ok)
+	}
+	if _, ok := small.get(7); ok {
+		t.Fatal("small get must not invent an entry")
 	}
 }

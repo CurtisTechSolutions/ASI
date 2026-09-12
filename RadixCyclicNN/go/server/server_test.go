@@ -125,12 +125,20 @@ func TestHealthStatusModel(t *testing.T) {
 	}
 	hasKeys(t, st, "nodes", "edges", "trigrams", "compression_ratio", "inverted", "backend", "device", "epochs_total",
 		"trained_chars", "trained_texts", "twonrl_runs", "history_len", "last_loss", "kind", "model_label", "kinds", "job",
-		"backends", "model_path", "checkpoint_dir", "upload_dir", "engine", "workers", "total_traversals", "window_traversals", "window")
+		"backends", "model_path", "checkpoint_dir", "upload_dir", "engine", "workers", "total_traversals", "window_traversals", "window",
+		"heap_bytes", "heap_sys_bytes", "memory_limit_bytes")
 	if st["kind"] != "count" || st["engine"] != "go" || st["job"] != nil || st["backends"].(map[string]any)["default"] != "go" {
 		t.Fatalf("status content: %v", st)
 	}
 	if st["counting"] != "exact" || st["workers"] != 0.0 || h["counting"] != "exact" {
 		t.Fatalf("counting / workers in status and health: %v %v", st["counting"], h["counting"])
+	}
+	// the status reports how close the process is to its soft memory limit
+	if heap, ok := st["heap_bytes"].(float64); !ok || heap <= 0 {
+		t.Fatalf("heap_bytes: %v", st["heap_bytes"])
+	}
+	if limit, ok := st["memory_limit_bytes"].(float64); ok && limit <= 0 {
+		t.Fatalf("memory_limit_bytes: %v", st["memory_limit_bytes"])
 	}
 	status, m := e.get("/api/model")
 	if status != 200 || m["kind"] != "count" || len(m["kinds"].([]any)) != 1 || m["weights"] == nil {
@@ -736,5 +744,40 @@ func TestStreamedArchiveUploadAndChunkedTraining(t *testing.T) {
 	status, doc = e.post("/api/train", map[string]any{"files": []string{"big.zip"}, "chunk_size": 0})
 	if status != 400 {
 		t.Fatalf("chunk_size 0: %d %v", status, doc)
+	}
+}
+
+// A big upload must train inside a bounded amount of memory: the reader waits
+// for a chunk slot, so the job's footprint is the graph plus the chunks in
+// flight, not the corpus.
+func TestTrainingHonoursTheInflightBound(t *testing.T) {
+	e := newEnv(t, true)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("corpus.txt")
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(w, "the cat sat on the mat number %d\n", i)
+	}
+	zw.Close()
+	status, doc, _ := e.do("POST", "/api/uploads?name=corpus.zip", buf.Bytes(), map[string]string{"Content-Type": "application/zip"})
+	if status != 201 {
+		t.Fatalf("upload: %d %v", status, doc)
+	}
+	status, doc = e.post("/api/train", map[string]any{"files": []string{"corpus.zip"}, "epochs": 1, "chunk_size": 100, "inflight": 2})
+	if status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	job := e.waitJob()
+	if job["state"] != "done" {
+		t.Fatalf("job: %v", job)
+	}
+	rec := job["history"].([]any)[0].(map[string]any)
+	if rec["chunks"] != float64(40) {
+		t.Fatalf("chunks: %v", rec["chunks"])
+	}
+	// an inflight of zero or less is refused like the other positive counts
+	status, doc = e.post("/api/train", map[string]any{"files": []string{"corpus.zip"}, "inflight": 0})
+	if status != 400 {
+		t.Fatalf("inflight 0: %d %v", status, doc)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -21,12 +22,15 @@ import (
 const version = "0.1.0"
 
 var (
-	modelPath = "model.count.json"
-	jsonMode  bool
-	seedFlag  int64
-	workers   = 0
-	exact     bool
-	outPath   string
+	modelPath  = "model.count.json"
+	jsonMode   bool
+	seedFlag   int64
+	workers    = 0
+	exact      bool
+	outPath    string
+	memProfile string
+	memLimit   = ""
+	memory     radixnet.MemoryLimit
 )
 
 func addGlobalFlags(fs *flag.FlagSet) {
@@ -35,6 +39,8 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.Int64Var(&seedFlag, "seed", seedFlag, "RNG seed for a new model and for sampling")
 	fs.IntVar(&workers, "workers", workers, "cap on the goroutines fanned out over texts and nodes (0 = none: one goroutine per text)")
 	fs.BoolVar(&exact, "exact", exact, "count with atomic increments (no lost updates, reproducible); default: plain racy increments")
+	fs.StringVar(&memProfile, "memprofile", memProfile, "write a heap profile to this file when the command finishes")
+	fs.StringVar(&memLimit, "memlimit", memLimit, "soft memory limit, e.g. 2GiB (default: 80% of the container / machine memory; \"off\" to let the heap grow freely)")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
 }
 
@@ -154,6 +160,7 @@ commands:
   version    print the version
 
 global options (before or after the command): --model PATH --json --seed N --workers N --exact --out PATH
+                                             --memlimit SIZE (soft heap limit, default 80%% of the machine / container) --memprofile PATH
 `, version)
 }
 
@@ -188,6 +195,16 @@ func main() {
 		os.Exit(2)
 	}
 	command, rest := args[cmdIndex], args[cmdIndex+1:]
+	want, err := radixnet.ParseSize(memLimit)
+	if err != nil {
+		fail("%v", err)
+	}
+	// the collector otherwise lets the heap grow to twice the live graph, which on a
+	// container with a hard limit is an OOM kill rather than a garbage collection
+	memory = radixnet.ApplyMemoryLimit(want, radixnet.DefaultMemoryFraction)
+	if memProfile != "" {
+		defer writeHeapProfile()
+	}
 	switch command {
 	case "train":
 		cmdTrain(rest)
@@ -238,7 +255,9 @@ func cmdTrain(args []string) {
 	unit := fs.String("split", "lines", "how a file is cut into texts, each handled by its own goroutine: lines | paragraphs | pages | file")
 	pageLines := fs.Int("page-lines", 50, "lines per page when a file has no form feeds (--split pages)")
 	epochs := fs.Int("epochs", 5, "passes over the texts")
-	chunk := fs.Int("chunk", radixnet.DefaultChunkSize, "texts streamed from the files per chunk (memory: one chunk + the graph, whatever the corpus size)")
+	chunk := fs.Int("chunk", radixnet.DefaultChunkSize, "texts streamed from the files per chunk (memory: the chunks in flight + the graph, whatever the corpus size)")
+	parallelParts := fs.Bool("parallel-parts", false, "stream every archive entry / file at once on its own goroutine")
+	inflight := fs.Int("inflight", 0, "chunks in flight at once (read, processed or waiting for their turn); 0 = two per CPU. Memory = the graph + inflight chunks")
 	noCompress := fs.Bool("no-compress", false, "do not merge unary chains after every epoch")
 	window := fs.Int("window", 0, "sliding window size for a NEW model (default 10000)")
 	globalScale := fs.Float64("global-scale", -1, "weight of log(all-time share) for a NEW model (default 0.5)")
@@ -283,12 +302,14 @@ func cmdTrain(args []string) {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
 	before := m.MetaInt("trained_texts")
-	say("training from %s (%s, chunks of %d texts): %s, %s counting, %d epoch(s)", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), *epochs)
+	say("training from %s (%s, chunks of %d texts): %s, %s counting, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), *epochs, memory)
 	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %6s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "chunks", "seconds")
 	opts := radixnet.DefaultTrainOptions()
 	opts.Epochs = *epochs
 	opts.AutoCompress = !*noCompress
 	opts.ChunkSize = *chunk
+	opts.ParallelParts = *parallelParts
+	opts.Inflight = *inflight
 	opts.Progress = func(r map[string]any) {
 		say("%5v %9.4f %10.3f %7v %7v %8v %6.2f %6v %11v %6v %8.3f", r["epoch"], r["loss"], r["perplexity"], r["nodes"], r["edges"], r["trigrams"], r["compression_ratio"], r["merges"], r["transitions"], r["chunks"], r["seconds"])
 	}
@@ -301,6 +322,7 @@ func cmdTrain(args []string) {
 	if texts == 0 && len(records) == 0 {
 		fail("no texts found in %s", strings.Join(data, ", "))
 	}
+	writeHeapProfile() // with the trained model still live (a no-op without --memprofile)
 	path := saveModel(m)
 	say("saved %s (%d texts, %.2fs)", path, texts, time.Since(t0).Seconds())
 	if jsonMode {
@@ -878,9 +900,28 @@ func cmdServe(args []string) {
 	if workers > 0 {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
-	logf(fmt.Sprintf("radixnet-count %s serving %s on http://%s (%s, %s counting, frontend %s)", version, source, addr, pool, map[bool]string{true: "exact", false: "racy"}[exact], map[bool]string{true: dir, false: "none"}[dir != ""]))
+	logf(fmt.Sprintf("radixnet-count %s serving %s on http://%s (%s, %s counting, %s, frontend %s)", version, source, addr, pool, map[bool]string{true: "exact", false: "racy"}[exact], memory, map[bool]string{true: dir, false: "none"}[dir != ""]))
 	httpServer := &http.Server{Addr: addr, Handler: server.NewHandler(svc, dir, *quiet, logf), ReadHeaderTimeout: 30 * time.Second}
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fail("%v", err)
+	}
+}
+
+// writeHeapProfile dumps the heap (after a GC) to --memprofile.
+func writeHeapProfile() {
+	if memProfile == "" {
+		return
+	}
+	f, err := os.Create(memProfile)
+	memProfile = "" // once
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "memprofile: %v\n", err)
+		return
+	}
+	defer f.Close()
+	runtime.GC()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		fmt.Fprintf(os.Stderr, "memprofile: %v\n", err)
 	}
 }

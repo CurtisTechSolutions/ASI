@@ -1,6 +1,7 @@
 package radixnet
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -108,8 +109,8 @@ func (g *Graph) ToDoc() *GraphDoc {
 	doc.Edges = edgesDoc{Src: []int{}, Dst: []int{}, W: []float64{}, Count: []int64{}, Reward: []float64{}}
 	for _, old := range order {
 		adj := &g.children[old]
-		for _, c := range adj.order {
-			e := adj.edge[c]
+		for i, c := range adj.order {
+			e := adj.edges[i]
 			edgeIndex[e] = len(doc.Edges.Src)
 			doc.Edges.Src = append(doc.Edges.Src, remap[old])
 			doc.Edges.Dst = append(doc.Edges.Dst, remap[c])
@@ -185,7 +186,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	copy(g.Count, d.Nodes.Count)
 	g.Alive = make([]bool, n)
 	g.children = make([]adjacency, n)
-	g.parents = make([]map[int]int, n)
+	g.parents = make([]adjacency, n)
 	g.index = make(map[string]loc, n*2)
 	for nid := 0; nid < n; nid++ {
 		g.Alive[nid] = true
@@ -233,10 +234,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			return nil, fmt.Errorf("duplicate edge %d -> %d", p, c)
 		}
 		g.children[p].set(c, e)
-		if g.parents[c] == nil {
-			g.parents[c] = make(map[int]int, 2)
-		}
-		g.parents[c][p] = e
+		g.parents[c].set(p, e)
 		g.EdgeAlive[e] = true
 		g.EdgeParent[e] = p
 	}
@@ -315,24 +313,64 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 // MarshalJSON renders a document compactly without HTML escaping (like json.dumps).
 func marshalCompact(v any) ([]byte, error) {
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err := encodeCompact(&buf, v); err != nil {
 		return nil, err
 	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+	return buf.Bytes(), nil
+}
+
+// encodeCompact streams a document as compact JSON without HTML escaping and
+// without the encoder's trailing newline, so a model of any size is written
+// without ever holding its serialised form in memory.
+func encodeCompact(w io.Writer, v any) error {
+	tw := &trimNewline{w: w}
+	enc := json.NewEncoder(tw)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// trimNewline passes everything through but holds back trailing newlines,
+// writing them only when more data follows (json.Encoder ends with one).
+type trimNewline struct {
+	w    io.Writer
+	held int // newlines seen at the end of the stream so far
+}
+
+func (t *trimNewline) Write(p []byte) (int, error) {
+	cut := len(p)
+	for cut > 0 && p[cut-1] == '\n' {
+		cut--
+	}
+	if cut > 0 {
+		for ; t.held > 0; t.held-- { // they were not trailing after all
+			if _, err := t.w.Write([]byte{'\n'}); err != nil {
+				return 0, err
+			}
+		}
+		if _, err := t.w.Write(p[:cut]); err != nil {
+			return 0, err
+		}
+	}
+	t.held += len(p) - cut
+	return len(p), nil
 }
 
 // Save writes the model as JSON (gzip when path ends with .gz) atomically.
 func (m *Model) Save(path string) error {
-	payload, err := marshalCompact(m.ToDoc())
-	if err != nil {
-		return err
-	}
-	return writeBytesAtomic(path, payload, strings.HasSuffix(path, ".gz"))
+	return writeDocAtomic(path, m.ToDoc(), strings.HasSuffix(path, ".gz"))
+}
+
+// writeDocAtomic streams a document into a temporary file and renames it over
+// path.  Nothing bigger than the write buffer is held in memory.
+func writeDocAtomic(path string, doc any, useGzip bool) error {
+	return writeAtomicWith(path, func(w io.Writer) error { return encodeCompact(w, doc) }, useGzip)
 }
 
 func writeBytesAtomic(path string, data []byte, useGzip bool) error {
+	return writeAtomicWith(path, func(w io.Writer) error { _, err := w.Write(data); return err }, useGzip)
+}
+
+func writeAtomicWith(path string, write func(io.Writer) error, useGzip bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -343,27 +381,31 @@ func writeBytesAtomic(path string, data []byte, useGzip bool) error {
 	}
 	tmpName := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpName) }
-	if useGzip {
-		zw := gzip.NewWriter(tmp)
-		if _, err := zw.Write(data); err != nil {
-			tmp.Close()
-			cleanup()
-			return err
-		}
-		if err := zw.Close(); err != nil {
-			tmp.Close()
-			cleanup()
-			return err
-		}
-	} else if _, err := tmp.Write(data); err != nil {
+	failed := func(err error) error {
 		tmp.Close()
 		cleanup()
 		return err
 	}
+	buf := bufio.NewWriterSize(tmp, 1<<20)
+	var out io.Writer = buf
+	var zw *gzip.Writer
+	if useGzip {
+		zw = gzip.NewWriter(buf)
+		out = zw
+	}
+	if err := write(out); err != nil {
+		return failed(err)
+	}
+	if zw != nil {
+		if err := zw.Close(); err != nil {
+			return failed(err)
+		}
+	}
+	if err := buf.Flush(); err != nil {
+		return failed(err)
+	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		cleanup()
-		return err
+		return failed(err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
@@ -376,23 +418,26 @@ func writeBytesAtomic(path string, data []byte, useGzip bool) error {
 	return nil
 }
 
-// ReadJSONFile loads a JSON document, gunzipping it when it carries the gzip magic.
+// ReadJSONFile decodes a JSON document straight from the file (gunzipping it
+// when it carries the gzip magic), so a huge model is never held twice.
 func ReadJSONFile(path string, v any) error {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	if len(raw) >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
-		zr, err := gzip.NewReader(bytes.NewReader(raw))
-		if err != nil {
-			return err
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 1<<20)
+	magic, err := br.Peek(2)
+	var r io.Reader = br
+	if err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
+		zr, zerr := gzip.NewReader(br)
+		if zerr != nil {
+			return zerr
 		}
-		raw, err = io.ReadAll(zr)
-		if err != nil {
-			return err
-		}
+		defer zr.Close()
+		r = zr
 	}
-	return json.Unmarshal(raw, v)
+	return json.NewDecoder(r).Decode(v)
 }
 
 // Load reads a model written by Save (or by the Python implementation).
