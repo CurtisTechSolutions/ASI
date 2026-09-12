@@ -60,7 +60,7 @@ export EPOCHS LR BATCH RADIXNET_PORT RADIXNET_BACKEND RADIXNET_CORPUS WITH_TORCH
 DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
-.PHONY: help install install-gpu check test train resume predict generate score 2nrl invert compress \
+.PHONY: help install install-gpu check test go-build go-test go-parity train resume predict generate score 2nrl invert compress \
         evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
         codegen codegen-teacher codegen-model \
@@ -87,6 +87,16 @@ check: ## Byte-compile the package and show which backends are available
 
 test: ## Run the unit test suite
 	$(PY) -m unittest discover -s tests -v
+
+GO ?= go
+go-build: ## Build the Go count / reward model CLI into go/bin/radixnet-count
+	cd go && $(GO) build -o bin/radixnet-count ./cmd/radixnet-count
+
+go-test: ## Run the Go tests with the race detector
+	cd go && $(GO) vet ./... && $(GO) test -race ./...
+
+go-parity: ## Cross-language parity of the Go port against the Python model
+	$(PY) -m unittest tests.test_go_parity -v
 
 ##@ Train / predict (local)
 train: ## Train on DATA (incremental: MODEL is loaded first if it exists), checkpointing into CKPT_DIR

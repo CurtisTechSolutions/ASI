@@ -925,3 +925,47 @@ A `Turn` records `index`, `speaker`, `text`, the `context` it picked up, the `re
 renders `speaker: text` lines. Beam conversations are deterministic and never repeat themselves; the CLI `converse`
 command, `POST /api/converse` (`ModelService.converse`, `partner` = another kind in memory) and the Converse tab
 expose it, and turns are rated with the same thumbs as generated samples (`RatingsCard.jsx`).
+
+## 23. The count / reward model in Go (`go/`) — goroutines over lines, paragraphs and pages
+
+`go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
+beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
+CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `weights`, `info`, `converse`). The
+Python implementation is untouched; the two share the `radixnet-count` model file.
+
+Files: `encoding.go` (code-point windows, `DecodePath`), `mt19937.go` (a Mersenne Twister with CPython's seeding,
+53-bit doubles and `getstate()` layout - `rng_state` round-trips between the languages), `fsum.go` (Shewchuk's
+exact summation, so path costs match `math.fsum` to the bit), `graph.go` (nodes, insertion-ordered adjacency -
+Python dict order decides the softmax summation order -, trigram index, `Split` / `MergeChild` / `Compress`,
+`ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
+function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
+`model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`),
+`json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`).
+
+Concurrency (`--workers`, default `runtime.NumCPU()`):
+
+* **Texts are the unit of work.** `SplitTexts(content, "lines" | "paragraphs" | "pages" | "file")` cuts a corpus;
+  pages are form-feed separated or every `--page-lines` lines. Encoding, tracing and counting fan one goroutine per
+  text out on a bounded pool (`parallelFor`).
+* **Counting is lock-free.** The counting pass traces every text through the frozen structure in parallel and bumps
+  `EdgeCount` / `Count` with `atomic.AddInt64`: no locks, no lost updates, so the result equals the sequential
+  run and the Python model exactly. The sliding window is applied afterwards in corpus order (its meaning *is*
+  the order of traversals).
+* **Structure building is the one sequential phase.** Splits and merges reshape the shared trigram index and the
+  adjacency maps; Go's runtime aborts on concurrent map writes, and a racy structure would not be reproducible.
+  The walkable texts are detected in parallel (read lock) and only the novel ones are observed, in corpus order,
+  under the write lock (`register`). After `Compress()` every training text traces without a split, so the
+  epochs never need the lock.
+* **Weights are lazy.** `RecordTraversals` and `AddReward` mark the parents whose rows changed; `Prepare()` (called
+  by every cost reader) recomputes only those rows, or every row in parallel over the nodes after a structural
+  change (`parallelRanges`). Edge costs (`-log softmax`) are cached per version the same way. This removes the
+  Python implementation's per-text full recompute - the O(texts × edges) hot spot measured earlier.
+* **Predictions run their two beams side by side** whenever the bottom cap is known up front; `ScoreAll` scores
+  texts in parallel; the loss is a parallel reduction.
+
+Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
+with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),
+weights (1e-12), predictions, generated texts, scores and conversation transcripts; each side loads and continues
+the other's file with identical results; feedback, invert and weight changes match too. `go test -race ./...`
+covers the Go module (RNG vectors against CPython, exact summation, structure invariants, lazy weights against a
+full recompute, 1 vs 8 workers giving the same model, search / generation / conversation, gzip round trips).
