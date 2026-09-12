@@ -455,6 +455,15 @@ class RadixCyclicGraph:
         path.append(END)
         return transitions, path
 
+    def trace(self, trigrams: Sequence[str]) -> tuple[list[tuple[int, int]], list[int]] | None:
+        """``(transitions, node_path)`` of a sequence through the current structure, or ``None``.
+
+        Like :meth:`observe_sequence` without the observing: nothing is
+        created, split or counted, so ``None`` means the structure cannot
+        represent the sequence as it stands (see :meth:`node_path`).
+        """
+        return self._trace(trigrams)
+
     def node_path(self, trigrams: Sequence[str]) -> list[int] | None:
         """Node ids ``[START, n0, ..., END]`` visited by a sequence, or ``None``.
 

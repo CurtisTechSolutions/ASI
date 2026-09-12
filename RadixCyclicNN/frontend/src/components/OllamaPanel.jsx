@@ -16,7 +16,7 @@ import {
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import UploadPicker from "./UploadPicker.jsx";
-import { NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
 
 const MAX_ROWS = 100;
 const SLOW_NOTE = "Ollama is working; this can take a minute or two.";
@@ -497,6 +497,7 @@ function ReviewCard({ overrides, onResult }) {
   const [threshold, setThreshold] = useState("6");
   const [texts, setTexts] = useState("");
   const [context, setContext] = useState("");
+  const [blame, setBlame] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -508,7 +509,7 @@ function ReviewCard({ overrides, onResult }) {
     setLoading(true);
     setError(null);
     try {
-      const body = { threshold: parseNumber(threshold, 6), ...overrides, apply: "none" };
+      const body = { threshold: parseNumber(threshold, 6), ...overrides, apply: "none", blame };
       if (usingGiven) {
         body.texts = given;
       } else {
@@ -602,6 +603,12 @@ function ReviewCard({ overrides, onResult }) {
         placeholder="The model is trained on short English sentences about the weather."
         disabled={loading}
       />
+      <CheckField
+        label="Teach the negative network (the critique becomes the reason, the rating the severity)"
+        checked={blame}
+        onChange={setBlame}
+        disabled={loading}
+      />
       <div className="actions">
         <button type="submit" className="primary" disabled={loading}>
           {loading ? "Reviewing…" : "Review"}
@@ -693,6 +700,14 @@ function ReviewResultCard({ review, status, heldBad, heldGood, onClearBad, onCle
             <span className="stat">
               threshold <b>{fmtNum(review.threshold, 1)}</b>
             </span>
+            {review.negative ? (
+              <span className="stat" title="what the tutor taught the negative network (see the Negative tab)">
+                blamed <b>{fmtInt(review.negative.blamed)}</b> ·{" "}
+                {Object.entries(review.negative.reasons || {})
+                  .map(([name, n]) => `${name}×${n}`)
+                  .join(", ") || "–"}
+              </span>
+            ) : null}
           </div>
           <div className="table-wrap">
             <table className="data">

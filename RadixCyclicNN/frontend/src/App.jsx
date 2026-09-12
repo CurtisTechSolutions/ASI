@@ -8,6 +8,7 @@ import GeneratePanel from "./components/GeneratePanel.jsx";
 import ConversePanel from "./components/ConversePanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
+import NegativePanel from "./components/NegativePanel.jsx";
 import EvolvePanel from "./components/EvolvePanel.jsx";
 import OllamaPanel from "./components/OllamaPanel.jsx";
 import TutorPanel from "./components/TutorPanel.jsx";
@@ -26,6 +27,7 @@ const TABS = [
   { id: "converse", label: "Converse", Component: ConversePanel },
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
+  { id: "negative", label: "Negative", Component: NegativePanel, pythonOnly: true },
   { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
   { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
   { id: "tutor", label: "Tutor", Component: TutorPanel },
@@ -111,7 +113,7 @@ export default function App() {
         </div>
         <p className="tagline">
           self-compressing cyclic graph · sine activation or count / reward edges · Dijkstra and top-K / bottom-K
-          prediction · 2NRL · GAN-style evolution
+          prediction · 2NRL · GAN-style evolution · a negative network that filters the output
         </p>
       </header>
 

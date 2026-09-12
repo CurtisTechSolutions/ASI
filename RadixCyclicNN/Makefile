@@ -31,6 +31,9 @@ MAX_LENGTH  ?= 60
 TEXT        ?= the cat sat on the mat
 GENERATIONS ?= 3
 SAMPLES     ?= 8
+NEGATIVE    ?= $(basename $(MODEL)).negative$(suffix $(MODEL))
+REASON      ?= gibberish
+SEVERITY    ?= 1
 DISC        ?= $(dir $(MODEL))discriminator.json
 NAME        ?= latest
 HOST        ?= 127.0.0.1
@@ -74,8 +77,9 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve train resume predict generate score 2nrl invert compress \
-        evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
-        frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
+        negative-blame negative-clear negative-why negative-filter negative-reasons negative-forget tutor-blame \
+        evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
+        frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
@@ -140,11 +144,34 @@ invert: ## Invert the network (flip every edge weight and activation amplitude)
 compress: ## Merge unary chains (radix-tree path compression) and save
 	$(RADIXNET) $(GLOBAL) compress
 
+##@ The negative network (failures only; it filters the positive model)
+negative-blame: ## Blame every line of GARBAGE for REASON with SEVERITY (the negative model is NEGATIVE)
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
+
+negative-clear: ## The tutor passed DATA: take blame off the fragments it shares with known failures
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) clear --data $(DATA)
+
+negative-why: ## Why TEXT looks like a failure: the reasons and the fragments carrying them
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) why --text "$(TEXT)"
+
+negative-filter: ## Generate COUNT texts through the pair: the positive model writes, the negative one vetoes
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) filter --count $(COUNT) --max-length $(MAX_LENGTH)
+
+negative-reasons: ## What the tutor has blamed, and the journal of what it said
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) reasons
+
+negative-forget: ## Forget the blame behind REASON (the tutor can be wrong too)
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) forget --reason $(REASON)
+
+##@ Evolve (GAN-style self-upgrading)
 evolve: ## GAN-style self-upgrade for GENERATIONS generations (checkpoints in CKPT_DIR, discriminator in DISC)
 	$(RADIXNET) $(GLOBAL) evolve --data $(DATA) --generations $(GENERATIONS) --samples $(SAMPLES) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR) --discriminator $(DISC)
 
 evolve-forever: ## Self-upgrade until Ctrl-C (the model is saved on stop)
 	$(MAKE) evolve GENERATIONS=0
+
+evolve-blame: ## Self-upgrade and let the discriminator teach the negative network as it goes
+	$(RADIXNET) $(GLOBAL) evolve --data $(DATA) --generations $(GENERATIONS) --samples $(SAMPLES) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR) --discriminator $(DISC) --blame --negative $(NEGATIVE)
 
 info: ## Model statistics and training history
 	$(RADIXNET) $(GLOBAL) info
@@ -179,6 +206,9 @@ ollama-garbage: ## Ask Ollama for LINES deliberately wrong lines about PROMPT an
 ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pass at THRESHOLD)
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD)
 
+ollama-blame: ## Review COUNT samples and teach the negative network why the failures failed (critique -> reason)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --blame --negative $(NEGATIVE)
+
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
 
@@ -188,6 +218,9 @@ TUTOR_FLAGS := --tutor-provider $(TUTOR) $(if $(TUTOR_URL),--url $(TUTOR_URL),) 
 
 tutor: ## English lessons about TOPIC (TUTOR=ollama|chatgpt teaches): ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --drills $(DRILLS) --threshold $(THRESHOLD) --report tutor-report.json
+
+tutor-blame: ## English lessons that also teach the negative network why each sentence failed
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --blame --negative $(NEGATIVE)
 
 tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trained on
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds 1 --exercises $(EXERCISES) --threshold $(THRESHOLD) --dry-run

@@ -318,6 +318,7 @@ export default function TutorPanel({ status }) {
   const [teachAnswer, setTeachAnswer] = useState(true);
   const [twonrlPer, setTwonrlPer] = useState("round");
   const [diffCorrections, setDiffCorrections] = useState(true);
+  const [blame, setBlame] = useState(false);
   const [keepWeight, setKeepWeight] = useState("0.25");
   const [minWeight, setMinWeight] = useState("0.25");
   const [negEpochs, setNegEpochs] = useState("2");
@@ -389,6 +390,7 @@ export default function TutorPanel({ status }) {
         drills: parseInteger(drills, 0),
         twonrl_per: twonrlPer,
         diff_corrections: diffCorrections,
+        blame,
         keep_weight: parseNumber(keepWeight, 0.25),
         min_weight: parseNumber(minWeight, 0.25),
         neg_epochs: parseInteger(negEpochs, 2),
@@ -626,6 +628,12 @@ export default function TutorPanel({ status }) {
               label="Teach corrections from the diff"
               checked={diffCorrections}
               onChange={setDiffCorrections}
+              disabled={running}
+            />
+            <CheckField
+              label="Teach the negative network why each sentence failed"
+              checked={blame}
+              onChange={setBlame}
               disabled={running}
             />
           </div>

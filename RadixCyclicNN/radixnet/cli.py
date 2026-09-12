@@ -44,8 +44,10 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "beam", "sample")
-KINDS = ("radix", "count")
+KINDS = ("radix", "count", "negative")
 DEFAULT_COUNT_MODEL = "model.count.json"
+DEFAULT_NEGATIVE_MODEL = "model.negative.json"
+DEFAULT_KIND_MODELS = {"count": DEFAULT_COUNT_MODEL, "negative": DEFAULT_NEGATIVE_MODEL}
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -1111,16 +1113,29 @@ def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
         wrong, right, strength=args.strength, weight=args.weight, reward=args.reward, keep=args.keep,
         count=not args.no_count,
     )
+    negative = blamed = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        blamed = negative.correct(
+            wrong, right, reason=args.reason, severity=args.weight * args.strength, source="cli",
+            note=args.note,
+        )
     _print_changes(console, changes)
     console.say(
         f"moved: {moved['penalised']} step(s) penalised, {moved['rewarded']} taught, "
         f"{moved['kept']} kept at {args.keep}"
     )
+    if blamed is not None:
+        console.say(
+            f"negative network: {blamed['blamed']} step(s) blamed for {blamed['reason']}, {blamed['cleared']} cleared"
+        )
     saved = save_model(model, out)
     console.say(f"saved {out} ({saved['bytes']} bytes)")
     return {
         "model": origin.to_dict(), "out": out, "wrong": wrong, "right": right, **moved,
         "changes": changes, "saved": saved, "stats": model.stats(),
+        "negative": None if negative is None else {"blamed": blamed, **_save_negative(console, negative, negative_path(args))},
     }
 
 
@@ -1133,6 +1148,265 @@ def _print_changes(console: Console, changes: list[dict]) -> None:
         ["change", "the network wrote", "the teacher wrote"],
         [[change["op"], change["wrong"] or "-", change["right"] or "-"] for change in changes],
     )
+# --------------------------------------------------------------------------
+# the negative network (the failures, and why)
+# --------------------------------------------------------------------------
+
+
+def negative_path(args: argparse.Namespace) -> str:
+    """``--negative``, else the negative model beside ``--model`` (``model.json`` -> ``model.negative.json``)."""
+    path = getattr(args, "negative", None)
+    if path:
+        return path
+    root, ext = os.path.splitext(args.model)
+    if ext == ".gz":
+        root, inner = os.path.splitext(root)
+        ext = inner + ext
+    return args.model if root.endswith(".negative") else f"{root}.negative{ext}"
+
+
+def open_negative(args: argparse.Namespace, console: Console, *, required: bool) -> tuple[Any, Origin]:
+    """Load the negative network from :func:`negative_path`, else create an empty one."""
+    from .negative import NegativeNet
+
+    path = negative_path(args)
+    if os.path.isfile(path):
+        model = load_model(path, backend=args.backend, device=args.device)
+        if model.kind != "negative":
+            raise CliError(f"{path} holds a {model.kind} model, not a negative one")
+        g = model.graph
+        return model, Origin("model", path, f"{fmt(g.total_blame)} blame over {len(g.reasons)} reasons")
+    if required:
+        raise CliError(
+            f"negative model file not found: {path} "
+            f"(teach it first with `{PROG} negative blame --text '...' --reason gibberish`)"
+        )
+    seed = effective_seed(args)
+    return NegativeNet(seed=seed), Origin("new", None, f"seed {seed}")
+
+
+def _negative_texts(args: argparse.Namespace, what: str) -> list[str]:
+    texts = list(getattr(args, "text", None) or [])
+    if getattr(args, "data", None):
+        texts += read_texts([args.data], what=what)
+    texts = [t for t in texts if t.strip()]
+    if not texts:
+        raise CliError(f"no texts to {what}: give --text TEXT (repeatable) or --data FILE")
+    return texts
+
+
+def _reason_rows(model: Any, limit: int = 10) -> list[list[Any]]:
+    return [[r["reason"], r["blame"], r["fails"], r["edges"], r["share"]] for r in model.reasons()[:limit]]
+
+
+def cmd_negative_blame(args: argparse.Namespace, console: Console) -> dict:
+    """Teach the negative network a failure: its reason, its severity and the tutor's own words."""
+    texts = _negative_texts(args, "blame")
+    model, origin = open_negative(args, console, required=False)
+    out = args.out or negative_path(args)
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("failures", f"{len(texts)} texts"),
+        ("reason", args.reason),
+        ("severity", args.severity),
+        ("source", args.source),
+        ("note", clip(args.note, 60) if args.note else "-"),
+        ("epochs", args.epochs),
+        ("output", out),
+    ])
+    console.say()
+    printer = EpochPrinter(console)
+    stop = threading.Event()
+    records, interrupted = run_interruptible(
+        lambda: model.blame(
+            texts, reason=args.reason, severity=args.severity, source=args.source, note=args.note,
+            epochs=args.epochs, progress=printer, stop_event=stop,
+        ),
+        stop, console, "epoch",
+    )
+    saved = _finish_training(console, model, out, interrupted, printer, "epoch")
+    console.say()
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(model))
+    return {
+        "model": origin.to_dict(), "out": out, "texts": len(texts), "reason": args.reason,
+        "severity": args.severity, "source": args.source, "records": records, "interrupted": interrupted,
+        "saved": saved, "reasons": model.reasons(), "stats": model.stats(),
+    }
+
+
+def cmd_negative_clear(args: argparse.Namespace, console: Console) -> dict:
+    """The tutor passed these texts: credit the edges they share with known failures, creating nothing."""
+    texts = _negative_texts(args, "clear")
+    model, origin = open_negative(args, console, required=True)
+    out = args.out or negative_path(args)
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("cleared", f"{len(texts)} texts"),
+        ("weight", args.weight),
+        ("epochs", args.epochs),
+        ("output", out),
+    ])
+    console.say()
+    printer = EpochPrinter(console)
+    stop = threading.Event()
+    records, interrupted = run_interruptible(
+        lambda: model.clear(texts, weight=args.weight, epochs=args.epochs, progress=printer, stop_event=stop),
+        stop, console, "epoch",
+    )
+    saved = _finish_training(console, model, out, interrupted, printer, "epoch")
+    last = records[-1] if records else {}
+    console.say(f"matched {last.get('matched', 0)} of {len(texts)} texts ({last.get('edges_touched', 0)} edges cleared)")
+    return {
+        "model": origin.to_dict(), "out": out, "texts": len(texts), "weight": args.weight, "records": records,
+        "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+    }
+
+
+def _print_verdict(console: Console, verdict: dict, spans: bool = True) -> None:
+    """One judgement as a block: the sentence, the reasons and the fragments to blame."""
+    console.pairs([
+        ("text", quote(clip(verdict["text"], 70))),
+        ("verdict", verdict.get("decision") or verdict["verdict"]),
+        ("risk", verdict["risk"]),
+        ("coverage", verdict["coverage"]),
+        ("blame", verdict["blame"]),
+        *([("ratio", verdict["ratio"])] if "ratio" in verdict else []),
+        ("why", verdict["why"]),
+    ])
+    if verdict["reasons"]:
+        console.say()
+        console.table(("reason", "blame", "share"), [[r["reason"], r["blame"], r["share"]] for r in verdict["reasons"]])
+    if spans and verdict["spans"]:
+        console.say()
+        console.table(
+            ("at", "fragment", "blame", "fails", "reason"),
+            [[f"{s['start']}..{s['end']}", quote(s["fragment"]), s["blame"], s["fails"], s["reason"]] for s in verdict["spans"]],
+        )
+
+
+def cmd_negative_why(args: argparse.Namespace, console: Console) -> dict:
+    """Why the negative network thinks a text went wrong: the reasons, and the fragments carrying them."""
+    texts = _negative_texts(args, "judge")
+    model, origin = open_negative(args, console, required=True)
+    console.pairs([("negative model", origin.describe()), ("texts", len(texts))])
+    verdicts = []
+    for text in texts:
+        verdict = model.judge(text, threshold=args.threshold, min_coverage=args.min_coverage, spans=args.spans)
+        verdicts.append(verdict)
+        console.say()
+        _print_verdict(console, verdict)
+    return {"model": origin.to_dict(), "verdicts": verdicts, "stats": model.stats()}
+
+
+def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
+    """The pair at work: the positive model writes, the negative one vetoes (or judge given texts)."""
+    from .duo import FilterConfig, NegativeFilter
+
+    negative, neg_origin = open_negative(args, console, required=True)
+    positive, pos_origin = open_model(args, console, required=True)
+    config = FilterConfig(
+        threshold=args.threshold, min_coverage=args.min_coverage, ratio=None if args.no_ratio else args.ratio,
+        peak=args.peak, over_sample=args.over_sample, strict=args.strict, spans=args.spans, learn=args.learn,
+    )
+    pair = NegativeFilter(positive, negative, config)
+    given = list(args.text or [])
+    if args.data:
+        given += read_texts([args.data], what="filterable")
+    console.pairs([
+        ("positive model", f"{pos_origin.describe()} [{kind_label(positive)}]"),
+        ("negative model", neg_origin.describe()),
+        ("source", f"{len(given)} given texts" if given else f"{args.count} generated ({args.mode}, x{args.over_sample})"),
+        ("threshold", f"risk >= {fmt(config.threshold if config.threshold is not None else negative.threshold)}"
+                      f", coverage >= {fmt(config.min_coverage if config.min_coverage is not None else negative.min_coverage)}"),
+        ("ratio", "off" if config.ratio is None else f">= {fmt(config.ratio)} nats/char"),
+        ("peak", "off" if config.peak is None else f">= {fmt(config.peak)} blame on one fragment"),
+        ("strict", config.strict),
+        ("learn", config.learn),
+    ])
+    if given:
+        outcome = pair.filter(given)
+        doc: dict[str, Any] = {
+            "texts": outcome["kept"], "kept": outcome["kept"], "verdicts": outcome["verdicts"],
+            "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
+            "candidates": len(given), "asked": len(given), "rate": outcome["rate"],
+        }
+    else:
+        doc = pair.generate(
+            count=args.count, mode=args.mode, max_length=args.max_length, temperature=args.temperature,
+            prefix=args.prefix, seed=args.seed, step_penalty=args.step_penalty,
+        )
+    console.say()
+    console.table(
+        ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
+        [
+            [v["decision"], v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
+             v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))]
+            for v in doc["verdicts"]
+        ],
+    )
+    console.say()
+    returned = doc.get("texts") or []
+    console.say(
+        f"{len(doc['verdicts'])} candidates: {len(doc['kept'])} passed the filter, {len(doc['rejected'])} vetoed"
+        + (f" (acceptance {fmt(doc['rate'])})" if doc.get("rate") is not None else "")
+        + (f"; returning the {len(returned)} cleanest" if len(returned) < len(doc["kept"]) else "")
+    )
+    for text in returned:
+        console.say(f"  {quote(text)}")
+    for verdict in doc["rejected"]:
+        console.say(f"  vetoed: {quote(clip(verdict['text'], 60))} - {verdict['why']}")
+    if config.learn:
+        saved = save_model(negative, negative_path(args))
+        console.say(f"saved {saved['path']} ({saved['bytes']} bytes)")
+        doc["saved"] = saved
+    doc["pair"] = pair.describe()
+    return doc
+
+
+def cmd_negative_reasons(args: argparse.Namespace, console: Console) -> dict:
+    """Everything the tutor has blamed, and the journal of what it said."""
+    model, origin = open_negative(args, console, required=True)
+    stats = model.stats()
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("failures", stats["failures_total"]),
+        ("blame", stats["edge_blame_total"]),
+        ("cleared", stats["cleared_total"]),
+        ("nodes / edges", f"{stats['nodes']} / {stats['edges']}"),
+        ("judgements", f"{stats['judgements']} ({stats['rejected']} rejected)"),
+        ("sources", ", ".join(f"{k}={v}" for k, v in sorted(stats["sources"].items())) or "-"),
+        ("filter", f"risk >= {fmt(stats['threshold'])}, coverage >= {fmt(stats['min_coverage'])}"),
+    ])
+    console.say()
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(model, limit=args.limit))
+    journal = model.recent(args.log)
+    if journal:
+        console.say()
+        console.table(
+            ("when", "reason", "severity", "source", "text", "the tutor said"),
+            [[e["at"], e["reason"], e["severity"], e["source"] or "-", quote(clip(e["text"], 34)), clip(e["note"], 44)]
+             for e in journal],
+        )
+    return {"model": origin.to_dict(), "reasons": model.reasons(), "journal": journal, "stats": stats}
+
+
+def cmd_negative_forget(args: argparse.Namespace, console: Console) -> dict:
+    """The tutor can be wrong too: drop (or fade) the blame behind one reason, or all of it."""
+    model, origin = open_negative(args, console, required=True)
+    out = args.out or negative_path(args)
+    result = model.forget(args.reason, factor=args.factor)
+    saved = save_model(model, out)
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("reason", result["reason"]),
+        ("keeping", f"{fmt(args.factor * 100)}% of its blame"),
+        ("edges", result["edges"]),
+        ("blame removed", result["blame_removed"]),
+        ("saved", f"{saved['path']} ({saved['bytes']} bytes)"),
+    ])
+    console.say()
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(model))
+    return {"model": origin.to_dict(), "out": out, **result, "saved": saved, "stats": model.stats()}
 
 
 def cmd_invert(args: argparse.Namespace, console: Console) -> dict:
@@ -1192,7 +1466,10 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
         seed=effective_seed(args),
         blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
     )
-    evolver = Evolver(generator, corpus, discriminator, config)
+    negative = neg_origin = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
+    evolver = Evolver(generator, corpus, discriminator, config, negative=negative)
     generations = args.generations or None
     out = args.out or args.model
     console.pairs([
@@ -1204,6 +1481,7 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
         ("config", f"samples={config.samples} real={config.real_per_generation} max_length={config.max_length} "
                    f"temperature={config.temperature} batch={config.batch_size}"),
         ("checkpoints", f"{manager.directory} every {every} generation(s), keep {manager.keep}" if manager else "off"),
+        *([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")] if negative is not None else []),
         ("output", out),
     ])
     console.say()
@@ -1218,7 +1496,9 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
     if args.discriminator:
         disc_saved = save_model(evolver.discriminator, args.discriminator)
         console.say(f"saved discriminator {args.discriminator} ({disc_saved['bytes']} bytes)")
+    negative_doc = _save_negative(console, negative, negative_path(args)) if negative is not None else None
     return {
+        "negative": negative_doc,
         "model": origin.to_dict(),
         "out": out,
         "corpus_texts": len(evolver.corpus),
@@ -1369,6 +1649,9 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         raise CliError(str(exc)) from exc
     sandbox = Sandbox(timeout=args.sandbox_timeout, memory_mb=args.memory_mb, isolate_network=not args.no_network_isolation)
     model, origin = open_model(args, console, required=False)
+    negative = neg_origin = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
     out = args.out or args.model
     console.pairs([
         ("model", origin.describe()),
@@ -1384,12 +1667,14 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
                     + ("isolated" if sandbox.network_isolated else "NOT isolated")),
         ("2NRL", f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
                  f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}, {config.strictness}"),
+        *([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")] if negative is not None else []),
         ("output", out),
     ])
     console.say()
     printer = ProblemPrinter(console)
     stop = threading.Event()
     trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client)
+    trainer = CodeGenTrainer(model, client, sandbox, config, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(problems, progress=printer, stop_event=stop, checkpoint_manager=manager),
@@ -1410,6 +1695,8 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         "records": records, "attempts": printer.attempts, "solved": solved, "model_solved": by_model,
         "solutions": trainer.solved, "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
+    if negative is not None:
+        doc["negative"] = _save_negative(console, negative, negative_path(args))
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
             json.dump({k: doc[k] for k in ("problems", "config", "records", "solutions", "solved", "model_solved")}, fh, indent=2)
@@ -1476,6 +1763,12 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     printer = LessonPrinter(console)
     stop = threading.Event()
     trainer = TutorTrainer(model, client, config, grader_client=grader_client)
+    negative = neg_origin = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        console.say()
+    trainer = TutorTrainer(model, client, config, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(progress=printer, stop_event=stop, checkpoint_manager=manager), stop, console, "round",
@@ -1505,12 +1798,20 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         "model": origin.to_dict(), "out": None if args.dry_run else out, "config": config.to_dict(),
         "records": records, "lessons": [lesson.to_dict() for lesson in trainer.lessons], "report": card,
         "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+        "negative": _save_negative(console, negative, negative_path(args)) if negative is not None else None,
     }
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
             json.dump({k: doc[k] for k in ("config", "records", "lessons", "report")}, fh, indent=2)
         console.say(f"wrote report to {args.report}")
     return doc
+def _save_negative(console: Console, negative: Any, path: str) -> dict:
+    """Save the negative network and print what the tutor taught it."""
+    saved = save_model(negative, path)
+    console.say()
+    console.say(f"negative model: {saved['path']} ({saved['bytes']} bytes)")
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(negative))
+    return {"path": path, "saved": saved, "reasons": negative.reasons(), "stats": negative.stats()}
 
 
 def _ollama_client(args: argparse.Namespace) -> Any:
@@ -1630,6 +1931,23 @@ def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     )
     doc: dict[str, Any] = dict(result)
     doc["two_nrl"] = None
+    doc["negative"] = None
+    if args.blame:
+        from . import blame
+
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.say()
+        console.pairs([("negative model", neg_origin.describe()), ("blaming", f"{len(result['bad'])} failed texts")])
+        report = blame.teach_reviews(negative, result, threshold=args.threshold, source="review")
+        console.say(
+            f"blamed {report['blamed']} texts over {report['edges']} edges "
+            f"(mean severity {fmt(report['severity_mean'])}), cleared {report['cleared']} of {report['passed']} passed"
+        )
+        doc["negative"] = {
+            "blamed": report["blamed"], "cleared": report["cleared"], "edges": report["edges"],
+            "reasons": report["reasons"], "lessons": report["lessons"],
+            **_save_negative(console, negative, negative_path(args)),
+        }
     if args.apply_two_nrl:
         bad = list(result["bad"])
         good = list(result["good"])
@@ -1847,11 +2165,20 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="RNG seed for a newly created model (default 0) and for `generate` sampling")
     group.add_argument("--kind", choices=KINDS, default=default(None),
                        help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
-                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction); a "
-                            "loaded file's own kind always wins.  With --kind count the default --model is "
-                            f"{DEFAULT_COUNT_MODEL}")
+                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction), "
+                            "negative = the negative network (failures only, blamed with the tutor's reasons); a "
+                            "loaded file's own kind always wins.  With --kind count / negative the default --model is "
+                            f"{DEFAULT_COUNT_MODEL} / {DEFAULT_NEGATIVE_MODEL}")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
+
+
+def _add_negative_option(parser: argparse.ArgumentParser, top_level: bool) -> None:
+    """``--negative PATH``; the action copies suppress their default so the group's value survives."""
+    parser.add_argument(
+        "--negative", metavar="PATH", default=None if top_level else argparse.SUPPRESS,
+        help=f"negative model file (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)",
+    )
 
 
 def _add_checkpoint_options(parser: argparse.ArgumentParser, unit: str) -> None:
@@ -2141,8 +2468,131 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep", type=nonneg_float, default=0.25, help="what the unchanged part of the correction still earns")
     p.add_argument("--no-count", action="store_true", help="do not traverse the correction (it is counted by default)")
     p.add_argument("--dry-run", action="store_true", help="show the alignment without touching the model")
+    p.add_argument("--blame", action="store_true",
+                   help="also teach the negative network: the same diff, blaming only the characters you changed")
+    p.add_argument("--reason", default="corrected", metavar="TAG", help="reason recorded with --blame")
+    p.add_argument("--note", default="", metavar="TEXT", help="your own words, kept in the negative network's journal")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_correct)
+    # negative -------------------------------------------------------------
+    p = command(
+        "negative", "the negative network: failures, why they failed, and the filter",
+        "A copy of the network that keeps only its negative portions: every node and edge in it exists\n"
+        "because something went wrong there, and every edge remembers why - the reasons the tutor gave\n"
+        "(the Ollama reviewer, the code judge, a thumbs down, the evolve discriminator) with the blame\n"
+        "each one carries.  `blame` teaches it a failure, `clear` lets text the tutor passed take blame\n"
+        "back off the fragments it shares, `why` explains a text, `reasons` lists what the tutor said\n"
+        "and `filter` runs the pair: the positive model writes, the negative one vetoes.\n"
+        "The negative model lives beside --model (model.json -> model.negative.json) unless --negative\n"
+        "says otherwise; it is also an ordinary model kind, so `--kind negative train` blames as well.",
+    )
+    _add_negative_option(p, top_level=True)
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+
+    a = actions.add_parser(
+        "blame", help="learn a failure: the text, its reason and its severity",
+        description="Teach the negative network that these texts went wrong.  --reason is the tutor's verdict\n"
+                    "(gibberish, repetition, wrong-output, thumbs-down, ...), --note its own words (kept in the\n"
+                    "journal) and --severity how badly it failed (1 = one ordinary failure).  This is the only\n"
+                    "operation that adds structure to the negative network.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--text", action="append", metavar="TEXT", help="a failed text (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="failed texts, one per line")
+    a.add_argument("--reason", default="unspecified", metavar="TAG", help="why it failed (the tutor's verdict)")
+    a.add_argument("--severity", type=nonneg_float, default=1.0, help="how heavily to blame it (1 = one ordinary failure)")
+    a.add_argument("--source", default="cli", metavar="NAME", help="who says so (review, codegen, evolve, frontend, cli)")
+    a.add_argument("--note", default="", metavar="TEXT", help="the tutor's own words, kept in the journal")
+    a.add_argument("--epochs", type=pos_int, default=1, help="blame passes over the texts")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative model (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_blame)
+
+    a = actions.add_parser(
+        "clear", help="the tutor passed these texts: take blame off what they share",
+        description="Credit the edges these texts share with known failures.  Net evidence is blame minus\n"
+                    "clearing, so a fragment that shows up in good and bad output alike stops carrying the\n"
+                    "verdict.  Nothing is created: text the failure structure cannot walk simply does not match.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--text", action="append", metavar="TEXT", help="a passed text (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="passed texts, one per line")
+    a.add_argument("--weight", type=nonneg_float, default=1.0, help="how much blame one pass cancels")
+    a.add_argument("--epochs", type=pos_int, default=1, help="clearing passes over the texts")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative model (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_clear)
+
+    a = actions.add_parser(
+        "why", help="why a text looks like a failure (reasons and the fragments to blame)",
+        description="Walk texts through the failure structure: how much of each is built out of known failure\n"
+                    "(risk and coverage), which reasons that blame carries and which fragments carry it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--text", action="append", metavar="TEXT", help="a text to judge (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="texts to judge, one per line")
+    a.add_argument("--threshold", type=nonneg_float, metavar="RISK", help="reject at this blame per transition (default: the model's)")
+    a.add_argument("--min-coverage", type=nonneg_float, metavar="SHARE", help="known-failing share needed before rejecting")
+    a.add_argument("--spans", type=nonneg_int, default=5, help="blamed fragments to show")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_why)
+
+    a = actions.add_parser(
+        "filter", help="the pair: the positive model writes, the negative one vetoes",
+        description="The GAN at output time.  The positive model (--model) over-samples candidates, the negative\n"
+                    "one judges each of them, and what survives is printed with what was dropped and why.  Two\n"
+                    "signals reject: blame (risk over the threshold) and the likelihood ratio (the candidate reads\n"
+                    "more like known failure than like the training data).  With --text / --data the given texts\n"
+                    "are judged instead of generating any.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--count", type=pos_int, default=3, help="texts wanted out of the filter")
+    a.add_argument("--prefix", default="", metavar="TEXT", help="continue this prefix")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per candidate")
+    a.add_argument("--mode", choices=("sample", "beam", "dijkstra"), default="sample", help="how the positive model writes")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature")
+    a.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="extra cost per edge (longer texts cost more)")
+    a.add_argument("--over-sample", type=pos_int, default=3, help="candidates drawn per wanted text")
+    a.add_argument("--text", action="append", metavar="TEXT", help="judge this text instead of generating (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="judge the texts of FILE (one per line) instead of generating")
+    a.add_argument("--threshold", type=nonneg_float, metavar="RISK", help="reject at this blame per transition (default: the model's)")
+    a.add_argument("--min-coverage", type=nonneg_float, metavar="SHARE", help="known-failing share needed before rejecting")
+    a.add_argument("--ratio", type=float, default=0.0, metavar="NATS",
+                   help="reject when the candidate reads this much more like failure than like the training data")
+    a.add_argument("--no-ratio", action="store_true", help="judge by blame alone (turn the likelihood ratio off)")
+    a.add_argument("--peak", type=nonneg_float, metavar="BLAME",
+                   help="reject a candidate carrying this much blame on a single fragment, whatever the rest of it is "
+                        "(1 = a fragment the tutor corrected once); off by default")
+    a.add_argument("--strict", action="store_true", help="also drop candidates the negative network only finds suspect")
+    a.add_argument("--spans", type=nonneg_int, default=3, help="blamed fragments per verdict")
+    a.add_argument("--learn", action="store_true",
+                   help="blame what the filter rejects (off by default: the tutor supplies the negatives)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_filter)
+
+    a = actions.add_parser(
+        "reasons", help="what the tutor has blamed, and the journal of what it said",
+        description="The reason table (blame, failures and edges per reason) and the newest journal entries.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--limit", type=pos_int, default=20, help="reasons to list")
+    a.add_argument("--log", type=nonneg_int, default=10, help="journal entries to show")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_reasons)
+
+    a = actions.add_parser(
+        "forget", help="drop or fade the blame behind a reason (the tutor can be wrong)",
+        description="Remove the blame one reason contributed (or all of it with no --reason).  --factor keeps a\n"
+                    "share of it instead of dropping it entirely, which is how old failures fade.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--reason", metavar="TAG", help="the reason to forget (default: every reason)")
+    a.add_argument("--factor", type=nonneg_float, default=0.0, help="share of the blame to keep (0 = forget it, 0.5 = halve it)")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative model (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_forget)
 
     # invert / compress ----------------------------------------------------
     p = command("invert", "invert the network and save", "Flip every edge weight and activation amplitude, then save.")
@@ -2170,6 +2620,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-length", type=pos_int, default=EvolveConfig.max_length, help="maximum characters per fake")
     p.add_argument("--temperature", type=nonneg_float, default=EvolveConfig.temperature, help="sampling temperature")
     p.add_argument("--discriminator", metavar="PATH", help="discriminator model file (loaded when it exists, saved at the end)")
+    p.add_argument("--blame", action="store_true",
+                   help="teach the negative network from this loop: every fake the discriminator scores below the "
+                        "real texts is blamed (reason discriminator / blatant), the real texts clear blame")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.add_argument("--disc-neg-epochs", type=nonneg_int, default=EvolveConfig.disc_neg_epochs,
                    help="discriminator negative-phase epochs")
     p.add_argument("--disc-pos-epochs", type=nonneg_int, default=EvolveConfig.disc_pos_epochs,
@@ -2279,6 +2734,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_checkpoint_options(p, "problem")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.add_argument("--report", metavar="FILE", help="write a JSON report (problems, config, records, solutions)")
+    p.add_argument("--blame", action="store_true",
+                   help="teach the negative network why the rejected programs were rejected (the sandbox, the style "
+                        "checker and the judge are the tutor)")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.set_defaults(handler=cmd_codegen)
 
     # tutor ------------------------------------------------------------------
@@ -2355,6 +2815,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_checkpoint_options(p, "round")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, lessons, report card)")
+    p.add_argument("--blame", action="store_true",
+                   help="teach the negative network why each failed sentence failed: the mistake the teacher named "
+                        "is the reason, its mark the severity, and only the characters it corrected are blamed")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.set_defaults(handler=cmd_tutor)
 
     # chatgpt ---------------------------------------------------------------
@@ -2448,6 +2913,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--context", metavar="TEXT", help="extra context for the reviewer (e.g. what the model was trained on)")
     a.add_argument("--2nrl", dest="apply_two_nrl", action="store_true",
                    help="afterwards run 2NRL: failed texts as garbage, passed texts (+ --good) as correct data, then save")
+    a.add_argument("--blame", action="store_true",
+                   help="teach the negative network what failed and why: the reviewer's critique becomes the reason, "
+                        "its rating the severity, and the passed texts clear blame")
+    a.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     a.add_argument("--good", metavar="FILE", help="extra correct texts for the 2NRL positive phase (one per line)")
     _add_two_nrl_options(a, neg_epochs=3, pos_epochs=3, batch_size=4)
     a.add_argument("--out", metavar="PATH", help="where to save the model after --2nrl (default: --model)")
@@ -2509,8 +2979,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse: --help / --version (0) or a usage error (1)
         return exc.code if isinstance(exc.code, int) else (EXIT_OK if exc.code is None else EXIT_ERROR)
-    if getattr(args, "kind", None) == "count" and args.model == DEFAULT_MODEL:
-        args.model = DEFAULT_COUNT_MODEL  # a count model does not overwrite the radix default file
+    kind_default = DEFAULT_KIND_MODELS.get(getattr(args, "kind", None) or "")
+    if kind_default and args.model == DEFAULT_MODEL:
+        args.model = kind_default  # another kind does not overwrite the radix default file
     console = Console(bool(args.json))
     try:
         doc = args.handler(args, console)

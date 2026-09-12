@@ -7,7 +7,9 @@ graph learns with a local rule that updates the **activation function itself**
 (the custom `-sin(x / 3)` sine), prediction is a **shortest path** search with a
 cost function (Dijkstra), and the system keeps upgrading itself with a
 **GAN-style** generator/discriminator loop driven by **2NRL** (train on garbage,
-invert the network, fine-tune on correct data).
+invert the network, fine-tune on correct data).  A second copy of the network
+keeps only the **negative** side - the failures the tutor found, and *why* they
+failed - and filters the first one's output.
 
 It ships as a Python package (`radixnet`), a CLI, a JSON HTTP API, a React
 frontend, a Makefile and a Docker Compose stack. Checkpointing, save/load,
@@ -32,6 +34,10 @@ and an optional GPU backend (torch) are built in.
 | Go port of the count / reward model | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
+| The negative network | `NegativeNet` (`--kind negative`, the Negative tab): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
+| The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
+| A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
+| The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
 | CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `frontend/` (Vite + React, prebuilt `dist` is served by the API). |
 | Checkpointing, saving, loading | JSON model files (gzip with `.gz`), `CheckpointManager` with rotation, `latest` pointer, restore and resume. |
@@ -57,6 +63,9 @@ python -m radixnet generate --count 3
 python -m radixnet score --text "the cat sat on the mat"
 python -m radixnet 2nrl --bad data/sample_garbage.txt --good data/sample_corpus.txt --neg-lr 0.5 --pos-lr 0.1 --batch-size 4
 python -m radixnet evolve --data data/sample_corpus.txt --generations 3 --batch-size 4
+python -m radixnet negative blame --data data/sample_garbage.txt --reason gibberish --source review
+python -m radixnet negative why --text "the the the the cat"
+python -m radixnet negative filter --count 3        # the positive model writes, the negative one vetoes
 python -m radixnet serve      # API + frontend on http://127.0.0.1:8000
 ```
 
@@ -81,16 +90,20 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make generate COUNT=5` | generate texts from scratch |
 | `make score TEXT="..."` | log-probability of a text |
 | `make 2nrl` | 2NRL with `GARBAGE` as bad and `DATA` as good data |
+| `make tutor-blame TOPIC="..."` | English lessons that also teach the negative network what the teacher marked down |
+| `make negative-blame REASON=gibberish` / `negative-clear` | teach the negative network every line of `GARBAGE` as a failure / let `DATA` take blame back off what it shares |
+| `make negative-why TEXT="..."` / `negative-filter COUNT=3` / `negative-reasons` / `negative-forget REASON=...` | explain a text, run the pair, list what the tutor blamed, drop a reason |
 | `make invert` / `make compress` | invert the network / merge unary chains |
-| `make evolve GENERATIONS=3` / `make evolve-forever` | GAN-style self-upgrade loop |
+| `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
 | `make go-build` / `go-test` / `go-parity` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
 | `make tutor TOPIC="..." ROUNDS=5` / `tutor-dry` / `tutor-focus FOCUS="past tense"` | automated English lessons taught by `TUTOR=ollama\|chatgpt` (`TUTOR_MODEL`, `TUTOR_URL`) |
-| `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the tutor and judge (`TUTOR=ollama\|chatgpt`, `CODEGEN_MODEL=gemma4`) and 2NRL rewards |
+| `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
 | `make chatgpt-models` / `chatgpt-ask PROMPT="..."` | ChatGPT (OpenAI): what `$OPENAI_API_KEY` may use, one question — the quickest check that ChatGPT can tutor |
+| `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-blame` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + blame the negative network, review + 2NRL |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
@@ -166,18 +179,19 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
+| `negative <action>` | the negative network (`--negative PATH`, default `model.negative.json` beside `--model`): `blame --text/--data --reason TAG --severity N --source NAME --note TEXT` (teach it a failure), `clear --text/--data` (the tutor passed these: take blame off what they share), `why --text/--data [--threshold --min-coverage --spans]` (risk, coverage, the reasons and the blamed fragments), `filter [--count --prefix --mode --max-length --over-sample --threshold --min-coverage --ratio --no-ratio --peak --strict --learn]` or `filter --text/--data` (the pair: the positive model writes, the negative one vetoes), `reasons [--limit --log]`, `forget [--reason TAG] [--factor F]` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
-| `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
+| `evolve --data FILE` | `--blame` / `--negative PATH` (the discriminator teaches the negative network), `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, `--chatgpt-url`, `--chatgpt-model` (the key is the server's own `$OPENAI_API_KEY`) |
-| `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
-| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
-| `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
+| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
+| `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]` |
+| `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
+| `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
-| `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
+| `codegen --problems FILE` | `--blame` / `--negative PATH` (the sandbox and the judge teach the negative network), `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -202,17 +216,17 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/uploads/delete` | `{"name"}` |
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
-| `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
+| `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "blame" (teach the negative network), "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
 | `GET /api/chatgpt/models?url=` | always 200: `{"available", "configured" (the server has a key), "url", "model", "models": [{"name","owned_by","created"}], "error"}`. The key is never a request field: it is the server's own `$OPENAI_API_KEY` |
 | `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
 | `POST /api/images/encode` | an image as multipart (`curl -F file=@photo.png`), a raw body, or JSON `{"name","content_base64"}` + `?size=128&encoder=auto\|sd\|tiny&train=true&save_as=photo.txt` (train settings `epochs`, `lr`, `batch_size`) -> `{"text","encoder","width","height","latent_shape","bytes","chars","source_size","name","upload","job"}` (202 with a train job) |
 | `POST /api/images/decode` | `{"text", "encoder"}` -> `{"png_base64","encoder","width","height","bytes","repaired"}` (a cut-off or rambling prediction is padded / truncated) |
-| `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_provider": "ollama"\|"chatgpt", "teacher_model", "judge_provider", "judge_model", "url", "judge_url", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}`; an attempt's `source` and a verdict's `judged_by` name the provider (400 when `teacher_provider` is `chatgpt` and the server has no key) |
+| `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_provider": "ollama"\|"chatgpt", "teacher_model", "judge_provider", "judge_model", "url", "judge_url", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", "blame" (the sandbox and the judge also teach the negative network), 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}`; an attempt's `source` and a verdict's `judged_by` name the provider (400 when `teacher_provider` is `chatgpt` and the server has no key) |
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", "teacher_provider", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
 | `POST /api/codegen/run` | `{"code", "tests", "expected_output", "sandbox_timeout", "memory_mb"}` -> `{"run", "style", "verdict"}` |
 | `GET /api/tutor` | the English tutor: `{"url", "model", "env_model", "providers": {"ollama": {...}, "chatgpt": {"url","model","configured"}}, "error_types", "modes", "twonrl_per", "defaults": {every setting}}` |
-| `POST /api/tutor/start` | `{"topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_provider": "ollama"\|"chatgpt", "tutor_model", "grader_provider", "grader_model", "url", "grader_url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
+| `POST /api/tutor/start` | `{"blame" (teach the negative network why each sentence failed), "topic", "rounds": 3, "exercises": 5, "attempts", "focus", "level", "words", "tutor_provider": "ollama"\|"chatgpt", "tutor_model", "grader_provider", "grader_model", "url", "grader_url", "timeout", "mode", "length", "max_length", "temperature", "to_end", "threshold": 6, "grammar_weight": 0.6, "batch", "adapt", "drills", "teach_answer", "learn", "twonrl_per": "round"\|"lesson", "diff_corrections", "keep_weight", "min_weight", 2NRL settings, "checkpoint_every"}` -> a job whose records are `{"kind": "lesson"\|"round"\|"report"\|"note", ...}`; a lesson carries `score`, `grammar`, `spelling`, `fluency`, `passed`, `error`, `sentence`, `correction`, `changes` (what the teacher changed, span by span), `comment`, a round the report card and what it taught (`corrections`, `edits`, `penalised`, `rewarded`) |
 | `GET /api/tutor/history` | `{"history": [lesson / round / report records of all tutor runs]}` |
 | `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"chatgpt"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (400 when `tutor_provider` is `chatgpt` and the server has no key, 502 when the teacher fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
@@ -222,9 +236,15 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr", "bad_weights" \| "bad_ratings", "good_weights" \| "good_ratings"}` (or `bad_files` / `good_files` upload names) -> job; the weights (0..1 shares) or ratings (marks out of 10) scale each phase per text |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "good_ratings": [10, 5], "bad_ratings": [...] (or "good_weights" / "bad_weights" as 0..1 shares), "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad", "good_weights", "bad_weights"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone. A rating is more than a like: each text is learned in proportion to its mark (10 = the full rate, 0 skips it) |
+| `GET /api/negative` | the negative network: `{"path","active","stats","reasons": [{"reason","blame","fails","edges","share"}],"journal": [{"at","text","reason","severity","source","note"}],"weights","settings"}` |
+| `POST /api/negative/blame` | teach it a failure: `{"texts"\|"text","reason","severity": 1,"source","note","epochs": 1}` -> `{"records","reasons","stats", ...}`; the only call that adds structure to the negative network |
+| `POST /api/negative/clear` | the tutor passed these: `{"texts"\|"text","weight": 1,"epochs": 1}` -> `{"matched","unmatched","records","stats"}`; nothing is created |
+| `POST /api/negative/judge` | `{"texts"\|"text","threshold","min_coverage","spans": 5}` -> `{"verdicts": [{"verdict": "reject"\|"suspect"\|"pass","risk","coverage","blame","reasons","spans": [{"start","end","fragment","blame","fails","reason"}],"why"}]}` |
+| `POST /api/negative/filter` | the pair: `{"count": 3,"prefix","mode","max_length","temperature","over_sample": 3,"threshold","min_coverage","ratio": 0,"no_ratio","peak","strict","learn"}` (or `{"texts"}` to judge given texts) -> `{"texts" (the cleanest survivors),"kept","rejected": [verdicts],"verdicts","candidates","asked","rate","pair"}` |
+| `POST /api/negative/forget` / `POST /api/negative/settings` / `POST /api/negative/reset` / `POST /api/negative/save` | drop or fade a reason `{"reason","factor"}` / `{"threshold","min_coverage","share_scale","blame_scale","clear_scale"}` / a fresh negative network `{"seed"}` / write it `{"path"}` |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
-| `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` |
-| `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
+| `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, `blame`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` (and `negative_blamed` / `negative_reasons` with `blame`) |
+| `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file; the negative network is written beside it when it holds failures) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
 | `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
@@ -256,7 +276,10 @@ view: an opening line, turns, context, beam / sample, the two voices' names,
 the other kind in memory as the second voice; Continue extends the
 conversation, and turns are rated like samples; every rating carries a mark out
 of 10 - "how good" / "how bad" - and the network learns each text in proportion
-to it), Score, 2NRL,
+to it), Score, 2NRL, Negative (the
+failure network: run the pair and see what was vetoed and why, judge a text
+with its blamed fragments marked, blame or clear texts by hand, and the table
+of everything the tutor has blamed with the journal of what it said),
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Tutor (automated English lessons: the settings, a dry run
 that marks without training, a chart of the marks per round, the report card
@@ -665,6 +688,163 @@ boost / amount and whether a 2NRL pass ran.  Outside the loop the same
 primitives are available directly: `RadixNet.two_nrl(bad, good,
 bad_weights=[...])` and `model.invert_paths(texts, mode, amounts)`.
 
+## The negative network: what went wrong, and why
+
+The positive model learns what text looks like.  The **negative network**
+(`radixnet/negative.py`, `--kind negative`, the Negative tab) is a second copy
+of the same machinery - the same self-compressing cyclic graph, the same
+trigram window, the same Dijkstra / beam searches - that keeps only the
+negative portions: **every node and edge in it exists because something went
+wrong there**.
+
+What an edge remembers:
+
+| Number | Meaning |
+|---|---|
+| `blame` | the summed severity of the failures that ran through it |
+| `fails` | how many failing texts ran through it |
+| `clear` | how much text the tutor *passed* ran through it |
+| `reasons` | `{reason: blame}` - the tutor's reasons, split by how much blame each contributed |
+
+The **net evidence** against an edge is `max(0, blame - clear)`: blame and
+clearing cancel, so an edge the tutor's passes cross as often as its failures
+do carries no verdict at all - which is how a common fragment like `" the "`
+stays out of the judgement.  There is no learning rate and no gradient; like
+the count / reward model every activation is the constant 1, so an edge's
+score *is* its weight, and the weight is its share of the failure mass leaving
+its parent:
+
+```
+net    = max(0, blame - clear_scale * clear)
+R_bad  = (net + 0.5) / (net leaving the parent + 0.5 * children)
+weight = share_scale * log(R_bad) + blame_scale * log(1 + net)
+```
+
+A softmax over that is `P(child | parent)` **under the failure distribution**:
+the network models how text goes wrong.  `negative predict` therefore returns
+the most likely ways to *fail* from a prefix (and the least likely ones as the
+bottom-K) - a warning, not a suggestion.
+
+### The negatives come from the tutor
+
+Nothing is invented.  Every failure arrives from something outside the network
+that looked at an output and said it was wrong, and why (`radixnet/blame.py`
+turns each verdict into a **fault**: a reason tag, a severity, the tutor's own
+sentence for the journal and, where there is one, the correction to diff
+against):
+
+| Tutor | How it blames | Reasons it gives |
+|---|---|---|
+| the **English tutor** (`tutor --blame`, the Tutor tab's checkbox, `POST /api/tutor/start {"blame": true}`) | the mistake it named marks the sentence, its mark out of 10 is the severity, its sentence of teaching is the note, and its correction is diffed so **only the characters it changed** are blamed | `agreement`, `tense`, `article`, `preposition`, `plural`, `pronoun`, `word-order`, `spelling`, `punctuation`, `vocabulary`, `fragment`, `nonsense` |
+| the Ollama reviewer (`ollama review --blame`, the Ollama tab's checkbox, `"blame": true`) | its critique picks the reason, its rating the severity (0 -> 2.0, the pass threshold -> 0.25); the texts it passed clear blame | `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`, `contradiction`, `false`, `incoherent`, `off-topic`, `empty`, `unrated`, `other` |
+| the code sandbox, the style checker and the judge (`codegen --blame`) | every rejected program is blamed for what they found, with the teacher's feedback as the note | `timeout`, `crash`, `wrong-output`, `task-not-done`, `style`, `naming` |
+| the evolve discriminator (`evolve --blame`) | every fake it scores below the real texts, by how far below | `discriminator`, `blatant` |
+| a person | `negative blame --text ... --reason ... --note ...`, the Negative tab, a thumbs down | anything you type |
+
+A correction is the sharpest lesson of all.  When the teacher writes the
+sentence out in correct English, `NegativeNet.correct(wrong, right)` aligns the
+two character by character (`radixnet/diff.py`) and blames only the steps that
+wrote something the teacher struck out - the rest of the sentence was right and
+keeps no verdict - while the correction itself clears blame wherever the
+failure structure already knows it:
+
+```
+$ python -m radixnet negative why --text "the cat sit on the mat"     # after one tutor round
+verdict     suspect
+peak        1.5000
+why         1 of 21 transitions are known failures (risk 0.07), mostly 'agreement', worst at 'sit '; below the threshold, kept
+
+at      fragment   blame  fails  reason
+------  --------  ------  -----  ---------
+7..12   "sit "    1.5000      1  agreement
+```
+
+A blamed transition is never compressed away (`NegativeGraph.merge_child`
+refuses to merge across it), so the fragment that went wrong stays an edge and
+stays nameable however much the rest of the graph is folded up.
+
+`negative reasons` (and `GET /api/negative`) prints the table of everything
+blamed so far and the journal of what the tutor said, entry by entry.  The
+tutor can be wrong too: `negative forget --reason TAG [--factor 0.5]` drops
+that reason's blame, or fades it.
+
+### Why a text is a failure
+
+`negative why --text "..."` (`judge` / `POST /api/negative/judge`) walks the
+text through the failure structure and reports
+
+* `risk` - the net evidence per transition (repeating a failure blamed once
+  scores about 1, sharing a third of one's transitions with it about 0.33),
+* `coverage` - the share of its transitions that are known failures,
+* `reasons` - the tutor's reasons behind that blame, heaviest first,
+* `spans` - the worst fragments with their character range (the Negative tab
+  marks them inside the text), and
+* `verdict` - `reject` when coverage reaches `min_coverage` (0.5) and `risk`
+  the `threshold` (1.0), `suspect` when something failed but not enough,
+  `pass` when nothing here has ever failed.
+
+```
+$ python -m radixnet negative why --text "the the the the cat"
+verdict     reject
+risk        2.3333
+coverage    1.0000
+why         9 of 9 transitions are known failures (risk 2.33), mostly 'repetition', worst at 'he t'; rejected
+
+at     fragment   blame  fails  reason
+-----  --------  ------  -----  ----------
+1..5   "he t"    3.0000      3  repetition
+3..7   " the"    3.0000      3  repetition
+```
+
+### The pair: a GAN at output time
+
+`radixnet/duo.py` puts the two networks on one output path.  In the evolve
+loop the generator and the discriminator take turns improving each other; here
+the finished pair works together on every answer: the positive model
+over-samples candidates (it is the only one that can write), the negative one
+judges each of them (it is the only one that knows what going wrong looks
+like), what survives comes back ranked and what does not comes back with the
+reason it was dropped.
+
+Two signals reject, either one is enough, and both sit behind the coverage
+gate so text the tutor has never failed is never vetoed on a hunch:
+
+* **blame** - `risk` at or above the threshold,
+* **ratio** - `log P_negative(text) - log P_positive(text)` per character, the
+  classic discriminator logit of two generative models: how much more the
+  candidate reads like known failure than like the text the positive model was
+  trained on, and
+* **peak** (`--peak N`, off by default) - the blame on a *single* fragment,
+  which is how one word the tutor has already corrected vetoes a sentence that
+  is otherwise perfectly good.
+
+```bash
+python -m radixnet negative filter --count 3 --max-length 60      # write, then veto
+python -m radixnet negative filter --text "the the the the cat"   # judge given texts
+```
+
+```
+decision  rule    risk    peak     ratio  reason      text
+--------  -----  ------  ------  --------  ----------  --------------------------
+reject    blame  2.3333  3.0000    1.5157  repetition  "the the the the cat"
+suspect   -      0.0625  1.0000   -9.5765  repetition  "the rain in autumn"
+
+2 candidates: 1 passed the filter, 1 vetoed (acceptance 0.5000)
+  vetoed: "the the the the cat" - 9 of 9 transitions are known failures ...
+```
+
+`--strict` also drops the suspects, `--no-ratio` judges by blame alone, and
+`--learn` blames what the filter itself rejected (off by default: the tutor
+supplies the negatives, the filter only applies them).  `negative predict`
+also comes back from `POST /api/negative/filter` as a `warning` - what the
+negative network expects to go wrong from that prefix - whether or not
+anything was actually vetoed.
+
+The negative model is an ordinary model file (`model.negative.json` beside the
+model, `--negative PATH` to move it) and an ordinary model kind, so
+`--kind negative train` blames, `info`, `checkpoints`, `save` / `load` and the
+model selector at the top of the frontend all work on it as usual.
+
 ## Checkpoints, saving, loading
 
 Models are JSON: `{"format": "radixnet", "version": 1, "saved_at", "meta",
@@ -885,6 +1065,25 @@ net.save("model.json.gz")
 Evolver(RadixNet.load("model.json.gz"), corpus=["the cat sat on the mat"]).run(generations=2)
 ```
 
+The negative half, and the two of them as one output path:
+
+```python
+from radixnet import NegativeFilter, NegativeNet, RadixNet, blame
+
+negative = NegativeNet(seed=1)
+negative.blame(["the the the the cat"], reason="repetition", source="review", note="it repeats the same word")
+negative.correct("the cat sit on the mat", "the cat sits on the mat", reason="agreement")   # only "sit " is blamed
+blame.teach_lessons(negative, tutor_round_lessons)            # or let the tutor do the blaming
+blame.teach_reviews(negative, ollama_review["reviews"])
+
+print(negative.judge("the the the the cat")["why"])
+# 9 of 9 transitions are known failures (risk 1.00), mostly 'repetition', worst at 'he t'; rejected
+
+pair = NegativeFilter(RadixNet.load("model.json.gz"), negative)
+out = pair.generate(count=3, max_length=60)                   # over-sample, then veto
+print(out["texts"], [(v["text"], v["why"]) for v in out["rejected"]])
+```
+
 ## Tests
 
 ```bash
@@ -896,8 +1095,9 @@ make go-test     # cd go && go test -race ./...
 
 ```
 RadixCyclicNN/
-  radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
-                      checkpoint, bench, cli, api, llm, ollama, chatgpt, tutor, codegen
+  radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
+                      blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
+                      tutor, codegen
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)

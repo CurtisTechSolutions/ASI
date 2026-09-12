@@ -59,6 +59,7 @@ UNKNOWN_PROB = 1e-6
 
 _LOG_UNKNOWN = math.log(UNKNOWN_PROB)
 _W = WINDOW
+_OV = WINDOW - 1
 _MAX_LOG_PPL = 700.0  # exp() overflows above ~709; a mean -log softmax never gets there
 
 ProgressFn = Callable[[dict], None]
@@ -196,6 +197,21 @@ def _weight_groups(
     return sorted(groups.items(), key=lambda item: -item[0])
 
 
+def _touches(lo: int, hi: int, spans: Sequence[tuple[int, int]]) -> bool:
+    """Does the half-open range ``[lo, hi)`` meet any of the changed ``spans``?
+
+    An empty span is an insertion point: the characters belong on the other
+    side, so the step that walked straight past the position is the one at
+    fault.
+    """
+    for start, end in spans:
+        if end == start:
+            end = start + 1
+        if start < hi and lo < end:
+            return True
+    return False
+
+
 def _resolve_config(config: TrainConfig | None, overrides: dict) -> TrainConfig:
     """Merge keyword overrides into ``config`` (or the defaults) and validate."""
     cfg = TrainConfig() if config is None else config
@@ -283,6 +299,38 @@ class GraphModel:
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"amounts must lie in [0, 1], got {v}")
         return values
+
+    def _steps_over(self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]) -> list[int]:
+        """The edges of a traced text whose step wrote a character inside one of ``spans``.
+
+        Every step is charged with the characters it adds to the text: the
+        first with the whole of its node's label, a later one with everything
+        past the two characters it overlaps its parent by, and the step into
+        END with the position just past the last character - where a sentence
+        that stopped too early went wrong.  Used to move only the nodes a
+        correction's diff (:mod:`radixnet.diff`) marks as changed.
+        """
+        graph = self.graph
+        path = graph.node_path(grams)
+        if not path or len(path) < 2:
+            return []
+        labels = graph.labels
+        children = graph.children
+        out: list[int] = []
+        position = 0  # trigram index of the node being entered
+        for index in range(1, len(path)):
+            node = path[index]
+            edge = children[path[index - 1]].get(node)
+            if node == END:
+                if edge is not None and _touches(length, length + 1, spans):
+                    out.append(edge)
+                break
+            size = len(labels[node])
+            lo = 0 if index == 1 else position + _OV
+            if edge is not None and _touches(lo, position + size, spans):
+                out.append(edge)
+            position += size - _OV
+        return out
 
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
         """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""
@@ -1162,10 +1210,11 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"`` and ``"count"``)."""
-    from .countnet import CountRewardNet  # local import: countnet builds on this module
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"`` and ``"negative"``)."""
+    from .countnet import CountRewardNet  # local imports: both build on this module
+    from .negative import NegativeNet
 
-    return {RadixNet.kind: RadixNet, CountRewardNet.kind: CountRewardNet}
+    return {RadixNet.kind: RadixNet, CountRewardNet.kind: CountRewardNet, NegativeNet.kind: NegativeNet}
 
 
 def model_kinds() -> list[dict]:

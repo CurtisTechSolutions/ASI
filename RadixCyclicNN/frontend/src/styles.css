@@ -1390,3 +1390,34 @@ ol.dialogue li.rated.down .bubble {
   padding: 0 3px;
   text-decoration: none;
 }
+
+/* the negative network: verdicts, blamed fragments and the journal */
+.verdict {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  background: var(--card);
+}
+
+.verdict p {
+  margin: 4px 0;
+}
+
+.verdict .chips {
+  margin-top: 6px;
+}
+
+p.blamed {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+p.blamed mark {
+  background: rgba(220, 38, 38, 0.18);
+  color: inherit;
+  border-radius: 3px;
+  padding: 1px 0;
+  box-shadow: 0 1px 0 rgba(220, 38, 38, 0.5);
+}

@@ -757,6 +757,9 @@ class CodeGenTrainer:
     manager that is entered around slow external work (sandbox runs, LLM
     calls); the API uses it to release the model lock so the server stays
     responsive while a program runs or the tutor thinks.
+    responsive while a program runs or the teacher thinks.  ``negative`` is an
+    optional negative network that learns *why* the rejected programs were
+    rejected.
     """
 
     def __init__(
@@ -767,10 +770,14 @@ class CodeGenTrainer:
         config: CodeGenConfig | None = None,
         external: Callable[[], Any] | None = None,
         judge_client: LLMClient | None = None,
+        negative: Any = None,
     ) -> None:
         self.model = model
         self.client = client
         self.sandbox = sandbox or Sandbox()
+        self.negative = negative
+        """Optional :class:`~radixnet.negative.NegativeNet`: here the teacher, the sandbox and the judge are the
+        tutor, so every rejected program is blamed for what they found (:func:`radixnet.blame.teach_attempts`)."""
         self.config = config or CodeGenConfig()
         self.config.validate()
         if judge_client is None and self.config.judge_provider != provider_of(client):
@@ -917,6 +924,7 @@ class CodeGenTrainer:
         if correct is not None:
             self.solved[problem.id] = correct.text
         shown = correct if correct is not None else attempts[-1]
+        blamed = self._teach_negative(attempts)
         record = {
             "kind": "problem", "phase": phase, "round": round_no, "problem": problem.id,
             "prompt": problem.prompt[:200], "attempts": len(attempts), "correct": correct is not None,
@@ -925,7 +933,18 @@ class CodeGenTrainer:
             "bad": len(bad), "good": len(good), "score": shown.verdict.score, "code": shown.code[:2000],
             "issues": shown.verdict.issues[:4], "seconds": time.perf_counter() - t0,
         }
+        if blamed is not None:
+            record["negative_blamed"] = blamed["blamed"]
+            record["negative_reasons"] = blamed["reasons"]
         return record, bad, good
+
+    def _teach_negative(self, attempts: list[Attempt]) -> dict | None:
+        """Hand the rejected attempts to the negative network (the sandbox and the judge are its tutor)."""
+        if self.negative is None or not attempts:
+            return None
+        from . import blame  # local import: codegen is optional, the negative network need not be loaded for it
+
+        return blame.teach_attempts(self.negative, attempts)
 
     def run(
         self,

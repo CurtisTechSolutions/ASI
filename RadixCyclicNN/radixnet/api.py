@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import dataclasses
 import heapq
 import html
 import itertools
@@ -79,7 +80,9 @@ from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS
+from .duo import FilterConfig, NegativeFilter
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
+from .negative import NegativeNet
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
     DEFAULT_URL as OLLAMA_DEFAULT_URL,
@@ -91,6 +94,7 @@ from .ollama import (
     normalise_url,
     sample_texts,
 )
+from .blame import teach_reviews
 from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
@@ -128,6 +132,9 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 """Largest accepted JSON request body (a training corpus can be big)."""
 MAX_UPLOAD_BYTES: int | None = None
 """Largest accepted ``POST /api/uploads`` body: ``None`` = no limit (a ZIP of a whole source tree is fine)."""
+_FILTER_FIELDS = frozenset(f.name for f in dataclasses.fields(FilterConfig))
+"""Request fields that configure the filter rather than the generation behind it."""
+
 _UPLOAD_PATH = "/api/uploads"
 _BINARY_ROUTES = {"/api/uploads": None, "/api/images/encode": "image"}
 """POST routes whose bodies may be raw bytes or multipart (value: the default name of a raw body, None = required)."""
@@ -470,7 +477,7 @@ class ModelService:
             "model_path": self.model_path_for(self.kind),
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
             "in_memory": sorted({self.kind, *self._parked}),
-            "weights": self.model.weight_config() if self.kind == "count" else None,
+            "weights": self.model.weight_config() if hasattr(self.model, "weight_config") else None,
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -605,11 +612,14 @@ class ModelService:
 
         return self._start_job("feedback", work)
 
-    def start_evolve(self, corpus: list[str], generations: int | None, config: EvolveConfig) -> dict:
+    def start_evolve(self, corpus: list[str], generations: int | None, config: EvolveConfig, blame: bool = False) -> dict:
         """Start an ``evolve`` job (``generations`` ``None`` / ``0`` = until stopped).
 
         The discriminator survives across runs of the same model with the same
         ``config.seed``; its records are appended to :meth:`evolve_history`.
+        With ``blame`` the discriminator also teaches the negative network:
+        every fake it scores below the real texts is blamed, the real texts
+        clear blame.
         """
         if not generations:
             generations = None
@@ -618,7 +628,10 @@ class ModelService:
         with self.session() as model:
             self._ensure_idle()
             disc = self._discriminator if self._discriminator_seed == config.seed else None
-            evolver = Evolver(model, corpus, discriminator=disc, config=config)
+            evolver = Evolver(
+                model, corpus, discriminator=disc, config=config,
+                negative=self.negative_model() if blame else None,
+            )
             self._discriminator = evolver.discriminator
             self._discriminator_seed = config.seed
             sink = self._evolve_history
@@ -736,6 +749,206 @@ class ModelService:
         with self.session() as model:
             return _graph_view(model.graph, limit)
 
+    # -- the negative network ------------------------------------------------
+
+    def negative_model(self) -> NegativeNet:
+        """The one negative network of this service (the active model when that kind is selected, else the parked one).
+
+        On first use it is loaded from its file (``model.negative.json``
+        beside the model path) or created empty; it lives in the same
+        ``_parked`` store as the other kinds, so selecting ``negative`` as the
+        active model hands back this very object.
+        """
+        if isinstance(self.model, NegativeNet):
+            return self.model
+        model = self._parked.get(NegativeNet.kind)
+        if model is None:
+            path = self.model_path_for(NegativeNet.kind)
+            if path and os.path.isfile(path):
+                model = load_model(path, backend=self.backend_name, device=self.device)
+                if not isinstance(model, NegativeNet):
+                    raise ApiError(400, f"{path} holds a {model.kind} model, not a negative one")
+                self._log(f"negative model loaded from {path}")
+            else:
+                model = NegativeNet(seed=self.seed, backend=self.backend_name, device=self.device)
+            self._parked[NegativeNet.kind] = model
+        return model
+
+    def positive_model(self) -> GraphModel:
+        """The model the negative network filters: the active one, or a parked / saved positive model."""
+        if not isinstance(self.model, NegativeNet):
+            return self.model
+        for kind in (self._path_kind, RadixNet.kind, "count"):
+            parked = self._parked.get(kind)
+            if parked is not None and not isinstance(parked, NegativeNet):
+                return parked
+            path = self.model_path_for(kind)
+            if path and os.path.isfile(path):
+                model = load_model(path, backend=self.backend_name, device=self.device)
+                if not isinstance(model, NegativeNet):
+                    self._parked[model.kind] = model
+                    return model
+        raise ApiError(
+            409, "the negative network is the active model and no positive model is in memory; "
+                 "select the radix or count kind first (POST /api/model/select)"
+        )
+
+    def negative_status(self) -> dict:
+        """Stats, the reason table and the journal of the negative network."""
+        with self.session():
+            model = self.negative_model()
+            return {
+                "path": self.model_path_for(NegativeNet.kind),
+                "active": isinstance(self.model, NegativeNet),
+                "stats": model.stats(),
+                "reasons": model.reasons(),
+                "journal": model.recent(20),
+                "weights": model.weight_config(),
+                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+            }
+
+    def _negative_result(self, model: NegativeNet, records: list[dict], **extra: Any) -> dict:
+        return {"records": records, "reasons": model.reasons(), "stats": model.stats(), **extra}
+
+    def negative_blame(
+        self, texts: list[str], reason: str, severity: float = 1.0, source: str = "api", note: str = "",
+        epochs: int = 1,
+    ) -> dict:
+        """Teach the negative network a failure (synchronous: rated sets are small)."""
+        if not texts:
+            raise ApiError(400, "give the failed texts as 'texts' (a list) or 'text' (one per line)")
+        with self.mutating():
+            model = self.negative_model()
+            try:
+                records = model.blame(texts, reason=reason, severity=severity, source=source, note=note, epochs=epochs)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            return self._negative_result(model, records, texts=len(texts), reason=reason, severity=severity)
+
+    def negative_clear(self, texts: list[str], weight: float = 1.0, epochs: int = 1) -> dict:
+        """The tutor passed these texts: take blame off the fragments they share with known failures."""
+        if not texts:
+            raise ApiError(400, "give the passed texts as 'texts' (a list) or 'text' (one per line)")
+        with self.mutating():
+            model = self.negative_model()
+            try:
+                records = model.clear(texts, weight=weight, epochs=epochs)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            last = records[-1] if records else {}
+            return self._negative_result(
+                model, records, texts=len(texts), matched=last.get("matched", 0), unmatched=last.get("unmatched", 0)
+            )
+
+    def negative_judge(
+        self, texts: list[str], threshold: float | None = None, min_coverage: float | None = None, spans: int = 5,
+    ) -> dict:
+        """Why these texts look like failures."""
+        if not texts:
+            raise ApiError(400, "give the texts to judge as 'texts' (a list) or 'text' (one per line)")
+        with self.session():
+            model = self.negative_model()
+            try:
+                verdicts = [model.judge(t, threshold=threshold, min_coverage=min_coverage, spans=spans) for t in texts]
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"verdicts": verdicts, "stats": model.stats()}
+
+    def negative_filter(
+        self, texts: list[str] | None = None, count: int = 3, no_ratio: bool = False, **options: Any
+    ) -> dict:
+        """The pair at work: the positive model writes, the negative one vetoes (or the given texts are judged)."""
+        fields = {k: v for k, v in options.items() if k in _FILTER_FIELDS and v is not None}
+        if no_ratio:
+            fields["ratio"] = None  # a None in ``options`` means "unset"; only this turns the ratio rule off
+        config = FilterConfig(**fields)
+        try:
+            config.validate()
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        generate = {k: v for k, v in options.items() if k not in _FILTER_FIELDS}
+        with (self.mutating() if config.learn else self.session()):
+            negative = self.negative_model()
+            pair = NegativeFilter(self.positive_model(), negative, config)
+            try:
+                if texts:
+                    outcome = pair.filter(texts)
+                    result = {
+                        "texts": outcome["kept"], "kept": outcome["kept"], "verdicts": outcome["verdicts"],
+                        "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
+                        "candidates": len(texts), "asked": len(texts), "rate": outcome["rate"],
+                    }
+                else:
+                    result = pair.generate(count=count, **generate)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            result["pair"] = pair.describe()
+            return result
+
+    def negative_forget(self, reason: str | None = None, factor: float = 0.0) -> dict:
+        """Drop (or fade) the blame behind one reason - the tutor can be wrong too."""
+        with self.mutating():
+            model = self.negative_model()
+            try:
+                result = model.forget(reason, factor=factor)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return self._negative_result(model, [], **result)
+
+    def negative_settings(self, **options: Any) -> dict:
+        """Change how strictly the negative network judges (``threshold``, ``min_coverage``) and its weight scales."""
+        with self.mutating():
+            model = self.negative_model()
+            for name in ("threshold", "min_coverage"):
+                value = options.get(name)
+                if value is not None:
+                    setattr(model, name, float(value))
+            scales = {k: options.get(k) for k in ("share_scale", "blame_scale", "clear_scale")}
+            if any(v is not None for v in scales.values()):
+                try:
+                    model.configure_weights(**{k: v for k, v in scales.items() if v is not None})
+                except ValueError as exc:
+                    raise ApiError(400, str(exc)) from exc
+            return {
+                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+                "weights": model.weight_config(),
+                "stats": model.stats(),
+            }
+
+    def negative_reset(self, seed: int | None = None) -> dict:
+        """Forget every failure: a fresh, empty negative network."""
+        with self.mutating():
+            model = NegativeNet(
+                seed=self.seed if seed is None else int(seed), backend=self.backend_name, device=self.device
+            )
+            if isinstance(self.model, NegativeNet):
+                self.model = model
+            else:
+                self._parked[NegativeNet.kind] = model
+            return {"stats": model.stats(), "reasons": [], "journal": []}
+
+    def negative_save(self, path: str | None = None) -> dict:
+        """Write the negative network (default: its file beside the model path)."""
+        target = path or self.model_path_for(NegativeNet.kind)
+        if not target:
+            raise ApiError(400, "no 'path' given and the server was started without a model path")
+        target = os.path.abspath(target)
+        with self.session():
+            self.negative_model().save(target)
+        return {"path": target, "bytes": os.path.getsize(target)}
+
+    def negative_teach(self, reviews: list[dict], threshold: float = 6.0, source: str = "review") -> dict:
+        """Hand a tutor's review (ratings, verdicts, critiques) to the negative network."""
+        with self.mutating():
+            model = self.negative_model()
+            report = teach_reviews(model, reviews, threshold=threshold, source=source)
+            return {
+                "blamed": report["blamed"], "cleared": report["cleared"], "unmatched": report["unmatched"],
+                "edges": report["edges"], "reasons": report["reasons"], "lessons": report["lessons"],
+                "severity_mean": report["severity_mean"], "stats": model.stats(),
+                "reason_table": model.reasons(),
+            }
+
     # -- persistence ---------------------------------------------------------
 
     def save(self, path: str | None = None) -> dict:
@@ -745,9 +958,17 @@ class ModelService:
         if not target:
             raise ApiError(400, "no 'path' given and the server was started without a model path")
         target = os.path.abspath(target)
+        negative: dict | None = None
         with self.session() as model:
             model.save(target)
-        return {"path": target, "bytes": os.path.getsize(target)}
+            companion = self._parked.get(NegativeNet.kind)
+            if path is None and companion is not None and companion.graph.total_blame:
+                # the negative network is a second file beside the model; saving the work means saving both
+                side = self.model_path_for(NegativeNet.kind)
+                if side:
+                    companion.save(side)
+                    negative = {"path": side, "bytes": os.path.getsize(side)}
+        return {"path": target, "bytes": os.path.getsize(target), "negative": negative}
 
     def load(self, path: str) -> dict:
         """Replace the model with the one at ``path`` (parsed outside the lock)."""
@@ -1050,14 +1271,21 @@ class ModelService:
         client: LLMClient,
         sandbox: Sandbox,
         judge_client: LLMClient | None = None,
+        blame: bool = False,
     ) -> dict:
-        """Start a ``codegen`` job: teacher / model phases over ``problems`` with 2NRL rewards."""
+        """Start a ``codegen`` job: teacher / model phases over ``problems`` with 2NRL rewards.
+
+        With ``blame`` the sandbox, the style checker and the judge also teach
+        the negative network why each rejected program was rejected.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
             trainer = CodeGenTrainer(
                 self.model, client, sandbox, config, external=self.pause_lock, judge_client=judge_client,
+                negative=negative,
             )
             trainer.run(
                 problems, progress=self._progress(job, self._codegen_history), stop_event=job.stop_event,
@@ -1071,14 +1299,24 @@ class ModelService:
 
     # -- English lessons (Ollama sets and marks the exercises) ---------------
 
-    def start_tutor(self, config: TutorConfig, client: LLMClient, grader_client: LLMClient | None = None) -> dict:
-        """Start a ``tutor`` job: rounds of prefix -> completion -> grade -> 2NRL."""
+    def start_tutor(
+        self, config: TutorConfig, client: LLMClient, grader_client: LLMClient | None = None, blame: bool = False,
+    ) -> dict:
+        """Start a ``tutor`` job: rounds of prefix -> completion -> grade -> 2NRL.
+
+        With ``blame`` every failed sentence also teaches the negative network
+        why it failed: the mistake the teacher named is the reason, its mark
+        the severity, and only the characters the correction changed are
+        blamed.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
             trainer = TutorTrainer(
                 self.model, client, config, external=self.pause_lock, grader_client=grader_client,
+                negative=negative,
             )
             trainer.run(
                 progress=self._progress(job, self._tutor_history), stop_event=job.stop_event,
@@ -1745,7 +1983,7 @@ def _r_evolve_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         blatant_margin=f.number("blatant_margin", d.blatant_margin, minimum=0.0),
         blatant_boost=f.number("blatant_boost", d.blatant_boost, minimum=1.0),
     )
-    return 202, {"job": svc.start_evolve(corpus, generations, config)}
+    return 202, {"job": svc.start_evolve(corpus, generations, config, blame=f.flag("blame", False))}
 
 
 def _r_evolve_stop(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1797,6 +2035,91 @@ def _r_model_select(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         return 200, svc.select_kind(kind)
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
+
+
+def _r_negative(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_status()
+
+
+def _negative_texts(f: Fields, what: str) -> list[str]:
+    texts = f.texts_optional("texts", "text")
+    if not texts:
+        raise ApiError(400, f"give the {what} as 'texts' (a list) or 'text' (one per line)")
+    return texts
+
+
+def _r_negative_blame(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_blame(
+        _negative_texts(f, "failed texts"),
+        reason=f.text("reason", "unspecified"),
+        severity=f.number("severity", 1.0, minimum=0.0),
+        source=f.text("source", "api"),
+        note=f.text("note", ""),
+        epochs=f.integer("epochs", 1, minimum=1),
+    )
+
+
+def _r_negative_clear(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_clear(
+        _negative_texts(f, "passed texts"),
+        weight=f.number("weight", 1.0, minimum=0.0),
+        epochs=f.integer("epochs", 1, minimum=1),
+    )
+
+
+def _r_negative_judge(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_judge(
+        _negative_texts(f, "texts to judge"),
+        threshold=f.number("threshold", None, minimum=0.0),
+        min_coverage=f.number("min_coverage", None, minimum=0.0),
+        spans=f.integer("spans", 5, minimum=0),
+    )
+
+
+def _r_negative_filter(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_filter(
+        texts=f.texts_optional("texts", "text"),
+        count=f.integer("count", 3, minimum=0),
+        threshold=f.number("threshold", None, minimum=0.0),
+        min_coverage=f.number("min_coverage", None, minimum=0.0),
+        ratio=f.number("ratio", 0.0),
+        no_ratio=f.flag("no_ratio", False),
+        peak=f.number("peak", None, minimum=0.0),
+        over_sample=f.integer("over_sample", 3, minimum=1),
+        strict=f.flag("strict", False),
+        spans=f.integer("spans", 3, minimum=0),
+        learn=f.flag("learn", False),
+        reason=f.text("reason", "filtered"),
+        mode=f.text("mode", "sample"),
+        max_length=f.integer("max_length", 60, minimum=0),
+        temperature=f.number("temperature", 1.0, minimum=0.0),
+        prefix=f.text("prefix", ""),
+        seed=f.integer("seed", None),
+        step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
+        beam=f.integer("beam", None, minimum=1),
+    )
+
+
+def _r_negative_forget(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_forget(f.text("reason", None), factor=f.number("factor", 0.0, minimum=0.0))
+
+
+def _r_negative_settings(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_settings(
+        threshold=f.number("threshold", None, minimum=0.0),
+        min_coverage=f.number("min_coverage", None, minimum=0.0),
+        share_scale=f.number("share_scale", None),
+        blame_scale=f.number("blame_scale", None),
+        clear_scale=f.number("clear_scale", None),
+    )
+
+
+def _r_negative_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_reset(f.integer("seed", None))
+
+
+def _r_negative_save(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_save(f.text("path", None))
 
 
 def _r_checkpoints(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -2012,6 +2335,9 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     result["source"] = source
     result["url"] = client.url
     result["job"] = None
+    result["negative"] = None
+    if f.flag("blame", False):
+        result["negative"] = svc.negative_teach(result["reviews"], threshold=threshold, source="review")
     if apply != "2nrl":
         return 200, result
     bad = list(result["bad"])
@@ -2156,7 +2482,7 @@ def _r_codegen_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     config = _codegen_config(svc, f)
     client, judge = _codegen_clients(svc, f, config)
     sandbox = _sandbox_from(f)
-    job = svc.start_codegen(problems, config, client, sandbox, judge_client=judge)
+    job = svc.start_codegen(problems, config, client, sandbox, judge_client=judge, blame=f.flag("blame", False))
     return 202, {
         "job": job, "problems": [p.id for p in problems], "config": config.to_dict(),
         "sandbox": {"timeout": sandbox.timeout, "memory_mb": sandbox.memory_mb, "network_isolated": sandbox.network_isolated},
@@ -2324,7 +2650,7 @@ def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 def _r_tutor_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     config = _tutor_config(f, svc)
     client, grader = _tutor_clients(svc, f, config)
-    job = svc.start_tutor(config, client, grader_client=grader)
+    job = svc.start_tutor(config, client, grader_client=grader, blame=f.flag("blame", False))
     return 202, {"job": job, "config": config.to_dict(), "url": client.url}
 
 
@@ -2396,7 +2722,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/compress", _r_compress, "merge unary chains"),
     ("POST", "/api/evolve/start", _r_evolve_start,
      "start the GAN-style loop: {corpus | corpus_text | corpus_files, generations, samples, ..., blatant_mode: none | "
-     "fail_invert | activation | state, blatant_margin, blatant_boost}"),
+     "fail_invert | activation | state, blatant_margin, blatant_boost, blame (the discriminator also teaches the "
+     "negative network)}"),
     ("POST", "/api/evolve/stop", _r_evolve_stop, "stop the evolve job"),
     ("GET", "/api/evolve/history", _r_evolve_history, "generation records of all evolve runs"),
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
@@ -2405,6 +2732,27 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "replace the model with a fresh one: {seed, kind, count model: count_scale, global_scale, window_scale, reward_scale, window}"),
     ("POST", "/api/model/weights", _r_model_weights,
      "count model: change the dual frequency function {count_scale, global_scale, window_scale, reward_scale, window} -> {weights, stats}"),
+    ("GET", "/api/negative", _r_negative,
+     "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
+     "filter settings"),
+    ("POST", "/api/negative/blame", _r_negative_blame,
+     "teach it a failure: {texts | text, reason, severity, source, note, epochs} - the only thing that adds "
+     "structure to the negative network"),
+    ("POST", "/api/negative/clear", _r_negative_clear,
+     "the tutor passed these texts: {texts | text, weight, epochs} takes blame off the fragments they share with "
+     "known failures (nothing is created)"),
+    ("POST", "/api/negative/judge", _r_negative_judge,
+     "why texts look like failures: {texts | text, threshold, min_coverage, spans} -> verdicts with risk, coverage, "
+     "the reasons and the fragments to blame"),
+    ("POST", "/api/negative/filter", _r_negative_filter,
+     "the pair: the positive model writes, the negative one vetoes - {count, prefix, mode, max_length, temperature, "
+     "over_sample, threshold, min_coverage, ratio, no_ratio, peak (blame on a single fragment), strict, learn} or "
+     "{texts} to judge given texts"),
+    ("POST", "/api/negative/forget", _r_negative_forget, "drop or fade the blame behind a reason: {reason, factor}"),
+    ("POST", "/api/negative/settings", _r_negative_settings,
+     "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
+    ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
+    ("POST", "/api/negative/save", _r_negative_save, "save the negative network: {path} (default: beside the model path)"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
@@ -2425,12 +2773,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
     ("POST", "/api/ollama/review", _r_ollama_review,
-     "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, good, good_files}"),
+     "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, "
+     "good, good_files, blame (teach the negative network what failed and why)}"),
     ("GET", "/api/chatgpt/models", _r_chatgpt_models,
      "is ChatGPT usable as a tutor here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails"),
     ("POST", "/api/codegen/start", _r_codegen_start,
      "start a codegen job: {problems | problems_text | problem_files, phases: both|teacher|model, rounds, "
-     "teacher_provider: ollama|chatgpt, teacher_model, judge_provider, judge_model, ...}"),
+     "teacher_provider: ollama|chatgpt, teacher_model, judge_provider, judge_model, blame (the sandbox and the judge "
+     "also teach the negative network), ...}"),
     ("GET", "/api/codegen/history", _r_codegen_history, "attempt / problem / round records of all codegen runs"),
     ("POST", "/api/codegen/solve", _r_codegen_solve,
      "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
@@ -2443,7 +2793,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, "
      "grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, "
      "neg_epochs, pos_epochs, neg_lr, pos_lr, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
-     "grader_model, url, grader_url, ...}"),
+     "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
+     "failed), ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "

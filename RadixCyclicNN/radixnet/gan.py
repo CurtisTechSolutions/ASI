@@ -17,8 +17,10 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
+from . import blame as blame_module
 from .encoding import WINDOW
 from .model import GraphModel, RadixNet
+from .negative import NegativeNet
 
 __all__ = ["BLATANT_MODES", "EvolveConfig", "Evolver"]
 
@@ -100,6 +102,7 @@ class Evolver:
         corpus: Iterable[str],
         discriminator: GraphModel | None = None,
         config: EvolveConfig | None = None,
+        negative: NegativeNet | None = None,
     ) -> None:
         self.config = EvolveConfig() if config is None else config
         self.config.validate()
@@ -113,6 +116,10 @@ class Evolver:
                 seed=self.config.seed + 1, backend=generator.backend.name, device=generator.backend.device
             )
         self.discriminator = discriminator
+        self.negative = negative
+        """Optional :class:`~radixnet.negative.NegativeNet`: here the discriminator is the critic, so every fake it
+        scores below the real texts is blamed (reason ``"discriminator"``, or ``"blatant"`` past the margin) and the
+        real texts clear blame."""
         self.rng = random.Random(self.config.seed)
         self.generation = 0
         self.history: list[dict] = []
@@ -204,6 +211,7 @@ class Evolver:
             else:
                 # nothing left for the negative pass: only the fine-tune pass on real texts, no inversion
                 positive = self.generator.reward(real, epochs=cfg.pos_epochs, lr=cfg.pos_lr, batch_size=cfg.batch_size)
+        negative_report = self._teach_negative(fakes, fake_scores, real_mean, real)
         self.generation += 1
         g = self.generator.graph
         record = {
@@ -227,8 +235,43 @@ class Evolver:
             "mode": mode,
             "seconds": time.perf_counter() - t0,
         }
+        if negative_report is not None:
+            record["negative_blamed"] = negative_report["blamed"]
+            record["negative_edges"] = negative_report["edges"]
+            record["negative_reasons"] = negative_report["reasons"]
         self.history.append(record)
         return record
+
+    def _teach_negative(
+        self, fakes: list[str], fake_scores: list[float], real_mean: float | None, real: list[str]
+    ) -> dict | None:
+        """Hand this generation's failures to the negative network: the discriminator is its tutor.
+
+        Every fake the critic scored below the real texts is blamed by how far
+        below it landed (``"blatant"`` past ``blatant_margin``, else
+        ``"discriminator"``); the real texts clear blame.  Returns ``None``
+        when no negative network is attached.
+        """
+        if self.negative is None or real_mean is None:
+            return None
+        cfg = self.config
+        margin = cfg.blatant_margin if cfg.blatant_margin > 0 else 1.0
+        faults = []
+        for fake, score in zip(fakes, fake_scores):
+            gap = real_mean - score
+            if gap <= 0:
+                continue
+            faults.append({
+                "text": fake,
+                "reason": "blatant" if gap > cfg.blatant_margin else "discriminator",
+                "severity": max(0.25, min(2.0, gap / margin)),
+                "note": f"the discriminator scored it {gap:.3f} per char below the real texts",
+                "source": "evolve",
+            })
+        if not faults:
+            return {"blamed": 0, "edges": 0, "reasons": {}, "cleared": 0, "unmatched": 0, "severity_mean": 0.0,
+                    "records": []}
+        return blame_module.teach(self.negative, faults, real)
 
     def run(
         self,

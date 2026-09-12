@@ -114,6 +114,19 @@ export const api = {
     return post("/api/uploads", form);
   },
   deleteUpload: (name) => post("/api/uploads/delete", { name }),
+  /**
+   * The negative network (see NegativePanel): the failures only, blamed with the tutor's reasons, and the filter it
+   * forms with the positive model.
+   */
+  negative: () => get("/api/negative"),
+  negativeBlame: (body) => post("/api/negative/blame", body),
+  negativeClear: (body) => post("/api/negative/clear", body),
+  negativeJudge: (body) => post("/api/negative/judge", body),
+  negativeFilter: (body) => post("/api/negative/filter", body),
+  negativeForget: (body) => post("/api/negative/forget", body),
+  negativeSettings: (body) => post("/api/negative/settings", body),
+  negativeReset: (body = {}) => post("/api/negative/reset", body),
+  negativeSave: (body = {}) => post("/api/negative/save", body),
   /** Ollama (see OllamaPanel). `url` optionally overrides the server's configured Ollama URL. */
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),

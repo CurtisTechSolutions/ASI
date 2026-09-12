@@ -725,6 +725,11 @@ class TutorTrainer:
     ``external`` is an optional zero-argument callable returning a context
     manager entered around the LLM calls; the API passes its lock-releasing
     one so the server stays responsive while the teacher thinks.
+    ``negative`` is an optional
+    :class:`~radixnet.negative.NegativeNet` that learns *why* each failed
+    sentence failed - the mistake the teacher named, the mark it gave and, via
+    the same diff the correction is taught from, the characters it changed
+    (:func:`radixnet.blame.teach_lessons`).
     """
 
     def __init__(
@@ -734,6 +739,7 @@ class TutorTrainer:
         config: TutorConfig | None = None,
         external: Callable[[], Any] | None = None,
         grader_client: LLMClient | None = None,
+        negative: Any = None,
     ) -> None:
         self.model = model
         self.client = client
@@ -746,6 +752,7 @@ class TutorTrainer:
         self.grader_client = grader_client if grader_client is not None else client
         self.tutor_provider = provider_of(client)
         self.grader_provider = provider_of(self.grader_client)
+        self.negative = negative
         self._external = external or nullcontext
         self.history: list[dict] = []
         self.lessons: list[Lesson] = []
@@ -1028,6 +1035,7 @@ class TutorTrainer:
                 except LLMError as exc:  # the lesson stands without its drill sentences
                     self._emit(progress, {"kind": "note", "round": round_no, "message": f"no drill sentences: {exc}"})
         learned = {} if self._stopped() else self._learn_lessons(lessons, drills)
+        blamed = self._teach_negative(lessons)
         if cfg.adapt:
             self.weak = card["weakest"]
         record = {
@@ -1035,7 +1043,19 @@ class TutorTrainer:
             "exercises": len(exercises), "drills": len(drills), "seconds": time.perf_counter() - t0,
             **card, **learned,
         }
+        if blamed is not None:
+            record["negative_blamed"] = blamed["blamed"]
+            record["negative_edges"] = blamed["edges"]
+            record["negative_reasons"] = blamed["reasons"]
         return record, lessons
+
+    def _teach_negative(self, lessons: list[Lesson]) -> dict | None:
+        """Hand this round's failures to the negative network: the teacher named the mistake, so it is the reason."""
+        if self.negative is None or not lessons:
+            return None
+        from . import blame  # local import: the tutor runs without a negative network
+
+        return blame.teach_lessons(self.negative, lessons, threshold=self.config.threshold)
 
     def _learn_lessons(self, lessons: list[Lesson], drills: list[str]) -> dict:
         """2NRL over the whole round, or lesson by lesson (the drill sentences are taught once either way)."""

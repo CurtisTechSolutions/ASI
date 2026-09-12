@@ -22,6 +22,10 @@ imported lazily and never required.
 | Shortest path prediction (cost function + Dijkstra) | Edge cost `cost(p->c) = -log(softmax_over_children(p)[c]) + step_penalty` (>= 0). Prediction runs Dijkstra from the context node over the depth-unrolled graph and returns the cheapest path that emits the requested number of characters, or the cheapest path to the END node. |
 | Train & predict | `RadixNet.train / predict / generate / score`. |
 | Constantly self-upgrading (GAN idea) | `Evolver`: generator = the model, discriminator = a second `RadixNet`. Each generation: sample fakes, discriminator learns real-vs-fake via 2NRL, low-scoring fakes become the generator's "garbage" for 2NRL, real corpus samples are the fine-tune pass. Runs indefinitely in a background thread (API) or for N generations (CLI), checkpointing as it goes. |
+| The negative network | `NegativeNet` (section 24): a copy of the network keeping only its negative portions - every node and edge exists because something went wrong there, every edge keeps `blame`, `fails`, `clear` and the tutor's `reasons`, and the net evidence against it is `max(0, blame - clear)`. Trained on negative data only; `judge(text)` says how much of a text is built out of known failure, which reasons that blame carries and which fragments carry it. |
+| The negatives come from the tutor | `blame.py` (section 24.2): the English tutor's marked mistake and correction, the Ollama reviewer's critique and rating, the code sandbox / style checker / judge, the evolve discriminator and a person's thumbs down become faults `(text, reason, severity, note, correction)`. The negative network never invents a failure. |
+| A correction blames only what changed | `NegativeNet.correct(wrong, right)` (section 24.2): the same character alignment the count model's `correct` teaches from (`diff.py`) decides which steps are blamed - the words the teacher kept carry no verdict, and a blamed transition is never compressed away. |
+| The pair as a GAN at output time | `NegativeFilter` (section 24.3): the positive model over-samples candidates, the negative one vetoes them by blame or by the likelihood ratio `log P_negative - log P_positive`; what survives is returned ranked, what does not comes back with its reason. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) `invert()` the network, (3) fine-tune on correct data with a smaller learning rate. |
 | CLI / API / React frontend | `radixnet.cli` (argparse), `radixnet.api` (stdlib `http.server`, JSON), `frontend/` (Vite + React). |
 | Checkpointing / save / load | JSON (optionally gzip) model files, `CheckpointManager` with rotation + `latest` pointer + resume. |
@@ -48,6 +52,9 @@ RadixCyclicNN/
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
+    negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
+    blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
+    duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
@@ -620,6 +627,9 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
+* `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
+* `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
+* `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the four endpoints and the CLI.
 
@@ -823,6 +833,11 @@ spelling, fluency, passed, error, correction, changes, comment, graded_by, proba
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
 `pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.
+
+With `--blame` (`TutorTrainer(negative=...)`, `POST /api/tutor/start {"blame": true}`) every failed sentence of a
+round also teaches the **negative network** (section 24) why it failed: the mistake the teacher named is the reason,
+its mark the severity, its sentence of teaching the note, and the correction is diffed so only the characters it
+changed are blamed. The round records then carry `negative_blamed`, `negative_edges` and `negative_reasons`.
 
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
@@ -1278,3 +1293,153 @@ without `whole_file`, graph, save / load / reset, checkpoints in the Python layo
 and `tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `tests/test_api.py`, a
 model saved by the server loaded in Python with identical predictions, ZIP uploads, `split: paragraphs`, and the
 Python `CheckpointManager` reading the server's checkpoints).
+
+---
+
+## 24. The negative network (`negative.py`, `blame.py`, `duo.py`) — the failures, and why
+
+A second copy of the network that keeps only its **negative portions**: the same self-compressing cyclic graph, the
+same trigram window, the same Dijkstra / beam searches, but **every node and edge in it exists because something went
+wrong there**. It is a model kind like the others (`kind = "negative"`, `format = "radixnet-negative"`, default file
+`model.negative.json`), so `model_classes()`, `load_model`, checkpoints, `POST /api/model/select` and `--kind
+negative` all reach it; what makes it different is that it is trained on negative data alone and that every edge
+remembers *why*.
+
+### 24.1 `NegativeGraph(RadixCyclicGraph)`
+
+Per-edge lists beside `edge_w` / `edge_count` (appended in `_new_edge`, so they survive `split` and `merge_child`
+exactly as the counts do): `edge_blame` (summed severity), `edge_fails` (failing texts through the edge),
+`edge_clear` (how much cleared text crossed it) and `edge_reasons` (`{reason_id: blame}`, at most
+`MAX_EDGE_REASONS = 8` entries; the smallest is dropped when a ninth appears and the graph-level totals keep it).
+The graph owns the reason registry (`reasons`, `reason_ids`, `reason_blame`, `reason_fails`, `reason_id(label)`
+normalising tags to one lower-case line) and the totals `total_blame`, `total_fails`, `total_clear`.
+
+* `record_failure(edge_ids, severity, reason)` adds the severity to every listed alive edge, bumps its fail count and
+  its reason entry, updates the totals and recomputes the weights; `record_clear(edge_ids, weight)` does the same for
+  cleared text.
+* `evidence(e) = max(0, blame - clear_scale * clear)` — **blame and clearing cancel**, so an edge the tutor's passes
+  cross as often as its failures do carries no verdict at all. This is the only notion of evidence in the module:
+  the weight function, `judge` and the filter all read it.
+* `edge_weight(evidence, parent_evidence, degree) = share_scale * log((net + s) / (parent_net + s * deg)) +
+  blame_scale * log1p(net)` with `s = SMOOTHING = 0.5`, `share_scale = 1`, `blame_scale = 0`, `clear_scale = 1`.
+  `recompute_weights()` walks every parent once (O(E)) and bumps `version` so the cost cache refreshes;
+  `configure(**scales)` changes the function at run time and `weight_config()` describes it.
+* Every node is created with `a = 0, k = 1` (the sine activation is the constant 1), so the base class's score
+  `w * f_p * f_c` is the weight itself and `child_probs`, `child_costs`, Dijkstra, sampling, splits and merges work
+  unchanged. A softmax over the children is therefore `P(child | parent)` **under the failure distribution**.
+* `merge_child(p)` refuses to merge a unary chain whose edge carries blame or clearing: compression turns a
+  transition into a deterministic step *inside* a node, and a step inside a node has no edge to carry evidence, so a
+  correction that blamed a single transition would be folded away and forgotten. Everything the tutor never ruled on
+  still merges.
+* `forget(reason=None, factor=0.0)` scales one reason's blame (or all of it) down — `factor` 0 drops it, 0.5 halves
+  it — and returns `{reason, edges, blame_removed}`. `invert()` swaps `edge_blame` and `edge_clear` (the inverse of a
+  network of failures is a network of what passed) and toggles `inverted`.
+* `to_dict` / `from_dict` carry `edges.blame|fails|clear|reasons` (compacted in the same order as the base class's
+  edge arrays), the scales, the totals and the reason registry, and rebuild the weights on load.
+
+`RadixCyclicGraph.trace(trigrams)` (public wrapper around `_trace`) walks a sequence without creating, splitting or
+counting anything — what clearing and judging need.
+
+### 24.2 `NegativeNet(GraphModel)` and the tutor
+
+One `_pass(texts, cfg, blame=..., amount, reason, source, note)` routine underlies everything. A **blame** pass
+registers the texts structurally (`_register`: two passes, because a later text can split a node an earlier one
+pointed at), compresses, and then per epoch blames every transition of every text; a **clear** pass creates nothing
+and credits only the transitions a text shares with the existing failure structure (`_shared_edges`, built from
+`crossings`), so ordinary correct text — which will never walk a graph of failures end to end — still counts. Each
+pass appends a record (`phase: "negative" | "clear"`, `loss` = mean `-log P` of the transitions, `matched` /
+`unmatched`, `edges_touched`, `reason`, `severity`, `source`) and, for blame passes, a journal entry
+(`MAX_LOG_ENTRIES = 200`, newest kept: `at`, `text`, `reason`, `severity`, `source`, `note`).
+
+| Method | What it does |
+|---|---|
+| `blame(texts, reason, severity, source, note, epochs)` | learn a failure — the only operation that adds structure |
+| `clear(texts, weight, epochs)` | the tutor passed these: take blame off what they share, create nothing |
+| `train(texts, ...)` | **is** a blame pass (`lr` / `act_lr` / `batch_size` accepted and ignored) |
+| `punish` / `reward` | thumbs down = `blame` (reason `thumbs-down`), thumbs up = `clear` |
+| `two_nrl(bad, good, ...)` | blame `bad` (optionally per-text `bad_weights` scaling the severity), then clear `good`; no inversion |
+| `invert_paths(texts, amounts=...)` | the evolve loop's failures: blame each path by `strength * amount` |
+| `predict(prefix, ...)` | the beam search of section 19 over the failure distribution: the K most likely ways to go wrong (and the K least likely as `bottom`) |
+| `crossings(text)` | every transition of a text through the failure structure: `{index, start, end, fragment, parent, edge, blame, fails, clear, evidence, reason, reasons}`, `edge = None` where the network has never been |
+| `correct(wrong, right, reason=, severity=, ...)` | the tutor wrote the sentence out correctly: blame only the steps that wrote a character it struck out (`_steps_over` over `diff.changed_spans`), never an edge the correction walks too, and clear everything the correction shares with the failure structure |
+| `judge(text, threshold=, min_coverage=, spans=)` | the verdict (below) |
+| `reasons()` / `recent(limit)` / `forget(...)` | the reason table / the journal / drop or fade a reason |
+
+`judge` returns `{text, chars, transitions, known, blamed, coverage, blame, risk, peak, per_char, threshold,
+min_coverage, verdict, reasons, spans, why}`: `blame` is the summed evidence of the blamed transitions, **`risk` that sum over
+*all* of the text's transitions** (compression moves both together, so the ratio does not depend on it — repeating a
+failure blamed once scores about 1, sharing a third of one's transitions with it about 0.33), `coverage` the share
+of transitions that are known failures, `reasons` the aggregated reason histogram (each blamed edge contributes its
+reasons scaled by `evidence / blame`), `spans` the worst fragments with their character range (`start = i - 1`,
+`end = i + WINDOW` around the junction), and `verdict` is `"reject"` when `coverage >= min_coverage` **and**
+`risk >= threshold` (defaults 0.5 and 1.0), `"suspect"` when something failed but not enough, `"pass"` when nothing
+here ever failed; `peak` is the most evidence any single transition carries, which is what a correction moves and
+what the filter's `peak` rule reads. `why` says it in one sentence. Judging is counted in `meta` (`judgements`,
+`rejected`).
+
+`GraphModel._steps_over(grams, length, spans)` and `_touches` live in `model.py` (moved up from `countnet.py`, which
+inherits them): the edges of a traced text whose step wrote a character inside one of the changed spans, charging
+every step with the characters it adds and the step into END with the position just past the last one. Both
+corrections - the count model's reward-based `correct` and the negative network's blame-based one - mark the same
+characters, and so does the Go port.
+
+**`blame.py`** is where the negatives come from; nothing else may create them. A **fault** is
+`{text, reason, severity, note, source}` plus, when the tutor rewrote the sentence, `correction`.
+`faults_from_lessons(lessons, threshold)` reads a round of the English tutor (section 16.1): the mistake it named
+(`grade.error`, one of `tutor.ERROR_TYPES`) is the reason, its mark is the severity, its sentence of teaching is the
+note and its correction rides along so `teach` routes the fault through `NegativeNet.correct`; the sentences that
+passed, the corrections themselves and the teacher's model answers all clear blame.
+`classify(critique, verdict=, rating=)`
+picks a reason out of `REASONS` (`empty`, `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`,
+`contradiction`, `false`, `incoherent`, `off-topic`, `other`, plus `unrated`) by matching the tutor's own words;
+`severity_from_rating(rating, threshold)` maps 0 -> 2.0 and the pass threshold -> 0.25 (an unrated failure is 1.0);
+`code_reason(attempt)` reads the sandbox, the style report and the judge into `CODE_REASONS` (`timeout`, `crash`,
+`wrong-output`, `task-not-done`, `style`, `naming`) with the severities in `CODE_SEVERITY`.
+`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` turn a tutor's output into `(faults, passed)`,
+and `teach(negative, faults, passed)` (with the wrappers `teach_reviews`, `teach_attempts` and `teach_lessons`)
+blames each fault - through `correct` when it carries one - and clears the passes, returning
+`{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
+
+The call sites: `tutor --blame` / `TutorTrainer(negative=...)` / `POST /api/tutor/start {"blame": true}`, which
+blames every failed sentence of a round with the mistake the teacher named and adds `negative_blamed` /
+`negative_edges` / `negative_reasons` to its round records; `ollama review --blame` /
+`POST /api/ollama/review {"blame": true}` (the reviewer), `codegen --blame`
+/ `CodeGenTrainer(negative=...)`, which blames the rejected attempts of every problem and adds `negative_blamed` /
+`negative_reasons` to its problem records, `evolve --blame` / `Evolver(negative=...)`, which blames every fake the
+discriminator scored below the real texts (reason `blatant` past `blatant_margin`, else `discriminator`, severity
+`gap / margin` clamped to `[0.25, 2]`) and clears the real texts, and `POST /api/negative/blame` for a person.
+
+### 24.3 `duo.py` — the pair as a GAN at output time
+
+`NegativeFilter(positive, negative, config)` puts the two networks on one output path (`FilterConfig`: `threshold`,
+`min_coverage`, `ratio` (`None` = off), `peak` (`None` = off), `over_sample`, `strict`, `spans`, `learn`, `reason`). `judge(text)` merges
+the negative network's verdict with the likelihood ratio `negative.score(text)["per_char"] -
+positive.score(text)["per_char"]` — the discriminator logit of two generative models — and rejects when the blame
+rule fires, when `peak >= config.peak` (the evidence on one transition - a correction blames a handful of
+characters, so this is how a single corrected word vetoes an otherwise clean sentence), or, behind the same coverage
+gate, when `ratio >= config.ratio`; `rule` names which (`"blame"`, `"peak"`, `"ratio"`, `"suspect"` under `strict`). `filter(texts)` splits kept from rejected (blaming the rejects
+when `learn`, which is off by default: the tutor supplies the negatives, the filter only applies them).
+`generate(count, over_sample=, ...)` asks the positive model for `count * over_sample` candidates, filters them and
+returns the `count` survivors with the least blame plus every rejected verdict; `predict(prefix, ...)` filters the
+positive model's top-K continuations and adds `warning`, what the negative network predicts goes wrong from that
+prefix. `describe()` reports both halves and the settings.
+
+### 24.4 CLI, API, frontend, tests
+
+* CLI: `negative <action>` with `--negative PATH` (before or after the action; default `model.negative.json` derived
+  from `--model`): `blame`, `clear`, `why`, `filter`, `reasons`, `forget` — see the README's CLI table. `--blame`
+  (with `--negative`) on `tutor`, `correct` (one hand-written correction teaches both networks from the same diff),
+  `ollama review`, `codegen` and `evolve`. `--kind negative` makes it the ordinary model.
+* API: `GET /api/negative` (stats, reasons, journal, settings), `POST /api/negative/blame|clear|judge|filter|forget|
+  settings|reset|save`. The service keeps exactly one negative network, in the same `_parked` store as the other
+  kinds, so selecting the `negative` kind hands back that very object; `positive_model()` finds the model it filters
+  (the active one, else a parked or saved positive kind, else 409). `POST /api/save` writes the negative network
+  beside the model when it holds blame.
+* Frontend: the **Negative** tab (`NegativePanel.jsx`) — run the pair, judge a text with its blamed fragments marked
+  (`<mark>`), blame / clear by hand, the reason table with per-reason *forget*, and the journal; the Ollama tab's
+  review card has a *teach the negative network* checkbox and reports what it learned.
+* Tests: `tests/test_negative.py` (weight function, evidence, blame / clear, corrections, judge, crossings,
+  prediction, forget, inversion, persistence, the kind registry, the API routes, the CLI group),
+  `tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
+  tutor, evolve and codegen hooks) and `tests/test_duo.py` (all three rules, the coverage gate, strict, learn,
+  generate / predict, the count model as the positive half).

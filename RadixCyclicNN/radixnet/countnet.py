@@ -58,7 +58,6 @@ __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
 
 COUNT_MODEL_FORMAT = "radixnet-count"
 _W = WINDOW
-_OVERLAP = WINDOW - 1
 _MAX_LOG_PPL = 700.0
 
 
@@ -68,21 +67,6 @@ def _by_amount(rewards: dict[int, float]) -> dict[float, list[int]]:
     for edge, amount in rewards.items():
         groups.setdefault(amount, []).append(edge)
     return groups
-
-
-def _touches(lo: int, hi: int, spans: Sequence[tuple[int, int]]) -> bool:
-    """Does the half-open range ``[lo, hi)`` meet any of the changed ``spans``?
-
-    An empty span is an insertion point: the characters belong on the other
-    side, so the step that walked straight past the position is the one at
-    fault.
-    """
-    for start, end in spans:
-        if end == start:
-            end = start + 1
-        if start < hi and lo < end:
-            return True
-    return False
 
 
 class CountRewardGraph(RadixCyclicGraph):
@@ -775,37 +759,6 @@ class CountRewardNet(GraphModel):
             self.meta["penalties_total"] += result["penalty"]
             graph.recompute_weights()
         return result
-
-    def _steps_over(self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]) -> list[int]:
-        """The edges of a traced text whose step wrote a character inside one of ``spans``.
-
-        Every step is charged with the characters it adds to the text: the
-        first with the whole of its node's label, a later one with everything
-        past the two characters it overlaps its parent by, and the step into
-        END with the position just past the last character - where a sentence
-        that stopped too early went wrong.
-        """
-        graph = self.graph
-        path = graph.node_path(grams)
-        if not path or len(path) < 2:
-            return []
-        labels = graph.labels
-        children = graph.children
-        out: list[int] = []
-        position = 0  # trigram index of the node being entered
-        for index in range(1, len(path)):
-            node = path[index]
-            edge = children[path[index - 1]].get(node)
-            if node == END:
-                if edge is not None and _touches(length, length + 1, spans):
-                    out.append(edge)
-                break
-            size = len(labels[node])
-            lo = 0 if index == 1 else position + _OVERLAP
-            if edge is not None and _touches(lo, position + size, spans):
-                out.append(edge)
-            position += size - _OVERLAP
-        return out
 
     # -- prediction ----------------------------------------------------------
 
