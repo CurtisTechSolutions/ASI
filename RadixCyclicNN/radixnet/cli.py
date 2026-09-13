@@ -390,6 +390,12 @@ class LessonPrinter(_RowPrinter):
                 f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
                 f"mean {fmt(record.get('mean_score'))}"
             )
+        elif kind == "batch":
+            self.console.note(
+                f"batch {record.get('batch')} ({record.get('step')}): {record.get('level')} level, openings of "
+                f"{record.get('words')} words, pass at {fmt(record.get('threshold'))}, "
+                f"{record.get('drills')} drill(s) - {clip(str(record.get('brief') or '-'), 100)}"
+            )
         elif kind == "plan":
             self.console.note(
                 f"lesson plan ({record.get('source')}): {len(record.get('lessons') or [])} lesson(s) at "
@@ -2008,7 +2014,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
-        plan=args.plan or 0,
+        plan=args.plan or 0, batches=args.batches,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
@@ -2051,6 +2057,9 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         ("brief", clip(config.brief, 100) if config.brief else "none (--brief TEXT: the last plan's prompt)"),
         ("plan", f"the teacher plans the next {config.plan} lesson(s) from the final report card"
                  if config.plan else "no lesson plan (--plan N)"),
+        ("auto run", "one batch (--batches N to plan and teach the next ones)" if config.batches == 1 else
+                     (f"{config.batches} batches, each planned from the one before"
+                      if config.batches else "batches until stopped (Ctrl-C), each planned from the one before")),
         ("output", "not saved (--dry-run)" if args.dry_run else out),
     ])
     console.say()
@@ -2088,7 +2097,11 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         ("mistakes", ", ".join(f"{name} x{count}" for name, count in card["errors"].items()) or "none"),
         ("weakest", ", ".join(card["weakest"]) or "-"),
     ])
-    plan = next((record for record in reversed(records) if record.get("kind") == "plan"), None)
+    # the plan that says what comes *after* the run: the one the last batch's card led to, if it was asked for
+    last_batch = max((r.get("batch", 1) for r in records if r.get("kind") == "report"), default=1)
+    plan = next(
+        (r for r in reversed(records) if r.get("kind") == "plan" and r.get("batch", 1) == last_batch), None
+    )
     if plan is not None:
         upgrade = plan.get("upgrade") or {}
         console.say()
@@ -3251,6 +3264,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--topic", default="everyday life", metavar="TEXT", help="what the sentences are about")
     p.add_argument("--rounds", type=pos_int, default=3, help="lesson rounds (each writes, completes and marks a new set of exercises)")
+    p.add_argument("--batches", type=nonneg_int, default=1, metavar="N",
+                   help="auto run: N batches of --rounds rounds, each one planned from the report card of the one "
+                        "before (its brief and its step up in difficulty); 0 keeps going until Ctrl-C")
     p.add_argument("--exercises", type=pos_int, default=5, help="sentence openings per round")
     p.add_argument("--attempts", type=pos_int, default=1, help="completions the network writes per exercise (the first in --mode, the rest sampled)")
     p.add_argument("--focus", metavar="TEXT", help="pin every exercise to one point of grammar, e.g. 'past tense'")

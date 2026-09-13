@@ -2857,6 +2857,7 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         adapt=f.flag("adapt", d.adapt),
         drills=f.integer("drills", d.drills, minimum=0),
         plan=f.integer("plan", d.plan, minimum=0),
+        batches=f.integer("batches", d.batches, minimum=0),
         teach_answer=f.flag("teach_answer", d.teach_answer),
         learn=f.flag("learn", d.learn),
         twonrl_per=f.text("twonrl_per", d.twonrl_per).strip().lower(),
@@ -3092,7 +3093,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the "
      "grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, "
      "grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, "
-     "neg_epochs, pos_epochs, neg_lr, pos_lr, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
+     "neg_epochs, pos_epochs, neg_lr, pos_lr, brief, plan, batches (auto run: each batch planned from the last, "
+     "0 = until stopped), tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
      "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
      "failed), ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),

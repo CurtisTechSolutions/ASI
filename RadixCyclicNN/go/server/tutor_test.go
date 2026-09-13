@@ -450,6 +450,49 @@ func TestTutorStartTeachesToTheBrief(t *testing.T) {
 	}
 }
 
+func TestTutorAutoRunJob(t *testing.T) {
+	e, fake := tutorEnv(t)
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "threshold": 9.5, "batches": 3,
+		"neg_epochs": 1, "pos_epochs": 1,
+	})
+	if status != 202 {
+		t.Fatalf("POST /api/tutor/start = %d: %v", status, body)
+	}
+	if config, _ := body["config"].(map[string]any); config["batches"] != 3.0 {
+		t.Fatalf("the job should carry the batches: %v", body["config"])
+	}
+	waitForJob(e, 60*time.Second)
+	_, history := e.get("/api/tutor/history")
+	records, _ := history["history"].([]any)
+	kinds, started := []string{}, []map[string]any{}
+	for _, entry := range records {
+		record, _ := entry.(map[string]any)
+		kind, _ := record["kind"].(string)
+		if kind != "lesson" {
+			kinds = append(kinds, kind)
+		}
+		if kind == "batch" {
+			started = append(started, record)
+		}
+	}
+	want := "round,report,plan,batch,round,report,plan,batch,round,report"
+	if strings.Join(kinds, ",") != want {
+		t.Fatalf("records = %v", kinds)
+	}
+	if len(started) != 2 || started[0]["batch"] != 2.0 {
+		t.Fatalf("batch records wrong: %v", started)
+	}
+	brief, _ := started[1]["brief"].(string)
+	if brief == "" {
+		t.Fatalf("a batch should be announced with the brief it teaches: %v", started[1])
+	}
+	if len(fake.prompts["exercises"]) != 3 ||
+		!strings.Contains(fake.prompts["exercises"][2], "The plan for this batch of lessons: "+brief) {
+		t.Fatalf("the last batch was not taught to the brief:\n%v", fake.prompts["exercises"])
+	}
+}
+
 func TestTutorPlanBadRequests(t *testing.T) {
 	e, _ := tutorEnv(t)
 	cases := []struct {

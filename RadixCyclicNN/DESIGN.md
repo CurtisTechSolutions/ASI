@@ -680,7 +680,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
   neither Pillow nor a transcriber, so nothing in it is skipped.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
-* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the five endpoints and the CLI.
+* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
 ---
 
@@ -894,8 +894,8 @@ def plan_lessons(client, card, *, topic, level, words, threshold, count=3, exerc
 `write_exercises` with **every** round of the run that follows (`"The plan for this batch of lessons: ..."` above
 the topic, the focus and the weak points), so one batch's report card is the next batch's instructions.
 
-`TutorConfig` (validated like every other config) holds the topic, `rounds`, `exercises`, `attempts`, `focus`,
-`level`, `words`, `brief` (the previous batch's plan), the two providers and their model names (`tutor_provider`, `tutor_model`, `grader_provider`,
+`TutorConfig` (validated like every other config) holds the topic, `rounds`, `batches`, `exercises`, `attempts`,
+`focus`, `level`, `words`, `brief` (the previous batch's plan), the two providers and their model names (`tutor_provider`, `tutor_model`, `grader_provider`,
 `grader_model`; `__post_init__` normalises the providers and fills in the models they imply, and
 `resolved_grader_model` is what the marking runs on), the completion settings (`mode`, `length`, `max_length`, `temperature`,
 `to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `plan`, `teach_answer`,
@@ -922,14 +922,24 @@ one is built from the environment), and every grade records which one marked it:
    the replay buffer like any taught text. `diff_corrections=False` goes back to the whole-sentence way;
    `learn=False` reports what it would have taught and touches nothing.
 
-Records: `{"kind": "lesson", round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
+`run()` is a loop over **batches**: one batch is `rounds` rounds and the report card over them (its own lessons,
+not the run's).  With `batches` > 1 - or 0, which keeps going until the stop event - it closes the loop itself:
+`plan` from that card, `apply_plan(plan)` (the brief becomes `config.brief`, the upgrade sets `level`, `words`,
+`threshold` and `drills`, and `focus` is released because the brief carries the points of grammar in order), then
+the next batch, taught to it.  A batch that cannot be planned ends the run rather than repeating itself; a stop
+between batches never starts one, and the batch it stops in still reports.
+
+Records: `{"kind": "lesson", batch, round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
 spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds}` (`changes` is what
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
 `pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
 `plan = N` (`--plan N`, `POST /api/tutor/start {"plan": N}`) one more record closes the run:
-`{"kind": "plan", rounds, ...LessonPlan.to_dict()}`, from `TutorTrainer.plan(card=None, count=N)` — the run's own
-report card unless one is given.  A teacher that cannot plan costs only a `note`; the lessons stand.
+`{"kind": "plan", batch, rounds, ...LessonPlan.to_dict()}`, from `TutorTrainer.plan(card=None, count=N)` — the
+run's own report card unless one is given.  A teacher that cannot plan costs only a `note`; the lessons stand.
+An auto run plans between batches whether or not `plan` was asked for (`DEFAULT_PLAN_LESSONS` then), and announces
+each new batch with `{"kind": "batch", batch, step, brief, topic, level, words, threshold, drills, note}` — what
+`apply_plan` just set, so a reader always knows what is being taught.
 
 With `--blame` (`TutorTrainer(negative=...)`, `POST /api/tutor/start {"blame": true}`) every failed sentence of a
 round also teaches the **negative network** (section 24) why it failed: the mistake the teacher named is the reason,
@@ -940,7 +950,8 @@ CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
 the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons, the card and
 the plan.  `--plan [N]` (default 3) prints the planned lessons as a table, the step up, the brief, and the
-`tutor --brief ...` command that teaches the next batch to it; `--brief TEXT` is the other end of that loop.
+`tutor --brief ...` command that teaches the next batch to it; `--brief TEXT` is the other end of that loop, and
+`--batches N` (0 = until Ctrl-C) runs it automatically, printing one line per batch as it starts.
 
 CLI flags for the teacher: `--tutor-provider ollama|chatgpt` (`--provider`), `--tutor-model`, `--grader-provider`,
 `--grader-model`, `--url`, `--grader-url`; a `chatgpt` teacher without `$OPENAI_API_KEY` stops before anything is
@@ -969,7 +980,10 @@ the upgraded level, openings, pass mark and drills into the settings above), the
 per planned lesson (the point of grammar, the mistake it fixes, the topic, the exercises, why) with *Use this
 lesson*, which loads that one lesson instead.  Both leave **Start lessons** to the user.  The form's **Brief** box
 and **Prefix words** field are `brief` and `words`; the **Plan** field is the run's own `plan` setting, so a run
-that ends with a `"plan"` record shows it in the same card without asking again.
+that ends with a `"plan"` record shows it in the same card without asking again.  **Batches** is the auto run: the
+button becomes *Start auto run*, the Rounds table gains a `batch` column, the report card is the last batch's, and
+every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
+per batch) so the settings show what the server is teaching.
 
 Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, answers drill requests and
 plans the next lessons; the parsers, the marking, the planner, the loop with a scripted model, the endpoints and
@@ -1366,7 +1380,8 @@ full recompute, 1 vs 8 workers giving the same model, search / generation / conv
 prompts, in order), the marks, the report card and the resulting graph must all match, a dry run on either side
 must change nothing, with `--plan N` the report card is read out to the teacher in the same words and both sides
 come back with the same syllabus (lessons, targets, weak points, level, summary, the brief and the upgrade), and
-with `--brief TEXT` both hand that brief to the exercise writer identically.
+with `--brief TEXT` both hand that brief to the exercise writer identically; `--batches 2` runs the whole loop on
+both sides and the batch records - brief, step, level, openings, pass mark, drills - must match.
 
 ### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
 

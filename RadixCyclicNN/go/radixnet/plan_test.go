@@ -558,6 +558,113 @@ func TestTutorRunCanEndWithAPlan(t *testing.T) {
 	}
 }
 
+func TestAutoRunPlansAndTeachesTheNextBatch(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := DefaultTutorConfig()
+	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Threshold, cfg.Batches = "animals", 1, 2, 9.5, 3
+	cfg.NegEpochs, cfg.PosEpochs = 1, 1
+	trainer, err := NewTutorTrainer(tutorModel(t), fake.client(t), cfg)
+	if err != nil {
+		t.Fatalf("NewTutorTrainer: %v", err)
+	}
+	records, err := trainer.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	kinds := []string{}
+	for _, record := range records {
+		kinds = append(kinds, record["kind"].(string))
+	}
+	want := "round,report,plan,batch,round,report,plan,batch,round,report"
+	if strings.Join(kinds, ",") != want {
+		t.Fatalf("records = %v", kinds)
+	}
+	cards, started := []int{}, []map[string]any{}
+	for _, record := range records {
+		switch record["kind"] {
+		case "report":
+			cards = append(cards, record["lessons"].(int)) // each card is its own batch's
+		case "batch":
+			started = append(started, record)
+		}
+	}
+	if fmt.Sprint(cards) != "[2 2 2]" {
+		t.Fatalf("report cards should be per batch: %v", cards)
+	}
+	if len(started) != 2 || started[0]["batch"] != 2 || started[1]["batch"] != 3 {
+		t.Fatalf("batch records wrong: %v", started)
+	}
+	brief, _ := started[1]["brief"].(string)
+	if brief == "" || trainer.Config.Brief != brief || trainer.Config.Focus != "" {
+		t.Fatalf("the run should now be teaching to the plan: %+v", trainer.Config)
+	}
+	if trainer.Config.Drills != HoldDrills {
+		t.Fatalf("a held-back batch should get sentences to imitate: %d", trainer.Config.Drills)
+	}
+	prompts := fake.prompts["exercises"]
+	if len(prompts) != 3 || strings.Contains(prompts[0], "The plan for this batch") {
+		t.Fatalf("the first batch has no brief yet: %d prompts", len(prompts))
+	}
+	for _, prompt := range prompts[1:] {
+		if !strings.Contains(prompt, "The plan for this batch of lessons: "+brief) {
+			t.Fatalf("a batch was taught without the brief:\n%s", prompt)
+		}
+	}
+}
+
+func TestAutoRunStops(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := DefaultTutorConfig()
+	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Batches, cfg.Learn = "animals", 1, 2, 0, false
+	trainer, err := NewTutorTrainer(tutorModel(t), fake.client(t), cfg)
+	if err != nil {
+		t.Fatalf("NewTutorTrainer: %v", err)
+	}
+	rounds := 0
+	trainer.Stop = func() bool { return rounds >= 2 } // let two batches through, then pull the handle
+	trainer.Progress = func(record map[string]any) {
+		if record["kind"] == "round" {
+			rounds++
+		}
+	}
+	records, err := trainer.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rounds != 2 {
+		t.Fatalf("the run should have stopped after two batches: %d rounds", rounds)
+	}
+	last := records[len(records)-1]["kind"]
+	if last != "report" && last != "plan" {
+		t.Fatalf("a stopped auto run still ends on its card: %v", last)
+	}
+}
+
+func TestApplyPlanSetsTheBriefAndTheStepUp(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := DefaultTutorConfig()
+	cfg.Topic, cfg.Focus, cfg.Drills = "animals", "past tense", 1
+	trainer, err := NewTutorTrainer(tutorModel(t), fake.client(t), cfg)
+	if err != nil {
+		t.Fatalf("NewTutorTrainer: %v", err)
+	}
+	plan := PlanFromCard(planCard(), PlanRequest{Topic: "animals", Level: "beginner", Words: "3 to 6",
+		Threshold: 6.0, Count: 3, Exercises: 5})
+	applied := trainer.ApplyPlan(plan)
+	if trainer.Config.Brief != plan.Prompt || trainer.Config.Focus != "" {
+		t.Fatalf("the brief should replace the pin: %+v", trainer.Config)
+	}
+	if trainer.Config.Level != "beginner" || trainer.Config.Words != "3 to 6" || trainer.Config.Threshold != 6.0 ||
+		trainer.Config.Drills != HoldDrills {
+		t.Fatalf("the step up did not reach the config: %+v", trainer.Config)
+	}
+	for _, key := range []string{"step", "brief", "topic", "level", "words", "threshold", "drills", "note"} {
+		if _, ok := applied[key]; !ok {
+			t.Fatalf("missing %q in %v", key, applied)
+		}
+	}
+}
+
 func TestTutorPlanFailureIsOnlyANote(t *testing.T) {
 	fake := newFakeTeacher(t)
 	cfg := DefaultTutorConfig()

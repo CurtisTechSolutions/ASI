@@ -331,6 +331,7 @@ function LessonTable({ rows, total, running }) {
 /** What each round learned from its grades. */
 function RoundTable({ rounds }) {
   if (rounds.length === 0) return null;
+  const batched = rounds.some((r) => Number(r.batch) > 1); // only an auto run has more than one
   return (
     <>
       <h3>Rounds</h3>
@@ -338,6 +339,7 @@ function RoundTable({ rounds }) {
         <table className="data">
           <thead>
             <tr>
+              {batched ? <th>batch</th> : null}
               <th>round</th>
               <th>lessons</th>
               <th>passed</th>
@@ -357,6 +359,7 @@ function RoundTable({ rounds }) {
           <tbody>
             {rounds.map((r, i) => (
               <tr key={i}>
+                {batched ? <td>{fmtInt(r.batch)}</td> : null}
                 <td>{fmtInt(r.round)}</td>
                 <td>{fmtInt(r.lessons)}</td>
                 <td>{fmtInt(r.passed)}</td>
@@ -416,6 +419,7 @@ export default function TutorPanel({ status }) {
   const [grammarWeight, setGrammarWeight] = useState("0.6");
   const [drills, setDrills] = useState("0");
   const [planCount, setPlanCount] = useState(String(DEFAULT_PLAN_LESSONS));
+  const [batches, setBatches] = useState("1");
   const [adapt, setAdapt] = useState(true);
   const [teachAnswer, setTeachAnswer] = useState(true);
   const [twonrlPer, setTwonrlPer] = useState("round");
@@ -437,6 +441,7 @@ export default function TutorPanel({ status }) {
   const [planError, setPlanError] = useState(null);
   const [showPlan, setShowPlan] = useState(false);
   const planRef = useRef(null);
+  const appliedBatch = useRef(0);
   const [notice, setNotice] = useState(null);
   const [formError, setFormError] = useState(null);
   const [serverHistory, setServerHistory] = useState([]);
@@ -494,12 +499,15 @@ export default function TutorPanel({ status }) {
     }
     setFormError(null);
     setNotice(null);
+    setPlanError(null);
+    appliedBatch.current = 0;
     await start(() =>
       api.tutorStart({
         ...settings(),
         rounds: parseInteger(rounds, 3),
         drills: parseInteger(drills, 0),
         plan: parseInteger(planCount, DEFAULT_PLAN_LESSONS),
+        batches: Math.max(0, parseInteger(batches, 1)),
         twonrl_per: twonrlPer,
         diff_corrections: diffCorrections,
         blame,
@@ -612,6 +620,26 @@ export default function TutorPanel({ status }) {
   const card = reports.length ? reports[reports.length - 1] : null;
   const plans = history.filter((r) => r && r.kind === "plan");
   const plannedByRun = plans.length ? plans[plans.length - 1] : null;
+  const started = history.filter((r) => r && r.kind === "batch");
+  const startedBatch = started.length ? started[started.length - 1] : null;
+  useEffect(() => {
+    // an auto run applies each plan itself; the settings follow it here so the form shows what is being taught
+    const number = startedBatch ? Number(startedBatch.batch) || 0 : 0;
+    if (!startedBatch || number <= appliedBatch.current) return;
+    appliedBatch.current = number;
+    if (startedBatch.brief) setBrief(String(startedBatch.brief));
+    if (startedBatch.topic) setTopic(String(startedBatch.topic));
+    if (startedBatch.level) setLevel(String(startedBatch.level));
+    if (startedBatch.words) setWords(String(startedBatch.words));
+    if (startedBatch.threshold !== null && startedBatch.threshold !== undefined) {
+      setThreshold(String(startedBatch.threshold));
+    }
+    if (startedBatch.drills !== null && startedBatch.drills !== undefined) setDrills(String(startedBatch.drills));
+    setFocus("");
+    setNotice(
+      `Batch ${number} started (${String(startedBatch.step || "hold")}): ${String(startedBatch.brief || "")}`,
+    );
+  }, [startedBatch]);
   useEffect(() => {
     if (plannedByRun) setPlan(plannedByRun); // a run that ended with a plan of its own shows it straight away
   }, [plannedByRun]);
@@ -654,7 +682,9 @@ export default function TutorPanel({ status }) {
           one made. At the end the report card goes back to the teacher, which writes the <b>lesson plan</b> that
           repairs it: one point of grammar per lesson, worst mistake first, the step up in difficulty the marks
           have earned, and the <b>brief</b> for the next batch — which the exercise writer is handed with every
-          round of the run you start from it.
+          round of the run you start from it. Set <b>Batches</b> above 1 and the run does that itself: each batch
+          ends with its report card, plans from it, fills the brief and the step up in below, and teaches the next
+          one (0 keeps going until you press Stop).
         </p>
         <div className="row">
           <TextField
@@ -726,6 +756,15 @@ export default function TutorPanel({ status }) {
             hint="lessons planned at the end, 0 = off"
             value={planCount}
             onChange={setPlanCount}
+            min={0}
+            step={1}
+            disabled={running}
+          />
+          <NumberField
+            label="Batches"
+            hint="auto run: each planned from the last, 0 = until stopped"
+            value={batches}
+            onChange={setBatches}
             min={0}
             step={1}
             disabled={running}
@@ -916,7 +955,7 @@ export default function TutorPanel({ status }) {
 
         <div className="actions">
           <button type="submit" className="primary" disabled={running || busy || otherJobRunning}>
-            {busy ? "Starting…" : "Start lessons"}
+            {busy ? "Starting…" : parseInteger(batches, 1) === 1 ? "Start lessons" : "Start auto run"}
           </button>
           <button type="button" className="danger" disabled={!running} onClick={() => stop()}>
             Stop
@@ -986,7 +1025,10 @@ export default function TutorPanel({ status }) {
             emptyText="No rounds yet."
           />
         ) : null}
-        <ReportCard card={card} title="Report card" />
+        <ReportCard
+          card={card}
+          title={card && Number(card.batch) > 1 ? `Report card · batch ${fmtInt(card.batch)}` : "Report card"}
+        />
         {card && card.lessons ? (
           <>
             <div className="actions">

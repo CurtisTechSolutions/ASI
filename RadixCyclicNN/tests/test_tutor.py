@@ -794,6 +794,76 @@ class TrainerTests(unittest.TestCase):
         for prompt in prompts:
             self.assertIn(f"The plan for this batch of lessons: {brief}", prompt)
 
+    def test_an_auto_run_plans_and_teaches_the_next_batch_itself(self):
+        trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=1, threshold=9.5, batches=3))
+        records = trainer.run()
+        self.assertEqual([r["kind"] for r in records],
+                         ["round", "report", "plan", "batch", "round", "report", "plan", "batch", "round", "report"])
+        self.assertEqual([r["batch"] for r in records if r["kind"] == "round"], [1, 2, 3])
+        self.assertEqual([r["round"] for r in records if r["kind"] == "round"], [1, 2, 3])  # rounds run on
+        cards = [r for r in records if r["kind"] == "report"]
+        self.assertEqual([c["lessons"] for c in cards], [2, 2, 2])  # each card is its own batch's, not the run's
+        self.assertEqual([c["batch"] for c in cards], [1, 2, 3])
+        started = [r for r in records if r["kind"] == "batch"]
+        self.assertEqual([r["batch"] for r in started], [2, 3])
+        self.assertTrue(all(r["brief"] for r in started))
+        self.assertEqual(started[0]["step"], "hold")  # nothing passed at 9.5
+        # the config the run is now teaching to is the plan's
+        self.assertEqual(trainer.config.brief, started[-1]["brief"])
+        self.assertEqual(trainer.config.drills, HOLD_DRILLS)
+        self.assertIsNone(trainer.config.focus)
+        # and the exercise writer was handed it from the second batch on
+        prompts = self.fake.prompts("exercises")
+        self.assertEqual(len(prompts), 3)
+        self.assertNotIn("The plan for this batch", prompts[0])
+        for prompt in prompts[1:]:
+            self.assertIn(f"The plan for this batch of lessons: {trainer.config.brief}", prompt)
+
+    def test_an_auto_run_keeps_going_until_it_is_stopped(self):
+        stop = threading.Event()
+        trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=1, batches=0))
+        original = trainer.apply_plan
+
+        def apply(plan):  # three batches in, pull the handle
+            applied = original(plan)
+            if applied["brief"] and len([r for r in trainer.history if r["kind"] == "batch"]) >= 2:
+                stop.set()
+            return applied
+
+        trainer.apply_plan = apply
+        records = trainer.run(stop_event=stop)
+        self.assertEqual([r["batch"] for r in records if r["kind"] == "batch"], [2, 3])
+        self.assertEqual(len([r for r in records if r["kind"] == "round"]), 3)
+        cards = [r for r in records if r["kind"] == "report"]
+        self.assertEqual([c["batch"] for c in cards], [1, 2, 3])  # the batch it was stopped in still reports
+        self.assertEqual(records[-1]["kind"], "plan")  # and what would have come next is still said
+
+    def test_an_auto_run_that_cannot_be_planned_stops_rather_than_repeating(self):
+        self.fake.plan_response = json.dumps({"lessons": []})  # unusable, so the marks plan instead
+        trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=1, threshold=9.5, batches=2))
+        self.assertEqual([r["kind"] for r in trainer.run()],
+                         ["round", "report", "plan", "batch", "round", "report"])
+        self.fake.plan_response = None
+        self.fake.fail_with = None
+
+        trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=1, batches=3))
+        trainer.plan = lambda *a, **k: (_ for _ in ()).throw(LLMError("the teacher went home"))
+        records = trainer.run()
+        self.assertEqual([r["kind"] for r in records], ["round", "report"])  # no plan, no next batch
+        self.assertIn("no lesson plan", trainer.history[-1]["message"])
+
+    def test_apply_plan_sets_the_brief_and_the_step_up(self):
+        trainer = TutorTrainer(trained_model(), self.client, self.config(focus="past tense", drills=1))
+        plan = plan_from_card(CARD, topic="animals", level="beginner", words="3 to 6", threshold=6.0)
+        applied = trainer.apply_plan(plan)
+        cfg = trainer.config
+        self.assertEqual(cfg.brief, plan.prompt)
+        self.assertIsNone(cfg.focus)  # the brief carries the points of grammar now
+        self.assertEqual((cfg.level, cfg.words, cfg.threshold, cfg.drills), ("beginner", "3 to 6", 6.0, HOLD_DRILLS))
+        self.assertEqual(applied["step"], "hold")
+        self.assertEqual(applied["brief"], cfg.brief)
+        self.assertEqual(sorted(applied), ["brief", "drills", "level", "note", "step", "threshold", "topic", "words"])
+
     def test_a_run_can_end_with_the_next_lesson_plan(self):
         trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=1, threshold=9.5, plan=2))
         seen = []
@@ -1162,6 +1232,39 @@ class ApiTests(unittest.TestCase):
         wait_for_job(self.client)
         self.assertIn(f"The plan for this batch of lessons: {brief}", self.fake.prompts("exercises")[0])
 
+    def test_an_auto_run_job_plans_and_teaches_itself(self):
+        status, body, _ = self.client.post(
+            "/api/tutor/start",
+            {"topic": "animals", "rounds": 1, "exercises": 2, "threshold": 9.5, "batches": 3, **FAST},
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["config"]["batches"], 3)
+        job = wait_for_job(self.client)
+        self.assertEqual((job["state"], job["error"]), ("done", None))
+        _status, history, _ = self.client.get("/api/tutor/history")
+        kinds = [r["kind"] for r in history["history"]]
+        self.assertEqual([k for k in kinds if k != "lesson"],
+                         ["round", "report", "plan", "batch", "round", "report", "plan", "batch", "round", "report"])
+        started = [r for r in history["history"] if r["kind"] == "batch"]
+        self.assertEqual([r["batch"] for r in started], [2, 3])
+        self.assertTrue(started[0]["brief"])
+        self.assertEqual(started[0]["drills"], 3)  # held back: correct sentences to imitate come with it
+        # every batch after the first was taught to the brief the one before it planned
+        written = self.fake.prompts("exercises")
+        self.assertEqual(len(written), 3)
+        self.assertIn(f"The plan for this batch of lessons: {started[-1]['brief']}", written[-1])
+
+    def test_a_running_auto_run_can_be_stopped(self):
+        status, _body, _ = self.client.post(
+            "/api/tutor/start", {"topic": "animals", "rounds": 1, "exercises": 2, "batches": 0, **FAST},
+        )
+        self.assertEqual(status, 202)
+        self.client.post("/api/job/stop")
+        job = wait_for_job(self.client)
+        self.assertIn(job["state"], ("done", "stopped"))
+        _status, history, _ = self.client.get("/api/tutor/history")
+        self.assertTrue(any(r["kind"] == "report" for r in history["history"]))
+
     def test_plan_bad_requests(self):
         for body, expected in (
             ({"report": "a card", "topic": "animals"}, "'report' must be an object"),
@@ -1272,6 +1375,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(plan["upgrade"]["step"], "hold")
         with open(report, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["plan"]["lessons"], plan["lessons"])
+
+    def test_auto_run_batches_plan_themselves(self):
+        self.train()
+        doc = self.run_cli("tutor", "--topic", "animals", "--rounds", "1", "--exercises", "2", "--threshold", "9.5",
+                           "--dry-run", "--batches", "2")
+        self.assertEqual([r["kind"] for r in doc["records"]],
+                         ["round", "report", "plan", "batch", "round", "report"])
+        started = [r for r in doc["records"] if r["kind"] == "batch"]
+        self.assertEqual(started[0]["batch"], 2)
+        self.assertTrue(started[0]["brief"])
+        self.assertIsNone(doc["plan"])  # the last batch was not asked for a plan of its own
+        self.assertEqual(doc["config"]["batches"], 2)
 
     def test_bad_options_and_unreachable_ollama(self):
         self.run_cli("tutor", "--topic", " ", expect=1)

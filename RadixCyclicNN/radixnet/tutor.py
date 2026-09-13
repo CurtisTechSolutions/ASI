@@ -1170,6 +1170,7 @@ class TutorConfig:
     adapt: bool = True  # drill the previous round's weakest points
     drills: int = 0  # extra correct example sentences per round
     plan: int = 0  # lessons to plan from the final report card at the end of the run (0 = no plan)
+    batches: int = 1  # auto run: batches of ``rounds`` rounds, each planned from the last (0 = until stopped)
     teach_answer: bool = True  # a failed lesson also learns the teacher's model answer
     # 2NRL
     learn: bool = True  # False: a dry run - the grades are reported, the network is left alone
@@ -1240,6 +1241,8 @@ class TutorConfig:
             raise ValueError("drills, replay_limit and checkpoint_every must be >= 0")
         if self.plan < 0:
             raise ValueError("plan must be >= 0")
+        if self.batches < 0:
+            raise ValueError("batches must be >= 0 (0 = until stopped)")
         if self.neg_epochs < 0 or self.pos_epochs < 0:
             raise ValueError("epochs must be >= 0")
         if self.neg_lr < 0 or self.pos_lr < 0:
@@ -1535,10 +1538,11 @@ class TutorTrainer:
         if progress is not None:
             progress(record)
 
-    def _emit_lesson(self, progress: ProgressFn | None, round_no: int, lesson: Lesson) -> None:
+    def _emit_lesson(self, progress: ProgressFn | None, round_no: int, lesson: Lesson, batch: int = 1) -> None:
         grade = lesson.grade
         self._emit(progress, {
-            "kind": "lesson", "round": round_no, "exercise": lesson.exercise.id, "prefix": lesson.exercise.prefix,
+            "kind": "lesson", "batch": batch, "round": round_no, "exercise": lesson.exercise.id,
+            "prefix": lesson.exercise.prefix,
             "focus": lesson.exercise.focus, "attempt": lesson.attempt + 1, "mode": lesson.mode,
             "continuation": _clip(lesson.continuation, 400), "sentence": _clip(lesson.sentence, 400),
             "score": grade.score, "grammar": grade.grammar, "spelling": grade.spelling, "fluency": grade.fluency,
@@ -1551,7 +1555,9 @@ class TutorTrainer:
         """What the teacher changed, span by span - ``[{"op", "wrong", "right"}]`` - or ``[]``."""
         return lesson.changes
 
-    def run_round(self, round_no: int, progress: ProgressFn | None = None) -> tuple[dict, list[Lesson]]:
+    def run_round(
+        self, round_no: int, progress: ProgressFn | None = None, batch: int = 1
+    ) -> tuple[dict, list[Lesson]]:
         """One round: exercises, completions, grades, and the 2NRL they lead to."""
         cfg = self.config
         t0 = time.perf_counter()
@@ -1565,7 +1571,7 @@ class TutorTrainer:
         if lessons and not self._stopped():
             self.grade(lessons)
         for lesson in lessons:
-            self._emit_lesson(progress, round_no, lesson)
+            self._emit_lesson(progress, round_no, lesson, batch)
         self.lessons.extend(lessons)
         card = report_card(lessons)
         drills: list[str] = []
@@ -1582,7 +1588,7 @@ class TutorTrainer:
         if cfg.adapt:
             self.weak = card["weakest"]
         record = {
-            "kind": "round", "round": round_no, "topic": cfg.topic, "focus": cfg.focus,
+            "kind": "round", "batch": batch, "round": round_no, "topic": cfg.topic, "focus": cfg.focus,
             "exercises": len(exercises), "drills": len(drills), "seconds": time.perf_counter() - t0,
             **card, **learned,
         }
@@ -1661,35 +1667,96 @@ class TutorTrainer:
         stop_event: threading.Event | None = None,
         checkpoint_manager: Any = None,
     ) -> list[dict]:
-        """Every round, then a final report card; the lesson records go to ``progress`` as they happen."""
+        """Every batch of rounds, each ending in its own report card; the records go to ``progress`` as they happen.
+
+        One **batch** is ``rounds`` rounds and the report card over them.  With
+        ``batches`` > 1 (or 0, which keeps going until it is stopped) the run
+        drives itself: the card is planned from (:meth:`plan`), the plan is
+        applied (:meth:`apply_plan`: its brief becomes the next batch's
+        standing instruction and the step up its difficulty), and the next
+        batch is taught to it.  A batch that cannot be planned ends the run
+        rather than repeating itself.
+        """
         cfg = self.config
         self._stop = stop_event if stop_event is not None else threading.Event()
         total = cfg.rounds if rounds is None else rounds
         if total < 1:
             raise ValueError("rounds must be >= 1")
         records: list[dict] = []
-        for round_no in range(1, total + 1):
-            if self._stopped():
-                break
-            record, _lessons = self.run_round(round_no, progress)
-            self._emit(progress, record)
-            records.append(record)
-            if checkpoint_manager is not None and cfg.checkpoint_every and round_no % cfg.checkpoint_every == 0:
-                checkpoint_manager.save(self.model, round_no, "tutor", {
-                    "round": round_no, "mean_score": record.get("mean_score"), "pass_rate": record.get("pass_rate"),
-                })
-        summary = {"kind": "report", "rounds": len(records), "topic": cfg.topic, **report_card(self.lessons)}
-        self._emit(progress, summary)
-        records.append(summary)
-        if cfg.plan and self.lessons and not self._stopped():
-            try:
-                record = {"kind": "plan", "rounds": len(records) - 1, **self.plan(summary, cfg.plan).to_dict()}
-            except LLMError as exc:  # the lessons stand without a plan for the next ones
-                self._emit(progress, {"kind": "note", "message": f"no lesson plan: {exc}"})
-            else:
+        round_no = 0
+        batch = 0
+        while cfg.batches == 0 or batch < cfg.batches:
+            if batch and self._stopped():
+                break  # stopped between batches: no empty card for one that never ran
+            batch += 1
+            taught = len(self.lessons)  # this batch's lessons, so its card is its own
+            rounds_here = 0
+            for _ in range(total):
+                if self._stopped():
+                    break
+                round_no += 1
+                rounds_here += 1
+                record, _lessons = self.run_round(round_no, progress, batch)
                 self._emit(progress, record)
                 records.append(record)
+                if checkpoint_manager is not None and cfg.checkpoint_every and round_no % cfg.checkpoint_every == 0:
+                    checkpoint_manager.save(self.model, round_no, "tutor", {
+                        "round": round_no, "batch": batch, "mean_score": record.get("mean_score"),
+                        "pass_rate": record.get("pass_rate"),
+                    })
+            summary = {
+                "kind": "report", "batch": batch, "rounds": rounds_here, "topic": cfg.topic,
+                **report_card(self.lessons[taught:]),
+            }
+            self._emit(progress, summary)  # a batch always ends with its card, stopped or not
+            records.append(summary)
+            last = bool(cfg.batches) and batch >= cfg.batches
+            wanted = bool(cfg.plan) or not last  # a batch that has a successor is always planned
+            if self._stopped() or not wanted or not self.lessons[taught:]:
+                break  # the run was stopped, nothing was asked for, or there is nothing to plan from
+            try:
+                plan = self.plan(summary, cfg.plan or DEFAULT_PLAN_LESSONS)
+            except LLMError as exc:  # the lessons stand without a plan for the next ones
+                self._emit(progress, {"kind": "note", "batch": batch, "message": f"no lesson plan: {exc}"})
+                break
+            record = {"kind": "plan", "batch": batch, "rounds": rounds_here, **plan.to_dict()}
+            self._emit(progress, record)
+            records.append(record)
+            if last:
+                break
+            applied = self.apply_plan(plan)
+            if self._stopped():
+                break  # stopped while it was planning: do not announce a batch that will not run
+            started = {"kind": "batch", "batch": batch + 1, **applied}
+            self._emit(progress, started)
+            records.append(started)
         return records
+
+    def apply_plan(self, plan: LessonPlan) -> dict:
+        """Teach what comes next to a plan: its brief, and the step up the marks earned.
+
+        The brief becomes :attr:`TutorConfig.brief` - handed to the exercise
+        writer with every round from now on - and the upgrade sets the level,
+        how long the openings are, the pass mark and the drill sentences.  The
+        single-focus pin is released: the brief carries the points of grammar,
+        in order, and a pin from an earlier batch would silently overrule it.
+        """
+        cfg = self.config
+        upgrade = plan.upgrade or {}
+        cfg.brief = plan.prompt or cfg.brief
+        cfg.focus = None
+        cfg.level = str(upgrade.get("level") or cfg.level)
+        cfg.words = str(upgrade.get("words") or cfg.words)
+        threshold = _mark_of(upgrade.get("threshold"))
+        if threshold is not None:
+            cfg.threshold = threshold
+        if upgrade.get("drills") is not None:
+            cfg.drills = _count_of(upgrade.get("drills"))
+        cfg.validate()
+        return {
+            "step": upgrade.get("step", "hold"), "brief": cfg.brief, "topic": cfg.topic, "level": cfg.level,
+            "words": cfg.words, "threshold": cfg.threshold, "drills": cfg.drills, "note": upgrade.get("note", ""),
+        }
 
     def plan(self, card: dict | None = None, count: int = DEFAULT_PLAN_LESSONS) -> LessonPlan:
         """The next lessons, planned by the teacher from a report card - by default the run's own.

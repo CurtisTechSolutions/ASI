@@ -698,11 +698,13 @@ type TutorConfig struct {
 	Threshold     float64 `json:"threshold"`
 	GrammarWeight float64 `json:"grammar_weight"`
 	Batch         int     `json:"batch"`
-	Adapt         bool    `json:"adapt"`        // drill the previous round's weakest points
-	Drills        int     `json:"drills"`       // extra correct example sentences per round
-	Plan          int     `json:"plan"`         // lessons to plan from the final report card (0 = no plan)
-	TeachAnswer   bool    `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
-	Learn         bool    `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
+	Adapt         bool    `json:"adapt"`  // drill the previous round's weakest points
+	Drills        int     `json:"drills"` // extra correct example sentences per round
+	Plan          int     `json:"plan"`   // lessons to plan from the final report card (0 = no plan)
+	// Batches is the auto run: batches of Rounds rounds, each planned from the one before (0 = until stopped).
+	Batches     int  `json:"batches"`
+	TeachAnswer bool `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
+	Learn       bool `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
 	// 2NRL
 	TwoNRLPer string `json:"twonrl_per"`
 	// DiffCorrections teaches a correction from its diff with the sentence the network wrote
@@ -725,7 +727,7 @@ func DefaultTutorConfig() TutorConfig {
 		Topic: "everyday life", Rounds: 3, Exercises: 5, Attempts: 1, Level: "beginner", Words: "3 to 6",
 		TutorProvider: DefaultProvider, TutorModel: DefaultTutorModel(),
 		Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
-		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Adapt: true, TeachAnswer: true, Learn: true,
+		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Batches: 1, Adapt: true, TeachAnswer: true, Learn: true,
 		TwoNRLPer: "round", DiffCorrections: true, KeepWeight: 0.25, MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3,
 		Strength: 1.0, Replay: true, ReplayLimit: 64,
 	}
@@ -818,6 +820,9 @@ func (c *TutorConfig) Validate() error {
 	}
 	if c.Plan < 0 {
 		return fmt.Errorf("plan must be >= 0")
+	}
+	if c.Batches < 0 {
+		return fmt.Errorf("batches must be >= 0 (0 = until stopped)")
 	}
 	if c.NegEpochs < 0 || c.PosEpochs < 0 {
 		return fmt.Errorf("epochs must be >= 0")
@@ -1258,11 +1263,12 @@ func lastLoss(records []map[string]any) any {
 	return nil
 }
 
-func (t *TutorTrainer) emitLesson(round int, lesson *Lesson) {
+func (t *TutorTrainer) emitLesson(round int, lesson *Lesson, batch int) {
 	grade := lesson.Grade
 	t.emit(map[string]any{
-		"kind": "lesson", "round": round, "exercise": lesson.Exercise.ID, "prefix": lesson.Exercise.Prefix,
-		"focus": lesson.Exercise.Focus, "attempt": lesson.Attempt + 1, "mode": lesson.Mode,
+		"kind": "lesson", "batch": batch, "round": round, "exercise": lesson.Exercise.ID,
+		"prefix": lesson.Exercise.Prefix,
+		"focus":  lesson.Exercise.Focus, "attempt": lesson.Attempt + 1, "mode": lesson.Mode,
 		"continuation": clipText(lesson.Continuation, 400), "sentence": clipText(lesson.Sentence, 400),
 		"score": grade.Score, "grammar": grade.Grammar, "spelling": grade.Spelling, "fluency": grade.Fluency,
 		"passed": grade.Passed, "error": grade.Error, "correction": clipText(grade.Correction, 400),
@@ -1273,6 +1279,11 @@ func (t *TutorTrainer) emitLesson(round int, lesson *Lesson) {
 
 // RunRound runs one round: exercises, completions, grades and the 2NRL they lead to.
 func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
+	return t.runRound(round, 1)
+}
+
+// runRound is RunRound, tagging its records with the batch they belong to.
+func (t *TutorTrainer) runRound(round, batch int) (map[string]any, []*Lesson, error) {
 	cfg := t.Config
 	started := time.Now()
 	exercises, err := t.SetExercises(round)
@@ -1298,7 +1309,7 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 		}
 	}
 	for _, lesson := range lessons {
-		t.emitLesson(round, lesson)
+		t.emitLesson(round, lesson, batch)
 	}
 	t.Lessons = append(t.Lessons, lessons...)
 	card := ReportCard(lessons)
@@ -1328,7 +1339,7 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 		t.Weak = card["weakest"].([]string)
 	}
 	record := map[string]any{
-		"kind": "round", "round": round, "topic": cfg.Topic, "focus": cfg.Focus,
+		"kind": "round", "batch": batch, "round": round, "topic": cfg.Topic, "focus": cfg.Focus,
 		"exercises": len(exercises), "drills": len(drills), "seconds": time.Since(started).Seconds(),
 	}
 	for key, value := range card {
@@ -1426,41 +1437,115 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 	return merged, nil
 }
 
-// Run works through every round and finishes with a report card over all of them.
+// Run works through every batch of rounds, each ending in its own report card.
+//
+// One batch is Rounds rounds and the card over them.  With Batches > 1 (or 0,
+// which keeps going until it is stopped) the run drives itself: the card is
+// planned from (PlanNext), the plan is applied (ApplyPlan: its brief becomes
+// the next batch's standing instruction and the step up its difficulty), and
+// the next batch is taught to it.  A batch that cannot be planned ends the run
+// rather than repeating itself.
 func (t *TutorTrainer) Run() ([]map[string]any, error) {
+	cfg := &t.Config
 	records := []map[string]any{}
-	for round := 1; round <= t.Config.Rounds; round++ {
-		if t.stopped() {
+	round, batch := 0, 0
+	for cfg.Batches == 0 || batch < cfg.Batches {
+		if batch > 0 && t.stopped() {
+			break // stopped between batches: no empty card for one that never ran
+		}
+		batch++
+		taught := len(t.Lessons) // this batch's lessons, so its card is its own
+		here := 0
+		for i := 0; i < cfg.Rounds; i++ {
+			if t.stopped() {
+				break
+			}
+			round++
+			here++
+			record, _, err := t.runRound(round, batch)
+			if err != nil {
+				return records, err
+			}
+			t.emit(record)
+			records = append(records, record)
+		}
+		summary := map[string]any{"kind": "report", "batch": batch, "rounds": here, "topic": cfg.Topic}
+		for key, value := range ReportCard(t.Lessons[taught:]) {
+			summary[key] = value
+		}
+		t.emit(summary) // a batch always ends with its card, stopped or not
+		records = append(records, summary)
+		last := cfg.Batches > 0 && batch >= cfg.Batches
+		wanted := cfg.Plan > 0 || !last // a batch that has a successor is always planned
+		if t.stopped() || !wanted || len(t.Lessons) == taught {
 			break
 		}
-		record, _, err := t.RunRound(round)
-		if err != nil {
-			return records, err
+		count := cfg.Plan
+		if count < 1 {
+			count = DefaultPlanLessons
 		}
-		t.emit(record)
-		records = append(records, record)
-	}
-	summary := map[string]any{"kind": "report", "rounds": len(records), "topic": t.Config.Topic}
-	for key, value := range ReportCard(t.Lessons) {
-		summary[key] = value
-	}
-	t.emit(summary)
-	rounds := len(records)
-	records = append(records, summary)
-	if t.Config.Plan > 0 && len(t.Lessons) > 0 && !t.stopped() {
-		plan, err := t.PlanNext(summary, t.Config.Plan)
+		plan, err := t.PlanNext(summary, count)
 		if err != nil { // the lessons stand without a plan for the next ones
-			t.emit(map[string]any{"kind": "note", "message": "no lesson plan: " + err.Error()})
-			return records, nil
+			t.emit(map[string]any{"kind": "note", "batch": batch, "message": "no lesson plan: " + err.Error()})
+			break
 		}
-		record := map[string]any{"kind": "plan", "rounds": rounds}
+		record := map[string]any{"kind": "plan", "batch": batch, "rounds": here}
 		for key, value := range plan.Map() {
 			record[key] = value
 		}
 		t.emit(record)
 		records = append(records, record)
+		if last {
+			break
+		}
+		applied := t.ApplyPlan(plan)
+		if t.stopped() {
+			break // stopped while it was planning: do not announce a batch that will not run
+		}
+		started := map[string]any{"kind": "batch", "batch": batch + 1}
+		for key, value := range applied {
+			started[key] = value
+		}
+		t.emit(started)
+		records = append(records, started)
 	}
 	return records, nil
+}
+
+// ApplyPlan teaches what comes next to a plan: its brief, and the step up the
+// marks earned.  The brief becomes TutorConfig.Brief - handed to the exercise
+// writer with every round from now on - and the upgrade sets the level, how
+// long the openings are, the pass mark and the drill sentences.  The
+// single-focus pin is released: the brief carries the points of grammar, in
+// order, and a pin from an earlier batch would silently overrule it.
+func (t *TutorTrainer) ApplyPlan(plan LessonPlan) map[string]any {
+	cfg := &t.Config
+	upgrade := plan.Upgrade
+	if upgrade == nil {
+		upgrade = map[string]any{}
+	}
+	if plan.Prompt != "" {
+		cfg.Brief = plan.Prompt
+	}
+	cfg.Focus = ""
+	if level, _ := upgrade["level"].(string); level != "" {
+		cfg.Level = level
+	}
+	if words, _ := upgrade["words"].(string); words != "" {
+		cfg.Words = words
+	}
+	if threshold := markOf(upgrade["threshold"]); threshold != nil {
+		cfg.Threshold = *threshold
+	}
+	if drills, ok := upgrade["drills"].(int); ok {
+		cfg.Drills = drills
+	}
+	step, _ := upgrade["step"].(string)
+	note, _ := upgrade["note"].(string)
+	return map[string]any{
+		"step": step, "brief": cfg.Brief, "topic": cfg.Topic, "level": cfg.Level, "words": cfg.Words,
+		"threshold": cfg.Threshold, "drills": cfg.Drills, "note": note,
+	}
 }
 
 // PlanNext is the next lessons, planned by the teacher from a report card - by

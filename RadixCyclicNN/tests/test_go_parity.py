@@ -391,6 +391,28 @@ class TestGoTutorParity(unittest.TestCase):
         self.assertEqual(len(written), 1)
         self.assertIn(f"The plan for this batch of lessons: {brief}", written[0])
 
+    def test_both_tutors_auto_run_the_same_way(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--dry-run", "--batches", 2)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+
+        # the same conversation: exercises, marking, the plan between the batches, then the second batch's exercises
+        self.assertEqual(len(py_calls), len(self.calls()))
+        for i, (first, second) in enumerate(zip(py_calls, self.calls())):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        self.assertEqual([r["kind"] for r in a["records"]], [r["kind"] for r in b["records"]])
+        self.assertEqual([r["kind"] for r in a["records"]], ["round", "report", "plan", "batch", "round", "report"])
+        started_py = [r for r in a["records"] if r["kind"] == "batch"]
+        started_go = [r for r in b["records"] if r["kind"] == "batch"]
+        self.assertEqual(started_py, started_go)  # the same brief, step, level, openings, pass mark and drills
+        self.assertEqual(started_py[0]["batch"], 2)
+        written = [prompt for system, prompt in py_calls if "writing exercises" in system]
+        self.assertEqual(len(written), 2)
+        self.assertIn(f"The plan for this batch of lessons: {started_py[0]['brief']}", written[1])
+
     def test_dry_runs_agree_and_change_nothing(self):
         options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run")
         before = load_json(self.py_path)["graph"]["edges"]["reward"]

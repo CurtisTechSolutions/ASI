@@ -815,6 +815,7 @@ func cmdTutor(args []string) {
 	cfg := radixnet.DefaultTutorConfig()
 	topic := fs.String("topic", cfg.Topic, "what the sentences are about")
 	rounds := fs.Int("rounds", cfg.Rounds, "lesson rounds")
+	batches := fs.Int("batches", cfg.Batches, "auto run: batches of --rounds rounds, each planned from the report card of the one before (0 = until interrupted)")
 	exercises := fs.Int("exercises", cfg.Exercises, "sentence openings per round")
 	attempts := fs.Int("attempts", cfg.Attempts, "completions per exercise (the first in --mode, the rest sampled)")
 	focus := fs.String("focus", "", "pin every exercise to one point of grammar, e.g. 'past tense'")
@@ -856,6 +857,7 @@ func cmdTutor(args []string) {
 	_ = fs.Parse(args)
 
 	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Attempts = *topic, *rounds, *exercises, *attempts
+	cfg.Batches = *batches
 	cfg.Focus, cfg.Level, cfg.Words, cfg.Brief = *focus, *level, *words, *brief
 	cfg.TutorProvider, cfg.GraderProvider = *tutorProvider, *graderProvider
 	cfg.TutorModel, cfg.GraderModel = *tutorModel, *graderModel
@@ -927,7 +929,7 @@ func cmdTutor(args []string) {
 	}
 	say("report card: %v/%v passed, mean %s (grammar %s); mistakes: %s",
 		card["passed"], card["lessons"], fmtMark(card["mean_score"]), fmtMark(card["mean_grammar"]), mistakes(card))
-	planned := lastRecord(records, "plan")
+	planned := lastPlan(records)
 	if planned != nil {
 		sayPlan(planned)
 	}
@@ -942,10 +944,21 @@ func cmdTutor(args []string) {
 	}
 }
 
-// lastRecord is the last record of one kind, or nil.
-func lastRecord(records []map[string]any, kind string) map[string]any {
+// lastPlan is the plan that says what comes *after* the run: the one the last
+// batch's report card led to, if a plan was asked for at all.
+func lastPlan(records []map[string]any) map[string]any {
+	last := 1
+	for _, record := range records {
+		if kind, _ := record["kind"].(string); kind == "report" {
+			if batch, ok := record["batch"].(int); ok && batch > last {
+				last = batch
+			}
+		}
+	}
 	for i := len(records) - 1; i >= 0; i-- {
-		if name, _ := records[i]["kind"].(string); name == kind {
+		kind, _ := records[i]["kind"].(string)
+		batch, ok := records[i]["batch"].(int)
+		if kind == "plan" && (!ok || batch == last) {
 			return records[i]
 		}
 	}
@@ -1004,6 +1017,10 @@ func sayLesson(record map[string]any) {
 		say("round %v: %v/%v passed, mean %s (grammar %s), weakest: %s -> %s (bad=%v, good=%v)",
 			record["round"], record["passed"], record["lessons"], fmtMark(record["mean_score"]),
 			fmtMark(record["mean_grammar"]), weak, action, record["bad"], record["good"])
+	case "batch":
+		say("batch %v (%v): %v level, openings of %v words, pass at %v, %v drill(s) - %v",
+			record["batch"], record["step"], record["level"], record["words"], fmtMark(record["threshold"]),
+			record["drills"], record["brief"])
 	case "plan":
 		lessons, _ := record["lessons"].([]map[string]any)
 		targets, _ := record["targets"].([]string)
