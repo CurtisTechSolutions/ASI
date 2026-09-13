@@ -1883,7 +1883,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     grader_provider = args.grader_provider or args.tutor_provider
     config = TutorConfig(
         topic=args.topic, rounds=args.rounds, exercises=args.exercises, attempts=args.attempts, focus=args.focus,
-        level=args.level, words=args.words, tutor_provider=args.tutor_provider, grader_provider=grader_provider,
+        level=args.level, words=args.words, brief=args.brief or "",
+        tutor_provider=args.tutor_provider, grader_provider=grader_provider,
         tutor_model=args.tutor_model or default_tutor_model(args.tutor_provider),
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
@@ -1928,6 +1929,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
                  f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive "
                  f"epochs={config.pos_epochs} lr={config.pos_lr}, batch={config.batch_size}, "
                  f"garbage weight {fmt(config.min_weight)}..1"),
+        ("brief", clip(config.brief, 100) if config.brief else "none (--brief TEXT: the last plan's prompt)"),
         ("plan", f"the teacher plans the next {config.plan} lesson(s) from the final report card"
                  if config.plan else "no lesson plan (--plan N)"),
         ("output", "not saved (--dry-run)" if args.dry_run else out),
@@ -1969,6 +1971,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     ])
     plan = next((record for record in reversed(records) if record.get("kind") == "plan"), None)
     if plan is not None:
+        upgrade = plan.get("upgrade") or {}
         console.say()
         console.say(f"lesson plan ({plan['source']}): {plan['summary']}")
         console.table(
@@ -1979,11 +1982,17 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
                 for i, lesson in enumerate(plan["lessons"], 1)
             ],
         )
+        console.pairs([
+            ("step up", f"{upgrade.get('step', '-')}: {upgrade.get('note', '-')}"),
+            ("brief", plan.get("prompt") or "-"),
+        ])
         first = plan["lessons"][0]
         console.say(
-            f"run the first one: {PROG} tutor --topic {quote(first['topic'] or config.topic)}"
-            + (f" --focus {quote(first['focus'])}" if first["focus"] else "")
-            + f" --level {plan['level']} --exercises {first['exercises']}"
+            f"teach the next batch: {PROG} tutor --topic {quote(first['topic'] or config.topic)}"
+            + f" --level {upgrade.get('level', plan['level'])} --words {quote(str(upgrade.get('words', config.words)))}"
+            + f" --threshold {float(upgrade.get('threshold', config.threshold)):g}"
+            + f" --exercises {first['exercises']} --drills {upgrade.get('drills', config.drills)}"
+            + f" --brief {quote(plan.get('prompt') or '')}"
         )
     doc = {
         "model": origin.to_dict(), "out": None if args.dry_run else out, "config": config.to_dict(),
@@ -3059,6 +3068,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--focus", metavar="TEXT", help="pin every exercise to one point of grammar, e.g. 'past tense'")
     p.add_argument("--level", default="beginner", metavar="TEXT", help="how hard the exercises are (beginner, intermediate, ...)")
     p.add_argument("--words", default="3 to 6", metavar="TEXT", help="how many words a prefix has")
+    p.add_argument("--brief", metavar="TEXT",
+                   help="what this batch of lessons is being taught to: the prompt the last report card led to "
+                        "(the plan's 'brief'), handed to the teacher with every set of exercises")
     p.add_argument("--tutor-provider", "--provider", dest="tutor_provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
                    help="who teaches: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY; the lessons go to OpenAI)")
     p.add_argument("--tutor-model", metavar="NAME",

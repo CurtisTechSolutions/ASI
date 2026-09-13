@@ -112,6 +112,8 @@ from .tutor import (
     LEVELS as TUTOR_LEVELS,
     MODES as TUTOR_MODES,
     TWONRL_PER as TUTOR_TWONRL_PER,
+    UPGRADE_STEPS as TUTOR_UPGRADE_STEPS,
+    WORDS_LADDER as TUTOR_WORDS_LADDER,
     Exercise,
     TutorConfig,
     TutorTrainer,
@@ -2713,6 +2715,7 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         focus=f.text("focus", None) or None,
         level=f.text("level", d.level),
         words=f.text("words", d.words),
+        brief=f.text("brief", d.brief),
         tutor_provider=tutor_provider,
         tutor_model=f.text("tutor_model", None) or f.text("model", None) or _default_tutor_model(svc, tutor_provider),
         grader_provider=grader_provider,
@@ -2770,6 +2773,8 @@ def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         "modes": list(TUTOR_MODES),
         "twonrl_per": list(TUTOR_TWONRL_PER),
         "levels": list(TUTOR_LEVELS),
+        "words_ladder": list(TUTOR_WORDS_LADDER),
+        "upgrade_steps": list(TUTOR_UPGRADE_STEPS),
         "plan_lessons": DEFAULT_PLAN_LESSONS,
         "defaults": TutorConfig().to_dict(),
     }
@@ -2823,8 +2828,8 @@ def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     count = f.integer("count", config.plan or DEFAULT_PLAN_LESSONS, minimum=1)
     try:
         plan = plan_lessons(
-            client, card, topic=config.topic, level=config.level, count=count, exercises=config.exercises,
-            drills=config.drills, model=config.tutor_model,
+            client, card, topic=config.topic, level=config.level, words=config.words, threshold=config.threshold,
+            count=count, exercises=config.exercises, drills=config.drills, model=config.tutor_model,
         )
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
@@ -2963,8 +2968,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card"),
     ("POST", "/api/tutor/plan", _r_tutor_plan,
      "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, "
-     "level, exercises, drills, tutor_provider, tutor_model, url} -> {plan: {summary, level, weak, targets, "
-     "lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, source}"),
+     "level, words, threshold, exercises, drills, tutor_provider, tutor_model, url} -> {plan: {summary, prompt "
+     "(the brief for the next batch: start a run with it as 'brief'), upgrade: {step, level, words, threshold, "
+     "drills, note}, level, weak, targets, lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, "
+     "source}"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}

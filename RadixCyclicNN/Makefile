@@ -51,6 +51,7 @@ ROUNDS      ?= 3
 EXERCISES   ?= 5
 DRILLS      ?= 0
 PLAN        ?= 3
+BRIEF       ?=
 PROBLEMS    ?= data/sample_problems.jsonl
 AUDIO       ?= utterance.wav
 TRANSCRIPT  ?=
@@ -234,8 +235,8 @@ tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trai
 tutor-focus: ## Lessons drilling one point of grammar: FOCUS="past tense"
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --focus "$(FOCUS)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD)
 
-tutor-plan: ## Lessons about TOPIC that end with the next PLAN lessons, planned by the teacher from the report card
-	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD) --plan $(PLAN) --report tutor-report.json
+tutor-plan: ## Lessons about TOPIC that end with the next PLAN lessons and the brief that teaches them; BRIEF="..." runs a batch to one
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD) $(if $(BRIEF),--brief "$(BRIEF)",) --plan $(PLAN) --report tutor-report.json
 
 ##@ ChatGPT (OpenAI as the code-generation tutor; needs $$OPENAI_API_KEY)
 CHATGPT_FLAGS := $(if $(CHATGPT_URL),--url $(CHATGPT_URL),) $(if $(CHATGPT_MODEL),--chatgpt-model $(CHATGPT_MODEL),)

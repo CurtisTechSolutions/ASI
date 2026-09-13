@@ -240,6 +240,7 @@ type ExerciseRequest struct {
 	Level       string   // "beginner", "intermediate", ...
 	Weak        []string // the mistakes the student keeps making
 	Words       string   // how long a prefix is, e.g. "3 to 6"
+	Brief       string   // the plan this batch of lessons is being taught to (LessonPlan.Prompt)
 	Model       string
 	Temperature float64
 }
@@ -266,6 +267,9 @@ func WriteExercises(client LLMClient, req ExerciseRequest) ([]Exercise, error) {
 		temperature = 0.9
 	}
 	lines := []string{"Topic: " + topic, "Level: " + level}
+	if brief := strings.Join(strings.Fields(req.Brief), " "); brief != "" {
+		lines = append(lines, "The plan for this batch of lessons: "+brief)
+	}
 	if strings.TrimSpace(req.Focus) != "" {
 		lines = append(lines, "Every exercise must drill: "+strings.TrimSpace(req.Focus))
 	}
@@ -674,6 +678,8 @@ type TutorConfig struct {
 	Focus     string `json:"focus"`     // pin every exercise to one point of grammar
 	Level     string `json:"level"`
 	Words     string `json:"words"`
+	// Brief is what this batch of lessons is being taught to: the previous batch's plan (LessonPlan.Prompt).
+	Brief string `json:"brief"`
 	// TutorProvider names who teaches: "ollama" (a local model) or "chatgpt" (OpenAI).
 	TutorProvider string `json:"tutor_provider"`
 	TutorModel    string `json:"tutor_model"`
@@ -906,7 +912,7 @@ func (t *TutorTrainer) SetExercises(round int) ([]Exercise, error) {
 	err := t.outside(func() error {
 		written, err := WriteExercises(t.Client, ExerciseRequest{
 			Topic: cfg.Topic, Count: cfg.Exercises, Focus: cfg.Focus, Level: cfg.Level, Weak: weak,
-			Words: cfg.Words, Model: cfg.TutorModel,
+			Words: cfg.Words, Brief: cfg.Brief, Model: cfg.TutorModel,
 		})
 		exercises = written
 		return err
@@ -1447,8 +1453,8 @@ func (t *TutorTrainer) PlanNext(card map[string]any, count int) (LessonPlan, err
 	err := t.outside(func() error {
 		var err error
 		plan, err = PlanLessons(t.Client, card, PlanRequest{
-			Topic: cfg.Topic, Level: cfg.Level, Count: count, Exercises: cfg.Exercises, Drills: cfg.Drills,
-			Model: cfg.TutorModel,
+			Topic: cfg.Topic, Level: cfg.Level, Words: cfg.Words, Threshold: cfg.Threshold, Count: count,
+			Exercises: cfg.Exercises, Drills: cfg.Drills, Model: cfg.TutorModel,
 		})
 		return err
 	})

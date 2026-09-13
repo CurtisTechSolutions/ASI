@@ -27,7 +27,9 @@ from radixnet.ollama import OllamaClient, OllamaError  # noqa: E402
 from radixnet.search import PathResult  # noqa: E402
 from radixnet.tutor import (  # noqa: E402
     ERROR_TYPES,
+    HOLD_DRILLS,
     LEVELS,
+    WORDS_LADDER,
     Exercise,
     Grade,
     Lesson,
@@ -41,12 +43,15 @@ from radixnet.tutor import (  # noqa: E402
     focus_for,
     grade_completions,
     next_level,
+    next_words,
     overall_score,
     parse_exercises,
     parse_plan,
+    plan_brief,
     plan_from_card,
     plan_lessons,
     report_card,
+    upgrade_from_card,
     weak_points,
     write_exercises,
 )
@@ -148,6 +153,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
             ]
             return json.dumps({
                 "summary": "The student writes verbs badly.", "level": "beginner",
+                "prompt": "Drill subject-verb agreement first, then plurals. Keep it at beginner.",
                 "lessons": [pool[i % len(pool)] for i in range(count)],
             })
         if "model sentences" in system:  # drills
@@ -351,6 +357,13 @@ class TeacherTests(unittest.TestCase):
         self.assertIn("agreement", prompt)
         self.assertNotIn("none", prompt.split("mistakes, so drill them:")[1].split("\n")[0])
 
+    def test_write_exercises_hands_on_the_batch_brief(self):
+        write_exercises(self.client, "animals", 2, brief="  Drill plurals.\n  Stay at beginner.  ")
+        prompt = self.fake.prompts("exercises")[-1]
+        self.assertIn("The plan for this batch of lessons: Drill plurals. Stay at beginner.", prompt)
+        write_exercises(self.client, "animals", 2)
+        self.assertNotIn("The plan for this batch", self.fake.prompts("exercises")[-1])
+
     def test_write_exercises_rejects_bad_input_and_empty_answers(self):
         with self.assertRaises(ValueError):
             write_exercises(self.client, "animals", 0)
@@ -479,6 +492,56 @@ class WeakPointTests(unittest.TestCase):
         self.assertIn("none recorded", card_lines({"lessons": 1})[2])
 
 
+class UpgradeTests(unittest.TestCase):
+    """The incremental step the next batch takes, and the brief the marks write for it."""
+
+    STRONG = {"lessons": 10, "passed": 9, "pass_rate": 0.9, "mean_score": 8.6, "errors": {"article": 1}}
+    MIDDLING = {"lessons": 10, "passed": 6, "pass_rate": 0.6, "mean_score": 6.5, "errors": {"tense": 4}}
+
+    def test_next_words_climbs_one_rung(self):
+        self.assertEqual(next_words("3 to 6"), "5 to 8")
+        self.assertEqual(next_words("5 to 8"), "7 to 12")
+        self.assertEqual(next_words(WORDS_LADDER[-1]), WORDS_LADDER[-1])  # the ladder ends
+        self.assertEqual(next_words("3 to 6", 2), "7 to 12")
+        self.assertEqual(next_words("two or three"), "two or three")  # off the ladder: left alone
+        self.assertEqual(next_words(""), WORDS_LADDER[0])
+
+    def test_a_strong_card_advances(self):
+        step = upgrade_from_card(self.STRONG, level="beginner", words="3 to 6", threshold=6.0)
+        self.assertEqual(step["step"], "advance")
+        self.assertEqual((step["level"], step["words"], step["threshold"]), ("intermediate", "5 to 8", 7.0))
+        self.assertIn("steps up to intermediate", step["note"])
+        self.assertIn("passed 90% at 8.6 out of 10", step["note"])
+        self.assertEqual(upgrade_from_card(self.STRONG, threshold=9.0)["threshold"], 9.0)  # the pass mark caps
+
+    def test_a_middling_card_only_stretches(self):
+        step = upgrade_from_card(self.MIDDLING, level="beginner", words="3 to 6", threshold=6.0)
+        self.assertEqual(step["step"], "stretch")
+        self.assertEqual((step["level"], step["words"], step["threshold"]), ("beginner", "5 to 8", 6.0))
+        self.assertIn("stays at beginner", step["note"])
+
+    def test_a_weak_card_is_held_back_with_examples(self):
+        step = upgrade_from_card(CARD, level="beginner", words="3 to 6", threshold=6.0, drills=0)
+        self.assertEqual(step["step"], "hold")
+        self.assertEqual((step["level"], step["words"], step["threshold"]), ("beginner", "3 to 6", 6.0))
+        self.assertEqual(step["drills"], HOLD_DRILLS)  # correct sentences to imitate instead of harder exercises
+        self.assertIn("holds at beginner", step["note"])
+        self.assertEqual(upgrade_from_card(CARD, drills=8)["drills"], 8)  # more than the floor is kept
+        self.assertEqual(upgrade_from_card({})["step"], "hold")  # no marks: nothing has been earned
+
+    def test_the_brief_names_the_drills_the_step_and_the_topic(self):
+        step = upgrade_from_card(CARD)
+        brief = plan_brief(weak_points(CARD), step, "the sea")
+        self.assertTrue(brief.startswith(
+            "Drill subject-verb agreement, verb tenses and articles (a, an, the), worst first:"))
+        self.assertIn(step["note"], brief)
+        self.assertTrue(brief.endswith("Keep the sentences about the sea."))
+        one = plan_brief(weak_points({"lessons": 4, "errors": {"tense": 2}}), step, "")
+        self.assertTrue(one.startswith("Drill verb tenses: that is what the last batch got wrong."))
+        self.assertNotIn("Keep the sentences", one)
+        self.assertTrue(plan_brief([], step, "the sea").startswith("Nothing was marked down"))
+
+
 class PlanFromCardTests(unittest.TestCase):
     def test_every_weak_point_gets_a_lesson(self):
         plan = plan_from_card(CARD, topic="animals", level="beginner", count=3, exercises=4, drills=2)
@@ -487,11 +550,28 @@ class PlanFromCardTests(unittest.TestCase):
         self.assertEqual(plan.targets, ["agreement", "tense", "article"])
         self.assertEqual([l.focus for l in plan.lessons][0], "subject-verb agreement")
         self.assertTrue(all(l.topic == "animals" for l in plan.lessons))
-        self.assertTrue(all((l.exercises, l.drills) == (4, 2) for l in plan.lessons))
+        # a card this weak is held back, so every lesson comes with sentences to imitate
+        self.assertTrue(all((l.exercises, l.drills) == (4, HOLD_DRILLS) for l in plan.lessons))
         self.assertEqual(plan.lessons[0].why, "5 of 10 lessons (50%) were marked down for agreement.")
         self.assertEqual(plan.lessons[2].why, "1 of 10 lessons (10%) was marked down for article.")
         self.assertIn("2 of 10 lessons passed", plan.summary)
         self.assertEqual(plan.level, "beginner")
+
+    def test_the_plan_carries_the_brief_and_the_step_up(self):
+        plan = plan_from_card(CARD, topic="animals", level="beginner", words="3 to 6", threshold=6.0)
+        self.assertEqual(plan.upgrade, upgrade_from_card(CARD, level="beginner", words="3 to 6", threshold=6.0))
+        self.assertEqual(plan.prompt, plan_brief(plan.weak, plan.upgrade, "animals"))
+        self.assertIn("Drill subject-verb agreement", plan.prompt)
+        self.assertIn("holds at beginner", plan.prompt)
+        self.assertEqual(plan.level, plan.upgrade["level"])
+
+    def test_a_strong_card_plans_a_harder_batch(self):
+        strong = {"lessons": 10, "passed": 9, "pass_rate": 0.9, "mean_score": 8.6, "errors": {"article": 2}}
+        plan = plan_from_card(strong, topic="the sea", level="beginner", words="3 to 6", threshold=6.0)
+        self.assertEqual((plan.level, plan.upgrade["words"], plan.upgrade["threshold"]),
+                         ("intermediate", "5 to 8", 7.0))
+        self.assertIn("steps up to intermediate", plan.prompt)
+        self.assertIn("Drill articles", plan.prompt)
 
     def test_count_caps_the_lessons(self):
         self.assertEqual(len(plan_from_card(CARD, count=2).lessons), 2)
@@ -506,7 +586,9 @@ class PlanFromCardTests(unittest.TestCase):
 
     def test_a_plan_is_json(self):
         doc = plan_from_card(CARD, topic="animals").to_dict()
-        self.assertEqual(sorted(doc), ["lessons", "level", "source", "summary", "targets", "topic", "weak"])
+        self.assertEqual(sorted(doc), ["lessons", "level", "prompt", "source", "summary", "targets", "topic",
+                                       "upgrade", "weak"])
+        self.assertEqual(sorted(doc["upgrade"]), ["drills", "level", "note", "step", "threshold", "words"])
         self.assertEqual(sorted(doc["lessons"][0]),
                          ["drills", "exercises", "focus", "prefixes", "targets", "topic", "why"])
         self.assertEqual(json.loads(json.dumps(doc))["weak"][0]["error"], "agreement")
@@ -514,13 +596,13 @@ class PlanFromCardTests(unittest.TestCase):
 
 class ParsePlanTests(unittest.TestCase):
     def test_reads_the_documented_shape(self):
-        raw = json.dumps({"summary": "Verbs are the trouble.", "level": "Intermediate", "lessons": [
+        raw = json.dumps({"summary": "Verbs are the trouble.", "prompt": "Drill the verbs.", "lessons": [
             {"focus": "subject-verb agreement", "targets": "agreement", "topic": "the market", "why": "Most marks."},
             {"focus": "past tense", "targets": "verb tense", "topic": "yesterday", "prefixes": ["last week we"]},
         ]})
         plan = parse_plan(raw, 3, topic="animals", exercises=4, drills=1)
         self.assertEqual(plan.summary, "Verbs are the trouble.")
-        self.assertEqual(plan.level, "intermediate")
+        self.assertEqual(plan.prompt, "Drill the verbs.")
         self.assertEqual([(l.focus, l.targets, l.topic) for l in plan.lessons], [
             ("subject-verb agreement", "agreement", "the market"),
             ("past tense", "tense", "yesterday"),
@@ -556,6 +638,13 @@ class ParsePlanTests(unittest.TestCase):
         self.assertEqual([(l.focus, l.targets) for l in plan.lessons],
                          [("plural nouns", "plural"), ("verb tenses", "tense"), ("articles", "article")])
 
+    def test_the_difficulty_is_not_read_from_the_answer(self):
+        raw = json.dumps({"level": "advanced", "words": "20 to 30", "threshold": 2,
+                          "lessons": [{"focus": "plural nouns"}]})
+        plan = parse_plan(raw, 3)
+        self.assertEqual(plan.level, "beginner")  # the dataclass default; upgrade_from_card decides it
+        self.assertEqual(plan.upgrade, {})
+
     def test_an_unreadable_answer_plans_nothing(self):
         self.assertEqual(parse_plan("", 3).lessons, [])
         self.assertEqual(parse_plan(json.dumps({"lessons": []}), 3).lessons, [])
@@ -570,15 +659,48 @@ class PlanLessonsTests(unittest.TestCase):
         plan = plan_lessons(self.client, CARD, topic="animals", level="beginner", count=2, exercises=4, drills=1)
         self.assertEqual(plan.source, "ollama")
         self.assertEqual(plan.summary, "The student writes verbs badly.")
+        self.assertEqual(plan.prompt, "Drill subject-verb agreement first, then plurals. Keep it at beginner.")
         self.assertEqual(plan.level, "beginner")
         self.assertEqual([(l.focus, l.targets) for l in plan.lessons][0], ("subject-verb agreement", "agreement"))
-        self.assertEqual([(l.exercises, l.drills) for l in plan.lessons], [(4, 1), (4, 1)])
+        self.assertEqual([(l.exercises, l.drills) for l in plan.lessons], [(4, HOLD_DRILLS), (4, HOLD_DRILLS)])
         self.assertEqual([p["error"] for p in plan.weak], ["agreement", "tense"])
         prompt = self.fake.prompts("plan")[0]
         self.assertIn("The lessons so far were about: animals", prompt)
         self.assertIn("Mistakes, worst first: agreement x5 (50% of the lessons)", prompt)
         self.assertIn("Level so far: beginner", prompt)
         self.assertIn("Plan the next 2 lesson(s) now.", prompt)
+
+    def test_the_teacher_writes_the_brief_for_the_next_batch(self):
+        self.fake.plan_response = json.dumps({
+            "summary": "Verbs.", "prompt": "Drill agreement, then tenses. Hold at beginner. Keep it about animals.",
+            "lessons": [{"focus": "subject-verb agreement", "targets": "agreement"}],
+        })
+        plan = plan_lessons(self.client, CARD, topic="animals", count=1)
+        self.assertEqual(plan.prompt, "Drill agreement, then tenses. Hold at beginner. Keep it about animals.")
+        # the step up is the card's to decide, never the answer's
+        self.assertEqual(plan.upgrade, upgrade_from_card(CARD, level="beginner", words="3 to 6", threshold=6.0))
+        self.assertEqual(plan.upgrade["level"], plan.level)
+        self.assertEqual([l.drills for l in plan.lessons], [HOLD_DRILLS])
+        prompt = self.fake.prompts("plan")[-1]
+        self.assertIn("Level so far: beginner, openings of 3 to 6 words, pass mark 6 out of 10", prompt)
+        self.assertIn("The step up this batch has earned, to repeat in your brief: ", prompt)
+        self.assertIn(plan.upgrade["note"], prompt)
+
+    def test_a_brief_the_teacher_did_not_write_comes_from_the_marks(self):
+        self.fake.plan_response = json.dumps({
+            "summary": "Verbs.", "lessons": [{"focus": "subject-verb agreement", "targets": "agreement"}],
+        })
+        plan = plan_lessons(self.client, CARD, topic="animals", count=1)
+        self.assertEqual(plan.prompt, plan_brief(plan.weak, plan.upgrade, "animals"))
+        self.assertEqual(plan.source, "ollama")  # its lessons were still usable
+
+    def test_the_difficulty_it_plans_for_follows_the_settings_it_was_given(self):
+        strong = {"lessons": 10, "passed": 9, "pass_rate": 0.9, "mean_score": 8.6, "errors": {"article": 2}}
+        plan = plan_lessons(self.client, strong, topic="animals", level="intermediate", words="5 to 8",
+                            threshold=7.0, count=1)
+        self.assertEqual((plan.level, plan.upgrade["words"], plan.upgrade["threshold"]),
+                         ("advanced", "7 to 12", 8.0))
+        self.assertIn("openings of 5 to 8 words, pass mark 7 out of 10", self.fake.prompts("plan")[-1])
 
     def test_a_weakness_the_teacher_skipped_takes_an_off_card_slot(self):
         # the teacher plans plurals (not on the card) and agreement; tense must still get a lesson
@@ -617,6 +739,7 @@ class PlanLessonsTests(unittest.TestCase):
         plan = plan_lessons(self.client, CARD, topic="animals", level="beginner", count=3)
         self.assertEqual(plan.lessons[0].why, "3 of 10 lessons (30%) were marked down for tense.")
         self.assertEqual(plan.lessons[0].topic, "animals")
+        self.assertEqual(plan.level, plan.upgrade["level"])
         self.assertIn(plan.level, LEVELS)
         self.assertTrue(plan.summary.startswith("2 of 10 lessons passed"))
 
@@ -662,6 +785,15 @@ class TrainerTests(unittest.TestCase):
         after = model.stats()
         self.assertGreater(after["epochs_total"], before["epochs_total"])
 
+    def test_a_run_is_taught_to_the_brief_it_was_started_with(self):
+        brief = "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+        trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=2, brief=brief))
+        trainer.run()
+        prompts = self.fake.prompts("exercises")
+        self.assertEqual(len(prompts), 2)  # every round of the batch is written to the same plan
+        for prompt in prompts:
+            self.assertIn(f"The plan for this batch of lessons: {brief}", prompt)
+
     def test_a_run_can_end_with_the_next_lesson_plan(self):
         trainer = TutorTrainer(trained_model(), self.client, self.config(rounds=1, threshold=9.5, plan=2))
         seen = []
@@ -672,6 +804,8 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(len(plan["lessons"]), 2)
         self.assertIn("agreement", plan["targets"])
         self.assertEqual(plan["lessons"][0]["exercises"], 2)  # the run's own settings ride along
+        self.assertTrue(plan["prompt"])  # the brief for the next batch
+        self.assertEqual(plan["upgrade"]["step"], "hold")  # nothing passed at 9.5, so nothing gets harder
         self.assertEqual([r["kind"] for r in seen][-1], "plan")  # and it reaches the progress callback
         self.assertIn("Lessons marked: 2", self.fake.prompts("plan")[0])
 
@@ -988,6 +1122,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(plan["lessons"][0]["exercises"], 3)
         self.assertEqual([p["error"] for p in plan["weak"]], ["agreement", "tense"])
         self.assertIn("agreement x4", self.fake.prompts("plan")[0])
+        self.assertTrue(plan["prompt"])  # the brief that teaches the next batch
+        self.assertEqual(plan["upgrade"]["step"], "hold")  # one in six passed: nothing gets harder
+        self.assertEqual(plan["upgrade"]["drills"], 3)
 
     def test_plan_falls_back_to_the_last_run(self):
         status, answer, _ = self.client.post("/api/tutor/plan", {"topic": "animals"})
@@ -1014,6 +1151,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(record["kind"], "plan")
         self.assertEqual(len(record["lessons"]), 2)
         self.assertIn("agreement", record["targets"])
+
+    def test_a_run_is_taught_to_the_brief_it_was_given(self):
+        brief = "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+        status, body, _ = self.client.post(
+            "/api/tutor/start", {"topic": "animals", "rounds": 1, "exercises": 2, "brief": brief, "learn": False},
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["config"]["brief"], brief)
+        wait_for_job(self.client)
+        self.assertIn(f"The plan for this batch of lessons: {brief}", self.fake.prompts("exercises")[0])
 
     def test_plan_bad_requests(self):
         for body, expected in (
@@ -1121,6 +1268,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(plan["lessons"]), 2)
         self.assertEqual(plan["source"], "ollama")
         self.assertIn("agreement", plan["targets"])
+        self.assertTrue(plan["prompt"])
+        self.assertEqual(plan["upgrade"]["step"], "hold")
         with open(report, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["plan"]["lessons"], plan["lessons"])
 

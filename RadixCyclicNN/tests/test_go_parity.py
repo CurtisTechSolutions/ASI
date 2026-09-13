@@ -364,14 +364,32 @@ class TestGoTutorParity(unittest.TestCase):
         self.assertEqual(len(plan_prompts), 1)
         self.assertIn("Lessons marked: 2", plan_prompts[0])
 
-        # and the same syllabus comes out
+        # and the same syllabus comes out, down to the brief the next batch would be taught to
         self.assertEqual(a["plan"]["lessons"], b["plan"]["lessons"])
         self.assertEqual(a["plan"]["targets"], b["plan"]["targets"])
         self.assertEqual(a["plan"]["weak"], b["plan"]["weak"])
         self.assertEqual((a["plan"]["level"], a["plan"]["source"]), (b["plan"]["level"], b["plan"]["source"]))
         self.assertEqual(a["plan"]["summary"], b["plan"]["summary"])
+        self.assertEqual(a["plan"]["prompt"], b["plan"]["prompt"])
+        self.assertEqual(a["plan"]["upgrade"], b["plan"]["upgrade"])
+        self.assertEqual(a["plan"]["upgrade"]["step"], "hold")  # nothing passed at 9.5
         self.assertEqual(a["plan"]["lessons"][0]["targets"], "agreement")
         self.assertEqual([r["kind"] for r in a["records"]], [r["kind"] for r in b["records"]])
+
+    def test_both_tutors_teach_to_the_same_brief(self):
+        brief = "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run",
+                   "--brief", brief)
+        py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(len(py_calls), len(self.calls()))
+        for i, (first, second) in enumerate(zip(py_calls, self.calls())):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        written = [prompt for system, prompt in py_calls if "writing exercises" in system]
+        self.assertEqual(len(written), 1)
+        self.assertIn(f"The plan for this batch of lessons: {brief}", written[0])
 
     def test_dry_runs_agree_and_change_nothing(self):
         options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run")

@@ -795,6 +795,7 @@ func cmdTutor(args []string) {
 	focus := fs.String("focus", "", "pin every exercise to one point of grammar, e.g. 'past tense'")
 	level := fs.String("level", cfg.Level, "how hard the exercises are")
 	words := fs.String("words", cfg.Words, "how many words a prefix has")
+	brief := fs.String("brief", "", "what this batch is being taught to: the prompt the last report card led to (the plan's brief)")
 	url := fs.String("url", "", "the teacher's base URL (default: $OLLAMA_HOST, or $OPENAI_BASE_URL for chatgpt)")
 	tutorProvider := fs.String("tutor-provider", radixnet.DefaultProvider,
 		"who teaches: ollama (a local model) or chatgpt (OpenAI; needs $OPENAI_API_KEY)")
@@ -827,7 +828,7 @@ func cmdTutor(args []string) {
 	_ = fs.Parse(args)
 
 	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Attempts = *topic, *rounds, *exercises, *attempts
-	cfg.Focus, cfg.Level, cfg.Words = *focus, *level, *words
+	cfg.Focus, cfg.Level, cfg.Words, cfg.Brief = *focus, *level, *words, *brief
 	cfg.TutorProvider, cfg.GraderProvider = *tutorProvider, *graderProvider
 	cfg.TutorModel, cfg.GraderModel = *tutorModel, *graderModel
 	cfg.Mode, cfg.Length, cfg.MaxLength, cfg.Temperature = *mode, *length, *maxLength, *temperature
@@ -910,23 +911,26 @@ func lastRecord(records []map[string]any, kind string) map[string]any {
 	return nil
 }
 
-// sayPlan prints the lessons the teacher planned from the report card.
+// sayPlan prints the lessons the teacher planned from the report card, the step
+// up the marks earned and the brief that teaches the next batch.
 func sayPlan(record map[string]any) {
 	lessons, _ := record["lessons"].([]map[string]any)
+	upgrade, _ := record["upgrade"].(map[string]any)
 	say("lesson plan (%v): %v", record["source"], record["summary"])
 	for i, lesson := range lessons {
 		say("  %d. %v  [fixes %v, topic %v, %v exercise(s), %v drill(s)]  %v",
 			i+1, lesson["focus"], lesson["targets"], lesson["topic"], lesson["exercises"], lesson["drills"],
 			lesson["why"])
 	}
+	say("step up (%v): %v", upgrade["step"], upgrade["note"])
+	say("brief: %v", record["prompt"])
 	if len(lessons) > 0 {
-		first := lessons[0]
-		focus := ""
-		if text, _ := first["focus"].(string); text != "" {
-			focus = fmt.Sprintf(" --focus %q", text)
-		}
-		say("run the first one: radixnet-count tutor --topic %q%s --level %v --exercises %v",
-			first["topic"], focus, record["level"], first["exercises"])
+		threshold, _ := upgrade["threshold"].(float64)
+		prompt, _ := record["prompt"].(string)
+		say("teach the next batch: radixnet-count tutor --topic %q --level %v --words %q --threshold %g "+
+			"--exercises %v --drills %v --brief %q",
+			lessons[0]["topic"], upgrade["level"], upgrade["words"], threshold, lessons[0]["exercises"],
+			upgrade["drills"], prompt)
 	}
 }
 

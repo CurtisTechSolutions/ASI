@@ -39,11 +39,24 @@ var Levels = []string{"beginner", "intermediate", "advanced"}
 // DefaultPlanLessons is how many lessons a plan holds unless more are asked for.
 const DefaultPlanLessons = 3
 
-// A report card at or above both is a student ready for the next level.
+// A report card at or above both is a student ready for the next level;
+// StretchPassRate is not a level up, but the openings get longer.
 const (
-	StrongPassRate = 0.8
-	StrongScore    = 8.0
+	StrongPassRate  = 0.8
+	StrongScore     = 8.0
+	StretchPassRate = 0.5
 )
+
+// WordsLadder is how long an opening the teacher writes; an upgrade moves one rung up.
+var WordsLadder = []string{"3 to 6", "5 to 8", "7 to 12", "10 to 16"}
+
+// UpgradeSteps are what the next batch does with the difficulty: hold it, stretch it, or move up a level.
+var UpgradeSteps = []string{"hold", "stretch", "advance"}
+
+// HoldDrills is how many correct example sentences a held-back batch gets to imitate.
+const HoldDrills = 3
+
+const maxBriefChars = 600
 
 // FocusFor is the grammar point that drills one mistake ("" for "none" and anything unrecognised).
 func FocusFor(error string) string { return ErrorFocus[ErrorTypeOf(error)] }
@@ -162,6 +175,118 @@ func NextLevel(level string, card map[string]any) string {
 	return level
 }
 
+// NextWords is one rung up WordsLadder; a setting that is not on the ladder is left alone.
+func NextWords(words string, steps int) string {
+	text := strings.Join(strings.Fields(words), " ")
+	if steps < 0 {
+		steps = 0
+	}
+	for i, rung := range WordsLadder {
+		if rung == text {
+			return WordsLadder[min(i+steps, len(WordsLadder)-1)]
+		}
+	}
+	if text == "" {
+		return WordsLadder[0]
+	}
+	return text
+}
+
+func percentOf(value *float64) string {
+	if value == nil {
+		return "too few"
+	}
+	return fmt.Sprintf("%.0f%%", *value*100)
+}
+
+// UpgradeFromCard is the incremental step the next batch takes, read off the marks.
+//
+// "advance" when the card is strong (StrongPassRate of the lessons passed at
+// StrongScore): a level up, longer openings and a higher pass mark.  "stretch"
+// when StretchPassRate passed: the same level, but longer openings.  "hold"
+// otherwise: nothing gets harder, the weak points are drilled and the
+// teacher's own example sentences (HoldDrills) come with them, because a
+// student who is failing does not need a harder exercise.
+func UpgradeFromCard(card map[string]any, level, words string, threshold float64, drills int) map[string]any {
+	rate, score := markOf(card["pass_rate"]), markOf(card["mean_score"])
+	level = strings.ToLower(strings.TrimSpace(level))
+	if level == "" {
+		level = Levels[0]
+	}
+	words = strings.Join(strings.Fields(words), " ")
+	if words == "" {
+		words = WordsLadder[0]
+	}
+	passed, mark := percentOf(rate), "-"
+	if score != nil {
+		mark = fmt.Sprintf("%.1f", *score)
+	}
+	var step, note string
+	switch {
+	case rate != nil && *rate >= StrongPassRate && score != nil && *score >= StrongScore:
+		step, level, words = "advance", NextLevel(level, card), NextWords(words, 1)
+		threshold = math.Min(9.0, threshold+1.0)
+		note = fmt.Sprintf(
+			"The last batch passed %s at %s out of 10, so this one steps up to %s: openings of %s words and a "+
+				"pass mark of %.0f out of 10.", passed, mark, level, words, threshold)
+	case rate != nil && *rate >= StretchPassRate:
+		step, words = "stretch", NextWords(words, 1)
+		note = fmt.Sprintf(
+			"The last batch passed %s, so this one stays at %s but stretches the openings to %s words.",
+			passed, level, words)
+	default:
+		step = "hold"
+		drills = max(drills, HoldDrills)
+		note = fmt.Sprintf(
+			"The last batch passed %s, so this one holds at %s with openings of %s words, drills the mistakes "+
+				"and comes with %d correct sentences to imitate.", passed, level, words, drills)
+	}
+	return map[string]any{
+		"step": step, "level": level, "words": words, "threshold": threshold, "drills": drills, "note": note,
+	}
+}
+
+// andList is "a, b and c" - the teacher's own English, so its brief reads like one.
+func andList(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+// PlanBrief is what the marks alone write for the next batch: what to drill,
+// how it steps up, what it is about.
+func PlanBrief(weak []WeakPoint, upgrade map[string]any, topic string) string {
+	points := []string{}
+	for _, point := range weak {
+		if name := point.Focus; name != "" {
+			points = append(points, name)
+		} else if point.Error != "" {
+			points = append(points, point.Error)
+		}
+	}
+	var opening string
+	switch {
+	case len(points) > 1:
+		opening = "Drill " + andList(points) + ", worst first: that is what the last batch got wrong."
+	case len(points) == 1:
+		opening = "Drill " + points[0] + ": that is what the last batch got wrong."
+	default:
+		opening = "Nothing was marked down, so widen the vocabulary instead of drilling one point of grammar."
+	}
+	lines := []string{opening}
+	if note, _ := upgrade["note"].(string); strings.TrimSpace(note) != "" {
+		lines = append(lines, strings.TrimSpace(note))
+	}
+	if strings.TrimSpace(topic) != "" {
+		lines = append(lines, "Keep the sentences about "+strings.TrimSpace(topic)+".")
+	}
+	return strings.Join(lines, " ")
+}
+
 // PlannedLesson is one lesson of a plan: the point of grammar it drills, what
 // its sentences are about and the mistake it is aimed at.
 type PlannedLesson struct {
@@ -178,10 +303,14 @@ type PlannedLesson struct {
 type LessonPlan struct {
 	Lessons []PlannedLesson `json:"lessons"`
 	Summary string          `json:"summary"` // where the student stands, in a sentence or two
-	Level   string          `json:"level"`   // the level the next lessons should be at
-	Topic   string          `json:"topic"`   // the topic they were planned around
-	Weak    []WeakPoint     `json:"weak"`    // the weak points of the card behind the plan
-	Source  string          `json:"source"`  // who wrote it: the provider, or "report card" (the marks alone)
+	// Prompt is the brief for the next batch: what to drill, how it steps up, what it is about.
+	Prompt string `json:"prompt"`
+	// Upgrade is UpgradeFromCard: the step the next batch takes, and the settings it takes it with.
+	Upgrade map[string]any `json:"upgrade"`
+	Level   string         `json:"level"`  // the level the next lessons should be at
+	Topic   string         `json:"topic"`  // the topic they were planned around
+	Weak    []WeakPoint    `json:"weak"`   // the weak points of the card behind the plan
+	Source  string         `json:"source"` // who wrote it: the provider, or "report card" (the marks alone)
 }
 
 // Targets are the mistakes the plan drills, in its own order.
@@ -214,13 +343,17 @@ func (p LessonPlan) Map() map[string]any {
 	if weak == nil {
 		weak = []WeakPoint{}
 	}
+	upgrade := p.Upgrade
+	if upgrade == nil {
+		upgrade = map[string]any{}
+	}
 	return map[string]any{
-		"summary": p.Summary, "level": p.Level, "topic": p.Topic, "source": p.Source,
-		"weak": weak, "targets": p.Targets(), "lessons": lessons,
+		"summary": p.Summary, "prompt": p.Prompt, "upgrade": upgrade, "level": p.Level, "topic": p.Topic,
+		"source": p.Source, "weak": weak, "targets": p.Targets(), "lessons": lessons,
 	}
 }
 
-const planSchema = `{"summary": "<one or two sentences>", "level": "<beginner|intermediate|advanced>", "lessons": ` +
+const planSchema = `{"summary": "<one or two sentences>", "prompt": "<the brief for the next batch>", "lessons": ` +
 	`[{"focus": "<the point of grammar>", "targets": "<the mistake it fixes>", "topic": "<what its sentences are ` +
 	`about>", "why": "<one sentence>"}, ...]}`
 
@@ -232,17 +365,16 @@ const planSystem = "You are an English teacher planning the next lessons for a b
 	"'subject-verb agreement', 'past tense', 'plural nouns'), names the mistake from the report card it is aimed " +
 	"at ('targets', one of: %[2]s), gives the everyday subject its sentences should be about ('topic', two or " +
 	"three words) and says in one short sentence why it is being taught ('why'). Put the worst mistake first, " +
-	"never plan two lessons for the same mistake, and set 'level' to the level the student should now be working " +
-	"at (%[3]s). 'summary' is one or two sentences on where the student stands. Reply with JSON only, no prose, " +
-	"exactly of the form %[4]s with exactly %[1]d lessons."
+	"never plan two lessons for the same mistake. How much harder the next batch gets is decided by the marks " +
+	"and given to you below: it is not yours to change. 'summary' is one or two sentences on where the student " +
+	"stands. 'prompt' is the brief for the teacher who writes the next batch of exercises: two or three " +
+	"sentences addressed to them, naming the points of grammar to drill in order, repeating the step up in " +
+	"difficulty word for word, and saying what the sentences should be about - instructions to a colleague, not " +
+	"a report on the student. Reply with JSON only, no prose, exactly of the form %[3]s with exactly %[1]d " +
+	"lessons."
 
 func planSystemPrompt(count int) string {
-	types := strings.Join(ErrorTypes[1:], ", ")
-	levels := make([]string, len(Levels))
-	for i, name := range Levels {
-		levels[i] = "'" + name + "'"
-	}
-	return fmt.Sprintf(planSystem, count, types, strings.Join(levels, ", "), planSchema)
+	return fmt.Sprintf(planSystem, count, strings.Join(ErrorTypes[1:], ", "), planSchema)
 }
 
 // CardLines is the report card as the teacher reads it: the marks, then the mistakes worst first.
@@ -283,7 +415,8 @@ func CardLines(card map[string]any) []string {
 // unusable and duplicate entries.  It tolerates the shapes an LLM drifts into:
 // {"lessons": [...]}, {"plan": [...]}, a bare list, plain strings, "point" /
 // "skill" instead of "focus", "reason" instead of "why", and a "targets" that
-// names the mistake in its own words.
+// names the mistake in its own words.  How much harder the next batch gets is
+// not read from the answer at all: UpgradeFromCard decides it from the marks.
 func ParsePlan(raw string, count int, topic string, exercises, drills int) LessonPlan {
 	var items []any
 	plan := LessonPlan{Lessons: []PlannedLesson{}, Topic: topic, Source: "llm"}
@@ -304,7 +437,7 @@ func ParsePlan(raw string, count int, topic string, exercises, drills int) Lesso
 			}
 		}
 		plan.Summary = clipText(stringField(data, "summary", "assessment", "comment"), maxCommentChars)
-		plan.Level = strings.ToLower(strings.TrimSpace(stringField(data, "level")))
+		plan.Prompt = clipText(stringField(data, "prompt", "brief", "instructions", "next_prompt"), maxBriefChars)
 	case []any:
 		items = data
 	}
@@ -389,6 +522,8 @@ func planPrefixes(item map[string]any, count int) []string {
 type PlanRequest struct {
 	Topic       string
 	Level       string
+	Words       string  // how long the last batch's openings were (the ladder steps up from here)
+	Threshold   float64 // the pass mark it was marked against
 	Count       int
 	Exercises   int
 	Drills      int
@@ -399,13 +534,16 @@ type PlanRequest struct {
 // PlanFromCard is the lesson plan the marks alone imply: one lesson per weak
 // point of the card, worst first.  No LLM is involved, so a report card always
 // leads to a plan - this is both what PlanLessons asks the teacher to improve
-// on and what it falls back to when the answer cannot be read.
+// on and what it falls back to when the answer cannot be read.  The step up
+// (UpgradeFromCard) and the brief for the next batch (PlanBrief) come with it.
 func PlanFromCard(card map[string]any, req PlanRequest) LessonPlan {
 	count := req.Count
 	if count < 1 {
 		count = DefaultPlanLessons
 	}
 	weak := WeakPoints(card, count)
+	upgrade := UpgradeFromCard(card, req.Level, req.Words, req.Threshold, req.Drills)
+	upgradeDrills, _ := upgrade["drills"].(int)
 	lessons := []PlannedLesson{}
 	total := countOf(card["lessons"])
 	for _, point := range weak {
@@ -424,13 +562,13 @@ func PlanFromCard(card map[string]any, req PlanRequest) LessonPlan {
 		}
 		lessons = append(lessons, PlannedLesson{
 			Focus: focus, Topic: req.Topic, Why: why + fmt.Sprintf(" marked down for %s.", point.Error),
-			Targets: point.Error, Exercises: req.Exercises, Drills: req.Drills, Prefixes: []string{},
+			Targets: point.Error, Exercises: req.Exercises, Drills: upgradeDrills, Prefixes: []string{},
 		})
 	}
 	if len(lessons) == 0 {
 		lessons = append(lessons, PlannedLesson{
-			Focus: "", Topic: req.Topic, Targets: "none", Exercises: req.Exercises, Drills: req.Drills,
-			Why:      "No mistake was named, so the next lessons stay on the topic and move up a level.",
+			Focus: "", Topic: req.Topic, Targets: "none", Exercises: req.Exercises, Drills: upgradeDrills,
+			Why:      "No mistake was named, so the next lessons stay on the topic and take the step up instead.",
 			Prefixes: []string{},
 		})
 	}
@@ -447,22 +585,27 @@ func PlanFromCard(card map[string]any, req PlanRequest) LessonPlan {
 	} else {
 		summary += "; nothing was marked down"
 	}
+	level, _ := upgrade["level"].(string)
 	return LessonPlan{
-		Lessons: lessons, Summary: summary + ".", Level: NextLevel(req.Level, card), Topic: req.Topic,
-		Weak: weak, Source: "report card",
+		Lessons: lessons, Summary: summary + ".", Prompt: PlanBrief(weak, upgrade, req.Topic), Upgrade: upgrade,
+		Level: level, Topic: req.Topic, Weak: weak, Source: "report card",
 	}
 }
 
 // PlanLessons asks the teacher for the next lessons, given the report card of
-// the ones just marked: one point of grammar per lesson, the mistake it
-// repairs, a topic and a line on why.
+// the ones just marked and the step up in difficulty the marks have earned:
+// one point of grammar per lesson, the mistake it repairs, a topic, a line on
+// why, and Prompt - the brief for the next batch, which TutorConfig.Brief
+// hands to the exercise writer of the run that follows.
 //
 // PlanFromCard is the floor.  A weakness the teacher's plan does not target
 // takes the place of a lesson that drills nothing the card marked down (and is
 // appended when there is no such lesson), so every mistake on the card is
-// somebody's lesson; an answer that cannot be read - or that names no mistake
-// and says nothing about the student - leaves that plan as it stands.  Source
-// says which of the two wrote it.
+// somebody's lesson; a brief it does not write is the one the marks wrote; an
+// answer that cannot be read - or that names no mistake and says nothing about
+// the student - leaves the whole plan as it stands.  Source says which of the
+// two wrote it.  The upgrade is never the answer's to invent: UpgradeFromCard
+// computes it from the marks and the teacher is asked to repeat it.
 func PlanLessons(client LLMClient, card map[string]any, req PlanRequest) (LessonPlan, error) {
 	if req.Count < 1 {
 		return LessonPlan{}, fmt.Errorf("count must be >= 1")
@@ -484,7 +627,15 @@ func PlanLessons(client LLMClient, card map[string]any, req PlanRequest) (Lesson
 	if level == "" {
 		level = Levels[0]
 	}
-	lines = append(lines, "Level so far: "+level, fmt.Sprintf("Plan the next %d lesson(s) now.", req.Count))
+	words := strings.Join(strings.Fields(req.Words), " ")
+	if words == "" {
+		words = WordsLadder[0]
+	}
+	note, _ := fallback.Upgrade["note"].(string)
+	lines = append(lines,
+		fmt.Sprintf("Level so far: %s, openings of %s words, pass mark %.0f out of 10", level, words, req.Threshold),
+		"The step up this batch has earned, to repeat in your brief: "+note,
+		fmt.Sprintf("Plan the next %d lesson(s) now.", req.Count))
 	raw, err := client.Generate(strings.Join(lines, "\n"), LLMOptions{
 		System: planSystemPrompt(req.Count), Model: req.Model, JSON: true, Temperature: temperature,
 	})
@@ -501,9 +652,12 @@ func PlanLessons(client LLMClient, card map[string]any, req PlanRequest) (Lesson
 	if plan.Summary == "" {
 		plan.Summary = fallback.Summary
 	}
-	if !contains(Levels, plan.Level) {
-		plan.Level = fallback.Level
+	if plan.Prompt == "" {
+		plan.Prompt = fallback.Prompt
 	}
+	plan.Upgrade = fallback.Upgrade // the marks decide the step up, not the answer
+	plan.Level = fallback.Level
+	upgradeDrills, _ := plan.Upgrade["drills"].(int)
 	covered, marked := map[string]bool{}, map[string]bool{}
 	for _, point := range fallback.Weak {
 		marked[point.Error] = true
@@ -512,6 +666,7 @@ func PlanLessons(client LLMClient, card map[string]any, req PlanRequest) (Lesson
 		if plan.Lessons[i].Topic == "" {
 			plan.Lessons[i].Topic = req.Topic
 		}
+		plan.Lessons[i].Drills = upgradeDrills
 		if plan.Lessons[i].Why == "" && plan.Lessons[i].Targets != "none" {
 			for _, lesson := range fallback.Lessons {
 				if lesson.Targets == plan.Lessons[i].Targets {

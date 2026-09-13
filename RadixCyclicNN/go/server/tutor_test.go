@@ -368,6 +368,13 @@ func TestTutorPlanFromAReportCard(t *testing.T) {
 	if len(weak) != 2 || weak[0].(map[string]any)["error"] != "agreement" {
 		t.Fatalf("weak points wrong: %v", plan["weak"])
 	}
+	if prompt, _ := plan["prompt"].(string); prompt == "" {
+		t.Fatalf("the plan should carry the brief for the next batch: %v", plan)
+	}
+	upgrade, _ := plan["upgrade"].(map[string]any)
+	if upgrade["step"] != "hold" || upgrade["drills"] != 3.0 {
+		t.Fatalf("a weak card should be held back with examples: %v", upgrade)
+	}
 	if !strings.Contains(fake.prompts["plan"][0], "agreement x4") {
 		t.Fatalf("the teacher did not see the card: %s", fake.prompts["plan"][0])
 	}
@@ -418,6 +425,28 @@ func TestTutorStartCanPlanItsOwnNextLessons(t *testing.T) {
 	}
 	if targets, _ := last["targets"].([]any); len(targets) == 0 || targets[0] != "agreement" {
 		t.Fatalf("the plan should drill the card's worst mistake: %v", last["targets"])
+	}
+}
+
+func TestTutorStartTeachesToTheBrief(t *testing.T) {
+	e, fake := tutorEnv(t)
+	brief := "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "brief": brief, "learn": false,
+	})
+	if status != 202 {
+		t.Fatalf("POST /api/tutor/start = %d: %v", status, body)
+	}
+	waitForJob(e, 30*time.Second)
+	if len(fake.prompts["exercises"]) == 0 {
+		t.Fatal("the teacher was never asked for exercises")
+	}
+	if !strings.Contains(fake.prompts["exercises"][0], "The plan for this batch of lessons: "+brief) {
+		t.Fatalf("the brief did not reach the exercise writer:\n%s", fake.prompts["exercises"][0])
+	}
+	config, _ := body["config"].(map[string]any)
+	if config["brief"] != brief {
+		t.Fatalf("the job should report the brief it was started with: %v", config["brief"])
 	}
 }
 

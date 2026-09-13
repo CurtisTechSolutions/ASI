@@ -136,8 +136,8 @@ func (s *Service) TutorPlan(
 		return nil, badRequest("%v", err)
 	}
 	plan, err := radixnet.PlanLessons(client, card, radixnet.PlanRequest{
-		Topic: config.Topic, Level: config.Level, Count: count, Exercises: config.Exercises,
-		Drills: config.Drills, Model: config.TutorModel,
+		Topic: config.Topic, Level: config.Level, Words: config.Words, Threshold: config.Threshold, Count: count,
+		Exercises: config.Exercises, Drills: config.Drills, Model: config.TutorModel,
 	})
 	if err != nil {
 		if radixnet.IsLLMError(err) {
@@ -222,7 +222,7 @@ func init() {
 	route("POST", "/api/tutor/lesson", rTutorLesson)
 	doc("POST", "/api/tutor/lesson", "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card")
 	route("POST", "/api/tutor/plan", rTutorPlan)
-	doc("POST", "/api/tutor/plan", "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, level, exercises, drills, tutor_model, url} -> {plan: {summary, level, weak, targets, lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, source}")
+	doc("POST", "/api/tutor/plan", "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, level, words, threshold, exercises, drills, tutor_model, url} -> {plan: {summary, prompt (the brief for the next batch: start a run with it as 'brief'), upgrade: {step, level, words, threshold, drills, note}, level, weak, targets, lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, source}")
 }
 
 // rChatGPTModels reports whether ChatGPT can teach on this server and which
@@ -272,12 +272,14 @@ func rTutor(rq *request) (int, any, error) {
 				"configured": radixnet.ChatGPTConfigured(),
 			},
 		},
-		"error_types":  radixnet.ErrorTypes,
-		"modes":        radixnet.TutorModes,
-		"twonrl_per":   radixnet.TwoNRLPer,
-		"levels":       radixnet.Levels,
-		"plan_lessons": radixnet.DefaultPlanLessons,
-		"defaults":     radixnet.DefaultTutorConfig(),
+		"error_types":   radixnet.ErrorTypes,
+		"modes":         radixnet.TutorModes,
+		"twonrl_per":    radixnet.TwoNRLPer,
+		"levels":        radixnet.Levels,
+		"words_ladder":  radixnet.WordsLadder,
+		"upgrade_steps": radixnet.UpgradeSteps,
+		"plan_lessons":  radixnet.DefaultPlanLessons,
+		"defaults":      radixnet.DefaultTutorConfig(),
 	}, nil
 }
 
@@ -331,6 +333,7 @@ func tutorConfigFrom(rq *request) (radixnet.TutorConfig, error) {
 	text("focus", "", &c.Focus)
 	text("level", d.Level, &c.Level)
 	text("words", d.Words, &c.Words)
+	text("brief", d.Brief, &c.Brief)
 	provider := func(name, alias, def string, into *string) {
 		if err != nil {
 			return

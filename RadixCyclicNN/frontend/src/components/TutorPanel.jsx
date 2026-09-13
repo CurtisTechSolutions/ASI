@@ -159,10 +159,11 @@ function ReportCard({ card, title }) {
 }
 
 /** The lessons the teacher plans from a report card: what each one drills, at which weakness, and why. */
-function LessonPlanCard({ plan, onUse, onClear, disabled }) {
+function LessonPlanCard({ plan, onUse, onTeach, onClear, disabled }) {
   const lessons = asArray(plan && plan.lessons);
   if (lessons.length === 0) return null;
   const weak = asArray(plan.weak);
+  const upgrade = plan.upgrade && typeof plan.upgrade === "object" ? plan.upgrade : {};
   const by = plan.source === "report card" ? "the report card alone" : providerLabel(plan.source);
   return (
     <div className="card">
@@ -174,9 +175,29 @@ function LessonPlanCard({ plan, onUse, onClear, disabled }) {
       </div>
       <p className="muted">
         The next lessons, written from the report card by <b>{by}</b>, for a <b>{String(plan.level || "beginner")}</b>{" "}
-        student. "Use this lesson" loads one into the settings above; press <b>Start lessons</b> to teach it.
+        student: teach the whole batch to the brief below, or load a single lesson from the table.
       </p>
       {plan.summary ? <p>{String(plan.summary)}</p> : null}
+      {upgrade.note ? (
+        <p className="muted">
+          <b>{String(upgrade.step || "hold")}</b> — {String(upgrade.note)}
+        </p>
+      ) : null}
+      {plan.prompt ? (
+        <>
+          <h3>The brief for the next batch</h3>
+          <blockquote className="brief">{String(plan.prompt)}</blockquote>
+          <div className="actions">
+            <button type="button" className="primary" disabled={disabled} onClick={() => onTeach(plan)}>
+              Teach the next batch
+            </button>
+            <span className="muted">
+              Loads the brief and the step up into the settings above — the exercise writer is given it with every
+              round.
+            </span>
+          </div>
+        </>
+      ) : null}
       {weak.length > 0 ? (
         <div className="chips">
           {weak.map((point) => (
@@ -380,6 +401,8 @@ export default function TutorPanel({ status }) {
   const [topic, setTopic] = useState("everyday life");
   const [focus, setFocus] = useState("");
   const [level, setLevel] = useState("beginner");
+  const [words, setWords] = useState("3 to 6");
+  const [brief, setBrief] = useState("");
   const [rounds, setRounds] = useState("3");
   const [exercises, setExercises] = useState("5");
   const [attempts, setAttempts] = useState("1");
@@ -443,6 +466,8 @@ export default function TutorPanel({ status }) {
       topic: topic.trim(),
       ...(focus.trim() ? { focus: focus.trim() } : {}),
       level: level.trim() || "beginner",
+      words: words.trim() || "3 to 6",
+      brief: brief.trim(),
       exercises: parseInteger(exercises, 5),
       attempts: parseInteger(attempts, 1),
       mode,
@@ -530,6 +555,25 @@ export default function TutorPanel({ status }) {
     }
   }
 
+  /** Load the whole plan into the settings above: its brief, and the step up the marks earned. */
+  function teachNextBatch(next) {
+    const upgrade = next.upgrade && typeof next.upgrade === "object" ? next.upgrade : {};
+    if (next.prompt) setBrief(String(next.prompt));
+    if (next.topic) setTopic(String(next.topic));
+    if (upgrade.level) setLevel(String(upgrade.level));
+    if (upgrade.words) setWords(String(upgrade.words));
+    if (upgrade.threshold !== null && upgrade.threshold !== undefined) setThreshold(String(upgrade.threshold));
+    if (upgrade.drills !== null && upgrade.drills !== undefined) setDrills(String(upgrade.drills));
+    setFocus(""); // the brief carries the points of grammar, in order
+    setFormError(null);
+    setNotice(
+      `The next batch is loaded (${String(upgrade.step || "hold")}: ${String(upgrade.level || level)}, openings of ${String(upgrade.words || words)} words): press Start lessons to teach it.`,
+    );
+    if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
   /** Load one planned lesson into the settings above, ready to start. */
   function usePlanLesson(lesson) {
     const openings = asArray(lesson.prefixes).filter((p) => typeof p === "string" && p.trim());
@@ -589,8 +633,9 @@ export default function TutorPanel({ status }) {
           words both sentences share keep what they earned. Sentences with no correction to align stay 2NRL
           garbage weighted by how bad the mark was; with <b>adapt</b> on, the next round drills the mistakes this
           one made. At the end the report card goes back to the teacher, which writes the <b>lesson plan</b> that
-          repairs it — one point of grammar per lesson, worst mistake first — and any lesson of it can be loaded
-          into these settings and started.
+          repairs it: one point of grammar per lesson, worst mistake first, the step up in difficulty the marks
+          have earned, and the <b>brief</b> for the next batch — which the exercise writer is handed with every
+          round of the run you start from it.
         </p>
         <div className="row">
           <TextField
@@ -610,7 +655,24 @@ export default function TutorPanel({ status }) {
             placeholder="past tense"
           />
           <TextField label="Level" value={level} onChange={setLevel} disabled={running} placeholder="beginner" />
+          <TextField
+            label="Prefix words"
+            hint="how long an opening is"
+            value={words}
+            onChange={setWords}
+            disabled={running}
+            placeholder="3 to 6"
+          />
         </div>
+        <TextArea
+          label="Brief"
+          hint="what this batch is being taught to: the prompt the last report card led to"
+          value={brief}
+          onChange={setBrief}
+          rows={2}
+          disabled={running}
+          placeholder="Drill subject-verb agreement and plural nouns, worst first. Keep the sentences about animals."
+        />
         <div className="row auto">
           <NumberField label="Rounds" value={rounds} onChange={setRounds} min={1} step={1} disabled={running} />
           <NumberField
@@ -919,7 +981,13 @@ export default function TutorPanel({ status }) {
         <LessonTable rows={lessons.slice(-MAX_ROWS)} total={lessons.length} running={running} />
       </div>
 
-      <LessonPlanCard plan={plan} onUse={usePlanLesson} onClear={() => setPlan(null)} disabled={running} />
+      <LessonPlanCard
+        plan={plan}
+        onUse={usePlanLesson}
+        onTeach={teachNextBatch}
+        onClear={() => setPlan(null)}
+        disabled={running}
+      />
     </>
   );
 }

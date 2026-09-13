@@ -2,6 +2,7 @@ package radixnet
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -117,6 +118,103 @@ func TestCardLinesReadLikeAReportCard(t *testing.T) {
 	}
 }
 
+func strongCard() map[string]any {
+	return map[string]any{"lessons": 10, "passed": 9, "pass_rate": 0.9, "mean_score": 8.6,
+		"errors": map[string]int{"article": 1}}
+}
+
+func TestNextWordsClimbsOneRung(t *testing.T) {
+	for _, tc := range [][3]string{
+		{"3 to 6", "1", "5 to 8"}, {"5 to 8", "1", "7 to 12"}, {WordsLadder[len(WordsLadder)-1], "1",
+			WordsLadder[len(WordsLadder)-1]}, {"3 to 6", "2", "7 to 12"}, {"two or three", "1", "two or three"},
+		{"", "1", WordsLadder[0]},
+	} {
+		steps := 1
+		if tc[1] == "2" {
+			steps = 2
+		}
+		if got := NextWords(tc[0], steps); got != tc[2] {
+			t.Fatalf("NextWords(%q, %d) = %q, want %q", tc[0], steps, got, tc[2])
+		}
+	}
+}
+
+func TestUpgradeFromCard(t *testing.T) {
+	advance := UpgradeFromCard(strongCard(), "beginner", "3 to 6", 6.0, 0)
+	if advance["step"] != "advance" || advance["level"] != "intermediate" || advance["words"] != "5 to 8" ||
+		advance["threshold"] != 7.0 {
+		t.Fatalf("a strong card should advance: %v", advance)
+	}
+	if !strings.Contains(advance["note"].(string), "steps up to intermediate") ||
+		!strings.Contains(advance["note"].(string), "passed 90% at 8.6 out of 10") {
+		t.Fatalf("note wrong: %v", advance["note"])
+	}
+	if capped := UpgradeFromCard(strongCard(), "beginner", "3 to 6", 9.0, 0); capped["threshold"] != 9.0 {
+		t.Fatalf("the pass mark should cap: %v", capped["threshold"])
+	}
+
+	middling := map[string]any{"lessons": 10, "passed": 6, "pass_rate": 0.6, "mean_score": 6.5,
+		"errors": map[string]int{"tense": 4}}
+	stretch := UpgradeFromCard(middling, "beginner", "3 to 6", 6.0, 0)
+	if stretch["step"] != "stretch" || stretch["level"] != "beginner" || stretch["words"] != "5 to 8" ||
+		stretch["threshold"] != 6.0 {
+		t.Fatalf("a middling card should only stretch: %v", stretch)
+	}
+
+	hold := UpgradeFromCard(planCard(), "beginner", "3 to 6", 6.0, 0)
+	if hold["step"] != "hold" || hold["words"] != "3 to 6" || hold["drills"] != HoldDrills {
+		t.Fatalf("a weak card should be held back with examples: %v", hold)
+	}
+	if kept := UpgradeFromCard(planCard(), "beginner", "3 to 6", 6.0, 8); kept["drills"] != 8 {
+		t.Fatalf("more drills than the floor should be kept: %v", kept["drills"])
+	}
+	if none := UpgradeFromCard(map[string]any{}, "", "", 6.0, 0); none["step"] != "hold" {
+		t.Fatalf("no marks, nothing earned: %v", none)
+	}
+}
+
+func TestPlanBriefNamesTheDrillsTheStepAndTheTopic(t *testing.T) {
+	step := UpgradeFromCard(planCard(), "beginner", "3 to 6", 6.0, 0)
+	brief := PlanBrief(WeakPoints(planCard(), 3), step, "the sea")
+	want := "Drill subject-verb agreement, verb tenses and articles (a, an, the), worst first:"
+	if !strings.HasPrefix(brief, want) {
+		t.Fatalf("brief wrong: %s", brief)
+	}
+	if !strings.Contains(brief, step["note"].(string)) || !strings.HasSuffix(brief, "Keep the sentences about the sea.") {
+		t.Fatalf("brief wrong: %s", brief)
+	}
+	one := PlanBrief(WeakPoints(map[string]any{"lessons": 4, "errors": map[string]int{"tense": 2}}, 3), step, "")
+	if !strings.HasPrefix(one, "Drill verb tenses: that is what the last batch got wrong.") ||
+		strings.Contains(one, "Keep the sentences") {
+		t.Fatalf("one weak point reads wrong: %s", one)
+	}
+	if !strings.HasPrefix(PlanBrief(nil, step, "the sea"), "Nothing was marked down") {
+		t.Fatalf("a clean card reads wrong")
+	}
+}
+
+func TestPlanCarriesTheBriefAndTheStepUp(t *testing.T) {
+	req := PlanRequest{Topic: "animals", Level: "beginner", Words: "3 to 6", Threshold: 6.0, Count: 3, Exercises: 5}
+	plan := PlanFromCard(planCard(), req)
+	want := UpgradeFromCard(planCard(), "beginner", "3 to 6", 6.0, 0)
+	if fmt.Sprint(plan.Upgrade) != fmt.Sprint(want) {
+		t.Fatalf("upgrade wrong: %v", plan.Upgrade)
+	}
+	if plan.Prompt != PlanBrief(plan.Weak, plan.Upgrade, "animals") {
+		t.Fatalf("brief wrong: %s", plan.Prompt)
+	}
+	if plan.Level != plan.Upgrade["level"] {
+		t.Fatalf("the level should be the step up's: %s", plan.Level)
+	}
+	harder := PlanFromCard(strongCard(), req)
+	if harder.Level != "intermediate" || harder.Upgrade["words"] != "5 to 8" || harder.Upgrade["threshold"] != 7.0 {
+		t.Fatalf("a strong card should plan a harder batch: %v", harder.Upgrade)
+	}
+	if !strings.Contains(harder.Prompt, "steps up to intermediate") {
+		t.Fatalf("the brief should carry the step up: %s", harder.Prompt)
+	}
+}
+
 func TestPlanFromCardGivesEveryWeakPointALesson(t *testing.T) {
 	plan := PlanFromCard(planCard(), PlanRequest{Topic: "animals", Level: "beginner", Count: 3, Exercises: 4, Drills: 2})
 	if plan.Source != "report card" || plan.Level != "beginner" {
@@ -126,7 +224,9 @@ func TestPlanFromCardGivesEveryWeakPointALesson(t *testing.T) {
 		t.Fatalf("lessons wrong: %v", got)
 	}
 	first, last := plan.Lessons[0], plan.Lessons[2]
-	if first.Focus != "subject-verb agreement" || first.Topic != "animals" || first.Exercises != 4 || first.Drills != 2 {
+	// a card this weak is held back, so every lesson comes with sentences to imitate
+	if first.Focus != "subject-verb agreement" || first.Topic != "animals" || first.Exercises != 4 ||
+		first.Drills != HoldDrills {
 		t.Fatalf("first lesson wrong: %+v", first)
 	}
 	if first.Why != "5 of 10 lessons (50%) were marked down for agreement." {
@@ -164,7 +264,8 @@ func TestPlanMapIsTheSameJSONAsPython(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, key := range []string{"summary", "level", "topic", "source", "weak", "targets", "lessons"} {
+	for _, key := range []string{"summary", "prompt", "upgrade", "level", "topic", "source", "weak", "targets",
+		"lessons"} {
 		if _, ok := doc[key]; !ok {
 			t.Fatalf("missing %q in %s", key, raw)
 		}
@@ -178,16 +279,28 @@ func TestPlanMapIsTheSameJSONAsPython(t *testing.T) {
 	if doc["weak"].([]any)[0].(map[string]any)["error"] != "agreement" {
 		t.Fatalf("weak points wrong: %v", doc["weak"])
 	}
+	upgrade, _ := doc["upgrade"].(map[string]any)
+	for _, key := range []string{"step", "level", "words", "threshold", "drills", "note"} {
+		if _, ok := upgrade[key]; !ok {
+			t.Fatalf("missing %q in %v", key, upgrade)
+		}
+	}
 }
 
 func TestParsePlanReadsTheShapesAnLLMDriftsInto(t *testing.T) {
-	raw, _ := json.Marshal(map[string]any{"summary": "Verbs are the trouble.", "level": "Intermediate", "lessons": []any{
+	raw, _ := json.Marshal(map[string]any{"summary": "Verbs are the trouble.", "prompt": "Drill the verbs.", "lessons": []any{
 		map[string]any{"focus": "subject-verb agreement", "targets": "agreement", "topic": "the market", "why": "Most marks."},
 		map[string]any{"focus": "past tense", "targets": "verb tense", "topic": "yesterday", "prefixes": []any{"last week we"}},
 	}})
 	plan := ParsePlan(string(raw), 3, "animals", 4, 1)
-	if plan.Summary != "Verbs are the trouble." || plan.Level != "intermediate" || plan.Source != "llm" {
+	if plan.Summary != "Verbs are the trouble." || plan.Prompt != "Drill the verbs." || plan.Source != "llm" {
 		t.Fatalf("plan header wrong: %+v", plan)
+	}
+	// how much harder the next batch gets is never read from the answer
+	harder := ParsePlan(`{"level": "advanced", "words": "20 to 30", "lessons": [{"focus": "plural nouns"}]}`,
+		3, "", 5, 0)
+	if harder.Level != "" || len(harder.Upgrade) != 0 {
+		t.Fatalf("the answer set the difficulty: %+v", harder)
 	}
 	if got := strings.Join(targetsOf(plan), ","); got != "agreement,tense" {
 		t.Fatalf("targets wrong: %v", got)
@@ -239,7 +352,8 @@ func TestPlanLessonsAsksTheTeacher(t *testing.T) {
 	if plan.Source != "ollama" || plan.Summary != "The student writes verbs badly." || plan.Level != "beginner" {
 		t.Fatalf("plan header wrong: %+v", plan)
 	}
-	if plan.Lessons[0].Targets != "agreement" || plan.Lessons[0].Exercises != 4 || plan.Lessons[0].Drills != 1 {
+	if plan.Lessons[0].Targets != "agreement" || plan.Lessons[0].Exercises != 4 ||
+		plan.Lessons[0].Drills != HoldDrills {
 		t.Fatalf("first lesson wrong: %+v", plan.Lessons[0])
 	}
 	if got := targetsOfPoints(plan.Weak); strings.Join(got, ",") != "agreement,tense" {
@@ -253,6 +367,47 @@ func TestPlanLessonsAsksTheTeacher(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt is missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestPlanLessonsTakesTheTeachersBriefButNotItsDifficulty(t *testing.T) {
+	fake := newFakeTeacher(t)
+	client := fake.client(t)
+	fake.planAnswer = `{"summary": "Verbs.", "prompt": "Drill agreement, then tenses. Hold at beginner.",
+		"level": "advanced", "lessons": [{"focus": "subject-verb agreement", "targets": "agreement"}]}`
+	plan, err := PlanLessons(client, planCard(), PlanRequest{
+		Topic: "animals", Level: "beginner", Words: "3 to 6", Threshold: 6.0, Count: 1,
+	})
+	if err != nil {
+		t.Fatalf("PlanLessons: %v", err)
+	}
+	if plan.Prompt != "Drill agreement, then tenses. Hold at beginner." {
+		t.Fatalf("the teacher's brief was lost: %q", plan.Prompt)
+	}
+	want := UpgradeFromCard(planCard(), "beginner", "3 to 6", 6.0, 0)
+	if fmt.Sprint(plan.Upgrade) != fmt.Sprint(want) || plan.Level != "beginner" {
+		t.Fatalf("the answer set the difficulty: %v", plan.Upgrade)
+	}
+	if plan.Lessons[0].Drills != HoldDrills {
+		t.Fatalf("the step up should set the drills: %+v", plan.Lessons[0])
+	}
+	prompt := fake.prompts["plan"][0]
+	for _, want := range []string{
+		"Level so far: beginner, openings of 3 to 6 words, pass mark 6 out of 10",
+		"The step up this batch has earned, to repeat in your brief: ", plan.Upgrade["note"].(string),
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+
+	fake.planAnswer = `{"summary": "Verbs.", "lessons": [{"focus": "subject-verb agreement", "targets": "agreement"}]}`
+	plan, err = PlanLessons(client, planCard(), PlanRequest{Topic: "animals", Count: 1})
+	if err != nil {
+		t.Fatalf("PlanLessons: %v", err)
+	}
+	if plan.Prompt != PlanBrief(plan.Weak, plan.Upgrade, "animals") || plan.Source != "ollama" {
+		t.Fatalf("a brief the teacher did not write should come from the marks: %q", plan.Prompt)
 	}
 }
 
@@ -318,6 +473,47 @@ func TestPlanLessonsRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestWriteExercisesHandsOnTheBatchBrief(t *testing.T) {
+	fake := newFakeTeacher(t)
+	client := fake.client(t)
+	req := ExerciseRequest{Topic: "animals", Count: 2, Brief: "  Drill plurals.\n  Stay at beginner.  "}
+	if _, err := WriteExercises(client, req); err != nil {
+		t.Fatalf("WriteExercises: %v", err)
+	}
+	if want := "The plan for this batch of lessons: Drill plurals. Stay at beginner."; !strings.Contains(
+		fake.prompts["exercises"][0], want) {
+		t.Fatalf("the brief did not reach the teacher:\n%s", fake.prompts["exercises"][0])
+	}
+	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); err != nil {
+		t.Fatalf("WriteExercises: %v", err)
+	}
+	if strings.Contains(fake.prompts["exercises"][1], "The plan for this batch") {
+		t.Fatalf("no brief, no line:\n%s", fake.prompts["exercises"][1])
+	}
+}
+
+func TestTutorRunIsTaughtToItsBrief(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := DefaultTutorConfig()
+	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Learn = "animals", 2, 2, false
+	cfg.Brief = "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+	trainer, err := NewTutorTrainer(tutorModel(t), fake.client(t), cfg)
+	if err != nil {
+		t.Fatalf("NewTutorTrainer: %v", err)
+	}
+	if _, err := trainer.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fake.prompts["exercises"]) != 2 {
+		t.Fatalf("expected one exercise call per round, got %d", len(fake.prompts["exercises"]))
+	}
+	for _, prompt := range fake.prompts["exercises"] { // every round of the batch is written to the same plan
+		if !strings.Contains(prompt, "The plan for this batch of lessons: "+cfg.Brief) {
+			t.Fatalf("a round was written without the brief:\n%s", prompt)
+		}
+	}
+}
+
 func TestTutorRunCanEndWithAPlan(t *testing.T) {
 	fake := newFakeTeacher(t)
 	model := tutorModel(t)
@@ -347,6 +543,12 @@ func TestTutorRunCanEndWithAPlan(t *testing.T) {
 	}
 	if lessons := plan["lessons"].([]map[string]any); len(lessons) != 2 || lessons[0]["exercises"] != 2 {
 		t.Fatalf("planned lessons wrong: %v", plan["lessons"])
+	}
+	if prompt, _ := plan["prompt"].(string); prompt == "" {
+		t.Fatalf("the plan record should carry the brief for the next batch: %v", plan)
+	}
+	if upgrade, _ := plan["upgrade"].(map[string]any); upgrade["step"] != "hold" {
+		t.Fatalf("nothing passed at 9.5, so nothing should get harder: %v", plan["upgrade"])
 	}
 	if seen[len(seen)-1] != "plan" {
 		t.Fatalf("the plan never reached the progress callback: %v", seen)
