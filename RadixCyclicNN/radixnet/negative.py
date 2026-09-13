@@ -210,9 +210,10 @@ class NegativeGraph(RadixCyclicGraph):
                 by_reason = reasons[e]
                 by_reason[rid] = by_reason.get(rid, 0.0) + amount
                 if len(by_reason) > MAX_EDGE_REASONS:
-                    weakest = min(by_reason, key=lambda r: by_reason[r])
-                    if weakest != rid:
-                        del by_reason[weakest]
+                    # the weakest of the *others* goes: a reason just added carries the least blame of
+                    # all by construction and would otherwise evict itself
+                    weakest = min((r for r in by_reason if r != rid), key=lambda r: by_reason[r])
+                    del by_reason[weakest]
             touched += 1
         if touched:
             self.total_blame += amount * touched

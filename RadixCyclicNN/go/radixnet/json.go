@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -35,6 +36,30 @@ type edgesDoc struct {
 	W      []float64 `json:"w"`
 	Count  []int64   `json:"count"`
 	Reward []float64 `json:"reward"`
+
+	// the negative network's evidence (omitted on a count / reward graph)
+	Blame   []float64      `json:"blame,omitempty"`
+	Fails   []int64        `json:"fails,omitempty"`
+	Clear   []float64      `json:"clear,omitempty"`
+	Reasons [][][2]float64 `json:"reasons,omitempty"`
+}
+
+// reasonRegistryDoc is the negative graph's reason registry.
+type reasonRegistryDoc struct {
+	Labels []string  `json:"labels"`
+	Blame  []float64 `json:"blame"`
+	Fails  []int64   `json:"fails"`
+}
+
+// negativeWeightsDoc is the "weights" block of a negative graph, written
+// exactly as the Python implementation writes it.
+type negativeWeightsDoc struct {
+	NegativeWeightConfig
+	Kind       string            `json:"kind"`
+	TotalBlame float64           `json:"total_blame"`
+	TotalFails int64             `json:"total_fails"`
+	TotalClear float64           `json:"total_clear"`
+	Reasons    reasonRegistryDoc `json:"reasons"`
 }
 
 type weightsDoc struct {
@@ -43,7 +68,39 @@ type weightsDoc struct {
 	TotalTraversals int64  `json:"total_traversals"`
 	WindowEvents    []int  `json:"window_events"`
 
+	// the negative form, read from the same block
+	ShareScale float64            `json:"share_scale"`
+	BlameScale float64            `json:"blame_scale"`
+	ClearScale float64            `json:"clear_scale"`
+	TotalBlame float64            `json:"total_blame"`
+	TotalFails int64              `json:"total_fails"`
+	TotalClear float64            `json:"total_clear"`
+	Reasons    *reasonRegistryDoc `json:"reasons"`
+
+	// neg, when set, is what MarshalJSON writes instead of the count form
+	neg *negativeWeightsDoc
+
 	present map[string]bool // which keys the file carried (defaults depend on it, like Python's dict.get)
+}
+
+// negative reports whether this block describes a negative graph.
+func (w *weightsDoc) negative() bool {
+	return w != nil && (w.Kind == "negative" || w.Function == "blame" || w.has("share_scale"))
+}
+
+// MarshalJSON writes the count form, or the negative one when it is set.
+func (w *weightsDoc) MarshalJSON() ([]byte, error) {
+	if w.neg != nil {
+		return json.Marshal(w.neg)
+	}
+	type countForm struct {
+		WeightConfig
+		Kind            string `json:"kind"`
+		TotalTraversals int64  `json:"total_traversals"`
+		WindowEvents    []int  `json:"window_events"`
+	}
+	return json.Marshal(countForm{WeightConfig: w.WeightConfig, Kind: w.Kind, TotalTraversals: w.TotalTraversals,
+		WindowEvents: w.WindowEvents})
 }
 
 // UnmarshalJSON also records which keys were present.
@@ -107,6 +164,11 @@ func (g *Graph) ToDoc() *GraphDoc {
 	}
 	edgeIndex := make(map[int]int, g.nAliveEdges)
 	doc.Edges = edgesDoc{Src: []int{}, Dst: []int{}, W: []float64{}, Count: []int64{}, Reward: []float64{}}
+	negative := g.Neg
+	if negative != nil {
+		doc.Edges.Blame, doc.Edges.Fails = []float64{}, []int64{}
+		doc.Edges.Clear, doc.Edges.Reasons = []float64{}, [][][2]float64{}
+	}
 	for _, old := range order {
 		adj := &g.children[old]
 		for i, c := range adj.order {
@@ -117,9 +179,27 @@ func (g *Graph) ToDoc() *GraphDoc {
 			doc.Edges.W = append(doc.Edges.W, g.EdgeW[e])
 			doc.Edges.Count = append(doc.Edges.Count, g.EdgeCount[e])
 			doc.Edges.Reward = append(doc.Edges.Reward, g.EdgeReward[e])
+			if negative != nil {
+				doc.Edges.Blame = append(doc.Edges.Blame, negative.Blame[e])
+				doc.Edges.Fails = append(doc.Edges.Fails, negative.Fails[e])
+				doc.Edges.Clear = append(doc.Edges.Clear, negative.Clear[e])
+				doc.Edges.Reasons = append(doc.Edges.Reasons, reasonPairs(negative.Reasons[e]))
+			}
 		}
 	}
 	doc.RngState = g.rng.State()
+	if negative != nil {
+		doc.Weights = &weightsDoc{neg: &negativeWeightsDoc{
+			NegativeWeightConfig: g.NegativeWeightConfig(), Kind: "negative", TotalBlame: negative.TotalBlame,
+			TotalFails: negative.TotalFails, TotalClear: negative.TotalClear,
+			Reasons: reasonRegistryDoc{
+				Labels: append([]string{}, negative.ReasonNames...),
+				Blame:  append([]float64{}, negative.ReasonBlame...),
+				Fails:  append([]int64{}, negative.ReasonFails...),
+			},
+		}}
+		return doc
+	}
 	events := make([]int, 0, g.WindowTraversals())
 	for _, e := range g.window[g.windowHead:] {
 		if ni, ok := edgeIndex[e]; ok {
@@ -128,6 +208,16 @@ func (g *Graph) ToDoc() *GraphDoc {
 	}
 	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward", TotalTraversals: g.TotalTraversals, WindowEvents: events}
 	return doc
+}
+
+// reasonPairs renders one edge's reasons as Python writes them: [[id, blame], ...] by id.
+func reasonPairs(entries []ReasonBlame) [][2]float64 {
+	out := make([][2]float64, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, [2]float64{float64(entry.ID), entry.Blame})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
 }
 
 // GraphFromDoc rebuilds a graph from its document.
@@ -151,6 +241,9 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	// files written before the dual frequency function carry no global_scale: they get the old
 	// log(1 + count) weight (count_scale 1, no frequency terms); every present key wins over a default
 	w := d.Weights
+	if w.negative() {
+		return negativeGraphFromDoc(d)
+	}
 	legacy := !w.has("global_scale")
 	opts := DefaultGraphOptions()
 	if legacy {
@@ -260,6 +353,78 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	return g, nil
 }
 
+// negativeGraphFromDoc rebuilds a negative graph: the shared structure first,
+// then the evidence arrays and the reason registry.
+func negativeGraphFromDoc(d *GraphDoc) (*Graph, error) {
+	w := d.Weights
+	opts := DefaultNegativeOptions()
+	if w.has("share_scale") {
+		opts.ShareScale = w.ShareScale
+	}
+	if w.has("blame_scale") {
+		opts.BlameScale = w.BlameScale
+	}
+	if w.has("clear_scale") {
+		opts.ClearScale = w.ClearScale
+	}
+	// the structure, counts and rng come from the shared reader; a copy of the
+	// document without the negative marker keeps it on the count path
+	plain := *d
+	plainWeights := *w
+	plainWeights.Kind, plainWeights.Function = "count-reward", "dual-frequency"
+	delete(plainWeights.present, "share_scale")
+	plain.Weights = &plainWeights
+	g, err := GraphFromDoc(&plain)
+	if err != nil {
+		return nil, err
+	}
+	n := newNegativeData(opts)
+	m := len(g.EdgeW)
+	edges := d.Edges
+	for name, length := range map[string]int{"blame": len(edges.Blame), "clear": len(edges.Clear), "fails": len(edges.Fails)} {
+		if length != 0 && length != m {
+			return nil, fmt.Errorf("edge %s array has an inconsistent length", name)
+		}
+	}
+	if len(edges.Reasons) != 0 && len(edges.Reasons) != m {
+		return nil, fmt.Errorf("edge reason array has an inconsistent length")
+	}
+	n.Blame = make([]float64, m)
+	n.Fails = make([]int64, m)
+	n.Clear = make([]float64, m)
+	n.Reasons = make([][]ReasonBlame, m)
+	copy(n.Blame, edges.Blame)
+	copy(n.Fails, edges.Fails)
+	copy(n.Clear, edges.Clear)
+	if registry := w.Reasons; registry != nil {
+		for _, label := range registry.Labels {
+			n.ReasonID(label)
+		}
+		for id := range n.ReasonNames {
+			if id < len(registry.Blame) {
+				n.ReasonBlame[id] = registry.Blame[id]
+			}
+			if id < len(registry.Fails) {
+				n.ReasonFails[id] = registry.Fails[id]
+			}
+		}
+	}
+	for e, entries := range edges.Reasons {
+		for _, pair := range entries {
+			id := int(pair[0])
+			if id >= 0 && id < len(n.ReasonNames) {
+				n.Reasons[e] = append(n.Reasons[e], ReasonBlame{ID: id, Blame: pair[1]})
+			}
+		}
+	}
+	n.TotalBlame, n.TotalFails, n.TotalClear = w.TotalBlame, w.TotalFails, w.TotalClear
+	g.Neg = n
+	g.TotalTraversals = 0
+	g.dirtyAll = true
+	g.weightsStructure = -1
+	return g, nil
+}
+
 // ModelDoc is the JSON layout of a model file.
 type ModelDoc struct {
 	Format  string           `json:"format"`
@@ -268,7 +433,18 @@ type ModelDoc struct {
 	Kind    string           `json:"kind"`
 	Meta    map[string]any   `json:"meta"`
 	History []map[string]any `json:"history"`
-	Graph   *GraphDoc        `json:"graph"`
+
+	// the negative network's journal and filter settings (omitted on a count model)
+	Log    []LogEntry `json:"log,omitempty"`
+	Filter *filterDoc `json:"filter,omitempty"`
+
+	Graph *GraphDoc `json:"graph"`
+}
+
+// filterDoc is how strictly a negative network judges.
+type filterDoc struct {
+	Threshold   float64 `json:"threshold"`
+	MinCoverage float64 `json:"min_coverage"`
 }
 
 // utcNow is an ISO-8601 UTC timestamp like Python's datetime.isoformat(timespec="seconds").
@@ -280,17 +456,24 @@ func (m *Model) ToDoc() *ModelDoc {
 	for i, r := range m.History {
 		history[i] = copyMap(r)
 	}
-	return &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: "count",
+	doc := &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: m.Kind(),
 		Meta: copyMap(m.Meta), History: history, Graph: m.G.ToDoc()}
+	if m.IsNegative() {
+		doc.Format = NegativeFormat
+		doc.Log = append([]LogEntry{}, m.Neg.Log...)
+		doc.Filter = &filterDoc{Threshold: m.Neg.Threshold, MinCoverage: m.Neg.MinCoverage}
+	}
+	return doc
 }
 
-// FromDoc rebuilds a model from its document.
+// FromDoc rebuilds a model from its document: the count / reward model, or the
+// negative network (the format decides, as in Python's load_model).
 func FromDoc(d *ModelDoc) (*Model, error) {
-	if d.Format != ModelFormat {
-		return nil, fmt.Errorf("not a %s model document", ModelFormat)
+	if d.Format != ModelFormat && d.Format != NegativeFormat {
+		return nil, fmt.Errorf("not a %s or %s model document", ModelFormat, NegativeFormat)
 	}
 	if d.Version > ModelFormatVersion {
-		return nil, fmt.Errorf("unsupported %s model version %d", ModelFormat, d.Version)
+		return nil, fmt.Errorf("unsupported %s model version %d", d.Format, d.Version)
 	}
 	if d.Graph == nil {
 		return nil, fmt.Errorf("model document has no graph")
@@ -304,8 +487,21 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 	for i, r := range d.History {
 		m.History[i] = copyMap(r)
 	}
+	if g.IsNegative() {
+		m.makeNegative()
+		if len(d.Log) > MaxLogEntries {
+			d.Log = d.Log[len(d.Log)-MaxLogEntries:]
+		}
+		m.Neg.Log = append([]LogEntry{}, d.Log...)
+		if d.Filter != nil {
+			m.Neg.Threshold, m.Neg.MinCoverage = d.Filter.Threshold, d.Filter.MinCoverage
+		}
+	}
 	for k, v := range d.Meta {
 		m.Meta[k] = v
+	}
+	if d.Format == NegativeFormat && !g.IsNegative() {
+		return nil, fmt.Errorf("%s document without a negative graph", NegativeFormat)
 	}
 	return m, nil
 }

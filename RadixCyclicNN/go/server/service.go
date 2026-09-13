@@ -146,6 +146,8 @@ type Service struct {
 	ckpts     *Checkpoints
 	logf      func(string)
 	started   time.Time
+	// negative is the negative network this server filters with (nil until first used)
+	negative *radixnet.Model
 	// the teacher defaults of the tutor endpoints and the records of every tutor run
 	ollamaURL    string
 	ollamaModel  string
@@ -581,7 +583,16 @@ func (s *Service) Save(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": abs, "bytes": st.Size()}, nil
+	out := map[string]any{"path": abs, "bytes": st.Size(), "negative": nil}
+	// the negative network is a second file beside the model: saving the work means saving both
+	if path == "" && s.negative != nil && s.negative.G.Neg != nil && s.negative.G.Neg.TotalBlame > 0 {
+		if side := s.negativePath(); side != "" {
+			if saved, err := s.NegativeSave(side); err == nil {
+				out["negative"] = saved
+			}
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) replaceModel(m *radixnet.Model) (map[string]any, error) {

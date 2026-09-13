@@ -405,6 +405,185 @@ class TestGoTutorParity(unittest.TestCase):
         self.assertEqual(load_json(self.go_path)["graph"]["edges"]["reward"], before)
 
 
+class TestGoNegativeParity(unittest.TestCase):
+    """The negative network in both languages: the same blame, the same corrections, the same verdicts, and
+    each side reading the other's model file."""
+
+    def setUp(self):
+        self.py_model = os.path.join(TMP.name, f"neg_py_{self.id().rsplit('.', 1)[-1]}.count.json")
+        self.go_model = os.path.join(TMP.name, f"neg_go_{self.id().rsplit('.', 1)[-1]}.count.json")
+        self.py_negative = self.py_model.replace(".count.json", ".count.negative.json")
+        self.go_negative = self.go_model.replace(".count.json", ".count.negative.json")
+        for path in (self.py_negative, self.go_negative):
+            if os.path.exists(path):
+                os.remove(path)
+
+    def teach(self, model):
+        """The same three lessons on both sides: two whole failures and one correction."""
+        lessons = [
+            ("negative", "blame", "--text", "the the the the cat", "--reason", "repetition",
+             "--severity", 1.5, "--source", "review", "--note", "it repeats the same word"),
+            ("negative", "blame", "--text", "the cat cat cat sat", "--reason", "gibberish", "--source", "review"),
+            ("negative", "clear", "--text", "the cat sat on the mat"),
+        ]
+        runner = py if model == self.py_model else go
+        for args in lessons:
+            runner(*args, model=model)
+
+    def test_the_same_blame_and_the_same_verdicts(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py_doc, go_doc = load_json(self.py_negative), load_json(self.go_negative)
+        self.assertEqual(py_doc["format"], "radixnet-negative")
+        self.assertEqual(go_doc["format"], "radixnet-negative")
+        self.assertEqual(py_doc["kind"], go_doc["kind"])
+        p, g = py_doc["graph"], go_doc["graph"]
+        self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+        self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+        assert_close(self, p["edges"]["blame"], g["edges"]["blame"], 1e-12)
+        assert_close(self, p["edges"]["clear"], g["edges"]["clear"], 1e-12)
+        self.assertEqual(p["edges"]["fails"], g["edges"]["fails"])
+        self.assertEqual(p["edges"]["reasons"], g["edges"]["reasons"])
+        assert_close(self, p["edges"]["w"], g["edges"]["w"], 1e-12)
+        pw, gw = p["weights"], g["weights"]
+        for key in ("function", "kind", "share_scale", "blame_scale", "clear_scale", "smoothing",
+                    "total_blame", "total_fails", "total_clear"):
+            self.assertEqual(pw[key], gw[key], key)
+        self.assertEqual(pw["reasons"], gw["reasons"])
+        self.assertEqual(py_doc["filter"], go_doc["filter"])
+        self.assertEqual([e["reason"] for e in py_doc["log"]], [e["reason"] for e in go_doc["log"]])
+        self.assertEqual([e["note"] for e in py_doc["log"]], [e["note"] for e in go_doc["log"]])
+        # the same judgements, sentence for sentence
+        for text in ("the the the the cat", "the cat cat cat sat", "the cat sat on the mat", "a wholly unseen line"):
+            a = py("negative", "why", "--text", text, model=self.py_model)["verdicts"][0]
+            b = go("negative", "why", "--text", text, model=self.go_model)["verdicts"][0]
+            for key in ("verdict", "why", "transitions", "blamed", "known"):
+                self.assertEqual(a[key], b[key], f"{text}: {key}")
+            for key in ("risk", "peak", "coverage", "blame"):
+                self.assertAlmostEqual(a[key], b[key], places=9, msg=f"{text}: {key}")
+            self.assertEqual([r["reason"] for r in a["reasons"]], [r["reason"] for r in b["reasons"]], text)
+            self.assertEqual([s["fragment"] for s in a["spans"]], [s["fragment"] for s in b["spans"]], text)
+
+    def test_a_correction_blames_the_same_characters(self):
+        py("negative", "blame", "--text", "the cat sat here", "--reason", "other", model=self.py_model)
+        go("negative", "blame", "--text", "the cat sat here", "--reason", "other", model=self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 1, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 1, model=self.go_model)
+        for model in (self.py_model, self.go_model):
+            runner = py if model == self.py_model else go
+            runner("correct", "--wrong", "the cat sit on the mat", "--right", "the cat sits on the mat",
+                   "--blame", "--reason", "agreement", "--note", "the verb must agree", model=model)
+        a = py("negative", "why", "--text", "the cat sit on the mat", model=self.py_model)["verdicts"][0]
+        b = go("negative", "why", "--text", "the cat sit on the mat", model=self.go_model)["verdicts"][0]
+        self.assertEqual([s["fragment"] for s in a["spans"]], [s["fragment"] for s in b["spans"]])
+        self.assertEqual([s["reason"] for s in a["spans"]], [s["reason"] for s in b["spans"]])
+        self.assertAlmostEqual(a["risk"], b["risk"], places=9)
+        self.assertEqual(a["why"], b["why"])
+
+    def test_each_side_reads_the_other_s_negative_model(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        text = "the the the the cat"
+        # Go judges the model Python taught, and Python the one Go taught
+        crossed_go = go("negative", "why", "--text", text, "--negative", self.py_negative, model=self.go_model)["verdicts"][0]
+        crossed_py = py("negative", "why", "--text", text, "--negative", self.go_negative, model=self.py_model)["verdicts"][0]
+        own = py("negative", "why", "--text", text, model=self.py_model)["verdicts"][0]
+        for other in (crossed_go, crossed_py):
+            self.assertEqual(other["verdict"], own["verdict"])
+            self.assertAlmostEqual(other["risk"], own["risk"], places=9)
+            self.assertEqual(other["why"], own["why"])
+
+    def test_the_filter_agrees_on_what_to_veto(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        args = ("negative", "filter", "--text", "the the the the cat", "--text", "a rainy day in autumn")
+        a = py(*args, model=self.py_model)
+        b = go(*args, model=self.go_model)
+        self.assertEqual([v["decision"] for v in a["verdicts"]], [v["decision"] for v in b["verdicts"]])
+        self.assertEqual([v["rule"] for v in a["verdicts"]], [v["rule"] for v in b["verdicts"]])
+        self.assertEqual(a["kept"], b["kept"])
+        for x, y in zip(a["verdicts"], b["verdicts"]):
+            self.assertAlmostEqual(x["ratio"], y["ratio"], places=9)
+            self.assertAlmostEqual(x["peak"], y["peak"], places=9)
+            self.assertEqual(x["why"], y["why"])
+        # the peak rule fires on the same candidate in both
+        peak = ("negative", "filter", "--text", "the the the the cat", "--no-ratio", "--threshold", 1e9, "--peak", 1)
+        self.assertEqual(py(*peak, model=self.py_model)["verdicts"][0]["rule"],
+                         go(*peak, model=self.go_model)["verdicts"][0]["rule"])
+
+
+class TestGoServerNegative(unittest.TestCase):
+    """The Go server's negative endpoints answer the JSON the frontend's Negative tab expects."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import time
+        from tests.test_api import Client
+
+        cls.tmp = tempfile.TemporaryDirectory(prefix="radixnet-go-negative-")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        cls.model = os.path.join(cls.tmp.name, "model.count.json")
+        cls.proc = subprocess.Popen(
+            [BINARY, "--model", cls.model, "--exact", "serve", "--host", "127.0.0.1", "--port", str(port)],
+            cwd=GO_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        cls.client = Client(f"http://127.0.0.1:{port}")
+        for _ in range(200):
+            try:
+                if cls.client.get("/api/health")[0] == 200:
+                    break
+            except Exception:  # noqa: BLE001 - the server is still starting
+                pass
+            time.sleep(0.05)
+        else:
+            cls.tearDownClass()
+            raise AssertionError("the Go server did not start")
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "proc", None) is not None:
+            cls.proc.terminate()
+            try:
+                cls.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.proc.kill()
+        cls.tmp.cleanup()
+
+    def test_the_negative_endpoints(self):
+        status, data, _ = self.client.post("/api/negative/blame", {"texts": ["the the the the cat"],
+                                                                   "reason": "repetition", "note": "it repeats"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([r["reason"] for r in data["reasons"]], ["repetition"])
+        status, data, _ = self.client.get("/api/negative")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(set(data), {"path", "active", "stats", "reasons", "journal", "weights", "settings"})
+        self.assertEqual(data["stats"]["kind"], "negative")
+        self.assertEqual(data["journal"][0]["note"], "it repeats")
+        status, data, _ = self.client.post("/api/negative/judge", {"text": "the the the the cat"})
+        self.assertEqual(status, 200, data)
+        verdict = data["verdicts"][0]
+        self.assertEqual(verdict["verdict"], "reject")
+        self.assertLessEqual({"risk", "peak", "coverage", "blame", "reasons", "spans", "why"}, set(verdict))
+        status, data, _ = self.client.post("/api/negative/filter", {"texts": ["the the the the cat", "an unseen line"]})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([v["decision"] for v in data["verdicts"]], ["reject", "pass"])
+        self.assertIsNone(data["verdicts"][1]["rule"])
+        self.assertEqual(data["kept"], ["an unseen line"])
+        status, data, _ = self.client.post("/api/negative/settings", {"threshold": 2.0})
+        self.assertEqual(data["settings"]["threshold"], 2.0)
+        status, data, _ = self.client.post("/api/negative/save")
+        self.assertEqual(status, 200, data)
+        self.assertTrue(os.path.isfile(data["path"]))
+        from radixnet.model import load_model
+
+        self.assertEqual(load_model(data["path"]).kind, "negative")
+
+
 class TestGoServer(unittest.TestCase):
     """`radixnet-count serve` speaks the Python server's JSON contract for the count model: the frontend's
     requests and the shapes the Python API tests assert on must be served the same way."""

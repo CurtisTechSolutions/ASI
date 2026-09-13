@@ -75,10 +75,21 @@ func (s *Service) DefaultTutorModelFor(provider string) string {
 	return s.ollamaModel
 }
 
-// StartTutor starts a tutor job: rounds of exercise, completion, grade and 2NRL.
-func (s *Service) StartTutor(config radixnet.TutorConfig, client, grader radixnet.LLMClient) (map[string]any, error) {
+// StartTutor starts a tutor job: rounds of exercise, completion, grade and
+// 2NRL.  With blame every failed sentence also teaches the negative network why
+// it failed: the mistake the teacher named is the reason, its mark the
+// severity, and only the characters the correction changed are blamed.
+func (s *Service) StartTutor(config radixnet.TutorConfig, client, grader radixnet.LLMClient, blame bool) (map[string]any, error) {
 	if err := config.Validate(); err != nil {
 		return nil, badRequest("%v", err)
+	}
+	var negative *radixnet.Model
+	if blame {
+		found, err := s.negativeModel()
+		if err != nil {
+			return nil, err
+		}
+		negative = found
 	}
 	return s.startJob("tutor", func(job *Job, progress func(map[string]any), stop func() bool) error {
 		trainer, err := radixnet.NewTutorTrainer(s.model, client, config)
@@ -88,6 +99,7 @@ func (s *Service) StartTutor(config radixnet.TutorConfig, client, grader radixne
 		if grader != nil {
 			trainer.GraderClient = grader
 		}
+		trainer.Negative = negative
 		trainer.Progress = func(record map[string]any) {
 			s.tutorHistory = append(s.tutorHistory, record)
 			progress(record)
@@ -214,7 +226,7 @@ func init() {
 	route("GET", "/api/tutor", rTutor)
 	doc("GET", "/api/tutor", "the English tutor: the teachers on offer (ollama, chatgpt: url, model, configured), the error types a completion is marked with, the completion modes and every default setting")
 	route("POST", "/api/tutor/start", rTutorStart)
-	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, ...}")
+	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it failed), ...}")
 	route("GET", "/api/tutor/history", rTutorHistory)
 	doc("GET", "/api/tutor/history", "lesson / round / report records of all tutor runs")
 	route("GET", "/api/chatgpt/models", rChatGPTModels)
@@ -449,7 +461,11 @@ func rTutorStart(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	job, err := rq.svc.StartTutor(config, client, grader)
+	blame, err := rq.f.flag("blame", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	job, err := rq.svc.StartTutor(config, client, grader, blame)
 	if err != nil {
 		return 0, nil, err
 	}

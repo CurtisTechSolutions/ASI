@@ -144,6 +144,9 @@ type Graph struct {
 	EdgeAlive  []bool
 	EdgeParent []int
 
+	// Neg is the negative network's evidence (nil on a count / reward graph).
+	Neg *NegativeData
+
 	// the count / reward numbers
 	EdgeReward      []float64
 	WindowEdgeCount []int64
@@ -242,6 +245,9 @@ func (g *Graph) newEdge(p, c int, count int64) int {
 	g.EdgeParent = append(g.EdgeParent, p)
 	g.EdgeReward = append(g.EdgeReward, 0.0)
 	g.WindowEdgeCount = append(g.WindowEdgeCount, 0)
+	if g.Neg != nil {
+		g.Neg.appendEdge()
+	}
 	g.children[p].set(c, e)
 	g.parents[c].set(p, e)
 	g.nAliveEdges++
@@ -378,6 +384,9 @@ func (g *Graph) MergeChild(p int) bool {
 	pc := &g.parents[c]
 	if pc.size() != 1 {
 		return false
+	}
+	if g.blocksMerge(ch.edges[0]) {
+		return false // a blamed transition stays an edge, so the negative network can still name it
 	}
 	lp := []rune(g.Labels[p])
 	lc := []rune(g.Labels[c])

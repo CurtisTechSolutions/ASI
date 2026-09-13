@@ -152,6 +152,7 @@ commands:
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
+  negative   the negative network: blame | clear | why | filter | reasons | forget
   invert     flip the sign of every reward
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
@@ -219,6 +220,8 @@ func main() {
 		cmdFeedback(rest)
 	case "2nrl":
 		cmdTwoNRL(rest)
+	case "negative":
+		cmdNegative(rest)
 	case "correct":
 		cmdCorrect(rest)
 	case "invert":
@@ -558,6 +561,10 @@ func cmdCorrect(args []string) {
 	keep := fs.Float64("keep", 0.25, "what the unchanged part of the correction still earns")
 	noCount := fs.Bool("no-count", false, "do not traverse the correction (it is counted by default)")
 	dryRun := fs.Bool("dry-run", false, "show the alignment without touching the model")
+	blame := fs.Bool("blame", false, "also teach the negative network: the same diff, blaming only the characters you changed")
+	reason := fs.String("reason", "corrected", "reason recorded with --blame")
+	note := fs.String("note", "", "your own words, kept in the negative network's journal")
+	addNegativeFlag(fs)
 	_ = fs.Parse(args)
 	if strings.TrimSpace(*wrong) == "" && strings.TrimSpace(*right) == "" {
 		fail("correct needs --wrong (what the network wrote) and --right (what it should say)")
@@ -577,8 +584,26 @@ func cmdCorrect(args []string) {
 	if err != nil {
 		fail("%v", err)
 	}
+	var blamed *radixnet.NegativeCorrection
+	var negativeDoc map[string]any
+	if *blame {
+		negative := openNegative(false)
+		blamed, err = negative.BlameCorrection(*wrong, *right, radixnet.BlameOptions{
+			Reason: *reason, Severity: *weight * *strength, Source: "cli", Note: *note,
+		})
+		if err != nil {
+			fail("%v", err)
+		}
+		negativePathSaved := saveNegative(negative)
+		negativeDoc = map[string]any{"blamed": blamed, "saved": negativePathSaved, "reasons": negative.Reasons(),
+			"stats": negative.Stats()}
+	}
 	sayChanges(*wrong, *right, changes)
 	say("moved: %d step(s) penalised, %d taught, %d kept at %g", moved.Penalised, moved.Rewarded, moved.Kept, *keep)
+	if blamed != nil {
+		say("negative network: %d step(s) blamed for %s, %d cleared (%s)", blamed.Blamed, blamed.Reason,
+			blamed.Cleared, negativeDoc["saved"])
+	}
 	path := saveModel(m)
 	say("saved %s", path)
 	if jsonMode {
@@ -587,7 +612,7 @@ func cmdCorrect(args []string) {
 			"penalised": moved.Penalised, "rewarded": moved.Rewarded, "kept": moved.Kept,
 			"penalty": moved.Penalty, "reward": moved.Reward, "loss": moved.Loss,
 			"wrong_chars": moved.WrongChars, "right_chars": moved.RightChars,
-			"saved": path, "stats": m.Stats(),
+			"saved": path, "stats": m.Stats(), "negative": negativeDoc,
 		})
 	}
 }
@@ -825,6 +850,9 @@ func cmdTutor(args []string) {
 	posEpochs := fs.Int("pos-epochs", cfg.PosEpochs, "positive passes (traversal + reward)")
 	strength := fs.Float64("strength", cfg.Strength, "reward / penalty per path, scaled by the mark")
 	noReplay := fs.Bool("no-replay", false, "do not keep teaching earlier corrections")
+	blame := fs.Bool("blame", false, "teach the negative network why each failed sentence failed: the mistake the "+
+		"teacher named is the reason, its mark the severity, and only the characters it corrected are blamed")
+	addNegativeFlag(fs)
 	_ = fs.Parse(args)
 
 	cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.Attempts = *topic, *rounds, *exercises, *attempts
@@ -864,6 +892,12 @@ func cmdTutor(args []string) {
 		fail("%v", err)
 	}
 	trainer.GraderClient = grader
+	var negative *radixnet.Model
+	if *blame {
+		negative = openNegative(false)
+		trainer.Negative = negative
+		say("negative network: %s (every failed sentence is blamed for what the teacher marked it down for)", negativeFile())
+	}
 	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s: %s at %s, marked by %s: %s, pass at %g/10 (grammar %g)",
 		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorProvider, cfg.TutorModel, client.BaseURL(),
 		cfg.GraderProvider, cfg.ResolvedGraderModel(), cfg.Threshold, cfg.GrammarWeight)
@@ -884,6 +918,13 @@ func cmdTutor(args []string) {
 	if !*dryRun {
 		saved = saveModel(m)
 	}
+	var negativeDoc map[string]any
+	if negative != nil {
+		negativeSaved := saveNegative(negative)
+		negativeDoc = map[string]any{"path": negativeSaved, "reasons": negative.Reasons(), "stats": negative.Stats()}
+		say("negative network: %s", negativeSaved)
+		reasonTable(negative, 10)
+	}
 	say("report card: %v/%v passed, mean %s (grammar %s); mistakes: %s",
 		card["passed"], card["lessons"], fmtMark(card["mean_score"]), fmtMark(card["mean_grammar"]), mistakes(card))
 	planned := lastRecord(records, "plan")
@@ -896,7 +937,7 @@ func cmdTutor(args []string) {
 	if jsonMode {
 		emit(map[string]any{
 			"config": cfg, "records": records, "lessons": trainer.Lessons, "report": card,
-			"plan": planned, "saved": saved, "stats": m.Stats(),
+			"plan": planned, "saved": saved, "stats": m.Stats(), "negative": negativeDoc,
 		})
 	}
 }

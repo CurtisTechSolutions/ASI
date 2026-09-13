@@ -34,10 +34,10 @@ and an optional GPU backend (torch) are built in.
 | Teach it by talking to it | `speech`, the Speech tab and `POST /api/speech/teach`: the browser records the microphone and dictates the words (Web Speech API; faster-whisper, openai-whisper or an OpenAI-compatible transcription server do it on the server side), and **one utterance becomes two texts behind the same unique token** - `<speech:9f2a1c7d> the cat sat on the mat` and `<speech:9f2a1c7d> aud:mu:8000x1:<base64>`, the waveform itself with every sample quantised to one mu-law byte. Both are trained on, so the words and the sound leave the same node of the graph; `speech decode` plays a predicted waveform back. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
-| Go port of the count / reward model | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
+| Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
-| The negative network | `NegativeNet` (`--kind negative`, the Negative tab): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
+| The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
 | The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
@@ -101,7 +101,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
-| `make go-build` / `go-test` / `go-parity` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model |
+| `make go-build` / `go-test` / `go-parity` / `go-negative` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model, blame a garbage file into the Go negative network and judge a text through it |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
 | `make tutor TOPIC="..." ROUNDS=5` / `tutor-dry` / `tutor-focus FOCUS="past tense"` / `tutor-plan PLAN=3` | automated English lessons taught by `TUTOR=ollama\|chatgpt` (`TUTOR_MODEL`, `TUTOR_URL`); `tutor-plan` ends with the next lessons planned from the report card, and the brief that teaches them (`BRIEF="..."` runs a batch to one) |
@@ -996,15 +996,17 @@ epochs while the structure is unchanged.
 
 ## Go implementation of the count / reward model
 
-`go/` holds a Go port of the count / reward model (`CountRewardNet`), a
-standalone module with a library (`go/radixnet`) and a CLI
-(`go/cmd/radixnet-count`); the Python implementation stays as it is. Model
-files are interchangeable: both sides read and write the `radixnet-count`
-JSON format, including the Mersenne Twister state, so a model trained on one
-side continues on the other with identical numbers (`tests/test_go_parity.py`
-trains the same corpus on both, compares structure, counts, rewards, window,
-RNG state, predictions, generated texts, scores and conversations, and lets
-each side continue the other's file).
+`go/` holds a Go port of the count / reward model (`CountRewardNet`) **and of
+the negative network**, a standalone module with a library (`go/radixnet`) and
+a CLI (`go/cmd/radixnet-count`); the Python implementation stays as it is.
+Model files are interchangeable: both sides read and write the
+`radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
+Twister state, so a model trained on one side continues on the other with
+identical numbers (`tests/test_go_parity.py` trains the same corpus on both,
+compares structure, counts, rewards, window, RNG state, predictions, generated
+texts, scores and conversations, blames the same failures and corrections and
+compares the verdicts character for character, and lets each side read the
+other's files).
 
 ```bash
 make go-build                                   # -> go/bin/radixnet-count (needs Go 1.24+)
@@ -1013,12 +1015,18 @@ go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
 go/bin/radixnet-count --model model.count.json generate --mode beam --count 5
 go/bin/radixnet-count --model model.count.json converse --opening "the cat sat on the mat"
 go/bin/radixnet-count --model model.count.json tutor --topic "everyday life" --rounds 3   # Ollama teaches it English
+go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame    # ... and blames what it marks down
 go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
+go/bin/radixnet-count --model model.count.json negative why --text "the the the the cat"
+go/bin/radixnet-count --model model.count.json negative filter --count 3   # the pair: write, then veto
 python -m radixnet --model model.count.json info    # the Python side reads the same file
+python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
 ```
 
-Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`,
-`weights`, `info`, `converse`, `serve`, `version`; global options `--model`,
+Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`,
+`negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget`),
+`invert`, `weights`, `info`, `converse`, `tutor`, `serve`, `version`; `--blame`
+(with `--negative PATH`) on `tutor` and `correct`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
 none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
 limit, 80 % of the machine or container by default), `--memprofile PATH`.
@@ -1139,12 +1147,12 @@ The frontend detects the engine (`GET /api/health` and `/api/status` carry
 `engine: "go"`, the worker count and the live goroutine count): it shows a
 **Go engine** badge in the header and `engine go · workers · goroutines` in the
 status bar, hides the tabs that need the Python server (Evolve, Ollama, Code,
-Images, Speech - the Tutor tab stays, both servers run the lessons), locks the model
-selector to the count model, and the Train tab gains a
-**Texts are** selector (`lines | paragraphs | pages`) so the pasted text and the
-uploaded files are cut into the units the goroutines fan out over. Train,
-Predict (with the Like button), Generate (with ratings), Converse, Score, 2NRL,
-Tutor, Checkpoints and Graph work unchanged.
+Images, Speech - the Tutor and Negative tabs stay, both servers run the lessons
+and the negative network), locks the model selector to the count model, and the
+Train tab gains a **Texts are** selector (`lines | paragraphs | pages`) so the
+pasted text and the uploaded files are cut into the units the goroutines fan out
+over. Train, Predict (with the Like button), Generate (with ratings), Converse,
+Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
 
 | endpoint | Go server |
 |---|---|
@@ -1153,7 +1161,8 @@ Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
 | `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |
-| `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models` | the English lessons, same bodies and records as the Python server: the teacher (`tutor_provider`: a local Ollama model or ChatGPT) sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` set the defaults, the key is the server's own `$OPENAI_API_KEY`) |
+| `GET /api/negative`, `POST /api/negative/blame`, `/clear`, `/judge`, `/filter`, `/forget`, `/settings`, `/reset`, `/save` | the negative network, same bodies and results as the Python server: the failures with the tutor's reasons, the verdicts with their blamed fragments, and the pair (the count model writes, the negative network vetoes by blame, peak or the likelihood ratio). Its file is `model.negative.json` beside the model path, interchangeable with Python's; `POST /api/save` writes it alongside the model |
+| `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models` | the English lessons, same bodies and records as the Python server: the teacher (`tutor_provider`: a local Ollama model or ChatGPT) sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` set the defaults, the key is the server's own `$OPENAI_API_KEY`). With `blame` every failed sentence also teaches the negative network what the teacher marked it down for |
 | `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
@@ -1228,7 +1237,7 @@ RadixCyclicNN/
                       tutor, codegen, vision, speech, dialogue
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
-  go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)
+  go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data)
   docker/             container entrypoint (optional checkpoint resume)
   Dockerfile, docker-compose.yml, docker-compose.gpu.yml, .env.example, Makefile

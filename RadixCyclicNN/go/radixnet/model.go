@@ -29,6 +29,10 @@ type Model struct {
 	Meta    map[string]any
 	Workers int
 	Exact   bool
+
+	// Neg is the model-level state of the negative network - the journal and
+	// how strictly it judges - and is nil on a count / reward model.
+	Neg *Negative
 }
 
 // NewModel creates an untrained model.
@@ -50,7 +54,12 @@ func newModelWithGraph(g *Graph) *Model {
 }
 
 // Kind is the model kind shared with the Python implementation.
-func (m *Model) Kind() string { return "count" }
+func (m *Model) Kind() string {
+	if m.G != nil && m.G.IsNegative() {
+		return "negative"
+	}
+	return "count"
+}
 
 // workers is the goroutine cap: Model.Workers, else the package default (0 = unbounded).
 func (m *Model) workers() int {
@@ -137,27 +146,58 @@ type TrainOptions struct {
 // DefaultTrainOptions mirror the Python defaults (5 epochs, compression after every epoch).
 func DefaultTrainOptions() TrainOptions { return TrainOptions{Epochs: 5, AutoCompress: true} }
 
-// Train counts one traversal of every text's path per epoch.
+// Train counts one traversal of every text's path per epoch - or, on the
+// negative network, blames every text: training it *is* blaming (see Blame).
 func (m *Model) Train(texts []string, opts TrainOptions) ([]map[string]any, error) {
+	if m.IsNegative() {
+		return m.Blame(texts, blameFromTrain(opts))
+	}
 	return m.passesSource(SliceSource(texts), opts, true, 0.0)
 }
 
 // TrainSource is Train over a streaming source (a massive ZIP archive, a file,
-// several of them): the source is re-read for every pass, chunk by chunk.
+// several of them): the source is re-read for every pass, chunk by chunk.  The
+// negative network blames what the source holds instead, which needs the texts
+// in memory - a corpus of failures is small by construction.
 func (m *Model) TrainSource(src TextSource, opts TrainOptions) ([]map[string]any, error) {
+	if m.IsNegative() {
+		texts, err := CollectTexts(src)
+		if err != nil {
+			return nil, err
+		}
+		return m.Blame(texts, blameFromTrain(opts))
+	}
 	return m.passesSource(src, opts, true, 0.0)
 }
 
-// Reward (thumbs up): epochs passes that traverse and reward (+strength) every path.
+// blameFromTrain carries a training call's settings over to a blame pass.
+func blameFromTrain(opts TrainOptions) BlameOptions {
+	return BlameOptions{Epochs: opts.Epochs, NoCompress: !opts.AutoCompress, Progress: opts.Progress, Stop: opts.Stop}
+}
+
+// Reward (thumbs up): epochs passes that traverse and reward (+strength) every
+// path - or, on the negative network, clearing: it never learns *from* correct
+// text, it only lets go of blame.
 func (m *Model) Reward(texts []string, epochs int, strength float64) ([]map[string]any, error) {
 	opts := DefaultTrainOptions()
 	opts.Epochs = epochs
 	opts.Phase = "positive"
+	if m.IsNegative() {
+		return m.RewardWith(texts, opts, strength)
+	}
 	return m.passes(texts, opts, true, math.Abs(strength))
 }
 
 // RewardWith is Reward with explicit pass options (progress / stop hooks, phase name).
+// On the negative network it clears blame instead (nothing is created).
 func (m *Model) RewardWith(texts []string, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if m.IsNegative() {
+		weight := math.Abs(strength)
+		if weight == 0 {
+			weight = 1
+		}
+		return m.Clear(texts, weight, opts.Epochs)
+	}
 	if opts.Phase == "" {
 		opts.Phase = "positive"
 	}
@@ -169,11 +209,20 @@ func (m *Model) Punish(texts []string, epochs int, strength float64) ([]map[stri
 	opts := DefaultTrainOptions()
 	opts.Epochs = epochs
 	opts.Phase = "negative"
+	if m.IsNegative() {
+		return m.PunishWith(texts, opts, strength)
+	}
 	return m.passes(texts, opts, false, -math.Abs(strength))
 }
 
 // PunishWith is Punish with explicit pass options (progress / stop hooks, phase name).
+// On the negative network it blames the texts (thumbs down: reason "thumbs-down").
 func (m *Model) PunishWith(texts []string, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if m.IsNegative() {
+		o := blameFromTrain(opts)
+		o.Reason, o.Severity, o.Source = "thumbs-down", math.Abs(strength), "feedback"
+		return m.Blame(texts, o)
+	}
 	if opts.Phase == "" {
 		opts.Phase = "negative"
 	}
@@ -1088,6 +1137,9 @@ func (m *Model) Stats() map[string]any {
 	var lastLoss any
 	if len(m.History) > 0 {
 		lastLoss = m.History[len(m.History)-1]["loss"]
+	}
+	if m.IsNegative() {
+		return m.negativeStats(lastLoss)
 	}
 	return map[string]any{
 		"kind":                 "count",

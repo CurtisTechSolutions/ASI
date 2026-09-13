@@ -60,8 +60,12 @@ func (g *Graph) RecordTraversals(edges []int) int {
 	return len(edges)
 }
 
-// Configure changes the scales / window size and recomputes every weight.
+// Configure changes the scales / window size and recomputes every weight (on a
+// negative graph: the blame function's scales).
 func (g *Graph) Configure(opts map[string]float64) error {
+	if g.Neg != nil {
+		return g.ConfigureNegative(opts)
+	}
 	for name, value := range opts {
 		switch name {
 		case "window":
@@ -149,8 +153,14 @@ func (g *Graph) Shares(p int) []Share {
 	return out
 }
 
-// recomputeRow writes the dual frequency weight to every edge leaving p.
+// recomputeRow writes the weight function to every edge leaving p: the dual
+// frequency function of the count model, or the blame function of a negative
+// graph.
 func (g *Graph) recomputeRow(p int) {
+	if g.Neg != nil {
+		g.recomputeNegativeRow(p)
+		return
+	}
 	adj := &g.children[p]
 	if adj.size() == 0 || !g.Alive[p] {
 		return
@@ -249,8 +259,13 @@ func (g *Graph) TotalReward() (pos, neg float64) {
 	return pos, neg
 }
 
-// Invert flips the sign of every reward.
+// Invert flips the sign of every reward - or, on a negative graph, swaps
+// blame and clearing (see invertNegative).
 func (g *Graph) Invert() {
+	if g.Neg != nil {
+		g.invertNegative()
+		return
+	}
 	for e, ok := range g.EdgeAlive {
 		if ok {
 			g.EdgeReward[e] = -g.EdgeReward[e]

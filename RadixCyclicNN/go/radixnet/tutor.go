@@ -848,6 +848,11 @@ type TutorTrainer struct {
 	History      []map[string]any
 	Lessons      []*Lesson
 	Weak         []string
+	// Negative is an optional negative network that learns why each failed
+	// sentence failed: the mistake the teacher named is the reason, its mark
+	// the severity, and only the characters its correction changed are blamed
+	// (TeachLessons).
+	Negative *Model
 	// Progress receives every lesson, round and report record as it happens.
 	Progress func(map[string]any)
 	// Stop is polled between steps; a true answer ends the run cleanly.
@@ -1315,6 +1320,10 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 			return nil, nil, err
 		}
 	}
+	blamed, err := t.TeachNegative(lessons)
+	if err != nil {
+		return nil, nil, err
+	}
 	if cfg.Adapt {
 		t.Weak = card["weakest"].([]string)
 	}
@@ -1328,7 +1337,23 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 	for key, value := range learned {
 		record[key] = value
 	}
+	if blamed != nil {
+		record["negative_blamed"] = blamed.Blamed
+		record["negative_edges"] = blamed.Edges
+		record["negative_reasons"] = blamed.Reasons
+	}
 	return record, lessons, nil
+}
+
+// TeachNegative hands this round's failures to the negative network: the
+// teacher named the mistake, so it is the reason, and where it wrote the
+// sentence out correctly only the characters it changed are blamed.  Returns
+// nil when no negative network is attached.
+func (t *TutorTrainer) TeachNegative(lessons []*Lesson) (*TeachReport, error) {
+	if t.Negative == nil || len(lessons) == 0 {
+		return nil, nil
+	}
+	return TeachLessons(t.Negative, lessons, t.Config.Threshold, true, "tutor", TeachOptions{Stop: t.Stop})
 }
 
 // learnLessons applies the round's grades: once for the whole round, or lesson

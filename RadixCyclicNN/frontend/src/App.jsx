@@ -28,7 +28,7 @@ const TABS = [
   { id: "converse", label: "Converse", Component: ConversePanel },
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
-  { id: "negative", label: "Negative", Component: NegativePanel, pythonOnly: true },
+  { id: "negative", label: "Negative", Component: NegativePanel },
   { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
   { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
   { id: "tutor", label: "Tutor", Component: TutorPanel },

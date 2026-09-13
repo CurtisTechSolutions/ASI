@@ -53,6 +53,7 @@ RadixCyclicNN/
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
+                            (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
@@ -1256,6 +1257,8 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 
 ## 23. The count / reward model in Go (`go/`) — goroutines over lines, paragraphs and pages
 
+(The negative network is ported too; section 24.5 covers what it adds to the types below.)
+
 `go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
 beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
 CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `weights`, `info`, `converse`). The
@@ -1534,7 +1537,9 @@ prefix. `describe()` reports both halves and the settings.
 * CLI: `negative <action>` with `--negative PATH` (before or after the action; default `model.negative.json` derived
   from `--model`): `blame`, `clear`, `why`, `filter`, `reasons`, `forget` — see the README's CLI table. `--blame`
   (with `--negative`) on `tutor`, `correct` (one hand-written correction teaches both networks from the same diff),
-  `ollama review`, `codegen` and `evolve`. `--kind negative` makes it the ordinary model.
+  `ollama review`, `codegen` and `evolve`. `--kind negative` makes it the ordinary model.  The Go CLI
+  (`radixnet-count negative <action>`, `tutor --blame`, `correct --blame`) has the same commands and flags
+  (section 24.5).
 * API: `GET /api/negative` (stats, reasons, journal, settings), `POST /api/negative/blame|clear|judge|filter|forget|
   settings|reset|save`. The service keeps exactly one negative network, in the same `_parked` store as the other
   kinds, so selecting the `negative` kind hands back that very object; `positive_model()` finds the model it filters
@@ -1548,6 +1553,37 @@ prefix. `describe()` reports both halves and the settings.
   `tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
   tutor, evolve and codegen hooks) and `tests/test_duo.py` (all three rules, the coverage gate, strict, learn,
   generate / predict, the count model as the positive half).
+
+### 24.5 The negative network in Go (`go/radixnet/negative.go`, `blame.go`, `duo.go`)
+
+The Go port carries the negative network too, and the two implementations are held to the same numbers by
+`tests/test_go_parity.py::TestGoNegativeParity`: the same blame, the same corrections, the same file layout and the
+same verdicts character for character (the sentence a verdict carries is quoted the way Python's `repr()` quotes it,
+`pythonRepr`).  Go has one `Graph` type rather than a class hierarchy, so the negative arrays hang off it in an
+optional block:
+
+* `Graph.Neg *NegativeData` (nil on a count graph, so the count model pays nothing for it) holds `Blame`, `Fails`,
+  `Clear` and `Reasons` per edge - the last as a `[]ReasonBlame` of at most `MaxEdgeReasons` entries rather than a
+  map, because a map per edge is most of a graph's memory - plus the reason registry and the totals.  `newEdge`
+  grows them, `recomputeRow` routes to `recomputeNegativeRow`, `Invert` to `invertNegative`, `Configure` to
+  `ConfigureNegative` and `MergeChild` refuses to merge across an edge that carries evidence (`blocksMerge`).
+* `Model.Neg *Negative` holds the journal and the thresholds; `NewNegativeModel`, `IsNegative`, `Kind() ==
+  "negative"`, `Blame`, `Clear`, `BlameCorrection`, `Judge`, `Crossings`, `Reasons`, `Recent`, `Forget` and
+  `negativeStats` mirror the Python methods, and `stepsOver` (already there for the count model's `Correct`) marks
+  the same characters for both corrections.
+* `ToDoc` / `FromDoc` write and read the `radixnet-negative` format: `edges.blame|fails|clear|reasons`, the
+  `weights` block with the blame function and the reason registry, and the model-level `log` and `filter` blocks.
+  `Load` dispatches on the format, so either kind loads from either language.
+* `blame.go` is the Python `blame.py`: `Classify`, `SeverityFromRating`, `FaultsFromLessons`, `Teach` and
+  `TeachLessons` (the code-generation reasons stay in Python, which is where the sandbox lives).
+  `TutorTrainer.Negative` + `TeachNegative` blame every failed sentence of a round.
+* `duo.go` is `duo.py`: `FilterConfig` (pointers for "unset" and "off"), `NewFilter`, `Judge` with the blame, peak
+  and ratio rules, `Filter`, `Generate`, `Predict` and `Describe`.
+* `server/negative.go` adds the `/api/negative/*` endpoints and the tutor's `blame` flag; the service keeps one
+  negative network beside its model path, `POST /api/save` writes it alongside the model, and the frontend's
+  **Negative** tab is therefore no longer Python-only.
+* Go tests: `radixnet/negative_test.go`, `radixnet/blame_test.go`, `radixnet/duo_test.go`,
+  `server/negative_test.go`.
 
 ---
 

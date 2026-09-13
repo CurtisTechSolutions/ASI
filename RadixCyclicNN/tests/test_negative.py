@@ -197,8 +197,9 @@ class TestBlameAndClear(unittest.TestCase):
         model = NegativeNet(seed=7)
         for i in range(MAX_EDGE_REASONS + 3):
             model.blame([FAILURES[0]], reason=f"reason-{i}")
-        edge = next(e for e, ok in enumerate(model.graph.edge_alive) if ok and model.graph.edge_blame[e] > 0)
-        self.assertLessEqual(len(model.graph.edge_reasons[edge]), MAX_EDGE_REASONS)
+        for edge, ok in enumerate(model.graph.edge_alive):
+            if ok:
+                self.assertLessEqual(len(model.graph.edge_reasons[edge]), MAX_EDGE_REASONS)
         self.assertEqual(len(model.reasons()), MAX_EDGE_REASONS + 3)  # the totals keep every reason
 
     def test_journal_is_bounded(self):

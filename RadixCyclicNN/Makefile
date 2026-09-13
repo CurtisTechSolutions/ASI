@@ -82,7 +82,7 @@ export EPOCHS LR BATCH RADIXNET_PORT RADIXNET_BACKEND RADIXNET_CORPUS WITH_TORCH
 DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
-.PHONY: help install install-gpu check test go-build go-test go-parity go-serve train resume predict generate score 2nrl invert compress \
+.PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
@@ -118,6 +118,10 @@ go-build: ## Build the Go count / reward model CLI into go/bin/radixnet-count
 
 go-test: ## Run the Go tests with the race detector
 	cd go && $(GO) vet ./... && $(GO) test -race ./...
+
+go-negative: go-build ## The Go negative network: blame GARBAGE, then judge TEXT through it
+	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
+	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative why --text "$(TEXT)"
 
 go-parity: ## Cross-language parity of the Go port against the Python model
 	$(PY) -m unittest tests.test_go_parity -v
