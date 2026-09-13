@@ -58,6 +58,7 @@ RadixCyclicNN/
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
+    recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -596,6 +597,8 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/speech` | | `speech.describe()`: the transcription backends and which one `auto` picks, ffmpeg, the microphone recorders, the codecs, the token and the text format (section 25) |
 | POST `/api/speech/transcribe` | audio bytes (a binary route like `/api/uploads`: multipart, a raw body named `speech`, or JSON `content_base64`) + `backend`, `language`, `asr_model`, `asr_url`, `transcript` from the query string or the JSON body | `{"transcript", "backend", "model", "language", "seconds", "name"}` |
 | POST `/api/speech/teach` | the same audio forms + `transcript` (what the browser dictated), `rate`, `codec`, `normalise`, `waveform`, `pair`, `token`, `unique`, `backend`, `language`, `asr_model`, `asr_url`, `train`, `epochs`, `lr`, `batch_size`, `save_as` | `{"token", "transcript", "asr", "audio", "texts", "chars", "pair", "name", "upload", "job"}`; 202 with a train job on the texts, `save_as` keeps them as one upload |
+| POST `/api/speech/tutor` | the same audio forms (encoded and quizzed in one call) *or* `{"texts": ["<speech:…> aud:…"]}` for utterances already encoded, + `transcript`, `rate`, `codec`, `normalise`, `token`, `unique`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `listen_back`, `blame` | the recall tutor of section 26: `{"modality", "lessons", "report", "negative"}` — each lesson carries the exercise, what was written back, the mark out of 10, the reason it failed and the facts behind it; `blame` teaches the negative network and fills `negative` |
+| POST `/api/images/tutor` | the same image forms *or* `{"texts": ["img:…"]}`, + `size`, `encoder`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `blame` | the same, for a picture it was shown |
 | POST `/api/speech/decode` | `{"text", "codec"}` | `{"wav_base64", "codec", "rate", "channels", "samples", "seconds", "bytes", "repaired"}` — an encoded *or predicted* waveform as playable audio |
 
 `/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
@@ -635,6 +638,10 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
   settings; "Teach the model" posts `/api/speech/teach` with `train`, "Preview the texts" the same request without it,
   and the result card shows the token, the ASR backend, the waveform's size and every text. A third card decodes any
   `aud:` text - including a prediction - back into audio through `/api/speech/decode` and plays it.
+* `RecallCard.jsx` — the **What does it remember?** card, shared by the Speech and Images tabs (section 26): the
+  exercise settings (how much of the payload to ask for, the lead, attempts, mode, the pass mark, listen back, blame
+  it), one button, and the marked table — what was asked about, the mark out of 10, the agreement, the verdict and
+  the sentence saying what went wrong — with the report card above it and what the negative network was taught below.
 
 Plain readable CSS, responsive (single column under 800px). No TypeScript.
 
@@ -664,6 +671,14 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   texts share the token, pair / shared token / transcript-only, a failing ASR still teaches the waveform, the model
   learns and continues what was spoken), recording (no recorder, `arecord` called and its file read), the four API
   routes in all three body forms and the CLI actions. Runs without a microphone, ffmpeg or any ASR backend.
+* `test_recall.py` — the recall tutor (section 26): the exercise (a spoken cue is the token and the header, an image
+  cue carries a lead, texts that are not encoded are skipped), every way a completion can be wrong in both
+  modalities (unreadable, truncated, overrun, garbled, silence / blank, clipping / noise, mishearing, distortion /
+  drift, and the two cases where a flat reference means flat is *not* a fault), the agreement curve, the mark (the
+  overrun penalty, the caps, the cost of a repair), the quiz over a real model and over a perfect one (attempts stop
+  at the first pass, the stop event, progress, a capped quiz marked against what it asked for), the report card, the
+  faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
+  neither Pillow nor a transcriber, so nothing in it is skipped.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the five endpoints and the CLI.
 
@@ -1217,9 +1232,11 @@ may contain anything), completes the padding, pads or truncates the payload to t
 API: `GET /api/images` (`describe()`), `POST /api/images/encode` (a binary route like `/api/uploads`: multipart,
 raw body with a default name, or JSON `content_base64`; options from the query string or the JSON body: `size`,
 `encoder`, `train`, `save_as`, `epochs`, `lr`, `batch_size`; `train` starts a train job on the one text, `save_as`
-stores it as an upload so several images can be trained on together), `POST /api/images/decode`. CLI: `image info |
-encode | decode`. Frontend: the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image
-side by side with the original; train on it; save as upload; decode any pasted text such as a prediction).
+stores it as an upload so several images can be trained on together), `POST /api/images/decode`,
+`POST /api/images/tutor` (the recall tutor of section 26). CLI: `image info | encode | tutor | decode`. Frontend:
+the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image side by side with the
+original; train on it; save as upload; ask it for the picture back and blame what it misremembered; decode any
+pasted text such as a prediction).
 Dependencies: `pip install radixnet[images]` (pillow) or `radixnet[diffusion]` (pillow, torch, diffusers).
 
 ## 22. The model conversing with itself (`dialogue.py`) — replies are predictions picking up the last words
@@ -1502,11 +1519,15 @@ picks a reason out of `REASONS` (`empty`, `gibberish`, `repetition`, `truncated`
 `contradiction`, `false`, `incoherent`, `off-topic`, `other`, plus `unrated`) by matching the tutor's own words;
 `severity_from_rating(rating, threshold)` maps 0 -> 2.0 and the pass threshold -> 0.25 (an unrated failure is 1.0);
 `code_reason(attempt)` reads the sandbox, the style report and the judge into `CODE_REASONS` (`timeout`, `crash`,
-`wrong-output`, `task-not-done`, `style`, `naming`) with the severities in `CODE_SEVERITY`.
-`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` turn a tutor's output into `(faults, passed)`,
-and `teach(negative, faults, passed)` (with the wrappers `teach_reviews`, `teach_attempts` and `teach_lessons`)
-blames each fault - through `correct` when it carries one - and clears the passes, returning
-`{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
+`wrong-output`, `task-not-done`, `style`, `naming`) with the severities in `CODE_SEVERITY`; `recall_reason(facts)`
+does the same for the speech and image tutors of section 26, reading the round trip through the codec into
+`SPEECH_REASONS` (`unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`,
+`distortion`) and `IMAGE_REASONS` (the same four, then `blank`, `noise`, `drift`), with `RECALL_TRUNCATED` /
+`RECALL_OVERRUN` / `RECALL_AGREEMENT` as its boundaries.
+`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` / `faults_from_recall` turn a tutor's output
+into `(faults, passed)`, and `teach(negative, faults, passed)` (with the wrappers `teach_reviews`,
+`teach_attempts`, `teach_lessons` and `teach_recall`) blames each fault - through `correct` when it carries one -
+and clears the passes, returning `{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
 
 The call sites: `tutor --blame` / `TutorTrainer(negative=...)` / `POST /api/tutor/start {"blame": true}`, which
 blames every failed sentence of a round with the mistake the teacher named and adds `negative_blamed` /
@@ -1515,7 +1536,10 @@ blames every failed sentence of a round with the mistake the teacher named and a
 / `CodeGenTrainer(negative=...)`, which blames the rejected attempts of every problem and adds `negative_blamed` /
 `negative_reasons` to its problem records, `evolve --blame` / `Evolver(negative=...)`, which blames every fake the
 discriminator scored below the real texts (reason `blatant` past `blatant_margin`, else `discriminator`, severity
-`gap / margin` clamped to `[0.25, 2]`) and clears the real texts, and `POST /api/negative/blame` for a person.
+`gap / margin` clamped to `[0.25, 2]`) and clears the real texts; `speech tutor --blame` / `image tutor --blame` /
+`POST /api/speech/tutor {"blame": true}` / `POST /api/images/tutor {"blame": true}`, which ask the network for a
+recording or a picture back and blame what it misremembered (section 26); and `POST /api/negative/blame` for a
+person.
 
 ### 24.3 `duo.py` — the pair as a GAN at output time
 
@@ -1661,8 +1685,107 @@ its own is still worth learning, so talking to a machine without an ASR backend 
 `rec` / `sox` and `ffmpeg` (`-f alsa` / `-f avfoundation`) is installed; `recorders()` lists them and `describe()`
 reports everything the feature can reach.
 
-CLI: `speech info | transcribe | teach | listen | decode` (`listen` records first, then runs `teach`; `--train`
-trains on the texts and saves). API: `GET /api/speech`, `POST /api/speech/transcribe`, `POST /api/speech/teach`,
-`POST /api/speech/decode` (section 12). Frontend: the Speech tab (section 13). Dependencies: none for the waveform,
+CLI: `speech info | transcribe | teach | listen | tutor | decode` (`listen` records first, then runs `teach`;
+`--train` trains on the texts and saves; `tutor` is the recall tutor of section 26). API: `GET /api/speech`,
+`POST /api/speech/transcribe`, `POST /api/speech/teach`, `POST /api/speech/tutor`, `POST /api/speech/decode`
+(section 12). Frontend: the Speech tab (section 13). Dependencies: none for the waveform,
 the token and the browser's dictation; `pip install radixnet[speech]` (faster-whisper) or `radixnet[whisper]`
 (openai-whisper) for server-side transcription, ffmpeg for audio formats other than WAV.
+
+---
+
+## 26. The recall tutor (`recall.py`) — the tutor that needs no teacher
+
+Sections 16 and 24.2 all end at the same place: a negative needs something outside the network to look at an output
+and say it was wrong, **and why**.  For English that something has to be an LLM, because nobody knows in advance
+what the right sentence is.  For speech and images it does not, because **the right answer is on file**: an
+utterance or a picture was *encoded* into text (sections 25 and 11) before it was trained on, so asking the network
+to write that text out again is an exercise whose correction already exists.
+
+That is the whole idea of this module.  It is the same three steps the English tutor takes (section 16.2), with the
+codec in the marker's chair:
+
+1. **the exercise** — the opening of a text the network was taught.  `cue_of(text, lead)` is everything up to the
+   payload plus `lead` characters of it, and `DEFAULT_LEAD` differs by modality for one reason: a spoken text
+   carries a token of its own (`<speech:9f2a1c7d> aud:mu:8000x1:`), so the exercise can be the token alone — *what
+   did that utterance sound like?* — while an image header (`img:tiny:128x128:`) is the same for every picture of
+   that size, so without a lead there is nothing to say which one is wanted (16 characters by default);
+2. **the completion** — `quiz` runs the prediction search from the cue with a budget of `RECALL_OVERRUN` times what
+   is left, so rambling is bounded but detectable.  `length` caps how many payload characters are asked for and
+   **trims the reference to match**, because a capped quiz has to be a fair one;
+3. **the marking** — `check_speech` / `check_image` parse what came back with the modality's own `parse_text`, and
+   report facts rather than a verdict: `readable`, `repaired`, `written_bytes`, `expected_bytes`, `length_ratio`,
+   `agreement`, `flat`, `extreme`, the same two for the reference, and for speech `said` / `heard` / `match`.
+
+### Agreement, and the mark
+
+`_agreement` is the mean over the payload that was asked for of `max(0, 1 - |written - true| / TOLERANCE)`, with
+`TOLERANCE = 32` (one eighth of the byte range) and a byte that was never written counting as 0.  Two properties
+matter.  Truncation needs no separate penalty — the bytes that never arrived are already total disagreement — and
+the curve is *generous about the last bits of a quantised sample and unforgiving about noise*: an exact recall
+scores 1, one off by a quantisation step scores ~0.95, and random bytes score ~0.12.
+
+`mark(facts)` turns that into the mark out of 10, and adds the three things agreement cannot see:
+
+* what the network wrote **past** the end.  Agreement only asks whether the true bytes came back, so without
+  `score *= expected / written` a completion that recalled the payload perfectly and then rambled would score full
+  marks and never be blamed;
+* repairing the base64 costs a point;
+* silence, railing and wrong words are **caps** (2, 3 and 4 out of 10) rather than deductions, because they are
+  failures of a different kind from being slightly off — a waveform that decodes to nothing is not 90 % right
+  however its bytes line up.
+
+`grade(facts, correction, threshold)` is the marking proper: the mark, `passed`, the reason
+(`blame.recall_reason`), the original text as the **correction** and one sentence of teaching.  A pass carries no
+reason, no correction and no comment — exactly like the English tutor's grade, which is what lets
+`blame.faults_from_recall` read a `RecallLesson` the same way it reads a `Lesson`.
+
+### What can be wrong, in the order it matters
+
+`blame.recall_reason(facts)` names the single worst thing, and the order is the point: a completion that cannot be
+read at all is not *also* judged on its length, and one that stopped early is not blamed for the base64 it never
+got to.
+
+| reason (speech / image) | what it means |
+|---|---|
+| `unreadable` | it wrote something that is not an encoded waveform or image at all: the header is gone |
+| `truncated` / `overrun` | the payload is shorter than `RECALL_TRUNCATED` of the original, or longer than `RECALL_OVERRUN` |
+| `garbled` | the base64 had to be repaired before it could be read |
+| `silence` / `blank` | it decodes to nothing: a waveform whose peak is under `_FLAT_PEAK`, an image whose bytes have no spread |
+| `clipping` / `noise` | more than `_RAILED` of it sits against either end of the byte range |
+| `mishearing` | *speech only*: it decodes to speech, but the round trip transcribes to different words than were said |
+| `distortion` / `drift` | readable, the right length, decodes cleanly and simply wrong: agreement below `RECALL_AGREEMENT` |
+
+Both `flat` and `extreme` are compared against the *reference*: a recording that really was silent is not blamed for
+coming back silent.  `mishearing` only ever appears when both the words that were said and the words the round trip
+heard are known — `listen_back` decodes the recalled waveform and transcribes it, which needs an ASR backend and is
+therefore off by default.  Without it `match` is `None` and nothing is claimed about the words.
+
+### What it costs to run
+
+Nothing here needs Pillow, torch or a transcriber: the marking is over the payload bytes both codecs already
+produce, so the whole module works in an environment where neither the diffusion weights nor Whisper exist (which
+is why `tests/test_recall.py` skips nothing).  Decoding a *picture* to look at needs Pillow and `listen_back` needs
+a transcriber, but grading does not.
+
+The one real cost is the search: a second of 8 kHz audio is ~10 700 characters, so `length` is usually what you
+want.  It is why the option exists, and why it trims the reference too.
+
+### Feeding the negative network
+
+`blame.faults_from_recall(lessons, threshold, source)` is `faults_from_lessons` for these lessons: the reason is the
+grade's own error (falling back to `recall_reason` over the facts, then `DEFAULT_REASON`), the severity is
+`severity_from_rating` of the mark — the same curve the English tutor's marks go through — and the original text
+rides along as the correction.  So `teach` routes it to `NegativeNet.correct` and **only the characters the network
+actually got wrong are blamed**; the payload it did remember, and the original itself, clear blame.
+`blame.teach_recall` is the one call the CLI, the API and the frontend all make.
+
+CLI: `speech tutor FILE...` and `image tutor FILE...`, sharing `_add_recall_options` (`--lead`, `--length`,
+`--attempts`, `--mode`, `--temperature`, `--threshold`, `--train`, `--blame` / `--negative PATH`) and
+`_recall_tutor`, which trains first when asked, quizzes, prints the table and the report card, and saves the
+negative network beside the model.  API: `POST /api/speech/tutor` and `POST /api/images/tutor` over
+`ModelService.recall_quiz`, which quizzes `positive_model()` (quizzing the negative network itself is meaningless)
+and teaches `negative_model()` under the mutating lock when `blame` is set.  Frontend: the **What does it
+remember?** card (`RecallCard.jsx`), shared by the Speech and Images tabs.  Tests: `tests/test_recall.py` — the
+exercise, every way a completion can be wrong, the agreement curve, the mark, the loop over a real model, the
+faults, the CLI and the endpoints.

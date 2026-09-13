@@ -38,7 +38,8 @@ and an optional GPU backend (torch) are built in.
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
 | The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
-| The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
+| The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the **speech and image tutors** compare what the network remembers of a recording or a picture with the original (`speech tutor --blame`, `image tutor --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
+| A tutor that needs no teacher | `recall.py`: an utterance and a picture were *encoded* into text before being trained on, so the right answer is on file and marking needs no LLM. The network is given the opening of a text it was taught - the utterance's own token, or an image header and a few characters - and asked to write the rest; what comes back is run back through the codec and compared with the original. The agreement over the payload is the mark out of 10, the single worst thing wrong with it is named (`silence`, `clipping`, `mishearing`, `blank`, `noise`, `truncated`, ...), and the original is the correction the negative network blames from. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
@@ -192,11 +193,11 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]` |
-| `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
+| `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `tutor FILE...` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `tutor FILE...`: the recall tutor - ask it to say back what it was taught and mark what comes back, `--length 400` (payload characters asked for, and what the marking compares against), `--lead`, `--attempts`, `--mode beam\|sample`, `--threshold 6`, `--listen-back` (transcribe what it said and compare the words), `--train` (teach it first), `--blame` / `--negative PATH`. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--brief TEXT` (what this batch is being taught to: the prompt the last report card led to), `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
-| `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
+| `image info` / `image encode FILE` / `image tutor FILE...` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `tutor FILE...`: the recall tutor - ask it to draw back what it was shown and mark what comes back, `--size`, `--encoder`, `--lead 16` (payload characters the opening gives away, so it knows which picture), `--length`, `--attempts`, `--mode`, `--threshold 6`, `--train`, `--blame` / `--negative PATH`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--blame` / `--negative PATH` (the sandbox and the judge teach the negative network), `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
@@ -226,10 +227,12 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/chatgpt/models?url=` | always 200: `{"available", "configured" (the server has a key), "url", "model", "models": [{"name","owned_by","created"}], "error"}`. The key is never a request field: it is the server's own `$OPENAI_API_KEY` |
 | `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
 | `POST /api/images/encode` | an image as multipart (`curl -F file=@photo.png`), a raw body, or JSON `{"name","content_base64"}` + `?size=128&encoder=auto\|sd\|tiny&train=true&save_as=photo.txt` (train settings `epochs`, `lr`, `batch_size`) -> `{"text","encoder","width","height","latent_shape","bytes","chars","source_size","name","upload","job"}` (202 with a train job) |
+| `POST /api/images/tutor` | the recall tutor: the same image forms, or `{"texts": ["img:…"]}` for pictures already encoded, + `size`, `encoder`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `blame` -> `{"modality","lessons","report","negative"}`; every lesson carries the mark out of 10, the agreement, the reason it failed and the facts behind it |
 | `POST /api/images/decode` | `{"text", "encoder"}` -> `{"png_base64","encoder","width","height","bytes","repaired"}` (a cut-off or rambling prediction is padded / truncated) |
 | `GET /api/speech` | `{"backends", "faster_whisper", "whisper", "whisper_model", "server_url", "server_model", "auto", "ffmpeg", "recorders", "codecs", "default_rate", "token", "token_example", "text_format", "formats"}` |
 | `POST /api/speech/transcribe` | audio as multipart (`curl -F file=@clip.wav`), a raw body, or JSON `{name, content_base64}`; options from the query string or the body (`backend`, `language`, `asr_model`, `asr_url`, `transcript`) -> `{"transcript", "backend", "model", "language", "seconds"}` |
 | `POST /api/speech/teach` | the same audio forms + `transcript` (what the browser dictated), `rate`, `codec`, `normalise`, `waveform`, `pair`, `token`, `unique`, `train`, `epochs`, `lr`, `batch_size`, `save_as` -> `{"token", "transcript", "asr", "audio", "texts", "chars", "pair", "upload", "job"}` (202 with a train job on the texts) |
+| `POST /api/speech/tutor` | the recall tutor: the same audio forms, or `{"texts": ["<speech:…> aud:…"]}` for utterances already encoded, + `transcript`, `rate`, `codec`, `normalise`, `token`, `unique`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `listen_back`, `blame` -> `{"modality","lessons","report","negative"}` |
 | `POST /api/speech/decode` | `{"text", "codec"}` -> `{"wav_base64", "codec", "rate", "samples", "seconds", "repaired"}` - an encoded or predicted waveform as playable audio |
 | `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_provider": "ollama"\|"chatgpt", "teacher_model", "judge_provider", "judge_model", "url", "judge_url", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", "blame" (the sandbox and the judge also teach the negative network), 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}`; an attempt's `source` and a verdict's `judged_by` name the provider (400 when `teacher_provider` is `chatgpt` and the server has no key) |
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
@@ -302,7 +305,11 @@ generation with the sandbox and the judge),
 Speech (record the microphone, the browser writes down what it hears, teach
 the words and the waveform),
 Checkpoints (save / restore / load / reset) and a Graph view of the most
-visited nodes.
+visited nodes.  The Images and Speech tabs each end with a **What does it
+remember?** card - the recall tutor: ask the network for the picture or the
+utterance back, see the mark out of 10, the agreement and the reason each
+failure failed, and (with "blame it" ticked) hand those failures to the
+negative network.
 
 Training files: drop text files onto the Train panel (or press "Upload
 files…"); the browser reads them and sends them to `POST /api/uploads` (a
@@ -723,6 +730,26 @@ the API, the CLI and the tab working; `auto` (the default) picks `sd` when it
 loads.  Sizes are squares that are multiples of 8 (64 .. 512); 128 gives a
 4 x 16 x 16 latent, 1 024 bytes, about 1 400 characters of text.
 
+### Does it remember the picture? (`image tutor`)
+
+An image was encoded into text and trained on, so **the right answer is on
+file** and no LLM is needed to mark anything.  `image tutor` gives the network
+the opening of that text - the header and a few characters of the payload, so
+it knows which picture is wanted - and asks it to write the rest.  What comes
+back is decoded and compared with the original: the mark out of 10 is the
+agreement over the payload, and a failure is named (`unreadable`, `truncated`,
+`overrun`, `garbled`, `blank`, `noise`, `drift`).
+
+```bash
+python -m radixnet image tutor photo.jpg --train --blame     # teach it, ask for it back, blame what it forgot
+python -m radixnet image tutor photo.jpg --lead 32 --length 400    # a longer opening, only the first 400 characters asked for
+```
+
+With `--blame` the failures teach the negative network: the original text is
+the correction, so **only the characters it actually got wrong** are blamed and
+the payload it did remember clears blame (see
+[the negative network](#the-negative-network-what-went-wrong-and-why)).
+
 ## Speech: teach it by talking to it
 
 Say something and the network learns **two texts that start with the same
@@ -786,6 +813,35 @@ utterances are the ones to teach. `--pair` adds a third text - the waveform
 followed by its transcript - so the prediction search can run from the sound
 straight into the words; `--shared-token` puts every utterance behind the plain
 `<speech>` instead of a unique token.
+
+### Does it remember what you said? (`speech tutor`)
+
+The utterance was encoded into text and trained on, so **the right answer is on
+file** and no LLM is needed to mark anything.  `speech tutor` gives the network
+the utterance's own token and the waveform header - nothing of the payload,
+because the token already says which recording is wanted - and asks it to write
+the samples back.  What comes back is run through the codec and compared with
+the recording: the mark out of 10 is the agreement over the waveform, and a
+failure is named (`unreadable`, `truncated`, `overrun`, `garbled`, `silence`,
+`clipping`, `mishearing`, `distortion`).
+
+```bash
+python -m radixnet speech tutor clip.wav --text "the cat sat on the mat" --train --blame
+python -m radixnet speech tutor clip.wav --length 400        # only the first 400 characters of the waveform
+python -m radixnet speech tutor clip.wav --listen-back        # transcribe what it said back and compare the words
+```
+
+`--listen-back` decodes the recalled waveform and transcribes it, so one that
+is a perfectly plausible sound but says *different words* is a `mishearing`
+rather than a `distortion`; it needs a transcription backend and is off by
+default.  With `--blame` the failures teach the negative network: the original
+text is the correction, so **only the characters it actually got wrong** are
+blamed and the waveform it did remember clears blame (see
+[the negative network](#the-negative-network-what-went-wrong-and-why)).
+
+A whole second of 8 kHz audio is ~10 700 characters, so `--length` is usually
+what you want: it caps how much of the payload is asked for *and* what the
+marking compares against, so a short quiz is still a fair one.
 
 ## Evolve: train on failures, blatantly fail on purpose, then invert
 
@@ -858,6 +914,8 @@ against):
 | the **English tutor** (`tutor --blame`, the Tutor tab's checkbox, `POST /api/tutor/start {"blame": true}`) | the mistake it named marks the sentence, its mark out of 10 is the severity, its sentence of teaching is the note, and its correction is diffed so **only the characters it changed** are blamed | `agreement`, `tense`, `article`, `preposition`, `plural`, `pronoun`, `word-order`, `spelling`, `punctuation`, `vocabulary`, `fragment`, `nonsense` |
 | the Ollama reviewer (`ollama review --blame`, the Ollama tab's checkbox, `"blame": true`) | its critique picks the reason, its rating the severity (0 -> 2.0, the pass threshold -> 0.25); the texts it passed clear blame | `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`, `contradiction`, `false`, `incoherent`, `off-topic`, `empty`, `unrated`, `other` |
 | the code sandbox, the style checker and the judge (`codegen --blame`) | every rejected program is blamed for what they found, with the teacher's feedback as the note | `timeout`, `crash`, `wrong-output`, `task-not-done`, `style`, `naming` |
+| the **speech tutor** (`speech tutor --blame`, the Speech tab, `POST /api/speech/tutor {"blame": true}`) | it is asked to say back an utterance it was taught; what comes back is run through the codec and compared with the recording, the agreement over the waveform is the mark, and the original is the correction | `unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`, `distortion` |
+| the **image tutor** (`image tutor --blame`, the Images tab, `POST /api/images/tutor {"blame": true}`) | the same, for a picture it was shown: the payload it writes back is compared with the encoded image | `unreadable`, `truncated`, `overrun`, `garbled`, `blank`, `noise`, `drift` |
 | the evolve discriminator (`evolve --blame`) | every fake it scores below the real texts, by how far below | `discriminator`, `blatant` |
 | a person | `negative blame --text ... --reason ... --note ...`, the Negative tab, a thumbs down | anything you type |
 
@@ -1221,6 +1279,15 @@ print(spoken["token"], spoken["texts"][0])     # <speech:9f2a1c7d> <speech:9f2a1
 net.train(spoken["texts"], epochs=3, lr=0.5, batch_size=8)
 ```
 
+```python
+from radixnet import blame, recall            # does it remember what it was taught?
+
+waveform = [t for t in spoken["texts"] if "aud:" in t]
+lessons = recall.quiz(net, waveform, length=400)          # the exercise is the token and the header
+print(recall.report_card(lessons))                        # {"passed": 0, "mean_score": 4.3, "reasons": {"truncated": 1}, ...}
+blame.teach_recall(negative, lessons, source="speech")    # the original is the correction: only the wrong characters are blamed
+```
+
 ## Tests
 
 ```bash
@@ -1234,7 +1301,7 @@ make go-test     # cd go && go test -race ./...
 RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
                       blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
-                      tutor, codegen, vision, speech, dialogue
+                      tutor, recall, codegen, vision, speech, dialogue
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)

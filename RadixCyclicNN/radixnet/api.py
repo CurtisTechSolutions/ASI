@@ -790,6 +790,47 @@ class ModelService:
             self._parked[NegativeNet.kind] = model
         return model
 
+    def recall_quiz(
+        self, texts: list[str], labels: list[str], modality: str, *, said: list[str] | None = None,
+        blame: bool = False, threshold: float = 6.0, source: str = "", **options: Any
+    ) -> dict:
+        """Ask the model to write out texts it was taught, mark what comes back, and optionally blame the failures.
+
+        The recall tutor needs no LLM: the right answer is the encoded
+        utterance / image itself, so the mark is the agreement over the payload
+        and the original is the correction (:mod:`radixnet.recall`).
+        """
+        from . import blame as blame_module
+        from . import recall as recall_module
+
+        if not texts:
+            raise ApiError(400, f"nothing to ask about: send a {modality} or 'texts' (already-encoded)")
+        with self.mutating() if blame else self.session():
+            model = self.positive_model()
+            try:
+                lessons = recall_module.quiz(
+                    model, texts, labels=labels, said=said or [], threshold=threshold, **options
+                )
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            doc = {
+                "modality": modality,
+                "lessons": [lesson.to_dict() for lesson in lessons],
+                "report": recall_module.report_card(lessons),
+                "negative": None,
+            }
+            if blame:
+                negative = self.negative_model()
+                report = blame_module.teach_recall(
+                    negative, lessons, threshold=threshold, source=source or modality,
+                )
+                doc["negative"] = {
+                    "taught": {k: report[k] for k in ("blamed", "cleared", "edges", "reasons", "severity_mean")},
+                    "reasons": negative.reasons(),
+                    "stats": negative.stats(),
+                }
+            return doc
+
     def positive_model(self) -> GraphModel:
         """The model the negative network filters: the active one, or a parked / saved positive model."""
         if not isinstance(self.model, NegativeNet):
@@ -2325,6 +2366,90 @@ def _r_speech_teach(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, result
 
 
+def _recall_options(f: Fields, q: dict, modality: str) -> dict:
+    """The recall-tutor options a request may carry (see :mod:`radixnet.recall`)."""
+    lead = _option(f, q, "lead", None)
+    try:
+        return {
+            "lead": None if lead in (None, "") else int(lead),
+            "length": int(_option(f, q, "length", 0) or 0),
+            "attempts": max(1, int(_option(f, q, "attempts", 1) or 1)),
+            "mode": str(_option(f, q, "mode", "beam") or "beam"),
+            "temperature": float(_option(f, q, "temperature", 1.0) or 1.0),
+            "listen_back": modality == "speech" and _flag_option(f, q, "listen_back"),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, f"bad recall option: {exc}") from exc
+
+
+def _recall_threshold(f: Fields, q: dict) -> float:
+    try:
+        return float(_option(f, q, "threshold", 6.0) or 6.0)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "'threshold' must be a number out of 10") from exc
+
+
+def _r_image_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Ask the network to draw back a picture it was shown, and blame what it got wrong."""
+    texts = [t for t in f.texts_optional("texts", "text") if t.strip()]
+    labels = [f"text {i + 1}" for i in range(len(texts))]
+    if not texts:
+        files = f.upload_files()
+        name, payload = files[0]
+        if not isinstance(payload, bytes):
+            raise ApiError(400, "send the image as bytes: multipart/form-data, a raw body, or JSON {name, content_base64}")
+        try:
+            size = int(_option(f, q, "size", 0) or 0) or 128
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, "'size' must be an integer") from exc
+        try:
+            texts = [encode_image(payload, size=size, encoder=str(_option(f, q, "encoder", "auto") or "auto"))["text"]]
+        except VisionError as exc:
+            raise ApiError(400, str(exc)) from exc
+        labels = [name]
+    return 200, svc.recall_quiz(
+        texts, labels, "image", blame=_flag_option(f, q, "blame"), threshold=_recall_threshold(f, q),
+        **_recall_options(f, q, "image"),
+    )
+
+
+def _r_speech_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Ask the network to say back an utterance it was taught, and blame what it got wrong."""
+    texts = [t for t in f.texts_optional("texts", "text") if t.strip()]
+    labels = [f"text {i + 1}" for i in range(len(texts))]
+    said = [""] * len(texts)
+    if not texts:
+        name, payload = _audio_bytes(f, "recording")
+        try:
+            rate = int(_option(f, q, "rate", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, "'rate' must be an integer") from exc
+        try:
+            taught = teach_speech(
+                payload,
+                transcript=str(_option(f, q, "transcript", "") or ""),
+                backend=str(_option(f, q, "backend", "auto") or "auto"),
+                language=_option(f, q, "language", None) or None,
+                asr_model=_option(f, q, "asr_model", None) or None,
+                asr_url=_option(f, q, "asr_url", None) or None,
+                rate=rate or SPEECH_DEFAULT_RATE,
+                codec=str(_option(f, q, "codec", "auto") or "auto"),
+                normalise=_flag_option(f, q, "normalise"),
+                token=_option(f, q, "token", None) or None,
+                unique=_flag_option(f, q, "unique", True),
+            )
+        except SpeechError as exc:
+            raise ApiError(400, str(exc)) from exc
+        waveform = next((t for t in taught["texts"] if "aud:" in t), "")
+        if not waveform:
+            raise ApiError(400, "nothing to remember: the recording produced no waveform")
+        texts, labels, said = [waveform], [f"{name} {taught['token']}"], [taught["transcript"]]
+    return 200, svc.recall_quiz(
+        texts, labels, "speech", said=said, blame=_flag_option(f, q, "blame"),
+        threshold=_recall_threshold(f, q), **_recall_options(f, q, "speech"),
+    )
+
+
 def _r_speech_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     """An encoded - or predicted - waveform text back to a WAV file that can be played."""
     text = f.text("text")
@@ -2934,6 +3059,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/speech/teach", _r_speech_teach,
      "teach the model an utterance: the same audio forms plus transcript, rate, codec, normalise, waveform, pair, "
      "token, unique, train, save_as, epochs, lr, batch_size -> {token, transcript, asr, audio, texts, job, upload}"),
+    ("POST", "/api/images/tutor", _r_image_tutor,
+     "the recall tutor: ask the network to draw back an image it was shown and mark what comes back "
+     "{image bytes | texts, size, encoder, lead, length, attempts, mode, temperature, threshold, blame} -> "
+     "lessons with a mark out of 10 and the reason each failure failed"),
+    ("POST", "/api/speech/tutor", _r_speech_tutor,
+     "the recall tutor: ask the network to say back an utterance it was taught and mark what comes back "
+     "{recording bytes | texts, transcript, rate, codec, lead, length, attempts, mode, temperature, "
+     "threshold, listen_back, blame} -> lessons with a mark out of 10 and the reason each failure failed"),
     ("POST", "/api/speech/decode", _r_speech_decode,
      "decode an encoded or predicted waveform text back to audio: {text, codec} -> {wav_base64, rate, seconds, repaired}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),

@@ -34,6 +34,7 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, transcript
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
+from .recall import DEFAULT_LEAD
 from .speech import ASR_BACKENDS as SPEECH_BACKENDS
 from .speech import DEFAULT_RATE as SPEECH_RATE
 from .speech import RECORDERS as SPEECH_RECORDERS
@@ -955,6 +956,124 @@ def cmd_image_encode(args: argparse.Namespace, console: Console) -> dict:
         result["trained"] = {"epochs": len(records), "loss": records[-1]["loss"] if records else None, "saved": saved, "kind": model.kind}
         console.say(f"trained {len(records)} epoch(s); saved to {out}")
     return result
+
+
+def _recall_tutor(args: argparse.Namespace, console: Console, texts: list[str], labels: list[str],
+                  modality: str, said: list[str] | None = None) -> dict:
+    """The shared flow of `image tutor` and `speech tutor`: train, quiz, mark, blame.
+
+    The exercise is the opening of a text the network was taught; the answer is
+    on file, so nothing needs marking by an LLM - the completion is run back
+    through the codec and compared with the original.
+    """
+    from . import blame as blame_module
+    from . import recall
+
+    model, origin = open_model(args, console, required=False)
+    lead = args.lead if args.lead is not None else recall.DEFAULT_LEAD[modality]
+    rows = [
+        ("model", origin.describe()),
+        ("utterances" if modality == "speech" else "images", f"{len(texts)} ({sum(len(t) for t in texts)} chars)"),
+        ("exercise", f"the header plus {lead} payload character(s)" if lead
+                     else ("the token and the header alone" if modality == "speech" else "the header alone")),
+        ("asked for", f"{args.length} payload character(s)" if args.length else "the whole payload"),
+        ("attempts", f"{args.attempts} ({args.mode}, then sampled)"),
+        ("pass mark", f"{args.threshold:g}/10"),
+    ]
+    if modality == "speech" and args.listen_back:
+        rows.append(("listen back", "the recalled waveform is transcribed and compared with the words"))
+    console.pairs(rows)
+    if args.train:
+        console.say()
+        console.say(f"teaching it first: epochs={args.epochs} lr={args.lr} batch={args.batch_size}")
+        model.train(texts, epochs=args.epochs, lr=args.lr, batch_size=args.batch_size)
+    negative, neg_origin = (open_negative(args, console, required=False) if args.blame else (None, None))
+    if negative is not None:
+        console.say()
+        console.say(f"negative network: {neg_origin.describe()}")
+    console.say()
+    stop = threading.Event()
+    lessons, interrupted = run_interruptible(
+        lambda: recall.quiz(
+            model, texts, labels=labels, lead=args.lead, attempts=args.attempts, mode=args.mode,
+            temperature=args.temperature, length=args.length, threshold=args.threshold,
+            listen_back=(modality == "speech" and args.listen_back), said=said or [], stop_event=stop,
+        ),
+        stop, console, "lesson",
+    )
+    console.table(
+        ("what", "attempt", "mark", "agreement", "verdict", "why"),
+        [[
+            clip(lesson.exercise.label or lesson.exercise.id, 28), lesson.attempt,
+            f"{lesson.grade.score:.1f}", f"{lesson.grade.facts.get('agreement', 0.0) * 100:.0f}%",
+            "pass" if lesson.grade.passed else lesson.grade.error,
+            clip(lesson.grade.comment, 52) or "-",
+        ] for lesson in lessons],
+    )
+    card = recall.report_card(lessons)
+    console.say()
+    console.say(
+        f"report card: {card['passed']}/{card['lessons']} remembered, mean {fmt(card['mean_score'])}/10, "
+        f"{card['mean_agreement'] * 100:.0f}% agreement"
+        + (f"; {', '.join(f'{k} x{v}' for k, v in card['reasons'].items())}" if card["reasons"] else "")
+    )
+    doc: dict = {
+        "modality": modality, "lessons": [lesson.to_dict() for lesson in lessons], "report": card,
+        "interrupted": interrupted, "trained": bool(args.train), "saved": None, "negative": None,
+    }
+    if args.train and not interrupted:
+        doc["saved"] = save_model(model, args.model_out or args.model)
+        console.say(f"saved {args.model_out or args.model}")
+    if negative is not None:
+        report = blame_module.teach_recall(negative, lessons, threshold=args.threshold, source=modality)
+        console.say()
+        console.say(
+            f"blamed {report['blamed']} failure(s) over {report['edges']} edge(s); "
+            f"cleared {report['cleared']} fragment(s) from what it did remember"
+        )
+        doc["negative"] = _save_negative(console, negative, negative_path(args))
+        doc["negative"]["taught"] = {k: report[k] for k in ("blamed", "cleared", "edges", "reasons", "severity_mean")}
+    return doc
+
+
+def cmd_image_tutor(args: argparse.Namespace, console: Console) -> dict:
+    """Ask the network to draw back the pictures it was shown, and blame what it got wrong."""
+    from .vision import VisionError, encode_image
+
+    texts, labels = [], []
+    for path in args.file:
+        if not os.path.isfile(path):
+            raise CliError(f"image file not found: {path}")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        try:
+            texts.append(encode_image(data, size=args.size, encoder=args.encoder)["text"])
+        except VisionError as exc:
+            raise CliError(str(exc)) from exc
+        labels.append(os.path.basename(path))
+    return _recall_tutor(args, console, texts, labels, "image")
+
+
+def cmd_speech_tutor(args: argparse.Namespace, console: Console) -> dict:
+    """Ask the network to say back the utterances it was taught, and blame what it got wrong."""
+    from .speech import SpeechError, teach
+
+    texts, labels, said = [], [], []
+    for path in args.file:
+        data = read_audio_file(path)
+        try:
+            result = teach(data, transcript=args.text or "", backend=args.backend, language=args.language,
+                           asr_model=args.asr_model, asr_url=args.asr_url, rate=args.rate, codec=args.codec,
+                           normalise=args.normalise, token=args.token, unique=not args.shared_token)
+        except SpeechError as exc:
+            raise CliError(str(exc)) from exc
+        waveform = next((t for t in result["texts"] if "aud:" in t), "")
+        if not waveform:
+            raise CliError(f"{path} produced no waveform to remember")
+        texts.append(waveform)
+        labels.append(f"{os.path.basename(path)} {result['token']}")
+        said.append(result["transcript"])
+    return _recall_tutor(args, console, texts, labels, "speech", said)
 
 
 def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
@@ -2373,6 +2492,32 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 
 
+def _add_recall_options(parser: argparse.ArgumentParser, modality: str) -> None:
+    """The options both recall tutors share: the exercise, the marking and the blaming."""
+    group = parser.add_argument_group("recall options")
+    group.add_argument("--lead", type=nonneg_int, metavar="N",
+                       help=f"payload characters the exercise gives away (default: {DEFAULT_LEAD[modality]}"
+                            + ("; the utterance's own token already says which one is wanted)" if modality == "speech"
+                               else "; an image header alone does not say which picture is wanted)"))
+    group.add_argument("--length", type=nonneg_int, default=0, metavar="N",
+                       help="ask for only the first N payload characters (0: all of it); the marking compares "
+                            "against exactly that much, so a short quiz is still a fair one")
+    group.add_argument("--attempts", type=pos_int, default=1,
+                       help="tries per exercise (the first in --mode, the rest sampled); it stops at the first pass")
+    group.add_argument("--mode", choices=("beam", "dijkstra", "sample"), default="beam", help="how the first attempt is written")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the later attempts")
+    group.add_argument("--threshold", type=nonneg_float, default=6.0, metavar="MARK", help="pass mark out of 10")
+    group.add_argument("--train", action="store_true",
+                       help="teach it the texts first, then ask for them back (off: test what it already knows)")
+    group.add_argument("--epochs", type=nonneg_int, default=3, help="training epochs with --train")
+    group.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train")
+    group.add_argument("--batch-size", type=pos_int, default=8, help="batch size with --train")
+    group.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
+    group.add_argument("--blame", action="store_true",
+                       help="teach the negative network why each failure failed; what it remembered clears blame")
+    _add_negative_option(parser, top_level=False)
+
+
 def _add_negative_option(parser: argparse.ArgumentParser, top_level: bool) -> None:
     """``--negative PATH``; the action copies suppress their default so the group's value survives."""
     parser.add_argument(
@@ -2401,24 +2546,30 @@ def _add_asr_options(parser: argparse.ArgumentParser) -> None:
                        help="OpenAI-compatible /v1/audio/transcriptions endpoint ($RADIXNET_ASR_URL)")
 
 
-def _add_speech_teach_options(parser: argparse.ArgumentParser) -> None:
-    """Everything `speech teach` and `speech listen` share: the transcript, the waveform, the token, training."""
-    _add_asr_options(parser)
-    parser.add_argument("--text", metavar="TEXT",
-                        help="the transcript (what you said); skips the transcription backends")
+def _add_speech_encode_options(parser: argparse.ArgumentParser) -> None:
+    """How an utterance becomes text: the waveform quantisation and the token it hangs off."""
     group = parser.add_argument_group("waveform options")
     group.add_argument("--rate", type=pos_int, default=SPEECH_RATE,
                        help="resample the waveform to this many samples per second before quantising")
     group.add_argument("--codec", choices=("auto", "mu", "pcm8"), default="auto",
                        help="waveform quantisation (auto = mu-law)")
     group.add_argument("--normalise", action="store_true", help="scale a quiet recording up to full range first")
-    group.add_argument("--no-waveform", action="store_true", help="learn the transcript only, not the sound")
-    group.add_argument("--pair", action="store_true",
-                       help="also learn one text of the waveform followed by its transcript (sound -> words)")
     group = parser.add_argument_group("token options")
     group.add_argument("--token", metavar="TEXT", help="use this token instead of <speech:digest>")
     group.add_argument("--shared-token", action="store_true",
                        help=f"use the plain {SPEECH_TOKEN_HELP} for every utterance instead of a unique one")
+
+
+def _add_speech_teach_options(parser: argparse.ArgumentParser) -> None:
+    """Everything `speech teach` and `speech listen` share: the transcript, the waveform, the token, training."""
+    _add_asr_options(parser)
+    parser.add_argument("--text", metavar="TEXT",
+                        help="the transcript (what you said); skips the transcription backends")
+    _add_speech_encode_options(parser)
+    group = parser.add_argument_group("waveform options")
+    group.add_argument("--no-waveform", action="store_true", help="learn the transcript only, not the sound")
+    group.add_argument("--pair", action="store_true",
+                       help="also learn one text of the waveform followed by its transcript (sound -> words)")
     parser.add_argument("--out", metavar="PATH", help="write the texts (one per line) to this file")
     group = parser.add_argument_group("training options")
     group.add_argument("--train", action="store_true", help="train the model on the texts, then save it")
@@ -2629,6 +2780,22 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
     a.set_defaults(handler=cmd_image_encode)
     a = actions.add_parser(
+        "tutor", help="ask the network to draw back the pictures it was shown, and blame what it gets wrong",
+        description="Encode each image, give the network the header and a few characters of the payload, and\n"
+                    "let it write the rest.  What comes back is compared with the original: the mark out of 10\n"
+                    "is the agreement over the payload, and a failure is named (unreadable, truncated, overrun,\n"
+                    "garbled, blank, noise, drift).  No LLM marks anything - the right answer is the picture.\n"
+                    "With --blame each failure teaches the negative network why, blaming only the characters\n"
+                    "the network actually got wrong.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", nargs="+", metavar="FILE", help="image file(s) to ask it about")
+    a.add_argument("--size", type=pos_int, default=128, help="resize to SIZE x SIZE (a multiple of 8) before encoding")
+    a.add_argument("--encoder", choices=("auto", "sd", "tiny"), default="auto", help="the encoder (auto = sd when it loads)")
+    _add_recall_options(a, "image")
+    a.set_defaults(handler=cmd_image_tutor)
+
+    a = actions.add_parser(
         "decode", help="decode an encoded or predicted text back to a PNG",
         description="Turn `img:<encoder>:<w>x<h>:<base64>` back into an image (a cut-off tail is padded).",
         formatter_class=_HelpFormatter,
@@ -2688,6 +2855,27 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--save", metavar="WAV", help="also keep the recording in this file")
     _add_speech_teach_options(a)
     a.set_defaults(handler=cmd_speech_listen)
+
+    a = actions.add_parser(
+        "tutor", help="ask the network to say back the utterances it was taught, and blame what it gets wrong",
+        description="Encode each recording, give the network the utterance's own token and the waveform header,\n"
+                    "and let it write the samples back.  What comes back is run through the codec and compared\n"
+                    "with the original: the mark out of 10 is the agreement over the waveform, and a failure is\n"
+                    "named (unreadable, truncated, overrun, garbled, silence, clipping, mishearing, distortion).\n"
+                    "No LLM marks anything - the right answer is the recording.  With --listen-back the recalled\n"
+                    "waveform is transcribed too, so one that decodes to different words is a mishearing.  With\n"
+                    "--blame each failure teaches the negative network why, blaming only the characters it got\n"
+                    "wrong.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", nargs="+", metavar="FILE", help="audio file(s) to ask it about")
+    a.add_argument("--listen-back", action="store_true",
+                   help="transcribe what it said back and compare the words (needs a transcription backend)")
+    _add_asr_options(a)
+    a.add_argument("--text", metavar="TEXT", help="a transcript you already have (used instead of a backend)")
+    _add_speech_encode_options(a)
+    _add_recall_options(a, "speech")
+    a.set_defaults(handler=cmd_speech_tutor)
 
     a = actions.add_parser(
         "decode", help="turn an encoded or predicted waveform text back into a WAV file",

@@ -87,7 +87,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
-        speech-info speech-teach speech-listen speech-decode \
+        speech-info speech-teach speech-listen speech-tutor speech-decode \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -276,6 +276,9 @@ speech-teach: ## Teach AUDIO: its transcript and its waveform, behind one unique
 
 speech-listen: ## Record SECONDS from the microphone and teach the model what was said and how it sounded
 	$(RADIXNET) $(GLOBAL) speech listen --seconds $(SECONDS) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH)
+
+speech-tutor: ## Ask the model to say AUDIO back, mark what comes back and blame what it misremembered
+	$(RADIXNET) $(GLOBAL) speech tutor $(AUDIO) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --length 400 --blame
 
 speech-decode: ## Turn an encoded or predicted waveform text (TEXT=...) back into AUDIO
 	$(RADIXNET) $(GLOBAL) speech decode --text "$(TEXT)" --out $(AUDIO)

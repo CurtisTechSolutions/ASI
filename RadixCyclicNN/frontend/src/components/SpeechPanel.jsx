@@ -5,6 +5,7 @@ import { dictationSupported, micSupported, peakOf, startDictation, startRecordin
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
+import RecallCard from "./RecallCard.jsx";
 import { CheckField, NumberField, SelectField, TextArea } from "./Fields.jsx";
 
 const RATES = [
@@ -396,6 +397,21 @@ export default function SpeechPanel({ status }) {
           </>
         ) : null}
       </div>
+
+      <RecallCard
+        modality="speech"
+        disabled={!clip}
+        run={(options) =>
+          api.speechTutor(clip.blob, {
+            transcript: transcript.trim(),
+            rate: parseInteger(rate, 8000),
+            codec,
+            unique,
+            normalise,
+            ...options,
+          })
+        }
+      />
 
       <div className="card">
         <h2>Listen to a waveform text</h2>

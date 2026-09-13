@@ -41,16 +41,24 @@ __all__ = [
     "CODE_REASONS",
     "CODE_SEVERITY",
     "DEFAULT_REASON",
+    "IMAGE_REASONS",
     "REASONS",
+    "RECALL_AGREEMENT",
+    "RECALL_OVERRUN",
+    "RECALL_TRUNCATED",
+    "SPEECH_REASONS",
     "classify",
     "code_reason",
     "faults_from_attempts",
     "faults_from_lessons",
+    "faults_from_recall",
     "faults_from_reviews",
+    "recall_reason",
     "severity_from_rating",
     "teach",
     "teach_attempts",
     "teach_lessons",
+    "teach_recall",
     "teach_reviews",
 ]
 
@@ -92,6 +100,35 @@ CODE_SEVERITY = {
     DEFAULT_REASON: 1.0,
 }
 """How heavily each code failure is blamed (1 = one ordinary failure)."""
+
+SPEECH_REASONS = (
+    "unreadable",
+    "truncated",
+    "overrun",
+    "garbled",
+    "silence",
+    "clipping",
+    "mishearing",
+    "distortion",
+)
+"""Reason tags for a waveform the network was asked to remember (:mod:`radixnet.recall`)."""
+
+IMAGE_REASONS = (
+    "unreadable",
+    "truncated",
+    "overrun",
+    "garbled",
+    "blank",
+    "noise",
+    "drift",
+)
+"""Reason tags for an image the network was asked to remember."""
+
+RECALL_TRUNCATED, RECALL_OVERRUN = 0.9, 1.1
+"""Payload length ratios outside which a recalled text is short or long rather than merely wrong."""
+
+RECALL_AGREEMENT = 0.9
+"""Below this payload agreement a readable, right-length recall is still a distortion (an image: a drift)."""
 
 _PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("empty", ("empty output", "no output", "produced nothing", "blank")),
@@ -162,6 +199,36 @@ def code_reason(attempt: Any) -> str:
     critique = verdict.get("critique") or ""
     issues = verdict.get("issues") or []
     return classify(critique or "; ".join(str(i) for i in issues[:3]))
+
+
+def recall_reason(facts: Any) -> str:
+    """The single worst thing wrong with a recalled waveform or image (:func:`radixnet.recall.check`).
+
+    The order is the order the faults matter in: a completion that cannot be
+    read at all is not also judged on its length, and one that stopped early is
+    not blamed for the base64 it never got to.  ``"none"`` comes back when
+    nothing is wrong with it.
+    """
+    data = dict(facts or {})
+    speech = str(data.get("modality") or "speech") == "speech"
+    if not data.get("readable"):
+        return "unreadable"
+    ratio = float(data.get("length_ratio") or 0.0)
+    if ratio < RECALL_TRUNCATED:
+        return "truncated"
+    if ratio > RECALL_OVERRUN:
+        return "overrun"
+    if data.get("repaired"):
+        return "garbled"
+    if data.get("flat") and not data.get("reference_flat"):
+        return "silence" if speech else "blank"
+    if data.get("extreme") and not data.get("reference_extreme"):
+        return "clipping" if speech else "noise"
+    if data.get("match") is False:
+        return "mishearing"
+    if float(data.get("agreement") or 0.0) < RECALL_AGREEMENT:
+        return "distortion" if speech else "drift"
+    return "none"
 
 
 def _fault(text: str, reason: str, severity: float, note: str, source: str) -> dict:
@@ -270,6 +337,49 @@ def faults_from_lessons(lessons: Iterable[Any], threshold: float = 6.0, source: 
     return faults, passed
 
 
+def faults_from_recall(lessons: Iterable[Any], threshold: float = 6.0,
+                       source: str = "recall") -> tuple[list[dict], list[str]]:
+    """``(faults, passed_texts)`` from :class:`radixnet.recall.RecallLesson` objects (or their dicts).
+
+    The recall tutor needs no LLM: it asked the network to write out an
+    utterance or a picture it had been taught, so the *correct* text is on file
+    and rides along in the fault as the correction.  Only the characters the
+    network got wrong are therefore blamed, and a payload it remembered exactly
+    clears blame like any other text the tutor passed.
+    """
+    faults: list[dict] = []
+    passed: list[str] = []
+    for lesson in lessons or []:
+        data = lesson.to_dict() if hasattr(lesson, "to_dict") else dict(lesson or {})
+        text = str(data.get("sentence") or data.get("text") or "")
+        if not text:
+            continue
+        grade = data.get("grade") or {}
+        correction = str(grade.get("correction") or "")
+        if grade.get("passed"):
+            passed.append(text)
+            continue
+        reason = str(grade.get("error") or "").strip().lower()
+        if not reason or reason == "none":
+            reason = recall_reason(grade.get("facts") or {})
+        if reason == "none":
+            reason = DEFAULT_REASON
+        score = grade.get("score")
+        fault = _fault(
+            text,
+            reason,
+            severity_from_rating(score if isinstance(score, (int, float)) else None, threshold),
+            str(grade.get("comment") or ""),
+            source,
+        )
+        if correction and correction != text:
+            fault["correction"] = correction
+        faults.append(fault)
+        if correction and correction not in passed:
+            passed.append(correction)  # the original is correct by construction
+    return faults, passed
+
+
 def teach(
     negative: Any,
     faults: Sequence[dict],
@@ -361,6 +471,15 @@ def teach_lessons(negative: Any, lessons: Iterable[Any], *, threshold: float = 6
                   source: str = "tutor", **options: Any) -> dict:
     """Feed a round of English lessons into the negative network (see :func:`faults_from_lessons`)."""
     faults, passed = faults_from_lessons(lessons, threshold, source)
+    report = teach(negative, faults, passed if clear_passes else (), **options)
+    report.update(source=source, threshold=float(threshold), faults=faults, passed=len(passed))
+    return report
+
+
+def teach_recall(negative: Any, lessons: Iterable[Any], *, threshold: float = 6.0, clear_passes: bool = True,
+                 source: str = "recall", **options: Any) -> dict:
+    """Feed a round of the speech / image recall tutor into the negative network (see :func:`faults_from_recall`)."""
+    faults, passed = faults_from_recall(lessons, threshold, source)
     report = teach(negative, faults, passed if clear_passes else (), **options)
     report.update(source=source, threshold=float(threshold), faults=faults, passed=len(passed))
     return report

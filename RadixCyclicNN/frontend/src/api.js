@@ -177,6 +177,20 @@ export const api = {
     return post(`/api/images/encode${query ? `?${query}` : ""}`, form);
   },
   imageDecode: (text, encoder) => post("/api/images/decode", encoder ? { text, encoder } : { text }),
+  /**
+   * The recall tutor: ask the network to draw back a picture it was shown and mark what comes back.
+   * Options: size, encoder, lead, length, attempts, mode, temperature, threshold, blame.
+   */
+  imageTutor: (file, options = {}) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+    }
+    const query = params.toString();
+    return post(`/api/images/tutor${query ? `?${query}` : ""}`, form);
+  },
   /** English lessons (see TutorPanel): the tutor writes the prefix, the network completes it, the tutor marks it. */
   tutor: () => get("/api/tutor"),
   tutorStart: (body) => post("/api/tutor/start", body),
@@ -196,6 +210,12 @@ export const api = {
    * waveform, pair, token, unique, backend, language, train, epochs, lr, batch_size, save_as.
    */
   speechTeach: (audio, options = {}) => sendAudio("/api/speech/teach", audio, options),
+  /**
+   * The recall tutor: ask the network to say back an utterance it was taught and mark what comes back.
+   * Options: transcript, rate, codec, normalise, token, unique, lead, length, attempts, mode,
+   * temperature, threshold, listen_back, blame.
+   */
+  speechTutor: (audio, options = {}) => sendAudio("/api/speech/tutor", audio, options),
   /** An encoded - or predicted - `aud:...` text back to audio that can be played. */
   speechDecode: (text, codec) => post("/api/speech/decode", codec ? { text, codec } : { text }),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama or ChatGPT teacher / judge and 2NRL rewards. */
