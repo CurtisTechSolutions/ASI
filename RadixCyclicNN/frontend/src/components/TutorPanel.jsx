@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
@@ -17,6 +17,7 @@ function providerLabel(provider) {
 }
 
 const slowNote = (provider) => `${providerLabel(provider)} is writing and marking the exercises; this can take a minute or two.`;
+const planNote = (provider) => `${providerLabel(provider)} is reading the report card and planning the next lessons; this can take a minute.`;
 
 /**
  * Server-side defaults of one teacher, reported by /api/status as
@@ -159,14 +160,15 @@ function ReportCard({ card, title }) {
 }
 
 /** The lessons the teacher plans from a report card: what each one drills, at which weakness, and why. */
-function LessonPlanCard({ plan, onUse, onTeach, onClear, disabled }) {
+function LessonPlanCard({ plan, onUse, onTeach, onClear, disabled, cardRef }) {
   const lessons = asArray(plan && plan.lessons);
   if (lessons.length === 0) return null;
   const weak = asArray(plan.weak);
   const upgrade = plan.upgrade && typeof plan.upgrade === "object" ? plan.upgrade : {};
   const by = plan.source === "report card" ? "the report card alone" : providerLabel(plan.source);
   return (
-    <div className="card">
+    // wide: the plan is a table of lessons, not a sidebar note
+    <div className="card wide" ref={cardRef}>
       <div className="toolbar">
         <h2>Lesson plan</h2>
         <button type="button" className="small" onClick={onClear}>
@@ -432,6 +434,9 @@ export default function TutorPanel({ status }) {
   const [previewBusy, setPreviewBusy] = useState(false);
   const [plan, setPlan] = useState(null);
   const [planBusy, setPlanBusy] = useState(false);
+  const [planError, setPlanError] = useState(null);
+  const [showPlan, setShowPlan] = useState(false);
+  const planRef = useRef(null);
   const [notice, setNotice] = useState(null);
   const [formError, setFormError] = useState(null);
   const [serverHistory, setServerHistory] = useState([]);
@@ -538,6 +543,7 @@ export default function TutorPanel({ status }) {
     if (!card) return;
     setFormError(null);
     setNotice(null);
+    setPlanError(null);
     setPlanBusy(true);
     try {
       const data = await api.tutorPlan({
@@ -548,8 +554,14 @@ export default function TutorPanel({ status }) {
         report: card,
       });
       setPlan((data && data.plan) || null);
+      setShowPlan(true); // the plan lands at the foot of the tab: take the reader to it
     } catch (err) {
-      setFormError(err.message);
+      // 404: the API this tab is talking to is older than the tab itself
+      setPlanError(
+        err.status === 404
+          ? "This server has no POST /api/tutor/plan: it is running a version older than this page. Restart it (or rebuild the Go server) and try again."
+          : err.message,
+      );
     } finally {
       setPlanBusy(false);
     }
@@ -603,6 +615,13 @@ export default function TutorPanel({ status }) {
   useEffect(() => {
     if (plannedByRun) setPlan(plannedByRun); // a run that ended with a plan of its own shows it straight away
   }, [plannedByRun]);
+  useEffect(() => {
+    if (!showPlan || !plan || !planRef.current) return;
+    setShowPlan(false);
+    if (typeof planRef.current.scrollIntoView === "function") {
+      planRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [showPlan, plan]);
   const series = [
     {
       name: "mean score",
@@ -943,7 +962,9 @@ export default function TutorPanel({ status }) {
             >
               {planBusy ? "Planning…" : "Plan the next lessons"}
             </button>
+            {planBusy ? <span className="muted">{planNote(provider)}</span> : null}
           </div>
+          <Alert message={planError} onDismiss={() => setPlanError(null)} />
           <LessonTable rows={previewLessons} total={previewLessons.length} running={false} />
         </div>
       ) : null}
@@ -966,15 +987,22 @@ export default function TutorPanel({ status }) {
           />
         ) : null}
         <ReportCard card={card} title="Report card" />
-        {card ? (
-          <div className="actions">
-            <button type="button" disabled={running || planBusy} onClick={() => handlePlan(card)}>
-              {planBusy ? "Planning…" : "Plan the next lessons"}
-            </button>
-            <span className="muted">
-              The teacher reads the report card and writes the syllabus that repairs it, worst mistake first.
-            </span>
-          </div>
+        {card && card.lessons ? (
+          <>
+            <div className="actions">
+              <button type="button" disabled={running || planBusy} onClick={() => handlePlan(card)}>
+                {planBusy ? "Planning…" : "Plan the next lessons"}
+              </button>
+              <span className="muted">
+                {planBusy ? planNote(provider) : null}
+                {!planBusy && running ? "The lessons are still running; the plan is written from the card at the end." : null}
+                {!planBusy && !running
+                  ? "The teacher reads the report card and writes the syllabus that repairs it, worst mistake first."
+                  : null}
+              </span>
+            </div>
+            <Alert message={planError} onDismiss={() => setPlanError(null)} />
+          </>
         ) : null}
         <RoundTable rounds={roundRecords.slice(-MAX_ROWS)} />
         <h3>Every lesson</h3>
@@ -985,8 +1013,12 @@ export default function TutorPanel({ status }) {
         plan={plan}
         onUse={usePlanLesson}
         onTeach={teachNextBatch}
-        onClear={() => setPlan(null)}
+        onClear={() => {
+          setPlan(null);
+          setPlanError(null);
+        }}
         disabled={running}
+        cardRef={planRef}
       />
     </>
   );
