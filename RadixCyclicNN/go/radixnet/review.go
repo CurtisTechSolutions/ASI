@@ -77,6 +77,8 @@ type Review struct {
 	Rating   *float64 `json:"rating"`
 	Verdict  string   `json:"verdict"`
 	Critique string   `json:"critique"`
+	// Said is the line this text was a reply to, when it was one (chat.go).
+	Said string `json:"said,omitempty"`
 }
 
 // DefaultReviewBatch is how many texts go into one review call.
@@ -258,6 +260,14 @@ type ReviewResult struct {
 	PassRate   *float64 `json:"pass_rate"`
 	Good       []string `json:"good"`
 	Bad        []string `json:"bad"`
+	// Overall is the judge's verdict on a conversation as a whole (chat.go); nil elsewhere.
+	Overall *Overall `json:"overall,omitempty"`
+}
+
+// Overall is a judge's verdict on a whole conversation.
+type Overall struct {
+	Rating   *float64 `json:"rating"`
+	Critique string   `json:"critique"`
 }
 
 // AdversarialReviewOptions are the knobs of one review round.
@@ -356,4 +366,199 @@ func ReasonOrder(counts map[string]int) []string {
 		return names[i] < names[j]
 	})
 	return names
+}
+
+// -- conversing with the network, and marking the conversation ----------------
+
+const chatSystem = "You are having a short, ordinary conversation with a very small character-level neural " +
+	"network that is learning to talk. It answers by continuing the last few words you wrote, so every line you " +
+	"write must be short, plain and concrete, and must end on words that are easy to carry on from. Never mention " +
+	"that it is a model, never explain yourself, never ask more than one thing at a time, and never write more " +
+	"than one sentence. Reply with the next thing you would say and nothing else."
+
+const conversationSystem = "You are marking a conversation between a person and a very small character-level " +
+	"neural network that is learning to talk. Mark each of the network's lines out of 10 for one thing only: is it " +
+	"a real reply to the line before it - does it follow on, is it about the same thing, is it a sentence at all. " +
+	"Ignore style, length and ambition: a short plain line that follows on is a 10. A line that merely repeats " +
+	"what was just said, that is gibberish, or that answers something nobody asked is 0 to 3. %s out of 10 is a " +
+	"pass. Reply with JSON only, of the form {\"reviews\": [{\"index\": <n>, \"rating\": <0-10>, " +
+	"\"critique\": \"<one sentence>\"}, ...], \"overall\": {\"rating\": <0-10>, \"critique\": " +
+	"\"<one sentence about the conversation as a whole>\"}}."
+
+// ChatSpeakers are who is who in a transcript: the LLM, then the network.
+var ChatSpeakers = [2]string{"Partner", "Model"}
+
+// Line is one line of a conversation.
+type Line struct {
+	Speaker string `json:"speaker"`
+	Text    string `json:"text"`
+}
+
+// Exchange is a line said to the network and what it replied.
+type Exchange struct {
+	Said  string
+	Reply string
+}
+
+// ChatLineOptions are what the partner is told about the conversation it is holding.
+type ChatLineOptions struct {
+	Topic       string
+	Persona     string
+	Model       string
+	Temperature float64
+}
+
+// ChatLine is the next line of the LLM's side of a conversation with the
+// network.  An empty transcript opens the conversation.
+//
+// The system prompt asks for short, plain lines ending on words that are easy
+// to carry on from, because that is what a character-level model can actually
+// reply to.
+func ChatLine(client LLMClient, transcript []Line, o ChatLineOptions) (string, error) {
+	system := chatSystem
+	if strings.TrimSpace(o.Topic) != "" {
+		system += " The conversation is about " + strings.TrimSpace(o.Topic) + "."
+	}
+	if strings.TrimSpace(o.Persona) != "" {
+		system += " You are " + strings.TrimSpace(o.Persona) + "."
+	}
+	said := []string{}
+	for _, line := range transcript {
+		if strings.TrimSpace(line.Text) != "" {
+			said = append(said, line.Speaker+": "+line.Text)
+		}
+	}
+	user := "Open the conversation with one short, plain line."
+	if strings.TrimSpace(o.Topic) != "" {
+		user = "Open the conversation about " + strings.TrimSpace(o.Topic) + " with one short, plain line."
+	}
+	if len(said) > 0 {
+		user = "The conversation so far:\n" + strings.Join(said, "\n") + "\n\nWrite your next line."
+	}
+	temperature := o.Temperature
+	if temperature <= 0 {
+		temperature = 0.8
+	}
+	raw, err := client.Generate(user, LLMOptions{System: system, Model: o.Model, Temperature: temperature})
+	if err != nil {
+		return "", err
+	}
+	return firstLine(raw), nil
+}
+
+// firstLine is one line out of an LLM answer that may have written several (or
+// quoted itself).
+func firstLine(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		text := collapse(line)
+		if text == "" {
+			continue
+		}
+		for _, speaker := range []string{"Partner:", "Model:", "You:", "Me:"} {
+			if len(text) >= len(speaker) && strings.EqualFold(text[:len(speaker)], speaker) {
+				text = strings.TrimSpace(text[len(speaker):])
+			}
+		}
+		text = strings.Trim(text, "\"\u201c\u201d")
+		if text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// ReviewConversation marks every reply the network gave in a conversation, and
+// the conversation as a whole.
+//
+// The result is the SummariseReviews shape - so TeachReviews takes it as it is
+// - plus Overall, the judge's verdict on the conversation itself (nil when it
+// did not give one).
+func ReviewConversation(
+	client LLMClient, exchanges []Exchange, topic, model string, threshold float64,
+) (*ReviewResult, error) {
+	replies := make([]string, 0, len(exchanges))
+	blocks := []string{}
+	for i, exchange := range exchanges {
+		replies = append(replies, exchange.Reply)
+		if strings.TrimSpace(exchange.Reply) != "" {
+			blocks = append(blocks, fmt.Sprintf("[%d] %s: %s\n    %s: %s", i, ChatSpeakers[0], exchange.Said,
+				ChatSpeakers[1], exchange.Reply))
+		}
+	}
+	parsed := map[int]Review{}
+	var overall *Overall
+	if len(blocks) > 0 {
+		user := ""
+		if strings.TrimSpace(topic) != "" {
+			user = "Topic: " + strings.TrimSpace(topic) + "\n\n"
+		}
+		user += "The conversation:\n" + strings.Join(blocks, "\n\n") + "\n\nReturn the JSON now."
+		system := fmt.Sprintf(conversationSystem, strconv.FormatFloat(threshold, 'g', -1, 64))
+		raw, err := client.Generate(user, LLMOptions{System: system, Model: model, JSON: true, Temperature: 0.2})
+		if err != nil {
+			return nil, err
+		}
+		parsed = parseReviews(raw, len(exchanges))
+		overall = parseOverall(raw)
+	}
+	reviews := make([]Review, 0, len(exchanges))
+	for i, exchange := range exchanges {
+		entry := Review{Index: i, Text: exchange.Reply, Said: exchange.Said}
+		switch found, ok := parsed[i]; {
+		case strings.TrimSpace(exchange.Reply) == "":
+			zero := 0.0
+			entry.Rating, entry.Verdict, entry.Critique = &zero, "fail", "it said nothing"
+		case ok:
+			entry.Rating, entry.Critique = found.Rating, found.Critique
+			entry.Verdict = "fail"
+			if found.Rating != nil && *found.Rating >= threshold {
+				entry.Verdict = "pass"
+			}
+		default:
+			entry.Verdict, entry.Critique = "unrated", "no review returned"
+		}
+		reviews = append(reviews, entry)
+	}
+	judge := model
+	if judge == "" {
+		judge = client.ModelName()
+	}
+	result := SummariseReviews("chat", judge, threshold, replies, reviews)
+	result.Overall = overall
+	return result, nil
+}
+
+// parseOverall is the judge's verdict on the conversation as a whole, when it
+// gave one.
+func parseOverall(raw string) *Overall {
+	data, ok := loadsLenient(raw).(map[string]any)
+	if !ok {
+		return nil
+	}
+	var item map[string]any
+	for _, key := range []string{"overall", "conversation", "summary"} {
+		if found, ok := data[key].(map[string]any); ok {
+			item = found
+			break
+		}
+	}
+	if item == nil {
+		return nil
+	}
+	out := &Overall{}
+	if number, err := toNumber(firstPresent(item, "rating", "score")); err == nil {
+		value := math.Max(0, math.Min(10, number))
+		out.Rating = &value
+	}
+	out.Critique = collapse(pythonString(firstPresent(item, "critique", "reason", "comment")))
+	if out.Critique == "None" {
+		out.Critique = ""
+	}
+	if out.Rating == nil && out.Critique == "" {
+		return nil
+	}
+	if out.Critique == "" {
+		out.Critique = "no critique given"
+	}
+	return out
 }

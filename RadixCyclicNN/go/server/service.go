@@ -171,6 +171,7 @@ type Service struct {
 	criticHistory  []map[string]any
 	codegenHistory []map[string]any
 	agentHistory   []map[string]any
+	chatHistory    []map[string]any
 	// tools are the server's defaults for the external tools the network may call
 	tools         toolDefaults
 	evolveHistory []map[string]any

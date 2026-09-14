@@ -185,6 +185,7 @@ commands:
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
+  chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
   ollama     a corpus written to order, and the adversarial review (models | corpus | review)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
@@ -274,6 +275,8 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "chat":
+		cmdChat(rest)
 	case "ollama":
 		cmdOllama(rest)
 	case "chatgpt":

@@ -60,6 +60,7 @@ RadixCyclicNN/
                             and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, reply, converse - the model conversing with itself (section 22)
     chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
+                            (ported to Go as go/radixnet/chat.go, section 28.1)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
     critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
@@ -1478,6 +1479,8 @@ must change nothing, with `--plan N` the report card is read out to the teacher 
 come back with the same syllabus (lessons, targets, weak points, level, summary, the brief and the upgrade), and
 with `--brief TEXT` both hand that brief to the exercise writer identically; `--batches 2` runs the whole loop on
 both sides and the batch records - brief, step, level, openings, pass mark, drills - must match.
+`TestGoChatParity` does the same for the chat loop (section 28.1): one fake partner and judge answers both CLIs,
+and the prompts, the transcripts, the marks, the report card and both saved networks must match.
 
 ### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
 
@@ -1518,7 +1521,7 @@ tutor parity test finds the same rewards on both sides; `radixnet-count correct`
 
 Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; a tab that needed the Python server would carry
 `pythonOnly` and be neither shown nor mounted with `"go"` - there are none left, since both servers now run the
-lessons, the evolve loop, the Ollama calls, code generation, tool use and the media encoders.  The header shows a
+lessons, the evolve loop, the Ollama calls, code generation, tool use, the chat loop and the media encoders.  The header shows a
 **Go engine · N goroutines** badge, the status bar
 replaces the accelerator chips with `engine go · workers · goroutines` (`StatusBar.jsx`), and the Train tab
 (`TrainPanel.jsx`) offers **Texts are** `lines | paragraphs | pages` (+ lines per page): with paragraphs or pages
@@ -2293,6 +2296,33 @@ reply badged with its mark once the conversation has been judged), the table of 
 Tests: `tests/test_chat.py` — a fake partner and judge, a real trained model: the conversation, a given opening,
 the reply really continuing the line, the marking, what reaches the negative network and the positive one, the
 guard silencing a reply, stalling, the report card, stopping, the endpoint and the CLI.
+
+### 28.1 The conversation in Go (`go/radixnet/chat.go`, `review.go`, `dialogue.go`)
+
+The Go half is the same four steps, from the same prompts, and the parity test holds them to it call by call.
+
+* `dialogue.go` gained `Model.Reply(previous, ReplyOptions)` — the same extraction the Python side made, for the
+  same reason: `Converse` is now a loop over it, and the chat loop calls it for the model's own lines while an LLM
+  speaks the others.  One implementation of "what does this model say next", whoever is on the other side.
+* `review.go` gained the two prompts character for character (`chatSystem`, `conversationSystem`), `ChatLine`
+  with its `firstLine` reader (an answer that wrote several lines, or quoted itself, or prefixed a speaker name),
+  and `ReviewConversation` — the same `[i] Partner: … / Model: …` numbering, the same lenient `parseReviews`, and
+  `parseOverall` for the verdict on the conversation as a whole.  It returns the `SummariseReviews` shape plus
+  `Overall`, so `TeachReviews` takes it unchanged, exactly as in Python.
+* `chat.go` is `ChatConfig` / `Chat` / `ChatReportCard`: `Pair` (the guard, standing aside when there is no
+  negative network or nothing has ever been blamed), the `chatVeto` that remembers its judgements so a candidate
+  offered again after the context is shortened is not judged twice, `Converse`, `RunConversation`, `Learn` and
+  `Run`.  The records carry the same keys in the same shape, the learning keys included whether or not it
+  learned.  As everywhere in the port, the count model pushes by a `strength` rather than `neg_lr` / `pos_lr` /
+  `batch_size`, which is the only setting that differs.
+* `server/chat.go` adds `POST /api/chat/start` and `GET /api/chat/history` with the same request fields and the
+  same 400s, releasing the model lock around the partner's and the judge's thinking; the Go CLI gains `chat` with
+  the same flags, printing the transcript as it is spoken and saving only when it learned.
+* Go tests: `radixnet/chat_test.go` (a fake playing the partner and the judge, a real trained model — the
+  conversation, a given opening, the reply really continuing the line, the marking, the blame, the clearing, the
+  guard, stalling, learning, the report card, stopping) and `server/chat_test.go` (the endpoints end to end).
+  `TestGoChatParity` runs both CLIs against **one** fake partner and asserts the same prompts, the same
+  transcripts, the same marks and the same two networks on disk afterwards.
 
 ---
 ## 24. Counter overflow (`counter.py`, `go/radixnet/counter.go`) — cyclic counters with a reset count

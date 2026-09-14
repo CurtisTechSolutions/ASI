@@ -1077,6 +1077,11 @@ A conversation can also end early, and the report says which way: the model had
 nothing left to say, the guard vetoed everything it could say, or the partner
 went quiet.
 
+The Go port holds the same conversation: `radixnet-count chat`, `POST
+/api/chat/start` and `GET /api/chat/history`, with `TestGoChatParity` running
+both CLIs against one fake partner and asserting the same prompts, the same
+transcripts, the same marks and the same two networks on disk afterwards.
+
 ## The negative network: what went wrong, and why
 
 The positive model learns what text looks like.  The **negative network**
@@ -1414,6 +1419,7 @@ go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.t
 go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
 go/bin/radixnet-count --model model.count.json generate --mode beam --count 5
 go/bin/radixnet-count --model model.count.json converse --opening "the cat sat on the mat"
+go/bin/radixnet-count --model model.count.json chat --conversations 2 --topic animals   # an LLM talks to it and marks it
 go/bin/radixnet-count --model model.count.json tutor --topic "everyday life" --rounds 3   # Ollama teaches it English
 go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame    # ... and blames what it marks down
 go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
@@ -1437,7 +1443,7 @@ python -m radixnet negative why --text "..." --negative model.count.negative.jso
 
 Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`,
 `negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget` | `auto`),
-`invert`, `compress`, `weights`, `info`, `converse`, `tutor`, `evolve`,
+`invert`, `compress`, `weights`, `info`, `converse`, `chat`, `tutor`, `evolve`,
 `ollama` (`models` | `corpus` | `review`), `chatgpt` (`models` | `ask`),
 `image` (`info` | `encode` | `tutor` | `decode`),
 `speech` (`info` | `teach` | `tutor` | `decode`),
@@ -1567,7 +1573,7 @@ gains a **Texts are** selector (`lines | paragraphs | pages`) so the pasted
 text and the uploaded files are cut into the units the goroutines fan out over.
 Every tab works: both servers now run the lessons, the negative network and its
 automatic loop, the evolve loop, the Ollama corpus and review, code generation,
-tool use and the image and speech encoders. The Go side's images use a
+tool use, the chat loop and the image and speech encoders. The Go side's images use a
 thumbnail rather than the diffusion VAE, and its speech needs the words to come
 with the audio - which is what the page dictates anyway.
 
@@ -1592,6 +1598,7 @@ with the audio - which is what the page dictates anyway.
 | `POST /api/codegen/start`, `GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run` | code generation, same bodies and results as the Python server: the teacher writes, the sandbox runs, the judge decides and 2NRL follows. The sandbox is the same Python bootstrap both languages run, so a program sees the same interpreter, the same limits and the same isolation whichever server started it. The count model pushes by `strength` rather than `neg_lr` / `pos_lr` / `batch_size` |
 | `GET /api/tools`, `POST /api/tools/call` | the external tools the network can call by writing `<tool>name {...}</tool>`, and one direct call: the same names, parameters, descriptions and JSON schemas as the Python server, so a transcript written on one side is one the other reads. Browsing is the standard library either way, with the same guards (http / https only, no credentials, no private address unless allowed, a byte cap, redirects followed by hand) |
 | `POST /api/agent/start`, `/api/agent/explore`, `GET /api/agent/history`, `POST /api/agent/criteria`, `/api/agent/solve` | tool use: the LLM writes the acceptance criteria, mediates what the network could not write itself, judges the answer and demonstrates when it failed; 2NRL follows. Same bodies and records as the Python server; the count model pushes by `strength` rather than `neg_lr` / `pos_lr` |
+| `POST /api/chat/start`, `GET /api/chat/history` | an LLM converses with the model and marks every reply: the partner says a short line, the network replies by continuing it, the judge marks each reply against the line it answered and the conversation as a whole, the failures blame the negative network, the passes clear it, and 2NRL trains the model on both. Same bodies and records as the Python server; the count model pushes by `strength` rather than `neg_lr` / `pos_lr` / `batch_size` |
 | `/api/schedule/preview` | 404 with a message naming the Python server - the only endpoint that is still Python-only |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
@@ -1604,6 +1611,9 @@ holds the two tool sets to the same signatures, the same JSON schemas and the
 same answers - including the calculator's, down to `29.0` rather than `29` -
 because the network learns the characters of a call and its result, so a
 transcript written on one side has to be one the other can read.
+`TestGoChatParity` points both chat loops at one fake partner and judge: the
+same lines are said, the same replies come back, the same marks are given and
+the same two networks are on disk afterwards.
 
 `tests/test_go_parity.py` also starts the Go server and checks its answers
 against the key sets the Python API tests assert on, loads the model it saves
@@ -1674,7 +1684,7 @@ make go-test     # cd go && go test -race ./...
 RadixCyclicNN/
   radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
                       blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
-                      tutor, recall, critic, codegen, tools, agent, vision, speech, dialogue
+                      tutor, recall, critic, codegen, tools, agent, vision, speech, dialogue, chat
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)

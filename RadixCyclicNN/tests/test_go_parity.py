@@ -902,6 +902,109 @@ class TestGoCodeGenParity(unittest.TestCase):
         self.assertEqual(py_record["correct"], go_record["correct"])
 
 
+class TestGoChatParity(unittest.TestCase):
+    """One fake partner, both chat loops: the same conversation, the same marks, the same learning."""
+
+    def setUp(self):
+        try:  # the fake partner / judge of the chat tests answers both sides
+            from test_chat import start_partner
+        except ImportError:
+            from tests.test_chat import start_partner
+        self.fake = start_partner(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_OLLAMA_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "chat_py.count.json")
+        self.go_path = os.path.join(TMP.name, "chat_go.count.json")
+        for path in (self.py_path, self.go_path):
+            for name in (path, path.replace(".count.json", ".count.negative.json")):
+                if os.path.exists(name):
+                    os.remove(name)
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.py_path)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.go_path)
+
+    def prompts(self):
+        """Every prompt the partner and the judge were given, so both conversations can be compared."""
+        return [body.get("prompt", "") for body in self.fake.requests if body]
+
+    def restart(self):
+        """A fresh fake for the second side: the same lines, in the same order, from the start."""
+        self.fake.requests.clear()
+        self.fake.lines = 0
+        self.fake.marked = 0
+
+    def test_both_loops_converse_the_same_and_learn_the_same(self):
+        options = ("chat", "--url", self.fake.url, "--partner-model", "fake:latest", "--conversations", 2,
+                   "--turns", 2, "--topic", "animals", "--neg-epochs", 1, "--pos-epochs", 1)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.restart()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_prompts = self.prompts()
+
+        # the same conversation with the partner and the judge, prompt for prompt
+        self.assertEqual(len(py_prompts), len(go_prompts))
+        for i, (first, second) in enumerate(zip(py_prompts, go_prompts)):
+            self.assertEqual(first, second, f"call {i} differs between the two loops")
+        self.assertGreaterEqual(len(py_prompts), 4)  # open, carry on, open again, and the two judgements
+
+        # the same conversations, marked the same and learned from the same
+        py_held = [r for r in a["records"] if r["kind"] == "conversation"]
+        go_held = [r for r in b["records"] if r["kind"] == "conversation"]
+        self.assertEqual(len(py_held), 2)
+        self.assertEqual(len(py_held), len(go_held))
+        for first, second in zip(py_held, go_held):
+            for key in ("conversation", "transcript", "exchanges", "passed", "failed", "stalled", "vetoed",
+                        "blamed", "cleared", "edges", "reasons", "action", "bad", "good",
+                        "overall_rating", "overall_critique"):
+                self.assertEqual(first[key], second[key], f"conversation {first['conversation']}: {key}")
+            self.assertEqual([(r["index"], r["said"], r["text"], r["rating"], r["verdict"]) for r in first["reviews"]],
+                             [(r["index"], r["said"], r["text"], r["rating"], r["verdict"]) for r in second["reviews"]])
+            self.assertAlmostEqual(first["mean_rating"], second["mean_rating"], places=9)
+
+        # the same report card, and the same speakers in it
+        for key in ("conversations", "exchanges", "passed", "failed", "vetoed", "stalled", "blamed",
+                    "cleared", "edges", "reasons", "overall_rating"):
+            self.assertEqual(a["report"][key], b["report"][key], key)
+        self.assertAlmostEqual(a["report"]["mean_rating"], b["report"]["mean_rating"], places=9)
+        self.assertEqual(a["speakers"], b["speakers"])
+        self.assertEqual(a["speakers"], ["Partner", "Model"])
+
+        # and the same two networks on disk: 2NRL trained the positive one, the marks taught the negative one
+        py_model, go_model = load_json(self.py_path), load_json(self.go_path)
+        self.assertEqual(py_model["graph"]["nodes"]["labels"], go_model["graph"]["nodes"]["labels"])
+        self.assertEqual(py_model["graph"]["edges"]["count"], go_model["graph"]["edges"]["count"])
+        assert_close(self, py_model["graph"]["edges"]["reward"], go_model["graph"]["edges"]["reward"], 1e-9)
+        py_neg = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_neg = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual(py_neg["graph"]["nodes"]["labels"], go_neg["graph"]["nodes"]["labels"])
+        self.assertEqual(py_neg["graph"]["edges"]["blame"], go_neg["graph"]["edges"]["blame"])
+        self.assertEqual({r["source"] for r in py_neg["log"]}, {"chat"})
+        self.assertEqual({r["source"] for r in go_neg["log"]}, {"chat"})
+
+    def test_a_given_opening_is_spoken_as_it_is_on_both_sides(self):
+        options = ("chat", "--url", self.fake.url, "--partner-model", "fake:latest", "--conversations", 1,
+                   "--turns", 1, "--opening", "tell me about the cat", "--no-learn", "--no-blame")
+        a = py(*options, model=self.py_path, env=self.env)
+        self.restart()
+        b = go(*options, model=self.go_path, env=self.env)
+        py_held = next(r for r in a["records"] if r["kind"] == "conversation")
+        go_held = next(r for r in b["records"] if r["kind"] == "conversation")
+        self.assertEqual(py_held["transcript"][0], {"speaker": "Partner", "text": "tell me about the cat"})
+        self.assertEqual(py_held["transcript"], go_held["transcript"])
+        self.assertIsNone(a["saved"])  # nothing was learned, so neither model was written back
+        self.assertIsNone(b["saved"])
+
+    def test_neither_side_learns_with_no_learn(self):
+        before = (load_json(self.py_path), load_json(self.go_path))
+        options = ("chat", "--url", self.fake.url, "--partner-model", "fake:latest", "--conversations", 1,
+                   "--turns", 1, "--no-learn", "--no-blame")
+        py(*options, model=self.py_path, env=self.env)
+        self.restart()
+        go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(before[0], load_json(self.py_path))
+        self.assertEqual(before[1], load_json(self.go_path))
+
+
 class TestGoMediaParity(unittest.TestCase):
     """The media text formats: both sides must encode the same recording and the same picture identically.
 
@@ -1125,7 +1228,8 @@ class TestGoServer(unittest.TestCase):
         # what the Go server now serves too: evolve, the Ollama corpus / review, the automatic loop, images,
         # speech, code generation and tool use
         for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history",
-                     "/api/images", "/api/speech", "/api/codegen/history", "/api/tools", "/api/agent/history"):
+                     "/api/images", "/api/speech", "/api/codegen/history", "/api/tools", "/api/agent/history",
+                     "/api/chat/history"):
             status, doc, _ = self.client.get(path)
             self.assertEqual(status, 200, f"{path}: {doc}")
         # what is still Python-only is told so; unknown endpoints and wrong methods behave like the Python server
