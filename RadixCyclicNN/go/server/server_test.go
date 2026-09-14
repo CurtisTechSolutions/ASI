@@ -594,6 +594,43 @@ func TestGraphPersistenceAndCheckpoints(t *testing.T) {
 	if status != 400 {
 		t.Fatalf("save without a directory: %d %v", status, ck)
 	}
+
+	// the judged paths: nothing until a text is judged, then one row per step in its context
+	status, p := e.get("/api/paths?limit=5")
+	if status != 200 {
+		t.Fatalf("paths: %d %v", status, p)
+	}
+	if totals := p["totals"].(map[string]any); totals["contexts"].(float64) != 0 {
+		t.Fatalf("training alone judges nothing: %v", totals)
+	}
+	status, _ = e.post("/api/feedback", map[string]any{"good": []string{corpus[0]}, "bad": []string{"zzz qqq"}, "strength": 1})
+	if status != 202 {
+		t.Fatalf("feedback: %d", status)
+	}
+	e.waitJob()
+	status, p = e.get("/api/paths?limit=5")
+	totals := p["totals"].(map[string]any)
+	if status != 200 || totals["contexts"].(float64) == 0 || totals["correct"].(float64) == 0 || totals["incorrect"].(float64) == 0 {
+		t.Fatalf("a judged path should be counted: %d %v", status, p)
+	}
+	rows := p["paths"].([]any)
+	if len(rows) == 0 || len(rows) > 5 {
+		t.Fatalf("paths rows: %d", len(rows))
+	}
+	hasKeys(t, rows[0].(map[string]any), "prev", "edge", "after", "parent_label", "child_label", "seen", "correct",
+		"incorrect", "correct_ratio", "seen_ratio", "term")
+	_, st := e.get("/api/status")
+	if st["path_contexts"] != totals["contexts"] || st["path_correct"] != totals["correct"] {
+		t.Fatalf("the status should agree with /api/paths: %v vs %v", st["path_contexts"], totals["contexts"])
+	}
+	status, _ = e.get("/api/paths?limit=x")
+	if status != 400 {
+		t.Fatalf("bad paths limit: %d", status)
+	}
+	status, w := e.post("/api/model/weights", map[string]any{"path_scale": 0.5})
+	if status != 200 || w["weights"].(map[string]any)["path_scale"] != 0.5 {
+		t.Fatalf("path_scale: %d %v", status, w)
+	}
 }
 
 func TestStaticAndErrors(t *testing.T) {

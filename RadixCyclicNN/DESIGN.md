@@ -776,7 +776,7 @@ Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a ru
 parsers, the marking, the loop with a scripted model, the endpoints and the CLI) and `go/radixnet/tutor_test.go` +
 `go/server/tutor_test.go` for the port.
 
-### 16.2 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
+### 16.2 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves, counted per path
 
 A grade used to reach the graph as two verdicts on two whole sentences: the attempt was garbage, the correction was
 gospel. Most of a corrected sentence is however word for word what the network wrote - the teacher changes a tense,
@@ -807,6 +807,43 @@ CLI `radixnet correct --wrong ... --right ...` (and `radixnet-count correct`) te
 `go/radixnet/correct_test.go` (the alignment rebuilds both sentences, only the differing steps move, `keep` spreads
 the rest, an early end blames the step into END, a run of corrections keeps the graph sound), plus the cross-language
 parity case.
+
+### 16.3 Judged paths (`CountRewardGraph.paths`) — the node that called the step
+
+An edge is the right move in one sentence and the wrong one in another, so a reward counted per edge blurs the two
+together. Every judgement is counted **per path** instead: the key is `(the node before the edge's parent, the
+edge)` - the step in the company it kept - and the row is `[seen, correct, incorrect]`.
+
+* **Who writes it.** `record_path(transitions, outcome, create)` walks one text's `(parent, edge)` steps and takes
+  the context of step *k* from the parent of step *k-1* (START for the first, which has none). `reward` marks the
+  whole walk correct, `punish` marks it incorrect, a plain training pass marks nothing; `mark_steps` judges single
+  steps, which is what `correct` uses - the blamed steps incorrect, the fix correct, so **the counters follow the
+  reward**. A whole path is rewarded only when the output was correct: `keep` (and the tutor's `keep_weight`)
+  defaults to 0.
+* **What it costs.** A context is *born* when a path is judged and is kept up to date by every later traversal;
+  an unjudged pass never creates one (`create=False`), so training a corpus cannot fill the table with the
+  second-order counts of a whole language. Two indexes (by edge, by caller) make the structural fix-ups cheap, and
+  `nodes_with_paths()` is rebuilt lazily so a whole epoch of splits costs one rebuild.
+* **What it changes.** `path_term = log((correct + s) / (incorrect + s))` (zero until judged, symmetric) is added
+  to the edge's weight, times `path_scale` (1 by default, in the weight config and the file), before the softmax
+  over the node's children: `child_costs(p, prev)`. The searches carry the node they came from - the beam reads it
+  off its entry table, the sampler remembers its last step, and the Python Dijkstra puts it in the state key *only*
+  for the nodes where it makes a difference, so the search does not grow anywhere else. Go prices every judged
+  context once in `Prepare` (`ensureContextCosts`), because the two beams run side by side and must only read.
+* **Through splits and merges.** A split re-keys a moved edge's contexts to the new node and hands the bridge edge
+  the caller's counts (`q -> P -> c` becomes `q -> A -> B -> c`); a merge drops the contexts of the dying edge and
+  of the steps that were never a choice (a unary chain has one way through) and re-keys the ones that arrived
+  through the absorbed node. `edge_parent` is maintained alongside, as Go has always had `EdgeParent`.
+* **What it reports.** `path_stats` adds `correct_ratio` (of the judged traffic) and `seen_ratio` (of the edge's
+  traversals), `path_totals` the four counters that reach `stats()` as `path_contexts`, `path_judged`, `path_seen`,
+  `path_correct`, `path_incorrect`; `radixnet paths` / `radixnet-count paths` and `GET /api/paths` list the
+  contexts with their labels, and the status bar shows the totals. The file carries a `paths` block (prev, edge,
+  seen, correct, incorrect; ids remapped and sorted, so both implementations write the same bytes).
+
+Tests: `tests/test_countnet.py::TestPathCounters` and `go/radixnet/paths_test.go` (training judges nothing, a
+judgement starts the table and a later pass only updates it, the same edge is right after one word and wrong after
+another and its cost follows, the round trip, compression, the scale off), and
+`tests/test_go_parity.py::test_judged_paths_price_the_same_step_differently` for the two implementations.
 
 ---
 
@@ -913,7 +950,9 @@ frequency function* (`edge_weight`): with `C_p` / `W_p` the all-time / windowed 
 its `deg` children and `s = 0.5`, `R_all = (count + s) / (C_p + s * deg)`, `R_recent = (window_count + s) /
 (W_p + s * deg)`, `weight = count_scale * log1p(count) + global_scale * log(R_all) + window_scale * log(R_recent) +
 reward_scale * reward` (defaults 0, 0.5, 0.5, 1: the geometric mean of the two shares, so when they agree the
-probability is the share) - the edge's share of its node's traversals, all time and recently, with the rewards. `recompute_weights()` walks every parent once (O(E)); `shares(p)` reports
+probability is the share) - the edge's share of its node's traversals, all time and recently, with the rewards.
+A step is also priced by the company it kept when the model has judged that path: `path_scale * log((correct + s) /
+(incorrect + s))` of the context `(the node that called the step, the edge)` is added on top, which is section 16.3. `recompute_weights()` walks every parent once (O(E)); `shares(p)` reports
 the two ratios per edge for the graph view; `configure(**scales, window=)` changes the function at run time (the
 window is trimmed when shrunk) and `weight_config()` describes it. `to_dict` stores the scales, `total_traversals`
 and the window's edge ids (remapped like the edges); `from_dict` rebuilds the window counts from them, and a file

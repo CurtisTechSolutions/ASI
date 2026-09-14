@@ -477,6 +477,25 @@ class TestApi(unittest.TestCase):
         self.assertFalse(self.client.get("/api/status")[1]["inverted"])  # punishing never inverts the count model
         status, graph, _ = self.client.get("/api/graph?limit=10")
         self.assertTrue(all("reward" in e for e in graph["edges"]))
+        # the judged paths reached the graph and the endpoint reports them
+        status, paths, _ = self.client.get("/api/paths?limit=5")
+        self.assertEqual(status, 200, paths)
+        self.assertGreater(paths["totals"]["contexts"], 0)
+        self.assertGreater(paths["totals"]["correct"], 0)
+        self.assertGreater(paths["totals"]["incorrect"], 0)
+        self.assertEqual(paths["path_scale"], 1.0)
+        self.assertLessEqual(len(paths["paths"]), 5)
+        row = paths["paths"][0]
+        self.assertEqual(
+            set(row) >= {"after", "parent_label", "child_label", "seen", "correct", "incorrect", "correct_ratio",
+                         "seen_ratio", "term"},
+            True,
+        )
+        status, st, _ = self.client.get("/api/status")
+        self.assertEqual(st["path_contexts"], paths["totals"]["contexts"])
+        self.assertEqual(st["path_correct"], paths["totals"]["correct"])
+        status, data, _ = self.client.get("/api/paths?limit=nope")
+        self.assertEqual(status, 400)
         status, data, _ = self.client.post("/api/save", {})
         self.assertEqual(status, 200)
         self.assertTrue(data["path"].endswith("model.count.json"))
@@ -489,9 +508,10 @@ class TestApi(unittest.TestCase):
         self.assertEqual(data["weights"]["function"], "dual-frequency")
         self.client.post("/api/train", {"texts": TEXTS, "epochs": 1})
         self.wait()
-        status, data, _ = self.client.post("/api/model/weights", {"window_scale": 2.0, "window": 20})
+        status, data, _ = self.client.post("/api/model/weights", {"window_scale": 2.0, "window": 20, "path_scale": 0.5})
         self.assertEqual(status, 200, data)
         self.assertEqual((data["weights"]["window_scale"], data["weights"]["window"]), (2.0, 20))
+        self.assertEqual(data["weights"]["path_scale"], 0.5)
         self.assertEqual(data["stats"]["window"], 20)
         self.assertLessEqual(data["stats"]["window_traversals"], 20)
         self.assertGreater(data["stats"]["total_traversals"], 20)
@@ -601,6 +621,16 @@ class TestCli(unittest.TestCase):
             self.assertGreater(load_model(model).stats()["penalties_total"], penalties)
             proc = run_cli("correct", "--wrong", "a cat", "--right", "a cat", "--dry-run", model=model, json_mode=False)
             self.assertIn("nothing to teach", proc.stdout)
+            # paths: the judged steps, and the counters the correction left behind
+            doc = run_json("paths", "--limit", 5, model=model)
+            self.assertGreater(doc["totals"]["contexts"], 0)
+            self.assertGreater(doc["totals"]["incorrect"], 0)
+            self.assertLessEqual(len(doc["paths"]), 5)
+            self.assertEqual(set(doc["paths"][0]) >= {"prev", "edge", "seen", "correct", "incorrect", "term"}, True)
+            proc = run_cli("paths", "--limit", 3, model=model, json_mode=False)
+            self.assertIn("correct %", proc.stdout)
+            doc = run_json("weights", "--path-scale", 0.0, model=model)
+            self.assertEqual(doc["weights"]["path_scale"], 0.0)
             doc = run_json("weights", model=model)
             self.assertEqual(doc["weights"]["function"], "dual-frequency")
             self.assertEqual(doc["changed"], {})
@@ -668,7 +698,7 @@ class TestCorrections(unittest.TestCase):
         self.assertEqual(len(moved), 2)  # keep=0: the step that wrote the wrong character, and the right one
         self.assertEqual(sorted(v > 0 for v in moved.values()), [False, True])
         blamed = [e for e, delta in moved.items() if delta < 0]
-        self.assertEqual(blamed, model._steps_over(model.encoder.encode(wrong), len(wrong), [(11, 11)]))
+        self.assertEqual(blamed, [e for _prev, e in model._steps_over(model.encoder.encode(wrong), len(wrong), [(11, 11)])])
 
     def test_keep_spreads_a_smaller_reward_over_the_rest(self):
         model = trained(epochs=2)
@@ -691,7 +721,7 @@ class TestCorrections(unittest.TestCase):
         grams = model.encoder.encode(wrong)
         path = model.graph.node_path(grams)
         end_edge = model.graph.children[path[-2]][END]
-        self.assertEqual(model._steps_over(grams, len(wrong), [(len(wrong), len(wrong))]), [end_edge])
+        self.assertEqual([e for _prev, e in model._steps_over(grams, len(wrong), [(len(wrong), len(wrong))])], [end_edge])
 
     def test_short_and_empty_sentences_are_safe(self):
         model = trained(epochs=1)
@@ -705,6 +735,129 @@ class TestCorrections(unittest.TestCase):
         for i in range(12):
             model.correct(f"the cat sit on the mat number {i}", f"the cat sits on the mat number {i}")
             model.graph.check_invariants()
+
+
+class TestPathCounters(unittest.TestCase):
+    """Correct / incorrect per *path*: the node that called the step decides what the step is worth."""
+
+    def judged(self, corpus, good, bad, epochs=3):
+        model = CountRewardNet(seed=1)
+        model.train(corpus, epochs=epochs)
+        model.reward([good])
+        model.punish([bad])
+        return model
+
+    def walk(self, model, text):
+        """``[(prev, parent, edge)]`` of a text: what called each step."""
+        transitions = model.graph._trace(model.encoder.encode(text))[0]
+        out, prev = [], START
+        for i, (parent, edge) in enumerate(transitions):
+            if i:
+                prev = transitions[i - 1][0]
+            out.append((prev, parent, edge))
+        return out
+
+    def test_training_counts_nothing_and_a_judgement_starts_the_table(self):
+        model = CountRewardNet(seed=1)
+        model.train(TEXTS, epochs=2)
+        self.assertEqual(model.graph.path_totals()["contexts"], 0)  # a corpus is not a judgement
+        model.reward(["the cat sat on the mat"])
+        first = model.graph.path_totals()
+        self.assertGreater(first["contexts"], 0)
+        self.assertEqual(first["correct"], first["seen"])
+        self.assertEqual(first["incorrect"], 0)
+        model.punish(["the dog ate the bone"])
+        second = model.graph.path_totals()
+        self.assertGreater(second["incorrect"], 0)
+        # a later training pass keeps the counters up to date without inventing contexts
+        model.train(["the cat sat on the mat"], epochs=1)
+        third = model.graph.path_totals()
+        self.assertEqual(third["contexts"], second["contexts"])
+        self.assertGreater(third["seen"], second["seen"])
+        self.assertEqual((third["correct"], third["incorrect"]), (second["correct"], second["incorrect"]))
+
+    def test_the_same_edge_is_right_after_one_word_and_wrong_after_another(self):
+        # "a cat" passed and "the cat" failed, so the step into "sat" is the right move after one
+        # word and the wrong one after the other - which no per-edge counter can tell apart
+        good, bad = "a cat sat", "the cat sat"
+        model = self.judged([good, bad, "a cat ran"], good, bad)
+        graph = model.graph
+        by_step = {(parent, edge): prev for prev, parent, edge in self.walk(model, good)}
+        shared = [
+            (edge, by_step[(parent, edge)], prev)
+            for prev, parent, edge in self.walk(model, bad)
+            if (parent, edge) in by_step and by_step[(parent, edge)] != prev and len(graph.children[parent]) > 1
+        ]
+        self.assertTrue(shared, "the two sentences should share a step, reached from different nodes, with a choice")
+        edge, good_prev, bad_prev = shared[0]
+        self.assertGreater(graph.path_term(good_prev, edge), 0)  # right in the sentence that passed
+        self.assertLess(graph.path_term(bad_prev, edge), 0)  # wrong in the one that did not
+        parent = graph.edge_parent[edge]
+        plain = dict((e, cost) for _c, e, cost in graph.child_costs(parent))
+        from_good = dict((e, cost) for _c, e, cost in graph.child_costs(parent, good_prev))
+        from_bad = dict((e, cost) for _c, e, cost in graph.child_costs(parent, bad_prev))
+        self.assertLess(from_good[edge], plain[edge])  # cheaper for the walk that was right here
+        self.assertGreater(from_bad[edge], plain[edge])  # dearer for the walk that was wrong
+        stats = graph.path_stats(good_prev, edge)
+        self.assertEqual((stats["correct"], stats["incorrect"]), (1, 0))
+        self.assertEqual(stats["correct_ratio"], 1.0)
+        self.assertGreater(stats["seen_ratio"], 0.0)
+        self.assertIsNone(graph.path_stats(good_prev, 10_000))
+
+    def test_the_counters_survive_a_round_trip_and_the_predictions_with_them(self):
+        good, bad = "a cat sat down", "the cat sat down"
+        model = self.judged([good, bad], good, bad)
+        before = model.graph.path_totals()
+        again = CountRewardNet.from_dict(model.to_dict())
+        self.assertEqual(again.graph.path_totals(), before)
+        self.assertEqual(again.graph.weight_config()["path_scale"], 1.0)
+        for prefix in ("a cat", "the cat", "a "):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(again.predict(prefix, length=6).text, model.predict(prefix, length=6).text)
+        # the same walk is priced the same after a reload
+        steps = self.walk(model, good)
+        reloaded = self.walk(again, good)
+        self.assertEqual(
+            [round(model.graph.path_term(p, e), 12) for p, _n, e in steps],
+            [round(again.graph.path_term(p, e), 12) for p, _n, e in reloaded],
+        )
+
+    def test_compression_keeps_the_contexts_that_are_still_a_choice(self):
+        good, bad = "a cat sat down", "the cat sat down"
+        model = self.judged([good, bad], good, bad)
+        before = model.graph.path_totals()
+        merges = model.graph.compress()
+        after = model.graph.path_totals()
+        self.assertGreaterEqual(before["contexts"], after["contexts"])  # forced steps drop out
+        self.assertLessEqual(after["correct"], before["correct"])
+        model.graph.check_invariants()
+        # and the graph still walks both sentences
+        for text in (good, bad):
+            self.assertIsNotNone(model.graph.node_path(model.encoder.encode(text)))
+        self.assertGreater(merges, -1)
+
+    def test_a_correction_marks_the_steps_it_moves(self):
+        model = CountRewardNet(seed=1)
+        model.train(["the cat sits on the mat", "the cat sat on the mat"], epochs=2)
+        out = model.correct("the cat sit on the mat", "the cat sits on the mat")
+        self.assertEqual((out["marked_incorrect"], out["marked_correct"]), (1, 1))
+        totals = model.graph.path_totals()
+        self.assertEqual((totals["correct"], totals["incorrect"]), (1, 1))
+        # keep is 0 by default: a whole path is rewarded when the output was correct, not when it was corrected
+        self.assertEqual(out["kept"], 0)
+
+    def test_the_scale_can_be_turned_off(self):
+        good, bad = "a cat sat", "the cat sat"
+        model = self.judged([good, bad, "a cat ran"], good, bad)
+        graph = model.graph
+        prev, edge = next(k for k in graph.paths if len(graph.children[graph.edge_parent[k[1]]]) > 1)
+        parent = graph.edge_parent[edge]
+        with_paths = [cost for _c, _e, cost in graph.child_costs(parent, prev)]
+        graph.configure(path_scale=0.0)
+        self.assertEqual(graph.weight_config()["path_scale"], 0.0)
+        without = [cost for _c, _e, cost in graph.child_costs(parent, prev)]
+        self.assertEqual(without, [cost for _c, _e, cost in graph.child_costs(parent)])
+        self.assertNotEqual(with_paths, without)
 
 
 if __name__ == "__main__":

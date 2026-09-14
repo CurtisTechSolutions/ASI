@@ -1385,3 +1385,12 @@ ol.dialogue li.rated.down .bubble {
   padding: 0 3px;
   text-decoration: none;
 }
+
+/* judged paths in the status bar: correct against incorrect */
+.statusbar b.ok {
+  color: var(--ok);
+}
+
+.statusbar b.bad {
+  color: var(--danger);
+}

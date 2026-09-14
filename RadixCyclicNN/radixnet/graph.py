@@ -32,6 +32,7 @@ from .encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
 __all__ = ["START", "END", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
 
 START, END = 0, 1
+_NO_NODES: frozenset[int] = frozenset()
 
 _W = WINDOW          # trigram length
 _OV = WINDOW - 1     # overlap between consecutive labels
@@ -526,8 +527,17 @@ class RadixCyclicGraph:
         total = sum(v for _, v in exps)
         return [(c, v / total) for c, v in exps]
 
-    def child_costs(self, p: int) -> list[tuple[int, int, float]]:
-        """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes."""
+    def nodes_with_paths(self) -> set[int]:
+        """Nodes whose costs depend on where the walk came from; empty unless the model counts paths."""
+        return _NO_NODES
+
+    def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
+        """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes.
+
+        ``prev`` is the node the walk arrived from, which a model that counts
+        paths (:class:`~radixnet.countnet.CountRewardGraph`) uses to price the
+        same edge differently in different contexts; here it is ignored.
+        """
         if self._cost_cache_version != self.version:
             self._cost_cache.clear()
             self._cost_cache_version = self.version

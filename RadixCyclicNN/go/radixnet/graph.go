@@ -164,6 +164,15 @@ type Graph struct {
 	nAliveNodes      int
 	nAliveEdges      int
 
+	// what the walks did: (the node before an edge's parent, the edge) -> seen / correct / incorrect
+	paths       map[PathKey]*PathRow
+	pathsByEdge map[int]map[int]bool // edge -> the nodes that called it
+	pathsByPrev map[int]map[int]bool // node -> the edges it called
+	pathParents map[int]bool         // nodes whose costs depend on where the walk came from (lazy)
+	ctxCache    map[PathKey][]ChildCost
+	ctxVersion  int
+	PathScale   float64
+
 	// lazy weights and costs
 	dirty            map[int]struct{}
 	dirtyAll         bool
@@ -183,12 +192,13 @@ type GraphOptions struct {
 	RewardScale float64
 	GlobalScale float64
 	WindowScale float64
+	PathScale   float64
 	Window      int
 }
 
 // DefaultGraphOptions mirror the Python defaults (geometric mean of the two shares).
 func DefaultGraphOptions() GraphOptions {
-	return GraphOptions{CountScale: 0, RewardScale: 1, GlobalScale: 0.5, WindowScale: 0.5, Window: 10_000}
+	return GraphOptions{CountScale: 0, RewardScale: 1, GlobalScale: 0.5, WindowScale: 0.5, PathScale: 1, Window: 10_000}
 }
 
 // NewGraph creates an empty graph with the two sentinels.
@@ -208,6 +218,11 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 		RewardScale:      opts.RewardScale,
 		GlobalScale:      opts.GlobalScale,
 		WindowScale:      opts.WindowScale,
+		PathScale:        opts.PathScale,
+		paths:            map[PathKey]*PathRow{},
+		pathsByEdge:      map[int]map[int]bool{},
+		pathsByPrev:      map[int]map[int]bool{},
+		ctxVersion:       -1,
 		Workers:          Workers,
 	}
 	g.newNode(StartLabel, 0)
@@ -342,6 +357,7 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 	b := g.newNode(string(label[i:]), g.Count[a])
 	chA := &g.children[a]
 	chB := &g.children[b]
+	moved := append([]int(nil), chA.edges...)
 	for i, c := range chA.order {
 		e := chA.edges[i]
 		chB.set(c, e)
@@ -358,6 +374,12 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 	g.Labels[a] = string(label[:i+Overlap])
 	g.labelLen[a] = i + Overlap
 	g.dirtyAll = true
+	bridge := -1
+	if e, ok := g.children[a].get(b); ok {
+		bridge = e
+	}
+	g.splitPaths(a, b, moved, bridge) // q -> P -> c is now q -> A -> B -> c
+	g.pathParents = nil
 	return a, b, nil
 }
 
@@ -383,6 +405,7 @@ func (g *Graph) MergeChild(p int) bool {
 	lc := []rune(g.Labels[c])
 	shift := len(lp) - Overlap
 	e := ch.edges[0]
+	movedOut := append([]int(nil), g.children[c].edges...)
 	ch.clear()
 	pc.clear()
 	g.EdgeAlive[e] = false
@@ -416,6 +439,8 @@ func (g *Graph) MergeChild(p int) bool {
 	g.Version++
 	g.StructureVersion++
 	g.dirtyAll = true
+	g.mergePaths(p, c, e, movedOut) // the chain was unary: what its contexts knew was never a choice
+	g.pathParents = nil
 	return true
 }
 

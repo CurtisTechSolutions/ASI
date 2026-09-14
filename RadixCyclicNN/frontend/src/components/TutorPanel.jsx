@@ -249,10 +249,13 @@ function RoundTable({ rounds }) {
                 <td>{fmtNum(r.mean_grammar, 2)}</td>
                 <td className="wrap">{asArray(r.weakest).join(", ") || "–"}</td>
                 <td>{r.action || "–"}</td>
-                <td title="corrections taught from their diff: steps penalised / taught">
+                <td title="corrections taught from their diff: steps penalised / taught, counted as wrong / right paths">
                   {r.corrections ? (
                     <>
-                      {fmtInt(r.corrections)} <small>({fmtInt(r.penalised)}/{fmtInt(r.rewarded)})</small>
+                      {fmtInt(r.corrections)}{" "}
+                      <small>
+                        ({fmtInt(r.penalised)}/{fmtInt(r.rewarded)})
+                      </small>
                     </>
                   ) : (
                     "–"

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -35,6 +36,15 @@ type edgesDoc struct {
 	W      []float64 `json:"w"`
 	Count  []int64   `json:"count"`
 	Reward []float64 `json:"reward"`
+}
+
+// pathsDoc is the judged paths: one row per (the node that called the step, the edge it took).
+type pathsDoc struct {
+	Prev      []int   `json:"prev"`
+	Edge      []int   `json:"edge"`
+	Seen      []int64 `json:"seen"`
+	Correct   []int64 `json:"correct"`
+	Incorrect []int64 `json:"incorrect"`
 }
 
 type weightsDoc struct {
@@ -78,6 +88,7 @@ type GraphDoc struct {
 	Edges            edgesDoc    `json:"edges"`
 	RngState         []any       `json:"rng_state"`
 	Weights          *weightsDoc `json:"weights,omitempty"`
+	Paths            *pathsDoc   `json:"paths,omitempty"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -127,6 +138,38 @@ func (g *Graph) ToDoc() *GraphDoc {
 		}
 	}
 	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward", TotalTraversals: g.TotalTraversals, WindowEvents: events}
+	rows := make([][3]int64, 0, len(g.paths))
+	keys := make([][2]int, 0, len(g.paths))
+	for key, row := range g.paths {
+		ni, ok := edgeIndex[key.Edge]
+		pi, known := remap[key.Prev]
+		if !ok || !known {
+			continue
+		}
+		keys = append(keys, [2]int{pi, ni})
+		rows = append(rows, [3]int64{row.Seen, row.Correct, row.Incorrect})
+	}
+	order2 := make([]int, len(keys))
+	for i := range order2 {
+		order2[i] = i
+	}
+	// the two implementations keep their tables in different orders; the file has one
+	sort.Slice(order2, func(i, j int) bool {
+		a, b := keys[order2[i]], keys[order2[j]]
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		return a[1] < b[1]
+	})
+	paths := &pathsDoc{Prev: []int{}, Edge: []int{}, Seen: []int64{}, Correct: []int64{}, Incorrect: []int64{}}
+	for _, at := range order2 {
+		paths.Prev = append(paths.Prev, keys[at][0])
+		paths.Edge = append(paths.Edge, keys[at][1])
+		paths.Seen = append(paths.Seen, rows[at][0])
+		paths.Correct = append(paths.Correct, rows[at][1])
+		paths.Incorrect = append(paths.Incorrect, rows[at][2])
+	}
+	doc.Paths = paths
 	return doc
 }
 
@@ -167,6 +210,9 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	}
 	if w.has("window_scale") {
 		opts.WindowScale = w.WindowScale
+	}
+	if w.has("path_scale") {
+		opts.PathScale = w.PathScale
 	}
 	if w.has("window") {
 		opts.Window = w.Window
@@ -246,6 +292,17 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	}
 	g.Version = d.Version
 	g.StructureVersion = d.StructureVersion
+	if p := d.Paths; p != nil {
+		for i := range p.Prev {
+			if i >= len(p.Edge) || p.Edge[i] < 0 || p.Edge[i] >= m || p.Prev[i] < 0 || p.Prev[i] >= n {
+				continue
+			}
+			row := g.pathRow(p.Prev[i], p.Edge[i], true)
+			row.Seen = at64(p.Seen, i)
+			row.Correct = at64(p.Correct, i)
+			row.Incorrect = at64(p.Incorrect, i)
+		}
+	}
 	if d.Weights != nil {
 		g.TotalTraversals = d.Weights.TotalTraversals
 		for _, e := range d.Weights.WindowEvents {
@@ -455,4 +512,12 @@ func copyMap(m map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// at64 reads one counter of a paths block, tolerating a short column.
+func at64(values []int64, i int) int64 {
+	if i < len(values) {
+		return values[i]
+	}
+	return 0
 }

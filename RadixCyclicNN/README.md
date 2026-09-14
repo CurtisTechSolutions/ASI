@@ -25,6 +25,7 @@ and an optional GPU backend (torch) are built in.
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): Ollama writes sentence openings that drill a point of grammar, the network completes them with the prediction search, Ollama marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), and the round's mistakes become the next round's syllabus. |
+| Judgements follow the path, not the edge | A whole path is rewarded only when the output is deemed correct; anything corrected earns its fix. Every judged step is counted in the company it kept - the node that called it - as `seen` / `correct` / `incorrect`, and `log((correct + s) / (incorrect + s))` prices that step, so the same edge is the right move after one word and the wrong one after another (`paths`, `GET /api/paths`, `--path-scale`). |
 | Rewards follow the rating | `two_nrl(good_weights=)`, `reward(weights=)` and `punish(weights=)` (both models, Python and Go) scale every pass per text: a sentence marked 9 out of 10 is learned nine tenths as hard as a perfect one, a 0 is skipped. `/api/feedback` and `/api/2nrl` take `good_ratings` / `bad_ratings` (marks out of 10), the Ratings card a mark per rated text. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
@@ -157,7 +158,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up |
-| `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
+| `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--path-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
@@ -167,8 +168,9 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
-| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
-| `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
+| `tutor` | automated English lessons: `--topic TEXT`, `--rounds 3`, `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--tutor-model`, `--grader-model`, `--url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
+| `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0` (what the unchanged words still earn; a whole path is rewarded when the output was correct), `--no-count`, `--dry-run` (show the alignment only), `--out` |
+| `paths` | what the judged walks did, step by step: `--limit 20` rows of `correct` / `incorrect` / `seen`, the share of the edge's traffic that came through that caller, and the term the context adds to the weight |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
 
@@ -220,6 +222,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
+| `GET /api/paths?limit=50` | count model: the judged paths -> `{"totals": {"contexts","judged","seen","correct","incorrect"}, "path_scale", "paths": [{"after","parent_label","child_label","seen","correct","incorrect","correct_ratio","seen_ratio","term"}]}` |
 | `GET /api/history` | training history |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
 
@@ -347,11 +350,16 @@ One **round** is:
    share keep what they earned. Punishing a whole sentence for one wrong
    plural taxed the trigrams that were right; this does not.
 
-   The rest is unchanged. The whole corrected sentence is still traversed -
-   it is correct English whatever the mistake was - and `--keep-weight` (0.25)
-   gives its unchanged words a smaller share of the reward (0 teaches the fix
-   alone, 1 rewards the whole sentence as before). A failure the teacher left
-   uncorrected is still 2NRL garbage weighted by how bad the mark was
+   **A whole path is rewarded only when the output is correct.** A sentence
+   that passed is rewarded end to end, and every step of it is counted as a
+   correct path; a sentence that had to be corrected earns its fix, not its
+   sentence (`--keep-weight`, 0 by default; 1 rewards the whole corrected
+   sentence as an earlier version did). The whole correction is still
+   traversed - it is correct English whatever the mistake was - but traversal
+   is counting, not reward.
+
+   A failure the teacher left uncorrected is still 2NRL garbage weighted by
+   how bad the mark was
    (`--min-weight` for a near miss, 1 for a hopeless answer); the model
    answers and the sentences that passed are still the fine-tune pass,
    weighted by how good the mark was - a sentence marked 9 gets nine tenths of
@@ -366,6 +374,42 @@ One **round** is:
    python -m radixnet correct --wrong "he go to school" --right "he goes to school" --dry-run
    go/bin/radixnet-count correct --wrong "a apple a day" --right "an apple a day" --keep 0
    ```
+
+### Counting paths, not edges
+
+An edge is the right move in one sentence and the wrong one in another, so a
+reward counted per edge blurs the two together. Every judgement is therefore
+counted **per path**: the step in the company it kept - *the node that called
+the edge's parent, and the edge it then took* - with three numbers, `seen`,
+`correct` and `incorrect`. `log((correct + 0.5) / (incorrect + 0.5))` is then
+added to that edge's weight (times `path_scale`, 1 by default) before the
+softmax over the node's children, so the same step is cheap for the walk that
+was right here and dear for the one that was wrong. The term is exactly zero
+until something is judged, which is why a freshly trained model predicts as it
+always did.
+
+A context is born when a path is judged - a reward, a penalty, a correction's
+blamed or taught steps - and every later traversal keeps its `seen` up to
+date; an unjudged training pass never creates one, so training a corpus cannot
+fill the table with the second-order counts of a whole language. `seen_ratio`
+is how much of that edge's traffic came through that caller, `correct_ratio`
+how much of the judged traffic was right. Splits carry their contexts with
+them; a merge drops the ones that were never a choice (a unary chain has only
+one way through). The searches carry the node they came from, so the beam, the
+cheapest path and the sampler all see the context-aware costs.
+
+```bash
+python -m radixnet --model model.count.json paths --limit 20   # the judged steps and their counters
+python -m radixnet --model model.count.json weights --path-scale 0   # ignore the path counters
+go/bin/radixnet-count --model model.count.json paths
+curl localhost:8000/api/paths?limit=20
+```
+
+```
+after   step          correct  incorrect  seen  correct %  seen %  term
+"the"   he  -> e c          3          1     7  75%        13%     +1.253
+"a c"   ca  -> at           4          0     6  100%       22%     +2.197
+```
 
 The mistakes of a round add up to a **report card** (marks, pass rate, an error
 histogram and the weakest points). With `--adapt` (on by default) the weakest
@@ -789,7 +833,7 @@ Tutor, Checkpoints and Graph work unchanged.
 | `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
-| `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
+| `GET /api/graph`, `GET /api/paths`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`; the judged paths carry `seen`, `correct`, `incorrect`) |
 | `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake

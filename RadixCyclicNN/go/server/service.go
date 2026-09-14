@@ -704,6 +704,46 @@ func (s *Service) History() (map[string]any, error) {
 }
 
 // Graph is GET /api/graph: the top-limit nodes by visit count plus START / END and the edges among them.
+// Paths is the judged paths: what each step did in the context it was taken from.
+func (s *Service) Paths(limit int) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		rows := []map[string]any{}
+		for _, row := range m.Paths(limit, -1) {
+			parent := g.ParentOfEdge(row.Edge)
+			child := -1
+			if parent >= 0 {
+				for _, t := range g.Children(parent) {
+					if t.E == row.Edge {
+						child = t.P
+					}
+				}
+			}
+			rows = append(rows, map[string]any{
+				"prev": row.Prev, "edge": row.Edge, "seen": row.Seen, "correct": row.Correct,
+				"incorrect": row.Incorrect, "correct_ratio": row.CorrectRatio, "seen_ratio": row.SeenRatio,
+				"term": row.Term, "after": g.Label(row.Prev), "parent": parent,
+				"parent_label": g.Label(parent), "child": child, "child_label": g.Label(child),
+			})
+		}
+		totals := g.PathTotals()
+		return map[string]any{
+			"totals": map[string]any{
+				"contexts": totals.Contexts, "judged": totals.Judged, "seen": totals.Seen,
+				"correct": totals.Correct, "incorrect": totals.Incorrect,
+			},
+			"paths": rows, "limit": limit, "path_scale": g.WeightConfig().PathScale,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
 func (s *Service) Graph(limit int) (map[string]any, error) {
 	if limit < 0 {
 		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
