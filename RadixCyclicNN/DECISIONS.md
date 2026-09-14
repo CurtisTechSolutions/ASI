@@ -11,8 +11,9 @@ documents and deliberately overlaps neither:
 | `DECISIONS.md` (this) | *Why is it like that, and what did it cost?* | someone questioning a choice, or reconstructing the reasoning later |
 
 Where a decision carries an argument too long to fit an entry, it is written up
-separately and linked: `../Research/2NRL.md` for D-009, and the notes in
-`../Research/` for D-001 and D-002.
+as a paper in `../Research/` (indexed in `../Research/README.md`):
+`CyclesAreAFeature.md` for D-001 and D-028, `SineWaveActivationFunction.md` for
+D-002 and D-003, and `2NRL.md` for D-009, D-010 and D-045.
 
 A decision belongs here when reversing it would change the character of the
 system, not just an implementation detail. Each entry is dated to the commit
@@ -152,9 +153,11 @@ sine 28–48 reward — a 2.8×–4.8× improvement over the better baseline.
 * `b` is clamped to `≥ 1e-3` after every update: at `b = 0` the function is
   constant and the node stops carrying information irrecoverably.
 * The evidence is one task, one episode count, no variance and no seeds
-  reported. The range 28–48 is itself wide. This is the single most
-  load-bearing claim in the project and the thinnest measurement supporting
-  it. See Q-2.
+  reported, and the range 28–48 is itself wide — this being the most
+  load-bearing claim in the project on the thinnest measurement. That is now
+  addressed where it belongs: `Research/SineWaveActivationFunction.md` §9 sets
+  out what the CartPole result does and does not establish, gives a replication
+  protocol, and §12 states what would change the author's mind. See Q-2.
 
 **Lives in** `Research/SineWaveActivationFunction.md`, `ActivationFunctionTest/`,
 `radixnet/activation.py`
@@ -1022,8 +1025,24 @@ flips *alternating* nodes — `flip_nodes({node: amount}, mode)` applies
 **Why alternating** An edge's score is `w · f_p · f_c` (D-005). Flipping the
 sign of **both** endpoints leaves the product unchanged; flipping exactly one
 negates it. So to make every edge of a path unlikely, you must flip every
-*other* node. The implementation picks the parity that covers the most edges of
-the path, and where a node is shared it takes the largest amount.
+*other* node — a two-colouring of the path.
+
+**Why it is best-effort, and this is exact rather than sloppy** A path is always
+two-colourable. A *graph with cycles* need not be: a graph is two-colourable if
+and only if it contains no odd cycle, and a walk through a cyclic graph (D-001)
+can close one. On a 3-cycle, no assignment of flips covers all three edges — the
+best any of the eight patterns achieves is two. The obstruction is a theorem, not
+an approximation. The extreme case is the self-loop: `score(p → p) = w · f_p²`,
+and `f_p²` is non-negative whatever `f_p` is, so **flipping the node changes a
+self-loop's score by exactly nothing** — a self-loop is sign-locked against node
+inversion and can only be changed through its weight.
+
+This is why the implementation says *the parity that covers the most edges, a
+shared node takes the largest amount* rather than *the parity that covers every
+edge*. It is the strongest statement available in a graph that has cycles in it —
+and a clean instance of the general trade this project makes: allowing cycles
+turned an operation that is exact on a DAG into one that is best-effort.
+(`Research/CyclesAreAFeature.md` proves it.)
 
 **Consequences**
 * `amount` is continuous and gradual: 1 is a full sign flip, 0.5 zeroes the
@@ -2332,10 +2351,11 @@ appears in plain `generate`, in `predict`, and in the agent's tool loop, none of
 which back up. Should the hand-over be lifted out of `dialogue.py` and made a
 property of the search itself?
 
-**Q-2 — Evidence for the sine (D-002).** The strongest claim in the project
-rests on one RL task at 250 episodes with no variance reported and a 28–48 range.
-Is a firmer comparison worth running — multiple seeds, a second task, the range
-explained — or is the result already settled enough for its purpose here?
+**Q-2 — Evidence for the sine (D-002).** Now stated fully in
+`Research/SineWaveActivationFunction.md` §9 and §12, with a replication protocol.
+The decision left here is whether to *run* it — multiple seeds, a second task,
+the 28–48 range explained — or to let the result stand as sufficient for its
+purpose.
 
 **Q-3 — Is the sine a fixed family?** Only `a, b, h, k` are learned; the
 functional form is always a sine. Was a learnable *family* (sums of sines,

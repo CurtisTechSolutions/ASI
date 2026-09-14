@@ -558,6 +558,15 @@ not immediately undoing.
    of a global inversion when a failure is severe but isolated. Local and global
    correction are alternatives there, not layers — which suggests the global
    operator is not always the right tool.
+
+   The local variant is also **provably** incomplete, which is worth stating
+   rather than glossing. Flipping the edges of a path means two-colouring it, and
+   a graph is two-colourable only if it has no odd cycle. A cyclic graph can close
+   one: on a 3-cycle the best any flip pattern achieves is two edges of three, and
+   on a self-loop, where `score(p → p) = w · f_p²`, flipping the node changes the
+   score by *exactly nothing*. The obstruction is exact. Allowing cycles is what
+   turns an operation that is clean on a DAG into one that is best-effort —
+   the same trade, in a different place.
 3. **No stopping rule.** "Fail, invert, repeat" describes a loop. In a human
    life it terminates when the thing is learned. The self-improvement loop here
    runs indefinitely with no convergence criterion and no held-out evaluation;
@@ -622,5 +631,10 @@ Goodfellow, I. et al. (2014). Generative adversarial networks. *NeurIPS*.
   (proportional boosting), D-028 (local inversion), D-023 (the count model's
   non-inverting variant).
 - `RadixCyclicNN/DESIGN.md` §8, §9.1 — the normative specification.
-- `Research/SineWaveActivationFunction.md`, `Research/CyclesAreAFeature.md` —
-  the architectural claims 2NRL's inversion operator depends on.
+- [`SineWaveActivationFunction.md`](SineWaveActivationFunction.md) — why every
+  unit carries a sign parameter, which is what makes §3.3's inversion operator a
+  parameter change rather than a structural one. Without it 2NRL cannot run.
+- [`CyclesAreAFeature.md`](CyclesAreAFeature.md) — why inverting a *path* is a
+  two-colouring problem, and why odd cycles make it best-effort rather than
+  exact (see §10, item 2).
+- [`README.md`](README.md) — how the three papers depend on each other.
