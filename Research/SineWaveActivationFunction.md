@@ -2,7 +2,8 @@
 
 **Replacing the sigmoid with `f(x) = a·sin(b(x − h)) + k`, default `−sin(x/3)`**
 
-Curtis Tech Solutions — ASI research notes
+R. Curtis — Curtis Tech Solutions
+Working paper · September 2026
 
 ---
 
@@ -260,11 +261,18 @@ You cannot do this with a ReLU. `relu(−x) ≠ −relu(x)`; there is no paramet
 a ReLU whose sign you can flip to get the negation of the function. There isn't
 one for a logistic sigmoid either.
 
-I use this. It is the mechanism behind **2NRL** (train on garbage → invert →
-fine-tune on correct data): `invert()` in RadixCyclicNN flips every edge weight
-and every activation amplitude, and what was likely becomes unlikely. That
-whole training algorithm is only available because the activation function has a
-sign parameter. The activation function choice bought me a training algorithm.
+I use this. It is the mechanism behind **2NRL** (train on the failures → invert
+→ fine-tune on the correct data): `invert()` in RadixCyclicNN flips every edge
+weight and every activation amplitude, and what was likely becomes unlikely.
+That whole training algorithm is only available because the activation function
+has a sign parameter. The activation function choice bought me a training
+algorithm.
+
+2NRL has its own paper — `2NRL.md` — which treats the procedure, why inverting a
+failure is coherent rather than destructive, and the condition under which it
+carries information. What matters here is the dependency running the other way:
+it needs a unit whose negation is a parameter change, and that is what a sine
+gives you and a ReLU does not.
 
 ### Why `h` and `k`
 
