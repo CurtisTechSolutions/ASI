@@ -25,6 +25,7 @@ has to name something to keep the notation usable, it says so explicitly.
 | The cross-layer step moves through the stack via the vertical weights | `V[k, k']` is the medium the step travels through, not a static coupling sitting between the planes. |
 | Layers are accessed based on depth perception | At `(i, j)`, the column down the `k` axis holds one depth per plane; reading those depths is what selects the layer to access. |
 | Depth perception is the human eye's | The analogy is literal: perception is comparative, never absolute, so the accessed layer is unchanged by a constant shift of the whole column. |
+| Occlusion and parallax, for images | Both cues are monocular, so no second viewpoint is needed. `(i, j)` is a pixel and `k` is the viewing axis: occlusion is the instantaneous read (nearest plane wins), parallax the temporal one (near planes shift more between reads). |
 
 ---
 
@@ -144,7 +145,7 @@ never reads one plane's depth on its own. The consequence is concrete and
 testable: **adding a constant to every depth in a column must leave the accessed
 layer unchanged.** Depth perception is shift-invariant.
 
-It also puts the eye's actual cues on the table as the menu for 5.2:
+It also puts the eye's actual cues on the table. Section 4.2 picks from them:
 
 | Cue | What it would mean down a column |
 |---|---|
@@ -156,9 +157,9 @@ It also puts the eye's actual cues on the table as the menu for 5.2:
 Two further consequences are properties of the eye, not choices:
 
 1. **Stereopsis needs two views.** Depth from disparity is undefined from one
-   viewpoint. The design has one column per position, so either a second view
-   comes from somewhere (5.2), or the cue in use is monocular — occlusion and
-   parallax both work with one eye.
+   viewpoint, and the design has one column per position. Section 4.2 closes this
+   by choosing monocular cues, so no second viewpoint is needed; stereopsis is set
+   aside rather than solved.
 
 2. **The eye's depth range is finite.** Stereo acuity falls off with distance;
    past a certain separation the disparity is too small to resolve and everything
@@ -168,6 +169,49 @@ Two further consequences are properties of the eye, not choices:
    reaches a layer that perception can no longer distinguish from its neighbours.
    Whether to import that limit or drop it is a decision — and it is the one place
    where the eye and the dense stack actively disagree.
+
+### 4.2 The cues: occlusion and parallax
+
+The cues in use are **occlusion** and **motion parallax**. Both are monocular, so
+the gap opened by consequence 1 of 4.1 closes: one column per position is enough
+as the design stands, and stereopsis is set aside.
+
+They are chosen **for images**, and there the geometry stops being a metaphor.
+`(i, j)` is a pixel position, the `k` axis is the viewing axis running away from
+the eye, and a column is one pixel seen through all `L` planes. Perceiving depth
+down a column is precisely what an eye does looking into a scene along one
+direction.
+
+**Occlusion** is the instantaneous read: at `(i, j)` the nearest plane hides those
+behind it, so the shallowest depth in the column wins and the rest are unreachable
+from that position. This settles the hard/soft axis of 5.2 toward **hard** —
+selection is a single layer, discrete, not differentiable.
+
+**Motion parallax** is the temporal read: between successive views, near planes
+shift more than far ones, and depth follows from how much each moved. It needs two
+reads separated in *time* rather than two viewpoints separated in space.
+
+The two are not alternatives but a division of labour, and the second is what makes
+the first survivable:
+
+1. **Parallax is what keeps occlusion from freezing the stack.** Occlusion alone is
+   a hard minimum over the column: the nearest plane always wins and the layers
+   behind it are permanently unreachable at that position, so nothing would ever
+   change which layer is accessed. Motion breaks the deadlock — as the view shifts,
+   what was hidden comes out from behind, and parallax is the cue that reads it.
+   Occlusion without parallax is a stack that locks on the first read.
+
+2. **The descent supplies the motion.** Parallax needs the column to differ between
+   reads, and the only thing changing depths between reads is the descent itself.
+   The training step *is* the viewpoint motion: the model moves its own eye by
+   learning. Consequence 3 of section 4 said the descent shapes its own path; this
+   is that same loop seen from perception's side.
+
+3. **Scheduling becomes a perceptual parameter.** The gap between two reads is the
+   parallax baseline, and the baseline sets how finely depth can be resolved — too
+   short and nothing has moved enough to measure, too long and the correspondence
+   between reads is lost. 5.4 is therefore no longer only a question of how often
+   to take the vertical step.
 
 ---
 
@@ -179,7 +223,10 @@ rather than left as questions, so each can be closed by picking a branch.
 ### 5.1 What `V[k, k']` connects
 
 "Vertically" is read geometrically here — along `k`, perpendicular to the planes.
-Two readings remain, though consequence 1 of section 4 now favours the first:
+Two readings remain, though three independent lines now point at the first: the
+geometric sense of the word, consequence 1 of section 4 (depth perception needs a
+column to look down), and the choice of images in 4.2 (`(i, j)` is a pixel). It is
+open only because it has not been said outright.
 
 - **Column-wise.** `G_k[i, j]` connects to `G_k'[i, j]`: the same `(i, j)`
   position through the stack, so each position owns a column of `L` cells,
@@ -190,27 +237,33 @@ Two readings remain, though consequence 1 of section 4 now favours the first:
   `V[k, k']` is then `(m x n) x (m x n)`, which at any realistic width is far
   larger than the network it is attached to.
 
-Column-wise is the assumed reading. It carries a constraint worth naming before
-it bites: **columns only line up if the planes share a shape.** A conventional
-network is ragged (`784 -> 128 -> 10`), so either the planes are held to a common
-`m x n`, or a rule is needed for connecting positions that exist on one plane and
-not another.
+Column-wise is the assumed reading, and choosing images (4.2) largely dissolves
+the constraint that came with it. Image-shaped planes share `m x n` naturally,
+`(i, j)` is a pixel, and a column is that pixel through the stack — the ragged
+shapes of a conventional network (`784 -> 128 -> 10`) never arise.
 
-### 5.2 What depth perception computes
+It returns only if a plane is reshaped mid-stack: any pooling or stride step that
+changes resolution breaks the correspondence between columns. So either the stack
+holds one resolution throughout, or a rule is needed for reading a column across
+planes of different sizes.
 
-Section 4.1 settles that perception is comparative and puts the eye's cues on the
-table. Three things remain:
+### 5.2 How occlusion and parallax combine
 
-- **Which cue.** Occlusion, convergence and parallax are monocular and work as the
-  design stands; stereopsis is the eye's primary cue but needs a second view.
-- **Where the second view comes from,** if the cue is stereopsis: two read-heads
-  offset down the column, the disparity between neighbouring planes themselves, or
-  two passes separated in time. The design has one column per position and stereo
-  needs two views of it. This is the structural gap the eye analogy opens.
-- **Hard or soft.** Whether perception selects exactly one layer, or ranks all of
-  them and accesses them in proportion. Occlusion settles this toward hard
-  selection if that is the cue; the others leave it open. Hard selection makes the
-  step discrete and cheap, soft access keeps it differentiable.
+Section 4.2 settles the cues and settles selection as hard. What remains is how the
+two compose, and one question about what parallax even measures here:
+
+- **How the cues compose.** Whether parallax only decides what becomes visible next
+  — feeding occlusion's hard selection on the following read — or runs as a separate
+  graded channel alongside it.
+- **What "shift" means down a column.** Parallax in vision measures displacement
+  *across* the image plane: near things sweep further than far ones. Down a column
+  at fixed `(i, j)` there is no lateral sweep; the quantity that changes between
+  reads is the depth itself. So either shift is read as change in depth over time,
+  or the cue needs a real `(i, j)` displacement to measure against — and those are
+  different mechanisms with different costs.
+- **The parallax baseline.** How many steps apart the two reads are. Consequence 3
+  of 4.2 makes this a perceptual parameter rather than a scheduling convenience, and
+  it may need to adapt rather than sit fixed.
 
 ### 5.3 What travels once a layer is accessed
 
@@ -222,7 +275,9 @@ the accessed plane.
 
 Whether the horizontal and vertical steps alternate, run simultaneously, or run
 at different rates — and whether the vertical step is taken every batch, every
-epoch, or on a schedule of its own.
+epoch, or on a schedule of its own. Consequence 3 of 4.2 couples this to
+perception: the interval between reads is the parallax baseline, so the schedule
+sets how finely depth can be resolved.
 
 ### 5.5 Training the vertical weights
 
@@ -263,13 +318,14 @@ MultiGradientNN/
     __init__.py             exports MultiGradientNet, TrainConfig, __version__
     volume.py               the L x m x n volume: the planes, their columns, indexing
     vertical.py             V[k, k'] - the dense vertical connections (section 3)
-    perception.py           depth perception down a column: which layer is accessed (section 4)
+    perception.py           depth perception down a column: occlusion and parallax (section 4.2)
     descent.py              the horizontal step, the cross-layer step (section 4), the schedule (5.4)
     model.py                MultiGradientNet - forward, backward, train, predict
     cli.py                  argparse CLI
   tests/
     test_volume.py          geometry and indexing invariants
     test_vertical.py        all-to-all connectivity, L(L-1)/2 sets, one-hop reachability
-    test_perception.py      depth perception selects a layer from a column
+    test_perception.py      occlusion selects the nearest plane; shift-invariance (4.1); parallax
+                            across successive reads
     test_descent.py         the two steps and their scheduling
 ```
