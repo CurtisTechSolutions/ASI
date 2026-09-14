@@ -16,7 +16,9 @@ heard and, while "Avoid repeated words" is on, the ones that say the same words
 twice in a row - and a voice that catches itself repeating, its own words or
 the conversation's, keeps what it said once, backs up to where it would have
 said them again and explores other ways on ("Explore"), each turn saying what
-it noticed and whether it found one. The
+it noticed and whether it found one. With "Learn where it goes round" on (the
+default) what a rethink finds out is taught to the graph, so the model itself
+hands over there next time - which means a conversation changes the model. The
 duplicates it could not avoid come back flagged, and "Punish duplicates" marks
 them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
 

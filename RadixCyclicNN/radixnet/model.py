@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .search import PathResult, dijkstra_predict, sample_walk
 from .schedule import preview_points
@@ -494,7 +494,7 @@ class GraphModel:
         g = self.graph
         best: int | None = None
         best_count = -1
-        for node in range(2, len(g.labels)):
+        for node in range(FIRST, len(g.labels)):
             if g.alive[node] and g.labels[node].startswith(prefix):
                 c = g.node_count(node)
                 if c > best_count:
@@ -1007,7 +1007,7 @@ class RadixNet(GraphModel):
         values = self._amounts(texts, amounts)
         chosen: dict[int, float] = {}
         for path, amount in zip(self._paths_of(texts), values):
-            real = [n for n in path if n > END]
+            real = [n for n in path if n >= FIRST]
             if not real or amount <= 0:
                 continue
             best: tuple[int, set[int]] | None = None

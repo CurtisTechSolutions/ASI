@@ -30,9 +30,10 @@ function rethinkSays(turn) {
   const caught =
     r.kind === "stutter" ? `caught itself saying “${r.noticed}” twice` : `caught itself repeating “${r.noticed}”`;
   if (!r.steps) return `${caught}: the words it picked up, not its own`;
-  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)`;
+  const learned = r.taught >= 0 ? " (and learned to hand over there)" : "";
+  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)${learned}`;
   const ending = turn.repeat ? "said it anyway" : "took a lesser answer";
-  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}`;
+  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}${learned}`;
 }
 
 export default function ConversePanel({ status }) {
@@ -49,6 +50,7 @@ export default function ConversePanel({ status }) {
   const [punishRepeats, setPunishRepeats] = useState(true);
   const [avoidWordRepeats, setAvoidWordRepeats] = useState(true);
   const [explore, setExplore] = useState("3");
+  const [learn, setLearn] = useState(true);
   const [inMemory, setInMemory] = useState([]);
   const [transcript, setTranscript] = useState(null);
   const [guard, setGuard] = useState(true);
@@ -100,6 +102,7 @@ export default function ConversePanel({ status }) {
         guard,
         avoid_word_repeats: avoidWordRepeats,
         explore: parseInteger(explore, 3),
+        learn,
         ...(partner ? { partner } : {}),
         ...(history.length ? { history } : opening.trim() ? { opening } : {}),
       });
@@ -207,6 +210,13 @@ export default function ConversePanel({ status }) {
           checked={avoidWordRepeats}
           onChange={setAvoidWordRepeats}
           disabled={loading}
+        />
+        <CheckField
+          label="Learn where it goes round"
+          hint="what a rethink finds out is taught to the graph, so the model itself hands over there next time (this changes the model)"
+          checked={learn}
+          onChange={setLearn}
+          disabled={loading || !explore || explore === "0"}
         />
         <CheckField
           label="Punish duplicates"

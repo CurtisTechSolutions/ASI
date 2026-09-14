@@ -58,8 +58,9 @@ RadixCyclicNN/
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3),
                             and the guard: the same pair on every output path (section 24.7)
-    dialogue.py             Turn, Heard, stutter, backtrack, Rethink, reply, converse, repeats - the model
-                            conversing with itself, and thinking twice about a repeat (section 22)
+    dialogue.py             Turn, Heard, stutter, backtrack, teach_back, Rethink, reply, converse, repeats -
+                            the model conversing with itself, thinking twice about a repeat, and teaching the
+                            graph where it goes round (section 22)
     chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
                             (ported to Go as go/radixnet/chat.go, section 28.1)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
@@ -113,7 +114,7 @@ class SineActivation:            # convenience object (used by tests/docs, not i
     def __call__(self, x) -> float
     def derivative(self, x) -> float
     def partials(self, x) -> tuple
-    def inverted(self) -> "SineActivation"     # a -> -a
+    def inverted(self) -> "SineActivation"     # a -> -a AND k -> -k (the negation of the unit: f = a*sin(u)+k)
     def to_dict(self) -> dict ; @classmethod from_dict(cls, d)
 
 def edge_signal(w: float, fp: float, fc: float) -> float    # w * fp * fc  ("activation of child * activation of parent")
@@ -164,10 +165,10 @@ returned as it decodes; each format pads or truncates it to the length it needs.
 ### 5.1 Storage (performance: flat parallel lists indexed by node id)
 
 ```python
-START, END = 0, 1
+START, END, BACK = 0, 1, 2      # FIRST = 3: the first node id that is not a sentinel
 
 class RadixCyclicGraph:
-    labels: list[str]            # labels[i] = label of node i; labels[0] = "<s>", labels[1] = "</s>"
+    labels: list[str]            # labels[i] = label of node i; labels[0..2] = "<s>", "</s>", "<back>"
     z: list[float]               # node state / pre-activation, learnable
     a, b, h, k: list[float]      # per-node activation params (defaults -1, 1/3, 0, 0)
     count: list[int]             # times the node was visited in training - a cyclic counter (section 28)
@@ -200,6 +201,39 @@ New node: `z = rng.uniform(-4.5, 4.5)`, `a,b,h,k = defaults`, `count = 0`.
 New edge: `w = rng.uniform(0.5, 1.5)`, `count = 0`.
 If `inverted` is True at creation time: new nodes get `a = -DEFAULT_A` and new
 edges get `w = -rng.uniform(0.5, 1.5)` (consistent with the inverted network).
+
+### 5.1.1 The third sentinel: `BACK`, where the graph has learned it goes round
+
+`START` and `END` are observed: every training text runs `START -> … -> END`, so the model learns where texts
+begin and stop the way it learns everything else. **`BACK` is learned too, but from experience rather than from
+a corpus** - nothing in a text says "a walk that gets here goes round in circles".
+
+An edge `p -> BACK` is an ordinary edge: a weight, a counter, a share of `p`'s softmax. What it means is *this
+is where my walks loop*, and it is taught by the voices that caught themselves repeating and had to back up
+(`dialogue.teach_back`, section 22). `observe_back(p, went=…, instead=…)` teaches three things at once, all of
+them ordinary learned quantities:
+
+* `p -> BACK` is created on first use and bumped like an observed transition - the sine model nudges its weight
+  in the direction that makes it likelier, the count model gives it a reward and lets the dual frequency
+  function do the rest;
+* `went`, the child the walk was about to loop through, gets *dearer*;
+* `instead`, the child taken after backing up, gets *cheaper*.
+
+The first says where it goes round; the other two say what to do instead. Because `BACK` competes for
+probability with `p`'s real children, a few hand-overs are enough for it to become the model's most likely next
+step there - and then the **search itself** stops walking through `p` (`search.onward`, section 7), in every
+prediction, not only in conversation. The trait is the model's, and it is in the model file.
+
+`BACK` never appears in a path, emits nothing and is never trained by a text; its state `z = BACK_Z` is fixed at
+the edge of the drawn range rather than sampled, so adding the sentinel moved no random stream (every seeded
+model that existed still predicts exactly what it did) and its activation stays firmly non-zero, which is what
+lets an edge into it carry a learned weight at all. A node that has been taught to hand over has two children
+where it had one, so the unary-chain rule stops merging it: a loop point is a junction, and compression leaves
+it alone.
+
+Graph format 3 carries it. Files written at format 1 or 2 gain an unvisited `BACK` on load and their node ids
+shift up by one (`_with_back`, mirrored by the Go `withBack`); the sentinel takes `START`'s activation
+parameters, so a count model's stays 1 and a sine model's stays the default.
 
 ### 5.2 Public API
 
@@ -251,7 +285,9 @@ def compress(self) -> int
     # Repeatedly merge all mergeable unary chains until none remain. Returns number of merges.
 
 def invert(self) -> None
-    # w -> -w for every alive edge, a -> -a for every node (incl. START/END), inverted = not inverted, version += 1
+    # w -> -w for every alive edge; a -> -a AND k -> -k for every node (incl. START/END), which is the exact
+    # negation of the unit: f = a*sin(b(x-h))+k, so flipping `a` alone leaves -f + 2k and only negates while
+    # k == 0 - and k is learned (df/dk = 1). Then inverted = not inverted, version += 1
 
 def child_scores(self, p: int) -> list[tuple[int, float]]     # [(child_id, score)], score = w * f_p * f_c
 def child_probs(self, p: int) -> list[tuple[int, float]]      # softmax over child_scores (numerically stable)
@@ -343,6 +379,15 @@ def describe_backends() -> dict   # {"python": True, "torch": bool, "cuda": bool
 ---
 
 ## 7. `search.py` — shortest-path prediction
+
+**Every walk asks `onward(child_costs(node))` first** (`dijkstra_predict`, `sample_walk` and `beam.py` alike).
+`BACK` is not a continuation - it emits nothing and no text passes through it - so it never appears in a path;
+but it *competes* with the real children for probability, and when it is the cheapest of them the model's most
+likely next step at that node is to stop rather than carry on. `onward` then returns nothing: the branch offers
+no children, Dijkstra relaxes none, the beam drops it and carries on with its others, and the sampler ends the
+walk. That is the hand-over of section 5.1.1, performed by the search itself wherever it is walking - and on a
+model that has never been taught a `BACK` edge it is exactly the old behaviour, because there is nothing to
+find (`onward` returns the list it was given).
 
 ```python
 class PathResult:   # attributes: text: str, labels: list[str], node_ids: list[int], cost: float,
@@ -569,7 +614,7 @@ output only, one JSON document on stdout).
 | `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
 | `score` | `--text` or `--data FILE` | log-prob per text |
-| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript` |
+| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
 | `compress` | `--out` | compresses and saves, prints merges |
@@ -603,7 +648,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/job/stop` | | sets the stop event; returns job status |
 | POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
-| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
+| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
 | POST `/api/score` | `{"text"}` | score dict |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
@@ -651,7 +696,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
 * `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
 * `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`).
-* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked.
+* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked.
 * `ChatPanel.jsx` — the model in conversation with an LLM that marks it (section 28): the settings, the live transcript, the table of conversations and the report card. Its transcript is **newest first** too - a new exchange is appended to the top of the `<ol reversed>` and pushes the older ones down, so a running conversation never has to be scrolled to (the partner's line stays directly above the reply it drew) - and a line above it says how many replies were duplicates punished with the failures.
 * `RatingsCard.jsx` — shared by Generate and Converse: `useRatings()` (one rating per distinct text, toggling; `punish(texts)` marks a whole batch thumbs-down without toggling and returns how many), `RateButtons` (the thumbs pair) and the "Ratings → 2NRL" card (rated texts, the action that will run, epochs / learning rates / strength, Train on ratings → `POST /api/feedback` through the panel's `useJob("feedback")`, the job's phase table).
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
@@ -681,9 +726,9 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 
 * `test_activation.py` — default equals `-sin(x/3)`; numeric derivative check for all partials.
 * `test_encoding.py` — round trips, short text, unicode, decode_path both modes.
-* `test_graph.py` — invariants §5.3 under randomised observe/split/compress; merge/split round trip; CSR export/import; to_dict/from_dict equality; invert flips signs.
+* `test_graph.py` — invariants §5.3 under randomised observe/split/compress; merge/split round trip; CSR export/import; to_dict/from_dict equality; invert flips signs; the three sentinels (a fresh graph holds them and nothing else, and neither splits nor merges).
 * `test_backend.py` — loss decreases on a tiny fixed graph; gradient check vs finite differences (python backend); torch vs python equality when torch is importable (skip otherwise).
-* `test_search.py` — Dijkstra returns the trained sequence; to_end; fallback on dead end; sample_walk terminates.
+* `test_search.py` — Dijkstra returns the trained sequence; to_end; fallback on dead end; sample_walk terminates; `onward` hands over where the model has learned it goes round.
 * `test_model.py` — train reduces loss & perplexity; predict reproduces a training text continuation; score higher for trained text than garbage; two_nrl makes garbage continuation less likely than before; invert twice is identity; save/load round trip preserves predictions; compression changes node count but not predictions of trained texts.
 * `test_checkpoint.py` — rotation, latest pointer, load_latest, resume.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
@@ -720,7 +765,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   at the first pass, the stop event, progress, a capped quiz marked against what it asked for), the report card, the
   faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
   neither Pillow nor a transcriber, so nothing in it is skipped.
-* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
 ---
@@ -1119,7 +1164,9 @@ view over `edge_count`, `edge_reward` and the path table - so it costs nothing u
 * **The verdicts.** `edge_paths(edge)` sums the path table over every caller that reached an edge, giving
   `path_seen` (how much of the edge's traffic a judged context has been watching, `path_ratio` as a share of the
   edge's traversals) and `correct` / `incorrect` / `correct_ratio`. So 16.5 answers "was this step right *after
-  that word*" and this answers "of everything leaving this node, how much went the way that was right".
+  that word*" and this answers "of everything leaving this node, how much went the way that was right". `BACK`
+  (5.1.1) needs no special case: its edge is an ordinary one, so it reads as the share of the walks leaving the
+  node that have learned to go round, beside the penalty on the step they were about to loop through.
 * **What reports it.** `node_ratio_rows(limit, node)` orders the nodes by visit count; `radixnet nodes` /
   `radixnet-count nodes` (`--limit`, `--node LABEL`, a node label or a trigram it holds) print both sides, and
   `GET /api/nodes?limit=20&node=LABEL` returns them - 404 for a label the graph does not hold. The Graph tab
@@ -1443,8 +1490,9 @@ twice* from *caught itself repeating "on the west"*.
 
 A voice that finds a way out speaks it as an ordinary turn - no `repeat`, no `stutter`, nothing to punish - and
 one that does not falls through to what it would have done anyway: the next answer down the list, a shorter
-context, a fresh text, or the flagged repeat. Either way the turn carries a **`Rethink`**: `noticed` (the words
-it caught itself saying twice), `cut` (what it kept), `steps`, `explored` (paths weighed) and `found`. That
+context, a fresh text, or the flagged repeat. Either way the turn carries a **`Rethink`**: `kind`, `noticed`
+(the words it caught itself on), `cut` (what it kept), `steps`, `explored` (paths weighed), `found` and
+`taught`. That
 record is the turn's metacognition, and the CLIs and both tabs say it in a line - *caught itself saying "ha"
 twice; kept "ha " and found another way on in 3 path(s)*, *caught itself repeating "on the west"; kept "on the ",
 weighed 10 path(s), took a lesser answer*. One rethink per turn, so a conversation cannot spend
@@ -1452,6 +1500,25 @@ itself thinking; the paths it weighed are counted in `candidates`.
 
 A found way on is a path explored from the cut, so its `cost` and `probability` (and `labels` / `node_ids` /
 `step_costs`) are that walk's, measured from where the voice backed up rather than from the context.
+
+### The rethink is how the graph learns where it goes round
+
+A procedure that has to be re-run every time has learned nothing, so the last thing a rethink does is **teach**
+(`teach_back`, on by default; `learn=False`, `--no-learn`, `"learn": false`, a checkbox). The node the voice
+backed up to is located with `_prefix_start(cut)` and handed to `observe_back` (section 5.1.1) with the step it
+was about to loop through and the step it took instead. Three edges move, and that is the whole of it -
+`Rethink.taught` is the node, or `-1` when the graph could not place the repeat (it began inside the words the
+voice picked up, or in text the graph does not know).
+
+From then on the model needs the procedure less: after a few hand-overs at a node, `BACK` is its cheapest child
+and the search stops walking through it *by itself*, in `predict` and `generate` as much as in a conversation.
+Three conversations on the sample corpus teach 3, then 2, then 1 node - the trait is being learned, and the
+rethinks are its teacher, not its mechanism.
+
+Two consequences worth stating plainly. **A conversation changes the model**: two runs of the same conversation
+differ, because the first one taught it something (the determinism that remains is "a model in the same state
+says the same thing"). And the learning lives wherever the model does - the server keeps it in memory until
+something saves, and the CLI says *it learned to hand over at N node(s); --save writes that into the model*.
 
 When they are all duplicates the best one is spoken anyway — the cheapest candidate that was never said word for
 word, else the cheapest of all — and the turn is flagged `repeat=True`. Saying that same duplicate a second time
@@ -1542,8 +1609,8 @@ Python dict order decides the softmax summation order -, trigram index, `Split` 
 `ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`, `Reply`,
-`Heard`, `Stutter`, `Backtrack`, `Rethink`, `Repeats` - the same duplicate rules and second thoughts as Python,
-checked by `test_go_parity.py`),
+`Heard`, `Stutter`, `Backtrack`, `TeachBack`, `Rethink`, `Repeats` - the same duplicate rules, second thoughts
+and learning as Python, checked by `test_go_parity.py`),
 `json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`), `counter.go` (the
 cyclic counters of section 28, identical to `radixnet/counter.py`).
 

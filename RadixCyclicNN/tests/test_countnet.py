@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from radixnet import diff  # noqa: E402
 from radixnet.beam import Prediction, beam_predict, default_beam, path_probability  # noqa: E402
 from radixnet.countnet import COUNT_MODEL_FORMAT, CountRewardGraph, CountRewardNet  # noqa: E402
-from radixnet.graph import END, START  # noqa: E402
+from radixnet.graph import BACK, END, START  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -552,18 +552,22 @@ class TestApi(unittest.TestCase):
         self.select("radix")
         self.client.post("/api/train", {"texts": TEXTS, "epochs": 2, "lr": 1.0, "batch_size": 1})
         self.wait()
+        # "learn": false keeps the models exactly as trained - this is about who speaks, not about rethinks
         status, data, _ = self.client.post(
-            "/api/converse", {"opening": TEXTS[0], "turns": 4, "partner": "count", "speakers": ["radix", "count"]},
+            "/api/converse",
+            {"opening": TEXTS[0], "turns": 4, "partner": "count", "speakers": ["radix", "count"], "learn": False},
         )
         self.assertEqual(status, 200, data)
         self.assertEqual((data["kind"], data["partner"]), ("radix", "count"))
         self.assertEqual(data["count"], 5)
         self.assertEqual([t["speaker"] for t in data["turns"]], ["radix", "count", "radix", "count", "radix"])
         # the same kind as a partner means talking to itself
-        status, same, _ = self.client.post("/api/converse", {"opening": TEXTS[0], "turns": 2, "partner": "radix"})
+        status, same, _ = self.client.post(
+            "/api/converse", {"opening": TEXTS[0], "turns": 2, "partner": "radix", "learn": False},
+        )
         self.assertEqual((status, same["partner"]), (200, None))
         self.select("count")
-        status, data, _ = self.client.post("/api/converse", {"turns": 3, "partner": "radix"})
+        status, data, _ = self.client.post("/api/converse", {"turns": 3, "partner": "radix", "learn": False})
         self.assertEqual((status, data["kind"], data["partner"], data["count"]), (200, "count", "radix", 3))
 
     def test_radix_beam_prediction_and_load_switches_kind(self):
@@ -966,6 +970,22 @@ class TestNodeRatios(unittest.TestCase):
         one = model.node_ratios(limit=0, node=node)
         self.assertEqual([r["node"] for r in one], [node])
         self.assertIsNone(model.graph.node_ratios(len(model.graph.labels) + 5))
+
+    def test_back_is_an_ordinary_row(self):
+        """BACK needs no special case: its edge says what share of the walks leaving here have learned to go round."""
+        model = CountRewardNet(seed=1)
+        model.train(["the cat sat on the mat", "a cat ran to the park", "the cat sat on the log"], epochs=2)
+        graph = model.graph
+        node = self.branch_node(model)
+        went = next(iter(graph.children[node]))
+        graph.observe_back(node, went=went, amount=1.0)
+        row = graph.node_ratios(node)
+        back = next(r for r in row["to"] if r["node"] == BACK)
+        looped = next(r for r in row["to"] if r["node"] == went)
+        self.assertGreater(back["seen_ratio"], 0.0)
+        self.assertGreater(back["reward_ratio"], 0.0)  # the hand-over earned it
+        self.assertLess(looped["reward_ratio"], 0.0)  # the step it was about to loop through paid for it
+        self.assertAlmostEqual(sum(r["seen_ratio"] for r in row["to"]), 1.0)
 
     def test_a_dead_node_has_no_ratios(self):
         model = self.branching()

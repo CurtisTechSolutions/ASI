@@ -99,8 +99,15 @@ class SineActivation:
         return sine_partials(x, self.a, self.b, self.h, self.k)
 
     def inverted(self) -> "SineActivation":
-        """Return a copy with the amplitude sign flipped (``a -> -a``)."""
-        return SineActivation(-self.a, self.b, self.h, self.k)
+        """Return the negation of this activation: ``a -> -a`` and ``k -> -k``.
+
+        ``f(x) = a * sin(b * (x - h)) + k``, so negating the amplitude alone
+        gives ``-a * sin(u) + k``, which is ``-f(x) + 2k`` - the negation only
+        when ``k`` is 0.  The offset is part of the unit's output and is
+        negated with it, so ``inverted().inverted()`` is the identity and
+        ``inverted()(x) == -self(x)`` exactly, whatever ``k`` has learned.
+        """
+        return SineActivation(-self.a, self.b, self.h, -self.k)
 
     def to_dict(self) -> dict:
         """JSON-serialisable representation."""

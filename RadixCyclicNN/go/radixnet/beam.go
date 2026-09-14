@@ -123,7 +123,7 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 			} else if st.node == Start {
 				prev = Start
 			}
-			for _, cc := range g.ChildCostsFrom(st.node, prev) {
+			for _, cc := range Onward(g.ChildCostsFrom(st.node, prev)) {
 				nchars := st.chars
 				if cc.Child != End {
 					nchars += g.labelLen[cc.Child] - Overlap

@@ -47,7 +47,7 @@ from .beam import Prediction
 from . import diff
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, START, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
     GraphModel,
@@ -523,6 +523,25 @@ class CountRewardGraph(RadixCyclicGraph):
             self.record_traversals(transitions)
             self.recompute_weights()
         return transitions
+
+    def observe_back(self, p: int, went: int | None = None, instead: int | None = None,
+                     amount: float = 1.0) -> int:
+        """As :meth:`RadixCyclicGraph.observe_back`, learned the way this model learns everything.
+
+        The sine model nudges the weights directly; here a weight is a *function* of the counts and the
+        rewards, so going round is taught by the ``BACK`` edge's count and what to do instead by a penalty on
+        the step it looped through and a reward on the step it took after backing up - the same rewards 2NRL
+        moves (:meth:`add_reward`).
+        """
+        e = super().observe_back(p, amount=0.0)  # no weight is nudged by hand here
+        self.record_traversals([(p, e)])
+        self.add_reward([e], amount)  # the hand-over itself, learned the way this model learns everything
+        for child, sign in ((went, -1.0), (instead, 1.0)):
+            edge = self.children[p].get(child) if child is not None and child != BACK else None
+            if edge is not None:
+                self.add_reward([edge], sign * amount)
+        self.recompute_weights()
+        return e
 
     def configure(self, **options: float) -> dict:
         """Change scales / the window size (``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``,

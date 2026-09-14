@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from .encoding import WINDOW
 from .graph import END, START, RadixCyclicGraph
-from .search import PathResult, _build_result, _start_emission
+from .search import PathResult, _build_result, _start_emission, onward
 
 __all__ = ["Prediction", "beam_predict", "default_beam", "path_probability"]
 
@@ -113,7 +113,7 @@ def _run_beam(
             parent_entry = entries[entry][1]
             # where the walk came from: a model that counts paths prices the next step by it
             prev = entries[parent_entry][0] if parent_entry >= 0 else (START if node == START else None)
-            for c, _e, ec in child_costs(node, prev):
+            for c, _e, ec in onward(child_costs(node, prev)):
                 nchars = chars if c == END else chars + len(labels[c]) - _OV
                 step = ec + step_penalty
                 ncost = cost + step

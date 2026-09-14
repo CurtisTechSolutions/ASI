@@ -868,7 +868,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
-        explore=args.explore,
+        explore=args.explore, learn=not args.no_learn,
     )
     guard: dict | None = None
     if pair is None:
@@ -910,6 +910,12 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
     if said_twice:
         console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
         console.say("    radixnet feedback " + " ".join(f"--bad-text {quote(t)}" for t in said_twice))
+    taught = sorted({t.rethink.taught for t in turns if t.rethink is not None and t.rethink.taught >= 0})
+    saved = None
+    if taught and args.save:
+        saved = save_model(model, args.out or args.model)
+    elif taught:
+        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
     return {
         "guard": guard,
         "turns": [t.to_dict() for t in turns],
@@ -920,6 +926,8 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         "kind": model.kind,
         "partner_kind": partner.kind if partner is not None else None,
         "repeats": said_twice,
+        "taught": taught,
+        **({"saved": saved} if saved is not None else {}),
         "transcript": transcript(turns),
     }
 
@@ -3627,6 +3635,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
                    help="times a reply that caught itself repeating may back up and look for another way on "
                         "(0 = not at all)")
+    p.add_argument("--no-learn", action="store_true",
+                   help="do not teach the graph where it goes round (leave the model exactly as it was)")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 

@@ -89,9 +89,20 @@ class TestSineActivationObject(unittest.TestCase):
         act = SineActivation()
         inv = act.inverted()
         self.assertEqual(inv.a, -act.a)
-        self.assertEqual((inv.b, inv.h, inv.k), (act.b, act.h, act.k))
+        self.assertEqual((inv.b, inv.h), (act.b, act.h))
         for x in XS:
             self.assertAlmostEqual(inv(x), math.sin(x / 3.0), places=15)
+        self.assertEqual(inv.inverted(), act)
+
+    def test_inverted_negates_the_unit_with_a_learned_offset(self):
+        # f = a * sin(b(x - h)) + k, so the offset is part of the output and has to be
+        # negated with the amplitude: flipping `a` alone gives -f(x) + 2k.  k is learned
+        # (df/dk is 1), so it is not 0 by the time anything is inverted.
+        act = SineActivation(-0.8, 0.4, 1.1, 0.25)
+        inv = act.inverted()
+        self.assertEqual(inv.k, -act.k)
+        for x in XS:
+            self.assertAlmostEqual(inv(x), -act(x), places=15)
         self.assertEqual(inv.inverted(), act)
 
     def test_dict_round_trip(self):

@@ -2362,6 +2362,7 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         avoid_repeats=f.flag("avoid_repeats", True),
         avoid_word_repeats=f.flag("avoid_word_repeats", True),
         explore=f.integer("explore", EXPLORE, minimum=0),
+        learn=f.flag("learn", True),
     )
 
 
@@ -3687,7 +3688,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
      "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats "
      "(what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a "
-     "reply that caught itself repeating may back up and look for another way on; 0 = not at all), "
+     "reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn "
+     "(default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes "
+     "round - a conversation with this on changes the model), "
      "guard (default on: a reply the negative network vetoes is left unsaid)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
