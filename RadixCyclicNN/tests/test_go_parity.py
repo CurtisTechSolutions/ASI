@@ -7,13 +7,17 @@ window and RNG state, the same predictions, generated texts, scores and
 conversation, and each side must load and continue the other's model file.
 """
 
+import array
 import json
+import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -732,6 +736,113 @@ class TestGoCriticParity(unittest.TestCase):
         self.assertEqual(a["bad"], b["bad"])
 
 
+class TestGoMediaParity(unittest.TestCase):
+    """The media text formats: both sides must encode the same recording and the same picture identically.
+
+    This matters more than it looks.  The utterance token is a digest of the
+    waveform text and the token is *in the text the model trains on*, so if the
+    two sides encoded a recording differently the same file would teach two
+    different things and the "one model, two languages" guarantee would quietly
+    stop holding.
+    """
+
+    def setUp(self):
+        self.wav = os.path.join(TMP.name, "probe.wav")
+        self.png = os.path.join(TMP.name, "probe.png")
+        self.model = os.path.join(TMP.name, "media.count.json")
+        for path in (self.model, self.model.replace(".count.json", ".count.negative.json")):
+            if os.path.exists(path):
+                os.remove(path)
+        from radixnet import speech
+        rate, seconds = 8000, 0.05
+        samples = array.array("f", [0.6 * math.sin(2 * math.pi * 220 * i / rate) for i in range(int(rate * seconds))])
+        with open(self.wav, "wb") as fh:
+            fh.write(speech.wav_bytes(samples, rate))
+        with open(self.png, "wb") as fh:
+            fh.write(_gradient_png(64, 64))
+
+    def test_both_sides_encode_the_same_utterance_identically(self):
+        options = ("speech", "teach", self.wav, "--text", "the cat sat on the mat", "--rate", 8000)
+        a = py(*options, model=self.model)
+        b = go(*options, model=self.model)
+        self.assertEqual(a["token"], b["token"], "the utterance token must match: it is in the trained text")
+        self.assertEqual(a["texts"], b["texts"])
+        self.assertEqual(a["audio"]["codec"], b["audio"]["codec"])
+        self.assertEqual(a["audio"]["samples"], b["audio"]["samples"])
+        self.assertEqual(a["audio"]["bytes"], b["audio"]["bytes"])
+
+    def test_each_side_decodes_the_other_s_waveform(self):
+        text = py("speech", "teach", self.wav, "--rate", 8000, model=self.model)["texts"][0]
+        out_py = os.path.join(TMP.name, "back_py.wav")
+        out_go = os.path.join(TMP.name, "back_go.wav")
+        a = py("speech", "decode", "--text", text, "--out", out_py, model=self.model)
+        b = go("speech", "decode", "--text", text, "--out", out_go, model=self.model)
+        self.assertEqual((a["codec"], a["rate"], a["samples"]), (b["codec"], b["rate"], b["samples"]))
+        self.assertEqual(load_bytes(out_py), load_bytes(out_go), "the decoded WAV must be identical")
+
+    def test_both_sides_read_the_same_image_text(self):
+        """The image *format* is shared: each side parses the other's text to the same bytes.
+
+        The pixel reduction is not: Python's thumbnail encoder resamples with
+        Pillow's Lanczos filter and Go's with a box filter, so the same source
+        image gives two different (equally valid) texts.  Both sides read, train
+        on, predict and decode either one - what differs is only which bytes a
+        given picture turns into, and only for the ``tiny`` encoder.
+        """
+        from radixnet import vision
+
+        encoded = go("image", "encode", self.png, "--size", 64, "--encoder", "tiny", model=self.model)
+        self.assertEqual(encoded["encoder"], "tiny")
+        self.assertEqual(encoded["latent_shape"], [3, 8, 8])
+        # Python reads what Go wrote, byte for byte (parse_text needs no Pillow)
+        name, width, height, payload, repaired = vision.parse_text(encoded["text"])
+        self.assertEqual((name, width, height, repaired), ("tiny", 64, 64, False))
+        self.assertEqual(len(payload), encoded["bytes"])
+        # and Go reads what Python packs
+        text = vision.pack_text("tiny", 64, 64, payload)
+        self.assertEqual(text, encoded["text"])
+
+    def test_both_recall_tutors_mark_the_same(self):
+        py("--kind", "count", "--seed", 1, "speech", "teach", self.wav, "--text", "hello there",
+           "--rate", 8000, "--train", "--epochs", 4, model=self.model)
+        options = ("speech", "tutor", self.wav, "--text", "hello there", "--rate", 8000, "--length", 120)
+        a = py(*options, model=self.model)
+        b = go(*options, model=self.model)
+        self.assertEqual(len(a["lessons"]), len(b["lessons"]))
+        for first, second in zip(a["lessons"], b["lessons"]):
+            self.assertEqual(first["grade"]["error"], second["grade"]["error"])
+            self.assertEqual(first["grade"]["passed"], second["grade"]["passed"])
+            self.assertAlmostEqual(first["grade"]["score"], second["grade"]["score"], places=9)
+            self.assertEqual(first["grade"]["facts"]["expected_bytes"], second["grade"]["facts"]["expected_bytes"])
+            self.assertAlmostEqual(first["grade"]["facts"]["agreement"], second["grade"]["facts"]["agreement"],
+                                   places=9)
+            self.assertEqual(first["grade"]["comment"], second["grade"]["comment"])
+        self.assertEqual(a["report"]["passed"], b["report"]["passed"])
+        self.assertAlmostEqual(a["report"]["mean_score"], b["report"]["mean_score"], places=9)
+
+
+def _gradient_png(width, height):
+    """A deterministic RGB gradient as a PNG, built by hand so the test needs no Pillow."""
+    rows = b"".join(
+        b"\x00" + b"".join(bytes(((x * 255) // width, (y * 255) // height, 128)) for x in range(width))
+        for y in range(height)
+    )
+
+    def chunk(tag, body):
+        payload = tag + body
+        return struct.pack(">I", len(body)) + payload + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b""))
+
+
+def load_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 class TestGoServer(unittest.TestCase):
     """`radixnet-count serve` speaks the Python server's JSON contract for the count model: the frontend's
     requests and the shapes the Python API tests assert on must be served the same way."""
@@ -845,12 +956,13 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))
         status, doc, _ = self.client.post("/api/model/select", {"kind": "radix"})
         self.assertEqual(status, 400)
-        # what the Go server now serves too: the evolve loop, the Ollama corpus / review, the automatic loop
-        for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history"):
+        # what the Go server now serves too: evolve, the Ollama corpus / review, the automatic loop, images, speech
+        for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history",
+                     "/api/images", "/api/speech"):
             status, doc, _ = self.client.get(path)
             self.assertEqual(status, 200, f"{path}: {doc}")
-        # the Python-only tabs are still told so; unknown endpoints and wrong methods behave like the Python server
-        status, doc, _ = self.client.get("/api/speech")
+        # what is still Python-only is told so; unknown endpoints and wrong methods behave like the Python server
+        status, doc, _ = self.client.get("/api/codegen/history")
         self.assertEqual(status, 404)
         self.assertIn("Go server", doc["error"])
         status, doc, _ = self.client.get("/api/nope")

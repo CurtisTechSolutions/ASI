@@ -1340,7 +1340,23 @@ What is *not* ported:
   those modules that *are* code - the waveform codecs, the text formats, the thumbnail encoder, an
   OpenAI-compatible transcription server - have no such excuse and are simply not done yet.
 * Still Python-only for now, and listed in `pythonOnly` so the Go server says so rather than 404ing blankly:
-  `speech.py`, `vision.py`, `recall.py`, `codegen.py`, `schedule.py`, `tools.py` and `agent.py`.
+  `codegen.py`, `schedule.py`, `tools.py` and `agent.py`.
+
+`speech.go`, `vision.go` and `recall.go` port the rest of the media path, and one thing about them is worth stating
+because it is the only place in this port where the two sides do not produce identical bytes:
+
+* **Speech is at parity, exactly.**  The waveform text has to be, because the utterance token is a digest of it and
+  the token is *in the text the model trains on* - if the two sides encoded a recording differently the same file
+  would teach two different things.  Getting there took two things Go does not hand you: the sample pipeline carries
+  **float32**, not float64, because Python's `array("f")` rounds every stored value to single precision, and
+  `blake2b.go` is BLAKE2b written out (RFC 7693), because Go's standard library has none and this module takes no
+  dependencies.  That is the same reasoning that put MT19937 and Shewchuk summation here by hand.
+  `tests/test_go_parity.py::TestGoMediaParity` checks the token, the texts and the decoded WAV byte for byte.
+* **Image encoding is not at parity, and cannot cheaply be.**  Python's thumbnail resamples with Pillow's Lanczos
+  filter; the Go one uses a box filter, because reproducing Pillow's exact coefficients and rounding *without
+  Pillow to check against* would be a guess rather than a port.  So the same picture gives two different (equally
+  valid) texts.  The format is shared - each side parses, trains on, predicts and decodes the other's image texts -
+  and `DescribeVision` says so in its own output rather than leaving it to be discovered.
 
 Files: `encoding.go` (code-point windows, `DecodePath`), `mt19937.go` (a Mersenne Twister with CPython's seeding,
 53-bit doubles and `getstate()` layout - `rng_state` round-trips between the languages), `fsum.go` (Shewchuk's

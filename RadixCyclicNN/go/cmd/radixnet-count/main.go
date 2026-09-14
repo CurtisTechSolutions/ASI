@@ -166,6 +166,8 @@ commands:
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
 X
   invert     flip the sign of every reward
+  image      images as text: info | encode | tutor | decode
+  speech     teaching by talking: info | teach | tutor | decode
   evolve     the self-upgrade loop: the model generates, a discriminator judges, 2NRL follows
   compress   merge the unary chains of the graph by hand, then save
   checkpoints list a checkpoint directory, or restore one (--restore NAME | latest)
@@ -242,6 +244,10 @@ func main() {
 		cmdNegative(rest)
 	case "correct":
 		cmdCorrect(rest)
+	case "image":
+		cmdImage(rest)
+	case "speech":
+		cmdSpeech(rest)
 	case "evolve":
 		cmdEvolve(rest)
 	case "compress":

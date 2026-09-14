@@ -1318,6 +1318,9 @@ go/bin/radixnet-count --model model.count.json negative filter --count 3   # the
 go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
 go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
 go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
+go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
+go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
+go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
 go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
@@ -1327,6 +1330,8 @@ Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`
 `negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget` | `auto`),
 `invert`, `compress`, `weights`, `info`, `converse`, `tutor`, `evolve`,
 `ollama` (`models` | `corpus` | `review`), `chatgpt` (`models` | `ask`),
+`image` (`info` | `encode` | `tutor` | `decode`),
+`speech` (`info` | `teach` | `tutor` | `decode`),
 `checkpoints`, `bench`, `serve`, `version`; `--blame`
 (with `--negative PATH`) on `tutor`, `correct`, `evolve` and `ollama review`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
@@ -1472,7 +1477,9 @@ Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
 | `POST /api/evolve/start`, `POST /api/evolve/stop`, `GET /api/evolve/history` | the self-upgrade loop, same bodies and records as the Python server: the model generates, a discriminator judges, 2NRL follows; `blatant_mode` picks how failures drive the update and `blame` lets the critic teach the negative network. The discriminator lives beside the model as `discriminator.json` |
 | `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review` | a corpus written to order (`train` starts a job on the lines) and the adversarial review, which with `blame` teaches the negative network what failed and why |
 | `POST /api/negative/auto`, `GET /api/negative/auto/history` | the Negative tab, automatic: a `critic` job of write → review → blame, same bodies and records as the Python server |
-| `/api/images/*`, `/api/speech/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `GET /api/images`, `POST /api/images/encode`, `/decode`, `/tutor` | images as text, same bodies and results as the Python server. The **thumbnail encoder only**: the Stable Diffusion one needs torch and diffusers, so `encoder: "sd"` is refused here with a message naming the Python side |
+| `GET /api/speech`, `POST /api/speech/teach`, `/decode`, `/tutor` | the waveform as text and the recall tutor over it, same bodies and results as the Python server. **Transcription is Python-only** (faster-whisper / openai-whisper are Python packages), so send the words with the audio - which is what the browser's dictation does |
+| `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same

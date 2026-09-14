@@ -278,7 +278,7 @@ func init() {
 }
 
 // pythonOnly lists endpoint prefixes the Python server implements and this one does not.
-var pythonOnly = []string{"/api/images", "/api/speech", "/api/codegen", "/api/schedule/preview"}
+var pythonOnly = []string{"/api/codegen", "/api/schedule/preview"}
 
 // The tutor (/api/tutor, see tutor.go) is served here too: Ollama sets and
 // marks the exercises, this server's count / reward model answers them.  So are
