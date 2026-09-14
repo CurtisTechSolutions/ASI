@@ -502,6 +502,90 @@ func TestConverseWordRepeats(t *testing.T) {
 	}
 }
 
+// Catching itself repeating, backing up to where the walk went round, and looking for another way on.
+func TestBacktrack(t *testing.T) {
+	// "ha ha ..." loops; the other two lines leave the loop after "ha "
+	ways, err := NewModel(3, DefaultGraphOptions())
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if _, err := ways.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
+		TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	stuck, _ := NewModel(3, DefaultGraphOptions())
+	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60, AvoidRepeats: true}
+
+	found, record, err := ways.Backtrack("ha ha ha", opts)
+	if err != nil || found == nil || !record.Found {
+		t.Fatalf("backtrack: %v %+v", err, record)
+	}
+	if record.Noticed != "ha" || record.Cut != "ha " || record.Steps != 1 || record.Explored == 0 {
+		t.Fatalf("record = %+v", record)
+	}
+	if !strings.HasPrefix(found.FullText, "ha ") || Stutter(found.FullText, LongestStutter) != "" {
+		t.Fatalf("the way on keeps what was said once and does not go round again: %q", found.FullText)
+	}
+
+	// a voice with nowhere else to go says so - and it did look
+	found, record, _ = stuck.Backtrack("ha ha ha", opts)
+	if found != nil || record.Found || record.Noticed != "ha" || record.Explored == 0 {
+		t.Fatalf("stuck: %v %+v", found, record)
+	}
+
+	// the words it picked up are not its own to rethink
+	keep := opts
+	keep.Keep = "ha ha "
+	found, record, _ = ways.Backtrack("ha ha ha", keep)
+	if found != nil || record.Steps != 0 || record.Explored != 0 {
+		t.Fatalf("keep: %v %+v", found, record)
+	}
+
+	// nothing to rethink, and nothing to explore
+	if found, record, _ = ways.Backtrack("the cat sat on the mat", opts); found != nil || record.Noticed != "" {
+		t.Fatalf("clean: %v %+v", found, record)
+	}
+	off := opts
+	off.Explore = 0
+	if found, record, _ = ways.Backtrack("ha ha ha", off); found != nil || record.Steps != 0 {
+		t.Fatalf("off: %v %+v", found, record)
+	}
+
+	// and a conversation backs out of the loop it walks into
+	cfg := DefaultConverseOptions()
+	cfg.Turns = 4
+	turns, err := ways.Converse("", cfg)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	thought := 0
+	for _, turn := range turns {
+		if turn.Rethink == nil {
+			continue
+		}
+		thought++
+		if turn.Rethink.Noticed == "" || turn.Text != turn.Context+turn.Reply {
+			t.Fatalf("turn %+v", turn)
+		}
+		if turn.Rethink.Found && (!strings.HasPrefix(turn.Text, turn.Rethink.Cut) || turn.Repeat || turn.Stutter) {
+			t.Fatalf("a way out keeps what was said once: %+v", turn)
+		}
+	}
+	if thought == 0 {
+		t.Fatal("nothing was ever noticed")
+	}
+	cfg.Explore = 0
+	plain, _ := ways.Converse("", cfg)
+	for _, turn := range plain {
+		if turn.Rethink != nil {
+			t.Fatalf("nothing is noticed with the exploring off: %+v", turn)
+		}
+	}
+}
+
 // What counts as a duplicate, and what a conversation does with the ones it cannot avoid.
 func TestHeardAndRepeats(t *testing.T) {
 	heard := NewHeard([]string{"the cat sat on the mat"})

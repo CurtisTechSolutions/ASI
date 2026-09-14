@@ -20,7 +20,8 @@ const isObject = (value) => Boolean(value) && typeof value === "object";
  * positive phase: they are what a good reply here would have looked like. A
  * reply the model could only repeat is punished whatever the judge made of it,
  * and with "Avoid repeated words" on that includes a reply repeating its own
- * words.
+ * words - though a reply that catches itself repeating first backs up to where
+ * the walk went round and explores other ways on ("Explore").
  *
  * The transcript reads newest first: a new exchange is appended to the top and
  * pushes the older ones down, so the latest reply is where the eye already is
@@ -41,6 +42,7 @@ export default function ChatPanel({ status }) {
   const [url, setUrl] = useState("");
   const [guard, setGuard] = useState(true);
   const [avoidWordRepeats, setAvoidWordRepeats] = useState(true);
+  const [explore, setExplore] = useState("3");
   const [blame, setBlame] = useState(true);
   const [learn, setLearn] = useState(true);
   const [teachPartner, setTeachPartner] = useState(true);
@@ -92,6 +94,7 @@ export default function ChatPanel({ status }) {
         provider,
         guard,
         avoid_word_repeats: avoidWordRepeats,
+        explore: Math.max(0, parseInteger(explore, 3)),
         blame,
         learn,
         teach_partner: teachPartner,
@@ -134,6 +137,8 @@ export default function ChatPanel({ status }) {
         <div className="row">
           <SelectField label="Replies" value={mode} onChange={setMode} disabled={running}
                        options={[["beam", "beam (the most likely unheard one)"], ["sample", "sample (stochastic)"]]} />
+          <NumberField label="Explore" hint="times a reply may back up out of a repeat" value={explore}
+                       onChange={setExplore} min={0} step={1} disabled={running || !avoidWordRepeats} />
           <NumberField label="Pass mark" hint="out of 10" value={threshold} onChange={setThreshold} min={0} max={10}
                        disabled={running} />
           <SelectField label="Partner" value={provider} onChange={setProvider} disabled={running}
@@ -199,6 +204,7 @@ export default function ChatPanel({ status }) {
                       {r.fresh ? <span className="badge">new topic</span> : null}
                       {r.repeat ? <span className="badge down">repeat</span> : null}
                       {r.stutter ? <span className="badge down">repeats itself</span> : null}
+                      {r.rethink && r.rethink.found ? <span className="badge up">thought again</span> : null}
                       {r.vetoed ? <span className="badge down">{fmtInt(r.vetoed)} vetoed</span> : null}
                       {mark ? (
                         <span className={`badge ${mark.verdict === "pass" ? "pass" : "fail"}`}>
@@ -219,6 +225,7 @@ export default function ChatPanel({ status }) {
                     <div className="meta">
                       cost {fmtNum(r.cost, 3)} · p {fmtNum(r.probability, 4)}
                       {r.context ? <> · picked up “{r.context}”</> : <> · a fresh line</>}
+                      {r.rethink ? <> · {rethinkSays(r)}</> : null}
                       {mark && mark.critique ? <> · {mark.critique}</> : null}
                     </div>
                   </li>
@@ -285,6 +292,16 @@ export default function ChatPanel({ status }) {
       </div>
     </>
   );
+}
+
+/** What an exchange's rethink record says in one line: what it caught itself doing, and how that turned out. */
+function rethinkSays(exchange) {
+  const r = exchange.rethink;
+  const caught = `caught itself saying “${r.noticed}” twice`;
+  if (!r.steps) return `${caught}: the words it picked up, not its own`;
+  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)`;
+  const ending = exchange.repeat ? "said it anyway" : "took a lesser answer";
+  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}`;
 }
 
 /** The judge's mark for one exchange, once its conversation has been marked. */

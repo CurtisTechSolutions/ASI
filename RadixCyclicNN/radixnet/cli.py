@@ -32,7 +32,7 @@ from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
-from .dialogue import DEFAULT_SPEAKERS, repeats as dialogue_repeats, transcript
+from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -867,6 +867,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
+        explore=args.explore,
     )
     guard: dict | None = None
     if pair is None:
@@ -888,6 +889,17 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         if flags:
             detail += f"  [{', '.join(flags)}]"
         console.say(detail)
+        if turn.rethink is not None:
+            r = turn.rethink
+            thought = f"    caught itself saying {quote(r.noticed)} twice"
+            if not r.steps:
+                thought += "; the words it picked up, not its own"
+            elif r.found:
+                thought += f"; kept {quote(r.cut)} and found another way on in {r.explored} path(s)"
+            else:
+                ending = "said it anyway" if turn.repeat else "took a lesser answer"
+                thought += f"; kept {quote(r.cut)}, weighed {r.explored} path(s), {ending}"
+            console.say(thought)
     if not turns:
         console.say("(nothing to say: train the model first)")
     if guard is not None:
@@ -1953,7 +1965,7 @@ def cmd_chat(args: argparse.Namespace, console: Console) -> dict:
         judge_model=args.judge_model or "", guard=not args.no_guard, blame=not args.no_blame,
         clear_passes=not args.no_clear, learn=not args.no_learn, teach_partner=not args.no_teach_partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
-        neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs,
+        explore=args.explore, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs,
         neg_lr=args.neg_lr, pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
         epochs=args.epochs, seed=effective_seed(args),
     )
@@ -3506,6 +3518,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-repeats", action="store_true", help="do not skip continuations the conversation already heard")
     p.add_argument("--allow-word-repeats", action="store_true",
                    help="do not skip a reply that repeats its own words (\"say morning morning\")")
+    p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                   help="times a reply that caught itself repeating may back up and look for another way on "
+                        "(0 = not at all)")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 
@@ -3543,6 +3558,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-repeats", action="store_true", help="let the model say something already heard")
     p.add_argument("--allow-word-repeats", action="store_true",
                    help="let a reply repeat its own words (\"say morning morning\")")
+    p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                   help="times a reply that caught itself repeating may back up and look for another way on")
     p.add_argument("--no-guard", action="store_true",
                    help="do not let the negative network veto a reply before it is spoken")
     p.add_argument("--no-blame", action="store_true", help="do not blame the failed replies")

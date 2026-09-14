@@ -104,6 +104,8 @@ class ChatConfig:
     """Do not let the model say something the conversation has already heard."""
     avoid_word_repeats: bool = True
     """Do not let one reply repeat its own words (a stutter: "say morning morning")."""
+    explore: int = 3
+    """Times a reply that caught itself repeating may back up and look for another way on (0 = not at all)."""
     neg_epochs: int = 2
     pos_epochs: int = 3
     neg_lr: float = 0.5
@@ -253,7 +255,8 @@ class Chat:
             turn = reply(
                 self.model, line, heard=heard, index=len(transcript), speaker=DEFAULT_SPEAKERS[1], mode=cfg.mode,
                 max_length=cfg.max_length, context=cfg.context, temperature=cfg.temperature, k=cfg.k, rng=rng,
-                avoid_repeats=cfg.avoid_repeats, avoid_word_repeats=cfg.avoid_word_repeats, veto=veto,
+                avoid_repeats=cfg.avoid_repeats, avoid_word_repeats=cfg.avoid_word_repeats,
+                explore=cfg.explore, veto=veto,
             )
             if turn is None:
                 # the guard can silence it outright, and that is worth saying
@@ -268,8 +271,9 @@ class Chat:
                 progress({
                     "kind": "exchange", "conversation": self.number, "exchange": index + 1,
                     "said": line, "reply": turn.text, "context": turn.context, "fresh": turn.fresh,
-                    "repeat": turn.repeat, "vetoed": turn.vetoed, "cost": turn.cost,
+                    "repeat": turn.repeat, "stutter": turn.stutter, "vetoed": turn.vetoed, "cost": turn.cost,
                     "probability": turn.probability,
+                    "rethink": turn.rethink.to_dict() if turn.rethink is not None else None,
                 })
             if index == cfg.turns - 1:
                 break  # the last word is the model's: no line after it to reply to

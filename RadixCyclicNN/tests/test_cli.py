@@ -301,6 +301,21 @@ class TestInference(unittest.TestCase):
         self.assertIn("repeats itself", human)
         punished = run_json("converse", "--turns", 4, model=stutterer)
         self.assertTrue(punished["repeats"])  # with the setting on they are repeats, and punished
+        # --explore: the voice backs out of a loop it walks into, and the transcript says what it noticed
+        ways = os.path.join(TMP.name, "ways.json")
+        with open(corpus, "w", encoding="utf-8") as fh:  # "ha ha ..." loops; the other lines leave the loop
+            fh.write("ha ha ha ha ha\nha ha ho ho hum\nha ha and then the cat sat\n")
+        run_json("train", "--data", corpus, "--epochs", 3, *FAST, model=ways)
+        thought = run_json("converse", "--turns", 4, model=ways)
+        rethinks = [t["rethink"] for t in thought["turns"] if t["rethink"]]
+        self.assertTrue(rethinks, thought["transcript"])
+        for record in rethinks:
+            self.assertEqual(set(record), {"noticed", "cut", "steps", "explored", "found"})
+            self.assertTrue(record["noticed"])
+        plain = run_json("converse", "--turns", 4, "--explore", 0, model=ways)
+        self.assertFalse([t for t in plain["turns"] if t["rethink"]])
+        self.assertIn("caught itself saying",
+                      run_cli("converse", "--turns", 4, model=ways, json_mode=False).stdout)
         human = run_cli("converse", "--opening", "the cat sat on the mat", "--turns", 2, model=MODEL, json_mode=False).stdout
         self.assertIn("A: the cat sat on the mat", human)
         self.assertIn("[given]", human)

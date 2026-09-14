@@ -163,6 +163,9 @@ func chatConfigFrom(rq *request) (radixnet.ChatConfig, error) {
 			return cfg, err
 		}
 	}
+	if cfg.Explore, _, err = rq.f.integer("explore", cfg.Explore, &zeroI); err != nil {
+		return cfg, err
+	}
 	if cfg.NegEpochs, _, err = rq.f.integer("neg_epochs", cfg.NegEpochs, &zeroI); err != nil {
 		return cfg, err
 	}

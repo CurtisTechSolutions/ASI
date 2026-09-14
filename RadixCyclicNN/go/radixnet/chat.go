@@ -85,10 +85,12 @@ type ChatConfig struct {
 	// AvoidRepeats keeps the model from saying something the conversation has already heard.
 	AvoidRepeats bool `json:"avoid_repeats"`
 	// AvoidWordRepeats keeps one reply from repeating its own words (a stutter: "say morning morning").
-	AvoidWordRepeats bool    `json:"avoid_word_repeats"`
-	NegEpochs        int     `json:"neg_epochs"`
-	PosEpochs        int     `json:"pos_epochs"`
-	Strength         float64 `json:"strength"`
+	AvoidWordRepeats bool `json:"avoid_word_repeats"`
+	// Explore is how many times a reply that caught itself repeating may back up and look for another way on.
+	Explore   int     `json:"explore"`
+	NegEpochs int     `json:"neg_epochs"`
+	PosEpochs int     `json:"pos_epochs"`
+	Strength  float64 `json:"strength"`
 	// Epochs of blaming per conversation.
 	Epochs int `json:"epochs"`
 	// Seed of the first conversation's sampling; later ones advance it, so they differ.
@@ -101,7 +103,7 @@ func DefaultChatConfig() ChatConfig {
 		Conversations: 1, Turns: 4, Context: 12, MaxLength: 60, Mode: "beam", K: 5, Temperature: 1,
 		PartnerTemperature: 0.8, Threshold: 6, Provider: ProviderOllama, Guard: true, Blame: true,
 		ClearPasses: true, Learn: true, TeachPartner: true, AvoidRepeats: true, AvoidWordRepeats: true,
-		NegEpochs: 2, PosEpochs: 3,
+		Explore: Explore, NegEpochs: 2, PosEpochs: 3,
 		Strength: 1, Epochs: 1,
 	}
 }
@@ -336,7 +338,8 @@ func (c *Chat) Converse(progress func(map[string]any)) (*ChatHeld, error) {
 		turn, err := c.Model.Reply(line, ReplyOptions{
 			Heard: heard, Index: len(held.Transcript), Speaker: ChatSpeakers[1], Mode: cfg.Mode,
 			MaxLength: cfg.MaxLength, Context: cfg.Context, Temperature: cfg.Temperature, K: cfg.K,
-			RNG: rng, AvoidRepeats: cfg.AvoidRepeats, AvoidWordRepeats: cfg.AvoidWordRepeats, Veto: vetoFn,
+			RNG: rng, AvoidRepeats: cfg.AvoidRepeats, AvoidWordRepeats: cfg.AvoidWordRepeats,
+			Explore: cfg.Explore, Veto: vetoFn,
 		})
 		if err != nil {
 			return nil, err
@@ -361,7 +364,8 @@ func (c *Chat) Converse(progress func(map[string]any)) (*ChatHeld, error) {
 			progress(map[string]any{
 				"kind": "exchange", "conversation": c.Number, "exchange": index + 1,
 				"said": line, "reply": turn.Text, "context": turn.Context, "fresh": turn.Fresh,
-				"repeat": turn.Repeat, "vetoed": turn.Vetoed, "cost": turn.Cost,
+				"repeat": turn.Repeat, "stutter": turn.Stutter, "rethink": turn.Rethink, "vetoed": turn.Vetoed,
+				"cost":        turn.Cost,
 				"probability": turn.Probability,
 			})
 		}

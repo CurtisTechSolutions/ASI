@@ -581,6 +581,19 @@ class TestEndpoints(unittest.TestCase):
         for turn in strict["turns"] + loose["turns"]:
             self.assertEqual(turn["stutter"], bool(dialogue_stutter(turn["text"])), turn["text"])
         self.assertFalse([t for t in strict["turns"] if t["stutter"] and not t["repeat"]])
+        # the exploring is a setting of its own: what it noticed and did rides on the turn
+        for turn in strict["turns"]:
+            thought = turn["rethink"]
+            if thought is not None:
+                self.assertEqual(set(thought), {"noticed", "cut", "steps", "explored", "found"})
+                self.assertTrue(thought["noticed"])
+                if thought["found"]:
+                    self.assertTrue(turn["text"].startswith(thought["cut"]), (turn["text"], thought["cut"]))
+        status, plain, _ = self.client.post("/api/converse", {**body, "explore": 0})
+        self.assertEqual(status, 200, plain)
+        self.assertFalse([t for t in plain["turns"] if t["rethink"] is not None])
+        status, data, _ = self.client.post("/api/converse", {"explore": -1})
+        self.assertEqual(status, 400, data)
         # continue: the history is picked up, indices and speakers carry on
         status, more, _ = self.client.post("/api/converse", {"turns": 2, "history": texts, "speakers": ["me", "you"]})
         self.assertEqual(status, 200, more)

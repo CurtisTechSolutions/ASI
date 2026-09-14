@@ -17,10 +17,22 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * model of the other kind kept in memory. Turns can be rated like samples, and
  * the duplicates the model could not avoid are marked thumbs-down for the 2NRL
  * negative phase ("Punish duplicates") - a reply that repeats its own words
- * counts as one of those while "Avoid repeated words" is on. New turns are
+ * counts as one of those while "Avoid repeated words" is on, though a voice
+ * that catches itself repeating first backs up to where the walk went round
+ * and explores other ways on ("Explore"), and says so. New turns are
  * appended to the top of
  * the conversation and push the older ones down, so nothing has to scroll.
  */
+/** What a turn's rethink record says in one line: what it caught itself doing, and how that turned out. */
+function rethinkSays(turn) {
+  const r = turn.rethink;
+  const caught = `caught itself saying “${r.noticed}” twice`;
+  if (!r.steps) return `${caught}: the words it picked up, not its own`;
+  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)`;
+  const ending = turn.repeat ? "said it anyway" : "took a lesser answer";
+  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}`;
+}
+
 export default function ConversePanel({ status }) {
   const [opening, setOpening] = useState("");
   const [turns, setTurns] = useState("6");
@@ -34,6 +46,7 @@ export default function ConversePanel({ status }) {
   const [partner, setPartner] = useState("");
   const [punishRepeats, setPunishRepeats] = useState(true);
   const [avoidWordRepeats, setAvoidWordRepeats] = useState(true);
+  const [explore, setExplore] = useState("3");
   const [inMemory, setInMemory] = useState([]);
   const [transcript, setTranscript] = useState(null);
   const [guard, setGuard] = useState(true);
@@ -84,6 +97,7 @@ export default function ConversePanel({ status }) {
         speakers,
         guard,
         avoid_word_repeats: avoidWordRepeats,
+        explore: parseInteger(explore, 3),
         ...(partner ? { partner } : {}),
         ...(history.length ? { history } : opening.trim() ? { opening } : {}),
       });
@@ -157,6 +171,15 @@ export default function ConversePanel({ status }) {
             ]}
           />
           <NumberField label="K" hint="candidates per turn" value={k} onChange={setK} min={1} step={1} />
+          <NumberField
+            label="Explore"
+            hint="times it may back up out of a repeat (0 = not at all)"
+            value={explore}
+            onChange={setExplore}
+            min={0}
+            step={1}
+            disabled={!avoidWordRepeats}
+          />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} disabled={mode !== "sample"} />
         </div>
         <div className="row">
@@ -235,6 +258,7 @@ export default function ConversePanel({ status }) {
                 t.fresh && !t.given ? "new topic" : null,
                 t.repeat ? "repeat" : null,
                 t.stutter ? "repeats itself" : null,
+                t.rethink && t.rethink.found ? "thought again" : null,
                 t.vetoed ? `${fmtInt(t.vetoed)} vetoed` : null,
               ].filter(Boolean);
               return (
@@ -242,7 +266,7 @@ export default function ConversePanel({ status }) {
                   <div className="speaker">
                     <b>{t.speaker}</b>
                     {flags.map((f) => (
-                      <span key={f} className={`badge${f === "repeat" || f === "repeats itself" ? " down" : ""}`}>
+                      <span key={f} className={`badge${f === "repeat" || f === "repeats itself" ? " down" : ""}${f === "thought again" ? " up" : ""}`}>
                         {f}
                       </span>
                     ))}
@@ -263,6 +287,7 @@ export default function ConversePanel({ status }) {
                     cost {fmtNum(t.cost, 3)} · p {fmtNum(t.probability, 4)}
                     {t.context ? <> · picked up “{t.context}”</> : null}
                     {t.skipped ? <> · skipped {fmtInt(t.skipped)}</> : null}
+                    {t.rethink ? <> · {rethinkSays(t)}</> : null}
                     <RateButtons
                       text={t.text}
                       rating={rating}

@@ -12,8 +12,10 @@ from radixnet.dialogue import (  # noqa: E402
     Turn,
     converse,
     normalize,
+    backtrack,
     repeats,
     stutter,
+    stutter_at,
     tail_context,
     transcript,
 )
@@ -62,7 +64,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(d["speaker"], "A")
         self.assertEqual(set(d), {
             "index", "speaker", "text", "context", "reply", "cost", "probability", "reached_end", "fresh", "given",
-            "repeat", "stutter", "candidates", "skipped", "vetoed", "labels", "node_ids", "step_costs",
+            "repeat", "stutter", "rethink", "candidates", "skipped", "vetoed", "labels", "node_ids", "step_costs",
         })
 
 
@@ -80,11 +82,84 @@ class TestStutter(unittest.TestCase):
                      "a bird in the hand is worth two in the bush", "blowers blower", "park", ""):
             self.assertEqual(stutter(line), "", line)
 
+    def test_where_it_starts_saying_itself_again(self):
+        self.assertEqual(stutter_at("say morning morning"), len("say morning "))
+        self.assertEqual("say morning morning"[:stutter_at("say morning morning")], "say morning ")
+        self.assertEqual(stutter_at("the the west"), 4)
+        self.assertEqual(stutter_at("the cat sat on the mat"), -1)
+        self.assertEqual(stutter_at(""), -1)
+
     def test_only_a_run_up_to_longest_counts(self):
         line = "the cat sat on the mat the cat sat on the mat"
         self.assertEqual(stutter(line), "")  # six words twice over: past the default
         self.assertEqual(stutter(line, longest=6), "the cat sat on the mat")
         self.assertEqual(stutter("the the west", longest=0), "")
+
+
+class TestBacktrack(unittest.TestCase):
+    """Catching itself repeating, backing up to where the walk went round, and looking for another way on."""
+
+    @classmethod
+    def setUpClass(cls):
+        # "ha ha ..." loops; the other two lines leave the loop after "ha "
+        cls.stuck = new_model("radix", seed=3)
+        cls.stuck.train(["ha ha ha ha ha"], epochs=3, **FAST)
+        cls.ways = new_model("radix", seed=3)
+        cls.ways.train(["ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"], epochs=3, **FAST)
+
+    def test_it_keeps_what_was_said_once_and_finds_another_way(self):
+        found, thought = backtrack(self.ways, "ha ha ha", k=3)
+        self.assertEqual((thought.noticed, thought.cut, thought.steps), ("ha", "ha ", 1))
+        self.assertTrue(thought.found)
+        self.assertGreater(thought.explored, 0)
+        self.assertIsNotNone(found)
+        self.assertTrue(found.full_text.startswith("ha "), found.full_text)  # what it said once is kept
+        self.assertEqual(stutter(found.full_text), "")  # and the way on does not go round again
+
+    def test_a_voice_with_nowhere_else_to_go_says_so(self):
+        found, thought = backtrack(self.stuck, "ha ha ha", k=3)
+        self.assertIsNone(found)
+        self.assertEqual(thought.noticed, "ha")
+        self.assertFalse(thought.found)
+        self.assertGreater(thought.explored, 0)  # it did look
+
+    def test_it_never_rethinks_the_words_it_picked_up(self):
+        found, thought = backtrack(self.ways, "ha ha ha", keep="ha ha ", k=3)
+        self.assertIsNone(found)  # the repeat is inside the context: not this voice's to rethink
+        self.assertEqual((thought.noticed, thought.steps, thought.explored), ("ha", 0, 0))
+
+    def test_nothing_to_rethink_and_nothing_to_explore(self):
+        found, thought = backtrack(self.ways, "the cat sat on the mat", k=3)
+        self.assertEqual((found, thought.noticed, thought.explored), (None, "", 0))
+        found, thought = backtrack(self.ways, "ha ha ha", explore=0, k=3)
+        self.assertEqual((found, thought.noticed, thought.steps), (None, "ha", 0))
+
+    def test_what_it_already_heard_is_no_way_out_either(self):
+        first, _thought = backtrack(self.ways, "ha ha ha", k=5)
+        self.assertIsNotNone(first)
+        # the same way out, once it has been said, is no way out at all
+        again, thought = backtrack(self.ways, "ha ha ha", heard=Heard([first.full_text]), k=5)
+        self.assertNotEqual(again.full_text if again else None, first.full_text)
+        if again is None:
+            self.assertFalse(thought.found)
+
+    def test_a_conversation_backs_out_of_the_loop_it_walks_into(self):
+        model = trained()  # the sample corpus: its best continuation loops once in a long conversation
+        opening = "the cat sat on the mat"
+        turns = converse(model, opening, turns=25)
+        thought = [t for t in turns if t.rethink is not None]
+        self.assertTrue(thought, [t.text for t in turns])
+        for turn in thought:
+            self.assertTrue(turn.rethink.noticed)
+            self.assertEqual(turn.text, turn.context + turn.reply)  # still one utterance
+            if turn.rethink.found:
+                self.assertTrue(turn.text.startswith(turn.rethink.cut), (turn.text, turn.rethink.cut))
+                self.assertFalse(turn.repeat or turn.stutter, turn.text)
+        self.assertTrue([t for t in thought if t.rethink.found], [t.text for t in thought])
+        # with the exploring off nothing is noticed, and a lesser answer stands where a rethink had one
+        plain = converse(model, opening, turns=25, explore=0)
+        self.assertFalse([t for t in plain if t.rethink is not None])
+        self.assertNotEqual([t.text for t in plain], [t.text for t in turns])
 
 
 class TestHeard(unittest.TestCase):

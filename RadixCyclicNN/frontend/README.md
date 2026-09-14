@@ -13,14 +13,16 @@ chat view that reads newest first: a new turn is appended to the top and pushes
 the older ones down, so the latest reply is where the eye already is and nothing
 has to be scrolled to. The search skips the replies the conversation has already
 heard and, while "Avoid repeated words" is on, the ones that say the same words
-twice in a row; the duplicates it could not avoid come back flagged, and "Punish
-duplicates" marks them 👎 so "Train on ratings" runs the 2NRL negative phase on
-them.
+twice in a row - and a voice that catches itself repeating keeps what it said
+once, backs up to where the walk went round and explores other ways on
+("Explore"), each turn saying what it noticed and whether it found one. The
+duplicates it could not avoid come back flagged, and "Punish duplicates" marks
+them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
 
 The Chat panel (`POST /api/chat/start`) has an LLM converse with the model and
 mark every reply; its transcript reads newest first as well, it has the same
-"Avoid repeated words" setting, and a reply the model could only repeat is
-punished with the failures whatever the judge made of it.
+"Avoid repeated words" and "Explore" settings, and a reply the model could only
+repeat is punished with the failures whatever the judge made of it.
 
 The Ollama panel talks to a local Ollama server through the API
 (`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`).

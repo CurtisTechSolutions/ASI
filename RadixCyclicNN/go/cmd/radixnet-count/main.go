@@ -838,6 +838,7 @@ func cmdConverse(args []string) {
 	partner := fs.String("partner", "", "a second model file that speaks the second voice")
 	allowRepeats := fs.Bool("allow-repeats", false, "do not skip continuations already heard")
 	allowWordRepeats := fs.Bool("allow-word-repeats", false, "do not skip a reply that repeats its own words")
+	explore := fs.Int("explore", radixnet.Explore, "times a reply that caught itself repeating may back up and look for another way on")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
@@ -845,7 +846,7 @@ func cmdConverse(args []string) {
 	opts := radixnet.DefaultConverseOptions()
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
-	opts.AvoidWordRepeats = !*allowWordRepeats
+	opts.AvoidWordRepeats, opts.Explore = !*allowWordRepeats, *explore
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -919,6 +920,22 @@ func cmdConverse(args []string) {
 			detail += "  [" + strings.Join(flags, ", ") + "]"
 		}
 		fmt.Println(detail)
+		if r := t.Rethink; r != nil {
+			thought := fmt.Sprintf("    caught itself saying %s twice", quote(r.Noticed))
+			switch {
+			case r.Steps == 0:
+				thought += "; the words it picked up, not its own"
+			case r.Found:
+				thought += fmt.Sprintf("; kept %s and found another way on in %d path(s)", quote(r.Cut), r.Explored)
+			default:
+				ending := "took a lesser answer"
+				if t.Repeat {
+					ending = "said it anyway"
+				}
+				thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
+			}
+			fmt.Println(thought)
+		}
 	}
 	if len(turnsOut) == 0 {
 		fmt.Println("(nothing to say: train the model first)")
