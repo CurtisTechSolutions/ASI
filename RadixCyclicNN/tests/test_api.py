@@ -21,6 +21,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import __version__, api  # noqa: E402
+from radixnet.dialogue import stutter as dialogue_stutter  # noqa: E402
 from radixnet.model import RadixNet, TrainConfig  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -572,6 +573,14 @@ class TestEndpoints(unittest.TestCase):
         self.assertTrue(said_twice, "a long conversation on a small corpus runs out of new things to say")
         self.assertEqual(set(long["repeats"]), set(said_twice))
         self.assertEqual(len(long["repeats"]), len({t.strip().casefold() for t in long["repeats"]}))
+        # a reply may not repeat its own words either, unless the setting says it may
+        body = {"opening": CORPUS[0], "turns": 25}
+        status, strict, _ = self.client.post("/api/converse", body)
+        status2, loose, _ = self.client.post("/api/converse", {**body, "avoid_word_repeats": False})
+        self.assertEqual((status, status2), (200, 200))
+        for turn in strict["turns"] + loose["turns"]:
+            self.assertEqual(turn["stutter"], bool(dialogue_stutter(turn["text"])), turn["text"])
+        self.assertFalse([t for t in strict["turns"] if t["stutter"] and not t["repeat"]])
         # continue: the history is picked up, indices and speakers carry on
         status, more, _ = self.client.post("/api/converse", {"turns": 2, "history": texts, "speakers": ["me", "you"]})
         self.assertEqual(status, 200, more)

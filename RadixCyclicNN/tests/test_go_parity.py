@@ -157,6 +157,13 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual([t["repeat"] for t in a["turns"]], [t["repeat"] for t in b["turns"]])
         self.assertTrue(a["repeats"])
         self.assertEqual(a["repeats"], b["repeats"])
+        # and both know the same stutters, with the setting on and off
+        self.assertEqual([t["stutter"] for t in a["turns"]], [t["stutter"] for t in b["turns"]])
+        a = py("converse", "--turns", 40, "--allow-word-repeats", model=self.py_model)
+        b = go("converse", "--turns", 40, "--allow-word-repeats", model=self.go_model)
+        self.assertEqual(a["transcript"], b["transcript"])
+        self.assertEqual([t["stutter"] for t in a["turns"]], [t["stutter"] for t in b["turns"]])
+        self.assertEqual([t["repeat"] for t in a["turns"]], [t["repeat"] for t in b["turns"]])
 
     def test_each_side_loads_and_continues_the_other(self):
         # Python loads the Go file: same predictions as its own model

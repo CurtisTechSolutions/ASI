@@ -16,7 +16,9 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * the voice changes the subject with a fresh text. The second voice may be the
  * model of the other kind kept in memory. Turns can be rated like samples, and
  * the duplicates the model could not avoid are marked thumbs-down for the 2NRL
- * negative phase ("Punish duplicates"). New turns are appended to the top of
+ * negative phase ("Punish duplicates") - a reply that repeats its own words
+ * counts as one of those while "Avoid repeated words" is on. New turns are
+ * appended to the top of
  * the conversation and push the older ones down, so nothing has to scroll.
  */
 export default function ConversePanel({ status }) {
@@ -31,6 +33,7 @@ export default function ConversePanel({ status }) {
   const [speakerB, setSpeakerB] = useState("B");
   const [partner, setPartner] = useState("");
   const [punishRepeats, setPunishRepeats] = useState(true);
+  const [avoidWordRepeats, setAvoidWordRepeats] = useState(true);
   const [inMemory, setInMemory] = useState([]);
   const [transcript, setTranscript] = useState(null);
   const [guard, setGuard] = useState(true);
@@ -80,6 +83,7 @@ export default function ConversePanel({ status }) {
         k: parseInteger(k, 5),
         speakers,
         guard,
+        avoid_word_repeats: avoidWordRepeats,
         ...(partner ? { partner } : {}),
         ...(history.length ? { history } : opening.trim() ? { opening } : {}),
       });
@@ -173,6 +177,13 @@ export default function ConversePanel({ status }) {
           onChange={setGuard}
         />
         <CheckField
+          label="Avoid repeated words"
+          hint="skip a reply that says the same word or phrase twice in a row (“say morning morning”)"
+          checked={avoidWordRepeats}
+          onChange={setAvoidWordRepeats}
+          disabled={loading}
+        />
+        <CheckField
           label="Punish duplicates"
           hint="the repeats the model could not avoid are marked 👎 for the 2NRL negative phase"
           checked={punishRepeats}
@@ -223,6 +234,7 @@ export default function ConversePanel({ status }) {
                 t.given ? "given" : null,
                 t.fresh && !t.given ? "new topic" : null,
                 t.repeat ? "repeat" : null,
+                t.stutter ? "repeats itself" : null,
                 t.vetoed ? `${fmtInt(t.vetoed)} vetoed` : null,
               ].filter(Boolean);
               return (
@@ -230,7 +242,7 @@ export default function ConversePanel({ status }) {
                   <div className="speaker">
                     <b>{t.speaker}</b>
                     {flags.map((f) => (
-                      <span key={f} className={`badge${f === "repeat" ? " down" : ""}`}>
+                      <span key={f} className={`badge${f === "repeat" || f === "repeats itself" ? " down" : ""}`}>
                         {f}
                       </span>
                     ))}

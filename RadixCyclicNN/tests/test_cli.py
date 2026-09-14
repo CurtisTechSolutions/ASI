@@ -285,6 +285,22 @@ class TestInference(unittest.TestCase):
         self.assertIn("could only repeat - punish them (2NRL negative phase):", long)
         self.assertIn("radixnet feedback --bad-text ", long)
         self.assertIn("repeat]", long)
+        # a reply may not repeat its own words: only one that had to repeat something may stutter
+        strict = run_json("converse", "--opening", "the cat sat on the mat", "--turns", 25, model=MODEL)
+        self.assertFalse([t for t in strict["turns"] if t["stutter"] and not t["repeat"]])
+        # --allow-word-repeats lets a voice that can only stutter say it, flagged and unpunished
+        stutterer = os.path.join(TMP.name, "stutter.json")
+        corpus = os.path.join(TMP.name, "stutter.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write("ha ha ha ha ha\n")
+        run_json("train", "--data", corpus, "--epochs", 3, *FAST, model=stutterer)
+        loose = run_json("converse", "--turns", 4, "--allow-word-repeats", model=stutterer)
+        self.assertTrue(all(t["stutter"] and not t["repeat"] for t in loose["turns"]), loose["transcript"])
+        self.assertEqual(loose["repeats"], [])
+        human = run_cli("converse", "--turns", 4, "--allow-word-repeats", model=stutterer, json_mode=False).stdout
+        self.assertIn("repeats itself", human)
+        punished = run_json("converse", "--turns", 4, model=stutterer)
+        self.assertTrue(punished["repeats"])  # with the setting on they are repeats, and punished
         human = run_cli("converse", "--opening", "the cat sat on the mat", "--turns", 2, model=MODEL, json_mode=False).stdout
         self.assertIn("A: the cat sat on the mat", human)
         self.assertIn("[given]", human)

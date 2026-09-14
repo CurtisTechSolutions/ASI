@@ -13,6 +13,7 @@ from radixnet.dialogue import (  # noqa: E402
     converse,
     normalize,
     repeats,
+    stutter,
     tail_context,
     transcript,
 )
@@ -61,8 +62,29 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(d["speaker"], "A")
         self.assertEqual(set(d), {
             "index", "speaker", "text", "context", "reply", "cost", "probability", "reached_end", "fresh", "given",
-            "repeat", "candidates", "skipped", "vetoed", "labels", "node_ids", "step_costs",
+            "repeat", "stutter", "candidates", "skipped", "vetoed", "labels", "node_ids", "step_costs",
         })
+
+
+class TestStutter(unittest.TestCase):
+    """A run of words repeated immediately after itself - and only that."""
+
+    def test_a_run_said_twice_in_a_row_is_a_stutter(self):
+        self.assertEqual(stutter("the the west"), "the")
+        self.assertEqual(stutter("say morning morning"), "morning")
+        self.assertEqual(stutter("the cat the cat sat"), "the cat")
+        self.assertEqual(stutter("The  The"), "the")  # whitespace and case aside
+
+    def test_words_that_come_back_later_are_not_a_stutter(self):
+        for line in ("the cat sat on the mat", "where there is a will there is a way",
+                     "a bird in the hand is worth two in the bush", "blowers blower", "park", ""):
+            self.assertEqual(stutter(line), "", line)
+
+    def test_only_a_run_up_to_longest_counts(self):
+        line = "the cat sat on the mat the cat sat on the mat"
+        self.assertEqual(stutter(line), "")  # six words twice over: past the default
+        self.assertEqual(stutter(line, longest=6), "the cat sat on the mat")
+        self.assertEqual(stutter("the the west", longest=0), "")
 
 
 class TestHeard(unittest.TestCase):
@@ -258,10 +280,41 @@ class TestConverse(unittest.TestCase):
 
     def test_repeats_are_allowed_on_request(self):
         strict = converse(self.model, "the cat", turns=8)
-        loose = converse(self.model, "the cat", turns=8, avoid_repeats=False)
+        loose = converse(self.model, "the cat", turns=8, avoid_repeats=False, avoid_word_repeats=False)
         self.assertEqual(len({normalize(t.text) for t in strict}), len(strict))
         self.assertEqual(len(loose), 9)
         self.assertFalse(any(t.repeat for t in loose))  # nothing is *marked* a repeat when repeats are fine
+
+    def test_a_reply_never_repeats_its_own_words(self):
+        turns = converse(self.model, "the cat sat on the mat", turns=25)
+        for turn in turns:
+            if not turn.repeat:  # a turn that had to repeat may stutter; one that had a choice may not
+                self.assertEqual(stutter(turn.text), "", turn.text)
+                self.assertFalse(turn.stutter, turn.text)
+        # with the setting off the stutters come back, flagged but unpunished
+        loose = converse(self.model, "the cat sat on the mat", turns=25, avoid_word_repeats=False)
+        stutters = [t for t in loose if t.stutter]
+        self.assertTrue(stutters, [t.text for t in loose])
+        for turn in stutters:
+            self.assertTrue(stutter(turn.text), turn.text)
+            self.assertFalse(turn.repeat, turn.text)  # it was spoken by choice, not as a last resort
+            self.assertNotIn(turn.text, repeats(loose))
+
+    def test_a_voice_that_can_only_stutter_is_punished(self):
+        model = new_model("radix", seed=3)
+        model.train(["ha ha ha ha ha"], epochs=3, **FAST)  # everything it can say says "ha" twice
+        turns = converse(model, turns=4)
+        self.assertTrue(turns)
+        for turn in turns:
+            self.assertTrue(turn.repeat, turn.text)  # nothing it could say repeated nothing
+            self.assertEqual(turn.stutter, bool(stutter(turn.text)), turn.text)
+        self.assertTrue(any(t.stutter for t in turns), [t.text for t in turns])
+        self.assertEqual(repeats(turns), [t.text for t in turns])  # every one of them is punished
+        # allowed instead: spoken freely, flagged for what they are, and punished for nothing
+        loose = converse(model, turns=4, avoid_word_repeats=False)
+        self.assertEqual(len(loose), 4)
+        self.assertTrue(all(t.stutter and not t.repeat for t in loose), [t.text for t in loose])
+        self.assertEqual(repeats(loose), [])
 
     def test_empty_model_has_nothing_to_say(self):
         empty = new_model("radix")

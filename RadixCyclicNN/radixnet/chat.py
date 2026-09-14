@@ -102,6 +102,8 @@ class ChatConfig:
     """Put the partner's own lines in the positive phase: they are what a good reply looked like."""
     avoid_repeats: bool = True
     """Do not let the model say something the conversation has already heard."""
+    avoid_word_repeats: bool = True
+    """Do not let one reply repeat its own words (a stutter: "say morning morning")."""
     neg_epochs: int = 2
     pos_epochs: int = 3
     neg_lr: float = 0.5
@@ -251,7 +253,7 @@ class Chat:
             turn = reply(
                 self.model, line, heard=heard, index=len(transcript), speaker=DEFAULT_SPEAKERS[1], mode=cfg.mode,
                 max_length=cfg.max_length, context=cfg.context, temperature=cfg.temperature, k=cfg.k, rng=rng,
-                avoid_repeats=cfg.avoid_repeats, veto=veto,
+                avoid_repeats=cfg.avoid_repeats, avoid_word_repeats=cfg.avoid_word_repeats, veto=veto,
             )
             if turn is None:
                 # the guard can silence it outright, and that is worth saying

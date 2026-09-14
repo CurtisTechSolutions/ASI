@@ -21,6 +21,7 @@ type Turn struct {
 	Fresh       bool      `json:"fresh"`
 	Given       bool      `json:"given"`
 	Repeat      bool      `json:"repeat"`
+	Stutter     bool      `json:"stutter"`
 	Candidates  int       `json:"candidates"`
 	Skipped     int       `json:"skipped"`
 	Vetoed      int       `json:"vetoed"`
@@ -49,6 +50,40 @@ func TailContext(text string, chars int) string {
 
 // Normalize is the key two utterances are compared by.
 func Normalize(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
+
+// LongestStutter is how long a run may be for Stutter to call its immediate
+// repetition a stutter.
+const LongestStutter = 4
+
+// Stutter is the words an utterance says twice in a row, or "" when it says
+// each thing once.  A stutter is a run of one to longest words repeated
+// immediately after itself - "the the west", "say morning morning", "the cat
+// the cat sat" - the shape a cyclic graph falls into when it walks a loop
+// instead of going somewhere.  Words that come back later in the line are not
+// a stutter: "where there is a will there is a way" says its words again, and
+// says something with them.
+func Stutter(text string, longest int) string {
+	words := strings.Fields(Normalize(text))
+	for i := range words {
+		limit := (len(words) - i) / 2
+		if limit > longest {
+			limit = longest
+		}
+		for run := 1; run <= limit; run++ {
+			same := true
+			for j := 0; j < run; j++ {
+				if words[i+j] != words[i+run+j] {
+					same = false
+					break
+				}
+			}
+			if same {
+				return strings.Join(words[i:i+run], " ")
+			}
+		}
+	}
+	return ""
+}
 
 // Transcript renders "speaker: text" lines.
 func Transcript(turns []*Turn) string {
@@ -143,6 +178,8 @@ type ConverseOptions struct {
 	History      []string
 	Partner      *Model
 	AvoidRepeats bool
+	// AvoidWordRepeats keeps a reply from repeating its own words (a Stutter).
+	AvoidWordRepeats bool
 	// Veto is what a voice may not say: true for a candidate the speaker must
 	// not speak.  The conversation knows nothing about why - Filter.Converse
 	// passes its own judgement in (the negative network guarding the positive
@@ -153,7 +190,8 @@ type ConverseOptions struct {
 
 // DefaultConverseOptions mirror the Python defaults.
 func DefaultConverseOptions() ConverseOptions {
-	return ConverseOptions{Turns: 6, Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1.0, K: 5, Speakers: DefaultSpeakers, AvoidRepeats: true}
+	return ConverseOptions{Turns: 6, Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1.0, K: 5,
+		Speakers: DefaultSpeakers, AvoidRepeats: true, AvoidWordRepeats: true}
 }
 
 func shorter(context string) string {
@@ -185,12 +223,13 @@ func (m *Model) candidates(context, mode string, k, beam, maxLength int, stepPen
 }
 
 // pick returns the first candidate that adds something, is not vetoed and
-// (when asked) does not duplicate what the conversation has heard.  When they
-// all duplicate it, the best duplicate is the fallback - the cheapest one that
-// was never said word for word, else the cheapest of all - and speaking it
-// flags the turn a repeat.  A vetoed candidate is never the fallback - that is
-// the whole point of the veto.
-func pick(cands []*PathResult, heard *Heard, avoidRepeats bool, veto func(string) bool) (*PathResult, int, bool, int) {
+// repeats nothing - neither what the conversation has heard (avoidRepeats) nor
+// its own words (avoidWordRepeats: a Stutter).  When they all repeat
+// something, the best of them is the fallback - the cheapest one that was
+// never said word for word, else the cheapest of all - and speaking it flags
+// the turn a repeat.  A vetoed candidate is never the fallback - that is the
+// whole point of the veto.
+func pick(cands []*PathResult, heard *Heard, avoidRepeats bool, veto func(string) bool, avoidWordRepeats bool) (*PathResult, int, bool, int) {
 	skipped, vetoed := 0, 0
 	var fallback *PathResult
 	fallbackWordForWord := true
@@ -204,7 +243,8 @@ func pick(cands []*PathResult, heard *Heard, avoidRepeats bool, veto func(string
 			skipped++
 			continue
 		}
-		if avoidRepeats && heard.Duplicate(c.FullText, c.Text) {
+		heardBefore := avoidRepeats && heard.Duplicate(c.FullText, c.Text)
+		if heardBefore || (avoidWordRepeats && Stutter(c.FullText, LongestStutter) != "") {
 			wordForWord := heard.said[Normalize(c.FullText)]
 			if fallback == nil || (fallbackWordForWord && !wordForWord) {
 				fallback, fallbackWordForWord = c, wordForWord
@@ -275,7 +315,7 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 			Heard: heard, Index: index, Speaker: speakers[index%len(speakers)], Mode: mode,
 			MaxLength: opts.MaxLength, Context: opts.Context, Temperature: opts.Temperature, K: opts.K,
 			Beam: opts.Beam, StepPenalty: opts.StepPenalty, RNG: rng, AvoidRepeats: opts.AvoidRepeats,
-			Veto: opts.Veto,
+			AvoidWordRepeats: opts.AvoidWordRepeats, Veto: opts.Veto,
 		})
 		if err != nil {
 			return nil, err
@@ -317,6 +357,8 @@ type ReplyOptions struct {
 	StepPenalty  float64
 	RNG          *MT19937
 	AvoidRepeats bool
+	// AvoidWordRepeats keeps a reply from repeating its own words (a Stutter).
+	AvoidWordRepeats bool
 	// Veto is what the speaker may not say (see ConverseOptions.Veto).
 	Veto func(string) bool
 }
@@ -324,7 +366,7 @@ type ReplyOptions struct {
 // DefaultReplyOptions mirror the Python defaults.
 func DefaultReplyOptions() ReplyOptions {
 	return ReplyOptions{Speaker: "B", Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1, K: 5,
-		AvoidRepeats: true}
+		AvoidRepeats: true, AvoidWordRepeats: true}
 }
 
 // Reply is what this model says next after previous - one turn, or nil when it
@@ -374,7 +416,7 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 				}
 				offered += len(cands)
 				var dropped, refused int
-				spoken, dropped, repeat, refused = pick(cands, heard, o.AvoidRepeats, o.Veto)
+				spoken, dropped, repeat, refused = pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
 				skipped += dropped
 				vetoed += refused
 				if spoken != nil && !repeat {
@@ -398,7 +440,7 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 			}
 			offered += len(cands)
 			var dropped, refused int
-			freshPick, dropped, freshRepeat, refused = pick(cands, heard, o.AvoidRepeats, o.Veto)
+			freshPick, dropped, freshRepeat, refused = pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
 			skipped += dropped
 			vetoed += refused
 			if freshPick != nil && !freshRepeat {
@@ -418,7 +460,8 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 	}
 	return &Turn{Index: o.Index, Speaker: speaker, Text: text, Context: ctx, Reply: spoken.Text,
 		Cost: spoken.Cost, Probability: spoken.Probability(), ReachedEnd: spoken.ReachedEnd, Fresh: ctx == "",
-		Repeat: repeat, Candidates: offered, Skipped: skipped, Vetoed: vetoed,
+		Repeat: repeat, Stutter: Stutter(text, LongestStutter) != "",
+		Candidates: offered, Skipped: skipped, Vetoed: vetoed,
 		Labels: append([]string(nil), spoken.Labels...), NodeIDs: append([]int(nil), spoken.NodeIDs...),
 		StepCosts: append([]float64(nil), spoken.StepCosts...)}, nil
 }

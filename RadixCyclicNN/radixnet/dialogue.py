@@ -9,7 +9,9 @@ the other's last words and carries on from them.  ``"beam"`` offers the
 heard yet is spoken - a conversation that never repeats itself, and a
 deterministic one.  An utterance counts as heard when it was said before,
 when it adds the words some earlier reply already added (after a different
-context), or when it is a mere echo (a piece of a line already spoken);
+context), or when it is a mere echo (a piece of a line already spoken); a
+reply that repeats itself - the same run of words twice in a row, "say
+morning morning" - is skipped the same way;
 ``"sample"`` draws stochastic walks.  When nothing follows the tail of a
 line, or the graph only knows part of its last word, the context is
 shortened a word at a time (what else could follow "on the"?) and, if the
@@ -23,6 +25,11 @@ only go round in circles, so the conversation ends there instead.
 :func:`repeats` collects the utterances spoken twice so they can be punished
 (the thumbs down of the Converse tab, the 2NRL negative phase), which is how
 the model is taught out of the duplicates it cannot avoid by itself.
+
+Both kinds of repetition are settings: ``avoid_repeats`` for what the
+conversation has already heard, ``avoid_word_repeats`` for what one utterance
+says twice in a row.  With a setting off that kind is neither skipped nor
+flagged, and so is never punished.
 """
 
 from __future__ import annotations
@@ -63,7 +70,8 @@ class Turn:
     reached_end: bool = False
     fresh: bool = False  # spoken from START: the opening, or nothing followed the previous line
     given: bool = False  # supplied by the caller (the opening), not generated
-    repeat: bool = False  # every candidate had been said before; the best one was spoken anyway
+    repeat: bool = False  # every candidate repeated something; the best one was spoken anyway
+    stutter: bool = False  # the utterance says the same run of words twice in a row ("say morning morning")
     candidates: int = 0  # continuations the search offered for this turn
     skipped: int = 0  # candidates rejected (empty, or already said) before the spoken one
     vetoed: int = 0  # candidates the guard (the negative network) refused for this turn
@@ -84,6 +92,7 @@ class Turn:
             "fresh": self.fresh,
             "given": self.given,
             "repeat": self.repeat,
+            "stutter": self.stutter,
             "candidates": self.candidates,
             "skipped": self.skipped,
             "vetoed": self.vetoed,
@@ -112,6 +121,26 @@ def normalize(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
+LONGEST_STUTTER = 4
+"""Words a run may be long for :func:`stutter` to call its immediate repetition a stutter."""
+
+
+def stutter(text: str, longest: int = LONGEST_STUTTER) -> str:
+    """The words an utterance says twice in a row, or ``""`` when it says each thing once.
+
+    A *stutter* is a run of one to ``longest`` words repeated immediately after itself - "the **the** west",
+    "say morning **morning**", "**the cat** the cat sat" - the shape a cyclic graph falls into when it walks a
+    loop instead of going somewhere.  Words that come back later in the line are not a stutter: "where there is
+    a will there is a way" says its words again, and says something with them.
+    """
+    words = normalize(text).split()
+    for i in range(len(words)):
+        for run in range(1, min(longest, (len(words) - i) // 2) + 1):
+            if words[i:i + run] == words[i + run:i + 2 * run]:
+                return " ".join(words[i:i + run])
+    return ""
+
+
 def transcript(turns: Sequence[Turn]) -> str:
     """``speaker: text`` lines."""
     return "\n".join(f"{t.speaker}: {t.text}" for t in turns)
@@ -121,6 +150,8 @@ def repeats(turns: Sequence[Turn]) -> list[str]:
     """The duplicates a conversation could not avoid: the utterances of the turns flagged ``repeat``, each once.
 
     These are the texts to punish - the thumbs down of a 2NRL negative phase - so the model stops offering them.
+    An utterance that repeats its own words is among them when ``avoid_word_repeats`` was on: every candidate
+    then repeated something, and the one spoken anyway carries the flag like any other.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -213,11 +244,13 @@ def _candidates(
 
 def _pick(
     candidates: Sequence[PathResult], heard: Heard, avoid_repeats: bool, veto: "Veto | None" = None,
+    avoid_word_repeats: bool = True,
 ) -> tuple[PathResult | None, int, bool, int]:
-    """``(candidate, skipped, repeat, vetoed)``: the first candidate that adds something, is not vetoed and (when
-    asked) does not duplicate what the conversation has heard.
+    """``(candidate, skipped, repeat, vetoed)``: the first candidate that adds something, is not vetoed and
+    repeats nothing - neither what the conversation has heard (``avoid_repeats``) nor its own words
+    (``avoid_word_repeats``: a :func:`stutter`).
 
-    When they all duplicate it, the best duplicate is the fallback - the cheapest one that was never said word
+    When they all repeat something, the best of them is the fallback - the cheapest one that was never said word
     for word (an echo says at least something new about where the voice is), else the cheapest of all; speaking
     it flags the turn a ``repeat``.  A vetoed candidate is never the fallback - that is the whole point of the
     veto.
@@ -233,7 +266,8 @@ def _pick(
             vetoed += 1
             skipped += 1
             continue
-        if avoid_repeats and heard.duplicate(cand.full_text, cand.text):
+        heard_before = avoid_repeats and heard.duplicate(cand.full_text, cand.text)
+        if heard_before or (avoid_word_repeats and stutter(cand.full_text)):
             word_for_word = normalize(cand.full_text) in heard.said
             if fallback is None or (fallback_word_for_word and not word_for_word):
                 fallback, fallback_word_for_word = cand, word_for_word
@@ -271,6 +305,7 @@ def converse(
     history: Sequence[str] = (),
     partner: "GraphModel | None" = None,
     avoid_repeats: bool = True,
+    avoid_word_repeats: bool = True,
     veto: Veto | None = None,
 ) -> list[Turn]:
     """``model`` talks to itself (or to ``partner``) for ``turns`` new turns.
@@ -287,6 +322,8 @@ def converse(
     * ``partner`` - a second model speaking the even-numbered voice (``speakers[1]``); default the same model.
     * ``avoid_repeats`` - skip the candidates that duplicate the conversation (:class:`Heard`: an utterance
       said before, a reply adding what an earlier reply added, an echo of a line already spoken).
+    * ``avoid_word_repeats`` - skip the candidates that repeat themselves: a :func:`stutter`, the same run of
+      words twice in a row inside the one utterance.
     * ``veto`` - a candidate the voice may not speak (the guard: see :data:`Veto`).  A turn whose every
       candidate is vetoed falls back like any other dead end - a shorter context, then a fresh text - and the
       conversation stops when there is nothing left that may be said.
@@ -332,7 +369,7 @@ def converse(
             voice, said_list[-1] if said_list else "", heard=heard, index=index,
             speaker=speakers[index % len(speakers)], mode=mode, max_length=max_length, context=context,
             temperature=temperature, k=k, beam=beam, step_penalty=step_penalty, rng=rng,
-            avoid_repeats=avoid_repeats, veto=veto,
+            avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, veto=veto,
         )
         if turn is None:
             break
@@ -363,6 +400,7 @@ def reply(
     step_penalty: float = 0.0,
     rng: random.Random | None = None,
     avoid_repeats: bool = True,
+    avoid_word_repeats: bool = True,
     veto: Veto | None = None,
 ) -> Turn | None:
     """What ``voice`` says next after ``previous`` - one turn, or ``None`` when it has nothing to say.
@@ -372,9 +410,10 @@ def reply(
     (``mode``), the context loses a word at a time while nothing follows it,
     and a voice with nothing left to add changes the subject with a fresh text
     from START.  ``heard`` is what the conversation has already heard (so a
-    reply does not duplicate it - :class:`Heard`) and ``veto`` what the speaker
-    may not say.  Remember the turn in ``heard`` before asking for the next one,
-    or the same reply comes back.
+    reply does not duplicate it - :class:`Heard`), ``avoid_word_repeats``
+    whether a reply may repeat its own words (a :func:`stutter`) and ``veto``
+    what the speaker may not say.  Remember the turn in ``heard`` before asking
+    for the next one, or the same reply comes back.
 
     It is public because the other voice need not be a model at all: the chat
     loop (:mod:`radixnet.chat`) has an LLM speak every other line and calls
@@ -395,7 +434,7 @@ def reply(
             for _draw in range(draws):
                 cands = _candidates(voice, ctx, mode, k, beam, max_length, step_penalty, temperature, rng)
                 offered += len(cands)
-                spoken, dropped, repeat, refused = _pick(cands, heard, avoid_repeats, veto)
+                spoken, dropped, repeat, refused = _pick(cands, heard, avoid_repeats, veto, avoid_word_repeats)
                 skipped += dropped
                 vetoed += refused
                 if spoken is not None and not repeat:
@@ -410,7 +449,7 @@ def reply(
         for _draw in range(draws):
             cands = _candidates(voice, "", mode, k, beam, max_length, step_penalty, temperature, rng)
             offered += len(cands)
-            fresh_pick, dropped, fresh_repeat, refused = _pick(cands, heard, avoid_repeats, veto)
+            fresh_pick, dropped, fresh_repeat, refused = _pick(cands, heard, avoid_repeats, veto, avoid_word_repeats)
             skipped += dropped
             vetoed += refused
             if fresh_pick is not None and not fresh_repeat:
@@ -419,10 +458,12 @@ def reply(
             spoken, repeat, ctx = fresh_pick, fresh_repeat, ""
     if spoken is None:
         return None
+    text = spoken.full_text if ctx else spoken.text
     return Turn(
-        index=index, speaker=speaker, text=spoken.full_text if ctx else spoken.text, context=ctx,
+        index=index, speaker=speaker, text=text, context=ctx,
         reply=spoken.text, cost=spoken.cost, probability=path_probability(spoken),
-        reached_end=spoken.reached_end, fresh=not ctx, repeat=repeat, candidates=offered, skipped=skipped,
+        reached_end=spoken.reached_end, fresh=not ctx, repeat=repeat, stutter=bool(stutter(text)),
+        candidates=offered, skipped=skipped,
         vetoed=vetoed, labels=list(spoken.labels), node_ids=list(spoken.node_ids),
         step_costs=list(spoken.step_costs),
     )

@@ -157,6 +157,7 @@ func chatConfigFrom(rq *request) (radixnet.ChatConfig, error) {
 	}{
 		{"guard", &cfg.Guard}, {"blame", &cfg.Blame}, {"clear_passes", &cfg.ClearPasses},
 		{"learn", &cfg.Learn}, {"teach_partner", &cfg.TeachPartner}, {"avoid_repeats", &cfg.AvoidRepeats},
+		{"avoid_word_repeats", &cfg.AvoidWordRepeats},
 	} {
 		if *field.into, err = rq.f.flag(field.name, *field.into); err != nil {
 			return cfg, err

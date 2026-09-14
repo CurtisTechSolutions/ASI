@@ -426,6 +426,82 @@ func TestConverse(t *testing.T) {
 	}
 }
 
+// A run of words repeated immediately after itself - and only that.
+func TestStutter(t *testing.T) {
+	for line, want := range map[string]string{
+		"the the west":                                "the",
+		"say morning morning":                         "morning",
+		"the cat the cat sat":                         "the cat",
+		"The  The":                                    "the", // whitespace and case aside
+		"the cat sat on the mat":                      "",
+		"where there is a will there is a way":        "",
+		"a bird in the hand is worth two in the bush": "",
+		"blowers blower":                              "",
+		"park":                                        "",
+		"":                                            "",
+	} {
+		if got := Stutter(line, LongestStutter); got != want {
+			t.Fatalf("Stutter(%q) = %q; want %q", line, got, want)
+		}
+	}
+	long := "the cat sat on the mat the cat sat on the mat"
+	if got := Stutter(long, LongestStutter); got != "" { // six words twice over: past the default
+		t.Fatalf("Stutter(%q) = %q", long, got)
+	}
+	if got := Stutter(long, 6); got != "the cat sat on the mat" {
+		t.Fatalf("Stutter(%q, 6) = %q", long, got)
+	}
+	if got := Stutter("the the west", 0); got != "" {
+		t.Fatalf("Stutter with no run allowed = %q", got)
+	}
+}
+
+// A voice that can only repeat its own words: punished, or allowed to say them on request.
+func TestConverseWordRepeats(t *testing.T) {
+	m, err := NewModel(3, DefaultGraphOptions())
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if _, err := m.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	opts := DefaultConverseOptions()
+	opts.Turns = 4
+	turns, err := m.Converse("", opts)
+	if err != nil || len(turns) == 0 {
+		t.Fatalf("converse: %v %d", err, len(turns))
+	}
+	stutters := 0
+	for _, tr := range turns {
+		if !tr.Repeat { // nothing it could say repeated nothing
+			t.Fatalf("turn %q was not flagged a repeat", tr.Text)
+		}
+		if tr.Stutter != (Stutter(tr.Text, LongestStutter) != "") {
+			t.Fatalf("turn %q: stutter = %v", tr.Text, tr.Stutter)
+		}
+		if tr.Stutter {
+			stutters++
+		}
+	}
+	if stutters == 0 || len(Repeats(turns)) != len(turns) {
+		t.Fatalf("%d stutters, %d punished of %d turns", stutters, len(Repeats(turns)), len(turns))
+	}
+	// allowed instead: spoken freely, flagged for what they are, and punished for nothing
+	opts.AvoidWordRepeats = false
+	loose, err := m.Converse("", opts)
+	if err != nil || len(loose) != opts.Turns {
+		t.Fatalf("converse: %v %d", err, len(loose))
+	}
+	for _, tr := range loose {
+		if !tr.Stutter || tr.Repeat {
+			t.Fatalf("turn %q: stutter = %v, repeat = %v", tr.Text, tr.Stutter, tr.Repeat)
+		}
+	}
+	if got := Repeats(loose); len(got) != 0 {
+		t.Fatalf("nothing should be punished: %q", got)
+	}
+}
+
 // What counts as a duplicate, and what a conversation does with the ones it cannot avoid.
 func TestHeardAndRepeats(t *testing.T) {
 	heard := NewHeard([]string{"the cat sat on the mat"})

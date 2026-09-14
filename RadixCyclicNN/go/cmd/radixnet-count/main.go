@@ -837,6 +837,7 @@ func cmdConverse(args []string) {
 	speakers := fs.String("speakers", "A,B", "names of the voices")
 	partner := fs.String("partner", "", "a second model file that speaks the second voice")
 	allowRepeats := fs.Bool("allow-repeats", false, "do not skip continuations already heard")
+	allowWordRepeats := fs.Bool("allow-word-repeats", false, "do not skip a reply that repeats its own words")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
@@ -844,6 +845,7 @@ func cmdConverse(args []string) {
 	opts := radixnet.DefaultConverseOptions()
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
+	opts.AvoidWordRepeats = !*allowWordRepeats
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -906,6 +908,9 @@ func cmdConverse(args []string) {
 		}
 		if t.Repeat {
 			flags = append(flags, "repeat")
+		}
+		if t.Stutter {
+			flags = append(flags, "repeats itself")
 		}
 		if t.Vetoed > 0 {
 			flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))

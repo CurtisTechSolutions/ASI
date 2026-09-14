@@ -37,6 +37,7 @@ func cmdChat(args []string) {
 	judgeURL := fs.String("judge-url", "", "base URL of the judge (default: -url)")
 	timeout := fs.Float64("timeout", 0, "per-request timeout in seconds")
 	allowRepeats := fs.Bool("allow-repeats", false, "let the model say something already heard")
+	allowWordRepeats := fs.Bool("allow-word-repeats", false, "let a reply repeat its own words")
 	noGuard := fs.Bool("no-guard", false, "do not let the negative network veto a reply before it is spoken")
 	noBlame := fs.Bool("no-blame", false, "do not blame the failed replies")
 	noClear := fs.Bool("no-clear", false, "do not let the passed replies clear blame")
@@ -56,6 +57,7 @@ func cmdChat(args []string) {
 	cfg.Provider, cfg.PartnerModel, cfg.JudgeModel = *provider, *partnerModel, *judgeModel
 	cfg.Guard, cfg.Blame, cfg.ClearPasses = !*noGuard, !*noBlame, !*noClear
 	cfg.Learn, cfg.TeachPartner, cfg.AvoidRepeats = !*noLearn, !*noTeachPartner, !*allowRepeats
+	cfg.AvoidWordRepeats = !*allowWordRepeats
 	cfg.Epochs, cfg.NegEpochs, cfg.PosEpochs, cfg.Strength = *epochs, *negEpochs, *posEpochs, *strength
 	seed := seedFlag
 	cfg.Seed = &seed

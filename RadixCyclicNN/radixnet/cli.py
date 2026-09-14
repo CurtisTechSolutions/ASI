@@ -866,7 +866,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
     options = dict(
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
-        avoid_repeats=not args.allow_repeats,
+        avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
     )
     guard: dict | None = None
     if pair is None:
@@ -877,7 +877,8 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         turns = outcome["turns"]
         guard = _guard_doc(pair, outcome["verdicts"], refusals=outcome["vetoed"])
     for turn in turns:
-        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given), ("repeat", turn.repeat)) if on]
+        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given),
+                                 ("repeat", turn.repeat), ("repeats itself", turn.stutter)) if on]
         if turn.vetoed:
             flags.append(f"{turn.vetoed} vetoed")
         console.say(f"{turn.speaker}: {turn.text}")
@@ -1951,7 +1952,8 @@ def cmd_chat(args: argparse.Namespace, console: Console) -> dict:
         provider=args.provider, partner_model=args.partner_model or args.ollama_model or "",
         judge_model=args.judge_model or "", guard=not args.no_guard, blame=not args.no_blame,
         clear_passes=not args.no_clear, learn=not args.no_learn, teach_partner=not args.no_teach_partner,
-        avoid_repeats=not args.allow_repeats, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs,
+        avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
+        neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs,
         neg_lr=args.neg_lr, pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
         epochs=args.epochs, seed=effective_seed(args),
     )
@@ -3502,6 +3504,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speakers", default=",".join(DEFAULT_SPEAKERS), metavar="A,B", help="names of the voices")
     p.add_argument("--partner", metavar="FILE", help="a second model file that speaks the second voice")
     p.add_argument("--allow-repeats", action="store_true", help="do not skip continuations the conversation already heard")
+    p.add_argument("--allow-word-repeats", action="store_true",
+                   help="do not skip a reply that repeats its own words (\"say morning morning\")")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 
@@ -3537,6 +3541,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-url", metavar="URL", help="base URL of the judge (default: --url)")
     p.add_argument("--timeout", type=nonneg_float, metavar="SECONDS", help="per-request timeout")
     p.add_argument("--allow-repeats", action="store_true", help="let the model say something already heard")
+    p.add_argument("--allow-word-repeats", action="store_true",
+                   help="let a reply repeat its own words (\"say morning morning\")")
     p.add_argument("--no-guard", action="store_true",
                    help="do not let the negative network veto a reply before it is spoken")
     p.add_argument("--no-blame", action="store_true", help="do not blame the failed replies")

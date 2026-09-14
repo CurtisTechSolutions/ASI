@@ -18,7 +18,9 @@ const isObject = (value) => Boolean(value) && typeof value === "object";
  * whole. What failed blames the negative network, what passed clears it, and
  * 2NRL trains the model on both, with the partner's own lines joining the
  * positive phase: they are what a good reply here would have looked like. A
- * reply the model could only repeat is punished whatever the judge made of it.
+ * reply the model could only repeat is punished whatever the judge made of it,
+ * and with "Avoid repeated words" on that includes a reply repeating its own
+ * words.
  *
  * The transcript reads newest first: a new exchange is appended to the top and
  * pushes the older ones down, so the latest reply is where the eye already is
@@ -38,6 +40,7 @@ export default function ChatPanel({ status }) {
   const [partnerModel, setPartnerModel] = useState("");
   const [url, setUrl] = useState("");
   const [guard, setGuard] = useState(true);
+  const [avoidWordRepeats, setAvoidWordRepeats] = useState(true);
   const [blame, setBlame] = useState(true);
   const [learn, setLearn] = useState(true);
   const [teachPartner, setTeachPartner] = useState(true);
@@ -88,6 +91,7 @@ export default function ChatPanel({ status }) {
         threshold: parseNumber(threshold, 6),
         provider,
         guard,
+        avoid_word_repeats: avoidWordRepeats,
         blame,
         learn,
         teach_partner: teachPartner,
@@ -145,6 +149,8 @@ export default function ChatPanel({ status }) {
           <CheckField label="Train on the marks" checked={learn} onChange={setLearn} disabled={running} hint="2NRL" />
           <CheckField label="Learn the partner's lines too" checked={teachPartner} onChange={setTeachPartner}
                       disabled={running || !learn} />
+          <CheckField label="Avoid repeated words" checked={avoidWordRepeats} onChange={setAvoidWordRepeats}
+                      disabled={running} hint="a reply may not say the same word or phrase twice in a row" />
         </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={running || busy || otherJobRunning}>
@@ -192,6 +198,7 @@ export default function ChatPanel({ status }) {
                       <b>Model</b>
                       {r.fresh ? <span className="badge">new topic</span> : null}
                       {r.repeat ? <span className="badge down">repeat</span> : null}
+                      {r.stutter ? <span className="badge down">repeats itself</span> : null}
                       {r.vetoed ? <span className="badge down">{fmtInt(r.vetoed)} vetoed</span> : null}
                       {mark ? (
                         <span className={`badge ${mark.verdict === "pass" ? "pass" : "fail"}`}>

@@ -12,14 +12,15 @@ The Converse panel (`POST /api/converse`) lets the model talk to itself in a
 chat view that reads newest first: a new turn is appended to the top and pushes
 the older ones down, so the latest reply is where the eye already is and nothing
 has to be scrolled to. The search skips the replies the conversation has already
-heard; the duplicates it could not avoid come back flagged, and "Punish
+heard and, while "Avoid repeated words" is on, the ones that say the same words
+twice in a row; the duplicates it could not avoid come back flagged, and "Punish
 duplicates" marks them 👎 so "Train on ratings" runs the 2NRL negative phase on
 them.
 
 The Chat panel (`POST /api/chat/start`) has an LLM converse with the model and
-mark every reply; its transcript reads newest first as well, and a reply the
-model could only repeat is punished with the failures whatever the judge made
-of it.
+mark every reply; its transcript reads newest first as well, it has the same
+"Avoid repeated words" setting, and a reply the model could only repeat is
+punished with the failures whatever the judge made of it.
 
 The Ollama panel talks to a local Ollama server through the API
 (`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`).

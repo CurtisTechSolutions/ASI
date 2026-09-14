@@ -2313,6 +2313,7 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         speakers=f.names("speakers") or list(DEFAULT_SPEAKERS),
         history=f.texts_optional("history", "history_text"),
         avoid_repeats=f.flag("avoid_repeats", True),
+        avoid_word_repeats=f.flag("avoid_word_repeats", True),
     )
 
 
@@ -2569,6 +2570,7 @@ def _chat_config(f: Fields) -> Any:
         learn=f.flag("learn", d.learn),
         teach_partner=f.flag("teach_partner", d.teach_partner),
         avoid_repeats=f.flag("avoid_repeats", d.avoid_repeats),
+        avoid_word_repeats=f.flag("avoid_word_repeats", d.avoid_word_repeats),
         neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
         pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
         neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
@@ -3614,7 +3616,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
-     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats, "
+     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats "
+     "(what the conversation has heard), avoid_word_repeats (a reply repeating its own words), "
      "guard (default on: a reply the negative network vetoes is left unsaid)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
@@ -3665,7 +3668,7 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "partner_temperature, threshold, provider: ollama|chatgpt, partner_model, judge_model, url, judge_url, "
      "timeout, guard (the negative network vetoes a reply before it is spoken), blame, clear_passes, learn "
      "(2NRL on the marked replies), teach_partner (the partner's own lines join the positive phase), "
-     "avoid_repeats, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size, strength, epochs, seed}"),
+     "avoid_repeats, avoid_word_repeats, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size, strength, epochs, seed}"),
     ("GET", "/api/chat/history", _r_chat_history,
      "exchange / conversation / report records of all chat runs"),
     ("POST", "/api/negative/auto", _r_negative_auto,
