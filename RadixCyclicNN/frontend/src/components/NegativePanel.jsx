@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, fmtTime, parseInteger, parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
+import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
 
 const DECISION_CLASS = { reject: "fail", suspect: "unrated", pass: "pass" };
@@ -87,6 +89,18 @@ export default function NegativePanel({ status }) {
   const [candidates, setCandidates] = useState("");
   const [filtered, setFiltered] = useState(null);
 
+  // automatic (the reviewer on a loop)
+  const [autoRounds, setAutoRounds] = useState("3");
+  const [autoCount, setAutoCount] = useState("8");
+  const [autoLength, setAutoLength] = useState("60");
+  const [autoThreshold, setAutoThreshold] = useState("6");
+  const [autoContext, setAutoContext] = useState("");
+  const [autoProvider, setAutoProvider] = useState("ollama");
+  const [autoModel, setAutoModel] = useState("");
+  const [autoUrl, setAutoUrl] = useState("");
+  const [autoClear, setAutoClear] = useState(true);
+  const [autoHistory, setAutoHistory] = useState([]);
+
   // judge / teach
   const [judgeText, setJudgeText] = useState("");
   const [verdicts, setVerdicts] = useState([]);
@@ -97,6 +111,9 @@ export default function NegativePanel({ status }) {
   const [note, setNote] = useState("");
   const [cleared, setCleared] = useState("");
 
+  const { job: autoJob, running: autoRunning, busy: autoBusy, error: autoError, start: startAuto, stop: stopAuto, clearError: clearAutoError } =
+    useJob("critic");
+
   const refresh = useCallback(async () => {
     try {
       setInfo(await api.negative());
@@ -105,9 +122,27 @@ export default function NegativePanel({ status }) {
     }
   }, []);
 
+  // the loop teaches it in the background, so the tables follow the job rather than waiting to be poked:
+  // once on mount, then after every round it finishes and once more when it stops
+  const autoRecords = asArray(autoJob && autoJob.history);
+  const autoRoundCount = autoRecords.filter((r) => r && r.kind === "round").length;
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    if (autoRecords.length) setAutoHistory(autoRecords);
+  }, [refresh, autoRoundCount, autoRunning]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .negativeAutoHistory()
+      .then((data) => {
+        if (alive && !autoRunning) setAutoHistory(asArray(data && data.history));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [autoRunning]);
 
   async function run(what, work, message) {
     setBusy(what);
@@ -132,6 +167,22 @@ export default function NegativePanel({ status }) {
   const settings = (info && info.settings) || {};
   const running = Boolean(status && status.job && status.job.state === "running");
   const disabled = Boolean(busy) || running;
+
+  async function handleAuto(event) {
+    event.preventDefault();
+    const body = {
+      rounds: parseInteger(autoRounds, 3),
+      count: parseInteger(autoCount, 8),
+      max_length: parseInteger(autoLength, 60),
+      threshold: parseNumber(autoThreshold, 6),
+      provider: autoProvider,
+      clear_passes: autoClear,
+    };
+    if (autoContext.trim()) body.context = autoContext.trim();
+    if (autoModel.trim()) body.reviewer_model = autoModel.trim();
+    if (autoUrl.trim()) body.url = autoUrl.trim();
+    await startAuto(() => api.negativeAuto(body));
+  }
 
   async function handleFilter(event) {
     event.preventDefault();
@@ -196,11 +247,112 @@ export default function NegativePanel({ status }) {
     if (done) setCleared("");
   }
 
+  const autoShown = autoRunning || autoRecords.length ? autoRecords : autoHistory;
+  const autoRoundRecords = autoShown.filter((r) => r && r.kind === "round");
+  const autoReports = autoShown.filter((r) => r && r.kind === "report");
+  const autoCard = autoReports.length ? autoReports[autoReports.length - 1] : null;
   const rejected = asArray(filtered && filtered.rejected);
   const kept = asArray(filtered && filtered.texts);
 
   return (
     <>
+      <form className="card wide" onSubmit={handleAuto}>
+        <h2>Automatic</h2>
+        <p className="muted">
+          Nobody should have to type failures in by hand. Each round the model writes texts of its own, an LLM
+          reviewer marks them out of 10 and says what is wrong with each one, and everything below the pass mark
+          blames the network below — the critique picks the reason, the mark sets the severity — while the texts it
+          passed take blame off what they share with known failures. Then it goes round again. The positive model is
+          only read from: nothing here trains, rewards or inverts it.
+        </p>
+        <div className="row">
+          <NumberField label="Rounds" value={autoRounds} onChange={setAutoRounds} min="0" step="1" disabled={autoRunning}
+                       hint="0 = until you stop it" />
+          <NumberField label="Texts per round" value={autoCount} onChange={setAutoCount} min="1" step="1" disabled={autoRunning} />
+          <NumberField label="Max length" value={autoLength} onChange={setAutoLength} min="0" step="1" disabled={autoRunning} />
+          <NumberField label="Pass mark" value={autoThreshold} onChange={setAutoThreshold} min="0" max="10" disabled={autoRunning}
+                       hint="out of 10" />
+        </div>
+        <div className="row">
+          <SelectField label="Reviewer" value={autoProvider} onChange={setAutoProvider} disabled={autoRunning}
+                       options={[["ollama", "Ollama (local)"], ["chatgpt", "ChatGPT (server key)"]]} />
+          <TextField label="Model" value={autoModel} onChange={setAutoModel} disabled={autoRunning}
+                     placeholder="(the server's default)" />
+          <TextField label="URL" value={autoUrl} onChange={setAutoUrl} disabled={autoRunning}
+                     placeholder="(the server's default)" />
+        </div>
+        <TextField label="Context" value={autoContext} onChange={setAutoContext} disabled={autoRunning}
+                   hint="what the reviewer is told the texts are meant to be — its yardstick"
+                   placeholder="plain English sentences about everyday life" />
+        <div className="checks">
+          <CheckField label="Let what it passed clear blame" checked={autoClear} onChange={setAutoClear} disabled={autoRunning} />
+        </div>
+        <div className="actions">
+          <button type="submit" className="primary" disabled={autoRunning || autoBusy || running}>
+            {autoBusy ? "Starting…" : autoRunning ? "Running…" : "Start"}
+          </button>
+          <button type="button" className="danger" disabled={!autoRunning} onClick={() => stopAuto()}>
+            Stop
+          </button>
+        </div>
+        {running && !autoRunning ? <p className="muted">Another job is running; wait for it to finish.</p> : null}
+        <JobStatus job={autoJob} emptyText="It has never taught itself. Press Start and it will." />
+        <Alert message={autoError} onDismiss={clearAutoError} />
+        {autoRoundRecords.length ? (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>round</th>
+                  <th>texts</th>
+                  <th>passed</th>
+                  <th>failed</th>
+                  <th>mean mark</th>
+                  <th>blamed</th>
+                  <th>cleared</th>
+                  <th>edges</th>
+                  <th>reasons</th>
+                </tr>
+              </thead>
+              <tbody>
+                {autoRoundRecords.map((r) => (
+                  <tr key={r.round}>
+                    <td>{fmtInt(r.round)}</td>
+                    <td>{fmtInt(r.texts)}</td>
+                    <td>{fmtInt(r.passed)}</td>
+                    <td>{fmtInt(r.failed)}</td>
+                    <td>{fmtNum(r.mean_rating, 1)}</td>
+                    <td>{fmtInt(r.blamed)}</td>
+                    <td>{fmtInt(r.cleared)}</td>
+                    <td>{fmtInt(r.edges)}</td>
+                    <td className="muted">
+                      {Object.entries(r.reasons || {})
+                        .map(([k, v]) => `${k} ×${v}`)
+                        .join(", ") || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+        {autoCard ? (
+          <p className="muted">
+            <b>
+              {fmtInt(autoCard.rounds)} round(s): reviewed {fmtInt(autoCard.reviewed)}, blamed {fmtInt(autoCard.blamed)},
+              cleared {fmtInt(autoCard.cleared)}
+            </b>
+            {" · "}mean mark {fmtNum(autoCard.mean_rating, 1)}/10
+            {typeof autoCard.trend === "number" ? ` · trend ${autoCard.trend >= 0 ? "+" : ""}${fmtNum(autoCard.trend, 2)}` : ""}
+            {Object.keys(autoCard.reasons || {}).length
+              ? ` · ${Object.entries(autoCard.reasons)
+                  .map(([k, v]) => `${k} ×${v}`)
+                  .join(", ")}`
+              : ""}
+          </p>
+        ) : null}
+      </form>
+
       <form className="card wide" onSubmit={handleFilter}>
         <h2>Filter</h2>
         <p className="muted">

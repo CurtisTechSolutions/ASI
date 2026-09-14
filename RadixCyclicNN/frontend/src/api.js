@@ -159,6 +159,14 @@ export const api = {
   negativeSettings: (body) => post("/api/negative/settings", body),
   negativeReset: (body = {}) => post("/api/negative/reset", body),
   negativeSave: (body = {}) => post("/api/negative/save", body),
+  /**
+   * The Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and
+   * every failure blame the negative network. Body: rounds (0 = until stopped), count, prefix, max_length,
+   * temperature, threshold, context, provider, reviewer_model, url, timeout, clear_passes, epochs, seed.
+   */
+  negativeAuto: (body) => post("/api/negative/auto", body),
+  /** Round / report records of all automatic runs (the job's own history while one is running). */
+  negativeAutoHistory: () => get("/api/negative/auto/history"),
   /** Ollama (see OllamaPanel). `url` optionally overrides the server's configured Ollama URL. */
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),

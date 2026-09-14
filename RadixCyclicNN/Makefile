@@ -84,7 +84,7 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative train resume predict generate score 2nrl invert compress \
-        negative-blame negative-clear negative-why negative-filter negative-reasons negative-forget tutor-blame \
+        negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
@@ -168,6 +168,10 @@ negative-why: ## Why TEXT looks like a failure: the reasons and the fragments ca
 
 negative-filter: ## Generate COUNT texts through the pair: the positive model writes, the negative one vetoes
 	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) filter --count $(COUNT) --max-length $(MAX_LENGTH)
+
+REVIEWER_FLAGS := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),) $(if $(OLLAMA_MODEL),--reviewer-model $(OLLAMA_MODEL),)
+negative-auto: ## Teach it automatically for ROUNDS rounds: the model writes, Ollama reviews, the failures are blamed
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) auto --rounds $(ROUNDS) --count $(COUNT) --threshold $(THRESHOLD) $(REVIEWER_FLAGS)
 
 negative-reasons: ## What the tutor has blamed, and the journal of what it said
 	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) reasons

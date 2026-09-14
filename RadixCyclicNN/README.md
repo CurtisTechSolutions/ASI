@@ -41,6 +41,7 @@ and an optional GPU backend (torch) are built in.
 | The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
 | The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the **speech and image tutors** compare what the network remembers of a recording or a picture with the original (`speech tutor --blame`, `image tutor --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
 | A tutor that needs no teacher | `recall.py`: an utterance and a picture were *encoded* into text before being trained on, so the right answer is on file and marking needs no LLM. The network is given the opening of a text it was taught - the utterance's own token, or an image header and a few characters - and asked to write the rest; what comes back is run back through the codec and compared with the original. The agreement over the payload is the mark out of 10, the single worst thing wrong with it is named (`silence`, `clipping`, `mishearing`, `blank`, `noise`, `truncated`, ...), and the original is the correction the negative network blames from. |
+| The negative network feeds itself | `negative auto` (the Negative tab's *Automatic* card): the model writes texts of its own, a local **Ollama** model (or ChatGPT) marks each one out of 10 and says what is wrong with it, and everything below the pass mark blames the negative network - round after round, with nobody typing a failure in by hand. The positive model is only read from, so the loop can run beside whatever else is teaching it. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
@@ -186,7 +187,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
-| `negative <action>` | the negative network (`--negative PATH`, default `model.negative.json` beside `--model`): `blame --text/--data --reason TAG --severity N --source NAME --note TEXT` (teach it a failure), `clear --text/--data` (the tutor passed these: take blame off what they share), `why --text/--data [--threshold --min-coverage --spans]` (risk, coverage, the reasons and the blamed fragments), `filter [--count --prefix --mode --max-length --over-sample --threshold --min-coverage --ratio --no-ratio --peak --strict --learn]` or `filter --text/--data` (the pair: the positive model writes, the negative one vetoes), `reasons [--limit --log]`, `forget [--reason TAG] [--factor F]` |
+| `negative <action>` | the negative network (`--negative PATH`, default `model.negative.json` beside `--model`): `blame --text/--data --reason TAG --severity N --source NAME --note TEXT` (teach it a failure), `clear --text/--data` (the tutor passed these: take blame off what they share), `why --text/--data [--threshold --min-coverage --spans]` (risk, coverage, the reasons and the blamed fragments), `filter [--count --prefix --mode --max-length --over-sample --threshold --min-coverage --ratio --no-ratio --peak --strict --learn]` or `filter --text/--data` (the pair: the positive model writes, the negative one vetoes), `reasons [--limit --log]`, `forget [--reason TAG] [--factor F]`, `auto` (teach it automatically: the model writes, an LLM reviews, the failures are blamed - `--rounds 3` (0 = until Ctrl-C), `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--threshold 6`, `--context TEXT` (the reviewer's yardstick), `--provider ollama\|chatgpt`, `--reviewer-model`, `--url`, `--timeout`, `--epochs`, `--no-clear`, `--out`) |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
 | `evolve --data FILE` | `--blame` / `--negative PATH` (the discriminator teaches the negative network), `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
 | `info` | statistics and the training history tail |
@@ -257,6 +258,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/negative/judge` | `{"texts"\|"text","threshold","min_coverage","spans": 5}` -> `{"verdicts": [{"verdict": "reject"\|"suspect"\|"pass","risk","coverage","blame","reasons","spans": [{"start","end","fragment","blame","fails","reason"}],"why"}]}` |
 | `POST /api/negative/filter` | the pair: `{"count": 3,"prefix","mode","max_length","temperature","over_sample": 3,"threshold","min_coverage","ratio": 0,"no_ratio","peak","strict","learn"}` (or `{"texts"}` to judge given texts) -> `{"texts" (the cleanest survivors),"kept","rejected": [verdicts],"verdicts","candidates","asked","rate","pair"}` |
 | `POST /api/negative/forget` / `POST /api/negative/settings` / `POST /api/negative/reset` / `POST /api/negative/save` | drop or fade a reason `{"reason","factor"}` / `{"threshold","min_coverage","share_scale","blame_scale","clear_scale"}` / a fresh negative network `{"seed"}` / write it `{"path"}` |
+| `POST /api/negative/auto` / `GET /api/negative/auto/history` | the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every failure blame the negative network - `{rounds (0 = until stopped), count, prefix, max_length, temperature, threshold, context, provider: ollama\|chatgpt, reviewer_model, url, timeout, clear_passes, epochs, seed}` -> 202 `{"job","config","url","reviewer"}`; the history is its round / report records. The positive model is only read from |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, `blame`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` (and `negative_blamed` / `negative_reasons` with `blame`) |
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file; the negative network is written beside it when it holds failures) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
@@ -292,9 +294,12 @@ the other kind in memory as the second voice; Continue extends the
 conversation, and turns are rated like samples; every rating carries a mark out
 of 10 - "how good" / "how bad" - and the network learns each text in proportion
 to it), Score, 2NRL, Negative (the
-failure network: run the pair and see what was vetoed and why, judge a text
-with its blamed fragments marked, blame or clear texts by hand, and the table
-of everything the tutor has blamed with the journal of what it said),
+failure network: **Automatic** - press Start and an Ollama reviewer marks the
+model's own output round after round, blaming what fails, while the tables
+below fill in by themselves - plus run the pair and see what was vetoed and
+why, judge a text with its blamed fragments marked, blame or clear texts by
+hand, and the table of everything the tutor has blamed with the journal of what
+it said),
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Tutor (automated English lessons: the settings, a dry run
 that marks without training, a chart of the marks per round, the report card
@@ -934,6 +939,7 @@ against):
 | the code sandbox, the style checker and the judge (`codegen --blame`) | every rejected program is blamed for what they found, with the teacher's feedback as the note | `timeout`, `crash`, `wrong-output`, `task-not-done`, `style`, `naming` |
 | the **speech tutor** (`speech tutor --blame`, the Speech tab, `POST /api/speech/tutor {"blame": true}`) | it is asked to say back an utterance it was taught; what comes back is run through the codec and compared with the recording, the agreement over the waveform is the mark, and the original is the correction | `unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`, `distortion` |
 | the **image tutor** (`image tutor --blame`, the Images tab, `POST /api/images/tutor {"blame": true}`) | the same, for a picture it was shown: the payload it writes back is compared with the encoded image | `unreadable`, `truncated`, `overrun`, `garbled`, `blank`, `noise`, `drift` |
+| **itself, on a loop** (`negative auto`, the Negative tab's *Automatic* card, `POST /api/negative/auto`) | the model writes texts of its own and an LLM reviewer marks them, round after round - the same critique-to-reason and mark-to-severity rules as the reviewer above, with nobody typing anything in | the reviewed-text reasons |
 | the evolve discriminator (`evolve --blame`) | every fake it scores below the real texts, by how far below | `discriminator`, `blatant` |
 | a person | `negative blame --text ... --reason ... --note ...`, the Negative tab, a thumbs down | anything you type |
 
@@ -963,6 +969,40 @@ stays nameable however much the rest of the graph is folded up.
 blamed so far and the journal of what the tutor said, entry by entry.  The
 tutor can be wrong too: `negative forget --reason TAG [--factor 0.5]` drops
 that reason's blame, or fades it.
+
+### Feeding itself: `negative auto`
+
+Everything above needs *something else* to be running - a tutor round, a code
+problem, a review.  `negative auto` is that something else, on a loop, so the
+Negative tab stops being the one place where a person has to type a failure in
+by hand.  Each round:
+
+1. the positive model writes `--count` texts of its own;
+2. an LLM reviewer marks each one out of 10 and says what is wrong with it - a
+   local **Ollama** model by default, ChatGPT with `--provider chatgpt`;
+3. every text below the pass mark blames the negative network (the critique
+   picks the reason, the mark sets the severity) and the texts it passed take
+   blame off what they share with known failures.
+
+Then it goes round again.
+
+```bash
+python -m radixnet negative auto --rounds 5 --count 8              # five rounds, reviewed by the local Ollama
+python -m radixnet negative auto --rounds 0 --context "plain English about everyday life"   # until Ctrl-C
+python -m radixnet negative auto --provider chatgpt --reviewer-model gpt-4o-mini
+```
+
+`--context` is the reviewer's yardstick - what the texts are *meant* to be -
+and is worth setting, because "is this good?" means little without it.
+`--rounds 0` runs until Ctrl-C, which finishes the round it is in and saves.
+**The positive model is only read from**: nothing here trains, rewards or
+inverts it, so the loop can be left running beside whatever else is teaching
+it.
+
+In the browser it is the Negative tab's **Automatic** card: press Start and the
+round table, the reason table and the journal below it fill in by themselves as
+the rounds land (`POST /api/negative/auto` starts the job,
+`GET /api/negative/auto/history` is its record).
 
 ### Why a text is a failure
 
@@ -1319,7 +1359,7 @@ make go-test     # cd go && go test -race ./...
 RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
                       blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
-                      tutor, recall, codegen, vision, speech, dialogue
+                      tutor, recall, critic, codegen, vision, speech, dialogue
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)

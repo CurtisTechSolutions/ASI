@@ -33,6 +33,7 @@ from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, transcript
+from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
 from .speech import ASR_BACKENDS as SPEECH_BACKENDS
@@ -1658,6 +1659,83 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
     return doc
 
 
+def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
+    """The Negative tab, automatic: the model writes, an LLM reviews, the failures blame - round after round."""
+    from .chatgpt import api_key_configured
+    from .critic import Critic, CriticConfig
+    from .llm import LLMError, make_client
+
+    if args.provider == "chatgpt" and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT review, "
+            "or use --provider ollama"
+        )
+    config = CriticConfig(
+        rounds=args.rounds, count=args.count, prefix=args.prefix or "", max_length=args.max_length,
+        temperature=args.temperature, threshold=args.threshold, context=args.context or "",
+        provider=args.provider, reviewer_model=args.reviewer_model or "",
+        clear_passes=not args.no_clear, epochs=args.epochs, seed=effective_seed(args),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        client = make_client(config.provider, args.url, config.reviewer_model or None, args.timeout)
+    except (LLMError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    model, origin = open_model(args, console, required=True)
+    negative, neg_origin = open_negative(args, console, required=False)
+    out = args.out or negative_path(args)
+    console.pairs([
+        ("model", origin.describe()),
+        ("negative network", neg_origin.describe()),
+        ("reviewer", f"{config.provider}: {client.model} at {client.url}"),
+        ("rounds", "until stopped (Ctrl-C)" if not config.rounds else config.rounds),
+        ("per round", f"{config.count} text(s), {config.max_length} chars, temperature {config.temperature:g}"),
+        ("pass mark", f"{config.threshold:g}/10"),
+        ("context", clip(config.context, 60) if config.context else "-"),
+        ("passes clear", not args.no_clear),
+        ("output", out),
+    ])
+    console.say()
+    rows: list[list[Any]] = []
+    stop = threading.Event()
+
+    def show(record: dict) -> None:
+        if record.get("kind") != "round":
+            return
+        rows.append([
+            record["round"], record["texts"], record["passed"], record["failed"],
+            fmt(record["mean_rating"]), record["blamed"], record["cleared"], record["edges"],
+            ", ".join(f"{k} x{v}" for k, v in (record["reasons"] or {}).items()) or "-",
+        ])
+        console.note(
+            f"round {record['round']}: {record['failed']}/{record['texts']} failed, "
+            f"blamed {record['blamed']} over {record['edges']} edge(s), cleared {record['cleared']}"
+        )
+
+    critic = Critic(model, negative, client, config)
+    records, interrupted = run_interruptible(
+        lambda: critic.run(progress=show, stop_event=stop), stop, console, "round",
+    )
+    console.table(
+        ("round", "texts", "passed", "failed", "mean mark", "blamed", "cleared", "edges", "reasons"), rows,
+    )
+    card = records[-1] if records and records[-1].get("kind") == "report" else {}
+    console.say()
+    console.say(
+        f"{card.get('rounds', 0)} round(s): reviewed {card.get('reviewed', 0)}, blamed {card.get('blamed', 0)}, "
+        f"cleared {card.get('cleared', 0)}; mean mark {fmt(card.get('mean_rating'))}/10"
+        + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
+    )
+    return {
+        "config": config.to_dict(), "url": client.url, "reviewer": client.model,
+        "records": records, "report": card, "interrupted": interrupted,
+        "negative": _save_negative(console, negative, out),
+    }
+
+
 def cmd_negative_reasons(args: argparse.Namespace, console: Console) -> dict:
     """Everything the tutor has blamed, and the journal of what it said."""
     model, origin = open_negative(args, console, required=True)
@@ -3074,6 +3152,39 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(handler=cmd_negative_filter)
 
     a = actions.add_parser(
+        "auto", help="teach it automatically: the model writes, an LLM reviews, the failures are blamed",
+        description="The Negative tab without anyone typing a failure into it.  Each round the model writes\n"
+                    "--count texts of its own, the reviewer (a local Ollama model by default, ChatGPT with\n"
+                    "--provider chatgpt) marks each one out of 10 and says what is wrong with it, and every text\n"
+                    "below the pass mark blames the negative network - the critique picks the reason, the mark\n"
+                    "sets the severity - while the texts it passed take blame off what they share with known\n"
+                    "failures.  Then it goes round again.  --rounds 0 keeps going until Ctrl-C, which finishes\n"
+                    "the round it is in and saves.  The positive model is only read from: nothing here trains,\n"
+                    "rewards or inverts it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--rounds", type=nonneg_int, default=3, help="rounds to run (0: until Ctrl-C)")
+    a.add_argument("--count", type=pos_int, default=8, help="texts the model writes per round")
+    a.add_argument("--prefix", metavar="TEXT", help="continue this prefix instead of writing from scratch")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per text")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the writing")
+    a.add_argument("--threshold", type=nonneg_float, default=6.0, metavar="MARK",
+                   help="pass mark out of 10: below it the text is a failure and is blamed")
+    a.add_argument("--context", metavar="TEXT",
+                   help="what the reviewer is told the texts are meant to be (its yardstick)")
+    a.add_argument("--provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who reviews: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY)")
+    a.add_argument("--reviewer-model", metavar="NAME", help="the reviewer's model (default: the provider's)")
+    a.add_argument("--url", metavar="URL", help="the reviewer's base URL (default: the provider's)")
+    a.add_argument("--timeout", type=nonneg_float, metavar="SECONDS", help="per-request timeout")
+    a.add_argument("--epochs", type=nonneg_int, default=1, help="blame epochs per round")
+    a.add_argument("--no-clear", action="store_true",
+                   help="do not let the texts it passed take blame off what they share")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative network (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_auto)
+
+    a = actions.add_parser(
         "reasons", help="what the tutor has blamed, and the journal of what it said",
         description="The reason table (blame, failures and edges per reason) and the newest journal entries.",
         formatter_class=_HelpFormatter,
@@ -3177,7 +3288,6 @@ def build_parser() -> argparse.ArgumentParser:
     # codegen --------------------------------------------------------------
     from .chatgpt import DEFAULT_MODEL as chatgpt_default_model, DEFAULT_URL as chatgpt_default_url
     from .codegen import DEFAULT_TEACHER_MODEL as codegen_default_model
-    from .llm import DEFAULT_PROVIDER, PROVIDERS
 
     p = command(
         "codegen", "generate Python programs, run them in a sandbox, judge them with an LLM, reward / punish with 2NRL",

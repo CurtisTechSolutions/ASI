@@ -59,6 +59,7 @@ RadixCyclicNN/
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
+    critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -671,6 +672,13 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   texts share the token, pair / shared token / transcript-only, a failing ASR still teaches the waveform, the model
   learns and continues what was spoken), recording (no recorder, `arecord` called and its file read), the four API
   routes in all three body forms and the CLI actions. Runs without a microphone, ffmpeg or any ASR backend.
+* `test_critic.py` — the negative network feeding itself (section 24.6): the config and what it refuses, one round
+  (write → review → blame) against a scripted reviewer and against the fake Ollama server, the blame arriving sourced
+  to the loop with the critique kept, the mark setting the severity, what it passes not being blamed, rounds differing
+  because the seed advances, the report card and its trend, stopping between rounds rather than inside one,
+  `rounds=0` meaning until stopped, the positive model coming out untouched, `external` wrapping the slow call, the
+  `critic` job, the `/api/negative/auto` endpoint and the `negative auto` CLI (including `--json` staying parsable
+  because the progress goes to stderr).
 * `test_recall.py` — the recall tutor (section 26): the exercise (a spoken cue is the token and the header, an image
   cue carries a lead, texts that are not encoded are skipped), every way a completion can be wrong in both
   modalities (unreadable, truncated, overrun, garbled, silence / blank, clipping / noise, mishearing, distortion /
@@ -1551,7 +1559,9 @@ blames every failed sentence of a round with the mistake the teacher named and a
 / `CodeGenTrainer(negative=...)`, which blames the rejected attempts of every problem and adds `negative_blamed` /
 `negative_reasons` to its problem records, `evolve --blame` / `Evolver(negative=...)`, which blames every fake the
 discriminator scored below the real texts (reason `blatant` past `blatant_margin`, else `discriminator`, severity
-`gap / margin` clamped to `[0.25, 2]`) and clears the real texts; `speech tutor --blame` / `image tutor --blame` /
+`gap / margin` clamped to `[0.25, 2]`) and clears the real texts; `negative auto` / `POST /api/negative/auto`, the
+loop of section 24.6 that keeps the reviewer running so nobody has to type a failure in; `speech tutor --blame` /
+`image tutor --blame` /
 `POST /api/speech/tutor {"blame": true}` / `POST /api/images/tutor {"blame": true}`, which ask the network for a
 recording or a picture back and blame what it misremembered (section 26); and `POST /api/negative/blame` for a
 person.
@@ -1580,13 +1590,15 @@ prefix. `describe()` reports both halves and the settings.
   (`radixnet-count negative <action>`, `tutor --blame`, `correct --blame`) has the same commands and flags
   (section 24.5).
 * API: `GET /api/negative` (stats, reasons, journal, settings), `POST /api/negative/blame|clear|judge|filter|forget|
-  settings|reset|save`. The service keeps exactly one negative network, in the same `_parked` store as the other
+  settings|reset|save`, plus `POST /api/negative/auto` + `GET /api/negative/auto/history` (the loop of section 24.6).
+  The service keeps exactly one negative network, in the same `_parked` store as the other
   kinds, so selecting the `negative` kind hands back that very object; `positive_model()` finds the model it filters
   (the active one, else a parked or saved positive kind, else 409). `POST /api/save` writes the negative network
   beside the model when it holds blame.
-* Frontend: the **Negative** tab (`NegativePanel.jsx`) — run the pair, judge a text with its blamed fragments marked
-  (`<mark>`), blame / clear by hand, the reason table with per-reason *forget*, and the journal; the Ollama tab's
-  review card has a *teach the negative network* checkbox and reports what it learned.
+* Frontend: the **Negative** tab (`NegativePanel.jsx`) — **Automatic** (the reviewer on a loop, section 24.6; its
+  job history also refreshes the tables below, so the tab fills in by itself), run the pair, judge a text with its
+  blamed fragments marked (`<mark>`), blame / clear by hand, the reason table with per-reason *forget*, and the
+  journal; the Ollama tab's review card has a *teach the negative network* checkbox and reports what it learned.
 * Tests: `tests/test_negative.py` (weight function, evidence, blame / clear, corrections, judge, crossings,
   prediction, forget, inversion, persistence, the kind registry, the API routes, the CLI group),
   `tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
@@ -1623,6 +1635,52 @@ optional block:
   **Negative** tab is therefore no longer Python-only.
 * Go tests: `radixnet/negative_test.go`, `radixnet/blame_test.go`, `radixnet/duo_test.go`,
   `server/negative_test.go`.
+
+---
+
+### 24.6 The negative network feeding itself (`critic.py`) — the reviewer on a loop
+
+Every source of negatives in section 24.2 arrives as a *side effect* of something else running: a tutor round, a code
+problem, a review, a recall quiz.  That left the Negative tab as the one surface where a person had to type a failure
+in by hand — which is exactly the kind of work a loop should be doing.
+
+`Critic(model, negative, client, config, external=...)` is that loop.  One round is three steps and nothing else:
+
+1. the **positive model** writes `count` texts of its own (`ollama.sample_texts`, a stochastic walk, optionally
+   continuing `prefix`);
+2. an **LLM reviewer** marks each one out of 10, passes or fails it against `threshold` and writes a one-sentence
+   critique (`ollama.adversarial_review`).  The client is any `LLMClient`, so `provider` picks a local Ollama model
+   (the default) or ChatGPT — `review_texts` only ever calls `generate`, which is why it never had to care;
+3. the failures **blame** and the passes **clear** (`blame.teach_reviews`, source `critic`): the critique picks the
+   reason through `classify`, the mark sets the severity through `severity_from_rating`.  Nothing new is invented —
+   this is the section 24.2 path, driven on a timer instead of by hand.
+
+`CriticConfig` carries those knobs plus `context` (what the reviewer is *told* the texts are meant to be — its
+yardstick, and worth setting, because "is this good?" means little without one), `clear_passes`, `epochs` and `seed`.
+The seed advances by the round number (`_seed`), so a seeded run is reproducible *and* its rounds differ; an unseeded
+one leaves the sampling alone.
+
+`run(rounds=None, progress=, stop_event=)` loops until the count is reached, or forever when it is 0 / `None`, and
+checks the stop event **between** rounds, so stopping finishes the round it is in rather than abandoning a half-taught
+one.  The records are the round records followed by one `report` (`report_card`): rounds, reviewed, blamed, cleared,
+edges, the mean mark, the pass rate, the reason histogram, and `trend` — the last round's mean mark minus the first's,
+positive when the reviewer is marking the model's output better than it did at the start.
+
+Two invariants are worth stating because they are what make the loop safe to leave running:
+
+* **the positive model is only read from.**  Nothing here trains, rewards, inverts or compresses it, so the loop can
+  run beside anything that *is* teaching it without fighting over the model;
+* **`external` wraps the slow call**, exactly as the English tutor does, so the server releases its model lock while
+  the reviewer thinks and readers keep being served.
+
+CLI: `negative auto` (`--rounds 0` runs until Ctrl-C, which finishes the round and saves; the per-round progress goes
+to stderr as a notice, so `--json` still writes one document to stdout).  API: `POST /api/negative/auto` starts a
+`critic` job over `ModelService.start_critic` — which quizzes `positive_model()` and teaches `negative_model()` —
+and `GET /api/negative/auto/history` is its record.  Frontend: the Negative tab's **Automatic** card, whose job
+history also drives a refresh of the reason table, the stats and the journal below it, so the tab fills in by itself
+as rounds land.  Tests: `tests/test_critic.py` — the config, one round, what reaches the negative network, the mark
+setting the severity, stopping between rounds, the report card, a real `OllamaClient` against the fake server, the
+job, the endpoint and the CLI.
 
 ---
 

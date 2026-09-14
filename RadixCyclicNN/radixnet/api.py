@@ -329,6 +329,7 @@ class ModelService:
         self._evolve_history: list[dict] = []
         self._codegen_history: list[dict] = []
         self._tutor_history: list[dict] = []
+        self._critic_history: list[dict] = []
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
@@ -1382,6 +1383,37 @@ class ModelService:
 
         return self._start_job("tutor", work)
 
+    def start_critic(self, config: Any, client: LLMClient) -> dict:
+        """Start a ``critic`` job: rounds of write -> review -> blame, teaching the negative network on its own.
+
+        The positive model writes the texts, the LLM marks them and the
+        failures blame the negative network with the critique as the reason and
+        the mark as the severity (:mod:`radixnet.critic`).  The positive model
+        is only read from - nothing here trains, rewards or inverts it - so the
+        loop can be left running beside whatever else is teaching it.
+        """
+        from .critic import Critic
+
+        config.validate()
+        model = self.positive_model()
+        negative = self.negative_model()
+
+        def work(job: Job) -> None:
+            critic = Critic(model, negative, client, config, external=self.pause_lock)
+            critic.run(progress=self._progress(job, self._critic_history), stop_event=job.stop_event)
+
+        return self._start_job("critic", work)
+
+    def critic_history(self) -> dict:
+        return {"history": list(self._critic_history)}
+
+    def critic_card(self) -> dict | None:
+        """The report at the end of the last automatic run, or ``None`` when it has never run."""
+        for record in reversed(self._critic_history):
+            if record.get("kind") == "report":
+                return dict(record)
+        return None
+
     def tutor_history(self) -> dict:
         return {"history": list(self._tutor_history)}
 
@@ -2189,6 +2221,45 @@ def _r_negative_settings(svc: ModelService, f: Fields, q: dict) -> tuple[int, An
 
 def _r_negative_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.negative_reset(f.integer("seed", None))
+
+
+def _critic_config(f: Fields) -> Any:
+    """The automatic-teaching settings of a request body (:class:`~radixnet.critic.CriticConfig` defaults)."""
+    from .critic import CriticConfig
+
+    d = CriticConfig()
+    config = CriticConfig(
+        rounds=f.integer("rounds", d.rounds, minimum=0),
+        count=f.integer("count", d.count, minimum=1),
+        prefix=f.text("prefix", d.prefix),
+        max_length=f.integer("max_length", d.max_length, minimum=0),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        threshold=f.number("threshold", d.threshold, minimum=0.0),
+        context=f.text("context", d.context),
+        provider=_provider_field(f, "provider", "reviewer_provider", d.provider),
+        reviewer_model=f.text("reviewer_model", None) or f.text("model", None) or d.reviewer_model,
+        clear_passes=f.flag("clear_passes", d.clear_passes),
+        epochs=f.integer("epochs", d.epochs, minimum=0),
+        seed=f.integer("seed", d.seed),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _r_negative_auto(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Start the automatic loop: the model writes, the LLM reviews, the failures blame the negative network."""
+    config = _critic_config(f)
+    client = svc.llm_client(config.provider, f.text("url", None), config.reviewer_model or None,
+                            f.number("timeout", None, minimum=1.0))
+    job = svc.start_critic(config, client)
+    return 202, {"job": job, "config": config.to_dict(), "url": client.url, "reviewer": client.model}
+
+
+def _r_negative_auto_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.critic_history()
 
 
 def _r_negative_save(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3034,6 +3105,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/negative/settings", _r_negative_settings,
      "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
     ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
+    ("POST", "/api/negative/auto", _r_negative_auto,
+     "the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every "
+     "failure blame the negative network - {rounds (0 = until stopped), count, prefix, max_length, temperature, "
+     "threshold, context (what the texts are meant to be), provider: ollama|chatgpt, reviewer_model, url, timeout, "
+     "clear_passes, epochs, seed}; the positive model is only read from"),
+    ("GET", "/api/negative/auto/history", _r_negative_auto_history, "round / report records of all automatic runs"),
     ("POST", "/api/negative/save", _r_negative_save, "save the negative network: {path} (default: beside the model path)"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
