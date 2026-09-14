@@ -22,10 +22,14 @@ and — at the level of a mind — can ruminate.
 The resolution is the part of my original note that needs the most unpacking:
 *when we encounter a cycle, we use metacognition or another part of the brain
 instead.* This paper makes that precise. A system inside a loop has, by
-definition, no information inside the loop that tells it to leave. The exit must
-come from outside, and there are exactly three places it can come from: a clock,
-a monitor, or an inversion. All three are implemented in `RadixCyclicNN/` and I
-walk through each one in the code.
+definition, no information inside the loop that tells it to leave — re-asking
+the same question from the same place only returns the same answer. The exit
+must come from outside, and there are exactly three places it can come from: a
+clock, a monitor, or an inversion. All three are implemented in `RadixCyclicNN/`
+and I walk through each one in the code, including the piece that notices a loop
+from the shape of its own output, backs up to the point the walk went round, and
+searches again from past it — which the implementation calls, without any
+prompting from this paper, "the metacognition of a turn".
 
 ---
 
@@ -237,7 +241,7 @@ kinds of thing it can be:
 |---|---|---|---|
 | **a clock** | a quantity that only increases | `(node, chars_emitted)` search state; expansion budget | time passing, effort spent, fatigue, boredom |
 | **a monitor** | a second process watching the trajectory | `dialogue.py` repeat detection | noticing you are going in circles |
-| **an inversion** | flipping the landscape rather than searching it | `invert()`, 2NRL, `invert_paths` | deliberately doing the opposite |
+| **an inversion** | flipping the landscape rather than searching it | `invert()`, 2NRL, `invert_paths`, punishing the duplicates that could not be avoided | deliberately doing the opposite; and, slower, no longer wanting to |
 
 That table is the expansion of "we use metacognition or another part of the
 brain instead". Each row is a different part of the brain, and each is
@@ -284,59 +288,159 @@ supervisory level that only ever reports failure is not much of a supervisor.
 ### 5.2 The monitor: metacognition, literally
 
 `dialogue.py` is the piece of the system that most directly implements the
-original note. The model talks to itself: two voices take turns, and every reply
-is the prediction search run from the tail of what was just said.
+original note, and it has grown into the most complete answer to it. The model
+talks to itself: two voices take turns, and every reply is the prediction search
+run from the tail of what was just said.
 
 The failure mode is obvious the moment you build it. The most likely
 continuation of what was just said is *what was just said*. Unsupervised, two
 copies of a model settle into a loop within a handful of turns, agreeing with
 each other forever. This is a cycle — not in the graph this time, but in the
-conversation, one level up.
+conversation, one level up. And it shows up at two scales at once, which is why
+there are two monitors.
 
-So there is a monitor, and it escalates:
+**Between turns**, `Heard` decides what counts as a duplicate: an utterance was
+*said* before, or its reply *adds* what an earlier reply added (the same
+continuation reached from a different context), or it *echoes* a line already
+spoken. A longer utterance that happens to contain an earlier one is explicitly
+not a duplicate — it says more than was heard.
+
+**Inside a single utterance**, `stutter()` catches the loop directly:
+
+```python
+def stutter(text: str, longest: int = LONGEST_STUTTER) -> str:
+    """The words an utterance says twice in a row, or ``""`` when it says each thing once.
+
+    A *stutter* is a run of one to ``longest`` words repeated immediately after itself -
+    "the **the** west", "say morning **morning**", "**the cat** the cat sat" - the shape a
+    cyclic graph falls into when it walks a loop instead of going somewhere.  Words that
+    come back later in the line are not a stutter: "where there is a will there is a way"
+    says its words again, and says something with them.
+    """
+```
+
+That docstring is the thesis of this paper stated from the other direction. A
+stutter is not a language defect the system happens to produce; it is *what a
+cycle looks like from the outside*. The walk went round, and the output says the
+same words twice because the graph said the same nodes twice.
+
+Note the discrimination, which is the hard part. Only an *immediate* repetition
+counts. "Where there is a will there is a way" repeats its words and means
+something by it; the monitor leaves it alone. A monitor that flagged all
+repetition would be useless, because repetition is also how language emphasises,
+balances and rhymes. The monitor has to distinguish *going round* from *coming
+back*, and it does that by adjacency.
+
+#### The escalation
 
 ```
 1. speak the most likely continuation
-   ↓ but not if it is an utterance the conversation already heard,
-     and not if it merely echoes the previous line
+   ↓ not if the conversation already heard it, and not if it stutters
 2. shorten the context by one word and search again
    "nothing follows 'sat on the mat'? then what follows 'on the'?"
    ↓ repeat until the context is empty
 3. change the subject entirely: search from START  (fresh = True)
    ↓ still nothing new
-4. say the best repeat anyway — and flag it  (repeat = True)
-   ↓ nothing at all to say
-5. end the conversation
+4. say the best duplicate anyway — flag it, and end the conversation there
+   ↓ later
+5. punish it: the flagged utterances become a 2NRL negative phase
 ```
 
-Each step is a different escape, and they are ordered from cheapest to most
-drastic:
+Each step is a different escape, ordered cheapest to most drastic, and each one
+is a different part of the system taking over from the one that failed.
 
-- **Step 1** is the monitor proper. It is not part of the generator. The
-  generator's job is to produce the most likely continuation and it does that
-  job correctly; producing a repeat is not a bug in the generator. A *separate*
-  check, holding a record of what has been said, rejects the output. That
-  separation is the whole idea — the generator cannot see its own loop, so
-  something outside it has to.
-- **Step 2** is re-framing. Same question, less context. "What else could follow
-  this?" A narrower prompt has one answer; a wider one has several.
-- **Step 3** is the other part of the brain. Give up on continuing and start
-  somewhere else entirely. In a conversation this is changing the subject; in
-  cognition it is what you do when you have been staring at a problem for an
-  hour and get up to make coffee.
-- **Step 4** is the honest failure. It speaks, and it marks the turn
-  `repeat=True` so every layer above knows the answer is recycled. A system that
-  repeats itself and *knows* it is repeating itself is in a completely different
-  position from one that does not.
-- **Step 5** is knowing when to stop. An untrained model with nothing to say
-  ends the conversation rather than emitting noise.
+**Step 1** is the monitor proper, and the separation is the whole idea. The
+generator's job is to produce the most likely continuation, and producing a
+repeat is not a bug in it — it is the generator working correctly on a graph
+with a loop in it. A *separate* thing, holding a record of what has been said,
+rejects the output. The generator cannot see its own loop, so something outside
+it has to.
 
-Nothing in that list inspects the graph for cycles. There is no loop detector.
-The monitor watches *outputs* and notices that they repeat — which is exactly
-what metacognition has access to. You do not perceive your own synapses. You
-notice that you have had this thought before.
+**Step 2** is re-framing: same question, less context. A narrower prompt has one
+answer; a wider one has several.
 
----
+**Step 3** is the other part of the brain. Give up on continuing and start
+somewhere else entirely — changing the subject, which in cognition is what you
+do after an hour of staring at a problem when you get up to make coffee.
+
+**Step 4** is honest failure. It speaks, marks the turn `repeat=True`, and then
+*ends the conversation* rather than saying the same duplicate again — because
+saying it twice is the loop, one level higher again.
+
+**Step 5** is treated in §5.3: the utterances it could not avoid are collected
+and punished, so the loop is removed from the model rather than merely dodged.
+
+#### Second thoughts: backing up to where the walk went round
+
+The newest piece is the one I find most convincing, because it is the
+impossibility argument of §5 turned into an algorithm.
+
+Dropping a stuttering continuation throws away everything it got right. The
+words *before* the walk went round were said once and were the most likely thing
+to say; only the tail is the loop. So a voice that catches itself repeating does
+not just take the next answer down the list. It backs up:
+
+1. **Notice.** `stutter_at(text)` returns the character index where the
+   utterance started saying itself again — "say morning **morning**" cuts after
+   `"say morning "`. That index is *where the walk went round*.
+2. **Back up to exactly there and keep it.** Everything before the cut was said
+   once and is worth keeping.
+3. **Explore from the cut.** Re-run the search with that longer prefix.
+
+Step 3 is the crucial one, and the docstring says why better than I can:
+
+> a longer prefix than the turn started with, which **forces** the walk to leave
+> the loop at exactly the point it went round — asking the same question again
+> from the context would only rank the same answers.
+
+That is §5 exactly. *Asking the same question again from the same context would
+only rank the same answers.* You cannot escape a cycle from inside it, because
+inside it nothing has changed and the same query returns the same ranking
+forever. The escape works only because the state is different — the prefix now
+runs past the point where the loop closed, so the loop is no longer reachable
+from where the search starts.
+
+If that finds nothing, it backs up one more word and looks **wider** —
+`k * (step + 2)` candidates, so the further back it goes the more it weighs —
+up to `explore` times (default 3). Cheap and narrow first, expensive and broad
+only when the cheap move failed.
+
+And it is scoped. `keep` is the context picked up from the other voice, and it
+may not be rewritten:
+
+> a voice rethinks what it said, never what it heard.
+
+A repeat inside the *other* voice's words is recorded and left alone. The
+monitor's authority stops at its own output — which is both good manners and
+good engineering, since the other voice's text is not this one's to explain.
+
+The whole episode is recorded in an object whose docstring needs no gloss from
+me:
+
+```python
+class Rethink:
+    """A voice catching itself repeating, and what it did about it.
+
+    The metacognition of a turn: ``noticed`` is the run of words it caught itself
+    saying twice, ``cut`` what it kept of that attempt (everything said before the
+    walk went round), ``steps`` how many times it backed up, ``explored`` the paths
+    it weighed from there and ``found`` whether one of them said something new.
+    A turn that never had to think twice has no record at all.
+    """
+```
+
+`noticed`, `cut`, `steps`, `explored`, `found`. The system does not merely
+escape its loops — it keeps a record of having noticed, of how far it backed up,
+of how hard it looked, and of whether it got anywhere. A turn that never had to
+think twice has no record at all, which is exactly right: metacognition is not
+running all the time, it engages when the base level gets into trouble.
+
+Nothing in any of this inspects the graph for cycles. There is no loop detector,
+no visited set, no tortoise and hare. The monitor watches **outputs** and
+notices that they repeat — which is precisely what metacognition has access to.
+You do not perceive your own synapses. You notice that you have had this thought
+before.
+
 
 ### 5.3 The inversion: flip the landscape instead of searching it
 
@@ -430,6 +534,39 @@ For a self-loop the fix is the other knob: change `w`. Which is the right
 answer anyway — a self-loop means "this repeats", and the thing you want to
 adjust about a repetition is how attractive repeating is, not which direction
 it points.
+
+#### The slowest clock: punishing the loops that could not be escaped
+
+The inversion exit also runs on a much slower timescale, and this is step 5 of
+the ladder in §5.2.
+
+When every candidate is a duplicate, the voice says the best one anyway and
+flags the turn. `repeats(turns)` then collects those flagged utterances — *the
+duplicates the search could not avoid* — and they become the bad half of a 2NRL
+negative phase: the CLI prints the `radixnet feedback --bad-text …` that
+punishes them, and the Converse tab's "Punish duplicates" marks them 👎 so the
+next training run teaches the model out of them.
+
+That closes a loop between the timescales, and it is worth being explicit about
+what just happened:
+
+| Timescale | Mechanism | What it changes |
+|---|---|---|
+| within one search | the monotone resource, the expansion budget | nothing; the walk just cannot go round forever |
+| within one turn | `backtrack` — notice, cut, explore from past the loop | the query, not the model |
+| within one conversation | `Heard`, changing the subject, ending early | what gets said |
+| across training runs | punish the flagged duplicates via 2NRL | **the graph itself** |
+
+The first three exits route *around* a loop. Only the last one removes it. A
+loop the search could not escape is evidence about the model, and the system
+treats it as evidence: the thing it could not stop saying becomes the thing it
+is trained not to say.
+
+This is the difference between coping and learning, and a mind needs both. You
+can notice you are ruminating and change the subject — that is the monitor, and
+it works this afternoon. Or the fact that you kept ruminating can change what is
+attractive to you in the first place, which is slower and is the only one of the
+two that means you do not have to keep noticing.
 
 ---
 
@@ -553,11 +690,22 @@ Falsifiable, in order of how much each would cost me:
 cyclic representation stays bounded on inputs where the acyclic one grows
 linearly. This one is nearly definitional and I would be surprised to be wrong.
 
-**Prediction 2.** Disabling the `dialogue.py` monitor (`avoid_repeats=False`)
-collapses self-conversation into a fixed point within a small number of turns,
-and the number is small — single digits. If conversations stay varied without
-the monitor, then the generator is escaping its own loops somehow and my
-impossibility argument in §5 has a hole in it.
+**Prediction 2.** Disabling the `dialogue.py` monitors (`avoid_repeats=False`,
+`avoid_word_repeats=False`, `explore=0`) collapses self-conversation into a
+fixed point within a small number of turns, and the number is small — single
+digits. If conversations stay varied without the monitors, then the generator is
+escaping its own loops somehow and my impossibility argument in §5 has a hole in
+it.
+
+**Prediction 2a.** Of the three, `explore` should matter most per unit of cost.
+Rejecting a stuttering candidate only moves down a ranking that was produced
+from the same context, so the runner-up is drawn from the same loop; backing up
+past the cut changes the query itself. Concretely: at `explore = 0` the
+`Rethink.found` rate should be zero by construction, and turns that stutter
+should mostly resolve by *changing the subject* (`fresh=True`) rather than by
+continuing; at `explore = 3` most should resolve by continuing. If backing up
+and simply taking the next candidate perform the same, then the state really was
+not what mattered and §5 is wrong about where the escape comes from.
 
 **Prediction 3.** Targeted inversion is measurably less effective on paths
 containing odd cycles than on simple paths, because the parity cover is
@@ -615,14 +763,27 @@ the thesis.
 - The costs are real: no guaranteed termination, no layer order, no negative
   costs (which is *why* the cost function is `−log P + penalty ≥ 0`), and
   rumination.
-- A system inside a cycle cannot detect it from inside. The exit comes from a
-  clock, a monitor, or an inversion — implemented as the `(node, chars_emitted)`
-  search state, the repeat-detection ladder in `dialogue.py`, and
+- A system inside a cycle cannot detect it from inside, because inside it
+  nothing has changed and the same query returns the same ranking forever. The
+  exit comes from a clock, a monitor, or an inversion — the
+  `(node, chars_emitted)` search state, the ladder in `dialogue.py`, and
   `invert()` / 2NRL.
+- A stutter is what a cycle looks like from outside: a run of words said twice
+  in a row because the walk said the same nodes twice. The monitor finds the
+  loop by watching output, never by inspecting the graph — and it has to tell
+  *going round* from *coming back*, which it does by adjacency.
+- The escape works by changing the state, not by re-asking. `backtrack` cuts the
+  utterance at the point the walk went round and searches again from a prefix
+  that runs past it, which forces the walk out of the loop; taking the
+  next-ranked answer from the same context would only re-rank the same loop.
+- What cannot be escaped gets punished. Duplicates the search could not avoid
+  become a 2NRL negative phase, so the loop is removed from the graph instead of
+  dodged again next time. Routing around a loop is coping; this is learning, and
+  a mind needs both.
 - Cycles change the mathematics, not just the engineering: flipping a path's
   edges requires flipping alternate nodes, an odd cycle makes that impossible
   (2 of 3 edges at best), and a self-loop is sign-locked entirely because
-  `w · f² ` cannot change sign by flipping `f`.
+  `w · f²` cannot change sign by flipping `f`.
 - Loops are what make a supervisory level necessary *and* what make it
   worthwhile. Working memory, habit, iteration and self-reference are the same
   structural fact as rumination. Which one you get depends on whether something
