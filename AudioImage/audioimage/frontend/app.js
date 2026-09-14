@@ -285,7 +285,16 @@ function encodeParams() {
     freq_scale: $("freq_scale").value,
     depth: $("depth").value,
     colormap: $("colormap").value,
+    phase: $("phase").value,
+    lossless: $("lossless").checked ? "1" : "0",
   };
+  if ($("lossless").checked) params.phase = "rgb";
+  // storing the phase needs the exactly-invertible layout and the grey ramp,
+  // so the controls that would break it are held at their only valid value
+  if (params.phase !== "none") {
+    params.freq_scale = "linear";
+    params.colormap = "gray";
+  }
   // a warped frequency axis loses accuracy when it has fewer rows than there
   // are bins, so give it one row per bin unless the user says otherwise
   if (params.freq_scale !== "linear") {
@@ -363,9 +372,13 @@ async function doDecode() {
     loadIntoPlayer();
     $("dl-wav").href = URL.createObjectURL(blob);
     $("downloads").hidden = false;
+    const how = meta.lossless
+      ? "exact - the correction channel restored the original samples"
+      : meta.stored_phase
+      ? "phase read straight from the picture - nothing guessed"
+      : `${meta.iterations} griffin-lim passes, final error ${Number(meta.griffin_lim_error).toFixed(4)}`;
     status("decode-status",
-      `${meta.duration.toFixed(2)}s at ${meta.sample_rate} Hz, ${meta.iterations} passes, ` +
-      `final error ${Number(meta.griffin_lim_error).toFixed(4)}, in ${meta.seconds}s. ` +
+      `${meta.duration.toFixed(2)}s at ${meta.sample_rate} Hz, ${how}, in ${meta.seconds}s. ` +
       (meta.had_metadata ? "" : "(the picture carried no settings, so the ones above were used)"), "ok");
   } catch (err) {
     status("decode-status", String(err.message || err), "error");
@@ -391,7 +404,8 @@ async function doMeasure() {
       metric("spectrum kept", (100 - m.spectral_convergence * 100).toFixed(2) + "%",
              "relative error " + (m.spectral_convergence * 100).toFixed(2) + "%"),
       metric("log distance", m.log_spectral_distance.toFixed(2) + " dB", "difference where it is audible"),
-      metric("waveform SNR", m.waveform_snr.toFixed(1) + " dB", "expected to be poor: the phase was rebuilt"),
+      metric("waveform SNR", m.waveform_snr.toFixed(1) + " dB",
+             payload.stored_phase ? "the phase was stored, so this is real" : "expected to be poor: the phase was rebuilt"),
       metric("time", payload.encode_seconds + "s / " + payload.decode_seconds + "s", "encode / decode"),
     ].join("");
     status("decode-status", `Measured over ${payload.iterations} passes.`, "ok");
@@ -488,6 +502,7 @@ async function boot() {
   fill($("freq_scale"), options.freq_scales, defaults.freq_scale);
   fill($("colormap"), options.colormaps, defaults.colormap);
   fill($("depth"), options.depths, defaults.depth);
+  fill($("phase"), options.phase_modes || ["none", "rgb"], defaults.phase || "none");
   fill($("kind"), options.kinds, "melody");
   $("hop").value = defaults.hop;
   $("top_db").value = defaults.top_db;
@@ -502,6 +517,16 @@ async function boot() {
   });
 
   $("iters").addEventListener("input", () => { $("iters-value").textContent = $("iters").value; });
+  // the passes and the colour map mean nothing once the phase is in the file
+  const phaseChanged = () => {
+    const stored = $("phase").value !== "none" || $("lossless").checked;
+    $("phase").disabled = $("lossless").checked;
+    for (const id of ["iters", "colormap", "freq_scale"]) $(id).disabled = stored;
+    $("iters-value").textContent = stored ? "not needed" : $("iters").value;
+  };
+  $("phase").addEventListener("change", phaseChanged);
+  $("lossless").addEventListener("change", phaseChanged);
+  phaseChanged();
   $("encode").addEventListener("click", doEncode);
   $("decode").addEventListener("click", doDecode);
   $("measure").addEventListener("click", doMeasure);

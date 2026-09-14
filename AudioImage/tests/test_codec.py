@@ -11,6 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from audioimage.codec import (  # noqa: E402
     META_KEY,
+    META_VERSION,
+    PHASE_MODES,
+    pack_phase,
+    unpack_phase,
     EncodeConfig,
     compare,
     decode,
@@ -88,7 +92,7 @@ class TestRoundTrip(unittest.TestCase):
     def test_metadata_is_written(self):
         image = encode(tone(), SMALL)
         meta = read_meta(image)
-        self.assertEqual(meta["v"], 1)
+        self.assertEqual(meta["v"], META_VERSION)
         self.assertEqual(meta["sample_rate"], RATE)
         self.assertEqual(meta["n_fft"], 256)
         self.assertEqual(meta["hop"], 64)
@@ -278,3 +282,227 @@ class TestFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStoredPhase(unittest.TestCase):
+    """phase="rgb" puts the angle in the blue channel, so nothing has to be guessed."""
+
+    def setUp(self):
+        self.audio = tone()
+        self.cfg = EncodeConfig(n_fft=256, hop=64, phase="rgb")
+
+    def test_modes(self):
+        self.assertEqual(PHASE_MODES, ("none", "rgb"))
+        self.assertEqual(EncodeConfig().phase, "none")
+
+    def test_the_picture_is_rgb_and_still_grey(self):
+        """R and G carry the level, so the picture reads as a spectrogram."""
+        image = encode(self.audio, self.cfg)
+        self.assertEqual(image.mode, "RGB")
+        for x in range(0, image.width, 7):
+            for y in range(0, image.height, 11):
+                r, g, _ = image.get_rgb(x, y)
+                self.assertEqual(r, g)
+
+    def test_silence_stays_white(self):
+        """Where nothing is sounding the blue channel repeats the grey."""
+        image = encode(Audio([0.0] * 4000, RATE), EncodeConfig(n_fft=256, hop=64, phase="rgb"))
+        for x in range(0, image.width, 5):
+            r, g, b = image.get_rgb(x, 20)
+            self.assertEqual((r, g, b), (image.maxval,) * 3)
+
+    def test_metadata_records_it(self):
+        meta = read_meta(encode(self.audio, self.cfg))
+        self.assertEqual(meta["phase"], "rgb")
+        self.assertEqual(meta["v"], META_VERSION)
+        self.assertIn("phase_floor", meta)
+
+    def test_decoding_needs_no_passes(self):
+        result = decode(encode(self.audio, self.cfg), iterations=64)
+        self.assertTrue(result.stored_phase)
+        self.assertEqual(result.iterations, 0)
+        self.assertEqual(result.audio.meta["phase"], "stored")
+
+    def test_the_waveform_comes_back(self):
+        """The real prize: the samples match, not merely the spectrum."""
+        result = decode(encode(self.audio, self.cfg))
+        metrics = compare(self.audio, result.audio, self.cfg)
+        self.assertGreater(metrics["waveform_snr"], 30.0)
+        self.assertLess(metrics["spectral_convergence"], 0.02)
+
+    def test_it_beats_rebuilding_the_phase(self):
+        stored = compare(self.audio, decode(encode(self.audio, self.cfg)).audio, self.cfg)
+        rebuilt_cfg = EncodeConfig(n_fft=256, hop=64)
+        rebuilt = compare(self.audio, decode(encode(self.audio, rebuilt_cfg), iterations=64).audio, rebuilt_cfg)
+        self.assertLess(stored["spectral_convergence"], rebuilt["spectral_convergence"])
+        self.assertGreater(stored["waveform_snr"], rebuilt["waveform_snr"] + 20.0)
+
+    def test_16_bit_is_better_than_8(self):
+        scores = {}
+        for depth in (8, 16):
+            cfg = EncodeConfig(n_fft=256, hop=64, phase="rgb", depth=depth)
+            scores[depth] = compare(self.audio, decode(encode(self.audio, cfg)).audio, cfg)["waveform_snr"]
+        self.assertGreater(scores[16], scores[8])
+
+    def test_a_deeper_floor_keeps_more_phase(self):
+        sizes = {}
+        from audioimage.png import write_png_bytes
+
+        for floor in (30.0, 90.0):
+            cfg = EncodeConfig(n_fft=256, hop=64, phase="rgb", phase_floor=floor)
+            sizes[floor] = len(write_png_bytes(encode(self.audio, cfg)))
+        self.assertLess(sizes[30.0], sizes[90.0])
+
+    def test_refuses_layouts_it_cannot_invert(self):
+        """An angle cannot be interpolated, so a warped or resized plane is refused."""
+        for kwargs, why in (
+            ({"colormap": "magma"}, "a colour ramp has no room for the phase"),
+            ({"plane": PlaneConfig(freq_scale="mel")}, "a warped axis resamples"),
+            ({"plane": PlaneConfig(freq_scale="log")}, "a warped axis resamples"),
+            ({"plane": PlaneConfig(f_min=100.0)}, "a cropped axis resamples"),
+            ({"plane": PlaneConfig(height=64)}, "a resized plane interpolates"),
+        ):
+            with self.subTest(why=why):
+                with self.assertRaises(ValueError):
+                    EncodeConfig(n_fft=256, hop=64, phase="rgb", **kwargs)
+
+    def test_refuses_a_resized_width(self):
+        cfg = EncodeConfig(n_fft=256, hop=64, phase="rgb", plane=PlaneConfig(width=20))
+        with self.assertRaises(ValueError):
+            encode(self.audio, cfg)
+
+    def test_bad_settings(self):
+        with self.assertRaises(ValueError):
+            EncodeConfig(phase="maybe")
+        with self.assertRaises(ValueError):
+            EncodeConfig(phase="rgb", phase_floor=0.0)
+
+    def test_a_version_1_picture_still_decodes(self):
+        """Pictures written before phase existed carry none, and must still work."""
+        image = encode(self.audio, EncodeConfig(n_fft=256, hop=64))
+        result = decode(image, iterations=4)
+        self.assertFalse(result.stored_phase)
+        self.assertEqual(result.audio.meta["phase"], "rebuilt")
+
+    def test_packing_directly(self):
+        plane = [[0.0, 0.5], [1.0, 0.25]]
+        phases = [[0.0, 1.5], [-3.0, 3.0]]
+        image = pack_phase(plane, phases, depth=16, floor=0.0)
+        got_plane, got_phase = unpack_phase(image)
+        for a, b in zip(plane, got_plane):
+            for x, y in zip(a, b):
+                self.assertAlmostEqual(x, y, places=4)
+        for a, b in zip(phases, got_phase):
+            for x, y in zip(a, b):
+                self.assertAlmostEqual(x, y, places=3)
+
+    def test_packing_rejects_mismatched_shapes(self):
+        from audioimage.png import PngError
+
+        with self.assertRaises(PngError):
+            pack_phase([[0.0, 0.5]], [[0.0]], 8, 0.0)
+        with self.assertRaises(PngError):
+            pack_phase([], [], 8, 0.0)
+
+    def test_unpack_refuses_a_grey_picture(self):
+        from audioimage.png import PngError
+
+        with self.assertRaises(PngError):
+            unpack_phase(encode(self.audio, EncodeConfig(n_fft=256, hop=64)))
+
+    def test_angles_wrap_rather_than_clamp(self):
+        """+pi and -pi are the same angle; the last bucket must meet the first."""
+        image = pack_phase([[0.9, 0.9]], [[math.pi - 1e-9, -math.pi]], depth=8, floor=0.0)
+        _, phases = unpack_phase(image)
+        self.assertAlmostEqual(abs(phases[0][0] - phases[0][1]) % (2 * math.pi), 0.0, places=2)
+
+
+class TestLossless(unittest.TestCase):
+    """The correction channel: what comes out is what went in, sample for sample."""
+
+    def setUp(self):
+        self.audio = tone()
+        self.cfg = EncodeConfig(n_fft=256, hop=64, phase="rgb", lossless=True)
+
+    def _wav(self, audio):
+        from audioimage.wav import write_wav_bytes
+
+        return write_wav_bytes(audio)
+
+    def test_the_file_comes_back_byte_for_byte(self):
+        result = decode(encode(self.audio, self.cfg))
+        self.assertTrue(result.lossless)
+        self.assertEqual(self._wav(result.audio), self._wav(self.audio))
+
+    def test_every_sample_is_exact(self):
+        from audioimage.wav import read_wav_bytes
+
+        result = decode(encode(self.audio, self.cfg))
+        src = read_wav_bytes(self._wav(self.audio)).samples
+        got = read_wav_bytes(self._wav(result.audio)).samples
+        self.assertEqual(len(src), len(got))
+        self.assertEqual(src, got)
+
+    def test_it_holds_for_awkward_material(self):
+        """Noise is the hardest case for everything else here; it must be exact too."""
+        from audioimage.synth import chirp, noise
+
+        for name, clip in (("noise", noise(0.3, RATE)), ("sweep", chirp(50, 6000, 0.3, RATE))):
+            with self.subTest(name=name):
+                result = decode(encode(clip, self.cfg))
+                self.assertTrue(result.lossless)
+                self.assertEqual(self._wav(result.audio), self._wav(clip))
+
+    def test_silence_is_exact(self):
+        from audioimage.wav import Audio
+
+        quiet = Audio([0.0] * 3000, RATE)
+        result = decode(encode(quiet, self.cfg))
+        self.assertEqual(self._wav(result.audio), self._wav(quiet))
+
+    def test_the_picture_gains_a_channel(self):
+        image = encode(self.audio, self.cfg)
+        self.assertEqual(image.mode, "RGBA")
+        self.assertEqual(read_meta(image)["lossless"], True)
+
+    def test_the_picture_is_still_grey_and_readable(self):
+        image = encode(self.audio, self.cfg)
+        for x in range(0, image.width, 5):
+            for y in range(0, image.height, 9):
+                r, g, _ = image.get_rgb(x, y)
+                self.assertEqual(r, g)
+
+    def test_it_needs_a_phase_to_lean_on(self):
+        with self.assertRaises(ValueError):
+            encode(self.audio, EncodeConfig(n_fft=256, hop=64, lossless=True))
+
+    def test_a_picture_without_the_channel_is_not_claimed_lossless(self):
+        result = decode(encode(self.audio, EncodeConfig(n_fft=256, hop=64, phase="rgb")))
+        self.assertFalse(result.lossless)
+
+    def test_the_level_is_left_alone(self):
+        """Rescaling exact samples would stop them being exact."""
+        result = decode(encode(self.audio, self.cfg), level="peak")
+        self.assertEqual(self._wav(result.audio), self._wav(self.audio))
+
+    def test_bad_bit_depth(self):
+        with self.assertRaises(ValueError):
+            EncodeConfig(lossless_bits=12)
+
+    def test_it_refuses_rather_than_truncating(self):
+        """Too few pixels to hold the correction has to be an error, not a silent loss."""
+        from audioimage.codec import _pack_residual
+        from audioimage.png import Image
+
+        tiny = Image(2, 2, "RGBA", 16)
+        with self.assertRaises(ValueError) as ctx:
+            _pack_residual(tiny, [0] * 100)
+        self.assertIn("pixels", str(ctx.exception))
+
+    def test_a_correction_that_does_not_fit_is_refused(self):
+        from audioimage.codec import _pack_residual
+        from audioimage.png import Image
+
+        image = Image(4, 4, "RGBA", 8)
+        with self.assertRaises(ValueError):
+            _pack_residual(image, [9999])

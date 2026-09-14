@@ -97,9 +97,11 @@ blocks, each with its overtones stacked above it.
 
 ## What survives the round trip
 
-The magnitudes survive almost perfectly. **The phase does not** — a picture has
-one number per point, and phase is the second one — so decoding rebuilds it with
-Griffin-Lim. Measured on 2 second clips at 22050 Hz, `n_fft` 1024:
+The magnitudes survive almost perfectly. The **phase** is the question, because
+a grey picture has one number per point and phase is the second one.
+
+By default it is not stored, and decoding rebuilds it with Griffin-Lim.
+Measured on 2 second clips at 22050 Hz, `n_fft` 1024:
 
 | clip | passes | spectral error | log distance | decode |
 |------|-------:|---------------:|-------------:|-------:|
@@ -126,6 +128,82 @@ the phase you deliberately threw away.
 
 Noise is the hardest case, and for a good reason: noise is *nothing but* phase
 relationships, so there is least to recover.
+
+### Or store the phase instead
+
+`--phase rgb` writes the angle into the blue channel while the red and green
+channels keep the level, so the picture still reads as a spectrogram:
+
+```
+R = G = magnitude     the picture stays grey, and stays readable
+B     = phase         only where there is energy to have a phase
+```
+
+Decoding then needs no guessing at all — the spectrum goes straight back
+through the inverse transform:
+
+| clip | | spectral error | waveform SNR | decode | size |
+|------|-|---------------:|-------------:|-------:|-----:|
+| melody | grey, Griffin-Lim | 2.51 % | −2.8 dB | 0.45 s | 19.4 KiB |
+| melody | `--phase rgb` | **0.46 %** | **+44.1 dB** | **0.08 s** | **18.6 KiB** |
+| melody | `--phase rgb --depth 16` | **0.10 %** | **+58.2 dB** | 0.09 s | 42.9 KiB |
+| noise | grey, Griffin-Lim | 8.30 % | −3.0 dB | 0.42 s | 166 KiB |
+| noise | `--phase rgb --depth 16` | **0.002 %** | **+92.2 dB** | 0.11 s | 485 KiB |
+| sweep | grey, Griffin-Lim | 4.84 % | −3.1 dB | 0.38 s | 16.5 KiB |
+| sweep | `--phase rgb` | **0.40 %** | **+45.1 dB** | 0.09 s | 13.9 KiB |
+
+The waveform SNR is the number that changes character. Without the phase it is
+*negative* — the rebuilt waveform is further from the original than silence is,
+even with the spectrum 97 % right. With it, the samples genuinely come back.
+
+At 8 bits the file does not grow, and on two of those clips it shrinks, because
+the masking pays for itself: phase is noise, noise does not compress, so it is
+written only where the magnitude is within `--phase-floor` dB (60 by default) of
+the peak — 5.7 % of the pixels on the melody. Everywhere else the blue channel
+repeats the grey, which is also what keeps the picture legible: unmasked phase
+is confetti across the whole frame.
+
+Noise is the case that does grow, and there is no trick for it — noise *is*
+phase, so its picture has to carry phase everywhere.
+
+Storing the phase needs the exactly-invertible layout, and says so rather than
+quietly doing something worse: `gray`, a `linear` frequency axis from 0 Hz, and
+one row per bin. An angle cannot be interpolated — halfway between +3.1 and
+−3.1 radians is not 0, it is a whole turn from the truth.
+
+It is **not** the default. The grey picture is the format as described at the
+top of this file, and `--phase rgb` is the switch for when the sound matters
+more than the picture.
+
+### Or make it exact
+
+`--lossless` adds a fourth channel holding a correction: the encoder decodes
+its own picture, subtracts the result from the source, and writes the
+difference into alpha. Decoding adds it back.
+
+```bash
+audioimage roundtrip voice.wav --lossless
+cmp voice.wav voice-decoded.wav        # no output: the files are identical
+```
+
+Not "close", not "+92 dB" — **byte-for-byte identical**, on a melody, on a
+sweep, and on white noise, with a test for each. The picture stays grey and
+readable; the correction is invisible in the alpha channel.
+
+| | source WAV | lossless picture |
+|---|---:|---:|
+| melody | 90.5 KiB | **80.3 KiB** |
+| sweep | 44 KiB | 53.8 KiB |
+| noise | 88 KiB | 292 KiB |
+
+The correction costs whatever it costs to store, which is why it is paired
+with a stored phase — the closer the picture already is, the less there is to
+correct. The defaults (`--phase-floor 60`, the `db` scale) turn out to be the
+smallest combination: raising the floor shrinks the correction but grows the
+phase plane faster, because phase is noise and noise does not compress.
+
+Exactness is defined against a bit depth — `--lossless-bits`, 16 by default,
+which is what a WAV holds. It is the *samples* that come back exactly.
 
 ## In the browser
 
@@ -225,9 +303,13 @@ audioimage view drawn.wav -o check.png --n-fft 512   # the letters are audible
 | overlap | `--hop` | `n_fft / 4` reconstructs exactly; larger hops are faster and rougher |
 | amplitude | `--scale` | `db` (default) shows quiet detail the way hearing does; `linear` shows only the loudest parts; `sqrt` is between |
 | dynamic range | `--top-db` | how far below the peak reaches white. 80 dB by default |
-| frequency axis | `--freq-scale` | `linear` is the **only exactly invertible** one. `log` and `mel` look far better and cost ~8 % accuracy |
+| frequency axis | `--freq-scale` | `linear` is the **only exactly invertible** one. `log` and `mel` compress the top; `circle` compresses *both* ends and gives the middle the detail |
+| bulge | `--freq-bulge` | how hard `circle` bulges: 0 is linear, 1 the full arc (0.7) |
 | size | `--height`, `--width` | resample the plane to a fixed rectangle (useful when something downstream wants one shape) |
 | precision | `--depth` | 16 bits = 65536 levels of loudness, 8 bits = 256 and a third of the file size |
+| phase | `--phase` | `rgb` stores it in the blue channel: no Griffin-Lim, +45 dB on the waveform |
+| phase detail | `--phase-floor` | how far under the peak still gets a phase written (60 dB) |
+| exactness | `--lossless` | a correction channel: the decode is the original, byte for byte |
 | colour | `--colormap` | `gray` is the format. `fire`, `ice`, `viridis`, `magma` are invertible too, through their lookup tables, but lossier |
 | phase effort | `--iters` | 16 is rough, 64 is good, 128 is better and twice as slow |
 
@@ -328,7 +410,7 @@ picture's distinct colours in one vectorised pass instead.
 ## Tests
 
 ```bash
-make test                 # 267 tests
+make test                 # 334 tests
 make test-python          # the same, on the standard-library backend
 ```
 
@@ -342,12 +424,18 @@ package reads the PNGs it writes; when it is not, they skip.
 
 ## Limits
 
-- **Phase is not stored.** This is the defining property, not a bug. A decode
-  sounds like the original; it does not sample-match it.
-- **Not a compressor.** Smaller than WAV, much worse than FLAC or Opus.
+- **Phase is not stored by default.** A decode sounds like the original without
+  sample-matching it. `--phase rgb` stores it and removes this limitation
+  entirely, at the cost of an RGB picture that is tinted where the signal is.
+- **Not a compressor.** A lossless picture lands near the size of the WAV it
+  came from — sometimes under it, well over it for noise — and nowhere near
+  FLAC. Smallness was never the point.
 - **Mono.** Stereo input is mixed down on the way in.
-- **`log` and `mel` axes resample**, so they are approximate in both directions.
-  `linear` is the exact one.
+- **`log` and `mel` axes resample**, so they are approximate in both directions,
+  and they cannot carry a phase. `linear` is the exact one. The default height
+  is already one row per bin, which is where they lose least; *reducing*
+  `--height` costs a warped axis far more than a linear one (a `log` axis goes
+  from 6 % error at 513 rows to 31 % at 128).
 - **Lossy image formats will ruin a picture.** JPEG smears the spectrum and the
   decode hears the smear. PNG only.
 

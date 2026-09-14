@@ -112,6 +112,36 @@ class TestRowFrequencies(unittest.TestCase):
                 self.assertEqual(len(rows), 32)
                 self.assertTrue(all(b > a for a, b in zip(rows, rows[1:])))
 
+    def test_circle_axis_blends_the_ends_and_expands_the_middle(self):
+        rows = row_frequencies(PlaneConfig(freq_scale="circle", height=65, f_max=8000.0), 8000.0)
+        gaps = [b - a for a, b in zip(rows, rows[1:])]
+        self.assertTrue(all(g > 0 for g in gaps))            # still a frequency axis
+        self.assertGreater(gaps[0], gaps[32] * 3)            # the bottom is blended
+        self.assertGreater(gaps[-1], gaps[32] * 3)           # so is the top
+        self.assertAlmostEqual(rows[0], 0.0)
+        self.assertAlmostEqual(rows[-1], 8000.0, places=6)
+
+    def test_circle_bulge_controls_how_hard(self):
+        def ratio(bulge):
+            rows = row_frequencies(PlaneConfig(freq_scale="circle", freq_bulge=bulge, height=65, f_max=8000.0), 8000.0)
+            gaps = [b - a for a, b in zip(rows, rows[1:])]
+            return gaps[0] / gaps[32]
+
+        self.assertAlmostEqual(ratio(0.0), 1.0, places=6)     # 0 is a plain linear axis
+        self.assertGreater(ratio(0.7), ratio(0.3))
+
+    def test_circle_bulge_is_checked(self):
+        with self.assertRaises(ValueError):
+            PlaneConfig(freq_bulge=1.5)
+
+    def test_circle_warp_is_monotonic(self):
+        from audioimage.spectrogram import circle_warp
+
+        values = [circle_warp(i / 40) for i in range(41)]
+        self.assertAlmostEqual(values[0], 0.0, places=9)
+        self.assertAlmostEqual(values[-1], 1.0, places=9)
+        self.assertTrue(all(b >= a for a, b in zip(values, values[1:])))
+
     def test_single_row(self):
         self.assertEqual(len(row_frequencies(PlaneConfig(height=1), 8000.0)), 1)
 

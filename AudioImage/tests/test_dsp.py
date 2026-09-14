@@ -39,6 +39,22 @@ class TestWindows(unittest.TestCase):
         self.assertAlmostEqual(w[0], 0.0)
         self.assertGreater(w[-1], 0.0)
 
+    def test_circle_window(self):
+        """A half circle: nothing at the ends, full weight held across the middle."""
+        w = dsp.window_values("circle", 32)
+        self.assertAlmostEqual(w[0], 0.0)
+        self.assertAlmostEqual(max(w), 1.0)
+        self.assertGreater(w[16], 0.99)
+        # it stays near full weight much longer than a cosine does
+        hann = dsp.window_values("hann", 32)
+        self.assertGreater(sum(w), sum(hann))
+        self.assertEqual(len(w), 32)
+
+    def test_circle_window_reconstructs(self):
+        x = noise(2000, 23)
+        back = dsp.istft(dsp.stft(x, 256, 64, "circle"), 256, 64, "circle", length=len(x))
+        self.assertLess(max(abs(a - b) for a, b in zip(x, back)), 1e-9)
+
     def test_rect_is_all_ones(self):
         self.assertEqual(list(dsp.window_values("rect", 4)), [1.0] * 4)
 

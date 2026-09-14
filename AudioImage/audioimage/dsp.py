@@ -9,9 +9,10 @@ spectrum lives here, in plain Python with plain ``complex`` numbers:
   half-length :func:`fft`, which is about twice as fast as transforming the
   real signal directly and returns the ``N/2 + 1`` non-redundant bins.
 * :func:`stft` / :func:`istft` - the sliding window analysis and its
-  weighted-overlap-add inverse.  With the default periodic Hann window the
-  pair reconstructs the input to floating-point accuracy for any hop that
-  divides the window evenly.
+  weighted-overlap-add inverse.  With any of the windows here the pair
+  reconstructs the input to floating-point accuracy for any hop that divides
+  the window evenly, because the synthesis divides by the overlapped window
+  power rather than assuming it sums to one.
 * :func:`griffin_lim` - magnitudes back to a waveform when the phase is gone,
   which is exactly the situation after a spectrogram has been through a
   picture.
@@ -45,7 +46,7 @@ __all__ = [
     "window_values",
 ]
 
-WINDOWS = ("hann", "hamming", "blackman", "rect")
+WINDOWS = ("hann", "hamming", "blackman", "circle", "rect")
 
 NAME = "python"
 
@@ -76,6 +77,16 @@ def window_values(name: str, size: int) -> tuple[float, ...]:
         return tuple(
             0.42 - 0.5 * math.cos(two_pi_n * i) + 0.08 * math.cos(2.0 * two_pi_n * i) for i in range(size)
         )
+    if name == "circle":
+        # a half-circle laid over the frame: both ends come down to nothing so
+        # neighbouring frames blend into each other, and the middle stays at
+        # full weight far longer than a cosine does, which is where the detail
+        # is.  w[i] = sqrt(1 - x^2) with x running -1 .. +1 across the window.
+        out = []
+        for i in range(size):
+            x = 2.0 * i / size - 1.0
+            out.append(math.sqrt(max(0.0, 1.0 - x * x)))
+        return tuple(out)
     raise ValueError(f"unknown window {name!r}; choose from {', '.join(WINDOWS)}")
 
 

@@ -28,6 +28,7 @@ from typing import Any, Callable, NoReturn, Sequence, TextIO
 from . import __version__
 from .backend import BACKENDS, describe_backends
 from .codec import (
+    PHASE_MODES,
     EncodeConfig,
     compare,
     decode,
@@ -119,6 +120,10 @@ def _encode_config(args: argparse.Namespace) -> EncodeConfig:
         plane=_plane_config(args),
         colormap=args.colormap,
         depth=args.depth,
+        phase="rgb" if getattr(args, "lossless", False) else getattr(args, "phase", "none"),
+        phase_floor=getattr(args, "phase_floor", 60.0),
+        lossless=getattr(args, "lossless", False),
+        lossless_bits=getattr(args, "lossless_bits", 16),
     )
 
 
@@ -222,6 +227,13 @@ def cmd_encode(args: argparse.Namespace) -> int:
             f"  amplitude scale {cfg.plane.scale}"
             + (f" over {cfg.plane.top_db:.0f} dB" if cfg.plane.scale == "db" else "")
             + f", frequency axis {cfg.plane.freq_scale}",
+            "  phase in the blue channel, correction in alpha - the decode is the original, exactly"
+            if cfg.lossless
+            else (
+                "  phase stored in the blue channel - decoding needs no Griffin-Lim"
+                if cfg.phase != "none"
+                else "  phase not stored - decoding rebuilds it with Griffin-Lim"
+            ),
         ],
     )
     return EXIT_OK
@@ -259,7 +271,11 @@ def cmd_decode(args: argparse.Namespace) -> int:
         [
             f"wrote {args.output}  ({_fmt_size(args.output)}) in {elapsed:.2f}s",
             f"  {result.audio.duration:.2f}s at {result.audio.sample_rate} Hz",
-            f"  {args.iters} griffin-lim passes, final error {result.error:.4f}",
+            "  exact: the correction channel restored the original samples"
+            if result.lossless
+            else "  phase came from the picture - no passes needed"
+            if result.stored_phase
+            else f"  {args.iters} griffin-lim passes, final error {result.error:.4f}",
             *notes,
         ],
     )
@@ -300,7 +316,8 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
         "output": wav_path,
         "encode_seconds": round(encode_time, 3),
         "decode_seconds": round(decode_time, 3),
-        "iterations": args.iters,
+        "iterations": result.iterations,
+        "stored_phase": result.stored_phase,
         "metrics": metrics,
         "picture": image.describe(),
     }
@@ -311,10 +328,14 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
         [
             f"{args.input} -> {png_path} -> {wav_path}",
             f"  picture   {image.width}x{image.height}, {image.depth}-bit, {_fmt_size(png_path)}",
-            f"  encode    {encode_time:.2f}s     decode {decode_time:.2f}s ({args.iters} passes)",
+            f"  encode    {encode_time:.2f}s     decode {decode_time:.2f}s "
+            + ("(phase came from the picture)" if result.stored_phase else f"({args.iters} passes)"),
             f"  spectrum  {metrics['spectral_convergence'] * 100:.2f}% relative error"
             f"   ({metrics['log_spectral_distance']:.2f} dB log distance)",
-            f"  waveform  {snr:.2f} dB SNR - low is expected: the phase was rebuilt, not stored",
+            "  waveform  bit-for-bit identical to the source"
+            if result.lossless
+            else f"  waveform  {snr:.2f} dB SNR"
+            + ("" if cfg.phase != "none" else " - low is expected: the phase was rebuilt, not stored"),
         ],
     )
     return EXIT_OK
@@ -476,7 +497,23 @@ def _add_encode_options(parser: argparse.ArgumentParser, full: bool = True) -> N
     plane.add_argument("--width", type=int, default=None, help="columns (default: one per frame)")
     plane.add_argument("--origin", choices=ORIGINS, default="lower", help="which end of the picture is 0 Hz (default: lower)")
     plane.add_argument("--colormap", choices=COLORMAPS, default="gray", help="pixel colours (default: gray, the invertible one)")
-    plane.add_argument("--depth", type=int, choices=(8, 16), default=16, help="bits per pixel (default: 16)")
+    plane.add_argument("--depth", type=int, choices=(8, 16), default=16, help="bits per channel (default: 16)")
+    plane.add_argument(
+        "--phase", choices=PHASE_MODES, default="none",
+        help="'rgb' stores the phase in the blue channel, so decoding needs no guessing (default: none)",
+    )
+    plane.add_argument(
+        "--phase-floor", type=float, default=60.0,
+        help="with --phase rgb, how far under the peak still gets a phase, in dB (default: 60)",
+    )
+    plane.add_argument(
+        "--lossless", action="store_true",
+        help="add a correction channel so the decode is bit-for-bit the original (implies --phase rgb)",
+    )
+    plane.add_argument(
+        "--lossless-bits", type=int, choices=(8, 16, 24, 32), default=16,
+        help="the sample resolution --lossless makes exact (default: 16)",
+    )
 
 
 def _add_decode_options(parser: argparse.ArgumentParser) -> None:

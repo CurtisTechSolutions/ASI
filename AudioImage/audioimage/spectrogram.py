@@ -24,7 +24,10 @@ Three choices decide what the picture looks like, and all three are reversible:
     bin, which is the only setting that needs no interpolation and so is the
     only exactly invertible one.  ``log`` and ``mel`` compress the top of the
     range, which is where a picture of speech or music starts to look like
-    what you hear; they resample, so they cost a little accuracy.
+    what you hear.  ``circle`` compresses *both* ends instead - the bottom
+    octaves blend together, the top octaves blend together, and the middle,
+    where most of what anyone listens to actually sits, gets the rows.  All
+    three resample, so they cost a little accuracy.
 
 ``height`` / ``width``
     The size of the picture.  Leave them alone and the plane is exactly one
@@ -50,12 +53,15 @@ __all__ = [
     "from_plane",
     "hz_to_mel",
     "mel_to_hz",
+    "circle_warp",
+    "phases_to_plane",
+    "plane_to_phases",
     "row_frequencies",
     "to_plane",
 ]
 
 SCALES = ("db", "linear", "sqrt")
-FREQ_SCALES = ("linear", "log", "mel")
+FREQ_SCALES = ("linear", "log", "mel", "circle")
 ORIGINS = ("lower", "upper")
 
 MIN_LOG_HZ = 1.0
@@ -70,6 +76,23 @@ def hz_to_mel(hz: float) -> float:
 def mel_to_hz(mel: float) -> float:
     """Mels back to hertz."""
     return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+
+def circle_warp(t: float) -> float:
+    """A row position ``0..1`` -> a frequency position ``0..1``, bulging in the middle.
+
+    Built from the circle: the *rate* at which frequency advances is
+    ``1 - sqrt(1 - x^2)`` with ``x`` running -1 to +1, which is zero at the
+    middle and one at the ends.  Integrating that gives this curve, so the
+    frequency axis crawls through the mid range - many rows, fine detail - and
+    races through the bottom and the top, blending each of those ends together.
+    """
+    x = 2.0 * t - 1.0
+    x = -1.0 if x < -1.0 else (1.0 if x > 1.0 else x)
+    area = x - (x * math.sqrt(max(0.0, 1.0 - x * x)) + math.asin(x)) / 2.0
+    lo = -1.0 + math.pi / 4.0
+    span = 2.0 - math.pi / 2.0
+    return (area - lo) / span
 
 
 @dataclass
@@ -153,6 +176,14 @@ class PlaneConfig:
     """The magnitude that maps to 1.0 (black).  ``None`` -> the clip's peak."""
     freq_scale: str = "linear"
     f_min: float = 0.0
+    freq_bulge: float = 0.7
+    """How hard the ``circle`` axis bulges: 0 is a plain linear axis, 1 the full arc.
+
+    At 1 the curve is flat at the centre, which concentrates rows there so
+    sharply that the middle gets hundreds of times the detail of the ends.
+    Blending it back towards linear keeps the shape - ends blended, middle
+    expansive - without the extremes running away.
+    """
     f_max: float | None = None
     """``None`` -> the Nyquist frequency."""
     height: int | None = None
@@ -179,6 +210,8 @@ class PlaneConfig:
             raise ValueError(f"ref must be > 0, got {self.ref}")
         if self.f_min < 0:
             raise ValueError(f"f_min must be >= 0, got {self.f_min}")
+        if not 0.0 <= self.freq_bulge <= 1.0:
+            raise ValueError(f"freq_bulge must be in [0, 1], got {self.freq_bulge}")
         if self.f_max is not None and self.f_max <= self.f_min:
             raise ValueError(f"f_max must be greater than f_min, got {self.f_max} <= {self.f_min}")
 
@@ -205,6 +238,7 @@ class PlaneConfig:
             "top_db": self.top_db,
             "ref": self.ref,
             "freq_scale": self.freq_scale,
+            "freq_bulge": self.freq_bulge,
             "f_min": self.f_min,
             "f_max": self.f_max,
             "height": self.height,
@@ -215,7 +249,11 @@ class PlaneConfig:
     @classmethod
     def from_meta(cls, meta: dict[str, Any]) -> "PlaneConfig":
         """Rebuild a config from what was written into a picture."""
-        known = {f: meta[f] for f in ("scale", "top_db", "ref", "freq_scale", "f_min", "f_max", "height", "width", "origin") if f in meta}
+        known = {
+            f: meta[f]
+            for f in ("scale", "top_db", "ref", "freq_scale", "freq_bulge", "f_min", "f_max", "height", "width", "origin")
+            if f in meta
+        }
         return cls(**known)
 
 
@@ -281,6 +319,12 @@ def row_frequencies(cfg: PlaneConfig, nyquist: float) -> list[float]:
         hi = math.log(max(f_max, math.exp(lo) * 1.000001))
         step = (hi - lo) / (height - 1)
         return [math.exp(lo + step * i) for i in range(height)]
+    if cfg.freq_scale == "circle":
+        k = cfg.freq_bulge
+        return [
+            f_min + (f_max - f_min) * ((1.0 - k) * (i / (height - 1)) + k * circle_warp(i / (height - 1)))
+            for i in range(height)
+        ]
     lo, hi = hz_to_mel(f_min), hz_to_mel(f_max)
     step = (hi - lo) / (height - 1)
     return [mel_to_hz(lo + step * i) for i in range(height)]
@@ -401,3 +445,39 @@ def from_plane(
             column = [row[t] for row in mags_rows]
             out.append([_interp(row_hz, column, f) for f in bin_hz])
     return Spectrogram(out, sample_rate, n_fft, hop, window, center)
+
+
+# ---------------------------------------------------------------------------
+# the phase plane
+# ---------------------------------------------------------------------------
+
+
+def phases_to_plane(phases: Sequence[Sequence[float]], cfg: PlaneConfig) -> list[list[float]]:
+    """Phases (frame-major, radians) laid out like the magnitude plane.
+
+    Only the geometry is applied - the transpose and, for ``origin="lower"``,
+    the flip.  Nothing is interpolated or rescaled, because an angle cannot be
+    averaged with its neighbour: halfway between ``+3.1`` and ``-3.1`` radians
+    is not ``0``, it is a whole turn away from the truth.  That is why storing
+    phase requires the exactly-invertible layout (see
+    :meth:`PlaneConfig.exact`).
+    """
+    frames = list(phases)
+    if not frames:
+        return []
+    bins = len(frames[0])
+    rows = [[frames[t][b] for t in range(len(frames))] for b in range(bins)]
+    if cfg.origin == "lower":
+        rows.reverse()
+    return rows
+
+
+def plane_to_phases(rows: Sequence[Sequence[float]], cfg: PlaneConfig) -> list[list[float]]:
+    """The inverse of :func:`phases_to_plane`: back to one list per frame."""
+    grid = [list(r) for r in rows]
+    if not grid:
+        return []
+    if cfg.origin == "lower":
+        grid.reverse()
+    width = len(grid[0])
+    return [[row[t] for row in grid] for t in range(width)]

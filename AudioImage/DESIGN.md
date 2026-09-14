@@ -42,6 +42,16 @@ X[c][k] = Σ(i = 0 … n_fft−1)  x[c·hop + i] · w[i] · exp(−2πi·k·i / 
 for `k = 0 … n_fft/2`, which is `n_fft/2 + 1` bins. Bin `k` is the frequency
 `k · R / n_fft`.
 
+### 2.1b The window shapes
+
+`hann`, `hamming` and `blackman` are the usual cosine windows. `circle` is a
+half circle laid over the frame — `w[i] = √(1 − x²)`, `x` running −1 to +1 —
+which comes down to nothing at both ends, so neighbouring frames blend into
+each other, while holding full weight across the middle far longer than a
+cosine does. It reconstructs exactly like the others, because the synthesis
+divides by the overlapped window power rather than assuming any particular
+shape sums to one.
+
 ### 2.2 Why the window is periodic
 
 The windows are defined periodically — `cos(2πn / N)`, not `cos(2πn / (N−1))`.
@@ -115,6 +125,15 @@ would show the fundamentals and nothing else.
 | `linear` | hertz | **exactly**, when `height = n_fft/2 + 1` and `f_min = 0` |
 | `log` | log hertz (from 1 Hz) | by interpolation |
 | `mel` | mels, `2595·log₁₀(1 + f/700)` | by interpolation |
+| `circle` | a circular arc (below) | by interpolation |
+
+The `circle` axis compresses **both** ends rather than just the top. Its rate
+of frequency change is `1 − √(1 − x²)` with `x` running −1 to +1 — zero at the
+centre, one at the extremes — so integrating it gives an axis that crawls
+through the mid range and races through the bottom and the top. `freq_bulge`
+blends it back towards linear, because at full strength the centre is *flat*
+and concentrates rows there by a factor of thousands; at the default 0.7 the
+middle gets about ten times the detail of the ends.
 
 The exact case is detected and short-circuited: one row per bin, no arithmetic
 in between. Everything else resamples by linear interpolation in both
@@ -151,7 +170,7 @@ same input always produces the same file:
 
 | field | meaning |
 |-------|---------|
-| `v`, `tool` | format version, writer |
+| `v`, `tool` | format version (2; a version 1 picture simply has no phase), writer |
 | `sample_rate`, `samples` | what to restore on decode |
 | `n_fft`, `hop`, `window`, `center` | the analysis |
 | `frames` | columns before any resize, so the time axis can be stretched back |
@@ -159,6 +178,8 @@ same input always produces the same file:
 | `freq_scale`, `f_min`, `f_max` | the frequency mapping |
 | `height`, `width`, `origin` | the plane's shape and orientation |
 | `colormap`, `depth` | how to read the pixels |
+| `phase`, `phase_floor` | whether the blue channel is an angle, and down to what level |
+| `lossless`, `lossless_bits` | whether the alpha channel is a correction, and to what depth |
 | `peak`, `rms` | the loudness of the original |
 
 ### 5.2 Pictures from elsewhere
@@ -173,6 +194,85 @@ spectrogram shows the letters.
 
 ## 6. Phase
 
+A grey picture has one number per point. The STFT has two — a magnitude and an
+angle — so one of them has to go somewhere. There are two answers here.
+
+### 6.0 Storing it: `phase="rgb"`
+
+```
+R = G = magnitude    keeps the picture grey, so it still reads as a spectrogram
+B     = phase        quantised over a full turn, with wraparound
+```
+
+The angle is quantised as `round((phase + pi) / 2pi * steps) mod steps`, and the
+modulo is the point: +pi and -pi are the same angle, so the last bucket has to
+meet the first rather than clamp against it. At 8 bits that is 1.4 degrees of
+error, at 16 bits none worth measuring.
+
+**Masking.** Phase is written only where the intensity is within `phase_floor`
+dB of the peak. Below that the blue channel repeats the grey. Two things come
+of it, and both matter:
+
+* the file stays small — phase is noise and noise does not compress, so writing
+  it everywhere costs 4x; masked to the 5.7% of pixels that have energy, an
+  8-bit phase picture is *smaller* than the 16-bit grey one;
+* the picture stays legible — unmasked phase speckles the entire frame into
+  confetti, which was measured by doing it and looking at the result.
+
+Nothing audible is lost: a point 60 dB down is a thousandth of the amplitude,
+and its angle cannot be heard.
+
+**What it requires.** The exactly-invertible layout — `gray`, `linear` from
+0 Hz, one row per bin, one column per frame — enforced in
+:class:`EncodeConfig`. An angle cannot be interpolated: halfway between +3.1 and
+-3.1 radians is not 0 but a whole turn from the truth, so a warped or resized
+plane is refused rather than quietly resampled.
+
+**What it buys**, measured against the same clips through the grey format:
+
+=========  ====================  ==================  ==================
+clip       grey + Griffin-Lim    rgb, 8-bit          rgb, 16-bit
+=========  ====================  ==================  ==================
+melody     2.51% / -2.8 dB       0.46% / +44.1 dB    0.10% / +58.2 dB
+noise      8.30% / -3.0 dB       0.49% / +43.9 dB    0.002% / +92.2 dB
+sweep      4.84% / -3.1 dB       0.40% / +45.1 dB    0.025% / +69.0 dB
+=========  ====================  ==================  ==================
+
+(spectral error / waveform SNR).  Decoding also stops being iterative: 0.08 s
+against 0.45 s, because there is nothing to iterate.
+
+### 6.0b Making it exact: `lossless`
+
+Storing a 16-bit magnitude and a 16-bit phase gets within about one
+least-significant bit of a 16-bit WAV - 92% of samples already identical - and
+no amount of extra precision in those two numbers closes the last gap cheaply,
+because the error is spread across the quantisation of both.
+
+So the last gap is closed directly rather than approximated away. The encoder
+decodes the picture it has just written, using the *same* function the decoder
+will use (:func:`_reconstruct` - one shared implementation is what makes the
+two sides agree), quantises both the source and its own result to
+``lossless_bits``, and writes the difference into the alpha channel, one value
+per pixel. Decoding adds it back.
+
+The result is byte-for-byte identity, verified by comparing whole WAV files on
+a melody, a sweep, white noise and silence.
+
+Two things are checked rather than assumed: that the picture has at least as
+many pixels as the clip has samples (it does by a factor of two at
+``hop = n_fft/4``, and the encoder refuses rather than truncating if a large
+hop makes it false), and that every correction fits the channel width (it
+refuses rather than clamping, since a clamped correction is a silent loss).
+
+The correction is what makes the base quality matter for *size* rather than
+quality: the closer the picture already is, the less there is to store.
+Measured on a melody, the smallest combination is the default one - a 60 dB
+phase floor and the ``db`` scale, at 89% of the source WAV. Raising the floor
+shrinks the correction but grows the phase plane faster, because phase is noise
+and noise does not compress.
+
+### 6.1 Rebuilding it: `phase="none"`
+
 Magnitudes alone do not determine a waveform. Griffin-Lim searches for one whose
 spectrum matches:
 
@@ -185,7 +285,7 @@ repeat:
     c = S · step / |step|            project onto "has the right magnitudes"
 ```
 
-### 6.1 The damping matters
+### 6.2 The damping matters
 
 The acceleration is `α/(1+α)`, not `α`. Applied raw, a momentum of 0.99
 overshoots so far that the error *rises*. Measured over 32 passes on a 3-tone
@@ -201,14 +301,14 @@ signal:
 Undamped, more momentum is worse. Damped, it behaves the way the literature says
 it should.
 
-### 6.2 Reproducibility
+### 6.3 Reproducibility
 
 The starting phase is drawn from the **standard library's** `random.Random`
 in both backends, in the same order, so a seed gives the same waveform whether
 or not numpy is installed. Two different random starts land on two different,
 equally valid answers, so this is not cosmetic.
 
-### 6.3 Level
+### 6.4 Level
 
 The decode is scaled to the RMS recorded at encode time. RMS rather than peak:
 by Parseval the energy is preserved when the phase is replaced, but the tallest
@@ -261,9 +361,8 @@ held exactly in float64, so the arithmetic is exact.
   picture, would work; nothing needs it yet.
 - **Compression.** The picture is smaller than WAV as a side effect of
   discarding the phase, not by design.
-- **Phase in a second image.** It would make the round trip exact and the
-  pictures meaningless — phase looks like noise. The point of the format is that
-  the picture is legible.
+- **Phase in a second image.** Not needed: it fits in the blue channel of the
+  one picture (section 6.0), masked so the frame stays readable.
 - **Lossy image formats.** The decode would hear the artefacts.
 
 ## 11. Where this goes next

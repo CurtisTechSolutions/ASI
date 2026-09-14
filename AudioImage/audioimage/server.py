@@ -44,7 +44,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
 from .backend import BACKENDS, describe_backends
-from .codec import EncodeConfig, compare, decode, encode, image_to_plane, read_meta
+from .codec import PHASE_MODES, EncodeConfig, compare, decode, encode, image_to_plane, read_meta
 from .colormap import COLORMAPS
 from .dsp import WINDOWS
 from .png import Image, PngError, SIGNATURE, read_png_bytes, write_png_bytes
@@ -158,6 +158,10 @@ def _encode_config(params: Params) -> EncodeConfig:
             center=params.flag("center", True),
             colormap=params.choice("colormap", COLORMAPS, "gray"),
             depth=params.integer("depth", 16),
+            phase="rgb" if params.flag("lossless") else params.choice("phase", PHASE_MODES, "none"),
+            phase_floor=params.number("phase_floor", 60.0, 1.0, 400.0),
+            lossless=params.flag("lossless"),
+            lossless_bits=params.integer("lossless_bits", 16),
             plane=PlaneConfig(
                 scale=params.choice("scale", SCALES, "db"),
                 top_db=params.number("top_db", 80.0, 1.0, 400.0),
@@ -224,6 +228,7 @@ class Api:
                 "freq_scales": list(FREQ_SCALES),
                 "colormaps": list(COLORMAPS),
                 "origins": list(ORIGINS),
+                "phase_modes": list(PHASE_MODES),
                 "backends": list(BACKENDS),
                 "kinds": list(KINDS),
                 "depths": [8, 16],
@@ -238,6 +243,9 @@ class Api:
                 "origin": defaults.plane.origin,
                 "colormap": defaults.colormap,
                 "depth": defaults.depth,
+                "phase": defaults.phase,
+                "phase_floor": defaults.phase_floor,
+                "lossless": defaults.lossless,
                 "iters": 64,
                 "momentum": 0.99,
                 "rate": 22050,

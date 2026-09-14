@@ -59,7 +59,6 @@ class TestImage(unittest.TestCase):
             ((5, 0), "no height"),
             ((5, 5, "CMYK"), "unknown mode"),
             ((5, 5, "L", 4), "odd depth"),
-            ((5, 5, "RGB", 16), "16-bit rgb"),
         ):
             with self.subTest(why=why):
                 with self.assertRaises(PngError):
@@ -74,12 +73,20 @@ class TestImage(unittest.TestCase):
 
 class TestRoundTrip(unittest.TestCase):
     def test_every_mode(self):
-        for mode, depth in (("L", 8), ("L", 16), ("RGB", 8)):
+        for mode, depth in (("L", 8), ("L", 16), ("RGB", 8), ("RGB", 16)):
             with self.subTest(mode=mode, depth=depth):
                 im = random_image(mode=mode, depth=depth)
                 back = read_png_bytes(write_png_bytes(im))
                 self.assertEqual((back.width, back.height, back.mode, back.depth), (im.width, im.height, mode, depth))
                 self.assertEqual(list(back.data), list(im.data))
+
+    def test_16_bit_colour(self):
+        """What lets one picture hold a full-precision magnitude and a phase."""
+        im = random_image(24, 18, "RGB", 16, seed=3)
+        back = read_png_bytes(write_png_bytes(im))
+        self.assertEqual((back.mode, back.depth), ("RGB", 16))
+        self.assertEqual(list(back.data), list(im.data))
+        self.assertGreater(max(im.data), 255)  # genuinely using the extra byte
 
     def test_text_chunks_survive(self):
         im = random_image()

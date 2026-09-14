@@ -6,10 +6,13 @@ pixel** (256 grey levels is a coarse ruler for amplitude - 65536 is not), and
 that can carry the settings the encode used.  PNG does all three, and the
 parts of it this package needs are small enough to implement directly.
 
-Written: greyscale at 8 or 16 bits and 8-bit RGB, with adaptive scanline
+Written: greyscale, RGB and RGBA, each at 8 or 16 bits, with adaptive scanline
 filtering (each row is written with whichever of the five PNG filters predicts
-it best, which is most of what makes a PNG small).
-Read: the same, plus palette, greyscale+alpha and RGBA, at 8 or 16 bits.
+it best, which is most of what makes a PNG small).  16-bit colour is what lets
+a picture carry a full-precision magnitude *and* a phase, and the fourth
+channel is what lets it carry the correction that makes the round trip exact
+(see :mod:`audioimage.codec`).
+Read: the same, plus palette and greyscale+alpha, at 8 or 16 bits.
 Interlaced files are rejected rather than half-decoded.
 
 ``tEXt`` chunks survive the round trip, which is how :mod:`audioimage.codec`
@@ -27,7 +30,7 @@ from dataclasses import dataclass, field
 __all__ = ["Image", "PngError", "read_png", "read_png_bytes", "write_png", "write_png_bytes"]
 
 SIGNATURE = b"\x89PNG\r\n\x1a\n"
-MODES = ("L", "RGB")
+MODES = ("L", "RGB", "RGBA")
 _CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 
 
@@ -53,8 +56,7 @@ class Image:
             raise PngError(f"unknown mode {self.mode!r}; choose from {', '.join(MODES)}")
         if self.depth not in (8, 16):
             raise PngError(f"depth must be 8 or 16, got {self.depth}")
-        if self.mode == "RGB" and self.depth != 8:
-            raise PngError("RGB images are 8-bit in this module")
+
         want = self.width * self.height * self.channels
         if len(self.data) == 0:
             self.data = array("H", bytes(2 * want))
@@ -63,8 +65,8 @@ class Image:
 
     @property
     def channels(self) -> int:
-        """1 for greyscale, 3 for RGB."""
-        return 3 if self.mode == "RGB" else 1
+        """1 for greyscale, 3 for RGB, 4 with an alpha channel."""
+        return {"L": 1, "RGB": 3, "RGBA": 4}[self.mode]
 
     @property
     def maxval(self) -> int:
@@ -86,6 +88,17 @@ class Image:
             v = self.data[i]
             return (v, v, v)
         return (self.data[i], self.data[i + 1], self.data[i + 2])
+
+    def get_alpha(self, x: int, y: int) -> int:
+        """The fourth channel, or fully opaque when there is not one."""
+        if self.channels < 4:
+            return self.maxval
+        return self.data[(y * self.width + x) * 4 + 3]
+
+    def set_alpha(self, x: int, y: int, value: int) -> None:
+        """Set the fourth channel (ignored when there is not one)."""
+        if self.channels == 4:
+            self.data[(y * self.width + x) * 4 + 3] = value
 
     def set_rgb(self, x: int, y: int, rgb: tuple[int, int, int]) -> None:
         """Set an RGB pixel (on a greyscale image the red channel is used)."""
@@ -193,7 +206,7 @@ def _chunk(tag: bytes, payload: bytes) -> bytes:
 
 def write_png_bytes(image: Image, compression: int = 9) -> bytes:
     """Encode ``image`` as a complete PNG file."""
-    color_type = 2 if image.mode == "RGB" else 0
+    color_type = {"L": 0, "RGB": 2, "RGBA": 6}[image.mode]
     channels = image.channels
     sample_bytes = image.depth // 8
     bpp = channels * sample_bytes
@@ -298,10 +311,13 @@ def read_png_bytes(data: bytes) -> Image:
     if len(raw) < height * (stride + 1):
         raise PngError(f"image data is short: {len(raw)} bytes, expected {height * (stride + 1)}")
 
-    # greyscale+alpha and RGBA lose their alpha; palette images become RGB
-    out_mode = "RGB" if color_type in (2, 3, 6) else "L"
-    out_depth = 8 if (out_mode == "RGB" or depth < 8) else depth
-    out_channels = 3 if out_mode == "RGB" else 1
+    # RGBA keeps its fourth channel; greyscale+alpha and palette do not need one
+    out_mode = "RGBA" if color_type == 6 else ("RGB" if color_type in (2, 3) else "L")
+    # a palette is always 8-bit entries, and anything narrower than a byte is
+    # widened to one; everything else keeps the depth it was written at, so a
+    # 16-bit colour image survives the round trip
+    out_depth = 8 if (color_type == 3 or depth < 8) else depth
+    out_channels = {"L": 1, "RGB": 3, "RGBA": 4}[out_mode]
     image = Image(width, height, out_mode, out_depth)
     flat = image.data
 

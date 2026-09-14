@@ -69,6 +69,11 @@
     <div class="field"><label for="freq_scale">Frequency axis</label><select id="freq_scale"></select>
       <p class="hint">linear is the exactly invertible one.</p></div>
     <div class="field"><label for="depth">Bits</label><select id="depth"></select></div>
+    <div class="field"><label for="phase">Phase</label><select id="phase"></select>
+      <p class="hint">Store it in the blue channel and decoding needs no guessing.</p></div>
+    <div class="field"><label for="lossless">Lossless</label>
+      <label class="check"><input type="checkbox" id="lossless"> exact</label>
+      <p class="hint">A correction channel: the decode is the original, sample for sample.</p></div>
     <div class="field"><label for="colormap">Colours</label><select id="colormap"></select>
       <p class="hint">gray is the format itself.</p></div>
     <div class="field end"><button id="encode">Encode →</button></div>

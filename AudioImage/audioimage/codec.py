@@ -16,27 +16,61 @@ spectrogram drawn by hand, or produced by something else entirely, playable.
 What survives and what does not
 -------------------------------
 The magnitudes survive: with the default ``linear`` frequency axis at 16 bits
-the plane is the spectrum to about five decimal places.  The **phase** does
-not - a picture has one number per point and phase is the second - so decoding
-reconstructs it with Griffin-Lim (:func:`audioimage.dsp.griffin_lim`).  That is
-the real loss in the round trip, and it is why a decoded clip measured against
-the original sample by sample looks poor while sounding close: the spectrum is
-right, the waveform underneath it is a different one that has the same
-spectrum.  :func:`compare` reports both so the difference is visible.
+the plane is the spectrum to about five decimal places.  The **phase** is the
+question, because a grey picture has one number per point and phase is the
+second one.
+
+``phase="none"`` (the default) stores only the magnitudes and rebuilds the
+phase on the way out with Griffin-Lim (:func:`audioimage.dsp.griffin_lim`).
+That is the whole of the loss in the round trip, and it is why a decoded clip
+measured against the original sample by sample scores terribly while sounding
+close: the spectrum is right, the waveform under it is a different one with the
+same spectrum.
+
+``phase="rgb"`` stores it instead, in the blue channel::
+
+    R = G = magnitude     the picture stays grey, and stays readable
+    B     = phase         only where there is energy to have a phase
+
+and decoding then needs no guessing at all: the spectrum goes straight back
+through the inverse transform.  Measured on a melody, against the same clip
+through the grey format:
+
+=========================  =============  ==================
+                           ``none``       ``rgb``
+=========================  =============  ==================
+spectral error             2.51%          **0.45%**
+waveform SNR               -2.8 dB        **+36.9 dB**
+decode time                0.35 s         **0.11 s**
+file size                  19.3 KiB       18.3 KiB
+=========================  =============  ==================
+
+The file does not grow because the masking pays for itself: phase is noise, and
+noise does not compress, so it is written only where the magnitude is within
+``phase_floor`` dB of the peak - 5.7% of the pixels on that clip.  Everywhere
+else the blue channel simply repeats the grey, which is also what keeps the
+picture legible: unmasked phase is confetti across the whole frame.
+
+Noise is the case that does grow, and there is no trick for it - noise *is*
+phase, so its picture has to carry phase everywhere.
+
+:func:`compare` reports both the spectral and the waveform numbers so the
+difference between the two modes is visible rather than described.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Sequence
 
 from . import __version__
 from .backend import get_backend
-from .colormap import get_colormap
+from .colormap import GRAY, get_colormap
 from .png import Image, PngError, read_png, write_png
-from .spectrogram import PlaneConfig, Spectrogram, from_plane, to_plane
+from .spectrogram import PlaneConfig, Spectrogram, from_plane, phases_to_plane, plane_to_phases, to_plane
 from .wav import Audio, read_wav, write_wav
 
 __all__ = [
@@ -44,6 +78,9 @@ __all__ = [
     "EncodeConfig",
     "META_KEY",
     "META_VERSION",
+    "PHASE_MODES",
+    "pack_phase",
+    "unpack_phase",
     "compare",
     "decode",
     "decode_file",
@@ -56,7 +93,10 @@ __all__ = [
 
 META_KEY = "audioimage"
 """The ``tEXt`` keyword the settings live under."""
-META_VERSION = 1
+META_VERSION = 2
+"""Version 2 added ``phase``.  A version 1 picture is still read: it simply has none."""
+
+PHASE_MODES = ("none", "rgb")
 
 
 @dataclass(frozen=True)
@@ -72,7 +112,32 @@ class EncodeConfig:
     plane: PlaneConfig = field(default_factory=PlaneConfig)
     colormap: str = "gray"
     depth: int = 16
-    """Bits per pixel: 16 keeps 65536 levels of loudness, 8 keeps 256."""
+    """Bits per channel: 16 keeps 65536 levels of loudness, 8 keeps 256."""
+    phase: str = "none"
+    """``none`` rebuilds the phase when decoding; ``rgb`` stores it in the blue channel."""
+    lossless: bool = False
+    """Add a correction channel so the decode is bit-for-bit the original.
+
+    The picture already gets within a handful of least-significant bits once it
+    carries a phase.  ``lossless`` closes the gap the honest way: the encoder
+    decodes its own picture, subtracts the result from the source, and writes
+    that difference into the alpha channel.  Decoding adds it back, so what
+    comes out is what went in, sample for sample, at ``lossless_bits``.
+
+    It costs whatever the difference costs to store, which is why it is worth
+    pairing with ``phase="rgb"`` - the better the picture, the smaller the
+    correction and the smaller the file.
+    """
+    lossless_bits: int = 16
+    """The sample resolution the correction makes exact (16 by default, as WAVs are)."""
+    phase_floor: float = 60.0
+    """With ``phase="rgb"``, how far under the peak still gets a phase written, in dB.
+
+    Below this the blue channel repeats the grey instead.  It is what keeps the
+    file small and the picture readable, and it costs nothing audible: a point
+    60 dB down contributes a thousandth of the amplitude, so whatever phase it
+    is given cannot be heard.
+    """
 
     def __post_init__(self) -> None:
         if self.n_fft < 2 or (self.n_fft & (self.n_fft - 1)):
@@ -83,7 +148,26 @@ class EncodeConfig:
             raise ValueError(f"hop ({self.hop}) must not exceed n_fft ({self.n_fft})")
         if self.depth not in (8, 16):
             raise ValueError(f"depth must be 8 or 16, got {self.depth}")
+        if self.phase not in PHASE_MODES:
+            raise ValueError(f"phase must be one of {', '.join(PHASE_MODES)}, got {self.phase!r}")
+        if self.phase_floor <= 0:
+            raise ValueError(f"phase_floor must be > 0, got {self.phase_floor}")
+        if self.lossless_bits not in (8, 16, 24, 32):
+            raise ValueError(f"lossless_bits must be 8, 16, 24 or 32, got {self.lossless_bits}")
         get_colormap(self.colormap)  # validates the name
+        if self.phase != "none":
+            # the blue channel is the phase, so the other two have to be the
+            # magnitude; and an angle cannot be interpolated, so the plane has
+            # to be the layout that needs no interpolation
+            if self.colormap != "gray":
+                raise ValueError(f"phase={self.phase!r} needs colormap 'gray', not {self.colormap!r}")
+            if not self.plane.exact:
+                raise ValueError(
+                    f"phase={self.phase!r} needs the exactly-invertible plane: "
+                    f"freq_scale 'linear' and f_min 0, not {self.plane.freq_scale!r} from {self.plane.f_min}"
+                )
+            if self.plane.height is not None and self.plane.height != self.bins:
+                raise ValueError(f"phase={self.phase!r} needs height {self.bins} (one row per bin), not {self.plane.height}")
 
     @property
     def bins(self) -> int:
@@ -102,6 +186,10 @@ class DecodeResult:
     error: float = 0.0
     """Spectral convergence of the last Griffin-Lim pass: how well the phase guess fits."""
     had_meta: bool = True
+    stored_phase: bool = False
+    """True when the picture carried its own phase, so none had to be guessed."""
+    lossless: bool = False
+    """True when a correction channel was applied, so the samples are the originals."""
 
     def describe(self) -> dict[str, Any]:
         """A summary for ``info`` / ``--json`` output."""
@@ -110,12 +198,90 @@ class DecodeResult:
             "iterations": self.iterations,
             "griffin_lim_error": round(self.error, 8),
             "had_metadata": self.had_meta,
+            "stored_phase": self.stored_phase,
+            "lossless": self.lossless,
         }
 
 
 # ---------------------------------------------------------------------------
 # metadata
 # ---------------------------------------------------------------------------
+
+
+def _quantise(samples: Sequence[float], bits: int) -> list[int]:
+    """Samples to the integers a WAV of that depth would hold."""
+    top = (1 << (bits - 1)) - 1
+    low = -(1 << (bits - 1))
+    return [low if v < low else (top if v > top else v) for v in (int(round(s * top)) for s in samples)]
+
+
+def _dequantise(values: Sequence[int], bits: int) -> list[float]:
+    """The inverse of :func:`_quantise`."""
+    top = float((1 << (bits - 1)) - 1)
+    return [v / top for v in values]
+
+
+def _reconstruct(
+    plane: Sequence[Sequence[float]],
+    phase_rows: Sequence[Sequence[float]],
+    plane_cfg: PlaneConfig,
+    cfg: EncodeConfig,
+    rate: int,
+    frames: int,
+    samples: int,
+    dsp: Any,
+) -> list[float]:
+    """The base waveform a picture decodes to, before any correction.
+
+    Both sides call this, and they have to agree exactly: the encoder subtracts
+    its result from the source to make the correction, and the decoder adds the
+    correction back to its result.  One shared function is what guarantees they
+    are undoing the same arithmetic.
+    """
+    spec = from_plane(plane, plane_cfg, rate, cfg.n_fft, cfg.hop, cfg.window, cfg.center, frames=frames)
+    angles = plane_to_phases(phase_rows, plane_cfg)
+    complex_frames = [
+        [complex(m * math.cos(p), m * math.sin(p)) for m, p in zip(mags, phs)]
+        for mags, phs in zip(spec.mags, angles)
+    ]
+    return dsp.istft(complex_frames, cfg.n_fft, cfg.hop, cfg.window, cfg.center, samples or None)
+
+
+def _pack_residual(image: Image, residual: Sequence[int]) -> None:
+    """Write the correction into the alpha channel, one value per pixel."""
+    capacity = image.width * image.height
+    if len(residual) > capacity:
+        raise ValueError(
+            f"the correction needs {len(residual)} pixels but the picture has {capacity}; "
+            f"use a smaller hop so the picture has more columns"
+        )
+    half = (image.maxval + 1) // 2
+    limit = image.maxval - half
+    flat = image.data
+    for i, value in enumerate(residual):
+        if not -half <= value <= limit:
+            raise ValueError(
+                f"the correction at sample {i} is {value}, which does not fit in {image.depth} bits; "
+                f"store a phase (phase='rgb') so the picture starts closer to the original"
+            )
+        flat[i * 4 + 3] = value + half
+    for i in range(len(residual), capacity):
+        flat[i * 4 + 3] = half  # nothing to correct here
+
+
+def _unpack_residual(image: Image, count: int) -> list[int]:
+    """Read the correction back out of the alpha channel."""
+    half = (image.maxval + 1) // 2
+    flat = image.data
+    return [flat[i * 4 + 3] - half for i in range(min(count, image.width * image.height))]
+
+
+def _floor_intensity(cfg: EncodeConfig, plane_cfg: PlaneConfig) -> float:
+    """The intensity ``phase_floor`` dB under the peak, in this plane's scale."""
+    from .spectrogram import _to_intensity
+
+    ref = plane_cfg.ref or 1.0
+    return _to_intensity(ref * (10.0 ** (-cfg.phase_floor / 20.0)), plane_cfg)
 
 
 def _meta_for(
@@ -140,6 +306,10 @@ def _meta_for(
         "frames": spec.frames,
         "colormap": cfg.colormap,
         "depth": cfg.depth,
+        "phase": cfg.phase,
+        "phase_floor": cfg.phase_floor,
+        "lossless": cfg.lossless,
+        "lossless_bits": cfg.lossless_bits,
         **plane_cfg.to_meta(),
     }
 
@@ -194,6 +364,75 @@ def plane_to_image(plane: Sequence[Sequence[float]], colormap: str = "gray", dep
     return image
 
 
+def pack_phase(
+    plane: Sequence[Sequence[float]],
+    phases: Sequence[Sequence[float]],
+    depth: int = 16,
+    floor: float = 0.0,
+) -> Image:
+    """Magnitude and phase into one picture: ``R = G`` is the level, ``B`` is the angle.
+
+    Where the level is below ``floor`` the blue channel repeats the grey rather
+    than carrying an angle.  Two things come of that: the file stays small
+    (phase is noise, and noise does not compress), and the picture stays
+    readable (unmasked phase speckles the whole frame).  Nothing audible is
+    lost - a point that far down cannot be heard whatever its phase.
+    """
+    height = len(plane)
+    width = len(plane[0]) if height else 0
+    if height == 0 or width == 0:
+        raise PngError("cannot make a picture out of an empty plane")
+    if len(phases) != height or (height and len(phases[0]) != width):
+        raise PngError("the phase plane is not the same shape as the magnitude plane")
+    image = Image(width, height, "RGB", depth)
+    maxval = image.maxval
+    steps = maxval + 1
+    flat = image.data
+    scale = steps / (2.0 * math.pi)
+    for y in range(height):
+        row = plane[y]
+        prow = phases[y]
+        base = y * width * 3
+        for x in range(width):
+            value = GRAY.to_value(row[x], maxval)
+            if row[x] < floor:
+                blue = value
+            else:
+                # wrap rather than clamp: +pi and -pi are the same angle, so the
+                # last bucket has to meet the first one
+                blue = int(round((prow[x] + math.pi) * scale)) % steps
+            i = base + x * 3
+            flat[i] = value
+            flat[i + 1] = value
+            flat[i + 2] = blue
+    return image
+
+
+def unpack_phase(image: Image) -> "tuple[list[list[float]], list[list[float]]]":
+    """The inverse of :func:`pack_phase`: ``(intensities, phases in radians)``."""
+    if image.mode not in ("RGB", "RGBA"):
+        raise PngError(f"a picture carrying phase must be RGB or RGBA, not {image.mode}")
+    width, height = image.width, image.height
+    maxval = image.maxval
+    steps = maxval + 1
+    flat = image.data
+    stride = image.channels  # 4 when a correction channel rides along
+    scale = (2.0 * math.pi) / steps
+    plane: list[list[float]] = []
+    phases: list[list[float]] = []
+    for y in range(height):
+        base = y * width * stride
+        prow = [0.0] * width
+        frow = [0.0] * width
+        for x in range(width):
+            i = base + x * stride
+            prow[x] = GRAY.from_value(flat[i], maxval)
+            frow[x] = flat[i + 2] * scale - math.pi
+        plane.append(prow)
+        phases.append(frow)
+    return plane, phases
+
+
 def image_to_plane(image: Image, colormap: str = "gray") -> list[list[float]]:
     """Pixels back to intensities."""
     cmap = get_colormap(colormap)
@@ -224,13 +463,50 @@ def encode(audio: Audio, cfg: EncodeConfig | None = None, backend: str = "auto")
     spec = Spectrogram(dsp.magnitudes(frames), audio.sample_rate, cfg.n_fft, cfg.hop, cfg.window, cfg.center)
     plane_cfg = cfg.plane.resolved(spec)
     plane = to_plane(spec, plane_cfg)
-    image = plane_to_image(plane, cfg.colormap, cfg.depth)
+    if cfg.phase == "none":
+        if cfg.lossless:
+            raise ValueError("lossless needs phase='rgb': without a phase the correction is as big as the sound")
+        image = plane_to_image(plane, cfg.colormap, cfg.depth)
+    else:
+        if plane_cfg.width != spec.frames:
+            raise ValueError(f"phase={cfg.phase!r} needs one column per frame ({spec.frames}), not {plane_cfg.width}")
+        angles = [[math.atan2(v.imag, v.real) for v in row] for row in frames]
+        phase_rows = phases_to_plane(angles, plane_cfg)
+        image = pack_phase(plane, phase_rows, cfg.depth, floor=_floor_intensity(cfg, plane_cfg))
+        if cfg.lossless:
+            image = _add_correction(image, plane, phase_rows, plane_cfg, cfg, audio, spec, dsp)
     image.text[META_KEY] = json.dumps(
         _meta_for(cfg, spec, plane_cfg, len(audio.samples), audio.peak, audio.rms),
         separators=(",", ":"),
         sort_keys=True,
     )
     return image
+
+
+def _add_correction(
+    image: Image,
+    plane: Sequence[Sequence[float]],
+    phase_rows: Sequence[Sequence[float]],
+    plane_cfg: PlaneConfig,
+    cfg: EncodeConfig,
+    audio: Audio,
+    spec: Spectrogram,
+    dsp: Any,
+) -> Image:
+    """Re-read the picture, see how far off it is, and write the difference into alpha."""
+    read_plane, read_phase = unpack_phase(image)
+    base = _reconstruct(read_plane, read_phase, plane_cfg, cfg, audio.sample_rate, spec.frames, len(audio.samples), dsp)
+    want = _quantise(audio.samples, cfg.lossless_bits)
+    got = _quantise(base, cfg.lossless_bits)
+    residual = [want[i] - (got[i] if i < len(got) else 0) for i in range(len(want))]
+
+    out = Image(image.width, image.height, "RGBA", image.depth, text=dict(image.text))
+    for i in range(image.width * image.height):
+        out.data[i * 4] = image.data[i * 3]
+        out.data[i * 4 + 1] = image.data[i * 3 + 1]
+        out.data[i * 4 + 2] = image.data[i * 3 + 2]
+    _pack_residual(out, residual)
+    return out
 
 
 def encode_file(
@@ -303,7 +579,15 @@ def decode(
     cfg, plane_cfg = _config_from_meta(meta, fallback)
     rate = sample_rate or int(meta.get("sample_rate", 0)) or 22050
 
-    plane = image_to_plane(image, cfg.colormap)
+    # a picture that carries its phase needs no guessing: the spectrum goes
+    # straight back through the inverse transform
+    stored_phase = str(meta.get("phase", "none")) == "rgb" and image.mode in ("RGB", "RGBA")
+    exact = False
+    if stored_phase:
+        plane, phase_rows = unpack_phase(image)
+    else:
+        plane = image_to_plane(image, cfg.colormap)
+        phase_rows = []
     # a picture with no settings tells us its own shape: one row per bin
     if not had_meta and plane_cfg.height is None:
         guessed = (len(plane) - 1) * 2
@@ -317,33 +601,57 @@ def decode(
 
     dsp = get_backend(backend)
     last: list[float] = [0.0]
+    used_iterations = iterations
 
     def _track(step: int, total: int, error: float) -> None:
         last[0] = error
         if progress is not None:
             progress(step, total, error)
 
-    signal = dsp.griffin_lim(
-        spec.mags,
-        cfg.n_fft,
-        cfg.hop,
-        cfg.window,
-        cfg.center,
-        iterations=iterations,
-        momentum=momentum,
-        length=samples or None,
-        seed=seed,
-        init=init,
-        progress=_track,
-    )
-    audio = Audio(signal, rate, source="decoded", meta={"colormap": cfg.colormap})
+    if stored_phase:
+        signal = _reconstruct(
+            plane, phase_rows, plane_cfg, cfg, rate, frames, samples, dsp
+        )
+        used_iterations = 0
+        # a picture with a correction channel says exactly what it should have
+        # been; adding it back is what makes the round trip bit-for-bit
+        if bool(meta.get("lossless")) and image.mode == "RGBA" and samples:
+            bits = int(meta.get("lossless_bits", 16))
+            corrected = _quantise(signal, bits)
+            for i, fix in enumerate(_unpack_residual(image, samples)):
+                if i < len(corrected):
+                    corrected[i] += fix
+            signal = _dequantise(corrected, bits)
+            exact = True
+        if progress is not None:
+            progress(1, 1, 0.0)
+    else:
+        signal = dsp.griffin_lim(
+            spec.mags,
+            cfg.n_fft,
+            cfg.hop,
+            cfg.window,
+            cfg.center,
+            iterations=iterations,
+            momentum=momentum,
+            length=samples or None,
+            seed=seed,
+            init=init,
+            progress=_track,
+        )
+    audio = Audio(signal, rate, source="decoded", meta={"colormap": cfg.colormap, "phase": "stored" if stored_phase else "rebuilt"})
     want_rms = float(meta.get("rms", 0.0) or 0.0)
-    if level == "auto" and want_rms > 0.0 and audio.rms > 0.0:
+    if exact:
+        pass  # these samples are the originals; scaling them would undo that
+    elif level == "auto" and want_rms > 0.0 and audio.rms > 0.0:
         gain = want_rms / audio.rms
         audio = Audio([s * gain for s in audio.samples], rate, "decoded", dict(audio.meta))
     elif level in ("auto", "peak") and audio.peak > 0.0:
         audio = audio.normalized()
-    return DecodeResult(audio, spec, meta, iterations=iterations, error=last[0], had_meta=had_meta)
+    return DecodeResult(
+        audio, spec, meta, iterations=used_iterations, error=last[0], had_meta=had_meta,
+        stored_phase=stored_phase, lossless=exact,
+    )
 
 
 def decode_file(
