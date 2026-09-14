@@ -2422,9 +2422,11 @@ quantity. Recorded as D-067. **What remains open is the trigger**: what counts a
 detector, the schedule has nothing to key on.
 
 **Q-14 — Does the process have a stopping rule?** "Fail consistently, then
-invert" describes a loop. In a life it ends when the thing is learned. The
-evolve loop never ends (D-011) and has no convergence criterion (Q-4). What
-ended an iteration for the author?
+invert" describes a loop. In a life it ends when the thing is learned; the answer
+given in `Research/2NRL.md` §12 is *"when the thing worked"*. The evolve loop
+never ends (D-011) and has no convergence criterion (Q-4). What remains open is
+making that judgement computable — which is Q-13's problem in another form, since
+both come down to recognising that something has started working.
 
 **Q-15 — Does the negative network supersede inversion (D-045 vs D-009)?** The
 negative network is 2NRL's negative phase made permanent: a standing model of
