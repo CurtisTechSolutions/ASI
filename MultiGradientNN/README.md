@@ -44,8 +44,10 @@ connection between them, not a difference of indices.
 Concept stage. Settled so far: the stack geometry, the dense vertical
 connectivity above, and the cross-layer step — it travels through the stack via
 the vertical weights, and the layer it reaches is chosen by perceiving depth down
-the column. What that perception computes, what it carries, how the two descents
-are scheduled and how the vertical weights are trained are still open.
+the column — depth perception in the human eye's sense, so comparative rather
+than absolute. Which of the eye's cues does the choosing, what the step carries,
+how the two descents are scheduled and how the vertical weights are trained are
+still open.
 
 `DESIGN.md` is the specification — notation, geometry, the settled invariants,
 and every open decision written out with its trade-offs.

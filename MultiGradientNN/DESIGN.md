@@ -24,6 +24,7 @@ has to name something to keep the notation usable, it says so explicitly.
 | Each layer directly connected to each other vertically | All-to-all along `k`: every layer is one hop from every other, `L(L-1)/2` vertical connection sets, each with its own weights. |
 | The cross-layer step moves through the stack via the vertical weights | `V[k, k']` is the medium the step travels through, not a static coupling sitting between the planes. |
 | Layers are accessed based on depth perception | At `(i, j)`, the column down the `k` axis holds one depth per plane; reading those depths is what selects the layer to access. |
+| Depth perception is the human eye's | The analogy is literal: perception is comparative, never absolute, so the accessed layer is unchanged by a constant shift of the whole column. |
 
 ---
 
@@ -131,6 +132,43 @@ Four consequences follow.
    (section 2) and also the quantity perception reads to choose a layer. Changing
    a weight therefore changes which layers are reachable from it.
 
+### 4.1 Depth perception is the eye's
+
+The analogy is literal rather than decorative: depth perception here means what
+the **human eye** does, and the mechanism is imported, not merely named.
+
+That settles the first axis of 5.2. **Perception is comparative, never absolute.**
+The eye does not read a distance off a single view; it derives depth from the
+difference between views. So the access rule compares depths across the column and
+never reads one plane's depth on its own. The consequence is concrete and
+testable: **adding a constant to every depth in a column must leave the accessed
+layer unchanged.** Depth perception is shift-invariant.
+
+It also puts the eye's actual cues on the table as the menu for 5.2:
+
+| Cue | What it would mean down a column |
+|---|---|
+| Binocular disparity (stereopsis) | Depth from the difference between two views of the same column. The primary cue — and the one needing a second view the design does not yet have. |
+| Occlusion | A nearer plane hides those behind it: the shallowest depth at `(i, j)` wins and the rest are not reachable from there. Gives hard selection for free, and biologically. |
+| Convergence | The eye points at a chosen depth and the plane there is the one accessed. Makes access an active aim rather than a passive read. |
+| Motion parallax | Depth from how the column shifts between successive reads rather than between simultaneous views — a second view in time instead of in space. |
+
+Two further consequences are properties of the eye, not choices:
+
+1. **Stereopsis needs two views.** Depth from disparity is undefined from one
+   viewpoint. The design has one column per position, so either a second view
+   comes from somewhere (5.2), or the cue in use is monocular — occlusion and
+   parallax both work with one eye.
+
+2. **The eye's depth range is finite.** Stereo acuity falls off with distance;
+   past a certain separation the disparity is too small to resolve and everything
+   reads as equally far. Carried over, perception could not tell apart layers
+   beyond some depth separation even though section 3 connects every layer to
+   every other. **Connectivity and resolvability come apart:** `V[k, k']` still
+   reaches a layer that perception can no longer distinguish from its neighbours.
+   Whether to import that limit or drop it is a decision — and it is the one place
+   where the eye and the dense stack actively disagree.
+
 ---
 
 ## 5. Open decisions
@@ -160,17 +198,19 @@ not another.
 
 ### 5.2 What depth perception computes
 
-Section 4 settles that layers are accessed by perceiving depth down the column.
-What that perception *is* remains open, along two axes:
+Section 4.1 settles that perception is comparative and puts the eye's cues on the
+table. Three things remain:
 
-- **Absolute or relative.** Depth perception in vision is comparative — it judges
-  distance from the disparity between views, never from one absolute reading. If
-  the analogy is meant to hold, the rule compares depths across the column rather
-  than reading any single plane's depth on its own. The two give different
-  answers as soon as a whole column shifts by a constant.
-- **Hard or soft.** Whether perception selects exactly one layer to access, or
-  ranks all of them and accesses them in proportion. Hard selection makes the
-  step discrete and cheap; soft access keeps it differentiable.
+- **Which cue.** Occlusion, convergence and parallax are monocular and work as the
+  design stands; stereopsis is the eye's primary cue but needs a second view.
+- **Where the second view comes from,** if the cue is stereopsis: two read-heads
+  offset down the column, the disparity between neighbouring planes themselves, or
+  two passes separated in time. The design has one column per position and stereo
+  needs two views of it. This is the structural gap the eye analogy opens.
+- **Hard or soft.** Whether perception selects exactly one layer, or ranks all of
+  them and accesses them in proportion. Occlusion settles this toward hard
+  selection if that is the cue; the others leave it open. Hard selection makes the
+  step discrete and cheap, soft access keeps it differentiable.
 
 ### 5.3 What travels once a layer is accessed
 
