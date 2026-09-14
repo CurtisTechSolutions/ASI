@@ -1505,13 +1505,14 @@ open http://localhost:8001        # the React app, now backed by the Go model
 The frontend detects the engine (`GET /api/health` and `/api/status` carry
 `engine: "go"`, the worker count and the live goroutine count): it shows a
 **Go engine** badge in the header and `engine go · workers · goroutines` in the
-status bar, hides the tabs that need the Python server (Evolve, Ollama, Code,
-Images, Speech - the Tutor and Negative tabs stay, both servers run the lessons
-and the negative network), locks the model selector to the count model, and the
-Train tab gains a **Texts are** selector (`lines | paragraphs | pages`) so the
-pasted text and the uploaded files are cut into the units the goroutines fan out
-over. Train, Predict (with the Like button), Generate (with ratings), Converse,
-Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
+status bar, locks the model selector to the count model, and the Train tab
+gains a **Texts are** selector (`lines | paragraphs | pages`) so the pasted
+text and the uploaded files are cut into the units the goroutines fan out over.
+Every tab works: both servers now run the lessons, the negative network and its
+automatic loop, the evolve loop, the Ollama corpus and review, code generation,
+tool use and the image and speech encoders. The Go side's images use a
+thumbnail rather than the diffusion VAE, and its speech needs the words to come
+with the audio - which is what the page dictates anyway.
 
 | endpoint | Go server |
 |---|---|

@@ -1487,9 +1487,9 @@ upload directory, `ExtractTexts` with the same skip rules as `archive.py`, archi
 memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d>.json.gz`, `latest.json`,
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
-over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, the ollama corpus / review calls, images, speech, codegen, schedule preview) answer 404 with a message
-naming the Python server.
+over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the one endpoint
+this server does not implement (`/api/schedule/preview`, which would be dead code here - the count model ignores
+learning rates) answers 404 with a message naming the Python server rather than blankly.
 
 The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `plan.go`,
 `go/server/tutor.go`): the same prompts, the same records and the same endpoints (`GET /api/tutor`,
@@ -1512,8 +1512,10 @@ weight, the reward or penalty scaled by it), which also back `good_ratings` / `b
 tutor parity test finds the same rewards on both sides; `radixnet-count correct` is the CLI twin of
 `radixnet correct`.
 
-Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; with `"go"` the Python-only tabs (Evolve, Ollama,
-Code, Images - the Tutor tab stays, both servers run the lessons) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
+Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; a tab that needed the Python server would carry
+`pythonOnly` and be neither shown nor mounted with `"go"` - there are none left, since both servers now run the
+lessons, the evolve loop, the Ollama calls, code generation, tool use and the media encoders.  The header shows a
+**Go engine · N goroutines** badge, the status bar
 replaces the accelerator chips with `engine go · workers · goroutines` (`StatusBar.jsx`), and the Train tab
 (`TrainPanel.jsx`) offers **Texts are** `lines | paragraphs | pages` (+ lines per page): with paragraphs or pages
 the pasted text is sent whole as `text` together with `split`, and the server cuts it and the selected uploads.
