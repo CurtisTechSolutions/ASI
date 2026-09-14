@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from .beam import path_probability
 from .graph import START
@@ -40,6 +40,13 @@ if TYPE_CHECKING:  # pragma: no cover
 
 DEFAULT_SPEAKERS: tuple[str, ...] = ("A", "B")
 MODES = ("beam", "sample")
+
+Veto = Callable[[str], bool]
+"""What a voice may not say: ``veto(utterance)`` is true for a candidate the speaker must not speak.
+
+The conversation knows nothing about *why* - :class:`radixnet.duo.NegativeFilter` passes its own judgement in
+(the negative network guarding the positive one), and a candidate it refuses is skipped exactly like one that
+had been said before, except that it may not even be the fallback."""
 
 
 @dataclass
@@ -59,6 +66,7 @@ class Turn:
     repeat: bool = False  # every candidate had been said before; the best one was spoken anyway
     candidates: int = 0  # continuations the search offered for this turn
     skipped: int = 0  # candidates rejected (empty, or already said) before the spoken one
+    vetoed: int = 0  # candidates the guard (the negative network) refused for this turn
     labels: list[str] = field(default_factory=list)
     node_ids: list[int] = field(default_factory=list)
     step_costs: list[float] = field(default_factory=list)
@@ -78,6 +86,7 @@ class Turn:
             "repeat": self.repeat,
             "candidates": self.candidates,
             "skipped": self.skipped,
+            "vetoed": self.vetoed,
             "labels": list(self.labels),
             "node_ids": list(self.node_ids),
             "step_costs": list(self.step_costs),
@@ -203,20 +212,25 @@ def _candidates(
 
 
 def _pick(
-    candidates: Sequence[PathResult], heard: Heard, avoid_repeats: bool,
-) -> tuple[PathResult | None, int, bool]:
-    """``(candidate, skipped, repeat)``: the first candidate that adds something and (when asked) does not
-    duplicate what the conversation has heard.
+    candidates: Sequence[PathResult], heard: Heard, avoid_repeats: bool, veto: "Veto | None" = None,
+) -> tuple[PathResult | None, int, bool, int]:
+    """``(candidate, skipped, repeat, vetoed)``: the first candidate that adds something, is not vetoed and (when
+    asked) does not duplicate what the conversation has heard.
 
-    When they all do, the best duplicate is the fallback - the cheapest one that was never said word for word
-    (an echo says at least something new about where the voice is), else the cheapest of all; speaking it flags
-    the turn a ``repeat``.
+    When they all duplicate it, the best duplicate is the fallback - the cheapest one that was never said word
+    for word (an echo says at least something new about where the voice is), else the cheapest of all; speaking
+    it flags the turn a ``repeat``.  A vetoed candidate is never the fallback - that is the whole point of the
+    veto.
     """
-    skipped = 0
+    skipped = vetoed = 0
     fallback: PathResult | None = None
     fallback_word_for_word = True
     for cand in candidates:
         if not cand.text.strip():
+            skipped += 1
+            continue
+        if veto is not None and veto(cand.full_text):
+            vetoed += 1
             skipped += 1
             continue
         if avoid_repeats and heard.duplicate(cand.full_text, cand.text):
@@ -225,8 +239,8 @@ def _pick(
                 fallback, fallback_word_for_word = cand, word_for_word
             skipped += 1
             continue
-        return cand, skipped, False
-    return fallback, skipped, fallback is not None
+        return cand, skipped, False, vetoed
+    return fallback, skipped, fallback is not None, vetoed
 
 
 def _usable(voice: "GraphModel", context: str) -> bool:
@@ -257,6 +271,7 @@ def converse(
     history: Sequence[str] = (),
     partner: "GraphModel | None" = None,
     avoid_repeats: bool = True,
+    veto: Veto | None = None,
 ) -> list[Turn]:
     """``model`` talks to itself (or to ``partner``) for ``turns`` new turns.
 
@@ -272,6 +287,9 @@ def converse(
     * ``partner`` - a second model speaking the even-numbered voice (``speakers[1]``); default the same model.
     * ``avoid_repeats`` - skip the candidates that duplicate the conversation (:class:`Heard`: an utterance
       said before, a reply adding what an earlier reply added, an echo of a line already spoken).
+    * ``veto`` - a candidate the voice may not speak (the guard: see :data:`Veto`).  A turn whose every
+      candidate is vetoed falls back like any other dead end - a shorter context, then a fresh text - and the
+      conversation stops when there is nothing left that may be said.
 
     Every generated turn records the context it picked up, its cost and probability, whether it started fresh
     from START (nothing followed the previous line), and whether it had to repeat something already said
@@ -310,53 +328,101 @@ def converse(
 
     for _ in range(turns):
         voice = voices[index % 2]
-        speaker = speakers[index % len(speakers)]
-        previous = said_list[-1] if said_list else ""
-        ctx = tail_context(previous, context)
-        spoken: PathResult | None = None
-        offered = skipped = 0
-        repeat = False
-        draws = k if mode == "sample" else 1
-        while ctx:
-            if _usable(voice, ctx):
-                for _draw in range(draws):
-                    cands = _candidates(voice, ctx, mode, k, beam, max_length, step_penalty, temperature, rng)
-                    offered += len(cands)
-                    spoken, dropped, repeat = _pick(cands, heard, avoid_repeats)
-                    skipped += dropped
-                    if spoken is not None and not repeat:
-                        break
-                if spoken is not None and not repeat:
-                    break
-            ctx = _shorter(ctx)
-        if spoken is None or repeat:
-            # nothing (new) follows the previous line: change the subject with a fresh text
-            fresh_pick: PathResult | None = None
-            fresh_repeat = False
-            for _draw in range(draws):
-                cands = _candidates(voice, "", mode, k, beam, max_length, step_penalty, temperature, rng)
-                offered += len(cands)
-                fresh_pick, dropped, fresh_repeat = _pick(cands, heard, avoid_repeats)
-                skipped += dropped
-                if fresh_pick is not None and not fresh_repeat:
-                    break
-            if fresh_pick is not None and (spoken is None or not fresh_repeat):
-                spoken, repeat, ctx = fresh_pick, fresh_repeat, ""
-        if spoken is None:
-            break
-        text = spoken.full_text if ctx else spoken.text
-        if repeat and normalize(text) in repeated:
-            break  # the voice can only say a duplicate it has already repeated: the conversation is over
-        turn = Turn(
-            index=index, speaker=speaker, text=text, context=ctx, reply=spoken.text, cost=spoken.cost,
-            probability=path_probability(spoken), reached_end=spoken.reached_end, fresh=not ctx, repeat=repeat,
-            candidates=offered, skipped=skipped, labels=list(spoken.labels), node_ids=list(spoken.node_ids),
-            step_costs=list(spoken.step_costs),
+        turn = reply(
+            voice, said_list[-1] if said_list else "", heard=heard, index=index,
+            speaker=speakers[index % len(speakers)], mode=mode, max_length=max_length, context=context,
+            temperature=temperature, k=k, beam=beam, step_penalty=step_penalty, rng=rng,
+            avoid_repeats=avoid_repeats, veto=veto,
         )
+        if turn is None:
+            break
+        if turn.repeat and normalize(turn.text) in repeated:
+            break  # the voice can only say a duplicate it has already repeated: the conversation is over
         result.append(turn)
-        said_list.append(text)
-        heard.remember(text, spoken.text if ctx else "")
-        if repeat:
-            repeated.add(normalize(text))
+        said_list.append(turn.text)
+        heard.remember(turn.text, turn.reply if turn.context else "")
+        if turn.repeat:
+            repeated.add(normalize(turn.text))
         index += 1
     return result
+
+
+def reply(
+    voice: "GraphModel",
+    previous: str,
+    *,
+    heard: Heard | None = None,
+    index: int = 0,
+    speaker: str = "B",
+    mode: str = "beam",
+    max_length: int = 60,
+    context: int = 12,
+    temperature: float = 1.0,
+    k: int = 5,
+    beam: int | None = None,
+    step_penalty: float = 0.0,
+    rng: random.Random | None = None,
+    avoid_repeats: bool = True,
+    veto: Veto | None = None,
+) -> Turn | None:
+    """What ``voice`` says next after ``previous`` - one turn, or ``None`` when it has nothing to say.
+
+    This is the whole of a conversational turn, and :func:`converse` is a loop
+    over it: the tail of ``previous`` is located in the graph and continued
+    (``mode``), the context loses a word at a time while nothing follows it,
+    and a voice with nothing left to add changes the subject with a fresh text
+    from START.  ``heard`` is what the conversation has already heard (so a
+    reply does not duplicate it - :class:`Heard`) and ``veto`` what the speaker
+    may not say.  Remember the turn in ``heard`` before asking for the next one,
+    or the same reply comes back.
+
+    It is public because the other voice need not be a model at all: the chat
+    loop (:mod:`radixnet.chat`) has an LLM speak every other line and calls
+    this for the model's own.
+    """
+    mode = "beam" if mode in ("", "dijkstra") else mode
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}; expected 'beam' or 'sample'")
+    _check(0, max_length, context, k, beam, temperature, step_penalty, (speaker,))
+    heard = Heard([previous]) if heard is None else heard
+    ctx = tail_context(previous, context)
+    spoken: PathResult | None = None
+    offered = skipped = vetoed = 0
+    repeat = False
+    draws = k if mode == "sample" else 1
+    while ctx:
+        if _usable(voice, ctx):
+            for _draw in range(draws):
+                cands = _candidates(voice, ctx, mode, k, beam, max_length, step_penalty, temperature, rng)
+                offered += len(cands)
+                spoken, dropped, repeat, refused = _pick(cands, heard, avoid_repeats, veto)
+                skipped += dropped
+                vetoed += refused
+                if spoken is not None and not repeat:
+                    break
+            if spoken is not None and not repeat:
+                break
+        ctx = _shorter(ctx)
+    if spoken is None or repeat:
+        # nothing (new) follows the previous line: change the subject with a fresh text
+        fresh_pick: PathResult | None = None
+        fresh_repeat = False
+        for _draw in range(draws):
+            cands = _candidates(voice, "", mode, k, beam, max_length, step_penalty, temperature, rng)
+            offered += len(cands)
+            fresh_pick, dropped, fresh_repeat, refused = _pick(cands, heard, avoid_repeats, veto)
+            skipped += dropped
+            vetoed += refused
+            if fresh_pick is not None and not fresh_repeat:
+                break
+        if fresh_pick is not None and (spoken is None or not fresh_repeat):
+            spoken, repeat, ctx = fresh_pick, fresh_repeat, ""
+    if spoken is None:
+        return None
+    return Turn(
+        index=index, speaker=speaker, text=spoken.full_text if ctx else spoken.text, context=ctx,
+        reply=spoken.text, cost=spoken.cost, probability=path_probability(spoken),
+        reached_end=spoken.reached_end, fresh=not ctx, repeat=repeat, candidates=offered, skipped=skipped,
+        vetoed=vetoed, labels=list(spoken.labels), node_ids=list(spoken.node_ids),
+        step_costs=list(spoken.step_costs),
+    )

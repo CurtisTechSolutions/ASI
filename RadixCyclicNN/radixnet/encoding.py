@@ -5,10 +5,18 @@ characters with stride 1 (``"hello" -> ["hel", "ell", "llo"]``).
 ``Decoder`` reverses that for raw windows (:meth:`Decoder.decode_trigrams`) and
 for the (possibly path-compressed) node labels of the graph
 (:meth:`Decoder.decode_path`).
+
+:func:`repair_base64` is the shared tail of the *media* text formats
+(``img:...`` in :mod:`radixnet.vision`, ``aud:...`` in :mod:`radixnet.speech`):
+the base64 payload of a text the network predicted is rarely clean, so it is
+repaired before it is decoded.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 from collections.abc import Iterable
 
 WINDOW = 3
@@ -98,3 +106,30 @@ class Decoder:
 
     def __repr__(self) -> str:
         return f"Decoder(window={self.window})"
+
+
+_B64_JUNK = re.compile(r"[^A-Za-z0-9+/=]")
+
+
+def repair_base64(body: str) -> tuple[bytes, bool]:
+    """Decode the base64 tail of a media text, repairing it first; ``(payload, repaired)``.
+
+    The media encoders (:mod:`radixnet.vision`, :mod:`radixnet.speech`) pack
+    their payload as base64 into a text the network trains on and *predicts*,
+    so what comes back may be cut off, padded with junk or interrupted by
+    whitespace.  Characters outside the base64 alphabet are dropped, a single
+    dangling character (which can never decode) is removed with them, the
+    padding is completed, and ``repaired`` says whether any of that changed
+    the text.  The payload is returned as it decodes - callers pad or truncate
+    it to the length their format needs.
+    """
+    clean = _B64_JUNK.sub("", body).rstrip("=")
+    if len(clean) % 4 == 1:  # a single dangling character can never decode
+        clean = clean[:-1]
+    padded = clean + "=" * (-len(clean) % 4)
+    repaired = padded != body.strip()  # a clean text comes back unchanged, padding included
+    try:
+        payload = base64.b64decode(padded, validate=True)
+    except (ValueError, binascii.Error) as exc:  # pragma: no cover - the junk filter makes this rare
+        raise ValueError(f"the base64 part cannot be decoded: {exc}") from exc
+    return payload, repaired

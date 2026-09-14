@@ -4,6 +4,7 @@ import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 
 /**
@@ -32,11 +33,13 @@ export default function ConversePanel({ status }) {
   const [punishRepeats, setPunishRepeats] = useState(true);
   const [inMemory, setInMemory] = useState([]);
   const [transcript, setTranscript] = useState(null);
+  const [guard, setGuard] = useState(true);
+  const [guarded, setGuarded] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const feedback = useJob("feedback");
-  const { ratings, rate, punish, ratingOf, remove, clear } = useRatings();
+  const { ratings, rate, punish, ratingOf, setMark, remove, clear } = useRatings();
   const kind = status ? status.kind : null;
 
   // the kinds kept in memory decide which partner can answer
@@ -76,10 +79,12 @@ export default function ConversePanel({ status }) {
         temperature: parseNumber(temperature, 1),
         k: parseInteger(k, 5),
         speakers,
+        guard,
         ...(partner ? { partner } : {}),
         ...(history.length ? { history } : opening.trim() ? { opening } : {}),
       });
       const fresh = asArray(data && data.turns);
+      setGuarded((data && data.guard) || null);
       setTranscript((prev) => (history.length ? [...asArray(prev), ...fresh] : fresh));
       // the duplicates the search could not avoid: thumbs down, so "Train on ratings" punishes them
       const duplicates = Array.isArray(data && data.repeats)
@@ -162,7 +167,14 @@ export default function ConversePanel({ status }) {
           />
         </div>
         <CheckField
-          label="Punish duplicates (mark the repeats 👎 for the 2NRL negative phase)"
+          label="Filter with the negative network"
+          hint="a reply it vetoes is left unsaid and the voice looks for another one"
+          checked={guard}
+          onChange={setGuard}
+        />
+        <CheckField
+          label="Punish duplicates"
+          hint="the repeats the model could not avoid are marked 👎 for the 2NRL negative phase"
           checked={punishRepeats}
           onChange={setPunishRepeats}
           disabled={loading}
@@ -196,6 +208,7 @@ export default function ConversePanel({ status }) {
           <p className="muted">Newest first: the latest turn is at the top and the conversation grows downwards.</p>
         ) : null}
         {notice ? <p className="muted">{notice}</p> : null}
+        <GuardNotice guard={guarded} what="replies" />
         {transcript === null ? (
           <p className="muted">Press Start to let the model talk to itself.</p>
         ) : spoken.length === 0 ? (
@@ -210,6 +223,7 @@ export default function ConversePanel({ status }) {
                 t.given ? "given" : null,
                 t.fresh && !t.given ? "new topic" : null,
                 t.repeat ? "repeat" : null,
+                t.vetoed ? `${fmtInt(t.vetoed)} vetoed` : null,
               ].filter(Boolean);
               return (
                 <li key={`${t.index}-${position}`} className={`turn ${side}${rating ? ` rated ${rating}` : ""}`}>
@@ -256,6 +270,7 @@ export default function ConversePanel({ status }) {
         ratings={ratings}
         onClear={clear}
         onRemove={remove}
+        onMark={setMark}
         feedback={feedback}
         status={status}
         emptyText="rate some turns first"

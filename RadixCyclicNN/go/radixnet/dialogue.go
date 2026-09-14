@@ -23,6 +23,7 @@ type Turn struct {
 	Repeat      bool      `json:"repeat"`
 	Candidates  int       `json:"candidates"`
 	Skipped     int       `json:"skipped"`
+	Vetoed      int       `json:"vetoed"`
 	Labels      []string  `json:"labels"`
 	NodeIDs     []int     `json:"node_ids"`
 	StepCosts   []float64 `json:"step_costs"`
@@ -142,6 +143,12 @@ type ConverseOptions struct {
 	History      []string
 	Partner      *Model
 	AvoidRepeats bool
+	// Veto is what a voice may not say: true for a candidate the speaker must
+	// not speak.  The conversation knows nothing about why - Filter.Converse
+	// passes its own judgement in (the negative network guarding the positive
+	// one), and a candidate it refuses is skipped exactly like one that had
+	// been said before, except that it may not even be the fallback.
+	Veto func(string) bool
 }
 
 // DefaultConverseOptions mirror the Python defaults.
@@ -177,16 +184,23 @@ func (m *Model) candidates(context, mode string, k, beam, maxLength int, stepPen
 	return found.Top, nil
 }
 
-// pick returns the first candidate that adds something and (when asked) does
-// not duplicate what the conversation has heard.  When they all do, the best
-// duplicate is the fallback - the cheapest one that was never said word for
-// word, else the cheapest of all - and speaking it flags the turn a repeat.
-func pick(cands []*PathResult, heard *Heard, avoidRepeats bool) (*PathResult, int, bool) {
-	skipped := 0
+// pick returns the first candidate that adds something, is not vetoed and
+// (when asked) does not duplicate what the conversation has heard.  When they
+// all duplicate it, the best duplicate is the fallback - the cheapest one that
+// was never said word for word, else the cheapest of all - and speaking it
+// flags the turn a repeat.  A vetoed candidate is never the fallback - that is
+// the whole point of the veto.
+func pick(cands []*PathResult, heard *Heard, avoidRepeats bool, veto func(string) bool) (*PathResult, int, bool, int) {
+	skipped, vetoed := 0, 0
 	var fallback *PathResult
 	fallbackWordForWord := true
 	for _, c := range cands {
 		if strings.TrimSpace(c.Text) == "" {
+			skipped++
+			continue
+		}
+		if veto != nil && veto(c.FullText) {
+			vetoed++
 			skipped++
 			continue
 		}
@@ -198,9 +212,9 @@ func pick(cands []*PathResult, heard *Heard, avoidRepeats bool) (*PathResult, in
 			skipped++
 			continue
 		}
-		return c, skipped, false
+		return c, skipped, false, vetoed
 	}
-	return fallback, skipped, fallback != nil
+	return fallback, skipped, fallback != nil, vetoed
 }
 
 // Converse lets the model talk to itself (or to opts.Partner) for opts.Turns
@@ -253,84 +267,158 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 	heard := NewHeard(saidList)
 	for turn := 0; turn < opts.Turns; turn++ {
 		voice := voices[index%2]
-		speaker := speakers[index%len(speakers)]
 		previous := ""
 		if len(saidList) > 0 {
 			previous = saidList[len(saidList)-1]
 		}
-		ctx := TailContext(previous, opts.Context)
-		var spoken *PathResult
-		offered, skipped := 0, 0
-		repeat := false
-		draws := 1
-		if mode == "sample" {
-			draws = opts.K
-		}
-		for ctx != "" {
-			if voice.usable(ctx) {
-				for d := 0; d < draws; d++ {
-					cands, err := voice.candidates(ctx, mode, opts.K, opts.Beam, opts.MaxLength, opts.StepPenalty, opts.Temperature, rng)
-					if err != nil {
-						return nil, err
-					}
-					offered += len(cands)
-					var dropped int
-					spoken, dropped, repeat = pick(cands, heard, opts.AvoidRepeats)
-					skipped += dropped
-					if spoken != nil && !repeat {
-						break
-					}
-				}
-				if spoken != nil && !repeat {
-					break
-				}
-			}
-			ctx = shorter(ctx)
-		}
-		if spoken == nil || repeat {
-			var freshPick *PathResult
-			freshRepeat := false
-			for d := 0; d < draws; d++ {
-				cands, err := voice.candidates("", mode, opts.K, opts.Beam, opts.MaxLength, opts.StepPenalty, opts.Temperature, rng)
-				if err != nil {
-					return nil, err
-				}
-				offered += len(cands)
-				var dropped int
-				freshPick, dropped, freshRepeat = pick(cands, heard, opts.AvoidRepeats)
-				skipped += dropped
-				if freshPick != nil && !freshRepeat {
-					break
-				}
-			}
-			if freshPick != nil && (spoken == nil || !freshRepeat) {
-				spoken, repeat, ctx = freshPick, freshRepeat, ""
-			}
+		spoken, err := voice.Reply(previous, ReplyOptions{
+			Heard: heard, Index: index, Speaker: speakers[index%len(speakers)], Mode: mode,
+			MaxLength: opts.MaxLength, Context: opts.Context, Temperature: opts.Temperature, K: opts.K,
+			Beam: opts.Beam, StepPenalty: opts.StepPenalty, RNG: rng, AvoidRepeats: opts.AvoidRepeats,
+			Veto: opts.Veto,
+		})
+		if err != nil {
+			return nil, err
 		}
 		if spoken == nil {
 			break
 		}
-		text := spoken.Text
-		if ctx != "" {
-			text = spoken.FullText
-		}
-		if repeat && repeated[Normalize(text)] {
+		if spoken.Repeat && repeated[Normalize(spoken.Text)] {
 			break // the voice can only say a duplicate it has already repeated: the conversation is over
 		}
-		result = append(result, &Turn{Index: index, Speaker: speaker, Text: text, Context: ctx, Reply: spoken.Text,
-			Cost: spoken.Cost, Probability: spoken.Probability(), ReachedEnd: spoken.ReachedEnd, Fresh: ctx == "", Repeat: repeat,
-			Candidates: offered, Skipped: skipped, Labels: append([]string(nil), spoken.Labels...),
-			NodeIDs: append([]int(nil), spoken.NodeIDs...), StepCosts: append([]float64(nil), spoken.StepCosts...)})
-		saidList = append(saidList, text)
+		result = append(result, spoken)
+		saidList = append(saidList, spoken.Text)
 		reply := ""
-		if ctx != "" {
-			reply = spoken.Text
+		if spoken.Context != "" {
+			reply = spoken.Reply
 		}
-		heard.Remember(text, reply)
-		if repeat {
-			repeated[Normalize(text)] = true
+		heard.Remember(spoken.Text, reply)
+		if spoken.Repeat {
+			repeated[Normalize(spoken.Text)] = true
 		}
 		index++
 	}
 	return result, nil
+}
+
+// ReplyOptions are how one voice finds what to say next.
+type ReplyOptions struct {
+	// Heard is what the conversation has already heard, so a reply does not duplicate it; remember a turn in
+	// it before asking for the next one, or the same reply comes back.
+	Heard        *Heard
+	Index        int
+	Speaker      string
+	Mode         string
+	MaxLength    int
+	Context      int
+	Temperature  float64
+	K            int
+	Beam         int
+	StepPenalty  float64
+	RNG          *MT19937
+	AvoidRepeats bool
+	// Veto is what the speaker may not say (see ConverseOptions.Veto).
+	Veto func(string) bool
+}
+
+// DefaultReplyOptions mirror the Python defaults.
+func DefaultReplyOptions() ReplyOptions {
+	return ReplyOptions{Speaker: "B", Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1, K: 5,
+		AvoidRepeats: true}
+}
+
+// Reply is what this model says next after previous - one turn, or nil when it
+// has nothing to say.
+//
+// This is the whole of a conversational turn, and Converse is a loop over it:
+// the tail of previous is located in the graph and continued, the context
+// loses a word at a time while nothing follows it, and a voice with nothing
+// left to add changes the subject with a fresh text from START.
+//
+// It is exported because the other voice need not be a model at all: the chat
+// loop (chat.go) has an LLM speak every other line and calls this for the
+// model's own.
+func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
+	mode := o.Mode
+	if mode == "" || mode == "dijkstra" {
+		mode = "beam"
+	}
+	if mode != "beam" && mode != "sample" {
+		return nil, fmt.Errorf("unknown mode %q; expected 'beam' or 'sample'", o.Mode)
+	}
+	if o.MaxLength < 0 || o.Context < 0 || o.K < 1 || o.Beam < 0 || o.Temperature < 0 || o.StepPenalty < 0 {
+		return nil, fmt.Errorf("invalid reply options")
+	}
+	heard := o.Heard
+	if heard == nil {
+		heard = NewHeard([]string{previous})
+	}
+	speaker := o.Speaker
+	if speaker == "" {
+		speaker = "B"
+	}
+	ctx := TailContext(previous, o.Context)
+	var spoken *PathResult
+	offered, skipped, vetoed := 0, 0, 0
+	repeat := false
+	draws := 1
+	if mode == "sample" {
+		draws = o.K
+	}
+	for ctx != "" {
+		if m.usable(ctx) {
+			for d := 0; d < draws; d++ {
+				cands, err := m.candidates(ctx, mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
+				if err != nil {
+					return nil, err
+				}
+				offered += len(cands)
+				var dropped, refused int
+				spoken, dropped, repeat, refused = pick(cands, heard, o.AvoidRepeats, o.Veto)
+				skipped += dropped
+				vetoed += refused
+				if spoken != nil && !repeat {
+					break
+				}
+			}
+			if spoken != nil && !repeat {
+				break
+			}
+		}
+		ctx = shorter(ctx)
+	}
+	if spoken == nil || repeat {
+		// nothing (new) follows the previous line: change the subject with a fresh text
+		var freshPick *PathResult
+		freshRepeat := false
+		for d := 0; d < draws; d++ {
+			cands, err := m.candidates("", mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
+			if err != nil {
+				return nil, err
+			}
+			offered += len(cands)
+			var dropped, refused int
+			freshPick, dropped, freshRepeat, refused = pick(cands, heard, o.AvoidRepeats, o.Veto)
+			skipped += dropped
+			vetoed += refused
+			if freshPick != nil && !freshRepeat {
+				break
+			}
+		}
+		if freshPick != nil && (spoken == nil || !freshRepeat) {
+			spoken, repeat, ctx = freshPick, freshRepeat, ""
+		}
+	}
+	if spoken == nil {
+		return nil, nil
+	}
+	text := spoken.Text
+	if ctx != "" {
+		text = spoken.FullText
+	}
+	return &Turn{Index: o.Index, Speaker: speaker, Text: text, Context: ctx, Reply: spoken.Text,
+		Cost: spoken.Cost, Probability: spoken.Probability(), ReachedEnd: spoken.ReachedEnd, Fresh: ctx == "",
+		Repeat: repeat, Candidates: offered, Skipped: skipped, Vetoed: vetoed,
+		Labels: append([]string(nil), spoken.Labels...), NodeIDs: append([]int(nil), spoken.NodeIDs...),
+		StepCosts: append([]float64(nil), spoken.StepCosts...)}, nil
 }

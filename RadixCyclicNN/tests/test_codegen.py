@@ -31,7 +31,7 @@ from radixnet.codegen import (  # noqa: E402
     check_style,
     decide,
     extract_code,
-    judge_with_ollama,
+    judge_with_llm,
     load_problems,
     model_prefix,
     parse_problem_file,
@@ -364,16 +364,16 @@ class TeacherJudgeTests(unittest.TestCase):
     def test_judge(self):
         sandbox = Sandbox(timeout=3)
         run = sandbox.run(GOOD)
-        opinion = judge_with_ollama(self.client, HELLO, GOOD, run, check_style(GOOD))
+        opinion = judge_with_llm(self.client, HELLO, GOOD, run, check_style(GOOD))
         self.assertEqual((opinion["task"], opinion["pep8"], opinion["naming"], opinion["score"]), (True, True, True, 9.0))
         self.assertEqual(self.fake.requests[-1]["format"], "json")
         self.assertIn("stdout:\nhello", self.fake.requests[-1]["prompt"])
-        opinion = judge_with_ollama(self.client, HELLO, WRONG, sandbox.run(WRONG), check_style(WRONG))
+        opinion = judge_with_llm(self.client, HELLO, WRONG, sandbox.run(WRONG), check_style(WRONG))
         self.assertFalse(opinion["task"])
         self.assertEqual(opinion["issues"], ["prints the wrong text"])
         self.fake.fail_with = 500
         with self.assertRaises(OllamaError):
-            judge_with_ollama(self.client, HELLO, GOOD, run, check_style(GOOD))
+            judge_with_llm(self.client, HELLO, GOOD, run, check_style(GOOD))
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +602,35 @@ class CliTests(unittest.TestCase):
             self.assertEqual(json.load(fh)["solved"], 1)
         self.run_cli("codegen", "--problems", os.path.join(self.dir, "missing.txt"), expect=1)
         self.run_cli("codegen", "--problems", self.problems, "--twonrl-per", "epoch", expect=1)
+
+    def test_the_judge_client_the_flags_asked_for_reaches_the_trainer(self):
+        """--judge-url / --judge-provider build a client; the trainer must be given it, not build its own."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        from radixnet import codegen
+        from radixnet.cli import main
+
+        built = []
+
+        class Spy(codegen.CodeGenTrainer):
+            def __init__(self, *args, **kwargs):
+                built.append(self)  # the last one built is the one the command runs
+                super().__init__(*args, **kwargs)
+
+            def run(self, *args, **kwargs):
+                return []
+
+        judge = start_fake(self.addCleanup)
+        args = [
+            "--model", self.model, "--backend", "python", "--json", "codegen", "--problems", self.problems,
+            "--phase", "teacher", "--rounds", "1", "--url", self.fake.url, "--judge-url", judge.url, "--blame",
+        ]
+        with mock.patch.object(codegen, "CodeGenTrainer", Spy), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(args), 0)
+        self.assertEqual(built[-1].judge_client.url, judge.url)
+        self.assertIsNotNone(built[-1].negative)  # and the negative network still arrives with it
 
 
 if __name__ == "__main__":

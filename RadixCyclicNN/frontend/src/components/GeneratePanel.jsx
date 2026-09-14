@@ -3,7 +3,8 @@ import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, SelectField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 
 /**
@@ -21,11 +22,13 @@ export default function GeneratePanel({ status }) {
   const [temperature, setTemperature] = useState("1.0");
   const [mode, setMode] = useState("beam");
   const [prefix, setPrefix] = useState("");
+  const [guard, setGuard] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
+  const [guarded, setGuarded] = useState(null);
   const feedback = useJob("feedback");
-  const { ratings, rate, ratingOf, remove, clear } = useRatings();
+  const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -37,9 +40,11 @@ export default function GeneratePanel({ status }) {
         max_length: parseInteger(maxLength, 60),
         temperature: parseNumber(temperature, 1),
         mode,
+        guard,
         ...(prefix ? { prefix } : {}),
       });
       setSamples(asArray(data && data.samples));
+      setGuarded((data && data.guard) || null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -82,6 +87,12 @@ export default function GeneratePanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <CheckField
+          label="Filter with the negative network"
+          hint="the pair: the model over-samples and the negative network vetoes what it knows to be a failure"
+          checked={guard}
+          onChange={setGuard}
+        />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading}>
             {loading ? "Generating…" : "Generate"}
@@ -96,6 +107,7 @@ export default function GeneratePanel({ status }) {
           Rate a sample: thumbs up marks it correct (2NRL positive phase), thumbs down marks it garbage (negative
           phase). Press the same thumb again to remove the rating.
         </p>
+        <GuardNotice guard={guarded} what="candidates" />
         {samples === null ? (
           <p className="muted">Press Generate to sample texts from the model.</p>
         ) : samples.length === 0 ? (
@@ -126,7 +138,14 @@ export default function GeneratePanel({ status }) {
         )}
       </div>
 
-      <RatingsCard ratings={ratings} onClear={clear} onRemove={remove} feedback={feedback} status={status} />
+      <RatingsCard
+        ratings={ratings}
+        onClear={clear}
+        onRemove={remove}
+        onMark={setMark}
+        feedback={feedback}
+        status={status}
+      />
     </>
   );
 }
