@@ -11,13 +11,28 @@ const MAX_PROBLEM_ROWS = 200;
 const MAX_ROUND_LINES = 50;
 const MAX_ATTEMPTS = 20;
 const DEFAULT_TEACHER_MODEL = "gemma4";
-const OLLAMA_NOTE = "The teacher and the judge need a running Ollama server; sandbox runs work without one.";
-const SLOW_NOTE = "Ollama is working; this can take a minute or two.";
+const DEFAULT_CHATGPT_MODEL = "gpt-4o-mini";
+const PROVIDER_LABELS = { ollama: "Ollama", chatgpt: "ChatGPT" };
+
+/** "Ollama" / "ChatGPT" for a provider name. */
+function providerLabel(provider) {
+  return PROVIDER_LABELS[provider] || PROVIDER_LABELS.ollama;
+}
+
+/** What the tutor needs to work, per provider. */
+function providerNote(provider) {
+  return provider === "chatgpt"
+    ? "The teacher and the judge call OpenAI with the server's OPENAI_API_KEY; sandbox runs work without one."
+    : "The teacher and the judge need a running Ollama server; sandbox runs work without one.";
+}
+
+const slowNote = (provider) => `${providerLabel(provider)} is working; this can take a minute or two.`;
 
 /** Model / sandbox settings shared by the training job, "Try a problem" and the sandbox (numbers kept as strings). */
 const DEFAULT_SETTINGS = {
   phases: "both",
   rounds: "1",
+  teacherProvider: "ollama",
   teacherModel: DEFAULT_TEACHER_MODEL,
   url: "",
   teacherAttempts: "3",
@@ -39,20 +54,34 @@ const DEFAULT_SETTINGS = {
   batchSize: "4",
 };
 
-/** Server-side Ollama defaults reported by /api/status as {"ollama": {"url", "model"}}. */
-function ollamaDefaults(status) {
-  const o = status && status.ollama && typeof status.ollama === "object" ? status.ollama : {};
+/**
+ * Server-side defaults of one provider, reported by /api/status as
+ * {"ollama": {"url", "model"}, "chatgpt": {"url", "model", "configured"}}.
+ * `configured` is false when the server has no OPENAI_API_KEY.
+ */
+function providerDefaults(status, provider) {
+  const key = provider === "chatgpt" ? "chatgpt" : "ollama";
+  const o = status && status[key] && typeof status[key] === "object" ? status[key] : {};
   return {
     url: typeof o.url === "string" ? o.url : "",
     model: typeof o.model === "string" ? o.model : "",
+    configured: key === "ollama" ? true : Boolean(o.configured),
   };
 }
 
-/** Request fields every codegen call takes: teacher model, Ollama URL (blank = server default), strictness, sandbox. */
+/** The model a provider tutors with when the field is left blank (the server applies the same default). */
+function defaultModel(status, provider) {
+  if (provider !== "chatgpt") return DEFAULT_TEACHER_MODEL;
+  return providerDefaults(status, "chatgpt").model || DEFAULT_CHATGPT_MODEL;
+}
+
+/** Request fields every codegen call takes: the tutor, its model and URL (blank = server default), strictness, sandbox. */
 function sharedFields(s) {
   const url = s.url.trim();
+  const model = s.teacherModel.trim();
   return {
-    teacher_model: s.teacherModel.trim() || DEFAULT_TEACHER_MODEL,
+    teacher_provider: s.teacherProvider,
+    ...(model ? { teacher_model: model } : {}),
     ...(url ? { url } : {}),
     strictness: s.strictness,
     temperature: Math.max(0, parseNumber(s.temperature, 1)),
@@ -84,6 +113,7 @@ function outcome(correct, runs) {
 }
 
 function sourceClass(source) {
+  if (source === "chatgpt") return "chatgpt";
   return source === "ollama" ? "ollama" : "model";
 }
 
@@ -436,14 +466,15 @@ function SolveCard({ shared, onResult }) {
     }
   }
 
-  const usesOllama = source === "teacher" || judge;
+  const provider = shared.teacher_provider === "chatgpt" ? "chatgpt" : "ollama";
+  const usesTutor = source === "teacher" || judge;
 
   return (
     <form className="card" onSubmit={handleSubmit}>
       <h2>Try a problem</h2>
       <p className="muted">
-        Solve one problem with the model or the teacher without training on the result. The teacher model, Ollama URL,
-        strictness and sandbox settings come from the card above. {OLLAMA_NOTE}
+        Solve one problem with the model or the teacher without training on the result. The teacher, its model and
+        URL, the strictness and the sandbox settings come from the card above. {providerNote(provider)}
       </p>
       <TextArea
         label="Problem"
@@ -479,7 +510,7 @@ function SolveCard({ shared, onResult }) {
           disabled={loading}
           options={[
             ["model", "model (RadixCyclicNN)"],
-            ["teacher", "teacher (Ollama)"],
+            ["teacher", `teacher (${providerLabel(provider)})`],
           ]}
         />
         <NumberField
@@ -491,13 +522,13 @@ function SolveCard({ shared, onResult }) {
           disabled={loading}
         />
       </div>
-      <CheckField label="Judge with Ollama" checked={judge} onChange={setJudge} disabled={loading} />
+      <CheckField label={`Judge with ${providerLabel(provider)}`} checked={judge} onChange={setJudge} disabled={loading} />
       <div className="actions">
         <button type="submit" className="primary" disabled={loading}>
           {loading ? "Solving…" : "Solve"}
         </button>
         {loading ? (
-          <span className="muted note">{usesOllama ? SLOW_NOTE : "Generating and running in the sandbox…"}</span>
+          <span className="muted note">{usesTutor ? slowNote(provider) : "Generating and running in the sandbox…"}</span>
         ) : null}
       </div>
       <Alert message={error} onDismiss={() => setError(null)} />
@@ -591,7 +622,7 @@ function RunCard({ shared, onResult }) {
       <h2>Run code in the sandbox</h2>
       <p className="muted">
         Runs a Python program with the sandbox settings above (timeout, memory, network isolation), checks its style
-        and reports the verdict. Neither the model nor Ollama is involved.
+        and reports the verdict. Neither the model nor the tutor is involved.
       </p>
       <TextArea
         label="Code"
@@ -651,12 +682,12 @@ function RunResultCard({ result }) {
 
 /**
  * Code tab: a codegen job (teacher / model phases over problems, sandbox
- * runs, an optional Ollama judge, 2NRL rewards) with its live records, a
- * single-problem solver and a sandbox runner. The model and sandbox settings
- * of the job card are shared by the solver and the runner.
+ * runs, an optional LLM judge, 2NRL rewards) with its live records, a
+ * single-problem solver and a sandbox runner. The tutor (a local Ollama model
+ * or ChatGPT), the model and the sandbox settings of the job card are shared
+ * by the solver and the runner.
  */
 export default function CodeGenPanel({ status }) {
-  const defaults = ollamaDefaults(status);
   const [problems, setProblems] = useState("");
   const [files, setFiles] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -671,6 +702,11 @@ export default function CodeGenPanel({ status }) {
   const otherJobRunning = jobIsRunning(status) && !running;
   const s = settings;
   const field = (name) => (value) => setSettings((prev) => ({ ...prev, [name]: value }));
+  const provider = s.teacherProvider;
+  const defaults = providerDefaults(status, provider);
+  // Switching the tutor also switches the model: model names do not carry from one provider to the other.
+  const setProvider = (value) =>
+    setSettings((prev) => ({ ...prev, teacherProvider: value, teacherModel: defaultModel(status, value) }));
 
   const loadHistory = useCallback(async () => {
     try {
@@ -745,10 +781,16 @@ export default function CodeGenPanel({ status }) {
       <form className="card wide" onSubmit={handleStart}>
         <h2>Problems and training</h2>
         <p className="muted">
-          Each problem is solved by the teacher (an Ollama model) and by the RadixCyclicNN model. Every program runs
-          in a sandbox, is style-checked and optionally judged by Ollama; correct programs reward the model and
-          rejected ones punish it through 2NRL.
+          Each problem is solved by the teacher ({providerLabel(provider)}) and by the RadixCyclicNN model. Every
+          program runs in a sandbox, is style-checked and optionally judged by {providerLabel(provider)}; correct
+          programs reward the model and rejected ones punish it through 2NRL.
         </p>
+        {provider === "chatgpt" && !defaults.configured ? (
+          <p className="muted issue">
+            This server has no OPENAI_API_KEY, so ChatGPT cannot tutor yet: set it (or OPENAI_API_KEY_FILE) in the
+            server's environment and restart it.
+          </p>
+        ) : null}
         <TextArea
           label="Problems"
           hint="one per line; # starts a comment"
@@ -778,20 +820,31 @@ export default function CodeGenPanel({ status }) {
             ]}
           />
           <NumberField label="Rounds" value={s.rounds} onChange={field("rounds")} min={1} step={1} disabled={running} />
+          <SelectField
+            label="Teacher"
+            hint="who tutors"
+            value={provider}
+            onChange={setProvider}
+            disabled={running}
+            options={[
+              ["ollama", "Ollama (local)"],
+              ["chatgpt", "ChatGPT (OpenAI)"],
+            ]}
+          />
           <TextField
             label="Teacher model"
-            hint="Ollama"
+            hint={providerLabel(provider)}
             value={s.teacherModel}
             onChange={field("teacherModel")}
-            placeholder={DEFAULT_TEACHER_MODEL}
+            placeholder={defaultModel(status, provider)}
             disabled={running}
           />
           <TextField
-            label="Ollama URL"
-            hint={defaults.url ? `blank = ${defaults.url}` : "blank = server default"}
+            label={`${providerLabel(provider)} URL`}
+            hint="blank = server default"
             value={s.url}
             onChange={field("url")}
-            placeholder={defaults.url || "http://127.0.0.1:11434"}
+            placeholder={defaults.url || (provider === "chatgpt" ? "https://api.openai.com/v1" : "http://127.0.0.1:11434")}
             disabled={running}
           />
         </div>
@@ -870,7 +923,12 @@ export default function CodeGenPanel({ status }) {
           />
         </div>
         <div className="checks">
-          <CheckField label="Judge with Ollama" checked={s.judge} onChange={field("judge")} disabled={running} />
+          <CheckField
+            label={`Judge with ${providerLabel(provider)}`}
+            checked={s.judge}
+            onChange={field("judge")}
+            disabled={running}
+          />
           <CheckField
             label="Fall back to the teacher when the model fails"
             checked={s.fallbackTeacher}
@@ -926,7 +984,7 @@ export default function CodeGenPanel({ status }) {
           <button type="button" className="danger" disabled={!running} onClick={() => stop()}>
             Stop
           </button>
-          <span className="muted note">{OLLAMA_NOTE}</span>
+          <span className="muted note">{providerNote(provider)}</span>
         </div>
         {otherJobRunning ? <p className="muted">Another job is running; wait for it to finish.</p> : null}
         <Alert message={formError} onDismiss={() => setFormError(null)} />

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
-import { fmtInt, fmtNum, yesNo } from "../util.js";
+import { fmtBytes, fmtCounter, fmtInt, fmtNum, yesNo } from "../util.js";
 
 const POLL_MS = 2000;
 
@@ -68,6 +68,9 @@ export default function StatusBar({ onStatus }) {
   return (
     <div className="statusbar" aria-live="polite">
       {error ? <span className="stat err">API offline: {error}</span> : null}
+      <span className="stat" title="The active model kind (select it in the header)">
+        model <b>{s.model_label || s.kind || "–"}</b>
+      </span>
       <span className="stat">
         nodes <b>{fmtInt(s.nodes)}</b>
       </span>
@@ -89,13 +92,49 @@ export default function StatusBar({ onStatus }) {
           {s.backend || "–"}/{s.device || "–"}
         </b>
       </span>
-      <span className="stat" title="Optional accelerator availability on the server">
-        torch {mark(backends.torch)} · cuda {mark(backends.cuda)} · mps {mark(backends.mps)}
-      </span>
+      {s.engine === "go" ? (
+        <span
+          className="stat"
+          title="The Go server: one goroutine per text (or a capped pool), counters bumped without locks; racy counting may lose an update, exact uses atomics"
+        >
+          engine <b>go</b> · workers <b>{s.workers ? fmtInt(s.workers) : "∞"}</b> · goroutines <b>{fmtInt(s.goroutines)}</b>
+          {s.counting ? <> · counting <b>{String(s.counting)}</b></> : null}
+          {s.heap_bytes !== undefined && s.heap_bytes !== null ? (
+            <>
+              {" "}
+              · heap <b>{fmtBytes(s.heap_bytes)}</b>
+              {s.memory_limit_bytes ? <> / {fmtBytes(s.memory_limit_bytes)}</> : null}
+            </>
+          ) : null}
+        </span>
+      ) : (
+        <span className="stat" title="Optional accelerator availability on the server">
+          torch {mark(backends.torch)} · cuda {mark(backends.cuda)} · mps {mark(backends.mps)}
+        </span>
+      )}
       <span className="stat">
-        epochs <b>{fmtInt(s.epochs_total)}</b> · 2NRL runs <b>{fmtInt(s.twonrl_runs)}</b> · last loss{" "}
+        epochs <b>{fmtCounter(s.epochs_total, s.epochs_total_resets)}</b> · 2NRL runs{" "}
+        <b>{fmtCounter(s.twonrl_runs, s.twonrl_runs_resets)}</b> · last loss{" "}
         <b>{fmtNum(s.last_loss, 4)}</b>
       </span>
+      {s.kind === "count" ? (
+        <span className="stat" title="Sum of rewards and penalties applied to edges">
+          rewards <b>+{fmtNum(s.edge_reward_positive, 1)}</b> / <b>{fmtNum(s.edge_reward_negative, 1)}</b>
+        </span>
+      ) : null}
+      {s.kind === "count" ? (
+        <span
+          className="stat"
+          title={
+            "Traversals counted all time, and how many of them the sliding window still holds. " +
+            "Counters are cyclic: at 10^15 one goes back to 0 and the reset is counted, so the true total is " +
+            "resets × 10^15 + the number shown"
+          }
+        >
+          traversals <b>{fmtCounter(s.total_traversals, s.total_traversals_resets)}</b> ·
+          window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
+        </span>
+      ) : null}
       <span className={`stat job ${jobState}`}>
         job{" "}
         <b>

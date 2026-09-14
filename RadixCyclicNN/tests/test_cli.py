@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import signal
@@ -252,6 +253,46 @@ class TestInference(unittest.TestCase):
         self.assertEqual(len(cheapest["samples"]), 1)
         self.assertTrue(cheapest["samples"][0]["reached_end"])
         self.assertEqual(run_json("generate", "--count", 0, model=MODEL)["samples"], [])
+        beam = run_json("generate", "--mode", "beam", "--count", 3, "--max-length", 40, "--beam", 24, model=MODEL)
+        self.assertEqual((beam["count"], beam["mode"], beam["prefix"]), (3, "beam", ""))
+        self.assertEqual(len({s["text"] for s in beam["samples"]}), 3)
+        self.assertEqual([s["cost"] for s in beam["samples"]], sorted(s["cost"] for s in beam["samples"]))
+        for sample in beam["samples"]:
+            self.assertEqual(sample["full_text"], sample["text"])
+            self.assertTrue(sample["reached_end"] or len(sample["text"]) == 40, sample)
+            self.assertAlmostEqual(sample["probability"], math.exp(-sample["cost"]), places=9)
+        self.assertEqual(beam["samples"][0]["text"], cheapest["samples"][0]["text"])
+        prefixed = run_json("generate", "--mode", "beam", "--count", 2, "--prefix", "the ", "--max-length", 20, model=MODEL)
+        self.assertEqual(prefixed["prefix"], "the ")
+        self.assertTrue(all(s["text"].startswith("the ") and s["full_text"] == s["text"] for s in prefixed["samples"]))
+
+    def test_converse(self):
+        doc = run_json("converse", "--opening", "the cat sat on the mat", "--turns", 4, model=MODEL)
+        self.assertEqual((doc["count"], doc["mode"], doc["kind"], doc["partner_kind"]), (5, "beam", "radix", None))
+        self.assertEqual((doc["opening"], doc["speakers"]), ("the cat sat on the mat", ["A", "B"]))
+        turns = doc["turns"]
+        self.assertTrue(turns[0]["given"])
+        self.assertEqual([t["speaker"] for t in turns], ["A", "B", "A", "B", "A"])
+        for previous, turn in zip(turns, turns[1:]):
+            if not turn["fresh"]:
+                words, wanted = previous["text"].split(), turn["context"].split()
+                self.assertTrue(any(words[j:j + len(wanted)] == wanted for j in range(len(words))), (words, wanted))
+                self.assertEqual(turn["text"], turn["context"] + turn["reply"])
+        self.assertEqual(doc["transcript"], "\n".join(f"{t['speaker']}: {t['text']}" for t in turns))
+        human = run_cli("converse", "--opening", "the cat sat on the mat", "--turns", 2, model=MODEL, json_mode=False).stdout
+        self.assertIn("A: the cat sat on the mat", human)
+        self.assertIn("[given]", human)
+        self.assertIn("B: ", human)
+        self.assertRegex(human, r"cost \S+\s+p \S+")
+        named = run_json("--seed", 5, "converse", "--turns", 3, "--mode", "sample", "--speakers", "cat, dog", model=MODEL)
+        self.assertEqual((named["speakers"], [t["speaker"] for t in named["turns"]]), (["cat", "dog"], ["cat", "dog", "cat"]))
+        again = run_json("--seed", 5, "converse", "--turns", 3, "--mode", "sample", "--speakers", "cat, dog", model=MODEL)
+        self.assertEqual(named["transcript"], again["transcript"])
+        partner = run_json("converse", "--turns", 3, "--partner", MODEL, "--allow-repeats", model=MODEL)
+        self.assertEqual((partner["partner_kind"], partner["count"]), ("radix", 3))
+        self.assertEqual(run_json("converse", "--turns", 0, model=MODEL)["turns"], [])
+        proc = run_cli("converse", "--partner", os.path.join(TMP.name, "missing.json"), model=MODEL, expect=1)
+        self.assertIn("partner model file not found", proc.stderr)
 
     def test_score(self):
         good = run_json("score", "--text", "the cat sat on the mat", model=MODEL)
@@ -380,8 +421,8 @@ class TestOutputModes(unittest.TestCase):
                        json_mode=False, model=MODEL)
         lines = proc.stdout.splitlines()
         header = next(i for i, line in enumerate(lines) if line.startswith("epoch"))
-        self.assertRegex(lines[header], r"epoch\s+loss\s+ppl\s+nodes\s+edges\s+trigrams\s+ratio\s+merges\s+transitions\s+seconds")
-        self.assertRegex(lines[header + 2], r"^\s*3\s+\d+\.\d{4}\s+\d+\.\d{4}\s+\d+\s+\d+\s+\d+\s+")
+        self.assertRegex(lines[header], r"epoch\s+loss\s+ppl\s+lr\s+act_lr\s+nodes\s+edges\s+trigrams\s+ratio\s+merges\s+transitions\s+seconds")
+        self.assertRegex(lines[header + 2], r"^\s*3\s+\d+\.\d{4}\s+\d+\.\d{4}\s+\d+\.\d{4}\s+\d+\.\d{4}\s+\d+\s+\d+\s+\d+\s+")
         self.assertRegex(lines[header + 3], r"^\s*4\s+\d+\.\d{4}\s+")
         self.assertIn("saved ", proc.stdout)
         self.assertEqual(proc.stderr, "")
@@ -394,7 +435,7 @@ class TestOutputModes(unittest.TestCase):
         for word in ("prefix", "continuation", "full text", "cost", "path:", "label"):
             self.assertIn(word, predict)
         generate = run_cli("generate", "--count", 2, json_mode=False, model=MODEL).stdout
-        self.assertRegex(generate, r"#\s+cost\s+end\s+text")
+        self.assertRegex(generate, r"#\s+cost\s+prob\s+end\s+text")
         score = run_cli("score", "--text", "the cat sat on the mat", json_mode=False, model=MODEL).stdout
         self.assertRegex(score, r"log_prob\s+per_char\s+chars\s+transitions\s+unknown\s+text")
 
@@ -645,3 +686,36 @@ class TestServe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestZipData(unittest.TestCase):
+    """``--data`` accepts ZIP archives: every text entry inside contributes its lines (or one text per file)."""
+
+    def test_train_and_score_from_a_zip(self):
+        import io
+        import zipfile
+
+        with tempfile.TemporaryDirectory(prefix="radixnet-cli-zip-") as tmp:
+            with open(CORPUS, encoding="utf-8") as fh:
+                lines = [line for line in fh.read().splitlines() if line.strip()]
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                z.writestr("corpus/a.txt", "\n".join(lines[:20]) + "\n")
+                z.writestr("corpus/b.txt", "\n".join(lines[20:]) + "\n")
+                z.writestr("image.png", b"\x00\x01binary")
+                z.writestr("__MACOSX/._a.txt", "junk")
+            archive = os.path.join(tmp, "corpus.zip")
+            with open(archive, "wb") as fh:
+                fh.write(buf.getvalue())
+            model = os.path.join(tmp, "m.json")
+            doc = run_json("train", "--data", archive, "--epochs", 1, *FAST, model=model)
+            self.assertEqual(doc["texts"], len(lines))
+            doc = run_json("train", "--data", archive, "--whole-file", "--epochs", 1, *FAST, model=os.path.join(tmp, "w.json"))
+            self.assertEqual(doc["texts"], 2)
+            doc = run_json("score", "--data", archive, model=model)
+            self.assertEqual(doc["count"], len(lines))
+            with open(os.path.join(tmp, "bad.zip"), "wb") as fh:
+                fh.write(b"PK\x03\x04 not really an archive")
+            proc = run_cli("train", "--data", os.path.join(tmp, "bad.zip"), model=os.path.join(tmp, "x.json"), expect=1)
+            self.assertIn("not a valid ZIP archive", proc.stderr)
+

@@ -58,6 +58,7 @@ export default function TwoNRLPanel({ status }) {
   const [posEpochs, setPosEpochs] = useState("3");
   const [negLr, setNegLr] = useState("0.05");
   const [posLr, setPosLr] = useState("0.01");
+  const [strength, setStrength] = useState("1");
   const [formError, setFormError] = useState(null);
   const [inverting, setInverting] = useState(false);
   const [invertError, setInvertError] = useState(null);
@@ -65,6 +66,7 @@ export default function TwoNRLPanel({ status }) {
   const { job, running, busy, error, start, stop, clearError } = useJob("2nrl");
 
   const anyJobRunning = jobIsRunning(status) || running;
+  const countKind = Boolean(status && status.kind === "count");
   const otherJobRunning = jobIsRunning(status) && !running;
 
   async function handleStart(event) {
@@ -86,6 +88,7 @@ export default function TwoNRLPanel({ status }) {
         pos_epochs: parseInteger(posEpochs, 3),
         neg_lr: parseNumber(negLr, 0.05),
         pos_lr: parseNumber(posLr, 0.01),
+        ...(countKind ? { strength: parseNumber(strength, 1) } : {}),
       }),
     );
   }
@@ -168,9 +171,25 @@ export default function TwoNRLPanel({ status }) {
           />
         </div>
         <div className="row">
-          <NumberField label="Negative lr" value={negLr} onChange={setNegLr} min={0} disabled={running} />
-          <NumberField label="Positive lr" value={posLr} onChange={setPosLr} min={0} disabled={running} />
+          <NumberField label="Negative lr" value={negLr} onChange={setNegLr} min={0} disabled={running || countKind} />
+          <NumberField label="Positive lr" value={posLr} onChange={setPosLr} min={0} disabled={running || countKind} />
+          {countKind ? (
+            <NumberField
+              label="Strength"
+              hint="reward / penalty per pass"
+              value={strength}
+              onChange={setStrength}
+              min={0}
+              disabled={running}
+            />
+          ) : null}
         </div>
+        {countKind ? (
+          <p className="muted">
+            Count / reward model: the negative phase subtracts the strength from every edge of the bad paths, the
+            positive phase counts a traversal and adds it on the good paths. Nothing is inverted.
+          </p>
+        ) : null}
         <div className="actions">
           <button type="submit" className="primary" disabled={running || busy || otherJobRunning}>
             {busy ? "Starting…" : "Run 2NRL"}

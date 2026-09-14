@@ -12,9 +12,11 @@ model-from-docker.json
 .env
 uploads/
 codegen-report.json
+agent-report.json
 ollama-good.txt
 ollama-garbage.txt
 build/
 *.egg-info/
 dist/
 !frontend/dist/
+go/bin/
