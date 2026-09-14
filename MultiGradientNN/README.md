@@ -13,10 +13,11 @@ A gradient today is a single surface. Picture it as an XY coordinate plane
 where the weights give the depth — one landscape, and descent walks it looking
 for a minimum.
 
-This model builds **multiple gradients as layers**. Each layer owns its own
-gradient, its own XY plane with its own weight depth. Stacking them turns the
-single surface into a volume: the layer index becomes a new axis, so descent
-moves *through* the stack as well as across each plane in it.
+This model builds **multiple gradients as layers**. One gradient is a single
+plane, and each layer owns one — so `L` layers means `L` gradients means `L`
+planes. Stacking them turns the single surface into a volume: the layer index
+becomes a new axis, so descent moves *through* the stack as well as across each
+plane in it.
 
 That added axis is the whole point. A single gradient can only answer "which
 way is downhill from here". A stack can also answer "which layer is the right

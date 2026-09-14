@@ -18,9 +18,9 @@ has to name something to keep the notation usable, it says so explicitly.
 | Requirement | How it is realised |
 |---|---|
 | Traditional norms | Ordinary layers, ordinary forward pass, ordinary backpropagation. The architecture is not reinvented; the divergence is in the descent. |
-| A gradient is an XY coordinate plane with weights as depth | Layer `k`'s weights form a grid. `(i, j)` are the X and Y coordinates, `W_k[i, j]` is the depth at that point. One layer, one plane. |
-| Multiple gradients (multiple layers) | `L` planes, one per layer, each with its own gradient rather than all sharing one loss surface. |
-| This adds another dimension | The planes stack: `W` is an `L × m × n` volume. The stack index `k` is a third axis, and descent moves *through* it as well as across each plane. |
+| A gradient is an XY coordinate plane with weights as depth | **One gradient is a single plane.** `(i, j)` are the X and Y coordinates, and the weight at that point is the depth. |
+| Multiple gradients (multiple layers) | `L` gradients, so `L` planes, one per layer — rather than every layer sharing one surface. |
+| This adds another dimension | The planes stack: `G` is an `L × m × n` volume. The stack index `k` is a third axis, and descent moves *through* it as well as across each plane. |
 | Each layer directly connected to each other vertically | All-to-all along `k`: every layer is one hop from every other, `L(L-1)/2` vertical connection sets, each with its own weights. |
 
 ---
@@ -28,23 +28,28 @@ has to name something to keep the notation usable, it says so explicitly.
 ## 2. Notation and geometry (settled)
 
 ```
-L                 number of layers in the stack
+L                 number of layers = number of gradients = number of planes
 k, k'             layer indices, 0 <= k < L
-W_k               layer k's weight plane, an m_k x n_k grid
-W_k[i, j]         the depth at position (i, j) on that plane
-W                 the full volume, L planes stacked along the k axis
-G_k               layer k's own gradient over its own plane
+G_k               layer k's gradient - a single plane, an m_k x n_k grid
+G_k[i, j]         the depth at (i, j) on that plane: the weight there
+G                 the full volume - the L planes stacked along the k axis
 V[k, k']          the vertical connection between layers k and k'
 ```
+
+**One gradient is one plane.** The two words name the same object. Layer `k` has
+exactly one gradient, that gradient *is* a single plane, and the weights are the
+depth on it — `L` layers, `L` gradients, `L` planes, and the three counts never
+diverge. A gradient is not a field laid over a plane; there is nothing to hold
+apart.
 
 Two axes are horizontal (`i`, `j`, within a plane) and one is vertical (`k`,
 through the stack).
 
-**Horizontal descent** is conventional: within plane `k`, the slope at `(i, j)`
-is `G_k[i, j]`, and the step is the usual one.
+**Horizontal descent** is conventional: it moves across plane `G_k`, from `(i, j)`
+toward lower depth, by the usual step.
 
-**Vertical descent** is the new part. It moves along `k` — between planes —
-rather than across any single plane. Section 4.2 is where that step gets defined.
+**Vertical descent** is the new part. It moves along `k` — between planes — rather
+than across any single plane. Section 4.2 is where that step gets defined.
 
 The two are not the same operation. A single gradient answers *which way is
 downhill from here*; the stack must also answer *which layer is the right one to
@@ -93,7 +98,7 @@ rather than left as questions, so each can be closed by picking a branch.
 "Vertically" is read geometrically here — along `k`, perpendicular to the planes.
 Two readings remain:
 
-- **Column-wise.** `W_k[i, j]` connects to `W_k'[i, j]`: the same `(i, j)`
+- **Column-wise.** `G_k[i, j]` connects to `G_k'[i, j]`: the same `(i, j)`
   position through the stack, so each position owns a column of `L` cells,
   densely connected within the column. `V[k, k']` is then one weight per
   position, `m x n` per connection set. This is the literal reading of
@@ -128,8 +133,11 @@ vertical weights get a rule of their own.
 
 ### 4.5 What each layer's gradient is *of*
 
-Conventionally, every layer descends one shared scalar loss. Here each layer owns
-its own gradient `G_k`, which implies either per-layer losses or one loss read
+Conventionally every layer descends one shared scalar loss, and the gradient is a
+separate object derived from it. Here the gradient *is* the plane and the depth on
+it is the weight, so the array descended and the array learned are the same one.
+
+What stays open is what drives that descent: per-layer losses, or one loss read
 differently per layer. Which it is determines whether the vertical connections
 carry gradient, activation, or both.
 
@@ -154,7 +162,7 @@ MultiGradientNN/
   pyproject.toml            console script `mgradnet = mgradnet.cli:main`
   mgradnet/
     __init__.py             exports MultiGradientNet, TrainConfig, __version__
-    volume.py               the L x m x n weight volume: planes, columns, indexing
+    volume.py               the L x m x n volume: the planes, their columns, indexing
     vertical.py             V[k, k'] - the dense vertical connections (section 3)
     descent.py              the horizontal step, the vertical step (4.2), the schedule (4.3)
     model.py                MultiGradientNet - forward, backward, train, predict
