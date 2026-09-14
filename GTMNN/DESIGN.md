@@ -169,15 +169,18 @@ above it): `activation` -> `features` -> `micro` -> `payoff` -> `auction` ->
 
 ## 5. `activation.py`
 
-Identical contract to `RadixCyclicNN/radixnet/activation.py` — deliberately, so
-the two projects share the author's activation research verbatim and a fix in
-one transfers to the other by inspection.
+Same contract as `RadixCyclicNN/radixnet/activation.py`, so the two projects
+share the author's activation research and a fix in one transfers to the other by
+inspection — **with one deliberate divergence**: `DEFAULT_B` is `1.0` here rather
+than `1/3`, for the measured reason in §5.1.
 
 ```python
-DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K = -1.0, 1.0 / 3.0, 0.0, 0.0
+DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K = -1.0, 1.0, 0.0, 0.0   # b=1.0, not 1/3: see §5.1
 
 def sine_activation(x: float, a=DEFAULT_A, b=DEFAULT_B, h=DEFAULT_H, k=DEFAULT_K) -> float
-    # a * sin(b * (x - h)) + k       ->  default is exactly -1 * sin(x / 3.0)
+    # a * sin(b * (x - h)) + k       ->  default is -sin(x). The author's -sin(x/3) is the
+    # same function at b=1/3; §5.1 shows that frequency leaves every neuron in its linear
+    # region once features are L2-normalised, and measures the cost at 17x.
 
 def sine_derivative(x, a, b, h, k) -> float           # df/dx = a*b*cos(b*(x-h))
 
@@ -206,6 +209,51 @@ genuinely different solutions that agree on the training data. That is diversity
 the congestion game can then price. A monotone activation would give a
 population whose members mostly agree, and a congestion game among players who
 agree pays almost nothing to anyone.
+
+### 5.1 The frequency `b` must be initialised against the input scale
+
+`DEFAULT_B = 1/3` is **wrong for this network**, and measurably so. Reaching the
+first peak of `sin(b·z)` requires `|z| = π/(2b)`, which at `b = 1/3` is **4.71**.
+Features here are L2-normalised (§6.2) so `|x| ≈ 1`, and with weights initialised
+in `[-0.5, 0.5]` over `R = 8` inputs the pre-activation `z` sits near zero. Every
+neuron therefore operates in the **linear** region of its sine, and a population
+of near-linear units is a population of linear models however wide it is.
+
+Measured on a synthetic task whose target is itself a sine of a linear
+combination — the case most favourable to this activation
+(`NeuralCompression/experiment.py sweep`):
+
+| `b` | `\|z\|` to first peak | test MSE |
+|---|---|---|
+| **1/3** | 4.71 | **0.01674** |
+| 1.0 | 1.57 | **0.00015** |
+| 2.0 | 0.79 | **0.00004** |
+| 3.0 | 0.52 | diverges |
+| *tanh reference* | — | *0.00098* |
+
+At `b = 1/3` the sine is **17× worse than tanh**; at `b = 1-2` it is **6-24×
+better**. The activation is not the problem, the frequency is.
+
+**Therefore `DEFAULT_B = 1.0` for GTMNN**, with the general rule
+
+```
+b  ≈  π / (2 · E|z|)        # initialise so the first peak falls inside the
+                            # actual pre-activation range
+```
+
+`b` is learnable per neuron, but that does not rescue a bad initialisation:
+`∂f/∂b = a(x−h)·cos(b(x−h))` is small exactly when `x` is small, so the gradient
+that would correct the frequency is suppressed by the same condition that makes
+it wrong. The initialisation is the trap, not the parameterisation.
+
+Two consequences for text above and elsewhere:
+
+* §6.2's claim that L2 normalisation "keeps the sine in its informative range... where `-sin(x/3)` is steepest and **most nearly linear**" is corrected there: near-linear is the failure mode, not the goal. Normalisation is still right — it makes `E|z|` *predictable*, which is what lets `b` be set correctly at all.
+* The diversity argument above depends on the period `2π/b`, which at `b = 1` is `6.28` rather than `18.8`. Distinct solutions are therefore *closer together* in weight space than that paragraph assumed. The argument survives — periodicity still admits many non-identical solutions — but the spacing claim should be re-derived before being relied on, and `bench` should report the realised spread of `z` so this is measured rather than assumed. Open question 6.
+
+`RadixCyclicNN` carries the same `b = 1/3` default. It is a working, merged
+system on a different task with a different pre-activation scale, so this is
+flagged there rather than changed: measure its realised `E|z|` before touching it.
 
 ---
 
@@ -261,10 +309,13 @@ class FeatureHasher:
     def to_dict(self) -> dict ; @classmethod from_dict(cls, d)
 ```
 
-L2 normalisation is what keeps the sine in its informative range: feature values
-land in roughly `[-1, 1]`, a micro sums `R=8` of them through weights
-initialised in `[-0.5, 0.5]`, so pre-activations sit near zero where
-`-sin(x/3)` is steepest and most nearly linear. Without it, long contexts would
+L2 normalisation is what makes the pre-activation scale **predictable**: feature
+values land in roughly `[-1, 1]`, a micro sums `R=8` of them through weights
+initialised in `[-0.5, 0.5]`, so `E|z|` is known in advance — which is precisely
+what allows the sine frequency `b` to be initialised correctly against it (§5.1).
+It is *not* a reason to sit near zero: that region is the sine's linear one, and
+a population of near-linear units is a linear model. `b = 1.0` places the first
+peak at `|z| = 1.57`, inside the operating range rather than far outside it. Without it, long contexts would
 push pre-activations past `3π/2` and neighbouring inputs would start wrapping
 onto the same output for no reason.
 
@@ -1730,3 +1781,4 @@ guessing now.
 3. **Warm-started regret across stage games** (§11.4) is a real speedup and a mild theoretical liberty: Hart & Mas-Colell's result is about repeated play of *the same* game. Decaying by `gamma_regret` between different games is a heuristic bridge. Measure whether it helps or whether it drags stale regret into games where it does not belong.
 4. **Meta-player training signal.** The meta-population is trained against the same `y` as the base population, which credits it for the base population's correctness rather than purely for its own resolution quality. A cleaner signal is the *counterfactual* — how much better the chosen policy did than `TRUST_EQUILIBRIUM` would have — which is itself a marginal contribution and therefore in the same family as everything else here. Worth trying second.
 5. **Does the population actually specialise?** The whole design rests on the congestion game doing what §8.1 claims. `gini`, `diversity` and `coverage_gaps` are instrumented from the first commit specifically so this can be falsified early. If wealth stays flat and diversity stays high after real training, the split reward is not biting and the mechanism, not the hyperparameters, is what needs revisiting.
+6. **Is the diversity argument still true at `b = 1.0`?** §5's case for a periodic activation is that micros whose pre-activations differ by one period are indistinguishable at the output and unrelated in weight space, giving the congestion game genuinely different solutions to price. §5.1 changed the period from `18.8` to `6.28`, so those solutions now sit three times closer together in weight space. The argument plausibly survives — periodicity still admits many non-identical solutions — but the spacing was asserted, never measured. `bench` should report the realised spread of `z` across the population; if it is much smaller than `2π/b`, no micro is exploiting periodicity at all and the activation is doing nothing a monotone one would not do better.
