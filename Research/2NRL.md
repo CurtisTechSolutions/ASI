@@ -284,7 +284,10 @@ reasons is weak evidence for it, and I am recording it as weak.
 ## 6. Finding the thread: exploration, not effort
 
 The third commitment is the one I have **not** built. The gap is worth stating
-precisely, because the obvious reading of that sentence is wrong.
+precisely, because the obvious reading of that sentence is wrong — and because
+the part of it I used to call unformalisable turns out not to be. §6.1 to §6.3
+say what the commitment is and what is missing; §6.4 says what the trigger is,
+and §6.5 what the whole thing is a search *for*.
 
 ### 6.1 What it is not
 
@@ -338,10 +341,11 @@ about what to do once you have looked.
 
 Every parameter that governs breadth in my system — `temperature`, `k`, `beam`,
 the sample `count`, `step_penalty` — is **fixed for the duration of a call** and
-chosen by whoever made the call. Nothing narrows as a run proceeds. Nothing
-detects that a thread has appeared. A long self-improvement or tutoring run
-explores exactly as widely in its last generation as in its first, which is not
-how I work and not what I described.
+chosen by whoever made the call. Nothing narrows as a run proceeds, and nothing
+acts on a reward when one lands. A long self-improvement or tutoring run explores
+exactly as widely in its last generation as in its first, which is not how I work
+and not what I described. §6.4 settles what the trigger is; what is missing is
+the schedule that listens to it.
 
 Two pieces of the machinery already exist, pointed at the wrong thing:
 
@@ -356,27 +360,87 @@ Two pieces of the machinery already exist, pointed at the wrong thing:
   it is local recovery from a dead end, not the global schedule. The two compose
   rather than conflict.
 
-### 6.4 The harder half: what counts as finding a thread?
+### 6.4 What counts as finding a reward
 
-A schedule needs a trigger, and this is the genuinely open part. "A thread
-appeared" is doing real work in that sentence and resists formalising.
-Candidates, none of them tested:
+A schedule needs a trigger, and I had been asking the wrong question. "What
+counts as finding a *thread*?" treats it as a judgement, and judgements are
+exactly what this project exists to take apart. The question with an answer is
+**what counts as finding a reward**:
 
-* **A score threshold** — the first sample to clear a bar. Simple, and it depends
-  on a bar somebody has to set in advance.
-* **A plateau break** — narrow when the best-so-far improves after a stretch of
-  not improving. That detects *surprise* rather than quality, which is closer to
-  what a thread actually is.
-* **A run of passes** — narrow after *n* consecutive successes in one region.
-  Robust, slow to notice a single strong signal.
-* **Discriminator disagreement** — narrow where the positive and negative
-  networks disagree most sharply, on the grounds that disagreement is where the
-  information is.
+> Mainly when the network is rewarded, or we reach a known area of completion.
 
-Without a detector the schedule has nothing to key on, so this is what to settle
-first. It is also where my own account transfers least well. I knew a thread when
-I saw one, and that was a judgement — which is exactly the kind of thing this
-whole project exists to take apart.
+Two triggers, both of them events rather than estimates, and the system already
+emits both:
+
+* **The network is rewarded.** A judge paid out — the LLM grader passed the
+  attempt against its criteria, the sandbox ran the program, a human marked it
+  up, the discriminator scored a sample as real. Reward is not inferred from the
+  shape of a search curve. It happens, and the system already knows when.
+* **A known area of completion is reached.** The walk arrived somewhere already
+  known to be an end: `reached_end` on a path, a region of the graph that an
+  earlier run finished in. Not "this looks promising" but "this is a place I have
+  finished before".
+
+The difference from what I had been considering matters. A score threshold, a
+plateau break, a run of passes, discriminator disagreement — each of those is an
+*estimator* of a thread, inferred from the statistics of the search, and each
+needs a parameter somebody sets in advance. The two above are *observations* of
+one. They need no bar, they cannot be tuned wrong, and both were already being
+computed for other reasons. They remain the fallback for the case the two
+triggers do not cover: a run that is genuinely getting warmer without having yet
+been paid or arrived anywhere.
+
+### 6.5 Failing to understand the game
+
+Behind the trigger is the framing I actually work in, and it is game-theoretic. A
+task is a game. A game has rewards. The agent's problem at the start is not that
+it plays the game badly — it is that it does not know what the game *is* or what
+it pays.
+
+The conventional move is to learn the reward structure directly: explore, observe
+payoffs, fit a model of the game. The 2NRL move is the opposite, and it is the
+same double negative one level up:
+
+> We view this as game theory, and focus on failing to understand the game and
+> its rewards via a helper first. So we fail to understand the game.
+
+Deliberately. Fail to understand the game, all the way, the way phase 1 fails to
+produce the right answer all the way — and then invert *that*. Where §3 applies
+the double negative to an output, this applies it to the agent's model of the
+game itself.
+
+**And this is what the helper is for.** Not to teach in the ordinary sense, and
+explicitly not to play: in the agent loop the LLM has four roles and *solving the
+task is the last one it is given*. It writes the acceptance criteria before
+anything is attempted, judges the attempt against them, and demonstrates with the
+same real tools when the attempt failed.
+
+```
+task -> acceptance criteria (LLM, written first) -> the network calls tools
+     -> judge against the criteria (LLM)
+     -> teach with the same real tools when it failed (LLM)
+     -> train on the failures, invert, fine-tune (2NRL)
+```
+
+Read that in the light of §5 and the helper's job becomes clear. §5 says the
+information recoverable by inverting a failure is bounded by how *consistent* the
+failure is: a systematic failure inverts into signal, a random one inverts into
+nothing. A network turned loose on a game it does not understand fails
+**randomly** — its misunderstandings are high-entropy and there is nothing in
+them to invert. A network failing against criteria that were *written down
+first*, by a helper, and judged against the same fixed standard every time, fails
+**consistently**. The failures are wrong in the same way.
+
+So the helper is not a teacher. It is an entropy reducer on the negative set. It
+exists to make the misunderstanding systematic enough to be worth negating, which
+is the precondition the whole procedure runs on. That is why it writes the
+criteria first and solves last: a helper that solved the task would remove the
+failure, and the failure is the input.
+
+This also says what "finding a reward" is *for*. The trigger in §6.4 is not a
+signal to celebrate. It is the moment the game stops being unknown — the point
+at which failing to understand it has produced something to invert, and the
+exploration can narrow onto it.
 
 ---
 
@@ -688,7 +752,16 @@ got fairly criticised for.
   actually wrong.
 - "Pull hard on the thread" is not a learning rate. It is a schedule over search
   breadth — wide, then narrow once something moves — and I have not built it. The
-  hard part is not the schedule, it is detecting that a thread has appeared.
+  trigger is settled, though: narrow when the network is **rewarded**, or when it
+  reaches a **known area of completion**. Both are events the system already
+  emits, not estimates it would have to infer.
+- A task is a game, and the agent starts out not knowing the game or what it
+  pays. So it fails to understand the game first, deliberately, with a helper —
+  the double negative one level up, applied to the model of the game rather than
+  to an output. The helper writes the acceptance criteria first and solves last,
+  because its job is not to teach: it is to make the misunderstanding
+  *consistent* enough to be worth inverting. Without it the failures are random,
+  and §5 says random failure inverts into nothing.
 - It has never been measured against a baseline. §11 is the experiment, and arm C
   is the one that would tell me I am wrong.
 
