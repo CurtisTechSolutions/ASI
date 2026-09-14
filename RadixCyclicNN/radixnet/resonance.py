@@ -91,9 +91,10 @@ from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
+from .counter import CyclicCounter
 from .beam import Prediction, default_beam
 from .encoding import WINDOW, Decoder, Encoder
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .metacog import ABORT, ESCAPE, RIDE, MetaLayer, cycle_signature
 from .model import (
     MODEL_FORMAT_VERSION,
@@ -180,7 +181,7 @@ class ResonantGraph(RadixCyclicGraph):
         self.edge_cy: list[float] = []
         self.edge_cw: list[float] = []
         self.edge_reward: list[float] = []
-        self.total_traversals = 0
+        self.total_traversals = CyclicCounter()
         self._adv_cache: dict[str, int] = {}
         self._phase_costs: dict[tuple[int, int], list[tuple[int, int, float]]] = {}
         self._phase_cache_version = -1
@@ -215,10 +216,10 @@ class ResonantGraph(RadixCyclicGraph):
         """:meth:`label_advance` of a real node; 0 for START and END.
 
         The sentinels emit no characters, so they must not move the phase -
-        and their labels (``"<s>"``, ``"</s>"``) are long enough to look like
-        ordinary ones.
+        and their labels (``"<s>"``, ``"</s>"``, ``"<back>"``) are long enough
+        to look like ordinary ones.
         """
-        return 0 if node == START or node == END else self.label_advance(label)
+        return 0 if node < FIRST else self.label_advance(label)
 
     def text_bucket(self, text: str, start: int = 0) -> int:
         """Phase of a piece of text - the bucket a walk that emitted it would carry."""
@@ -265,14 +266,23 @@ class ResonantGraph(RadixCyclicGraph):
             return 0.0
         return r * math.cos(self.bucket_phase(bucket) - self.edge_mu(e))
 
-    def record_traversal(self, e: int, bucket: int, amount: float = 1.0) -> None:
-        """Count one traversal of ``e`` at phase ``bucket`` into the circular accumulator."""
-        angle = self.bucket_phase(bucket)
-        self.edge_cx[e] += amount * math.cos(angle)
-        self.edge_cy[e] += amount * math.sin(angle)
+    def record_traversal(self, e: int, bucket: int | None, amount: float = 1.0) -> None:
+        """Count one traversal of ``e`` into its circular accumulator, at phase ``bucket``.
+
+        ``bucket = None`` counts the traversal without a phase: the weight of
+        the mean grows but the vector does not, so the edge's coherence *falls*
+        towards 0 and it competes on its share alone.  That is what a traversal
+        whose phase is unknown honestly says - it fires, but nothing was learned
+        about when.
+        """
+        if bucket is not None:
+            angle = self.bucket_phase(bucket)
+            self.edge_cx[e] += amount * math.cos(angle)
+            self.edge_cy[e] += amount * math.sin(angle)
         self.edge_cw[e] += abs(amount)
         self.edge_count[e] += 1
         self.total_traversals += 1
+        self.traversals += 1   # what bounds every counter, and so decides when carry_counters() has work
 
     def add_reward(self, edge_ids: Iterable[int], amount: float) -> int:
         """Move the reward of every alive edge in ``edge_ids`` by ``amount``; returns how many moved."""
@@ -325,22 +335,22 @@ class ResonantGraph(RadixCyclicGraph):
 
     # -- weights -------------------------------------------------------------
 
-    def edge_amplitude(self, e: int, parent_total: int, degree: int) -> float:
+    def edge_amplitude(self, e: int, parent_total: float, degree: int) -> float:
         """The phase-free part of an edge's score: its smoothed share of the parent, plus rewards."""
         s = self.SMOOTHING
-        share = (self.edge_count[e] + s) / (parent_total + s * max(1, degree))
+        share = (self._edge_traversals_f(e) + s) / (parent_total + s * max(1, degree))
         return self.amp_scale * math.log(share) + self.reward_scale * self.edge_reward[e]
 
     def recompute_weights(self) -> None:
         """Rewrite every ``edge_w`` from the counts and rewards (O(E)); bumps ``version``."""
         ew = self.edge_w
-        ecount = self.edge_count
+        traversals = self._edge_traversals_f
         for p, ch in enumerate(self.children):
             if not ch or not self.alive[p]:
                 continue
-            total = 0
+            total = 0.0
             for e in ch.values():
-                total += ecount[e]
+                total += traversals(e)
             deg = len(ch)
             for e in ch.values():
                 ew[e] = self.edge_amplitude(e, total, deg)
@@ -448,14 +458,16 @@ class ResonantGraph(RadixCyclicGraph):
 
     # -- graph hooks ---------------------------------------------------------
 
-    def _new_node(self, label, z=None, a=None, b=DEFAULT_B, h=DEFAULT_H, k=0.0, count=0) -> int:
+    def _new_node(self, label, z=None, a=None, b=DEFAULT_B, h=DEFAULT_H, k=0.0, count=0, count_resets=0) -> int:
         # a = 0 and k = 1 make f(z) = 1: the base class's scores reduce to edge_w, the phase-marginal
-        nid = super()._new_node(label, z=0.0 if z is None else z, a=0.0, b=b, h=h, k=1.0, count=count)
+        nid = super()._new_node(
+            label, z=0.0 if z is None else z, a=0.0, b=b, h=h, k=1.0, count=count, count_resets=count_resets
+        )
         self.advance.append(self.node_advance(nid, label))
         return nid
 
-    def _new_edge(self, p: int, c: int, count: int = 0) -> int:
-        e = super()._new_edge(p, c, count)
+    def _new_edge(self, p: int, c: int, count: int = 0, count_resets: int = 0) -> int:
+        e = super()._new_edge(p, c, count, count_resets)
         self.edge_cx.append(0.0)
         self.edge_cy.append(0.0)
         self.edge_cw.append(0.0)
@@ -474,6 +486,28 @@ class ResonantGraph(RadixCyclicGraph):
         if merged:
             self._refresh_advance(p)
         return merged
+
+    def observe_back(self, p: int, went: int | None = None, instead: int | None = None,
+                     amount: float = 1.0) -> int:
+        """As :meth:`RadixCyclicGraph.observe_back`, learned the way this model learns everything.
+
+        The sine model nudges the weights directly; here a weight is a *function* of the counts, the rewards
+        and the phase, so nothing may be written to ``edge_w`` by hand - the next
+        :meth:`recompute_weights` would erase it.  Going round is taught by counting the ``BACK`` edge and what
+        to do instead by a penalty on the step it looped through and a reward on the step it took after backing
+        up.  The hand-over is counted **without a phase**: a voice that backed out of a repeat
+        (:func:`radixnet.dialogue.backtrack`) walked outside this model's search and cannot say which phase it
+        was in, so the edge competes on its share rather than pretending to a phase it never learned.
+        """
+        e = super().observe_back(p, amount=0.0)  # no weight is nudged by hand here
+        self.record_traversal(e, None, amount or 1.0)
+        self.add_reward([e], amount)
+        for child, sign in ((went, -1.0), (instead, 1.0)):
+            edge = self.children[p].get(child) if child is not None and child != BACK else None
+            if edge is not None:
+                self.add_reward([edge], sign * amount)
+        self.recompute_weights()
+        return e
 
     def invert(self) -> None:
         """Rotate every edge's mean phase by ``pi`` and negate every reward.
@@ -505,7 +539,12 @@ class ResonantGraph(RadixCyclicGraph):
                     cw.append(self.edge_cw[e])
                     reward.append(self.edge_reward[e])
         d["edges"].update(cx=cx, cy=cy, cw=cw, reward=reward)
-        d["weights"] = {**self.weight_config(), "kind": "resonant", "total_traversals": self.total_traversals}
+        d["weights"] = {
+            **self.weight_config(),
+            "kind": "resonant",
+            "total_traversals": self.total_traversals.value,
+            "total_traversals_resets": self.total_traversals.resets,
+        }
         return d
 
     @classmethod
@@ -519,7 +558,9 @@ class ResonantGraph(RadixCyclicGraph):
         g.amp_scale = float(weights.get("amp_scale", 1.0))
         g.reward_scale = float(weights.get("reward_scale", 1.0))
         g.concentration = float(weights.get("concentration", 2.0))
-        g.total_traversals = int(weights.get("total_traversals", 0))
+        g.total_traversals = CyclicCounter.from_pair(
+            weights.get("total_traversals", 0), weights.get("total_traversals_resets", 0)
+        )
         edges = d.get("edges", {})
         n = len(g.edge_w)
         for name, key in (("edge_cx", "cx"), ("edge_cy", "cy"), ("edge_cw", "cw"), ("edge_reward", "reward")):
@@ -639,7 +680,7 @@ class ResonantNet(GraphModel):
                 graph.record_traversal(e, bucket)
             edges.append(e)
             seen[(p, bucket)] = step
-            bucket = (bucket + advance[child]) % buckets if child != END else bucket
+            bucket = (bucket + advance[child]) % buckets
         if reward:
             graph.add_reward(edges, reward)
         return {
@@ -662,8 +703,8 @@ class ResonantNet(GraphModel):
         buckets = graph.buckets
         loops: dict[int, int] = {}
         for c in graph.children[p]:
-            if c == END:
-                continue
+            if c < FIRST:
+                continue  # a sentinel is not a node to loop through
             first = seen.get((c, (bucket + advance[c]) % buckets))
             if first is not None:
                 loops[c] = step + 1 - first
@@ -719,6 +760,7 @@ class ResonantNet(GraphModel):
                 graph.sharpen(touched, sharpen)
             if count or reward or sharpen != 1.0:
                 graph.recompute_weights()
+            graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             loss = cost / max(1, transitions)
             record = {
                 "epoch": epoch,
@@ -1121,7 +1163,8 @@ class ResonantNet(GraphModel):
             "twonrl_runs": self.meta["twonrl_runs"],
             "history_len": len(self.history),
             "last_loss": self.history[-1]["loss"] if self.history else None,
-            "total_traversals": graph.total_traversals,
+            "total_traversals": graph.total_traversals.value,
+            "total_traversals_resets": graph.total_traversals.resets,
             "rewards_total": rewards,
             "penalties_total": penalties,
             "feedback_passes": self.meta["feedback_passes"],

@@ -16,7 +16,13 @@
 // changes (splits and merges of nodes) take a write lock.
 package radixnet
 
-import "unicode/utf8"
+import (
+	"encoding/base64"
+	"fmt"
+	"regexp"
+	"strings"
+	"unicode/utf8"
+)
 
 // Window is the sliding-window length of the encoding (trigrams).
 const Window = 3
@@ -28,6 +34,8 @@ const Overlap = Window - 1
 const (
 	StartLabel = "<s>"
 	EndLabel   = "</s>"
+	// BackLabel is the third sentinel: where the graph has learned a walk goes round (Back).
+	BackLabel = "<back>"
 )
 
 // runeLen is the character (code point) length of a string, the unit the
@@ -112,4 +120,32 @@ func truncateRunes(s string, n int) string {
 		i++
 	}
 	return s
+}
+
+// b64Junk is everything outside the base64 alphabet: a predicted payload is
+// routinely interrupted by whitespace or a stray character.
+var b64Junk = regexp.MustCompile(`[^A-Za-z0-9+/=]`)
+
+// RepairBase64 decodes the base64 tail of a media text, repairing it first;
+// returns (payload, repaired, error).
+//
+// The media encoders (vision.go, speech.go) pack their payload as base64 into a
+// text the network trains on and *predicts*, so what comes back may be cut off,
+// padded with junk or interrupted by whitespace.  Characters outside the
+// alphabet are dropped, a single dangling character (which can never decode)
+// goes with them, the padding is completed, and `repaired` says whether any of
+// that changed the text.  The payload comes back as it decodes - callers pad or
+// truncate it to the length their format needs.
+func RepairBase64(body string) ([]byte, bool, error) {
+	clean := strings.TrimRight(b64Junk.ReplaceAllString(body, ""), "=")
+	if len(clean)%4 == 1 { // a single dangling character can never decode
+		clean = clean[:len(clean)-1]
+	}
+	padded := clean + strings.Repeat("=", (4-len(clean)%4)%4)
+	repaired := padded != strings.TrimSpace(body) // a clean text comes back unchanged, padding included
+	payload, err := base64.StdEncoding.DecodeString(padded)
+	if err != nil {
+		return nil, repaired, fmt.Errorf("the base64 part cannot be decoded: %w", err)
+	}
+	return payload, repaired, nil
 }

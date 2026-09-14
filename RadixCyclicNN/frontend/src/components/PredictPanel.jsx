@@ -5,6 +5,7 @@ import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, pars
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -99,6 +100,7 @@ export default function PredictPanel({ status }) {
   const [toEnd, setToEnd] = useState(false);
   const [stepPenalty, setStepPenalty] = useState("0");
   const [temperature, setTemperature] = useState("1.0");
+  const [guard, setGuard] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -135,6 +137,7 @@ export default function PredictPanel({ status }) {
         to_end: toEnd,
         step_penalty: parseNumber(stepPenalty, 0),
         temperature: parseNumber(temperature, 1),
+        guard,
       };
       if (effectiveMode === "beam") {
         body.k = parseInteger(k, 5);
@@ -229,6 +232,12 @@ export default function PredictPanel({ status }) {
           />
         </div>
         <CheckField label="Run to END (cheapest complete path)" checked={toEnd} onChange={setToEnd} />
+        <CheckField
+          label="Filter with the negative network"
+          hint="the best continuation it does not veto; none survives, none comes back"
+          checked={guard}
+          onChange={setGuard}
+        />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading}>
             {loading ? "Predicting…" : "Predict"}
@@ -245,6 +254,7 @@ export default function PredictPanel({ status }) {
 
       <div className="card">
         <h2>Result</h2>
+        <GuardNotice guard={result && result.guard} what="continuations" />
         {!result ? (
           <p className="muted">Enter a prefix and press Predict. The highlighted part is the predicted continuation.</p>
         ) : (

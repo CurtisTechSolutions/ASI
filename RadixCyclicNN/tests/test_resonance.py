@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.beam import Prediction  # noqa: E402
 from radixnet.encoding import Encoder  # noqa: E402
-from radixnet.graph import END, START  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START  # noqa: E402
 from radixnet.metacog import ABORT, ACTIONS, ESCAPE, RIDE, MetaLayer, cycle_signature  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 from radixnet.resonance import (  # noqa: E402
@@ -54,9 +54,9 @@ class TestTrigramPhase(unittest.TestCase):
 
 class TestPhase(unittest.TestCase):
     def test_sentinels_never_advance_the_phase(self):
-        # "<s>" and "</s>" are long enough to look like ordinary labels
+        # "<s>", "</s>" and "<back>" are all long enough to look like ordinary labels
         g = ResonantGraph(kick_scale=1.0)
-        self.assertEqual((g.advance[START], g.advance[END]), (0, 0))
+        self.assertEqual([g.advance[n] for n in range(FIRST)], [0] * FIRST)
 
     def test_phase_is_the_text_s_own_and_survives_compression(self):
         for kick in (0.0, 0.5, 1.0):
@@ -74,7 +74,7 @@ class TestPhase(unittest.TestCase):
         g = ResonantGraph(seed=0, buckets=8, kick_scale=1.0)
         g.observe_sequence(grams("abcdefgh"))
         g.compress()
-        node = next(n for n in g.alive_nodes() if len(g.labels[n]) > 4)
+        node = next(n for n in g.alive_nodes() if n >= FIRST and len(g.labels[n]) > 4)
         before = g.advance[node]
         a_id, b_id = g.split(node, 1)
         self.assertEqual((g.advance[a_id] + g.advance[b_id]) % g.buckets, before)
@@ -162,14 +162,54 @@ class TestResonantGraph(unittest.TestCase):
         self.g.rotate([e], 1.0)
         self.assertAlmostEqual((self.g.edge_mu(e) - mu) % TAU, math.pi, places=6)
 
+    def test_going_round_is_learned_in_this_model_s_own_currency(self):
+        """``observe_back`` must not nudge a weight by hand: the next recompute would erase it."""
+        net = ResonantNet(seed=0)
+        net.train(["the cat sat down", "a big cat ran away"], epochs=4)
+        graph = net.graph
+        node = graph.trigram_index["at "][0]
+        children = list(graph.children[node])
+        before = dict(graph.child_probs_at(node, 0))
+        graph.observe_back(node, went=children[0], instead=children[1], amount=2.0)
+        after = dict(graph.child_probs_at(node, 0))
+        self.assertIn(BACK, graph.children[node])
+        self.assertLess(after[children[0]], before[children[0]])   # the step it looped through
+        self.assertGreater(after[children[1]], before[children[1]])  # the step it took instead
+        graph.recompute_weights()
+        self.assertAlmostEqual(dict(graph.child_probs_at(node, 0))[BACK], after[BACK], places=9)
+        self.assertIsNotNone(graph.back_cost(node))
+
+    def test_a_hand_over_is_counted_without_a_phase(self):
+        """A voice that backed out walked outside this search and cannot say which phase it was in."""
+        net = ResonantNet(seed=0)
+        net.train(["the cat sat down", "a big cat ran away"], epochs=4)
+        graph = net.graph
+        node = graph.trigram_index["at "][0]
+        edge = graph.observe_back(node, amount=2.0)
+        self.assertEqual(graph.edge_coherence(edge), 0.0)
+        scores = [dict((c, s) for c, _e, s in graph.child_scores_at(node, b))[BACK] for b in range(graph.buckets)]
+        self.assertEqual(len({round(v, 9) for v in scores}), 1, "BACK must score the same at every phase")
+
+    def test_the_search_hands_over_where_the_model_expects_a_loop(self):
+        """``search.onward``: when BACK is the cheapest child, that branch offers nothing."""
+        net = ResonantNet(seed=0)
+        net.train(["the cat sat down"], epochs=4)
+        before = net.predict("the ", length=12, mode="beam", k=1).text
+        self.assertTrue(before)
+        node = net.graph.trigram_index["at "][0]
+        for _ in range(40):
+            net.graph.observe_back(node, amount=2.0)  # this node goes round, over and over
+        self.assertIsNotNone(net.graph.back_cost(node))
+        self.assertNotEqual(net.predict("the ", length=12, mode="beam", k=1).text, before)
+
     def test_configure_rephases_every_node(self):
         g = ResonantGraph(seed=0, buckets=8, kick_scale=0.0)
         g.observe_sequence(grams("hello there world"))
-        self.assertTrue(all(g.advance[n] == g.label_advance(g.labels[n]) for n in g.alive_nodes() if n > 1))
+        self.assertTrue(all(g.advance[n] == g.label_advance(g.labels[n]) for n in g.alive_nodes() if n >= FIRST))
         config = g.configure(kick_scale=1.0, buckets=16)
         self.assertEqual((config["kick_scale"], config["buckets"]), (1.0, 16))
         for n in g.alive_nodes():
-            self.assertEqual(g.advance[n], 0 if n < 2 else g.label_advance(g.labels[n]))
+            self.assertEqual(g.advance[n], 0 if n < FIRST else g.label_advance(g.labels[n]))
         with self.assertRaises(ValueError):
             g.configure(nonsense=1.0)
         with self.assertRaises(ValueError):

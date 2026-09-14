@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.backend import PythonBackend  # noqa: E402
 from radixnet.encoding import END_LABEL, START_LABEL, Encoder  # noqa: E402
-from radixnet.graph import END, START, RadixCyclicGraph  # noqa: E402
-from radixnet.search import PathResult, dijkstra_predict, sample_walk  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START, RadixCyclicGraph  # noqa: E402
+from radixnet.search import PathResult, dijkstra_predict, onward, sample_walk  # noqa: E402
 
 ENC = Encoder()
 
@@ -171,7 +171,7 @@ class TestDijkstra(unittest.TestCase):
         # a chain that stops short of min_chars returns the longest path
         g = graph_from(["abcd"])
         n, _ = g.lookup("abc")
-        (m,) = [i for i in g.alive_nodes() if i > END]
+        (m,) = [i for i in g.alive_nodes() if i >= FIRST]
         q = g._new_node("cdxyz")
         g.children[m].clear()
         g.parents[END].clear()
@@ -337,3 +337,33 @@ class TestSentinelLookalikes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHandsOver(unittest.TestCase):
+    """What the search does where the model has learned that its walks go round (graph.observe_back)."""
+
+    def graph(self):
+        g = RadixCyclicGraph(seed=1)
+        g.observe_sequence(ENC.encode("the cat sat on the mat"))
+        return g
+
+    def test_back_is_never_a_continuation_and_stops_the_branch_when_it_is_cheapest(self):
+        g = self.graph()
+        node = g.lookup("the")[0]
+        self.assertEqual(onward(g.child_costs(node)), g.child_costs(node))  # nothing learned yet: unchanged
+        for _ in range(6):
+            g.observe_back(node)
+        self.assertEqual(onward(g.child_costs(node)), [])  # its most likely next step is to stop
+        self.assertNotIn(BACK, [c for c, _e, _cost in onward(g.child_costs(g.lookup("cat")[0]))])
+
+    def test_a_learned_hand_over_shortens_the_walk(self):
+        g = self.graph()
+        start, offset = g.lookup("the")
+        before = dijkstra_predict(g, start, offset, min_chars=0, to_end=True)
+        for _ in range(6):
+            g.observe_back(start)
+        after = dijkstra_predict(g, start, offset, min_chars=0, to_end=True)
+        self.assertNotEqual(after.text, before.text)
+        self.assertEqual(after.text, "")  # nowhere else to go from there
+        walked = sample_walk(g, start, offset, max_chars=None, temperature=0.0)
+        self.assertEqual(walked.text, "")

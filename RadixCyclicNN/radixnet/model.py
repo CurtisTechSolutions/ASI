@@ -7,10 +7,12 @@ the self-compressing structure and its parameters, a
 CSR mini-batches and :mod:`radixnet.search` finds the cheapest (Dijkstra) or a
 sampled continuation.
 
-2NRL (:meth:`RadixNet.two_nrl`) is the author's two-phase scheme: train on
-bad / garbage data, :meth:`RadixNet.invert` the network (every edge weight
-and every activation amplitude flips sign, so what was likely becomes
-unlikely) and fine-tune on correct data with a smaller learning rate.
+2NRL (:meth:`RadixNet.two_nrl`) is *Double-Negative Reinforcement Learning*,
+the author's scheme: train on bad / garbage data, :meth:`RadixNet.invert` the
+network (every edge weight and every activation amplitude flips sign, so what
+was likely becomes unlikely) and fine-tune on correct data with a smaller
+learning rate.  The two negatives of the name are the first two steps - trained
+**on** the failures, then negated - and the fine-tune is the positive one.
 """
 
 from __future__ import annotations
@@ -30,8 +32,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .backend import Backend, get_backend
+from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .search import PathResult, dijkstra_predict, sample_walk
 from .schedule import preview_points
@@ -59,6 +62,7 @@ UNKNOWN_PROB = 1e-6
 
 _LOG_UNKNOWN = math.log(UNKNOWN_PROB)
 _W = WINDOW
+_OV = WINDOW - 1
 _MAX_LOG_PPL = 700.0  # exp() overflows above ~709; a mean -log softmax never gets there
 
 ProgressFn = Callable[[dict], None]
@@ -179,19 +183,36 @@ def _whole_text(result: PathResult, prefix: str) -> PathResult:
     return result
 
 
-def _weight_groups(texts: Iterable[str] | str, weights: Sequence[float]) -> list[tuple[float, list[str]]]:
+def _weight_groups(
+    texts: Iterable[str] | str, weights: Sequence[float], name: str = "weights"
+) -> list[tuple[float, list[str]]]:
     """``[(weight, texts)]`` grouping texts of equal (3-decimal) weight, heaviest first; zero weights are dropped."""
     items = [texts] if isinstance(texts, str) else list(texts)
     values = [float(w) for w in weights]
     if len(values) != len(items):
-        raise ValueError(f"bad_weights has {len(values)} entries for {len(items)} texts")
+        raise ValueError(f"{name} has {len(values)} entries for {len(items)} texts")
     groups: dict[float, list[str]] = {}
     for text, weight in zip(items, values):
         if not math.isfinite(weight) or weight < 0:
-            raise ValueError(f"bad_weights must be finite and >= 0, got {weight}")
+            raise ValueError(f"{name} must be finite and >= 0, got {weight}")
         if weight > 0:
             groups.setdefault(round(weight, 3), []).append(text)
     return sorted(groups.items(), key=lambda item: -item[0])
+
+
+def _touches(lo: int, hi: int, spans: Sequence[tuple[int, int]]) -> bool:
+    """Does the half-open range ``[lo, hi)`` meet any of the changed ``spans``?
+
+    An empty span is an insertion point: the characters belong on the other
+    side, so the step that walked straight past the position is the one at
+    fault.
+    """
+    for start, end in spans:
+        if end == start:
+            end = start + 1
+        if start < hi and lo < end:
+            return True
+    return False
 
 
 def _resolve_config(config: TrainConfig | None, overrides: dict) -> TrainConfig:
@@ -204,6 +225,79 @@ def _resolve_config(config: TrainConfig | None, overrides: dict) -> TrainConfig:
         cfg = dataclasses.replace(cfg, **overrides)
     cfg.validate()
     return cfg
+
+
+
+META_COUNTERS = (
+    "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes", "path_inversions",
+    "failures_total", "cleared_total", "judgements", "rejected",
+)
+"""Lifetime counters of :attr:`GraphModel.meta` that wrap: each keeps its resets in ``<name>_resets``."""
+
+META_COUNTER_MAPS = ("sources",)
+"""Lifetime counters of :attr:`GraphModel.meta` kept per key (``{name: count}``), resets in ``<name>_resets``."""
+
+
+def meta_add(meta: dict, key: str, delta: int) -> int:
+    """Add ``delta`` to a lifetime counter, wrapping it like every other counter; returns the new reading.
+
+    The counter is stored as the two JSON numbers a cyclic counter needs:
+    ``meta[key]`` - back to 0 whenever it reaches
+    :data:`~radixnet.counter.COUNTER_LIMIT` - and ``meta[key + "_resets"]``,
+    how often that happened (see :mod:`radixnet.counter`).
+    """
+    counter = CyclicCounter.from_pair(meta.get(key, 0), meta.get(f"{key}_resets", 0)).bumped(delta)
+    meta[key], meta[f"{key}_resets"] = counter.to_pair()
+    return counter.value
+
+
+def meta_counter(meta: dict, key: str) -> CyclicCounter:
+    """One lifetime counter as a :class:`~radixnet.counter.CyclicCounter` reading."""
+    return CyclicCounter.from_pair(meta.get(key, 0), meta.get(f"{key}_resets", 0))
+
+
+def meta_add_keyed(meta: dict, key: str, name: str, delta: int) -> int:
+    """Add to one entry of a ``{name: count}`` lifetime counter map, wrapping it; returns the new reading.
+
+    The resets live in a mirror map ``meta[key + "_resets"]`` and, as
+    everywhere else, only the names that ever wrapped appear in it.
+    """
+    resets = meta.setdefault(f"{key}_resets", {})
+    counts = meta.setdefault(key, {})
+    counter = CyclicCounter.from_pair(counts.get(name, 0), resets.get(name, 0)).bumped(delta)
+    counts[name] = counter.value
+    if counter.resets:
+        resets[name] = counter.resets
+    else:
+        resets.pop(name, None)
+    return counter.value
+
+
+def carry_meta(meta: dict) -> dict:
+    """Wrap every lifetime counter of ``meta`` in place - what a file loaded from disk goes through.
+
+    A file written before the counters were cyclic (or by hand) can carry a
+    plain integer over the limit; after this every counter reads as an
+    odometer, exactly as it would have if it had been counted here.
+    """
+    for key in META_COUNTERS:
+        if key in meta or f"{key}_resets" in meta:
+            meta[key], meta[f"{key}_resets"] = meta_counter(meta, key).to_pair()
+    for key in META_COUNTER_MAPS:
+        counts = meta.get(key)
+        if isinstance(counts, dict):
+            for name in list(counts):
+                meta_add_keyed(meta, key, name, 0)
+    return meta
+
+
+def meta_stats(meta: dict, *keys: str) -> dict:
+    """``{key: value, key + "_resets": resets}`` for the named lifetime counters - what :meth:`GraphModel.stats` reports."""
+    out: dict = {}
+    for key in keys:
+        counter = meta_counter(meta, key)
+        out[key], out[f"{key}_resets"] = counter.to_pair()
+    return out
 
 
 class GraphModel:
@@ -230,14 +324,10 @@ class GraphModel:
 
     @staticmethod
     def _new_meta(seed: int) -> dict:
-        return {
-            "created": _utc_now(),
-            "seed": seed,
-            "epochs_total": 0,
-            "trained_chars": 0,
-            "trained_texts": 0,
-            "twonrl_runs": 0,
-        }
+        meta = {"created": _utc_now(), "seed": seed}
+        for key in ("epochs_total", "trained_chars", "trained_texts", "twonrl_runs"):
+            meta[key], meta[f"{key}_resets"] = 0, 0
+        return meta
 
     # -- the algorithm-specific part (implemented by every kind) -------------
 
@@ -281,6 +371,39 @@ class GraphModel:
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"amounts must lie in [0, 1], got {v}")
         return values
+
+    def _steps_over(self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+        """The steps of a traced text that wrote a character inside one of ``spans``, as ``(prev node, edge)``.
+
+        Every step is charged with the characters it adds to the text: the
+        first with the whole of its node's label, a later one with everything
+        past the two characters it overlaps its parent by, and the step into
+        END with the position just past the last character - where a sentence
+        that stopped too early went wrong.  Used to move only the nodes a
+        correction's diff (:mod:`radixnet.diff`) marks as changed.
+        """
+        graph = self.graph
+        path = graph.node_path(grams)
+        if not path or len(path) < 2:
+            return []
+        labels = graph.labels
+        children = graph.children
+        out: list[tuple[int, int]] = []
+        position = 0  # trigram index of the node being entered
+        for index in range(1, len(path)):
+            node = path[index]
+            prev = path[index - 2] if index >= 2 else START  # who called the step: START begins every walk
+            edge = children[path[index - 1]].get(node)
+            if node == END:
+                if edge is not None and _touches(length, length + 1, spans):
+                    out.append((prev, edge))
+                break
+            size = len(labels[node])
+            lo = 0 if index == 1 else position + _OV
+            if edge is not None and _touches(lo, position + size, spans):
+                out.append((prev, edge))
+            position += size - _OV
+        return out
 
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
         """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""
@@ -356,12 +479,12 @@ class GraphModel:
 
     def _best_trigram(self, key: str) -> tuple[int, int] | None:
         """Most-visited ``(node, offset)`` holding a trigram that starts with ``key``."""
-        count = self.graph.count
+        count = self.graph.node_count
         best: tuple[int, int] | None = None
         best_rank: tuple[int, int, int] | None = None
         for t, (node, off) in self.graph.trigram_index.items():
             if t.startswith(key):
-                rank = (-count[node], node, off)
+                rank = (-count(node), node, off)
                 if best_rank is None or rank < best_rank:
                     best, best_rank = (node, off), rank
         return best
@@ -371,9 +494,9 @@ class GraphModel:
         g = self.graph
         best: int | None = None
         best_count = -1
-        for node in range(2, len(g.labels)):
+        for node in range(FIRST, len(g.labels)):
             if g.alive[node] and g.labels[node].startswith(prefix):
-                c = g.count[node]
+                c = g.node_count(node)
                 if c > best_count:
                     best, best_count = node, c
         return best
@@ -717,8 +840,8 @@ class RadixNet(GraphModel):
         records: list[dict] = []
 
         transitions, observed_version = self._observe(texts, count=True)
-        meta["trained_texts"] += len(texts)
-        meta["trained_chars"] += sum(len(t) for t in texts)
+        meta_add(meta, "trained_texts", len(texts))
+        meta_add(meta, "trained_chars", sum(len(t) for t in texts))
         pending_merges = graph.compress() if cfg.auto_compress else 0
 
         parents_all: list[int] = []
@@ -758,8 +881,8 @@ class RadixNet(GraphModel):
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
             loss = loss_sum / n if n else 0.0
-            meta["epochs_total"] += 1
-            epoch = meta["epochs_total"]
+            graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
+            epoch = meta_add(meta, "epochs_total", 1)
             record = {
                 "epoch": epoch,
                 "loss": loss,
@@ -884,7 +1007,7 @@ class RadixNet(GraphModel):
         values = self._amounts(texts, amounts)
         chosen: dict[int, float] = {}
         for path, amount in zip(self._paths_of(texts), values):
-            real = [n for n in path if n > END]
+            real = [n for n in path if n >= FIRST]
             if not real or amount <= 0:
                 continue
             best: tuple[int, set[int]] | None = None
@@ -897,7 +1020,7 @@ class RadixNet(GraphModel):
             for n in best[1]:
                 chosen[n] = max(chosen.get(n, 0.0), amount)
         flipped = self.graph.flip_nodes(chosen, mode)
-        self.meta["path_inversions"] = self.meta.get("path_inversions", 0) + flipped
+        meta_add(self.meta, "path_inversions", flipped)
         applied = [v for v in values if v > 0]
         return {
             "texts": len(texts), "flipped": flipped, "unit": "nodes", "mode": mode,
@@ -918,6 +1041,7 @@ class RadixNet(GraphModel):
         stop_event: threading.Event | None = None,
         strength: float | None = None,
         bad_weights: Sequence[float] | None = None,
+        good_weights: Sequence[float] | None = None,
         **overrides,
     ) -> dict:
         """2NRL: train on ``bad``, invert, fine-tune on ``good``.
@@ -927,8 +1051,12 @@ class RadixNet(GraphModel):
         for weights and states and ``w * act_lr`` for the activation
         parameters, so the worse a failure the harder the model is pushed to
         reproduce it - to *blatantly fail on purpose* - before the inversion
-        turns that into avoidance.  Texts of equal weight share a pass; the
-        negative records carry ``"weight"``.  ``strength`` is accepted for
+        turns that into avoidance.  ``good_weights`` does the same for the
+        positive phase (``w * pos_lr``, ``w * pos_lr / 10``): a rating, not a
+        thumbs up, so a text rated 9 out of 10 is learned nine tenths as hard
+        as a perfect one and a barely-acceptable text barely moves the
+        network.  Texts of equal weight share a pass, heaviest first, and
+        their records carry ``"weight"``.  ``strength`` is accepted for
         interface parity with the count / reward model and ignored here.
 
         The negative phase uses ``neg_lr``; the positive phase uses ``pos_lr``
@@ -956,7 +1084,7 @@ class RadixNet(GraphModel):
             negative = []
             act_lr = overrides.pop("act_lr", None)
             base_act_lr = TrainConfig.act_lr if act_lr is None else act_lr
-            for weight, group in _weight_groups(bad, bad_weights):
+            for weight, group in _weight_groups(bad, bad_weights, "bad_weights"):
                 if stop_event is not None and stop_event.is_set():
                     break
                 records = self.train(
@@ -971,14 +1099,28 @@ class RadixNet(GraphModel):
         self.invert()
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
-            positive = self.train(
-                good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, progress=progress,
-                checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
-            )
-        self.meta["twonrl_runs"] += 1
+            if good_weights is None:
+                positive = self.train(
+                    good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, progress=progress,
+                    checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
+                )
+            else:
+                for weight, group in _weight_groups(good, good_weights, "good_weights"):
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    records = self.train(
+                        group, epochs=pos_epochs, lr=pos_lr * weight, act_lr=pos_lr / 10 * weight,
+                        checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
+                    )
+                    for record in records:
+                        record["weight"] = weight
+                        if progress is not None:
+                            progress(record)
+                    positive.extend(records)
+        runs = meta_add(self.meta, "twonrl_runs", 1)
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)
-            checkpoint_manager.save(self, self.meta["twonrl_runs"], "2nrl", last)
+            checkpoint_manager.save(self, runs, "2nrl", last)
         return {"negative": negative, "positive": positive, "inverted": self.graph.inverted}
 
     def reward(
@@ -987,15 +1129,28 @@ class RadixNet(GraphModel):
         *,
         epochs: int = 3,
         lr: float = 0.1,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         strength: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs up: a positive-phase pass over ``texts`` (``act_lr = lr / 10``); records carry ``phase="positive"``."""
-        return self.train(
-            texts, epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive", progress=progress, stop_event=stop_event,
-            **overrides,
+        """Thumbs up: a positive-phase pass over ``texts`` (``act_lr = lr / 10``); records carry ``phase="positive"``.
+
+        ``weights`` (one per text, ``>= 0``) turns the thumbs up into a
+        rating: a text of weight ``w`` is learned with ``w * lr`` and
+        ``w * lr / 10``, so how good a text is decides how much of it the
+        network keeps.  Texts of equal weight share a pass (heaviest first)
+        and their records carry ``"weight"``; a weight of 0 is skipped.
+        """
+        if weights is None:
+            return self.train(
+                texts, epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive", progress=progress,
+                stop_event=stop_event, **overrides,
+            )
+        return self._weighted_passes(
+            texts, weights, "weights", epochs=epochs, lr=lr, act_lr=lr / 10, phase="positive",
+            progress=progress, stop_event=stop_event, **overrides,
         )
 
     def punish(
@@ -1004,15 +1159,59 @@ class RadixNet(GraphModel):
         *,
         epochs: int = 2,
         lr: float = 0.5,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         strength: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs down: a negative-phase pass over ``texts``, then the network is inverted (unless stopped)."""
-        records = self.train(texts, epochs=epochs, lr=lr, phase="negative", progress=progress, stop_event=stop_event, **overrides)
+        """Thumbs down: a negative-phase pass over ``texts``, then the network is inverted (unless stopped).
+
+        ``weights`` rates the failures the way :meth:`reward` rates the
+        successes: the worse a text, the larger its share of ``lr``.
+        """
+        if weights is None:
+            records = self.train(
+                texts, epochs=epochs, lr=lr, phase="negative", progress=progress, stop_event=stop_event, **overrides,
+            )
+        else:
+            act_lr = overrides.pop("act_lr", TrainConfig.act_lr)
+            records = self._weighted_passes(
+                texts, weights, "weights", epochs=epochs, lr=lr, act_lr=act_lr, phase="negative",
+                progress=progress, stop_event=stop_event, **overrides,
+            )
         if stop_event is None or not stop_event.is_set():
             self.invert()
+        return records
+
+    def _weighted_passes(
+        self,
+        texts: Iterable[str] | str,
+        weights: Sequence[float],
+        name: str,
+        *,
+        epochs: int,
+        lr: float,
+        act_lr: float,
+        phase: str,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """One pass per group of equally weighted texts, the learning rates scaled by the weight."""
+        records: list[dict] = []
+        for weight, group in _weight_groups(texts, weights, name):
+            if stop_event is not None and stop_event.is_set():
+                break
+            group_records = self.train(
+                group, epochs=epochs, lr=lr * weight, act_lr=act_lr * weight, phase=phase,
+                stop_event=stop_event, **overrides,
+            )
+            for record in group_records:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(group_records)
         return records
 
     # -- introspection -------------------------------------------------------
@@ -1030,10 +1229,7 @@ class RadixNet(GraphModel):
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,
-            "epochs_total": meta["epochs_total"],
-            "trained_chars": meta["trained_chars"],
-            "trained_texts": meta["trained_texts"],
-            "twonrl_runs": meta["twonrl_runs"],
+            **meta_stats(meta, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs"),
             "history_len": len(self.history),
             "last_loss": self.history[-1]["loss"] if self.history else None,
         }
@@ -1066,7 +1262,7 @@ class RadixNet(GraphModel):
         model.history = [dict(r) for r in d.get("history", [])]
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
-        model.meta = meta
+        model.meta = carry_meta(meta)
         return model
 
 
@@ -1084,11 +1280,17 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"``, ``"count"`` and ``"resonant"``)."""
-    from .countnet import CountRewardNet  # local imports: both build on this module
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"negative"`` and ``"resonant"``)."""
+    from .countnet import CountRewardNet  # local imports: they all build on this module
+    from .negative import NegativeNet
     from .resonance import ResonantNet
 
-    return {RadixNet.kind: RadixNet, CountRewardNet.kind: CountRewardNet, ResonantNet.kind: ResonantNet}
+    return {
+        RadixNet.kind: RadixNet,
+        CountRewardNet.kind: CountRewardNet,
+        NegativeNet.kind: NegativeNet,
+        ResonantNet.kind: ResonantNet,
+    }
 
 
 def model_kinds() -> list[dict]:

@@ -4,7 +4,7 @@ A state here is ``(node, chars_emitted, phase_bucket)`` rather than
 :mod:`radixnet.search`'s ``(node, chars_emitted)``.  The extra coordinate is
 what :class:`~radixnet.resonance.ResonantGraph` scores edges against, and it is
 a plain function of the state: entering node ``c`` moves the phase on by
-``graph.advance[c]`` buckets.  Costs are ``-log softmax`` over the children *at
+``graph.advance[c]`` buckets (0 for a sentinel, which emits nothing).  Costs are ``-log softmax`` over the children *at
 that phase* (plus ``step_penalty``), so ``exp(-cost)`` is still a path's
 probability and the results stay comparable with the other two models'.
 
@@ -38,9 +38,9 @@ from heapq import heappop, heappush
 
 from .beam import default_beam
 from .encoding import WINDOW
-from .graph import END
+from .graph import END, FIRST
 from .metacog import ABORT, ESCAPE, RIDE, cycle_signature
-from .search import PathResult, _build_result, _start_emission
+from .search import PathResult, _build_result, _start_emission, onward
 
 __all__ = ["phase_beam", "phase_dijkstra", "phase_walk", "start_bucket"]
 
@@ -119,11 +119,11 @@ def phase_dijkstra(
             break
         if max_chars is not None and chars >= max_chars:
             continue
-        for c, _e, ec in child_costs_at(node, phase):
-            nchars = chars if c == END else chars + len(labels[c]) - _OV
+        for c, _e, ec in onward(child_costs_at(node, phase)):
+            nchars = chars if c < FIRST else chars + len(labels[c]) - _OV
             step = ec + step_penalty
             ncost = cost + step
-            nkey = (c, nchars, phase if c == END else (phase + advance[c]) % buckets)
+            nkey = (c, nchars, (phase + advance[c]) % buckets)
             if ncost < best_get(nkey, inf):
                 best[nkey] = ncost
                 prev[nkey] = (key, step)
@@ -186,14 +186,14 @@ def _expand(graph, meta, entry: _Entry, step_penalty: float):
     advance = graph.advance
     buckets = graph.buckets
     labels = graph.labels
-    raw = graph.child_costs_at(node, phase)
+    raw = onward(graph.child_costs_at(node, phase))  # a node the model expects to go round offers nothing
     extra: dict[str, float] | None = None
     loops: dict[int, int] = {}
     if meta is not None and entry.seen:
         here = entry.depth.get((node, phase), 0)
         for c, _e, _cost in raw:
-            if c == END:
-                continue
+            if c < FIRST:
+                continue  # a sentinel is not a node to loop through
             nphase = (phase + advance[c]) % buckets
             first = entry.depth.get((c, nphase))
             if first is not None:
@@ -203,7 +203,7 @@ def _expand(graph, meta, entry: _Entry, step_penalty: float):
             extra = _meta_costs(meta, labels[target], loops[target])
     out = []
     for c, e, cost in raw:
-        nphase = phase if c == END else (phase + advance[c]) % buckets
+        nphase = (phase + advance[c]) % buckets
         action = None
         if extra is not None:
             action = RIDE if c in loops else (ABORT if c == END else ESCAPE)
@@ -268,8 +268,8 @@ def phase_beam(
                     continue
                 expanded += 1
                 for c, _e, step, nphase, _action in _expand(graph, meta, entry, step_penalty):
-                    nchars = entry.chars if c == END else entry.chars + len(labels[c]) - _OV
-                    if cap_chars is not None and nchars > cap_chars and c != END:
+                    nchars = entry.chars if c < FIRST else entry.chars + len(labels[c]) - _OV
+                    if cap_chars is not None and nchars > cap_chars and c >= FIRST:
                         continue
                     key = (c, nphase)
                     child = _Entry(
@@ -369,7 +369,7 @@ def phase_walk(
         c, _e, cst, nphase, _action = pick
         step_costs.append(cst)
         node_ids.append(c)
-        if c != END:
+        if c >= FIRST:
             chars += len(labels[c]) - _OV
         steps += 1
         key = (c, nphase)

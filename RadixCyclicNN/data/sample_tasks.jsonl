@@ -1,0 +1,3 @@
+{"id": "teapot", "prompt": "What is the HTTP status code for \"I'm a teapot\"?", "answer": "418", "criteria": ["The answer gives the number 418"]}
+{"id": "utf8", "prompt": "How many bytes does a UTF-8 encoded em dash (—) take?", "answer": "3"}
+{"id": "csr", "prompt": "What does CSR stand for in sparse-matrix storage, and what are its arrays called?", "seeds": ["https://en.wikipedia.org/wiki/Sparse_matrix"]}

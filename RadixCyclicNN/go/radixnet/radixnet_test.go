@@ -1,11 +1,13 @@
 package radixnet
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -178,7 +180,7 @@ func TestSplitAndMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.Compress()
-	if g.NumNodes() != 3 { // START, END and one compressed node
+	if g.NumNodes() != First+1 { // the sentinels and one compressed node
 		t.Fatalf("expected one compressed node, got %d nodes", g.NumNodes())
 	}
 	if _, err := g.ObserveSequence(Encode("hello there"), true); err != nil {
@@ -379,7 +381,7 @@ func TestGenerateAndScore(t *testing.T) {
 func TestConverse(t *testing.T) {
 	m := trained(t, 2, 4)
 	opts := DefaultConverseOptions()
-	opts.Turns = 6
+	opts.Turns, opts.Learn = 6, false
 	turns, err := m.Converse("the cat sat on the mat", opts)
 	if err != nil || len(turns) != 7 {
 		t.Fatalf("converse: %v %d", err, len(turns))
@@ -411,8 +413,12 @@ func TestConverse(t *testing.T) {
 			}
 		}
 	}
-	again, _ := m.Converse("the cat sat on the mat", opts)
-	if Transcript(again) != Transcript(turns) {
+	// deterministic on a model in the same state - with Learn on, the first conversation taught it something
+	plain := opts
+	plain.Learn = false
+	first, _ := m.Converse("the cat sat on the mat", plain)
+	again, _ := m.Converse("the cat sat on the mat", plain)
+	if Transcript(again) != Transcript(first) {
 		t.Fatal("beam conversations must be deterministic")
 	}
 	if got := TailContext("the cat sat on the mat", 12); got != "on the mat" {
@@ -421,6 +427,330 @@ func TestConverse(t *testing.T) {
 	empty, _ := NewModel(0, DefaultGraphOptions())
 	if turns, _ := empty.Converse("", opts); len(turns) != 0 {
 		t.Fatal("an untrained model has nothing to say")
+	}
+}
+
+// A run of words repeated immediately after itself - and only that.
+func TestStutter(t *testing.T) {
+	for line, want := range map[string]string{
+		"the the west":                                "the",
+		"say morning morning":                         "morning",
+		"the cat the cat sat":                         "the cat",
+		"The  The":                                    "the", // whitespace and case aside
+		"the cat sat on the mat":                      "",
+		"where there is a will there is a way":        "",
+		"a bird in the hand is worth two in the bush": "",
+		"blowers blower":                              "",
+		"park":                                        "",
+		"":                                            "",
+	} {
+		if got := Stutter(line, LongestStutter); got != want {
+			t.Fatalf("Stutter(%q) = %q; want %q", line, got, want)
+		}
+	}
+	long := "the cat sat on the mat the cat sat on the mat"
+	if got := Stutter(long, LongestStutter); got != "" { // six words twice over: past the default
+		t.Fatalf("Stutter(%q) = %q", long, got)
+	}
+	if got := Stutter(long, 6); got != "the cat sat on the mat" {
+		t.Fatalf("Stutter(%q, 6) = %q", long, got)
+	}
+	if got := Stutter("the the west", 0); got != "" {
+		t.Fatalf("Stutter with no run allowed = %q", got)
+	}
+}
+
+// A voice that can only repeat its own words: punished, or allowed to say them on request.
+func TestConverseWordRepeats(t *testing.T) {
+	m, err := NewModel(3, DefaultGraphOptions())
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if _, err := m.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	opts := DefaultConverseOptions()
+	opts.Turns = 4
+	turns, err := m.Converse("", opts)
+	if err != nil || len(turns) == 0 {
+		t.Fatalf("converse: %v %d", err, len(turns))
+	}
+	stutters := 0
+	for _, tr := range turns {
+		if !tr.Repeat { // nothing it could say repeated nothing
+			t.Fatalf("turn %q was not flagged a repeat", tr.Text)
+		}
+		if tr.Stutter != (Stutter(tr.Text, LongestStutter) != "") {
+			t.Fatalf("turn %q: stutter = %v", tr.Text, tr.Stutter)
+		}
+		if tr.Stutter {
+			stutters++
+		}
+	}
+	if stutters == 0 || len(Repeats(turns)) != len(turns) {
+		t.Fatalf("%d stutters, %d punished of %d turns", stutters, len(Repeats(turns)), len(turns))
+	}
+	// allowed instead: spoken freely, flagged for what they are, and punished for nothing
+	opts.AvoidWordRepeats = false
+	loose, err := m.Converse("", opts)
+	if err != nil || len(loose) != opts.Turns {
+		t.Fatalf("converse: %v %d", err, len(loose))
+	}
+	for _, tr := range loose {
+		if !tr.Stutter || tr.Repeat {
+			t.Fatalf("turn %q: stutter = %v, repeat = %v", tr.Text, tr.Stutter, tr.Repeat)
+		}
+	}
+	if got := Repeats(loose); len(got) != 0 {
+		t.Fatalf("nothing should be punished: %q", got)
+	}
+}
+
+// Catching itself repeating, backing up to where the walk went round, and looking for another way on.
+func TestBacktrack(t *testing.T) {
+	// "ha ha ..." loops; the other two lines leave the loop after "ha "
+	ways, err := NewModel(3, DefaultGraphOptions())
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if _, err := ways.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
+		TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	stuck, _ := NewModel(3, DefaultGraphOptions())
+	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60,
+		AvoidRepeats: true, AvoidWordRepeats: true}
+
+	found, record, err := ways.Backtrack("ha ha ha", opts)
+	if err != nil || found == nil || !record.Found {
+		t.Fatalf("backtrack: %v %+v", err, record)
+	}
+	if record.Kind != "stutter" || record.Noticed != "ha" || record.Cut != "ha " || record.Steps != 1 ||
+		record.Explored == 0 {
+		t.Fatalf("record = %+v", record)
+	}
+	if !strings.HasPrefix(found.FullText, "ha ") || Stutter(found.FullText, LongestStutter) != "" {
+		t.Fatalf("the way on keeps what was said once and does not go round again: %q", found.FullText)
+	}
+
+	// a voice with nowhere else to go says so - and it did look
+	found, record, _ = stuck.Backtrack("ha ha ha", opts)
+	if found != nil || record.Found || record.Noticed != "ha" || record.Explored == 0 {
+		t.Fatalf("stuck: %v %+v", found, record)
+	}
+
+	// the words it picked up are not its own to rethink
+	keep := opts
+	keep.Keep = "ha ha "
+	found, record, _ = ways.Backtrack("ha ha ha", keep)
+	if found != nil || record.Steps != 0 || record.Explored != 0 {
+		t.Fatalf("keep: %v %+v", found, record)
+	}
+
+	// a whole utterance it has said before is a retread end to end: it keeps all it can and differs at the end
+	said := opts
+	said.Heard = NewHeard([]string{"ha and then the cat sat"})
+	found, record, _ = ways.Backtrack("ha and then the cat sat", said)
+	if record.Kind != "repeat" || record.Noticed != "ha and then the cat sat" || record.Steps == 0 {
+		t.Fatalf("a heard line: %+v", record)
+	}
+	if !strings.HasPrefix("ha and then the cat ", record.Cut) {
+		t.Fatalf("cut %q is not that last word, or further back", record.Cut)
+	}
+	if found != nil && !strings.HasPrefix(found.FullText, record.Cut) {
+		t.Fatalf("a way on keeps what it cut: %q from %q", found.FullText, record.Cut)
+	}
+
+	// one word is nothing to back up from, and nothing is caught with the settings off
+	one := opts
+	one.Heard = NewHeard([]string{"ha"})
+	if found, record, _ = ways.Backtrack("ha", one); found != nil || record.Kind != "repeat" || record.Steps != 0 {
+		t.Fatalf("one word: %v %+v", found, record)
+	}
+	off := said
+	off.AvoidRepeats = false
+	if found, record, _ = ways.Backtrack("ha and then the cat sat", off); found != nil || record.Kind != "" {
+		t.Fatalf("repeats allowed: %v %+v", found, record)
+	}
+	noWords := opts
+	noWords.AvoidWordRepeats = false
+	if found, record, _ = ways.Backtrack("ha ha ha", noWords); found != nil || record.Kind != "" {
+		t.Fatalf("word repeats allowed: %v %+v", found, record)
+	}
+
+	// nothing to rethink, and nothing to explore
+	if found, record, _ = ways.Backtrack("the cat sat on the mat", opts); found != nil || record.Noticed != "" {
+		t.Fatalf("clean: %v %+v", found, record)
+	}
+	noExplore := opts
+	noExplore.Explore = 0
+	if found, record, _ = ways.Backtrack("ha ha ha", noExplore); found != nil || record.Steps != 0 {
+		t.Fatalf("off: %v %+v", found, record)
+	}
+
+	// and a conversation backs out of the loop it walks into
+	cfg := DefaultConverseOptions()
+	cfg.Turns = 4
+	turns, err := ways.Converse("", cfg)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	thought := 0
+	for _, turn := range turns {
+		if turn.Rethink == nil {
+			continue
+		}
+		thought++
+		if turn.Rethink.Noticed == "" || turn.Text != turn.Context+turn.Reply {
+			t.Fatalf("turn %+v", turn)
+		}
+		if turn.Rethink.Found && (!strings.HasPrefix(turn.Text, turn.Rethink.Cut) || turn.Repeat || turn.Stutter) {
+			t.Fatalf("a way out keeps what was said once: %+v", turn)
+		}
+	}
+	if thought == 0 {
+		t.Fatal("nothing was ever noticed")
+	}
+	cfg.Explore = 0
+	plain, _ := ways.Converse("", cfg)
+	for _, turn := range plain {
+		if turn.Rethink != nil {
+			t.Fatalf("nothing is noticed with the exploring off: %+v", turn)
+		}
+	}
+}
+
+// The rethink is not only a way out of this turn: what it finds out is taught to the graph.
+func TestLearnsWhereItGoesRound(t *testing.T) {
+	build := func() *Model {
+		m, _ := NewModel(3, DefaultGraphOptions())
+		if _, err := m.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
+			TrainOptions{Epochs: 3}); err != nil {
+			t.Fatalf("Train: %v", err)
+		}
+		return m
+	}
+	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60,
+		AvoidRepeats: true, AvoidWordRepeats: true, Learn: true}
+
+	m := build()
+	if len(m.G.parents[Back].order) != 0 {
+		t.Fatal("a fresh model has no idea where it goes round")
+	}
+	_, record, err := m.Backtrack("ha ha ha", opts)
+	if err != nil || record.Taught < First {
+		t.Fatalf("backing out teaches the node: %v %+v", err, record)
+	}
+	if _, ok := m.G.children[record.Taught].get(Back); !ok {
+		t.Fatalf("node %d was not taught to hand over", record.Taught)
+	}
+	if _, ok := m.G.BackCost(record.Taught); !ok {
+		t.Fatalf("node %d has no back cost", record.Taught)
+	}
+
+	// enough hand-overs and the search refuses by itself
+	node := record.Taught
+	for i := 0; i < 6; i++ {
+		if _, err := m.G.ObserveBack(node, -1, -1, 1); err != nil {
+			t.Fatalf("ObserveBack: %v", err)
+		}
+	}
+	if len(Onward(m.G.ChildCosts(node))) != 0 {
+		t.Fatalf("the model's most likely next step at %d should be to stop", node)
+	}
+
+	// a conversation leaves the model knowing more than it did, and with the learning off it does not
+	m = build()
+	cfg := DefaultConverseOptions()
+	cfg.Turns = 6
+	if _, err := m.Converse("", cfg); err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	if len(m.G.parents[Back].order) == 0 {
+		t.Fatal("a conversation taught it nothing")
+	}
+	quiet := build()
+	cfg.Learn = false
+	turns, _ := quiet.Converse("", cfg)
+	if len(quiet.G.parents[Back].order) != 0 {
+		t.Fatal("nothing is taught with the learning off")
+	}
+	for _, turn := range turns {
+		if turn.Rethink != nil && turn.Rethink.Taught != -1 {
+			t.Fatalf("turn taught %d with the learning off", turn.Rethink.Taught)
+		}
+	}
+
+	// a repeat the graph cannot place teaches nothing
+	blank := build()
+	if got := blank.TeachBack("zzz zzz", 4, nil, 1); got != -1 {
+		t.Fatalf("TeachBack on an unknown prefix = %d", got)
+	}
+}
+
+// What counts as a duplicate, and what a conversation does with the ones it cannot avoid.
+func TestHeardAndRepeats(t *testing.T) {
+	heard := NewHeard([]string{"the cat sat on the mat"})
+	if !heard.Duplicate("The   Cat Sat On The Mat", "") { // whitespace and case aside
+		t.Fatal("an utterance said before is a duplicate")
+	}
+	if heard.Duplicate("the dog barked", "") {
+		t.Fatal("an unheard utterance is not a duplicate")
+	}
+	if !heard.Duplicate("on the mat", "") || heard.Duplicate("on the mat outside", "") {
+		t.Fatal("an echo adds nothing; a longer utterance says more than was heard")
+	}
+	heard.Remember("the cat sat", " sat")
+	if !heard.Duplicate("the dog sat", " sat") || heard.Duplicate("the dog sat", " sat down") {
+		t.Fatal("the same words added after another context are a duplicate")
+	}
+	if heard.Duplicate("", "") || NewHeard(nil).Duplicate("anything", "") {
+		t.Fatal("nothing is a duplicate of an empty conversation")
+	}
+
+	turns := []*Turn{{Text: "the cat sat"}, {Text: " west", Repeat: true}, {Text: "West", Repeat: true}, {Text: "  ", Repeat: true}}
+	if got := Repeats(turns); !reflect.DeepEqual(got, []string{" west"}) {
+		t.Fatalf("Repeats = %q; the flagged utterances, each once", got)
+	}
+	if got := Repeats(nil); len(got) != 0 {
+		t.Fatalf("Repeats(nil) = %q", got)
+	}
+
+	// a long conversation on a small corpus runs out of new things to say: it speaks a duplicate once,
+	// flags it, and stops rather than saying it again (with the exploring off - a voice that backs out of
+	// its repeats keeps finding new things to say, which is TestBacktrack's business)
+	m := trained(t, 2, 4)
+	opts := DefaultConverseOptions()
+	opts.Turns, opts.Explore = 40, 0
+	long, err := m.Converse("", opts)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	said := map[string]bool{}
+	for _, tr := range long {
+		key := Normalize(tr.Text)
+		if said[key] && !tr.Repeat { // only a flagged duplicate may say something twice
+			t.Fatalf("utterance %q spoken twice", tr.Text)
+		}
+		said[key] = true
+	}
+	punished := Repeats(long)
+	if len(punished) == 0 || len(long) >= opts.Turns {
+		t.Fatalf("%d turns, %d to punish: the conversation should run out of new things to say", len(long), len(punished))
+	}
+	// and no duplicate is ever spoken twice: the conversation ends instead of going round in circles
+	for i, tr := range long {
+		if !tr.Repeat {
+			continue
+		}
+		for _, later := range long[i+1:] {
+			if Normalize(later.Text) == Normalize(tr.Text) {
+				t.Fatalf("duplicate %q spoken again at turn %d", tr.Text, later.Index)
+			}
+		}
 	}
 }
 
@@ -560,5 +890,135 @@ func TestLegacyWeightsBlockDefaults(t *testing.T) {
 	}
 	if legacy.G.CountScale != 0.25 || legacy.G.WindowSize != 7 || legacy.G.GlobalScale != 0 {
 		t.Fatalf("partial legacy block: %+v", legacy.G.WeightConfig())
+	}
+}
+
+// A soft memory limit is the difference between a collection and an OOM kill.
+func TestParseSizeAndMemoryLimit(t *testing.T) {
+	cases := map[string]int64{"": 0, "1024": 1024, "2k": 2 << 10, "3MiB": 3 << 20, "1.5g": 1536 << 20, "off": -1, "none": -1}
+	for text, want := range cases {
+		got, err := ParseSize(text)
+		if err != nil || got != want {
+			t.Fatalf("ParseSize(%q) = %d, %v; want %d", text, got, err, want)
+		}
+	}
+	if _, err := ParseSize("later"); err == nil {
+		t.Fatal("ParseSize must reject a non-size")
+	}
+	if n, source := AvailableMemory(); n <= 0 || source == "" {
+		t.Fatalf("AvailableMemory() = %d, %q", n, source)
+	}
+	before := debug.SetMemoryLimit(-1)
+	defer debug.SetMemoryLimit(before)
+	if got := ApplyMemoryLimit(512<<20, DefaultMemoryFraction); got.Bytes != 512<<20 || got.Source != "flag" {
+		t.Fatalf("explicit limit: %+v", got)
+	}
+	if got := debug.SetMemoryLimit(-1); got != 512<<20 {
+		t.Fatalf("limit not applied: %d", got)
+	}
+	if got := ApplyMemoryLimit(-1, DefaultMemoryFraction); got.Bytes != 0 || got.String() != "no memory limit" {
+		t.Fatalf("off: %+v", got)
+	}
+	auto := ApplyMemoryLimit(0, DefaultMemoryFraction)
+	if auto.Bytes <= 0 || auto.Source == "" || !strings.Contains(auto.String(), "soft memory limit") {
+		t.Fatalf("auto limit: %+v", auto)
+	}
+	if total, _ := AvailableMemory(); auto.Bytes > total {
+		t.Fatalf("auto limit %d above the available %d", auto.Bytes, total)
+	}
+}
+
+// Saving streams: a model file is never held in memory, and what it holds is
+// byte for byte what the buffered encoder wrote.
+func TestSaveStreamsTheSameBytes(t *testing.T) {
+	m := trained(t, 2, 0)
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "m.json")
+	if err := m.Save(plain); err != nil {
+		t.Fatal(err)
+	}
+	want, err := marshalCompact(m.ToDoc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("streamed file differs from the buffered encoding (%d vs %d bytes)", len(got), len(want))
+	}
+	if n := len(got); n == 0 || got[n-1] == '\n' {
+		t.Fatal("the file must not end with the encoder's newline")
+	}
+	zipped := filepath.Join(dir, "m.json.gz")
+	if err := m.Save(zipped); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Load(zipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.G.NumEdges() != m.G.NumEdges() || back.G.TotalTraversals != m.G.TotalTraversals {
+		t.Fatal("the gzipped round trip lost counts")
+	}
+}
+
+// The adjacency lists are two parallel slices, with a map index only for the
+// high-degree nodes: the lookups must agree either side of that threshold.
+func TestAdjacencyKeepsOrderAndFindsEveryEntry(t *testing.T) {
+	var a adjacency
+	n := 4 * adjacencyIndexAt
+	for i := 0; i < n; i++ {
+		a.set(i*3, i*7)
+	}
+	if a.idx == nil {
+		t.Fatal("a high-degree adjacency must keep a map index")
+	}
+	if a.size() != n {
+		t.Fatalf("size %d, want %d", a.size(), n)
+	}
+	for i := 0; i < n; i++ {
+		if a.order[i] != i*3 || a.edges[i] != i*7 {
+			t.Fatalf("entry %d is %d -> %d", i, a.order[i], a.edges[i])
+		}
+		if e, ok := a.get(i * 3); !ok || e != i*7 {
+			t.Fatalf("get(%d) = %d, %v", i*3, e, ok)
+		}
+	}
+	if _, ok := a.get(1); ok {
+		t.Fatal("get must not invent an entry")
+	}
+	a.set(9, 99) // overwriting keeps the position
+	if e, _ := a.get(9); e != 99 || a.size() != n {
+		t.Fatalf("overwrite: %d entries, 9 -> %d", a.size(), e)
+	}
+	a.set(9, 3*7) // back to what the loop wrote
+	if !a.unset(0) || a.unset(0) {
+		t.Fatal("unset must remove exactly once")
+	}
+	if a.size() != n-1 {
+		t.Fatalf("size after unset: %d", a.size())
+	}
+	for i := 1; i < n; i++ {
+		if e, ok := a.get(i * 3); !ok || e != i*7 {
+			t.Fatalf("lost %d after unset: %d, %v", i*3, e, ok)
+		}
+	}
+	a.clear()
+	if a.size() != 0 || a.idx != nil {
+		t.Fatal("clear must empty the adjacency")
+	}
+	var small adjacency
+	small.set(5, 1)
+	small.set(6, 2)
+	if small.idx != nil {
+		t.Fatal("a small adjacency must not allocate a map")
+	}
+	if e, ok := small.get(6); !ok || e != 2 {
+		t.Fatalf("small get: %d, %v", e, ok)
+	}
+	if _, ok := small.get(7); ok {
+		t.Fatal("small get must not invent an entry")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,10 @@ func (e *apiError) Error() string { return e.message }
 
 func badRequest(format string, args ...any) error {
 	return &apiError{400, fmt.Sprintf(format, args...)}
+}
+
+func notFound(format string, args ...any) error {
+	return &apiError{404, fmt.Sprintf(format, args...)}
 }
 
 func utcNow() string { return time.Now().UTC().Format("2006-01-02T15:04:05-07:00") }
@@ -117,6 +122,25 @@ type Options struct {
 	Keep          int
 	Quiet         bool
 	Log           func(string)
+	// OllamaURL / OllamaModel are the defaults of the /api/tutor endpoints
+	// (empty: $OLLAMA_HOST and $RADIXNET_TUTOR_MODEL, else the local defaults).
+	OllamaURL   string
+	OllamaModel string
+	// ChatGPTURL / ChatGPTModel are those of the hosted teacher (empty:
+	// $OPENAI_BASE_URL and $RADIXNET_OPENAI_MODEL, else OpenAI's own); the key
+	// always comes from the server's $OPENAI_API_KEY.
+	ChatGPTURL   string
+	ChatGPTModel string
+	// Tools are the defaults of the /api/tools and /api/agent endpoints: what
+	// the network may call, and how far it may reach.
+	Offline      bool    // no web tools at all
+	AllowPrivate bool    // let the web tools reach private addresses
+	SearchURL    string  // a different search endpoint
+	WebTimeout   float64 // seconds per web request (0: 20)
+	MaxBytes     int     // cap on a fetched page (0: 2 MB)
+	PythonTool   bool    // also offer the sandboxed `python` tool
+	SandboxTime  float64 // seconds a sandboxed program may run (0: 10)
+	NoIsolation  bool    // do not run sandboxed programs in their own network namespace
 }
 
 // Service holds the model, the current job and the directories.  Readers
@@ -136,6 +160,27 @@ type Service struct {
 	ckpts     *Checkpoints
 	logf      func(string)
 	started   time.Time
+	// negative is the negative network this server filters with (nil until first used)
+	negative *radixnet.Model
+	// negMu guards that lazy load: the output paths reach it under the read lock
+	negMu sync.Mutex
+	// guardConfig is how strictly the negative network guards the output paths
+	guardConfig radixnet.FilterConfig
+	// the teacher defaults of the tutor endpoints and the records of every tutor run
+	ollamaURL      string
+	ollamaModel    string
+	chatgptURL     string
+	chatgptModel   string
+	tutorHistory   []map[string]any
+	criticHistory  []map[string]any
+	codegenHistory []map[string]any
+	agentHistory   []map[string]any
+	chatHistory    []map[string]any
+	// tools are the server's defaults for the external tools the network may call
+	tools         toolDefaults
+	evolveHistory []map[string]any
+	// discriminator is the critic of the evolve loop (nil until first used)
+	discriminator *radixnet.Model
 	// epochDelay slows every epoch (tests: makes a job observable while running)
 	epochDelay time.Duration
 }
@@ -168,7 +213,36 @@ func NewService(opts Options) (*Service, error) {
 	m.Workers = workers
 	m.G.Workers = workers
 	m.Exact = opts.Exact
-	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact, started: time.Now(), logf: opts.Log}
+	tools := defaultToolDefaults()
+	tools.Offline, tools.AllowPrivate, tools.PythonTool = opts.Offline, opts.AllowPrivate, opts.PythonTool
+	tools.SearchURL, tools.NetworkIsolat = opts.SearchURL, !opts.NoIsolation
+	if opts.WebTimeout > 0 {
+		tools.WebTimeout = opts.WebTimeout
+	}
+	if opts.MaxBytes > 0 {
+		tools.MaxBytes = opts.MaxBytes
+	}
+	if opts.SandboxTime > 0 {
+		tools.SandboxTime = opts.SandboxTime
+	}
+	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact,
+		started: time.Now(), logf: opts.Log, guardConfig: radixnet.DefaultFilterConfig(), tools: tools}
+	s.ollamaURL = radixnet.DefaultOllamaURL()
+	if url, err := radixnet.NormaliseOllamaURL(opts.OllamaURL); err == nil {
+		s.ollamaURL = url
+	}
+	s.ollamaModel = radixnet.DefaultTutorModel()
+	if name := strings.TrimSpace(opts.OllamaModel); name != "" {
+		s.ollamaModel = name
+	}
+	s.chatgptURL = radixnet.DefaultChatGPTURL()
+	if url, err := radixnet.NormaliseChatGPTURL(opts.ChatGPTURL); err == nil {
+		s.chatgptURL = url
+	}
+	s.chatgptModel = radixnet.DefaultChatGPTModel()
+	if name := strings.TrimSpace(opts.ChatGPTModel); name != "" {
+		s.chatgptModel = name
+	}
 	if opts.UploadDir != "" {
 		s.uploads = NewUploads(opts.UploadDir)
 	}
@@ -275,17 +349,17 @@ type TrainRequest struct {
 
 // StartTrain starts a train job over texts held in memory.
 func (s *Service) StartTrain(texts []string, epochs int, autoCompress bool) (map[string]any, error) {
-	return s.StartTrainSource(radixnet.SliceSource(texts), epochs, autoCompress, 0)
+	return s.StartTrainSource(radixnet.SliceSource(texts), epochs, autoCompress, 0, false, 0)
 }
 
 // StartTrainSource starts a train job over a streaming source (uploads of any
 // size stream through in chunks of chunkSize texts; 0 = the default).
-func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int) (map[string]any, error) {
+func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int, parallelParts bool, inflight int) (map[string]any, error) {
 	if epochs < 0 {
 		return nil, badRequest("epochs must be >= 0, got %d", epochs)
 	}
 	return s.startJob("train", func(job *Job, progress func(map[string]any), stop func() bool) error {
-		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize}
+		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize, ParallelParts: parallelParts, Inflight: inflight}
 		_, err := s.model.TrainSource(src, opts)
 		return err
 	})
@@ -293,33 +367,43 @@ func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoComp
 
 // StartTwoNRL starts a 2nrl job: penalise bad, then count + reward good.
 func (s *Service) StartTwoNRL(bad, good []string, negEpochs, posEpochs int, strength float64) (map[string]any, error) {
+	return s.StartTwoNRLRated(bad, nil, good, nil, negEpochs, posEpochs, strength)
+}
+
+// StartTwoNRLRated is StartTwoNRL with a rating per text: badWeights scale the
+// penalties and goodWeights the rewards, so each text is learned in proportion
+// to how bad or how good it was rated (nil: every text alike).
+func (s *Service) StartTwoNRLRated(
+	bad []string, badWeights []float64, good []string, goodWeights []float64,
+	negEpochs, posEpochs int, strength float64,
+) (map[string]any, error) {
 	return s.startJob("2nrl", func(job *Job, progress func(map[string]any), stop func() bool) error {
-		return s.twoNRL(bad, good, negEpochs, posEpochs, strength, progress, stop)
+		return s.twoNRL(bad, badWeights, good, goodWeights, negEpochs, posEpochs, strength, progress, stop)
 	})
 }
 
-func (s *Service) phase(texts []string, epochs int, count bool, reward float64, phase string, progress func(map[string]any), stop func() bool) error {
+func (s *Service) phase(texts []string, weights []float64, epochs int, count bool, reward float64, phase string, progress func(map[string]any), stop func() bool) error {
 	opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: true, Phase: phase, Progress: progress, Stop: stop}
 	var err error
 	if count {
-		_, err = s.model.RewardWith(texts, opts, reward)
+		_, err = s.model.RewardWeighted(texts, weights, opts, reward)
 	} else {
-		_, err = s.model.PunishWith(texts, opts, reward)
+		_, err = s.model.PunishWeighted(texts, weights, opts, reward)
 	}
 	return err
 }
 
-func (s *Service) twoNRL(bad, good []string, negEpochs, posEpochs int, strength float64, progress func(map[string]any), stop func() bool) error {
-	if err := s.phase(bad, negEpochs, false, -math.Abs(strength), "negative", progress, stop); err != nil {
+func (s *Service) twoNRL(bad []string, badWeights []float64, good []string, goodWeights []float64, negEpochs, posEpochs int, strength float64, progress func(map[string]any), stop func() bool) error {
+	if err := s.phase(bad, badWeights, negEpochs, false, -math.Abs(strength), "negative", progress, stop); err != nil {
 		return err
 	}
 	if stop != nil && stop() {
 		return nil
 	}
-	if err := s.phase(good, posEpochs, true, math.Abs(strength), "positive", progress, stop); err != nil {
+	if err := s.phase(good, goodWeights, posEpochs, true, math.Abs(strength), "positive", progress, stop); err != nil {
 		return err
 	}
-	s.model.Meta["twonrl_runs"] = float64(s.model.MetaInt("twonrl_runs") + 1)
+	s.model.MetaAddInt("twonrl_runs", 1)
 	return nil
 }
 
@@ -338,6 +422,16 @@ func FeedbackAction(good, bad []string) string {
 
 // StartFeedback starts a feedback job from rated texts.
 func (s *Service) StartFeedback(good, bad []string, negEpochs, posEpochs int, strength float64) (map[string]any, string, error) {
+	return s.StartFeedbackRated(good, nil, bad, nil, negEpochs, posEpochs, strength)
+}
+
+// StartFeedbackRated is StartFeedback with a mark per text: goodWeights /
+// badWeights (0..1) turn the thumbs into ratings, and every text is learned in
+// proportion to its mark instead of every thumb counting alike.
+func (s *Service) StartFeedbackRated(
+	good []string, goodWeights []float64, bad []string, badWeights []float64,
+	negEpochs, posEpochs int, strength float64,
+) (map[string]any, string, error) {
 	action := FeedbackAction(good, bad)
 	if action == "" {
 		return nil, "", badRequest("give 'good' (thumbs up) and/or 'bad' (thumbs down) texts: lists, good_text / bad_text (one per line) or good_files / bad_files (upload names)")
@@ -345,11 +439,11 @@ func (s *Service) StartFeedback(good, bad []string, negEpochs, posEpochs int, st
 	job, err := s.startJob("feedback", func(job *Job, progress func(map[string]any), stop func() bool) error {
 		switch action {
 		case "2nrl":
-			return s.twoNRL(bad, good, negEpochs, posEpochs, strength, progress, stop)
+			return s.twoNRL(bad, badWeights, good, goodWeights, negEpochs, posEpochs, strength, progress, stop)
 		case "reward":
-			return s.phase(good, posEpochs, true, math.Abs(strength), "positive", progress, stop)
+			return s.phase(good, goodWeights, posEpochs, true, math.Abs(strength), "positive", progress, stop)
 		default:
-			return s.phase(bad, negEpochs, false, -math.Abs(strength), "negative", progress, stop)
+			return s.phase(bad, badWeights, negEpochs, false, -math.Abs(strength), "negative", progress, stop)
 		}
 	})
 	return job, action, err
@@ -417,11 +511,23 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["model_path"] = modelPath
 	stats["checkpoint_dir"] = ckptDir
 	stats["upload_dir"] = uploadDir
-	stats["ollama"] = nil
+	stats["ollama"] = map[string]any{"url": s.ollamaURL, "model": s.ollamaModel}
+	stats["chatgpt"] = map[string]any{
+		"url": s.chatgptURL, "model": s.chatgptModel, "configured": radixnet.ChatGPTConfigured(),
+	}
 	stats["engine"] = "go"
 	stats["workers"] = s.workers // 0 = no cap: one goroutine per text
 	stats["goroutines"] = runtime.NumGoroutine()
 	stats["counting"] = map[bool]string{true: "exact", false: "racy"}[s.exact]
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	stats["heap_bytes"] = ms.HeapAlloc
+	stats["heap_sys_bytes"] = ms.Sys
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < math.MaxInt64 {
+		stats["memory_limit_bytes"] = limit
+	} else {
+		stats["memory_limit_bytes"] = nil
+	}
 	return stats, nil
 }
 
@@ -517,7 +623,16 @@ func (s *Service) Save(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": abs, "bytes": st.Size()}, nil
+	out := map[string]any{"path": abs, "bytes": st.Size(), "negative": nil}
+	// the negative network is a second file beside the model: saving the work means saving both
+	if path == "" && s.negative != nil && s.negative.G.Neg != nil && s.negative.G.Neg.TotalBlame > 0 {
+		if side := s.negativePath(); side != "" {
+			if saved, err := s.NegativeSave(side); err == nil {
+				out["negative"] = saved
+			}
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) replaceModel(m *radixnet.Model) (map[string]any, error) {
@@ -658,6 +773,98 @@ func (s *Service) History() (map[string]any, error) {
 }
 
 // Graph is GET /api/graph: the top-limit nodes by visit count plus START / END and the edges among them.
+// Paths is the judged paths: what each step did in the context it was taken from.
+func (s *Service) Paths(limit int) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		rows := []map[string]any{}
+		for _, row := range m.Paths(limit, -1) {
+			parent := g.ParentOfEdge(row.Edge)
+			child := -1
+			if parent >= 0 {
+				for _, t := range g.Children(parent) {
+					if t.E == row.Edge {
+						child = t.P
+					}
+				}
+			}
+			rows = append(rows, map[string]any{
+				"prev": row.Prev, "edge": row.Edge, "seen": row.Seen, "correct": row.Correct,
+				"incorrect": row.Incorrect, "correct_ratio": row.CorrectRatio, "seen_ratio": row.SeenRatio,
+				"term": row.Term, "after": g.Label(row.Prev), "parent": parent,
+				"parent_label": g.Label(parent), "child": child, "child_label": g.Label(child),
+			})
+		}
+		totals := g.PathTotals()
+		return map[string]any{
+			"totals": map[string]any{
+				"contexts": totals.Contexts, "judged": totals.Judged, "seen": totals.Seen,
+				"correct": totals.Correct, "incorrect": totals.Incorrect,
+			},
+			"paths": rows, "limit": limit, "path_scale": g.WeightConfig().PathScale,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// NodeRatios is each node against the nodes around it: its traffic and its
+// reward, shared out over the previous and the next nodes.
+func (s *Service) NodeRatios(limit int, node string) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		wanted := -1
+		if node != "" {
+			for i := 0; i < g.NumNodeIDs(); i++ {
+				if g.Label(i) == node {
+					wanted = i
+					break
+				}
+			}
+			if wanted < 0 {
+				found, _, ok := g.Lookup(node)
+				if !ok {
+					return nil, notFound("no node labelled %q: give a node label, or one of its trigrams", node)
+				}
+				wanted = found
+			}
+		}
+		totals := g.PathTotals()
+		rows := g.NodeRatioRows(limit, wanted)
+		if rows == nil {
+			rows = []radixnet.NodeStats{}
+		}
+		return map[string]any{
+			"nodes": rows, "limit": limit, "node": nodeQuery(node), "total_nodes": g.NumNodes(),
+			"totals": map[string]any{
+				"contexts": totals.Contexts, "judged": totals.Judged, "seen": totals.Seen,
+				"correct": totals.Correct, "incorrect": totals.Incorrect,
+			},
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// nodeQuery echoes the ?node= that was asked for - null when none was, as the
+// Python server reports it.
+func nodeQuery(node string) any {
+	if node == "" {
+		return nil
+	}
+	return node
+}
+
 func (s *Service) Graph(limit int) (map[string]any, error) {
 	if limit < 0 {
 		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
@@ -681,8 +888,9 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	if limit < len(real) {
 		sorted := append([]int(nil), real...)
 		sort.Slice(sorted, func(a, b int) bool {
-			if g.Count[sorted[a]] != g.Count[sorted[b]] {
-				return g.Count[sorted[a]] > g.Count[sorted[b]]
+			ca, cb := g.NodeCount(sorted[a]), g.NodeCount(sorted[b])
+			if ca != cb {
+				return cb.Less(ca)
 			}
 			return sorted[a] < sorted[b]
 		})
@@ -696,7 +904,8 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	}
 	nodes := make([]map[string]any, 0, len(ids))
 	for _, i := range ids {
-		nodes = append(nodes, map[string]any{"id": i, "label": g.Labels[i], "count": g.Count[i], "activation": 1.0, "z": 0.0, "a": 0.0, "b": 1.0 / 3.0, "h": 0.0, "k": 1.0})
+		nodes = append(nodes, map[string]any{"id": i, "label": g.Labels[i], "count": g.Count[i],
+			"count_resets": g.CountResets[i], "activation": 1.0, "z": 0.0, "a": 0.0, "b": 1.0 / 3.0, "h": 0.0, "k": 1.0})
 	}
 	edges := []map[string]any{}
 	for _, p := range ids {
@@ -711,7 +920,8 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 			sh := shares[cc.Edge]
 			edges = append(edges, map[string]any{
 				"source": p, "target": cc.Child, "weight": g.EdgeW[cc.Edge], "count": g.EdgeCount[cc.Edge],
-				"prob": math.Exp(-cc.Cost), "cost": cc.Cost, "reward": g.EdgeReward[cc.Edge],
+				"count_resets": g.EdgeCountResets[cc.Edge],
+				"prob":         math.Exp(-cc.Cost), "cost": cc.Cost, "reward": g.EdgeReward[cc.Edge],
 				"share": sh.All, "recent_share": sh.Recent, "recent_count": g.WindowEdgeCount[cc.Edge],
 			})
 		}
@@ -724,26 +934,115 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	})
 	return map[string]any{
 		"nodes": nodes, "edges": edges, "limit": limit, "total_nodes": g.NumNodes(), "total_edges": g.NumEdges(),
-		"total_traversals": g.TotalTraversals, "window_traversals": g.WindowTraversals(), "window": g.WindowSize,
+		"total_traversals": g.TotalTraversals.Value, "total_traversals_resets": g.TotalTraversals.Resets,
+		"window_traversals": g.WindowTraversals(), "window": g.WindowSize,
 	}
 }
 
 // Predict / Generate / Score / Converse run under the read lock.
+//
+// Every answer they hand out goes through the guard: the positive model
+// writes and the negative network, built from nothing but the tutor's
+// failures, vetoes what it recognises (radixnet.Filter).  Each returns the
+// guard's report alongside the answer - nil when nothing guarded it.
 
-func (s *Service) Predict(prefix string, o radixnet.PredictOptions) (*radixnet.Prediction, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Predict(prefix, o) })
-	if err != nil {
-		return nil, badRequest("%v", err)
+// guard is the pair on the way out, or nil when there is nothing to guard
+// with: no negative network in memory and none saved beside the model, or one
+// that has never been taught a failure and would veto nothing.  An empty
+// negative network is never created here - an answer is not the place to
+// bring one into being.  Call it with the model lock held; the output paths
+// do.
+func (s *Service) guard() *radixnet.Filter {
+	negative := s.negative
+	if negative == nil {
+		path := s.negativePath()
+		if path == "" {
+			return nil
+		}
+		if _, err := os.Stat(path); err != nil {
+			return nil
+		}
+		var err error
+		if negative, err = s.negativeModel(); err != nil { // loads it from that file and parks it
+			return nil
+		}
 	}
-	return out.(*radixnet.Prediction), nil
+	pair, err := radixnet.NewFilter(s.model, negative, s.guardConfig)
+	if err != nil || !pair.Ready() {
+		return nil
+	}
+	return pair
 }
 
-func (s *Service) Generate(o radixnet.GenerateOptions) ([]*radixnet.PathResult, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Generate(o) })
-	if err != nil {
-		return nil, badRequest("%v", err)
+// guardReport is what the guard did, for the caller to show: the vetoes, with
+// the reason and the fragment behind each.
+func guardReport(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
 	}
-	return out.([]*radixnet.PathResult), nil
+	out := map[string]any{
+		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool) (*radixnet.Prediction, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		found, err := m.Predict(prefix, o)
+		if err != nil || !guard {
+			return found, err
+		}
+		if pair := s.guard(); pair != nil {
+			ranked, verdicts := pair.Rank(prefix, found) // the survivors, best first
+			kept := 0
+			for _, verdict := range verdicts {
+				if verdict.Decision != "reject" {
+					kept++
+				}
+			}
+			report = guardReport(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
+			return ranked, nil
+		}
+		return found, nil
+	})
+	if err != nil {
+		return nil, nil, badRequest("%v", err)
+	}
+	return out.(*radixnet.Prediction), report, nil
+}
+
+func (s *Service) Generate(o radixnet.GenerateOptions, guard bool) ([]*radixnet.PathResult, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		pair := (*radixnet.Filter)(nil)
+		if guard {
+			pair = s.guard()
+		}
+		if pair == nil {
+			return m.Generate(o)
+		}
+		count := o.Count
+		outcome, err := pair.Generate(count, o)
+		if err != nil {
+			return nil, err
+		}
+		report = guardReport(pair, outcome.Verdicts, map[string]any{
+			"candidates": outcome.Candidates, "kept": len(outcome.Kept), "asked": outcome.Asked, "rate": outcome.Rate,
+		})
+		return outcome.Results, nil
+	})
+	if err != nil {
+		return nil, nil, badRequest("%v", err)
+	}
+	return out.([]*radixnet.PathResult), report, nil
 }
 
 func (s *Service) Score(text string) radixnet.Score {
@@ -751,12 +1050,29 @@ func (s *Service) Score(text string) radixnet.Score {
 	return out.(radixnet.Score)
 }
 
-func (s *Service) Converse(opening string, o radixnet.ConverseOptions) ([]*radixnet.Turn, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Converse(opening, o) })
+func (s *Service) Converse(opening string, o radixnet.ConverseOptions, guard bool) ([]*radixnet.Turn, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		pair := (*radixnet.Filter)(nil)
+		if guard {
+			pair = s.guard()
+		}
+		if pair == nil {
+			return m.Converse(opening, o)
+		}
+		outcome, err := pair.Converse(opening, o)
+		if err != nil {
+			return nil, err
+		}
+		// "vetoed" counts the distinct texts refused, "refusals" how often one was (a turn may be
+		// offered the same candidate again after its context was shortened)
+		report = guardReport(pair, outcome.Verdicts, map[string]any{"refusals": outcome.Vetoed})
+		return outcome.Turns, nil
+	})
 	if err != nil {
-		return nil, badRequest("%v", err)
+		return nil, nil, badRequest("%v", err)
 	}
-	return out.([]*radixnet.Turn), nil
+	return out.([]*radixnet.Turn), report, nil
 }
 
 // UploadTexts reads training texts from uploads (400 when uploads are disabled).
