@@ -4,7 +4,7 @@
 
 **A training procedure derived from autodidactic practice**
 
-R. Curtis — Curtis Tech Solutions
+Mason Curtis — Curtis Tech Solutions
 Working paper · September 2026
 
 ---
