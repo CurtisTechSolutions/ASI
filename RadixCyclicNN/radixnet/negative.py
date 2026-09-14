@@ -66,6 +66,7 @@ from collections.abc import Iterable, Sequence
 from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
 from .beam import Prediction
+from .counter import CyclicCounter, carry_series, total
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import END, START, RadixCyclicGraph
 from .model import (
@@ -75,6 +76,10 @@ from .model import (
     TrainConfig,
     _resolve_config,
     _utc_now,
+    carry_meta,
+    meta_add,
+    meta_add_keyed,
+    meta_stats,
 )
 
 __all__ = [
@@ -132,16 +137,36 @@ class NegativeGraph(RadixCyclicGraph):
         self.clear_scale = float(clear_scale)
         self.edge_blame: list[float] = []
         self.edge_fails: list[int] = []
+        self.edge_fails_resets: dict[int, int] = {}
         self.edge_clear: list[float] = []
         self.edge_reasons: list[dict[int, float]] = []
         self.reasons: list[str] = []
         self.reason_ids: dict[str, int] = {}
         self.reason_blame: list[float] = []
         self.reason_fails: list[int] = []
+        self.reason_fails_resets: dict[int, int] = {}
         self.total_blame = 0.0
-        self.total_fails = 0
+        self.total_fails = CyclicCounter()
         self.total_clear = 0.0
         super().__init__(seed)
+
+    # -- counters ------------------------------------------------------------
+
+    def carry_counters(self, force: bool = False) -> int:
+        """Also wrap the fail counts (:mod:`radixnet.counter`); ``total_fails`` bounds every one of them."""
+        wrapped = super().carry_counters(force)
+        if force or self.total_fails.resets:
+            wrapped += carry_series(self.edge_fails, self.edge_fails_resets)
+            wrapped += carry_series(self.reason_fails, self.reason_fails_resets)
+        return wrapped
+
+    def edge_failures(self, e: int) -> int:
+        """How often edge ``e`` was blamed, exactly, across every reset of its counter."""
+        return total(self.edge_fails[e], self.edge_fails_resets.get(e, 0))
+
+    def reason_failures(self, rid: int) -> int:
+        """How often reason ``rid`` was blamed, exactly, across every reset of its counter."""
+        return total(self.reason_fails[rid], self.reason_fails_resets.get(rid, 0))
 
     # -- reasons -------------------------------------------------------------
 
@@ -175,6 +200,7 @@ class NegativeGraph(RadixCyclicGraph):
                 "reason": label,
                 "blame": self.reason_blame[rid],
                 "fails": self.reason_fails[rid],
+                "fails_resets": self.reason_fails_resets.get(rid, 0),
                 "edges": edges[rid],
                 "share": self.reason_blame[rid] / total,
             }
@@ -350,12 +376,14 @@ class NegativeGraph(RadixCyclicGraph):
 
     # -- construction overrides ----------------------------------------------
 
-    def _new_node(self, label, z=None, a=None, b=DEFAULT_B, h=DEFAULT_H, k=0.0, count=0) -> int:
+    def _new_node(self, label, z=None, a=None, b=DEFAULT_B, h=DEFAULT_H, k=0.0, count=0, count_resets=0) -> int:
         # a = 0 and k = 1 make f(z) = 1 whatever z is: scores reduce to the edge weight
-        return super()._new_node(label, z=0.0 if z is None else z, a=0.0, b=b, h=h, k=1.0, count=count)
+        return super()._new_node(
+            label, z=0.0 if z is None else z, a=0.0, b=b, h=h, k=1.0, count=count, count_resets=count_resets
+        )
 
-    def _new_edge(self, p: int, c: int, count: int = 0) -> int:
-        e = super()._new_edge(p, c, count)
+    def _new_edge(self, p: int, c: int, count: int = 0, count_resets: int = 0) -> int:
+        e = super()._new_edge(p, c, count, count_resets)
         self.edge_blame.append(0.0)
         self.edge_fails.append(0)
         self.edge_clear.append(0.0)
@@ -397,6 +425,7 @@ class NegativeGraph(RadixCyclicGraph):
         d = super().to_dict()
         blame: list[float] = []
         fails: list[int] = []
+        fails_resets: list[int] = []
         clear: list[float] = []
         reasons: list[list[list[float]]] = []
         for old, ok in enumerate(self.alive):
@@ -405,19 +434,25 @@ class NegativeGraph(RadixCyclicGraph):
             for _c, e in self.children[old].items():
                 blame.append(self.edge_blame[e])
                 fails.append(self.edge_fails[e])
+                fails_resets.append(self.edge_fails_resets.get(e, 0))
                 clear.append(self.edge_clear[e])
                 reasons.append([[rid, value] for rid, value in sorted(self.edge_reasons[e].items())])
         d["edges"].update(blame=blame, fails=fails, clear=clear, reasons=reasons)
+        if any(fails_resets):  # the reset counts ride along only once something has actually wrapped
+            d["edges"]["fails_resets"] = fails_resets
+        reason_resets = [self.reason_fails_resets.get(rid, 0) for rid in range(len(self.reasons))]
         d["weights"] = {
             **self.weight_config(),
             "kind": "negative",
             "total_blame": self.total_blame,
-            "total_fails": self.total_fails,
+            "total_fails": self.total_fails.value,
+            "total_fails_resets": self.total_fails.resets,
             "total_clear": self.total_clear,
             "reasons": {
                 "labels": list(self.reasons),
                 "blame": list(self.reason_blame),
                 "fails": list(self.reason_fails),
+                **({"fails_resets": reason_resets} if any(reason_resets) else {}),
             },
         }
         return d
@@ -430,13 +465,14 @@ class NegativeGraph(RadixCyclicGraph):
         g.blame_scale = float(weights.get("blame_scale", 0.0))
         g.clear_scale = float(weights.get("clear_scale", 1.0))
         g.total_blame = float(weights.get("total_blame", 0.0))
-        g.total_fails = int(weights.get("total_fails", 0))
+        g.total_fails = CyclicCounter.from_pair(weights.get("total_fails", 0), weights.get("total_fails_resets", 0))
         g.total_clear = float(weights.get("total_clear", 0.0))
         registry = weights.get("reasons") or {}
         g.reasons = [_clean_reason(label) for label in registry.get("labels", [])]
         g.reason_ids = {label: rid for rid, label in enumerate(g.reasons)}
         g.reason_blame = [float(v) for v in registry.get("blame", [])]
         g.reason_fails = [int(v) for v in registry.get("fails", [])]
+        g.reason_fails_resets = {i: int(v) for i, v in enumerate(registry.get("fails_resets") or []) if int(v)}
         while len(g.reason_blame) < len(g.reasons):
             g.reason_blame.append(0.0)
         while len(g.reason_fails) < len(g.reasons):
@@ -446,6 +482,10 @@ class NegativeGraph(RadixCyclicGraph):
         g.edge_blame = _float_array(edges.get("blame"), n, "blame")
         g.edge_clear = _float_array(edges.get("clear"), n, "clear")
         g.edge_fails = [int(v) for v in _float_array(edges.get("fails"), n, "fails")]
+        fails_resets = edges.get("fails_resets") or []
+        if fails_resets and len(fails_resets) != n:
+            raise ValueError("edge fails_resets array has an inconsistent length")
+        g.edge_fails_resets = {i: int(v) for i, v in enumerate(fails_resets) if int(v)}
         stored = edges.get("reasons")
         if stored is None:
             g.edge_reasons = [{} for _ in range(n)]
@@ -532,9 +572,9 @@ class NegativeNet(GraphModel):
     @staticmethod
     def _new_meta(seed: int) -> dict:
         meta = GraphModel._new_meta(seed)
-        meta.update(
-            failures_total=0, blame_total=0.0, cleared_total=0, judgements=0, rejected=0, sources={},
-        )
+        meta.update(blame_total=0.0, sources={}, sources_resets={})
+        for key in ("failures_total", "cleared_total", "judgements", "rejected"):
+            meta[key], meta[f"{key}_resets"] = 0, 0
         return meta
 
     # -- walking texts -------------------------------------------------------
@@ -596,10 +636,10 @@ class NegativeNet(GraphModel):
         grams = [self.encoder.encode(t) for t in texts]
         records: list[dict] = []
         if blame:
-            meta["trained_texts"] += len(texts)
-            meta["trained_chars"] += sum(len(t) for t in texts)
+            meta_add(meta, "trained_texts", len(texts))
+            meta_add(meta, "trained_chars", sum(len(t) for t in texts))
             if source:
-                meta["sources"][source] = meta["sources"].get(source, 0) + len(texts)
+                meta_add_keyed(meta, "sources", source, len(texts))
             for text in texts:
                 self._note(text, reason=reason, severity=amount, source=source, note=note)
         if blame:
@@ -621,15 +661,15 @@ class NegativeNet(GraphModel):
             flat = [t for transitions in per_text for t in transitions]
             matched = sum(1 for transitions in per_text if transitions)
             if blame:
-                meta["failures_total"] += matched
+                meta_add(meta, "failures_total", matched)
                 meta["blame_total"] += amount * touched
             else:
-                meta["cleared_total"] += matched
+                meta_add(meta, "cleared_total", matched)
             loss = self._mean_cost(flat)
             merges = (graph.compress() if (blame and cfg.auto_compress) else 0) + pending_merges
             pending_merges = 0
-            meta["epochs_total"] += 1
-            epoch = meta["epochs_total"]
+            graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
+            epoch = meta_add(meta, "epochs_total", 1)
             record = {
                 "epoch": epoch,
                 "loss": loss,
@@ -828,10 +868,10 @@ class NegativeNet(GraphModel):
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
             positive = self.clear(good, weight=base, epochs=pos_epochs, progress=progress, stop_event=stop_event, **overrides)
-        self.meta["twonrl_runs"] += 1
+        runs = meta_add(self.meta, "twonrl_runs", 1)
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)
-            checkpoint_manager.save(self, self.meta["twonrl_runs"], "2nrl", last)
+            checkpoint_manager.save(self, runs, "2nrl", last)
         return {"negative": negative, "positive": positive, "inverted": self.graph.inverted}
 
     def invert(self) -> None:
@@ -913,16 +953,16 @@ class NegativeNet(GraphModel):
         blamed = [e for e in self._steps_over(grams, len(wrong), wrong_spans) if e not in cleared]
         if blamed and amount:
             result["blamed"] = self.graph.record_failure(blamed, amount, tag)
-            self.meta["failures_total"] += 1
+            meta_add(self.meta, "failures_total", 1)
             self.meta["blame_total"] += amount * result["blamed"]
-            self.meta["trained_texts"] += 1
-            self.meta["trained_chars"] += len(wrong)
+            meta_add(self.meta, "trained_texts", 1)
+            meta_add(self.meta, "trained_chars", len(wrong))
             if source:
                 self.meta["sources"][source] = self.meta["sources"].get(source, 0) + 1
             self._note(wrong, reason=tag, severity=amount, source=source, note=note)
         if cleared and clear:
             result["cleared"] = self.graph.record_clear(cleared, clear)
-            self.meta["cleared_total"] += 1
+            meta_add(self.meta, "cleared_total", 1)
         return result
 
     def forget(self, reason: str | None = None, factor: float = 0.0) -> dict:
@@ -1097,9 +1137,9 @@ class NegativeNet(GraphModel):
             verdict = "suspect"
         else:
             verdict = "pass"
-        self.meta["judgements"] += 1
+        meta_add(self.meta, "judgements", 1)
         if verdict == "reject":
-            self.meta["rejected"] += 1
+            meta_add(self.meta, "rejected", 1)
         return {
             "text": text,
             "chars": chars,
@@ -1160,18 +1200,17 @@ class NegativeNet(GraphModel):
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,
-            "epochs_total": meta["epochs_total"],
-            "trained_chars": meta["trained_chars"],
-            "trained_texts": meta["trained_texts"],
-            "twonrl_runs": meta["twonrl_runs"],
+            **meta_stats(
+                meta, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs",
+                "failures_total", "cleared_total", "judgements", "rejected",
+            ),
             "history_len": len(self.history),
             "last_loss": self.history[-1]["loss"] if self.history else None,
-            "failures_total": meta["failures_total"],
             "blame_total": meta["blame_total"],
-            "cleared_total": meta["cleared_total"],
-            "judgements": meta["judgements"],
-            "rejected": meta["rejected"],
             "sources": dict(meta["sources"]),
+            "sources_resets": dict(meta.get("sources_resets") or {}),
+            "edge_fails_total": g.total_fails.value,
+            "edge_fails_total_resets": g.total_fails.resets,
             "edge_blame_total": g.total_blame,
             "edge_clear_total": g.total_clear,
             "reason_count": len(g.reasons),
@@ -1217,7 +1256,8 @@ class NegativeNet(GraphModel):
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
         meta["sources"] = dict(meta.get("sources") or {})
-        model.meta = meta
+        meta["sources_resets"] = dict(meta.get("sources_resets") or {})
+        model.meta = carry_meta(meta)
         return model
 
     def __repr__(self) -> str:

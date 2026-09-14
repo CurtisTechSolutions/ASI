@@ -46,10 +46,12 @@ and an optional GPU backend (torch) are built in.
 | The negative network feeds itself | `negative auto` (the Negative tab's *Automatic* card): the model writes texts of its own, a local **Ollama** model (or ChatGPT) marks each one out of 10 and says what is wrong with it, and everything below the pass mark blames the negative network - round after round, with nobody typing a failure in by hand. The positive model is only read from, so the loop can run beside whatever else is teaching it. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
+| Both networks on every answer | The pair is not something you have to ask for: `generate`, `predict` and `converse` run it by default, so nothing the tutor has already corrected goes out again. The model over-samples and the negative network vetoes; a vetoed continuation is dropped from `top`, a vetoed reply is left unsaid and the voice looks for another one. Every answer carries what was stopped and why, and `--no-guard` / `{"guard": false}` hands out what the positive model wrote. With no negative network, or one that has never been taught a failure, nothing is filtered and nothing is paid. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
 | CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `frontend/` (Vite + React, prebuilt `dist` is served by the API). |
 | Checkpointing, saving, loading | JSON model files (gzip with `.gz`), `CheckpointManager` with rotation, `latest` pointer, restore and resume. |
 | GPU acceleration, performance | `--backend auto` uses torch on CUDA / Apple MPS when installed, else the optimised pure-Python backend (flat CSR arrays, cached costs, ~150k transitions/s on a 4-core CPU). Both backends compute identical numbers. |
+| Counters that never overflow | Every growing integer (traversals, visit counts, epochs, trained characters, version stamps) is a **cyclic counter**: at `10^15` it goes back to 0 and the reset is counted, so the exact total is `resets × 10^15 + value` and nothing ever outgrows a 64-bit integer or a JSON number. The weights are computed from the exact totals, so a wrapped model behaves exactly as one that counted forever. |
 
 `DESIGN.md` is the full specification (math, invariants, module interfaces).
 
@@ -183,10 +185,11 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 |---|---|
 | `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
-| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N` |
-| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first |
+| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N`; the guard flags below |
+| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; the guard flags below |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
-| `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up |
+| `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up; the guard flags below |
+| the guard (on `predict`, `generate`, `converse`) | the negative network filters what the model writes, by default: `--no-guard` (print it unfiltered), `--negative PATH` (default `model.negative.json` beside `--model`), `--threshold RISK`, `--min-coverage SHARE`, `--over-sample N`. It stands aside when there is no negative model file, or when the one there has never been taught a failure |
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
@@ -196,21 +199,17 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
+| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, the tool options below |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]` |
 | `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `tutor FILE...` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `tutor FILE...`: the recall tutor - ask it to say back what it was taught and mark what comes back, `--length 400` (payload characters asked for, and what the marking compares against), `--lead`, `--attempts`, `--mode beam\|sample`, `--threshold 6`, `--listen-back` (transcribe what it said and compare the words), `--train` (teach it first), `--blame` / `--negative PATH`. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--batches 1` (auto run: batches of `--rounds` rounds, each planned from the one before; 0 = until Ctrl-C), `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--brief TEXT` (what this batch is being taught to: the prompt the last report card led to), `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0.25`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image tutor FILE...` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `tutor FILE...`: the recall tutor - ask it to draw back what it was shown and mark what comes back, `--size`, `--encoder`, `--lead 16` (payload characters the opening gives away, so it knows which picture), `--length`, `--attempts`, `--mode`, `--threshold 6`, `--train`, `--blame` / `--negative PATH`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
-| `codegen --problems FILE` | `--blame` / `--negative PATH` (the sandbox and the judge teach the negative network), `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, the tool options below |
-| `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
-| `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
-| `tools list \| describe \| call \| browser` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`, `browser` (what `--browser` would drive); tool options below |
+| `tools list \| describe \| call \| browser` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`, `browser` (what `--browser` would drive); tool options below. The Go CLI has the same three actions and the same flags |
 | `agent --tasks FILE` | `--phase model\|teacher\|both`, `--rounds`, `--twonrl-per task\|round`, `--agent-model`, `--judge-model`, `--url`, `--timeout`, `--criteria 4`, `--lenient`, `--no-judge`, `--mediation repair\|always\|never`, `--no-teach`, `--max-steps 6`, `--model-attempts 2`, `--teacher-attempts 1`, `--sample-first`, `--temperature`, `--max-length 200`, `--observation-chars 600`, `--read-reward`, `--no-replay`, `--blatant-mode fail_invert\|activation\|state\|none`, `--blatant-margin 0.5`, `--blatant-boost 4`, `--blame` (teach the negative network from every failure), `--no-avoid`, `--negative PATH`, 2NRL options, checkpoint options, tool options, `--out`, `--report FILE` |
-| `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option |
+| `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option. `agent` and `explore` are in the Go CLI too (`--strength` in place of the learning rates) |
 | `mcp` | serve the tools and the network over the Model Context Protocol (stdio): `--no-model`, `--no-solve`, `--blame`, `--negative PATH`, `--agent-model`, `--url`, tool options |
 | tool options (`tools`, `agent`, `explore`, `mcp`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted), `--web-timeout 20`, `--max-bytes 2000000`, `--browser` (draw pages in a real headless Chrome), `--no-headless`, `--page-timeout 30`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
 
@@ -258,9 +257,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"chatgpt"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (400 when `tutor_provider` is `chatgpt` and the server has no key, 502 when the teacher fails) |
 | `POST /api/tutor/plan` | the lessons a report card calls for: `{"report": {report card}` (default: the card at the end of the last run), `"count": 3, "topic", "level", "words", "threshold", "exercises", "drills", "tutor_provider", "tutor_model", "url"}` -> `{"plan": {"summary", "prompt"` (the brief: start the next run with it as `"brief"`)`, "upgrade": {"step": "hold"\|"stretch"\|"advance", "level", "words", "threshold", "drills", "note"}, "level", "topic", "source": "ollama"\|"chatgpt"\|"report card", "weak": [{"error","count","share","focus"}], "targets", "lessons": [{"focus","targets","topic","why","exercises","drills","prefixes"}]}, "source", "provider", "model", "report"}` (400 without a card, 502 when the teacher fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
-| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
-| `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
-| `POST /api/converse` | `{"opening","turns": 6,"mode": "beam"\|"sample","context": 12,"max_length": 60,"k": 5,"beam","temperature","step_penalty","seed","speakers": ["A","B"],"history": [utterances so far],"partner": kind in memory,"avoid_repeats": true}` -> `{"kind","partner","speakers","count","turns": [{"index","speaker","text","context","reply","cost","probability","reached_end","fresh","given","repeat","candidates","skipped","labels","node_ids","step_costs"}]}`; `history` continues a conversation (only the new turns come back) |
+| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature","guard": true}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end","guard"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`). The guard keeps the survivors in `top` and the best of them is the continuation; when it vetoes every one of them the continuation is empty and `full_text` is the prefix |
+| `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed","guard": true}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}],"guard"}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included. With the guard on, the model is asked for `count * over_sample` and the survivors come back (fewer than `count` when it vetoed too much) |
+| `POST /api/converse` | `{"opening","turns": 6,"mode": "beam"\|"sample","context": 12,"max_length": 60,"k": 5,"beam","temperature","step_penalty","seed","speakers": ["A","B"],"history": [utterances so far],"partner": kind in memory,"avoid_repeats": true,"guard": true}` -> `{"kind","partner","speakers","count","guard","turns": [{"index","speaker","text","context","reply","cost","probability","reached_end","fresh","given","repeat","candidates","skipped","vetoed","labels","node_ids","step_costs"}]}`; `history` continues a conversation (only the new turns come back) |
+| the `guard` of those three | `null` when nothing filtered the answer (no negative network, or one that has never been taught a failure), else `{"on": true,"vetoed","rejected": [verdicts],"verdicts","negative" (its stats),"config"}` plus `candidates` / `kept` / `asked` / `rate` / `refusals`. Send `"guard": false` to get what the positive model wrote |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr", "bad_weights" \| "bad_ratings", "good_weights" \| "good_ratings"}` (or `bad_files` / `good_files` upload names) -> job; the weights (0..1 shares) or ratings (marks out of 10) scale each phase per text |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "good_ratings": [10, 5], "bad_ratings": [...] (or "good_weights" / "bad_weights" as 0..1 shares), "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad", "good_weights", "bad_weights"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone. A rating is more than a like: each text is learned in proportion to its mark (10 = the full rate, 0 skips it) |
@@ -283,7 +283,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/agent/history` | criteria / step / attempt / task records of all agent and explore runs |
 | `POST /api/agent/criteria` | `{"tasks"}` -> the acceptance criteria the LLM writes, nothing attempted |
 | `POST /api/agent/solve` | `{"task", "source": "model"\|"teacher"}` -> the transcript, the verdict and how badly it failed; no training |
-| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
+| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`). Every count comes with its `count_resets` / `total_traversals_resets`: counters are cyclic, so the exact number of events is `resets × 10^15 + count` |
 | `GET /api/history` | training history |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
 
@@ -897,7 +897,9 @@ so a text seen a thousand times last year and one seen ten times today can
 both win, and raising one scale trusts history or recency more.  The Train tab (count model) shows the scales and the window with an
 "Apply" button, `radixnet weights` does the same from the shell, and the
 status bar shows the traversal totals; the Graph tab's edge tooltips show
-each edge's all-time and recent share.
+each edge's all-time and recent share.  Every one of those counts is a cyclic
+counter (below): it is set back to 0 at `10^15` and the reset is counted, and
+the ratios above are formed from the exact totals.
 
 The server keeps the model of each kind in memory: switching kinds parks the
 active model (unsaved work included) and brings the other one back, loading
@@ -1291,10 +1293,104 @@ also comes back from `POST /api/negative/filter` as a `warning` - what the
 negative network expects to go wrong from that prefix - whether or not
 anything was actually vetoed.
 
+### The guard: both networks on every answer
+
+The pair above is what `negative filter` runs when you ask for it.  It is also
+what `generate`, `predict` and `converse` run *without* being asked: the same
+two networks, in tandem, on every answer the model hands out.
+
+```bash
+python -m radixnet negative blame --text "a bird flew over the mat" --reason "mixed-up animals"
+python -m radixnet generate --count 3 --mode sample --seed 1 --max-length 28
+```
+
+```
+guard: model.negative.json (2.0000 blame over 1 reasons)
+#    cost    prob  end  text
+-  ------  ------  ---  ------------------------------
+1  2.4456  0.0867  yes  "the hill"
+2  5.0796  0.0062  no   "the dog sat sat sat sat sat "
+3  5.0244  0.0066  yes  "the dog sat on the mat"
+
+guard: 8 of 9 candidates passed the negative network
+rule     risk    peak   ratio  reason            vetoed
+-----  ------  ------  ------  ----------------  --------------------------
+blame  1.0000  1.0000  0.0917  mixed-up animals  "a bird flew over the mat"
+```
+
+The model was asked for nine texts rather than three, the sentence it had been
+taught to hate never reached the answer, and the veto says which fragment it
+was and who blamed it.  The same happens to a continuation (`predict` keeps
+the survivors in `top`, and comes back with nothing at all when every one of
+them is vetoed) and to a reply (`converse` leaves it unsaid and the voice
+looks for another one; each turn counts its own `vetoed`).
+
+Nothing is filtered silently and nothing is filtered for free:
+
+* with **no negative model file** beside the model, or one that has **never
+  been taught a failure**, the guard stands aside - the answer is exactly what
+  it was before, and `guard` is `null`.  An empty negative network is never
+  created just to guard an answer;
+* `--no-guard` (CLI), `{"guard": false}` (API) or the *Filter with the negative
+  network* checkbox (frontend) hands out what the positive model wrote;
+* `--threshold`, `--min-coverage` and `--over-sample` tune it per command, and
+  the Negative tab's settings move it for the server.
+
+The loops that *teach* the negative network are deliberately outside the
+guard: the critic (`negative auto`), the tutor and evolve all sample the
+positive model directly, because a reviewer that only ever saw what already
+passed the filter would have nothing left to teach.
+
 The negative model is an ordinary model file (`model.negative.json` beside the
 model, `--negative PATH` to move it) and an ordinary model kind, so
 `--kind negative train` blames, `info`, `checkpoints`, `save` / `load` and the
 model selector at the top of the frontend all work on it as usual.
+
+## Counters that never overflow
+
+Every number the model only ever counts up - traversals, node and edge visit
+counts, the negative network's failure counts, epochs, trained characters and
+texts, 2NRL runs, feedback passes, judgements, the internal version stamps -
+would eventually run out of the integer holding it:
+64 bits in the Go port, and long before that the 53 bits of mantissa in the
+JSON number that carries it through a model file, the API and the browser. So
+none of them is an unbounded integer. Each is a two-digit **odometer**:
+
+```
+total = resets × 1_000_000_000_000_000 + value        (0 ≤ value < 1_000_000_000_000_000)
+```
+
+The count goes up as before; the moment it reaches the limit it is **set back
+to 0** and `resets` - how often that has happened - goes up by one. Nothing is
+lost: the exact number of events is still there, split over two numbers that
+each stay small. Cycles are a feature here too.
+
+The limit is `10^15` because it is exactly representable as a double (so a
+counter survives a model file, an API response and a JavaScript number
+unchanged), and because it leaves four orders of magnitude of head room under a
+64-bit integer - enough that a whole epoch of counting can land on a counter
+before the next wrap. `resets` wraps at the same limit, so the odometer itself
+comes full circle after `10^30` events.
+
+What this changes in practice:
+
+* **Nothing in the numbers.** Weights, shares, probabilities, losses,
+  predictions and rankings are computed from the exact totals, so a model that
+  has wrapped behaves exactly as if its counters had grown forever.
+* **Counting stays as fast as it was.** Wrapping never happens in a counting
+  loop: the loops (in Go, from one goroutine per text) add to a plain integer,
+  and a sweep at the end of each epoch - skipped after a single comparison
+  until a counter can actually have reached the limit - moves whatever crossed
+  it into the resets.
+* **Model files carry both numbers** (`format_version` 2). Files written by
+  earlier versions load unchanged, with their counts wrapped on the way in.
+  Python and Go read and write the same fields, so a wrapped model still moves
+  between the two implementations unchanged.
+* **The UI shows both**: the status bar reads `traversals 12,345 (+2 resets)`
+  once a counter has gone round, and the Graph tab's node and edge tooltips and
+  the Negative tab's failure counts do the same. `total_traversals_resets`,
+  `epochs_total_resets`, `count_resets`, `fails_resets` and friends are in
+  `/api/status` and `/api/graph` next to the values.
 
 ## Checkpoints, saving, loading
 
@@ -1350,14 +1446,30 @@ go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 
 go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
 go/bin/radixnet-count --model model.count.json negative why --text "the the the the cat"
 go/bin/radixnet-count --model model.count.json negative filter --count 3   # the pair: write, then veto
+go/bin/radixnet-count --model model.count.json generate --count 3          # ... and the same pair on every answer
+go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
+go/bin/radixnet-count --model model.count.json codegen --problems problems.txt --phase teacher   # write programs, run them, learn
+go/bin/radixnet-count tools call --tool calculator --arg 'expression=2*(3+4)'   # the tools the network can call
+go/bin/radixnet-count --model model.count.json agent --tasks tasks.txt          # it browses, an LLM judges, 2NRL follows
+go/bin/radixnet-count --model model.count.json explore --steps 0               # ... and picks its own tasks, until Ctrl-C
+go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
+go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
+go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
+go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
+go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
+go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
 ```
 
 Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`,
-`negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget`),
-`invert`, `weights`, `info`, `converse`, `tutor`, `serve`, `version`; `--blame`
-(with `--negative PATH`) on `tutor` and `correct`; global options `--model`,
+`negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget` | `auto`),
+`invert`, `compress`, `weights`, `info`, `converse`, `tutor`, `evolve`,
+`ollama` (`models` | `corpus` | `review`), `chatgpt` (`models` | `ask`),
+`image` (`info` | `encode` | `tutor` | `decode`),
+`speech` (`info` | `teach` | `tutor` | `decode`),
+`checkpoints`, `bench`, `serve`, `version`; `--blame`
+(with `--negative PATH`) on `tutor`, `correct`, `evolve` and `ollama review`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
 none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
 limit, 80 % of the machine or container by default), `--memprofile PATH`.
@@ -1477,20 +1589,21 @@ open http://localhost:8001        # the React app, now backed by the Go model
 The frontend detects the engine (`GET /api/health` and `/api/status` carry
 `engine: "go"`, the worker count and the live goroutine count): it shows a
 **Go engine** badge in the header and `engine go · workers · goroutines` in the
-status bar, hides the tabs that need the Python server (Evolve, Ollama, Code,
-Images, Speech - the Tutor and Negative tabs stay, both servers run the lessons
-and the negative network), locks the model selector to the count model, and the
-Train tab gains a **Texts are** selector (`lines | paragraphs | pages`) so the
-pasted text and the uploaded files are cut into the units the goroutines fan out
-over. Train, Predict (with the Like button), Generate (with ratings), Converse,
-Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
+status bar, locks the model selector to the count model, and the Train tab
+gains a **Texts are** selector (`lines | paragraphs | pages`) so the pasted
+text and the uploaded files are cut into the units the goroutines fan out over.
+Every tab works: both servers now run the lessons, the negative network and its
+automatic loop, the evolve loop, the Ollama corpus and review, code generation,
+tool use and the image and speech encoders. The Go side's images use a
+thumbnail rather than the diffusion VAE, and its speech needs the words to come
+with the audio - which is what the page dictates anyway.
 
 | endpoint | Go server |
 |---|---|
 | `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers` (0 = one goroutine per text), `goroutines`, `counting` (`racy` \| `exact`), `heap_bytes`, `memory_limit_bytes` |
 | `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}` -> a job; uploads stream through in chunks whatever their size; learning rates are accepted and ignored |
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
-| `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
+| `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model, the guard included: all three run the pair by default and answer with the same `guard` report, and `{"guard": false}` turns it off |
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |
 | `GET /api/negative`, `POST /api/negative/blame`, `/clear`, `/judge`, `/filter`, `/forget`, `/settings`, `/reset`, `/save` | the negative network, same bodies and results as the Python server: the failures with the tutor's reasons, the verdicts with their blamed fragments, and the pair (the count model writes, the negative network vetoes by blame, peak or the likelihood ratio). Its file is `model.negative.json` beside the model path, interchangeable with Python's; `POST /api/save` writes it alongside the model |
 | `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models` | the English lessons, same bodies and records as the Python server: the teacher (`tutor_provider`: a local Ollama model or ChatGPT) sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` set the defaults, the key is the server's own `$OPENAI_API_KEY`). With `blame` every failed sentence also teaches the negative network what the teacher marked it down for |
@@ -1498,12 +1611,26 @@ Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
-| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/speech/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `POST /api/evolve/start`, `POST /api/evolve/stop`, `GET /api/evolve/history` | the self-upgrade loop, same bodies and records as the Python server: the model generates, a discriminator judges, 2NRL follows; `blatant_mode` picks how failures drive the update and `blame` lets the critic teach the negative network. The discriminator lives beside the model as `discriminator.json` |
+| `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review` | a corpus written to order (`train` starts a job on the lines) and the adversarial review, which with `blame` teaches the negative network what failed and why |
+| `POST /api/negative/auto`, `GET /api/negative/auto/history` | the Negative tab, automatic: a `critic` job of write → review → blame, same bodies and records as the Python server |
+| `GET /api/images`, `POST /api/images/encode`, `/decode`, `/tutor` | images as text, same bodies and results as the Python server. The **thumbnail encoder only**: the Stable Diffusion one needs torch and diffusers, so `encoder: "sd"` is refused here with a message naming the Python side |
+| `GET /api/speech`, `POST /api/speech/teach`, `/decode`, `/tutor` | the waveform as text and the recall tutor over it, same bodies and results as the Python server. **Transcription is Python-only** (faster-whisper / openai-whisper are Python packages), so send the words with the audio - which is what the browser's dictation does |
+| `POST /api/codegen/start`, `GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run` | code generation, same bodies and results as the Python server: the teacher writes, the sandbox runs, the judge decides and 2NRL follows. The sandbox is the same Python bootstrap both languages run, so a program sees the same interpreter, the same limits and the same isolation whichever server started it. The count model pushes by `strength` rather than `neg_lr` / `pos_lr` / `batch_size` |
+| `GET /api/tools`, `POST /api/tools/call` | the external tools the network can call by writing `<tool>name {...}</tool>`, and one direct call: the same names, parameters, descriptions and JSON schemas as the Python server, so a transcript written on one side is one the other reads. Browsing is the standard library either way, with the same guards (http / https only, no credentials, no private address unless allowed, a byte cap, redirects followed by hand) |
+| `POST /api/agent/start`, `/api/agent/explore`, `GET /api/agent/history`, `POST /api/agent/criteria`, `/api/agent/solve` | tool use: the LLM writes the acceptance criteria, mediates what the network could not write itself, judges the answer and demonstrates when it failed; 2NRL follows. Same bodies and records as the Python server; the count model pushes by `strength` rather than `neg_lr` / `pos_lr` |
+| `/api/schedule/preview` | 404 with a message naming the Python server - the only endpoint that is still Python-only |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same
 marks and leave the model in the same state, so the two implementations of the
-lessons cannot drift apart.
+lessons cannot drift apart.  `TestGoCodeGenParity` does the same for code
+generation: one fake teacher, both trainers, the same conversation prompt for
+prompt, the same solution and the same blame on disk.  `TestGoToolsParity`
+holds the two tool sets to the same signatures, the same JSON schemas and the
+same answers - including the calculator's, down to `29.0` rather than `29` -
+because the network learns the characters of a call and its result, so a
+transcript written on one side has to be one the other can read.
 
 `tests/test_go_parity.py` also starts the Go server and checks its answers
 against the key sets the Python API tests assert on, loads the model it saves
@@ -1572,7 +1699,7 @@ make go-test     # cd go && go test -race ./...
 
 ```
 RadixCyclicNN/
-  radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
+  radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
                       blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
                       tutor, recall, critic, codegen, tools, agent, browser, mcp, vision, speech, dialogue
   tests/              unittest suite
@@ -1593,6 +1720,7 @@ RadixCyclicNN/
 * **"invert the network"** (2NRL) flips the sign of every edge weight and every activation amplitude `a`, which negates every edge signal: the most likely continuation becomes the least likely. Two inversions are the identity.
 * **Prediction prefers short, confident completions** because the cost is summed per edge; `--step-penalty` and `--length` / `--to-end` steer that, and `--mode sample` gives diverse output for the GAN loop.
 * **Self-compression is lossy on purpose**: merging a unary chain keeps the parent's parameters; the chain was deterministic (probability 1, cost 0), so predictions are unchanged.
+* **Counters cycle rather than grow**: an integer that only counts up is a fault waiting to happen, so every one of them goes back to 0 at `10^15` and counts the reset. The pair is exact, both halves stay inside a double, and the wrapping is done by a sweep between epochs instead of a check on every increment - so the counting loops (and the Go port's goroutines) are untouched.
 
 ## License
 

@@ -53,15 +53,20 @@ type NegativeData struct {
 	Fails   []int64
 	Clear   []float64
 	Reasons [][]ReasonBlame
+	// how often each edge's fail counter wrapped (absent = never); CarryCounters
+	// does the wrapping, TotalFails bounds every one of them (see counter.go)
+	FailsResets map[int]int64
 
 	// the reason registry
 	ReasonNames []string
 	ReasonBlame []float64
 	ReasonFails []int64
-	reasonIDs   map[string]int
+	// how often each reason's fail counter wrapped (absent = never)
+	ReasonFailsResets map[int]int64
+	reasonIDs         map[string]int
 
 	TotalBlame float64
-	TotalFails int64
+	TotalFails Counter
 	TotalClear float64
 
 	ShareScale float64
@@ -71,7 +76,8 @@ type NegativeData struct {
 
 func newNegativeData(o NegativeOptions) *NegativeData {
 	return &NegativeData{
-		reasonIDs: map[string]int{}, ShareScale: o.ShareScale, BlameScale: o.BlameScale, ClearScale: o.ClearScale,
+		reasonIDs: map[string]int{}, FailsResets: map[int]int64{}, ReasonFailsResets: map[int]int64{},
+		ShareScale: o.ShareScale, BlameScale: o.BlameScale, ClearScale: o.ClearScale,
 	}
 }
 
@@ -207,10 +213,10 @@ func (g *Graph) RecordFailure(edges []int, severity float64, reason string) int 
 	}
 	if touched > 0 {
 		n.TotalBlame += amount * float64(touched)
-		n.TotalFails += int64(touched)
+		n.TotalFails.Add(int64(touched))
 		n.ReasonBlame[id] += amount * float64(touched)
 		n.ReasonFails[id]++
-		g.Version++
+		g.Version.Add(1)
 	}
 	return touched
 }
@@ -261,7 +267,7 @@ func (g *Graph) RecordClear(edges []int, weight float64) int {
 	}
 	if touched > 0 {
 		n.TotalClear += amount * float64(touched)
-		g.Version++
+		g.Version.Add(1)
 	}
 	return touched
 }
@@ -355,7 +361,7 @@ func (g *Graph) Forget(reason string, factor float64) (*ForgetResult, error) {
 		n.ReasonBlame[id] *= factor
 	}
 	if out.Edges > 0 {
-		g.Version++
+		g.Version.Add(1)
 		g.flushWeights()
 	}
 	return out, nil
@@ -419,11 +425,12 @@ func (g *Graph) NegativeWeightConfig() NegativeWeightConfig {
 
 // ReasonRow is one row of the reason table.
 type ReasonRow struct {
-	Reason string  `json:"reason"`
-	Blame  float64 `json:"blame"`
-	Fails  int64   `json:"fails"`
-	Edges  int     `json:"edges"`
-	Share  float64 `json:"share"`
+	Reason      string  `json:"reason"`
+	Blame       float64 `json:"blame"`
+	Fails       int64   `json:"fails"`
+	FailsResets int64   `json:"fails_resets"`
+	Edges       int     `json:"edges"`
+	Share       float64 `json:"share"`
 }
 
 // ReasonTable is everything the tutor has blamed, heaviest blame first.
@@ -453,7 +460,8 @@ func (g *Graph) ReasonTable() []ReasonRow {
 	rows := make([]ReasonRow, 0, len(n.ReasonNames))
 	for id, label := range n.ReasonNames {
 		rows = append(rows, ReasonRow{
-			Reason: label, Blame: n.ReasonBlame[id], Fails: n.ReasonFails[id], Edges: edges[id],
+			Reason: label, Blame: n.ReasonBlame[id], Fails: n.ReasonFails[id],
+			FailsResets: n.ReasonFailsResets[id], Edges: edges[id],
 			Share: n.ReasonBlame[id] / total,
 		})
 	}
@@ -543,6 +551,9 @@ func (m *Model) makeNegative() {
 	if _, seen := m.Meta["sources"]; !seen {
 		m.Meta["sources"] = map[string]any{}
 	}
+	if _, seen := m.Meta["sources_resets"]; !seen {
+		m.Meta["sources_resets"] = map[string]any{}
+	}
 }
 
 // IsNegative reports whether this model is the negative network.
@@ -566,7 +577,18 @@ func (m *Model) addSource(source string) {
 		table = map[string]any{}
 		m.Meta["sources"] = table
 	}
-	table[source] = toFloat(table[source]) + 1
+	resets, _ := m.Meta["sources_resets"].(map[string]any)
+	if resets == nil {
+		resets = map[string]any{}
+		m.Meta["sources_resets"] = resets
+	}
+	c := NewCounter(int64(toFloat(table[source])), int64(toFloat(resets[source]))).Bumped(1)
+	table[source] = c.Value
+	if c.Resets != 0 {
+		resets[source] = c.Resets
+	} else {
+		delete(resets, source)
+	}
 }
 
 // note appends one failure to the journal (the oldest entries drop out).
@@ -777,9 +799,9 @@ func (m *Model) blamePass(texts []string, o BlameOptions, blame bool, weight flo
 			merges += g.Compress()
 		}
 		pendingMerges = 0
-		m.metaAddInt("epochs_total", 1)
+		g.CarryCounters(false) // the epoch is over: wrap whatever reached the limit
 		record := map[string]any{
-			"epoch": m.metaInt("epochs_total"), "loss": loss,
+			"epoch": m.metaAddInt("epochs_total", 1), "loss": loss,
 			"perplexity":        math.Exp(math.Min(loss, maxLogPerplexity)),
 			"nodes":             g.NumNodes(),
 			"edges":             g.NumEdges(),
@@ -1225,9 +1247,11 @@ func whyVerdict(verdict string, blamed, total int, risk float64, reasons []Reaso
 	return out
 }
 
-// pythonRepr quotes a string the way Python's repr() does, so the sentence a
+// PythonRepr quotes a string the way Python's repr() does, so the sentence a
 // verdict carries is character for character the one the Python
 // implementation writes (the parity tests compare them).
+func PythonRepr(text string) string { return pythonRepr(text) }
+
 func pythonRepr(text string) string {
 	quote := byte('\'')
 	if strings.ContainsRune(text, '\'') && !strings.ContainsRune(text, '"') {
@@ -1270,37 +1294,41 @@ func (m *Model) negativeStats(lastLoss any) map[string]any {
 			sources[key] = value
 		}
 	}
-	return map[string]any{
-		"kind":              "negative",
-		"nodes":             g.NumNodes(),
-		"edges":             g.NumEdges(),
-		"trigrams":          g.NumTrigrams(),
-		"compression_ratio": g.CompressionRatio(),
-		"inverted":          g.Inverted,
-		"backend":           "go",
-		"device":            m.deviceLabel(),
-		"counting":          m.Counting(),
-		"epochs_total":      m.metaInt("epochs_total"),
-		"trained_chars":     m.metaInt("trained_chars"),
-		"trained_texts":     m.metaInt("trained_texts"),
-		"twonrl_runs":       m.metaInt("twonrl_runs"),
-		"history_len":       len(m.History),
-		"last_loss":         lastLoss,
-		"failures_total":    m.metaInt("failures_total"),
-		"blame_total":       toFloat(m.Meta["blame_total"]),
-		"cleared_total":     m.metaInt("cleared_total"),
-		"judgements":        m.metaInt("judgements"),
-		"rejected":          m.metaInt("rejected"),
-		"sources":           sources,
-		"edge_blame_total":  n.TotalBlame,
-		"edge_clear_total":  n.TotalClear,
-		"reason_count":      len(n.ReasonNames),
-		"top_reasons":       top,
-		"threshold":         m.Neg.Threshold,
-		"min_coverage":      m.Neg.MinCoverage,
-		"share_scale":       n.ShareScale,
-		"blame_scale":       n.BlameScale,
-		"clear_scale":       n.ClearScale,
-		"log_entries":       len(m.Neg.Log),
+	sourcesResets := map[string]any{}
+	if table, ok := m.Meta["sources_resets"].(map[string]any); ok {
+		for key, value := range table {
+			sourcesResets[key] = value
+		}
 	}
+	stats := map[string]any{
+		"kind":                    "negative",
+		"nodes":                   g.NumNodes(),
+		"edges":                   g.NumEdges(),
+		"trigrams":                g.NumTrigrams(),
+		"compression_ratio":       g.CompressionRatio(),
+		"inverted":                g.Inverted,
+		"backend":                 "go",
+		"device":                  m.deviceLabel(),
+		"counting":                m.Counting(),
+		"history_len":             len(m.History),
+		"last_loss":               lastLoss,
+		"blame_total":             toFloat(m.Meta["blame_total"]),
+		"sources":                 sources,
+		"sources_resets":          sourcesResets,
+		"edge_fails_total":        n.TotalFails.Value,
+		"edge_fails_total_resets": n.TotalFails.Resets,
+		"edge_blame_total":        n.TotalBlame,
+		"edge_clear_total":        n.TotalClear,
+		"reason_count":            len(n.ReasonNames),
+		"top_reasons":             top,
+		"threshold":               m.Neg.Threshold,
+		"min_coverage":            m.Neg.MinCoverage,
+		"share_scale":             n.ShareScale,
+		"blame_scale":             n.BlameScale,
+		"clear_scale":             n.ClearScale,
+		"log_entries":             len(m.Neg.Log),
+	}
+	m.metaStats(stats, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs",
+		"failures_total", "cleared_total", "judgements", "rejected")
+	return stats
 }

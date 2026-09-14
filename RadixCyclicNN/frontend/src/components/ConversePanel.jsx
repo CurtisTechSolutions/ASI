@@ -3,7 +3,8 @@ import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, SelectField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 
 /**
@@ -28,6 +29,8 @@ export default function ConversePanel({ status }) {
   const [partner, setPartner] = useState("");
   const [inMemory, setInMemory] = useState([]);
   const [transcript, setTranscript] = useState(null);
+  const [guard, setGuard] = useState(true);
+  const [guarded, setGuarded] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -77,10 +80,12 @@ export default function ConversePanel({ status }) {
         temperature: parseNumber(temperature, 1),
         k: parseInteger(k, 5),
         speakers,
+        guard,
         ...(partner ? { partner } : {}),
         ...(history.length ? { history } : opening.trim() ? { opening } : {}),
       });
       const fresh = asArray(data && data.turns);
+      setGuarded((data && data.guard) || null);
       setTranscript((prev) => (history.length ? [...asArray(prev), ...fresh] : fresh));
       if (!fresh.length && history.length) setNotice("The model had nothing more to say.");
     } catch (err) {
@@ -146,6 +151,12 @@ export default function ConversePanel({ status }) {
             options={[["", `the same model (${kind || "active"})`], ...partners.map((x) => [x, `the ${x} model (in memory)`])]}
           />
         </div>
+        <CheckField
+          label="Filter with the negative network"
+          hint="a reply it vetoes is left unsaid and the voice looks for another one"
+          checked={guard}
+          onChange={setGuard}
+        />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading}>
             {loading ? "Talking…" : spoken.length ? "Start over" : "Start"}
@@ -171,6 +182,7 @@ export default function ConversePanel({ status }) {
       <div className="card">
         <h2>Conversation</h2>
         {partnerLabel ? <p className="muted">{partnerLabel}.</p> : null}
+        <GuardNotice guard={guarded} what="replies" />
         {transcript === null ? (
           <p className="muted">Press Start to let the model talk to itself.</p>
         ) : spoken.length === 0 ? (
@@ -184,6 +196,7 @@ export default function ConversePanel({ status }) {
                 t.given ? "given" : null,
                 t.fresh && !t.given ? "new topic" : null,
                 t.repeat ? "repeat" : null,
+                t.vetoed ? `${fmtInt(t.vetoed)} vetoed` : null,
               ].filter(Boolean);
               return (
                 <li key={`${t.index}-${i}`} className={`turn ${side}${rating ? ` rated ${rating}` : ""}`}>

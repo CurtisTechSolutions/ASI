@@ -1391,6 +1391,25 @@ ol.dialogue li.rated.down .bubble {
   text-decoration: none;
 }
 
+/* the guard: what the negative network stopped on the way out */
+.guard {
+  border-left: 3px solid var(--border);
+  padding: 2px 0 2px 10px;
+  margin: 10px 0;
+}
+
+.guard.vetoed {
+  border-left-color: var(--warn);
+}
+
+.guard p {
+  margin: 0;
+}
+
+.guard .verdicts {
+  margin-bottom: 6px;
+}
+
 /* the negative network: verdicts, blamed fragments and the journal */
 .verdict {
   border: 1px solid var(--border);
@@ -1439,6 +1458,8 @@ blockquote.brief {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
+}
+
 /* Agent tab: the live log of criteria, proposals, tool calls and attempts */
 ul.log {
   list-style: none;

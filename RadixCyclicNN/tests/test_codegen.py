@@ -603,6 +603,35 @@ class CliTests(unittest.TestCase):
         self.run_cli("codegen", "--problems", os.path.join(self.dir, "missing.txt"), expect=1)
         self.run_cli("codegen", "--problems", self.problems, "--twonrl-per", "epoch", expect=1)
 
+    def test_the_judge_client_the_flags_asked_for_reaches_the_trainer(self):
+        """--judge-url / --judge-provider build a client; the trainer must be given it, not build its own."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        from radixnet import codegen
+        from radixnet.cli import main
+
+        built = []
+
+        class Spy(codegen.CodeGenTrainer):
+            def __init__(self, *args, **kwargs):
+                built.append(self)  # the last one built is the one the command runs
+                super().__init__(*args, **kwargs)
+
+            def run(self, *args, **kwargs):
+                return []
+
+        judge = start_fake(self.addCleanup)
+        args = [
+            "--model", self.model, "--backend", "python", "--json", "codegen", "--problems", self.problems,
+            "--phase", "teacher", "--rounds", "1", "--url", self.fake.url, "--judge-url", judge.url, "--blame",
+        ]
+        with mock.patch.object(codegen, "CodeGenTrainer", Spy), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(args), 0)
+        self.assertEqual(built[-1].judge_client.url, judge.url)
+        self.assertIsNotNone(built[-1].negative)  # and the negative network still arrives with it
+
 
 if __name__ == "__main__":
     unittest.main()

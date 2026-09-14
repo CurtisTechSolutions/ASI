@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
-import { fmtBytes, fmtInt, fmtNum, yesNo } from "../util.js";
+import { fmtBytes, fmtCounter, fmtInt, fmtNum, yesNo } from "../util.js";
 
 const POLL_MS = 2000;
 
@@ -113,7 +113,8 @@ export default function StatusBar({ onStatus }) {
         </span>
       )}
       <span className="stat">
-        epochs <b>{fmtInt(s.epochs_total)}</b> · 2NRL runs <b>{fmtInt(s.twonrl_runs)}</b> · last loss{" "}
+        epochs <b>{fmtCounter(s.epochs_total, s.epochs_total_resets)}</b> · 2NRL runs{" "}
+        <b>{fmtCounter(s.twonrl_runs, s.twonrl_runs_resets)}</b> · last loss{" "}
         <b>{fmtNum(s.last_loss, 4)}</b>
       </span>
       {s.kind === "count" ? (
@@ -122,8 +123,16 @@ export default function StatusBar({ onStatus }) {
         </span>
       ) : null}
       {s.kind === "count" ? (
-        <span className="stat" title="Traversals counted all time, and how many of them the sliding window still holds">
-          traversals <b>{fmtInt(s.total_traversals)}</b> · window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
+        <span
+          className="stat"
+          title={
+            "Traversals counted all time, and how many of them the sliding window still holds. " +
+            "Counters are cyclic: at 10^15 one goes back to 0 and the reset is counted, so the true total is " +
+            "resets × 10^15 + the number shown"
+          }
+        >
+          traversals <b>{fmtCounter(s.total_traversals, s.total_traversals_resets)}</b> ·
+          window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
         </span>
       ) : null}
       <span className={`stat job ${jobState}`}>

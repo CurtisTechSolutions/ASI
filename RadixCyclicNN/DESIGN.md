@@ -46,6 +46,7 @@ RadixCyclicNN/
     __main__.py             `python -m radixnet` -> cli.main()
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder
+    counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
@@ -55,11 +56,13 @@ RadixCyclicNN/
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
                             (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
-    duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
+    duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3),
+                            and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
     critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
+                            (ported to Go as go/radixnet/critic.go + review.go)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -164,19 +167,27 @@ class RadixCyclicGraph:
     labels: list[str]            # labels[i] = label of node i; labels[0] = "<s>", labels[1] = "</s>"
     z: list[float]               # node state / pre-activation, learnable
     a, b, h, k: list[float]      # per-node activation params (defaults -1, 1/3, 0, 0)
-    count: list[int]             # number of times the node was visited in training
+    count: list[int]             # times the node was visited in training - a cyclic counter (section 28)
+    count_resets: dict[int, int] # node id -> how often its counter wrapped (absent = never; usually empty)
     alive: list[bool]            # False for nodes removed by merge (ids are never reused until compaction on save)
     children: list[dict[int, int]]  # children[p][c] = edge id e
     parents:  list[dict[int, int]]  # parents[c][p]  = edge id e
     edge_w: list[float]          # edge weights (index = edge id)
-    edge_count: list[int]
+    edge_count: list[int]        # cyclic counters, like count
+    edge_count_resets: dict[int, int]
     edge_alive: list[bool]       # tombstones for removed edges
     trigram_index: dict[str, tuple[int, int]]   # trigram -> (node_id, offset); offset = index of the trigram inside the label
     rng: random.Random           # seeded
     inverted: bool = False
-    version: int                 # bumped on ANY structural or parameter change (cost caches key on it)
-    structure_version: int       # bumped only on node/edge creation, removal, split, merge
+    traversals: CyclicCounter    # every increment made to the counters above; bounds each of them (section 28)
+    version: CyclicCounter       # bumped on ANY structural or parameter change (cost caches key on it)
+    structure_version: CyclicCounter  # bumped only on node/edge creation, removal, split, merge
 ```
+
+Every integer above that only ever grows is a **cyclic counter**: it goes back
+to 0 at `COUNTER_LIMIT` and the wrap is counted in the matching `_resets`
+(section 28). `node_count(i)` / `edge_traversals(e)` give the exact totals and
+`carry_counters()` does the wrapping.
 
 Node id 0 is START, 1 is END; both always exist, are never merged or split, and
 their labels are not in `trigram_index`. `f_START` and `f_END` are ordinary
@@ -221,12 +232,13 @@ def split(self, node_id: int, i: int) -> tuple[int, int]
     # Split node between trigram i-1 and trigram i  (1 <= i <= len(label) - 3).
     # A keeps id `node_id` with label[:i+2]; B is a new node with label[i:].
     # A's out-edges move to B (edge ids preserved, parents[c] re-pointed); A gets ONE new edge A->B
-    # (initialised like a new edge, edge_count = count[node_id]). B copies A's z/a/b/h/k and count.
+    # (initialised like a new edge, edge_count = count[node_id]). B copies A's z/a/b/h/k, count and its resets.
     # trigram_index updated. Returns (A, B). Bad preconditions -> ValueError.
 
 def merge_child(self, p: int) -> bool
     # Merge p's single child c into p when: p, c not in (START, END); p != c; len(children[p]) == 1;
-    # len(parents[c]) == 1. New label = labels[p] + labels[c][2:]. count[p] = max(count[p], count[c]).
+    # len(parents[c]) == 1. New label = labels[p] + labels[c][2:]. count[p] = max(count[p], count[c]),
+    # compared as the EXACT counts (node_count) and taking the resets along.
     # c's out-edges move to p (edge ids preserved). If c had a self-loop c->c it becomes p->p.
     # Edge p->c is tombstoned; c is tombstoned (alive False, dicts emptied); trigram_index entries
     # of c re-pointed to p with offset shifted by len(labels[p]) - 2 (computed BEFORE relabel).
@@ -247,9 +259,20 @@ def apply_csr_weights(self, csr: CSR, weights: list[float]) -> None   # write ba
 def node_params(self) -> NodeParams  # copies of z, a, b, h, k in node-id order
 def apply_node_params(self, params: NodeParams) -> None             # version += 1
 
+def carry_counters(self, force: bool = False) -> int
+    # The ONLY place the visit counters wrap: every counter that reached COUNTER_LIMIT goes back to 0 and
+    # its reset is counted. Called at the end of every epoch and before a save; skipped after one comparison
+    # while `traversals` (which bounds every counter) has not wrapped. Returns how many wrapped. Section 28.
+
+def node_count(self, i: int) -> int ; def edge_traversals(self, e: int) -> int
+    # The exact counts across every reset: resets * COUNTER_LIMIT + the reading.
+
 def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> RadixCyclicGraph
-    # JSON-serialisable. Dead nodes/edges are compacted on save (ids remapped), START=0/END=1 preserved.
-    # Includes rng state (random.Random.getstate() converted to lists) so training is reproducible after load.
+    # JSON-serialisable, format_version 2. Dead nodes/edges are compacted on save (ids remapped),
+    # START=0/END=1 preserved. Includes rng state (random.Random.getstate() converted to lists) so training
+    # is reproducible after load, `version` / `structure_version` / `traversals` with their `*_resets`, and
+    # `nodes.count_resets` / `edges.count_resets` - dense arrays written only once something has wrapped.
+    # A format 1 file loads with all resets 0 and its counts carried on the way in.
 ```
 
 ### 5.3 Invariants (tests assert these after random sequences of observe/split/compress)
@@ -261,6 +284,7 @@ def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> RadixCyclicGraph
 5. `children`/`parents` are mirror images; every alive edge appears in both; dead nodes have empty dicts.
 6. After `compress()`, no unary chain remains (no non-sentinel p with exactly one child c != p, c non-sentinel, where c has exactly one parent).
 7. After `observe_sequence(encode(t))`, walking `t`'s trigrams through the index and decoding gives `t` (structure round trip), before and after `compress()`.
+8. Every counter is non-negative, every stored reset count is in `1..COUNTER_LIMIT - 1` and belongs to a real id; after `carry_counters()` every reading is below `COUNTER_LIMIT`.
 
 ---
 
@@ -425,7 +449,7 @@ class RadixNet:
         # phase 2: invert()
         # phase 3: train(good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10) -> "positive" records (phase="positive")
         # records passed to progress carry "phase". returns {"negative": [...], "positive": [...], "inverted": graph.inverted}
-        # meta["twonrl_runs"] += 1
+        # meta_add(meta, "twonrl_runs", 1)
         # bad_weights / good_weights (>= 0, one per text) make each phase a *rating* rather than one rate for all:
         # _weight_groups groups texts of equal (3-decimal) weight, heaviest first, drops zeros, and runs one pass per
         # group with lr * w (and act_lr * w; the positive phase pos_lr/10 * w). Those records carry "weight".
@@ -438,6 +462,7 @@ class RadixNet:
 
     def stats(self) -> dict   # {"nodes","edges","trigrams","compression_ratio","inverted","backend","device",
                               #  "epochs_total","trained_chars","trained_texts","twonrl_runs","history_len","last_loss"}
+                              # every lifetime counter is reported with its "<name>_resets" as well (section 28)
 
     def save(self, path: str) -> None
         # JSON; gzip if path endswith ".gz"; {"format": "radixnet", "version": 1, "saved_at", "meta", "history",
@@ -628,7 +653,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
-* `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count, hover label).
+* `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any).
 * `ScorePanel.jsx` — score a text.
 * `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
   (`MediaRecorder`) and dictates the words at the same time (`SpeechRecognition`, the Web Speech API); `audio.js`
@@ -660,9 +685,12 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
+* `test_counter.py` — the cyclic counters of section 28: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
+* `test_codegen.py` — code generation (section 17): the problem formats, the sandbox, the style check, the verdict, the trainer's phases, the API routes and the CLI.
 * `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
+* `test_guard.py` — the guard (section 24.7): `ready` / `rank` / `converse`, the three service methods, the three routes and the three CLI commands, on by default and off on request.
 * `test_speech.py` — the text format (packing, the header found behind a token and before a transcript, repair of a
   cut-off prediction), unique tokens, `speech_texts`, both codecs (mu-law beats linear 8-bit on quiet audio, byte
   round trips), resampling / downmixing / normalising, every WAV sample format the reader accepts (PCM 8/16/24/32,
@@ -1145,7 +1173,8 @@ call instead of spelling the rule out themselves.
 
 `CountRewardGraph(RadixCyclicGraph)` keeps more per-edge lists next to `edge_w` / `edge_count`: `edge_reward` and
 `window_edge_count` (traversals inside a sliding window, a deque `_window` of the last `window` edge ids traversed
-anywhere in the graph, default 10 000), plus the global `total_traversals`. `observe_sequence(count=True)` is
+anywhere in the graph, default 10 000), plus the global `total_traversals` - a cyclic counter like every other
+(section 28); the window counts are bounded by `window` and so need no wrapping. `observe_sequence(count=True)` is
 overridden to `record_traversals` (all time, window, total) and recompute the weights. The weight is the *dual
 frequency function* (`edge_weight`): with `C_p` / `W_p` the all-time / windowed traversals leaving the parent over
 its `deg` children and `s = 0.5`, `R_all = (count + s) / (C_p + s * deg)`, `R_recent = (window_count + s) /
@@ -1300,8 +1329,62 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 
 `go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
 beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
-CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `weights`, `info`, `converse`). The
+CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `compress`, `weights`, `info`,
+`converse`, `correct`, `negative`, `codegen`, `tutor`, `evolve`, `ollama`, `chatgpt`, `checkpoints`, `bench`,
+`serve`). The
 Python implementation is untouched; the two share the `radixnet-count` model file.
+
+What is *not* ported:
+
+* **RadixNet itself** (the sine-activation model of sections 3-8, its backends and the `radix` kind).  Go is
+  deliberately the count / reward port; the two are different algorithms over the same graph, and a Go RadixNet
+  would be a second gradient trainer rather than a translation.
+* The **Stable Diffusion encoder** (`vision.py`'s `sd`), the **local Whisper backends** (`speech.py`'s
+  `faster-whisper` / `whisper`) and the **torch backend**: Python ML packages, not code to translate.  The parts of
+  those modules that *are* code - the waveform codecs, the text formats, the thumbnail encoder, an
+  OpenAI-compatible transcription server - have no such excuse and are simply not done yet.
+* Nothing else is Python-only any more: `tools.go`, `web.go`, `calc.go`, `toolbox.go` and `agent.go` port
+  section 27, so the Go server serves `/api/tools/*` and `/api/agent/*` and the frontend hides no tab.  The
+  `pythonOnly` list the Go server answers 404-with-a-message for is down to `/api/schedule/preview`.
+* `schedule.py` is deliberately not ported, and would be dead code if it were: learning-rate schedules are a
+  RadixNet feature, the count / reward model ignores learning rates entirely, and the Train tab already hides the
+  schedule fields for it (`!countKind`).  Porting the expression evaluator would add a calculator nothing calls.
+
+`codegen.go` ports section 17, sandbox included, and the sandbox is the reason it can be ported at all: the
+programs are Python either way.  Go runs the *same bootstrap string* as Python does
+(`python3 -I -B -c <bootstrap>` under `unshare -rn`, with the rlimits set in the child), so a program sees the
+same interpreter, the same limits and the same isolation whichever language started it - and a traceback comes
+back cleaned the same way.  The rest follows: `ParseProblems` / `ParseProblemFile` / `LoadProblems` read the same
+problem files, `CheckStyle` shells out to a small Python helper for the AST rules (PEP 8 line and naming checks
+cannot be done on the text alone), `ExtractCode`, `TeacherGenerate`, `TeacherFix`, `JudgeWithLLM` and `Decide`
+speak the same prompts and the same verdict, and `CodeGenTrainer` runs the same teacher / model phases with the
+same records (`attempt`, `problem`, `round`).  Two differences, both of them the count model's:
+`CodeGenConfig.Strength` replaces Python's `neg_lr` / `pos_lr` / `batch_size` (the count model pushes by a
+strength, not a learning rate - the frontend already sends `strength` for the count kind and now does so for the
+Code tab too), and there is no `checkpoint_every` because the Go CLI has no checkpoint manager on this path.
+`blame.go` gains `CodeReasons`, `CodeSeverity`, `CodeReason`, `FaultsFromAttempts` and `TeachAttempts`, so
+`--blame` teaches the negative network why a program was rejected on both sides.  `cmd/radixnet-count/codegen.go`
+is the CLI command and `server/codegen.go` the four endpoints (`/api/codegen/start|history|solve|run`), which
+takes the **Code** tab off the frontend's `pythonOnly` list.
+`tests/test_go_parity.py::TestGoCodeGenParity` points both trainers at one fake teacher and holds them to the
+same conversation prompt for prompt (masking the two things that cannot match: the sandbox's scratch directory,
+which is named in tracebacks, and how long a program took), the same solutions and the same blame on disk.
+
+`speech.go`, `vision.go` and `recall.go` port the rest of the media path, and one thing about them is worth stating
+because it is the only place in this port where the two sides do not produce identical bytes:
+
+* **Speech is at parity, exactly.**  The waveform text has to be, because the utterance token is a digest of it and
+  the token is *in the text the model trains on* - if the two sides encoded a recording differently the same file
+  would teach two different things.  Getting there took two things Go does not hand you: the sample pipeline carries
+  **float32**, not float64, because Python's `array("f")` rounds every stored value to single precision, and
+  `blake2b.go` is BLAKE2b written out (RFC 7693), because Go's standard library has none and this module takes no
+  dependencies.  That is the same reasoning that put MT19937 and Shewchuk summation here by hand.
+  `tests/test_go_parity.py::TestGoMediaParity` checks the token, the texts and the decoded WAV byte for byte.
+* **Image encoding is not at parity, and cannot cheaply be.**  Python's thumbnail resamples with Pillow's Lanczos
+  filter; the Go one uses a box filter, because reproducing Pillow's exact coefficients and rounding *without
+  Pillow to check against* would be a guess rather than a port.  So the same picture gives two different (equally
+  valid) texts.  The format is shared - each side parses, trains on, predicts and decodes the other's image texts -
+  and `DescribeVision` says so in its own output rather than leaving it to be discovered.
 
 Files: `encoding.go` (code-point windows, `DecodePath`), `mt19937.go` (a Mersenne Twister with CPython's seeding,
 53-bit doubles and `getstate()` layout - `rng_state` round-trips between the languages), `fsum.go` (Shewchuk's
@@ -1310,7 +1393,8 @@ Python dict order decides the softmax summation order -, trigram index, `Split` 
 `ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`),
-`json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`).
+`json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`), `counter.go` (the
+cyclic counters of section 28, identical to `radixnet/counter.py`).
 
 Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
 
@@ -1403,9 +1487,9 @@ upload directory, `ExtractTexts` with the same skip rules as `archive.py`, archi
 memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d>.json.gz`, `latest.json`,
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
-over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, the ollama corpus / review calls, images, speech, codegen, schedule preview) answer 404 with a message
-naming the Python server.
+over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the one endpoint
+this server does not implement (`/api/schedule/preview`, which would be dead code here - the count model ignores
+learning rates) answers 404 with a message naming the Python server rather than blankly.
 
 The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `plan.go`,
 `go/server/tutor.go`): the same prompts, the same records and the same endpoints (`GET /api/tutor`,
@@ -1428,8 +1512,10 @@ weight, the reward or penalty scaled by it), which also back `good_ratings` / `b
 tutor parity test finds the same rewards on both sides; `radixnet-count correct` is the CLI twin of
 `radixnet correct`.
 
-Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; with `"go"` the Python-only tabs (Evolve, Ollama,
-Code, Images - the Tutor tab stays, both servers run the lessons) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
+Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; a tab that needed the Python server would carry
+`pythonOnly` and be neither shown nor mounted with `"go"` - there are none left, since both servers now run the
+lessons, the evolve loop, the Ollama calls, code generation, tool use and the media encoders.  The header shows a
+**Go engine · N goroutines** badge, the status bar
 replaces the accelerator chips with `engine go · workers · goroutines` (`StatusBar.jsx`), and the Train tab
 (`TrainPanel.jsx`) offers **Texts are** `lines | paragraphs | pages` (+ lines per page): with paragraphs or pages
 the pasted text is sent whole as `text` together with `split`, and the server cuts it and the selected uploads.
@@ -1636,6 +1722,21 @@ optional block:
 * Go tests: `radixnet/negative_test.go`, `radixnet/blame_test.go`, `radixnet/duo_test.go`,
   `server/negative_test.go`.
 
+The loop of section 24.6 is ported too (`go/radixnet/critic.go`), and with it the two things it is built out of
+that Go did not have: `review.go` is the Python `ollama.py` - `CorpusFromPrompt`, `ReviewTexts`, `SampleTexts`,
+`AdversarialReview` and `SummariseReviews` - duck-typed on `LLMClient`, so ChatGPT reviews as happily as a local
+model, and `blame.go` gains `FaultsFromReviews` / `TeachReviews`.  `negative auto`, `ollama models | corpus |
+review`, `chatgpt models | ask`, `POST /api/negative/auto`, `GET /api/negative/auto/history` and the three
+`/api/ollama/*` endpoints all speak the Python server's contract, and
+`tests/test_go_parity.py::TestGoCriticParity` holds the two loops to the same prompts, the same marks, the same
+rounds and the same blame on disk.
+
+Porting it turned up one thing worth stating, because it applies to both languages: a round **samples under the
+lock and reviews without it**.  Sampling walks the graph, so doing it with the model lock released is a data race
+in Go and a torn read in Python; only the reviewer's thinking - a network call that touches nothing of ours -
+belongs outside.  That is why `SummariseReviews` / `summarise_reviews` exists as a step of its own: the loop needs
+the two halves separately, while a one-shot `AdversarialReview` can still do both.
+
 ---
 
 ### 24.6 The negative network feeding itself (`critic.py`) — the reviewer on a loop
@@ -1681,6 +1782,60 @@ history also drives a refresh of the reason table, the stats and the journal bel
 as rounds land.  Tests: `tests/test_critic.py` — the config, one round, what reaches the negative network, the mark
 setting the severity, stopping between rounds, the report card, a real `OllamaClient` against the fake server, the
 job, the endpoint and the CLI.
+
+---
+
+### 24.7 The guard — the pair on every output path
+
+Section 24.3 built the pair and left it as something a caller had to *ask* for: the Negative tab, `negative filter`,
+`POST /api/negative/filter`.  Everything else — `generate`, `predict`, `converse` — still handed out whatever the
+positive model wrote, including the sentence the tutor had corrected an hour earlier.  The guard closes that: the
+two networks now work **in tandem on every answer**, and turning the filter *off* is what takes a flag.
+
+`ModelService.guard()` (Python) / `Service.guard()` (Go) builds the pair when there is something to guard with and
+returns `None`/`nil` otherwise — which is the whole of its judgement:
+
+* the **negative network is the active model** — it is generating *from* the failures, and there is no positive half
+  to guard;
+* there is **none in memory and none saved** beside the model path.  The guard never *creates* an empty negative
+  network: an answer is not the place to bring one into being (it would also park a model the caller never asked
+  for, and `/api/model` would start reporting it);
+* the one there **has never been taught a failure** (`NegativeFilter.ready` / `Filter.Ready()`, i.e.
+  `total_blame > 0`).  An empty network vetoes nothing, so a filter around one costs the over-sampling and buys
+  nothing.
+
+An unguarded answer is therefore exactly what it was before this section, byte for byte, and a `"guard": null` in
+the payload says so.  What each path does when there *is* a guard:
+
+| path | what the guard does |
+| --- | --- |
+| `generate` | `NegativeFilter.generate`: the model is asked for `count * over_sample` candidates and the survivors come back, cleanest first (a **stable** sort on `risk` alone, so among equally clean texts the model's own order wins — the veto re-ranks as little as it can).  Fewer than `count` texts is information, not an error |
+| `predict` | `NegativeFilter.rank` / `Filter.Rank`: the search has already run, so the guard *re-ranks* what it offered rather than asking for more — one judgement per continuation and no second search.  `top` keeps the survivors and the best of them becomes the prediction; when none survives the prediction is the prefix and nothing else (`expanded` still reports the search that ran) |
+| `converse` | `NegativeFilter.converse` / `Filter.Converse`: `dialogue.converse` gained a `veto` hook (`ConverseOptions.Veto` in Go) and a vetoed candidate is skipped exactly like one already said — except that it may not even be the fallback.  A turn whose every candidate is vetoed falls back as any dead end does (a shorter context, then a fresh text), and the conversation stops when there is nothing left that may be said.  Each `Turn` counts its own `vetoed` |
+
+Two things stayed deliberately outside it.  The **critic loop** (section 24.6) samples the positive model directly
+and must keep doing so: a reviewer that only ever saw what already passed the filter would have nothing to teach.
+The same goes for the tutor, evolve and the benchmark — the guard is on the way *out*, not on the way in.
+
+The answer always carries the guard's own report, so nothing is dropped silently: `{"on", "vetoed", "rejected"
+(the full verdicts), "verdicts", "negative" (its stats), "config"}` plus, per path, `candidates` / `kept` /
+`asked` / `rate` / `refusals`.  `NegativeFilter.generate` grew a `results` key for this — the walks behind the
+surviving texts, so a caller can still report cost, probability and path; it is popped before the explicit
+`/api/negative/filter` endpoint answers, and in Go `FilterOutcome.Results` is `json:"-"` for the same reason.
+
+* Python: `guard=False` on `ModelService.generate|predict|converse` and `{"guard": false}` on the three endpoints;
+  `--no-guard` on the `generate`, `predict` and `converse` CLI commands, with `--negative PATH`, `--threshold`,
+  `--min-coverage` and `--over-sample` beside it (`add_guard_flags` / `open_guard`).
+* Go: the same three service methods take a `guard bool` and return `(answer, report, error)`; the CLI has the same
+  flags (`addGuardFlags` / `openGuard`), and `negativeModel()` gained a `negMu` around its lazy load, because the
+  guard reaches it from the read-locked output path where several callers can arrive at once.
+* Frontend: `GuardNotice.jsx` under the Generate, Predict and Converse tabs — "the negative network judged N
+  candidates and vetoed M", with *why* opening the full verdicts and their blamed fragments — and a *Filter with
+  the negative network* checkbox on each of the three forms.
+* Tests: `tests/test_guard.py` (the filter's additions, the three service methods, the three routes, the three CLI
+  commands), `go/radixnet/guard_test.go`, `go/server/guard_test.go`, and
+  `tests/test_go_parity.py::TestGoNegativeParity` holds the two guards to the same vetoes, the same survivors and
+  the same order.
 
 ---
 
@@ -2047,7 +2202,45 @@ to a refused scheme — a byte cap; the format, the registry, the guards, `safe_
 the fake website, and a *real* untrained network: criteria, both mediation paths, judging, teaching, the gap and
 the weighting, the whole loop, exploring, the API endpoints and the CLI).
 
-### 27.6 The failures feeding the negative network (`blame.faults_from_agent`)
+### 27.6 Tool use in Go (`go/radixnet/tools.go`, `web.go`, `calc.go`, `toolbox.go`, `agent.go`)
+
+The last Python-only module, and the one where the standard library had to be taken at its word: Go has no
+`html.parser`, no `ast.literal_eval` and no `eval`, so three pieces are written out rather than translated.
+
+* `tools.go` is the text format and the registry: `TaskHeader`, `CallText`, `ResultText`, `AnswerText`,
+  `TranscriptText`, `ParseCall`, `ParseArguments` (JSON, `key=value` pairs, a bare value, and the same
+  truncated-JSON repair), `Param` / `Tool` / `ToolCall` / `ToolResult` / `ToolBox`.  One thing had to be written
+  by hand for the format to match character for character: `marshalSorted` renders a value the way
+  `json.dumps(..., ensure_ascii=False, sort_keys=True)` does — sorted keys, a space after every colon and comma,
+  floats as `repr()` writes them — because Go's encoder writes `{"url":"u"}` where Python writes `{"url": "u"}`,
+  and the network learns the characters.
+* `web.go` is the browsing half: a small HTML tokeniser (raw-text elements taken whole, so a `<` inside a script
+  is not a tag), the same block / drop tag sets, the same title-inside-`<head>` special case, and a `WebClient`
+  with the same guards — http / https only, no credentials, no private / loopback / link-local / reserved
+  address unless `AllowPrivate`, a byte cap, and redirects followed by hand so every hop is checked again.
+* `calc.go` is the calculator: a recursive-descent parser over the same grammar, keeping Python's arithmetic
+  where the two differ — `/` is true division, `//` floors, `%` takes the sign of the divisor, `int op int` stays
+  an int, `round` goes to even, and a result is rendered the way `str()` renders it (`29.0`, not `29`).
+  `TestGoToolsParity` runs a list of expressions through both CLIs and compares the answers.
+* `toolbox.go` is the built-in set (`web_search`, `web_fetch`, `web_links`, `calculator`, `python`,
+  `read_file`) with the same names, parameters and descriptions, so a transcript written on one side is a
+  transcript the other can read - and the JSON schemas the LLM is handed are equal, which the parity test
+  asserts.
+* `agent.go` is section 27.2: the four roles with the same prompts, the same lenient readers (`criterionMark`,
+  `marksOf`), `decideAgent`, the mediator's fallbacks, `TeachTask`, `ProposeTask`, and `AgentTrainer` with the
+  same records and the same blatant-failure handling (`TwoNRLWeighted`, `InvertPaths`).  The Go clients gained
+  `Chat` / `ChatMessage` for it, so Ollama's native tool calling is used where the model has it and JSON mode
+  where it does not - duck-typed on the client, exactly as Python's `getattr(client, "chat_message", None)`.
+* `server/agent.go` adds `/api/tools`, `/api/tools/call` and the five `/api/agent/*` endpoints; the Go CLI gains
+  `tools list | describe | call`, `agent` and `explore`, and `serve` takes the tool options.  The count model
+  pushes by a `strength` rather than `neg_lr` / `pos_lr` / `batch_size`, which is the only setting that differs.
+* Go tests: `radixnet/tools_test.go` (a fake website, the format, the registry, the guards, the calculator,
+  every built-in tool), `radixnet/agent_test.go` (a fake Ollama playing all four roles, a real untrained
+  network) and `server/agent_test.go` (the endpoints end to end).
+
+---
+
+### 27.7 The failures feeding the negative network (`blame.faults_from_agent`)
 
 Section 24 applied to tool use: the judge is the tutor, and every attempt it rejects becomes blame. Reasons are
 `AGENT_REASONS` (`no-call`, `bad-call`, `tool-error`, `no-answer`, then the judge's own words through `classify`),
@@ -2079,6 +2272,108 @@ therefore stop it repeating them. `agent --blame` / `explore --blame` (with `--n
 `POST /api/agent/start` / `/api/agent/explore` `{"blame": true}` switch it on; the Agent tab has the checkbox.
 
 ---
+
+---
+
+## 24. Counter overflow (`counter.py`, `go/radixnet/counter.go`) — cyclic counters with a reset count
+
+Every number in the model that only ever counts up - traversals, node and edge
+visit counts, the negative network's per-edge and per-reason `fails`, epochs,
+trained characters and texts, 2NRL runs, feedback passes, failures, clearings,
+judgements, rejections, the per-source tally, the version stamps - would
+eventually leave the range of whatever holds it:
+`int64` in the Go port, and long before that the 53-bit mantissa of the JSON
+number that carries it through a model file, the HTTP API and the frontend. So
+**no counter in the model is an unbounded integer.** Each one is a two-digit
+odometer in base `COUNTER_LIMIT`:
+
+```
+total = resets * COUNTER_LIMIT + value          with 0 <= value < COUNTER_LIMIT
+```
+
+The value counts up as before; the moment it reaches the limit it is **set back
+to 0** and `resets` - how often that happened - goes up by one. Nothing is lost:
+`total` is the exact number of events, `value` is what the odometer reads now,
+`resets` is how often it went round. Cycles are a feature here too.
+
+`COUNTER_LIMIT = 10 ** 15` because it is exactly representable as a `float64`
+(`< 2 ** 53`), so every counter survives a model file, a JSON response and a
+JavaScript `Number` unchanged; because it leaves four orders of magnitude of
+head room under `int64`, so a whole epoch of increments can land on a counter
+before the next carry without overflowing the Go port; and because it is a
+round decimal - one quadrillion events per turn. `resets` wraps at the same
+limit, so the pair itself cycles after `10 ** 30` events.
+
+```python
+COUNTER_LIMIT = 1_000_000_000_000_000
+
+def carry(value: int, resets: int = 0) -> tuple[int, int]   # whole turns move from value into resets
+def total(value: int, resets: int = 0) -> int               # the exact number of events
+def as_float(value: int, resets: int = 0) -> float          # float(resets) * COUNTER_LIMIT + float(value)
+def carry_series(values: list[int], resets: dict[int, int]) -> int   # wrap a parallel counter list in place
+
+class CyclicCounter:                 # one scalar odometer; immutable, so `counter += 1` rebinds
+    value: int ; resets: int         # compares and hashes as `total`, so version stamps stay exact
+    @property total ; def as_float() ; def bumped(n=1) ; def to_pair() ; @classmethod from_pair(value, resets=0)
+```
+
+Go mirrors it exactly (`CounterLimit`, `Carry`, `Counter{Value, Resets}` - a
+comparable struct, so a cached version stamp is still checked with `==` -,
+`CarrySeries`, `counterTotal`). Both compute the float total as
+`float(resets) * LIMIT + float(value)`, in that order, so the weights stay
+identical to the bit across the two implementations.
+
+**Wrapping never happens in a counting loop.** Hot loops add to a plain integer
+(the Go port from many goroutines, with plain or atomic increments); a *carry
+sweep* at a safe point moves whatever crossed the limit into the resets:
+
+* `RadixCyclicGraph.carry_counters(force=False)` / `(*Graph).CarryCounters(force)` —
+  the only place the visit counters wrap. Called at the end of every epoch and
+  before every save. `graph.traversals` counts every increment made and so
+  bounds each individual counter: while it has not wrapped, the sweep returns
+  after one comparison. `force` sweeps anyway (used when loading a file).
+* `meta_add(meta, key, delta)` (`(*Model).metaAddInt`) — the lifetime counters
+  of `model.meta` listed in `META_COUNTERS`, each wrapping into `<key>_resets`;
+  `meta_add_keyed(meta, key, name, delta)` does the same for the `{name: count}`
+  maps of `META_COUNTER_MAPS` (`sources`), whose resets mirror it in
+  `<key>_resets`. `carry_meta(meta)` / `(*Model).carryMeta` wrap them all when a
+  file is loaded, in case it carries one that was never wrapped.
+* `CyclicCounter` / `Counter` scalars (`total_traversals`, `traversals`,
+  `version`, `structure_version`) wrap as they are bumped; they are cheap.
+
+`NegativeGraph.carry_counters` extends the sweep to the negative network's
+`edge_fails` and `reason_fails`, bounded the same way by its `total_fails`.
+
+Per node / edge the reset counts live in a **sparse** map (`count_resets`,
+`edge_count_resets`, `edge_fails_resets`, `reason_fails_resets`), so the usual
+case - nothing ever came near the limit -
+costs one comparison per entry and stores nothing. `split` copies a node's
+resets to the new node and the new internal edge; `merge_child` keeps the
+larger of the two *exact* counts; every ranking by visits (`_best_trigram`,
+`_best_node_with_prefix`, the graph view) compares exact counts, never the bare
+readings.
+
+What crosses a boundary:
+
+| Where | Fields |
+|---|---|
+| model file (`format_version` 2) | `version` / `structure_version` / `traversals` and their `_resets`; `nodes.count_resets` and `edges.count_resets` (dense arrays, written only once something has wrapped); `weights.total_traversals_resets`; `meta.<counter>_resets` and `meta.sources_resets`; on a negative graph also `edges.fails_resets`, `weights.total_fails_resets` and `weights.reasons.fails_resets` |
+| `GET /api/status`, `/api/model` | `epochs_total_resets`, `trained_chars_resets`, `trained_texts_resets`, `twonrl_runs_resets`, `feedback_passes_resets`, `total_traversals_resets`; on the negative network `failures_total_resets`, `cleared_total_resets`, `judgements_resets`, `rejected_resets`, `sources_resets`, `edge_fails_total` / `edge_fails_total_resets` and `fails_resets` per reason row |
+| `GET /api/graph` | `count_resets` per node and per edge, `total_traversals_resets` |
+| frontend | `fmtCounter(value, resets)` renders `1,234 (+2 resets)` in the status bar, the Graph tab's tooltips and the Negative tab's counts; `counterTotal(value, resets)` is what node radius / edge opacity scale on |
+
+A format 1 file (written before any of this) loads unchanged: its counts are
+plain integers, are carried on the way in, and `traversals` is seeded with their
+sum so the guard above stays correct. The float accumulators `rewards_total` /
+`penalties_total` are sums of real numbers, not counters, and are left alone.
+
+Tests: `tests/test_counter.py` (the odometer itself; counters wrapping mid-training
+without losing history; weights, shares and rankings identical to what unbounded
+integers would give; the save / load round trip; a format 1 file; the guard;
+the lifetime counters), `go/radixnet/counter_test.go` (the same in Go) and
+`tests/test_go_parity.py::test_a_wrapped_model_file_crosses_over_unchanged`
+(a wrapped file trained on by both sides, with identical counters, weights and
+predictions).
 
 ## 28. A real browser (`browser.py`) — Chrome over the WebDriver protocol
 

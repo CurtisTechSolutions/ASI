@@ -43,6 +43,8 @@ __all__ = [
     "normalise_url",
     "parse_lines",
     "review_texts",
+    "sample_texts",
+    "summarise_reviews",
 ]
 
 DEFAULT_TIMEOUT = 120.0
@@ -400,14 +402,24 @@ def adversarial_review(
         samples = [str(t) for t in texts]
         source = "given"
     reviews = review_texts(client, samples, context=context, model=ollama_model, threshold=threshold)
+    return summarise_reviews(source, ollama_model or client.model, threshold, samples, reviews)
+
+
+def summarise_reviews(source: str, model: str, threshold: float, texts: list[str], reviews: list[dict]) -> dict:
+    """Split a marked set into what passed and what did not, and average the marks.
+
+    It is separate from :func:`adversarial_review` because a caller holding a
+    model lock has to sample and review in two steps: the sampling walks the
+    graph and must hold the lock, the reviewing is a network call and must not.
+    """
     ratings = [r["rating"] for r in reviews if r["rating"] is not None]
     passed = [r["text"] for r in reviews if r["verdict"] == "pass"]
     failed = [r["text"] for r in reviews if r["verdict"] != "pass"]
     return {
         "source": source,
-        "model": ollama_model or client.model,
+        "model": model,
         "threshold": float(threshold),
-        "texts": samples,
+        "texts": list(texts),
         "reviews": reviews,
         "mean_rating": statistics.fmean(ratings) if ratings else None,
         "pass_rate": len(passed) / len(reviews) if reviews else None,

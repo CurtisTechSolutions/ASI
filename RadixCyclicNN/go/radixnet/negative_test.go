@@ -403,8 +403,8 @@ func TestTrainingANegativeModelIsBlaming(t *testing.T) {
 	if len(records) != 1 || records[0]["phase"] != "negative" {
 		t.Fatalf("training the negative network blames: %+v", records)
 	}
-	if m.G.Neg.TotalBlame == 0 || m.G.TotalTraversals != 0 {
-		t.Fatalf("blame, not traversals: blame=%v traversals=%d", m.G.Neg.TotalBlame, m.G.TotalTraversals)
+	if m.G.Neg.TotalBlame == 0 || m.G.TotalTraversals != (Counter{}) {
+		t.Fatalf("blame, not traversals: blame=%v traversals=%+v", m.G.Neg.TotalBlame, m.G.TotalTraversals)
 	}
 	if _, err := m.TrainSource(SliceSource([]string{"the cat cat cat sat"}), TrainOptions{Epochs: 1}); err != nil {
 		t.Fatal(err)

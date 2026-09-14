@@ -40,6 +40,10 @@ func (s *Service) negativePath() string {
 // negativeModel is the one negative network of this service, loaded from its
 // file or created empty on first use.
 func (s *Service) negativeModel() (*radixnet.Model, error) {
+	// the read lock lets several callers in at once, and the guard puts every
+	// answer on this path: one of them may load it, the rest wait and share it
+	s.negMu.Lock()
+	defer s.negMu.Unlock()
 	if s.negative != nil {
 		return s.negative, nil
 	}

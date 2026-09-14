@@ -42,10 +42,10 @@ STATS_KEYS = {
 JOB_KEYS = {"id", "type", "state", "progress", "history", "error", "started_at", "finished_at", "stop_requested"}
 PREDICT_KEYS = {
     "prefix", "kind", "continuation", "full_text", "cost", "probability", "step_costs", "path", "node_ids", "expanded",
-    "reached_end",
+    "reached_end", "guard",
 }
-NODE_KEYS = {"id", "label", "count", "activation", "z", "a", "b", "h", "k"}
-EDGE_KEYS = {"source", "target", "weight", "count", "prob", "cost"}
+NODE_KEYS = {"id", "label", "count", "count_resets", "activation", "z", "a", "b", "h", "k"}
+EDGE_KEYS = {"source", "target", "weight", "count", "count_resets", "prob", "cost"}
 
 
 class Client:
@@ -519,7 +519,7 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual((status, status2), (200, 200))
         self.assertEqual(data, data2)
         status, data, _ = self.client.post("/api/generate", {"count": 0})
-        self.assertEqual((status, data), (200, {"samples": []}))
+        self.assertEqual((status, data), (200, {"samples": [], "guard": None}))  # no negative network: nothing to guard with
         # beam: the K most likely complete texts from the prediction search
         status, data, _ = self.client.post("/api/generate", {"count": 3, "mode": "beam", "max_length": 40, "beam": 24})
         self.assertEqual(status, 200, data)

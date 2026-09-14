@@ -7,16 +7,22 @@ window and RNG state, the same predictions, generated texts, scores and
 conversation, and each side must load and continue the other's model file.
 """
 
+import array
 import json
+import math
 import os
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from radixnet.counter import COUNTER_LIMIT  # noqa: E402
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.model import load_model  # noqa: E402
 
@@ -54,15 +60,17 @@ def go(*args, model, expect=0, env=None):
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300, env=env)
     if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
-    return json.loads(proc.stdout) if proc.stdout.strip() else None
+    if proc.stdout.strip():
+        return json.loads(proc.stdout)
+    return {"error": proc.stderr.strip()} if expect else None
 
 
-def py(*args, model, env=None):
+def py(*args, model, expect=0, env=None):
     cmd = [sys.executable, "-m", "radixnet", "--json", "--model", model, *[str(a) for a in args]]
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600, env=env)
-    if proc.returncode != 0:
+    if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stderr ---\n{proc.stderr}")
-    return json.loads(proc.stdout)
+    return json.loads(proc.stdout) if proc.stdout.strip() else {"error": proc.stderr.strip()}
 
 
 def load_json(path):
@@ -171,6 +179,44 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(a["weights"]["window_events"], b["weights"]["window_events"])
         self.assertEqual(a["weights"]["total_traversals"], b["weights"]["total_traversals"])
         assert_close(self, a["edges"]["w"], b["edges"]["w"], 1e-12)
+
+    def test_a_wrapped_model_file_crosses_over_unchanged(self):
+        """Counters wrap at COUNTER_LIMIT; both sides must read the other's reset counts and agree."""
+        py_path = os.path.join(TMP.name, "wrap_py.count.json")
+        go_path = os.path.join(TMP.name, "wrap_go.count.json")
+        py("--kind", "count", "--seed", 4, "train", "--data", CORPUS, "--epochs", 1, model=py_path)
+
+        model = load_model(py_path)  # wind every counter to one event short of its reset
+        graph = model.graph
+        step = COUNTER_LIMIT - 1
+        graph.count = [c + step for c in graph.count]
+        graph.edge_count = [c + step for c in graph.edge_count]
+        graph.traversals += step
+        graph.total_traversals += step
+        with open(py_path, "w", encoding="utf-8") as fh:
+            json.dump(model.to_dict(), fh)
+        shutil.copy(py_path, go_path)
+
+        py("train", "--data", CORPUS, "--epochs", 1, model=py_path)   # the epoch takes every counter round
+        go("train", "--data", CORPUS, "--epochs", 1, model=go_path)
+        a, b = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertTrue(a["nodes"]["count_resets"], "Python recorded no reset")
+        self.assertTrue(b["nodes"]["count_resets"], "Go recorded no reset")
+        for block, key in (("nodes", "count"), ("nodes", "count_resets"), ("edges", "count"), ("edges", "count_resets")):
+            self.assertEqual(a[block][key], b[block][key], f"{block}.{key}")
+        for key in ("traversals", "traversals_resets"):
+            self.assertEqual(a[key], b[key], key)
+        for key in ("total_traversals", "total_traversals_resets", "window_events"):
+            self.assertEqual(a["weights"][key], b["weights"][key], key)
+        self.assertEqual(a["weights"]["total_traversals_resets"], 1)
+        assert_close(self, a["edges"]["w"], b["edges"]["w"], 1e-12)
+        # and the wrapped counts still predict the same continuations on both sides
+        for prefix in ("the cat", "the dog"):
+            with self.subTest(prefix=prefix):
+                x = py("predict", "--prefix", prefix, "--length", 8, "--k", 3, model=py_path)
+                y = go("predict", "--prefix", prefix, "--length", 8, "--k", 3, model=go_path)
+                self.assertEqual(x["continuation"], y["continuation"])
+                self.assertLessEqual(abs(x["cost"] - y["cost"]), 1e-9)
 
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")
@@ -536,6 +582,44 @@ class TestGoNegativeParity(unittest.TestCase):
                          go(*peak, model=self.go_model)["verdicts"][0]["rule"])
 
 
+    def test_the_guard_vetoes_the_same_replies_on_both_sides(self):
+        """The pair on the ordinary output paths: both CLIs filter what they write, and agree on what to drop."""
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        a = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, model=self.py_model)
+        b = go("generate", "-count", 3, "-mode", "beam", "-max-length", 40, model=self.go_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        self.assertEqual(a["guard"]["asked"], b["guard"]["asked"])
+        self.assertEqual([v["text"] for v in a["guard"]["verdicts"]], [v["text"] for v in b["guard"]["verdicts"]])
+        self.assertEqual([v["decision"] for v in a["guard"]["verdicts"]], [v["decision"] for v in b["guard"]["verdicts"]])
+        self.assertEqual([v["why"] for v in a["guard"]["rejected"]], [v["why"] for v in b["guard"]["rejected"]])
+        # and both hand out what the positive model wrote when asked not to filter
+        a = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, "--no-guard", model=self.py_model)
+        b = go("generate", "-count", 3, "-mode", "beam", "-max-length", 40, "-no-guard", model=self.go_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        self.assertIsNone(a["guard"])
+        self.assertIsNone(b["guard"])
+
+    def test_the_guard_ranks_the_same_continuations_and_replies(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        a = py("predict", "--prefix", "the ", "--mode", "beam", "--k", 4, model=self.py_model)
+        b = go("predict", "-prefix", "the ", "-mode", "beam", "-k", 4, model=self.go_model)
+        self.assertEqual(a["continuation"], b["continuation"])
+        # the two CLIs name a continuation differently (text / continuation); full_text is the same in both
+        self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+        self.assertEqual(a["guard"]["kept"], b["guard"]["kept"])
+        a = py("converse", "--turns", 3, "--opening", "the the the the cat", model=self.py_model)
+        b = go("converse", "-turns", 3, "-opening", "the the the the cat", model=self.go_model)
+        self.assertEqual([t["text"] for t in a["turns"]], [t["text"] for t in b["turns"]])
+        self.assertEqual([t["vetoed"] for t in a["turns"]], [t["vetoed"] for t in b["turns"]])
+        self.assertEqual(a["guard"]["vetoed"], b["guard"]["vetoed"])
+
+
 class TestGoServerNegative(unittest.TestCase):
     """The Go server's negative endpoints answer the JSON the frontend's Negative tab expects."""
 
@@ -604,6 +688,325 @@ class TestGoServerNegative(unittest.TestCase):
         from radixnet.model import load_model
 
         self.assertEqual(load_model(data["path"]).kind, "negative")
+
+
+class TestGoCriticParity(unittest.TestCase):
+    """One fake reviewer, both loops: the same prompts, the same marks, the same blame."""
+
+    def setUp(self):
+        try:  # the fake Ollama of the ollama tests plays the reviewer for both sides
+            from test_ollama import start_fake
+        except ImportError:
+            from tests.test_ollama import start_fake
+        self.fake = start_fake(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_OLLAMA_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "critic_py.count.json")
+        self.go_path = os.path.join(TMP.name, "critic_go.count.json")
+        for path in (self.py_path, self.go_path):
+            for name in (path, path.replace(".count.json", ".count.negative.json")):
+                if os.path.exists(name):
+                    os.remove(name)
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.py_path)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.go_path)
+
+    def prompts(self):
+        """The prompt of every call so far, so both sides' conversations can be compared."""
+        return [body.get("prompt", "") for _method, _path, body in self.fake.requests if body]
+
+    def test_both_loops_ask_the_same_and_blame_the_same(self):
+        options = ("negative", "auto", "--rounds", 2, "--count", 4, "--max-length", 40, "--threshold", 6)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_prompts = self.prompts()
+
+        # the same texts written, so the same conversation with the reviewer
+        self.assertEqual(len(py_prompts), len(go_prompts))
+        for i, (first, second) in enumerate(zip(py_prompts, go_prompts)):
+            self.assertEqual(first, second, f"call {i} differs between the two loops")
+        self.assertGreaterEqual(len(py_prompts), 2)
+
+        # the same rounds, marked the same and blamed the same
+        py_rounds = [r for r in a["records"] if r["kind"] == "round"]
+        go_rounds = [r for r in b["records"] if r["kind"] == "round"]
+        self.assertEqual(len(py_rounds), 2)
+        self.assertEqual(len(py_rounds), len(go_rounds))
+        for first, second in zip(py_rounds, go_rounds):
+            for key in ("round", "texts", "passed", "failed", "blamed", "cleared", "edges", "reasons"):
+                self.assertEqual(first[key], second[key], f"round {first['round']}: {key}")
+            self.assertAlmostEqual(first["mean_rating"], second["mean_rating"], places=9)
+            self.assertAlmostEqual(first["severity_mean"], second["severity_mean"], places=9)
+
+        # the same report card
+        for key in ("rounds", "reviewed", "blamed", "cleared", "edges", "reasons"):
+            self.assertEqual(a["report"][key], b["report"][key], key)
+        self.assertAlmostEqual(a["report"]["mean_rating"], b["report"]["mean_rating"], places=9)
+
+        # and the same negative network on disk
+        py_doc = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_doc = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual(py_doc["format"], go_doc["format"])
+        self.assertEqual(py_doc["graph"]["nodes"]["labels"], go_doc["graph"]["nodes"]["labels"])
+        self.assertEqual(py_doc["graph"]["edges"]["blame"], go_doc["graph"]["edges"]["blame"])
+        self.assertEqual(py_doc["graph"]["edges"]["fails"], go_doc["graph"]["edges"]["fails"])
+        self.assertEqual(sorted(r["reason"] for r in py_doc["log"]),
+                         sorted(r["reason"] for r in go_doc["log"]))
+        self.assertEqual({r["source"] for r in py_doc["log"]}, {"critic"})
+        self.assertEqual({r["source"] for r in go_doc["log"]}, {"critic"})
+
+    def test_the_positive_model_comes_out_untouched_on_both_sides(self):
+        before = (load_json(self.py_path), load_json(self.go_path))
+        options = ("negative", "auto", "--rounds", 1, "--count", 3, "--max-length", 40)
+        py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(before[0], load_json(self.py_path))
+        self.assertEqual(before[1], load_json(self.go_path))
+
+    def test_both_reviews_mark_the_same_given_texts(self):
+        texts = ["the cat sat on the mat", "xxxx xxxx xxxx"]
+        options = ("ollama", "review", "--threshold", 6, *sum((("--text", t) for t in texts), ()))
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual([r["verdict"] for r in a["reviews"]], [r["verdict"] for r in b["reviews"]])
+        self.assertEqual([r["rating"] for r in a["reviews"]], [r["rating"] for r in b["reviews"]])
+        self.assertEqual(a["good"], b["good"])
+        self.assertEqual(a["bad"], b["bad"])
+
+
+class TestGoToolsParity(unittest.TestCase):
+    """The tools both sides offer, and the text format the network calls them in."""
+
+    def setUp(self):
+        self.py_model = os.path.join(TMP.name, "tools_py.count.json")
+        self.go_model = os.path.join(TMP.name, "tools_go.count.json")
+
+    def test_the_same_tools_with_the_same_schemas(self):
+        a = py("tools", "list", "--offline", model=self.py_model)
+        b = go("tools", "list", "--offline", model=self.go_model)
+        self.assertEqual(a["tools"], b["tools"])
+        a = py("tools", "list", model=self.py_model)
+        b = go("tools", "list", model=self.go_model)
+        self.assertEqual([t["name"] for t in a["tools"]], [t["name"] for t in b["tools"]])
+        self.assertEqual([t["signature"] for t in a["tools"]], [t["signature"] for t in b["tools"]])
+        self.assertEqual(a["tools"], b["tools"])  # descriptions, parameters, defaults and all
+        a = py("tools", "describe", "--tool", "web_fetch", model=self.py_model)
+        b = go("tools", "describe", "--tool", "web_fetch", model=self.go_model)
+        self.assertEqual(a["schema"], b["schema"])  # what the LLM is handed for tool calling
+
+    def test_the_calculator_answers_the_same(self):
+        for expression in ("2 * (3 + 4)", "sqrt(841)", "7 / 2", "7 // 2", "-7 % 3", "round(2.5)",
+                           "round(3.14159, 2)", "min(3, 1, 2)", "sum([1, 2, 3])", "2 ^ 8", "1 < 2",
+                           "abs(-3)", "int(3.9)", "float(3)", "log(100, 10)", "hypot(3, 4)", "0.1 + 0.2"):
+            a = py("tools", "call", "--tool", "calculator", "--arg", f"expression={expression}", model=self.py_model)
+            b = go("tools", "call", "--tool", "calculator", "--arg", f"expression={expression}", model=self.go_model)
+            self.assertEqual((a["ok"], a["output"]), (b["ok"], b["output"]), expression)
+        # both refuse the same expressions, and say so on stderr with exit 1
+        for bad in ("10 / 0", "open('x')", "nosuchname"):
+            args = ("tools", "call", "--tool", "calculator", "--arg", f"expression={bad}")
+            self.assertIn("calculator", py(*args, model=self.py_model, expect=1)["error"], bad)
+            self.assertIn("calculator", go(*args, model=self.go_model, expect=1)["error"], bad)
+
+    def test_a_call_is_written_and_read_the_same(self):
+        """The text format is the contract: a call one side writes is the call the other reads."""
+        written = 'calculator {"expression": "6*7"}'
+        a = py("tools", "call", "--call", written, model=self.py_model)
+        b = go("tools", "call", "--call", written, model=self.go_model)
+        self.assertEqual((a["tool"], a["arguments"], a["output"]), (b["tool"], b["arguments"], b["output"]))
+        # the lenient reader: a bare value, key=value pairs and a truncated call all arrive the same
+        for raw in ("calculator 5*5", "calculator expression=2+2", 'calculator {"expression": "9"'):
+            a = py("tools", "call", "--call", raw, model=self.py_model)
+            b = go("tools", "call", "--call", raw, model=self.go_model)
+            self.assertEqual((a["arguments"], a["output"]), (b["arguments"], b["output"]), raw)
+
+
+class TestGoCodeGenParity(unittest.TestCase):
+    """One fake teacher, both code-generation trainers: the same prompts, the same attempts, the same solutions."""
+
+    def setUp(self):
+        try:  # the fake Ollama of the codegen tests plays teacher and judge for both sides
+            from test_codegen import start_fake
+        except ImportError:
+            from tests.test_codegen import start_fake
+        self.fake = start_fake(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_CODEGEN_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "codegen_py.count.json")
+        self.go_path = os.path.join(TMP.name, "codegen_go.count.json")
+        for path in (self.py_path, self.go_path):
+            for name in (path, path.replace(".count.json", ".count.negative.json")):
+                if os.path.exists(name):
+                    os.remove(name)
+        self.problems = os.path.join(TMP.name, "codegen_problems.txt")
+        with open(self.problems, "w", encoding="utf-8") as fh:
+            fh.write("Print the word hello.\n")
+        # the teacher's first program does not run; its fix does
+        self.script = ["```python\nprint(hello)\n```", '```python\nprint("hello")\n```']
+
+    def prompts(self):
+        """Every prompt so far, with the two things in them that cannot match masked out: the sandbox's own
+        scratch directory (a fresh one per run, named in the tracebacks) and how long a program took."""
+        out = []
+        for body in self.fake.requests:
+            if not body:
+                continue
+            prompt = re.sub(r"radixnet-sandbox-\w+", "radixnet-sandbox-X", body.get("prompt", ""))
+            out.append(re.sub(r"exit code (-?\d+), [\d.]+s", r"exit code \1, Ts", prompt))
+        return out
+
+    def test_both_trainers_ask_the_same_and_solve_the_same(self):
+        self.fake.solutions = list(self.script)
+        options = ("codegen", "--problems", self.problems, "--phase", "teacher", "--teacher-attempts", 2,
+                   "--sandbox-timeout", 20, "--blame")
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.fake.requests.clear()
+        self.fake.solutions = list(self.script)
+        b = go(*options, model=self.go_path, env=self.env)
+        go_prompts = self.prompts()
+
+        # the same conversation with the teacher and the judge, prompt for prompt
+        self.assertEqual(len(py_prompts), len(go_prompts))
+        for i, (first, second) in enumerate(zip(py_prompts, go_prompts)):
+            self.assertEqual(first, second, f"call {i} differs between the two trainers")
+        self.assertGreaterEqual(len(py_prompts), 3)  # write, judge the fix, judge again
+
+        # the same solution, found the same way
+        self.assertEqual(a["solutions"], b["solutions"])
+        self.assertEqual(a["solutions"], {"p1": 'Print the word hello.\nprint("hello")\n'})
+        self.assertEqual((a["solved"], b["solved"]), (1, 1))
+
+        # and the rejected program blamed the same reason on both sides
+        py_negative = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_negative = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual([r["reason"] for r in a["negative"]["reasons"]],
+                         [r["reason"] for r in b["negative"]["reasons"]])
+        self.assertEqual(py_negative["graph"]["weights"]["reasons"], go_negative["graph"]["weights"]["reasons"])
+        self.assertEqual(py_negative["graph"]["edges"]["reasons"], go_negative["graph"]["edges"]["reasons"])
+
+    def test_both_sandboxes_report_the_same_failure(self):
+        """The sandbox is the same Python bootstrap on both sides, so a crash reads the same."""
+        self.fake.solutions = ["```python\nraise ValueError('boom')\n```"]
+        options = ("codegen", "--problems", self.problems, "--phase", "teacher", "--teacher-attempts", 1,
+                   "--sandbox-timeout", 20)
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.solutions = ["```python\nraise ValueError('boom')\n```"]
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual((a["solved"], b["solved"]), (0, 0))
+        py_record = [r for r in a["records"] if r["kind"] == "problem"][0]
+        go_record = [r for r in b["records"] if r["kind"] == "problem"][0]
+        self.assertEqual(py_record["issues"], go_record["issues"])
+        self.assertEqual(py_record["correct"], go_record["correct"])
+
+
+class TestGoMediaParity(unittest.TestCase):
+    """The media text formats: both sides must encode the same recording and the same picture identically.
+
+    This matters more than it looks.  The utterance token is a digest of the
+    waveform text and the token is *in the text the model trains on*, so if the
+    two sides encoded a recording differently the same file would teach two
+    different things and the "one model, two languages" guarantee would quietly
+    stop holding.
+    """
+
+    def setUp(self):
+        self.wav = os.path.join(TMP.name, "probe.wav")
+        self.png = os.path.join(TMP.name, "probe.png")
+        self.model = os.path.join(TMP.name, "media.count.json")
+        for path in (self.model, self.model.replace(".count.json", ".count.negative.json")):
+            if os.path.exists(path):
+                os.remove(path)
+        from radixnet import speech
+        rate, seconds = 8000, 0.05
+        samples = array.array("f", [0.6 * math.sin(2 * math.pi * 220 * i / rate) for i in range(int(rate * seconds))])
+        with open(self.wav, "wb") as fh:
+            fh.write(speech.wav_bytes(samples, rate))
+        with open(self.png, "wb") as fh:
+            fh.write(_gradient_png(64, 64))
+
+    def test_both_sides_encode_the_same_utterance_identically(self):
+        options = ("speech", "teach", self.wav, "--text", "the cat sat on the mat", "--rate", 8000)
+        a = py(*options, model=self.model)
+        b = go(*options, model=self.model)
+        self.assertEqual(a["token"], b["token"], "the utterance token must match: it is in the trained text")
+        self.assertEqual(a["texts"], b["texts"])
+        self.assertEqual(a["audio"]["codec"], b["audio"]["codec"])
+        self.assertEqual(a["audio"]["samples"], b["audio"]["samples"])
+        self.assertEqual(a["audio"]["bytes"], b["audio"]["bytes"])
+
+    def test_each_side_decodes_the_other_s_waveform(self):
+        text = py("speech", "teach", self.wav, "--rate", 8000, model=self.model)["texts"][0]
+        out_py = os.path.join(TMP.name, "back_py.wav")
+        out_go = os.path.join(TMP.name, "back_go.wav")
+        a = py("speech", "decode", "--text", text, "--out", out_py, model=self.model)
+        b = go("speech", "decode", "--text", text, "--out", out_go, model=self.model)
+        self.assertEqual((a["codec"], a["rate"], a["samples"]), (b["codec"], b["rate"], b["samples"]))
+        self.assertEqual(load_bytes(out_py), load_bytes(out_go), "the decoded WAV must be identical")
+
+    def test_both_sides_read_the_same_image_text(self):
+        """The image *format* is shared: each side parses the other's text to the same bytes.
+
+        The pixel reduction is not: Python's thumbnail encoder resamples with
+        Pillow's Lanczos filter and Go's with a box filter, so the same source
+        image gives two different (equally valid) texts.  Both sides read, train
+        on, predict and decode either one - what differs is only which bytes a
+        given picture turns into, and only for the ``tiny`` encoder.
+        """
+        from radixnet import vision
+
+        encoded = go("image", "encode", self.png, "--size", 64, "--encoder", "tiny", model=self.model)
+        self.assertEqual(encoded["encoder"], "tiny")
+        self.assertEqual(encoded["latent_shape"], [3, 8, 8])
+        # Python reads what Go wrote, byte for byte (parse_text needs no Pillow)
+        name, width, height, payload, repaired = vision.parse_text(encoded["text"])
+        self.assertEqual((name, width, height, repaired), ("tiny", 64, 64, False))
+        self.assertEqual(len(payload), encoded["bytes"])
+        # and Go reads what Python packs
+        text = vision.pack_text("tiny", 64, 64, payload)
+        self.assertEqual(text, encoded["text"])
+
+    def test_both_recall_tutors_mark_the_same(self):
+        py("--kind", "count", "--seed", 1, "speech", "teach", self.wav, "--text", "hello there",
+           "--rate", 8000, "--train", "--epochs", 4, model=self.model)
+        options = ("speech", "tutor", self.wav, "--text", "hello there", "--rate", 8000, "--length", 120)
+        a = py(*options, model=self.model)
+        b = go(*options, model=self.model)
+        self.assertEqual(len(a["lessons"]), len(b["lessons"]))
+        for first, second in zip(a["lessons"], b["lessons"]):
+            self.assertEqual(first["grade"]["error"], second["grade"]["error"])
+            self.assertEqual(first["grade"]["passed"], second["grade"]["passed"])
+            self.assertAlmostEqual(first["grade"]["score"], second["grade"]["score"], places=9)
+            self.assertEqual(first["grade"]["facts"]["expected_bytes"], second["grade"]["facts"]["expected_bytes"])
+            self.assertAlmostEqual(first["grade"]["facts"]["agreement"], second["grade"]["facts"]["agreement"],
+                                   places=9)
+            self.assertEqual(first["grade"]["comment"], second["grade"]["comment"])
+        self.assertEqual(a["report"]["passed"], b["report"]["passed"])
+        self.assertAlmostEqual(a["report"]["mean_score"], b["report"]["mean_score"], places=9)
+
+
+def _gradient_png(width, height):
+    """A deterministic RGB gradient as a PNG, built by hand so the test needs no Pillow."""
+    rows = b"".join(
+        b"\x00" + b"".join(bytes(((x * 255) // width, (y * 255) // height, 128)) for x in range(width))
+        for y in range(height)
+    )
+
+    def chunk(tag, body):
+        payload = tag + body
+        return struct.pack(">I", len(body)) + payload + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b""))
+
+
+def load_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
 
 
 class TestGoServer(unittest.TestCase):
@@ -719,8 +1122,14 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))
         status, doc, _ = self.client.post("/api/model/select", {"kind": "radix"})
         self.assertEqual(status, 400)
-        # Python-only tabs are told so; unknown endpoints and wrong methods behave like the Python server
-        status, doc, _ = self.client.get("/api/evolve/history")
+        # what the Go server now serves too: evolve, the Ollama corpus / review, the automatic loop, images,
+        # speech, code generation and tool use
+        for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history",
+                     "/api/images", "/api/speech", "/api/codegen/history", "/api/tools", "/api/agent/history"):
+            status, doc, _ = self.client.get(path)
+            self.assertEqual(status, 200, f"{path}: {doc}")
+        # what is still Python-only is told so; unknown endpoints and wrong methods behave like the Python server
+        status, doc, _ = self.client.post("/api/schedule/preview", {"lr_schedule": "lr"})
         self.assertEqual(status, 404)
         self.assertIn("Go server", doc["error"])
         status, doc, _ = self.client.get("/api/nope")

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
-import { asArray, fmtInt, fmtNum, fmtTime, parseInteger, parseNumber, splitLines } from "../util.js";
+import { asArray, fmtCounter, fmtInt, fmtNum, fmtTime, parseInteger, parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
@@ -495,23 +495,24 @@ export default function NegativePanel({ status }) {
         </div>
         <dl className="kv">
           <dt>failures</dt>
-          <dd>{fmtInt(stats.failures_total)}</dd>
+          <dd>{fmtCounter(stats.failures_total, stats.failures_total_resets)}</dd>
           <dt>blame on edges</dt>
           <dd>{fmtNum(stats.edge_blame_total, 2)}</dd>
           <dt>cleared</dt>
-          <dd>{fmtInt(stats.cleared_total)}</dd>
+          <dd>{fmtCounter(stats.cleared_total, stats.cleared_total_resets)}</dd>
           <dt>nodes / edges</dt>
           <dd>
             {fmtInt(stats.nodes)} / {fmtInt(stats.edges)}
           </dd>
           <dt>judgements</dt>
           <dd>
-            {fmtInt(stats.judgements)} ({fmtInt(stats.rejected)} rejected)
+            {fmtCounter(stats.judgements, stats.judgements_resets)} (
+            {fmtCounter(stats.rejected, stats.rejected_resets)} rejected)
           </dd>
           <dt>sources</dt>
           <dd>
             {Object.entries((stats.sources && typeof stats.sources === "object" ? stats.sources : {}))
-              .map(([k, v]) => `${k}=${v}`)
+              .map(([k, v]) => `${k}=${fmtCounter(v, (stats.sources_resets || {})[k])}`)
               .join(", ") || "–"}
           </dd>
           <dt>file</dt>
@@ -542,7 +543,7 @@ export default function NegativePanel({ status }) {
                   <tr key={r.reason}>
                     <td>{r.reason}</td>
                     <td>{fmtNum(r.blame, 2)}</td>
-                    <td>{fmtInt(r.fails)}</td>
+                    <td>{fmtCounter(r.fails, r.fails_resets)}</td>
                     <td>{fmtInt(r.edges)}</td>
                     <td>{fmtNum(r.share, 2)}</td>
                     <td>

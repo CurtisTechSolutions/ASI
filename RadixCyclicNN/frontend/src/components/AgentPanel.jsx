@@ -95,7 +95,10 @@ export default function AgentPanel({ status }) {
   const [posEpochs, setPosEpochs] = useState("3");
   const [negLr, setNegLr] = useState("0.5");
   const [posLr, setPosLr] = useState("0.1");
+  const [strength, setStrength] = useState("1");
   const [agentModel, setAgentModel] = useState("");
+  // the count / reward model has no learning rates: it pushes by a strength
+  const countKind = Boolean(status && status.kind === "count");
   const [formError, setFormError] = useState(null);
   const [tools, setTools] = useState(null);
   const [toolsError, setToolsError] = useState(null);
@@ -153,6 +156,8 @@ export default function AgentPanel({ status }) {
       pos_epochs: parseInteger(posEpochs, 3),
       neg_lr: parseNumber(negLr, 0.5),
       pos_lr: parseNumber(posLr, 0.1),
+      // the count / reward model pushes by a strength rather than a learning rate (2NRL, the Ratings card)
+      ...(countKind ? { strength: parseNumber(strength, 1) } : {}),
       ...(agentModel.trim() ? { agent_model: agentModel.trim() } : {}),
     };
   }
@@ -410,7 +415,14 @@ export default function AgentPanel({ status }) {
         </fieldset>
         <div className="row">
           <NumberField label="Negative epochs" value={negEpochs} onChange={setNegEpochs} min={0} step={1} disabled={running} />
-          <NumberField label="Negative lr" value={negLr} onChange={setNegLr} min={0} disabled={running} />
+          <NumberField
+            label={countKind ? "Strength" : "Negative lr"}
+            hint={countKind ? "how hard 2NRL pushes" : undefined}
+            value={countKind ? strength : negLr}
+            onChange={countKind ? setStrength : setNegLr}
+            min={0}
+            disabled={running}
+          />
           <NumberField label="Positive epochs" value={posEpochs} onChange={setPosEpochs} min={0} step={1} disabled={running} />
           <NumberField label="Positive lr" value={posLr} onChange={setPosLr} min={0} disabled={running} />
         </div>
