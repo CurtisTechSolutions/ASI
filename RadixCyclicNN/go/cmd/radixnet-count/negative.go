@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,106 @@ func openNegative(required bool) *radixnet.Model {
 		fail("%v", err)
 	}
 	return configure(m)
+}
+
+// noGuard turns the guard off for one command: print what the positive model
+// wrote, whatever the negative network says.
+var noGuard = false
+
+// guardConfig is how strictly the guard filters (the flags below set it).
+var guardConfig = radixnet.DefaultFilterConfig()
+
+// addGuardFlags registers the guard on a command that writes something: the
+// negative network filters its output by default.
+func addGuardFlags(fs *flag.FlagSet) {
+	addNegativeFlag(fs)
+	fs.BoolVar(&noGuard, "no-guard", noGuard,
+		"do not filter: print what the positive model wrote, whatever the negative network says")
+	fs.Func("threshold", "veto at this risk (blame per transition); default: the negative model's own", func(v string) error {
+		f, err := strconv.ParseFloat(v, 64)
+		guardConfig.Threshold = &f
+		return err
+	})
+	fs.Func("min-coverage", "share of a text that must be known failure before any rule may veto it", func(v string) error {
+		f, err := strconv.ParseFloat(v, 64)
+		guardConfig.MinCoverage = &f
+		return err
+	})
+	fs.IntVar(&guardConfig.OverSample, "over-sample", guardConfig.OverSample,
+		"generate: candidates drawn per wanted text, so the guard has something to choose from")
+}
+
+// openGuard is the negative network guarding positive's output, or nil when
+// there is nothing to guard with: --no-guard was given, there is no negative
+// model file beside the model, or the one there has never been taught a
+// failure and so would veto nothing.  The pair on every answer this program
+// prints (radixnet.Filter): the positive model writes, the negative one
+// vetoes what it recognises as a failure the tutor has already corrected.
+func openGuard(positive *radixnet.Model) *radixnet.Filter {
+	if noGuard || positive.IsNegative() {
+		return nil
+	}
+	path := negativeFile()
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	negative := openNegative(true)
+	pair, err := radixnet.NewFilter(positive, negative, guardConfig)
+	if err != nil {
+		fail("%v", err)
+	}
+	if !pair.Ready() {
+		return nil
+	}
+	note("guard: %s (%.4f blame over %d reasons)", path, negative.G.Neg.TotalBlame, len(negative.G.Neg.ReasonNames))
+	return pair
+}
+
+// printVetoes reports the guard's work: what it let through, what it stopped
+// and why.
+func printVetoes(verdicts []*radixnet.FilterVerdict, what string) {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
+	}
+	fmt.Printf("\nguard: %d of %d %s passed the negative network\n", len(verdicts)-len(rejected), len(verdicts), what)
+	if len(rejected) == 0 {
+		return
+	}
+	fmt.Printf("%-8s %8s %8s %8s  %-18s %s\n", "rule", "risk", "peak", "ratio", "reason", "vetoed")
+	for _, verdict := range rejected {
+		rule := "-"
+		if verdict.Rule != nil {
+			rule = *verdict.Rule
+		}
+		reason := "-"
+		if len(verdict.Reasons) > 0 {
+			reason = verdict.Reasons[0].Reason
+		}
+		fmt.Printf("%-8s %8.4f %8.4f %8.4f  %-18s %s\n", rule, verdict.Risk, verdict.Peak, verdict.Ratio, reason,
+			quote(clip(verdict.Text, 46)))
+	}
+}
+
+// guardDoc is the guard's report for --json: every veto, with the reason and
+// the fragment behind it.
+func guardDoc(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
+	}
+	out := map[string]any{
+		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
 }
 
 func saveNegative(m *radixnet.Model) string {

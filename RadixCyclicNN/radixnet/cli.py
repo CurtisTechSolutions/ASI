@@ -764,6 +764,13 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     )
     options.update(k=args.k, beam=args.beam)
     result = model.predict(args.prefix, **options)
+    pair = open_guard(args, console, model)
+    guard: dict | None = None
+    if pair is not None:
+        # the guard re-ranks what the search already offered: the best continuation it does not veto
+        result, verdicts = pair.rank(args.prefix, result)
+        guard = _guard_doc(pair, verdicts, candidates=len(verdicts),
+                           kept=sum(v["decision"] != "reject" for v in verdicts))
     console.pairs([
         ("model", kind_label(model)),
         ("prefix", quote(args.prefix)),
@@ -810,17 +817,32 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
             top=[{**r.to_dict(), "probability": path_probability(r)} for r in result.top],
             bottom=[{**r.to_dict(), "probability": path_probability(r)} for r in result.bottom],
         )
+    if guard is not None:
+        _print_vetoes(console, guard["verdicts"], "continuations")
+    doc["guard"] = guard
     return doc
 
 
 def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
-    results = model.generate(
-        max_length=args.max_length, mode=args.mode, temperature=args.temperature, count=args.count, seed=args.seed,
+    pair = open_guard(args, console, model)
+    options = dict(
+        max_length=args.max_length, mode=args.mode, temperature=args.temperature, seed=args.seed,
         prefix=args.prefix, step_penalty=args.step_penalty, beam=args.beam,
     )
+    guard: dict | None = None
+    if pair is None:
+        results = model.generate(count=args.count, **options)
+    else:
+        # the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back
+        outcome = pair.generate(count=args.count, **options)
+        results = outcome["results"]
+        guard = _guard_doc(pair, outcome["verdicts"], candidates=outcome["candidates"], asked=outcome["asked"],
+                           kept=len(outcome["kept"]), rate=outcome["rate"])
     rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
     console.table(("#", "cost", "prob", "end", "text"), rows)
+    if guard is not None:
+        _print_vetoes(console, guard["verdicts"])
     return {
         "samples": [{**r.to_dict(), "probability": path_probability(r)} for r in results],
         "count": len(results),
@@ -828,6 +850,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         "prefix": args.prefix,
         "max_length": args.max_length,
         "temperature": args.temperature,
+        "guard": guard,
     }
 
 
@@ -839,13 +862,24 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
             raise CliError(f"partner model file not found: {args.partner}")
         partner = load_model(args.partner, backend=args.backend, device=args.device)
     speakers = [name.strip() for name in args.speakers.split(",") if name.strip()] or list(DEFAULT_SPEAKERS)
-    turns = model.converse(
-        args.opening, args.turns, mode=args.mode, max_length=args.max_length, context=args.context,
-        temperature=args.temperature, k=args.k, beam=args.beam, step_penalty=args.step_penalty, seed=args.seed,
-        speakers=speakers, partner=partner, avoid_repeats=not args.allow_repeats,
+    pair = open_guard(args, console, model)
+    options = dict(
+        mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
+        beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
+        avoid_repeats=not args.allow_repeats,
     )
+    guard: dict | None = None
+    if pair is None:
+        turns = model.converse(args.opening, args.turns, **options)
+    else:
+        # a reply the negative network vetoes is left unsaid; the voice looks for another one
+        outcome = pair.converse(args.opening, args.turns, **options)
+        turns = outcome["turns"]
+        guard = _guard_doc(pair, outcome["verdicts"], refusals=outcome["vetoed"])
     for turn in turns:
         flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given), ("repeat", turn.repeat)) if on]
+        if turn.vetoed:
+            flags.append(f"{turn.vetoed} vetoed")
         console.say(f"{turn.speaker}: {turn.text}")
         detail = f"    cost {fmt(turn.cost)}  p {fmt(turn.probability)}"
         if turn.context:
@@ -855,7 +889,10 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         console.say(detail)
     if not turns:
         console.say("(nothing to say: train the model first)")
+    if guard is not None:
+        _print_vetoes(console, guard["verdicts"], "replies")
     return {
+        "guard": guard,
         "turns": [t.to_dict() for t in turns],
         "count": len(turns),
         "speakers": speakers,
@@ -1555,6 +1592,85 @@ def open_negative(args: argparse.Namespace, console: Console, *, required: bool)
     return NegativeNet(seed=seed), Origin("new", None, f"seed {seed}")
 
 
+def add_guard_flags(p: argparse.ArgumentParser) -> None:
+    """``--no-guard`` / ``--negative`` / ``--over-sample``: the negative network on the way out.
+
+    Every command that writes something runs the pair by default - the
+    positive model writes, the negative one vetoes what it recognises as a
+    failure the tutor has corrected (:func:`open_guard`).
+    """
+    group = p.add_argument_group("the guard (the negative network filters the output)")
+    group.add_argument("--no-guard", action="store_true",
+                       help="do not filter: print what the positive model wrote, whatever the negative network says")
+    group.add_argument("--negative", metavar="FILE",
+                       help=f"the negative network to filter with (default: beside --model, {DEFAULT_NEGATIVE_MODEL})")
+    group.add_argument("--threshold", type=float, metavar="RISK",
+                       help="veto at this risk (blame per transition); default: the negative model's own")
+    group.add_argument("--min-coverage", type=float, metavar="SHARE",
+                       help="share of a text that must be known failure before any rule may veto it")
+    group.add_argument("--over-sample", type=pos_int, metavar="N", default=3,
+                       help="generate: candidates drawn per wanted text, so the guard has something to choose from")
+
+
+def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel) -> Any:
+    """The negative network guarding ``positive``'s output, or ``None`` when there is nothing to guard with.
+
+    The pair on every answer this program prints (see :mod:`radixnet.duo`):
+    the positive model writes and the negative one, at :func:`negative_path`,
+    vetoes what it recognises as a failure the tutor has already corrected.
+    ``None`` - the output goes out as written - when ``--no-guard`` was given,
+    when there is no negative model file beside the model, or when the one
+    there has never been taught a failure and so would veto nothing.
+    """
+    from .duo import FilterConfig, NegativeFilter
+    from .negative import NegativeNet
+
+    if getattr(args, "no_guard", False) or isinstance(positive, NegativeNet):
+        return None
+    path = negative_path(args)
+    if not path or not os.path.isfile(path):
+        return None
+    negative = load_model(path, backend=args.backend, device=args.device)
+    if not isinstance(negative, NegativeNet):
+        raise CliError(f"{path} holds a {negative.kind} model, not a negative one")
+    pair = NegativeFilter(positive, negative, FilterConfig(
+        threshold=getattr(args, "threshold", None), min_coverage=getattr(args, "min_coverage", None),
+        over_sample=getattr(args, "over_sample", None) or 3,
+    ))
+    if not pair.ready:
+        return None
+    g = negative.graph
+    console.note(f"guard: {path} ({fmt(g.total_blame)} blame over {len(g.reasons)} reasons)")
+    return pair
+
+
+def _print_vetoes(console: Console, verdicts: list[dict], what: str = "candidates") -> None:
+    """The guard's work: what it let through, what it stopped and why."""
+    rejected = [v for v in verdicts if v["decision"] == "reject"]
+    console.say()
+    console.say(f"guard: {len(verdicts) - len(rejected)} of {len(verdicts)} {what} passed the negative network")
+    if rejected:
+        console.table(
+            ("rule", "risk", "peak", "ratio", "reason", "vetoed"),
+            [[v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
+              v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))] for v in rejected],
+        )
+
+
+def _guard_doc(pair: Any, verdicts: list[dict], **extra: Any) -> dict:
+    """The guard's report for ``--json``: every veto, with the reason and the fragment behind it."""
+    rejected = [v for v in verdicts if v["decision"] == "reject"]
+    return {
+        "on": True,
+        "vetoed": len(rejected),
+        "rejected": rejected,
+        "verdicts": verdicts,
+        "negative": pair.negative.stats(),
+        "config": pair.describe()["config"],
+        **extra,
+    }
+
+
 def _negative_texts(args: argparse.Namespace, what: str) -> list[str]:
     texts = list(getattr(args, "text", None) or [])
     if getattr(args, "data", None):
@@ -1705,6 +1821,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
             count=args.count, mode=args.mode, max_length=args.max_length, temperature=args.temperature,
             prefix=args.prefix, seed=args.seed, step_penalty=args.step_penalty,
         )
+        doc.pop("results")  # the walks behind the texts; the document carries the texts
     console.say()
     console.table(
         ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
@@ -3147,6 +3264,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    add_guard_flags(p)
     p.set_defaults(handler=cmd_predict)
 
     # generate -------------------------------------------------------------
@@ -3163,6 +3281,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
     p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
+    add_guard_flags(p)
     p.set_defaults(handler=cmd_generate)
 
     # converse -------------------------------------------------------------
@@ -3186,6 +3305,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speakers", default=",".join(DEFAULT_SPEAKERS), metavar="A,B", help="names of the voices")
     p.add_argument("--partner", metavar="FILE", help="a second model file that speaks the second voice")
     p.add_argument("--allow-repeats", action="store_true", help="do not skip continuations the conversation already heard")
+    add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 
     # score ----------------------------------------------------------------

@@ -148,6 +148,10 @@ type Service struct {
 	started   time.Time
 	// negative is the negative network this server filters with (nil until first used)
 	negative *radixnet.Model
+	// negMu guards that lazy load: the output paths reach it under the read lock
+	negMu sync.Mutex
+	// guardConfig is how strictly the negative network guards the output paths
+	guardConfig radixnet.FilterConfig
 	// the teacher defaults of the tutor endpoints and the records of every tutor run
 	ollamaURL     string
 	ollamaModel   string
@@ -190,7 +194,8 @@ func NewService(opts Options) (*Service, error) {
 	m.Workers = workers
 	m.G.Workers = workers
 	m.Exact = opts.Exact
-	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact, started: time.Now(), logf: opts.Log}
+	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact,
+		started: time.Now(), logf: opts.Log, guardConfig: radixnet.DefaultFilterConfig()}
 	s.ollamaURL = radixnet.DefaultOllamaURL()
 	if url, err := radixnet.NormaliseOllamaURL(opts.OllamaURL); err == nil {
 		s.ollamaURL = url
@@ -812,21 +817,109 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 }
 
 // Predict / Generate / Score / Converse run under the read lock.
+//
+// Every answer they hand out goes through the guard: the positive model
+// writes and the negative network, built from nothing but the tutor's
+// failures, vetoes what it recognises (radixnet.Filter).  Each returns the
+// guard's report alongside the answer - nil when nothing guarded it.
 
-func (s *Service) Predict(prefix string, o radixnet.PredictOptions) (*radixnet.Prediction, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Predict(prefix, o) })
-	if err != nil {
-		return nil, badRequest("%v", err)
+// guard is the pair on the way out, or nil when there is nothing to guard
+// with: no negative network in memory and none saved beside the model, or one
+// that has never been taught a failure and would veto nothing.  An empty
+// negative network is never created here - an answer is not the place to
+// bring one into being.  Call it with the model lock held; the output paths
+// do.
+func (s *Service) guard() *radixnet.Filter {
+	negative := s.negative
+	if negative == nil {
+		path := s.negativePath()
+		if path == "" {
+			return nil
+		}
+		if _, err := os.Stat(path); err != nil {
+			return nil
+		}
+		var err error
+		if negative, err = s.negativeModel(); err != nil { // loads it from that file and parks it
+			return nil
+		}
 	}
-	return out.(*radixnet.Prediction), nil
+	pair, err := radixnet.NewFilter(s.model, negative, s.guardConfig)
+	if err != nil || !pair.Ready() {
+		return nil
+	}
+	return pair
 }
 
-func (s *Service) Generate(o radixnet.GenerateOptions) ([]*radixnet.PathResult, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Generate(o) })
-	if err != nil {
-		return nil, badRequest("%v", err)
+// guardReport is what the guard did, for the caller to show: the vetoes, with
+// the reason and the fragment behind each.
+func guardReport(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
 	}
-	return out.([]*radixnet.PathResult), nil
+	out := map[string]any{
+		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool) (*radixnet.Prediction, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		found, err := m.Predict(prefix, o)
+		if err != nil || !guard {
+			return found, err
+		}
+		if pair := s.guard(); pair != nil {
+			ranked, verdicts := pair.Rank(prefix, found) // the survivors, best first
+			kept := 0
+			for _, verdict := range verdicts {
+				if verdict.Decision != "reject" {
+					kept++
+				}
+			}
+			report = guardReport(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
+			return ranked, nil
+		}
+		return found, nil
+	})
+	if err != nil {
+		return nil, nil, badRequest("%v", err)
+	}
+	return out.(*radixnet.Prediction), report, nil
+}
+
+func (s *Service) Generate(o radixnet.GenerateOptions, guard bool) ([]*radixnet.PathResult, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		pair := (*radixnet.Filter)(nil)
+		if guard {
+			pair = s.guard()
+		}
+		if pair == nil {
+			return m.Generate(o)
+		}
+		count := o.Count
+		outcome, err := pair.Generate(count, o)
+		if err != nil {
+			return nil, err
+		}
+		report = guardReport(pair, outcome.Verdicts, map[string]any{
+			"candidates": outcome.Candidates, "kept": len(outcome.Kept), "asked": outcome.Asked, "rate": outcome.Rate,
+		})
+		return outcome.Results, nil
+	})
+	if err != nil {
+		return nil, nil, badRequest("%v", err)
+	}
+	return out.([]*radixnet.PathResult), report, nil
 }
 
 func (s *Service) Score(text string) radixnet.Score {
@@ -834,12 +927,29 @@ func (s *Service) Score(text string) radixnet.Score {
 	return out.(radixnet.Score)
 }
 
-func (s *Service) Converse(opening string, o radixnet.ConverseOptions) ([]*radixnet.Turn, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Converse(opening, o) })
+func (s *Service) Converse(opening string, o radixnet.ConverseOptions, guard bool) ([]*radixnet.Turn, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		pair := (*radixnet.Filter)(nil)
+		if guard {
+			pair = s.guard()
+		}
+		if pair == nil {
+			return m.Converse(opening, o)
+		}
+		outcome, err := pair.Converse(opening, o)
+		if err != nil {
+			return nil, err
+		}
+		// "vetoed" counts the distinct texts refused, "refusals" how often one was (a turn may be
+		// offered the same candidate again after its context was shortened)
+		report = guardReport(pair, outcome.Verdicts, map[string]any{"refusals": outcome.Vetoed})
+		return outcome.Turns, nil
+	})
 	if err != nil {
-		return nil, badRequest("%v", err)
+		return nil, nil, badRequest("%v", err)
 	}
-	return out.([]*radixnet.Turn), nil
+	return out.([]*radixnet.Turn), report, nil
 }
 
 // UploadTexts reads training texts from uploads (400 when uploads are disabled).

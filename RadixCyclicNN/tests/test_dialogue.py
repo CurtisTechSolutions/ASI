@@ -52,7 +52,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(d["speaker"], "A")
         self.assertEqual(set(d), {
             "index", "speaker", "text", "context", "reply", "cost", "probability", "reached_end", "fresh", "given",
-            "repeat", "candidates", "skipped", "labels", "node_ids", "step_costs",
+            "repeat", "candidates", "skipped", "vetoed", "labels", "node_ids", "step_costs",
         })
 
 

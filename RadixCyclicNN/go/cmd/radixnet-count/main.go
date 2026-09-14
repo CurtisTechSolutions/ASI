@@ -60,6 +60,12 @@ func subFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
+// note is a line about the run itself: it goes to stderr, so --json output
+// stays one document on stdout.
+func note(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
 func fail(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "radixnet-count: error: "+format+"\n", args...)
 	os.Exit(1)
@@ -403,6 +409,7 @@ func cmdPredict(args []string) {
 	toEnd := fs.Bool("to-end", false, "run to the end of a text")
 	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
+	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
 	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength}
@@ -410,8 +417,23 @@ func cmdPredict(args []string) {
 	if err != nil {
 		fail("%v", err)
 	}
+	var guard map[string]any
+	var verdicts []*radixnet.FilterVerdict
+	if pair := openGuard(m); pair != nil {
+		// the guard re-ranks what the search already offered: the best continuation it does not veto
+		kept := 0
+		p, verdicts = pair.Rank(*prefix, p)
+		for _, verdict := range verdicts {
+			if verdict.Decision != "reject" {
+				kept++
+			}
+		}
+		guard = guardDoc(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
+	}
 	if jsonMode {
-		emit(predictDoc(*prefix, p))
+		doc := predictDoc(*prefix, p)
+		doc["guard"] = guard
+		emit(doc)
 		return
 	}
 	fmt.Printf("prefix       %s\ncontinuation %s\nfull text    %s\ncost %.4f  p %.4g  path %s\n", quote(*prefix), quote(p.Text), quote(p.FullText), p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
@@ -427,6 +449,9 @@ func cmdPredict(args []string) {
 			fmt.Printf("  %2d %8.4f %10.4g %s\n", i+1, r.Cost, r.Probability(), quote(r.FullText))
 		}
 	}
+	if guard != nil {
+		printVetoes(verdicts, "continuations")
+	}
 }
 
 func cmdGenerate(args []string) {
@@ -439,6 +464,7 @@ func cmdGenerate(args []string) {
 	stepPenalty := fs.Float64("step-penalty", 0, "beam / dijkstra: extra cost per edge")
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
+	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
 	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam}
@@ -446,9 +472,23 @@ func cmdGenerate(args []string) {
 		s := seedFlag
 		opts.Seed = &s
 	}
-	results, err := m.Generate(opts)
-	if err != nil {
-		fail("%v", err)
+	var results []*radixnet.PathResult
+	var guard map[string]any
+	var verdicts []*radixnet.FilterVerdict
+	var err error
+	if pair := openGuard(m); pair == nil {
+		if results, err = m.Generate(opts); err != nil {
+			fail("%v", err)
+		}
+	} else {
+		// the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back
+		outcome, err := pair.Generate(*count, opts)
+		if err != nil {
+			fail("%v", err)
+		}
+		results, verdicts = outcome.Results, outcome.Verdicts
+		guard = guardDoc(pair, verdicts, map[string]any{"candidates": outcome.Candidates, "asked": outcome.Asked,
+			"kept": len(outcome.Kept), "rate": outcome.Rate})
 	}
 	if jsonMode {
 		samples := make([]map[string]any, 0, len(results))
@@ -456,7 +496,8 @@ func cmdGenerate(args []string) {
 			samples = append(samples, map[string]any{"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
 				"labels": r.Labels, "node_ids": r.NodeIDs, "step_costs": r.StepCosts, "expanded": r.Expanded, "reached_end": r.ReachedEnd})
 		}
-		emit(map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength, "temperature": *temperature})
+		emit(map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength,
+			"temperature": *temperature, "guard": guard})
 		return
 	}
 	fmt.Printf("%3s %9s %10s %4s  %s\n", "#", "cost", "prob", "end", "text")
@@ -466,6 +507,9 @@ func cmdGenerate(args []string) {
 			end = "yes"
 		}
 		fmt.Printf("%3d %9.4f %10.4g %4s  %s\n", i+1, r.Cost, r.Probability(), end, quote(r.Text))
+	}
+	if guard != nil {
+		printVetoes(verdicts, "candidates")
 	}
 }
 
@@ -779,6 +823,7 @@ func cmdConverse(args []string) {
 	partner := fs.String("partner", "", "a second model file that speaks the second voice")
 	allowRepeats := fs.Bool("allow-repeats", false, "do not skip continuations already heard")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
+	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
 	opts := radixnet.DefaultConverseOptions()
@@ -807,13 +852,26 @@ func cmdConverse(args []string) {
 		opts.Partner = p
 		partnerKind = "count"
 	}
-	turnsOut, err := m.Converse(*opening, opts)
-	if err != nil {
-		fail("%v", err)
+	var turnsOut []*radixnet.Turn
+	var guard map[string]any
+	var verdicts []*radixnet.FilterVerdict
+	var err error
+	if pair := openGuard(m); pair == nil {
+		if turnsOut, err = m.Converse(*opening, opts); err != nil {
+			fail("%v", err)
+		}
+	} else {
+		// a reply the negative network vetoes is left unsaid; the voice looks for another one
+		outcome, err := pair.Converse(*opening, opts)
+		if err != nil {
+			fail("%v", err)
+		}
+		turnsOut, verdicts = outcome.Turns, outcome.Verdicts
+		guard = guardDoc(pair, verdicts, map[string]any{"refusals": outcome.Vetoed})
 	}
 	if jsonMode {
 		emit(map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode, "opening": *opening,
-			"kind": "count", "partner_kind": partnerKind, "transcript": radixnet.Transcript(turnsOut)})
+			"kind": "count", "partner_kind": partnerKind, "transcript": radixnet.Transcript(turnsOut), "guard": guard})
 		return
 	}
 	for _, t := range turnsOut {
@@ -832,6 +890,9 @@ func cmdConverse(args []string) {
 		if t.Repeat {
 			flags = append(flags, "repeat")
 		}
+		if t.Vetoed > 0 {
+			flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))
+		}
 		if len(flags) > 0 {
 			detail += "  [" + strings.Join(flags, ", ") + "]"
 		}
@@ -839,6 +900,9 @@ func cmdConverse(args []string) {
 	}
 	if len(turnsOut) == 0 {
 		fmt.Println("(nothing to say: train the model first)")
+	}
+	if guard != nil {
+		printVetoes(verdicts, "replies")
 	}
 }
 

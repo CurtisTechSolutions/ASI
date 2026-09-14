@@ -56,7 +56,8 @@ RadixCyclicNN/
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
                             (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
-    duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
+    duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3),
+                            and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
@@ -688,6 +689,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
 * `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
+* `test_guard.py` — the guard (section 24.7): `ready` / `rank` / `converse`, the three service methods, the three routes and the three CLI commands, on by default and off on request.
 * `test_speech.py` — the text format (packing, the header found behind a token and before a transcript, repair of a
   cut-off prediction), unique tokens, `speech_texts`, both codecs (mu-law beats linear 8-bit on quiet audio, byte
   round trips), resampling / downmixing / normalising, every WAV sample format the reader accepts (PCM 8/16/24/32,
@@ -1755,6 +1757,60 @@ history also drives a refresh of the reason table, the stats and the journal bel
 as rounds land.  Tests: `tests/test_critic.py` — the config, one round, what reaches the negative network, the mark
 setting the severity, stopping between rounds, the report card, a real `OllamaClient` against the fake server, the
 job, the endpoint and the CLI.
+
+---
+
+### 24.7 The guard — the pair on every output path
+
+Section 24.3 built the pair and left it as something a caller had to *ask* for: the Negative tab, `negative filter`,
+`POST /api/negative/filter`.  Everything else — `generate`, `predict`, `converse` — still handed out whatever the
+positive model wrote, including the sentence the tutor had corrected an hour earlier.  The guard closes that: the
+two networks now work **in tandem on every answer**, and turning the filter *off* is what takes a flag.
+
+`ModelService.guard()` (Python) / `Service.guard()` (Go) builds the pair when there is something to guard with and
+returns `None`/`nil` otherwise — which is the whole of its judgement:
+
+* the **negative network is the active model** — it is generating *from* the failures, and there is no positive half
+  to guard;
+* there is **none in memory and none saved** beside the model path.  The guard never *creates* an empty negative
+  network: an answer is not the place to bring one into being (it would also park a model the caller never asked
+  for, and `/api/model` would start reporting it);
+* the one there **has never been taught a failure** (`NegativeFilter.ready` / `Filter.Ready()`, i.e.
+  `total_blame > 0`).  An empty network vetoes nothing, so a filter around one costs the over-sampling and buys
+  nothing.
+
+An unguarded answer is therefore exactly what it was before this section, byte for byte, and a `"guard": null` in
+the payload says so.  What each path does when there *is* a guard:
+
+| path | what the guard does |
+| --- | --- |
+| `generate` | `NegativeFilter.generate`: the model is asked for `count * over_sample` candidates and the survivors come back, cleanest first (a **stable** sort on `risk` alone, so among equally clean texts the model's own order wins — the veto re-ranks as little as it can).  Fewer than `count` texts is information, not an error |
+| `predict` | `NegativeFilter.rank` / `Filter.Rank`: the search has already run, so the guard *re-ranks* what it offered rather than asking for more — one judgement per continuation and no second search.  `top` keeps the survivors and the best of them becomes the prediction; when none survives the prediction is the prefix and nothing else (`expanded` still reports the search that ran) |
+| `converse` | `NegativeFilter.converse` / `Filter.Converse`: `dialogue.converse` gained a `veto` hook (`ConverseOptions.Veto` in Go) and a vetoed candidate is skipped exactly like one already said — except that it may not even be the fallback.  A turn whose every candidate is vetoed falls back as any dead end does (a shorter context, then a fresh text), and the conversation stops when there is nothing left that may be said.  Each `Turn` counts its own `vetoed` |
+
+Two things stayed deliberately outside it.  The **critic loop** (section 24.6) samples the positive model directly
+and must keep doing so: a reviewer that only ever saw what already passed the filter would have nothing to teach.
+The same goes for the tutor, evolve and the benchmark — the guard is on the way *out*, not on the way in.
+
+The answer always carries the guard's own report, so nothing is dropped silently: `{"on", "vetoed", "rejected"
+(the full verdicts), "verdicts", "negative" (its stats), "config"}` plus, per path, `candidates` / `kept` /
+`asked` / `rate` / `refusals`.  `NegativeFilter.generate` grew a `results` key for this — the walks behind the
+surviving texts, so a caller can still report cost, probability and path; it is popped before the explicit
+`/api/negative/filter` endpoint answers, and in Go `FilterOutcome.Results` is `json:"-"` for the same reason.
+
+* Python: `guard=False` on `ModelService.generate|predict|converse` and `{"guard": false}` on the three endpoints;
+  `--no-guard` on the `generate`, `predict` and `converse` CLI commands, with `--negative PATH`, `--threshold`,
+  `--min-coverage` and `--over-sample` beside it (`add_guard_flags` / `open_guard`).
+* Go: the same three service methods take a `guard bool` and return `(answer, report, error)`; the CLI has the same
+  flags (`addGuardFlags` / `openGuard`), and `negativeModel()` gained a `negMu` around its lazy load, because the
+  guard reaches it from the read-locked output path where several callers can arrive at once.
+* Frontend: `GuardNotice.jsx` under the Generate, Predict and Converse tabs — "the negative network judged N
+  candidates and vetoed M", with *why* opening the full verdicts and their blamed fragments — and a *Filter with
+  the negative network* checkbox on each of the three forms.
+* Tests: `tests/test_guard.py` (the filter's additions, the three service methods, the three routes, the three CLI
+  commands), `go/radixnet/guard_test.go`, `go/server/guard_test.go`, and
+  `tests/test_go_parity.py::TestGoNegativeParity` holds the two guards to the same vetoes, the same survivors and
+  the same order.
 
 ---
 

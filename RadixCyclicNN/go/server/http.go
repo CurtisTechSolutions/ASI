@@ -236,11 +236,11 @@ func init() {
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, guard (default on: the negative network vetoes the continuations it recognises as failures)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats, guard (default on: a reply the negative network vetoes is left unsaid)}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -562,7 +562,11 @@ func rPredict(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	p, err := rq.svc.Predict(prefix, o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	p, report, err := rq.svc.Predict(prefix, o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -578,7 +582,7 @@ func rPredict(rq *request) (int, any, error) {
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
-		"top": top, "bottom": bottom,
+		"top": top, "bottom": bottom, "guard": report,
 	}, nil
 }
 
@@ -622,7 +626,11 @@ func rGenerate(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	results, err := rq.svc.Generate(o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	results, report, err := rq.svc.Generate(o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -630,7 +638,7 @@ func rGenerate(rq *request) (int, any, error) {
 	for _, r := range results {
 		samples = append(samples, sampleDict(r))
 	}
-	return 200, map[string]any{"samples": samples}, nil
+	return 200, map[string]any{"samples": samples, "guard": report}, nil
 }
 
 func rConverse(rq *request) (int, any, error) {
@@ -692,14 +700,19 @@ func rConverse(rq *request) (int, any, error) {
 	if o.AvoidRepeats, err = f.flag("avoid_repeats", true); err != nil {
 		return 0, nil, err
 	}
-	turns, err := rq.svc.Converse(opening, o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	turns, report, err := rq.svc.Converse(opening, o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
 	if turns == nil {
 		turns = []*radixnet.Turn{}
 	}
-	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns, "count": len(turns)}, nil
+	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+		"count": len(turns), "guard": report}, nil
 }
 
 func rScore(rq *request) (int, any, error) {

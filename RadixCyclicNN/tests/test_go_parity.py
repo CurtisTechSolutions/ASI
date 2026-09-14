@@ -579,6 +579,44 @@ class TestGoNegativeParity(unittest.TestCase):
                          go(*peak, model=self.go_model)["verdicts"][0]["rule"])
 
 
+    def test_the_guard_vetoes_the_same_replies_on_both_sides(self):
+        """The pair on the ordinary output paths: both CLIs filter what they write, and agree on what to drop."""
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        a = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, model=self.py_model)
+        b = go("generate", "-count", 3, "-mode", "beam", "-max-length", 40, model=self.go_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        self.assertEqual(a["guard"]["asked"], b["guard"]["asked"])
+        self.assertEqual([v["text"] for v in a["guard"]["verdicts"]], [v["text"] for v in b["guard"]["verdicts"]])
+        self.assertEqual([v["decision"] for v in a["guard"]["verdicts"]], [v["decision"] for v in b["guard"]["verdicts"]])
+        self.assertEqual([v["why"] for v in a["guard"]["rejected"]], [v["why"] for v in b["guard"]["rejected"]])
+        # and both hand out what the positive model wrote when asked not to filter
+        a = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, "--no-guard", model=self.py_model)
+        b = go("generate", "-count", 3, "-mode", "beam", "-max-length", 40, "-no-guard", model=self.go_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        self.assertIsNone(a["guard"])
+        self.assertIsNone(b["guard"])
+
+    def test_the_guard_ranks_the_same_continuations_and_replies(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        a = py("predict", "--prefix", "the ", "--mode", "beam", "--k", 4, model=self.py_model)
+        b = go("predict", "-prefix", "the ", "-mode", "beam", "-k", 4, model=self.go_model)
+        self.assertEqual(a["continuation"], b["continuation"])
+        # the two CLIs name a continuation differently (text / continuation); full_text is the same in both
+        self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+        self.assertEqual(a["guard"]["kept"], b["guard"]["kept"])
+        a = py("converse", "--turns", 3, "--opening", "the the the the cat", model=self.py_model)
+        b = go("converse", "-turns", 3, "-opening", "the the the the cat", model=self.go_model)
+        self.assertEqual([t["text"] for t in a["turns"]], [t["text"] for t in b["turns"]])
+        self.assertEqual([t["vetoed"] for t in a["turns"]], [t["vetoed"] for t in b["turns"]])
+        self.assertEqual(a["guard"]["vetoed"], b["guard"]["vetoed"])
+
+
 class TestGoServerNegative(unittest.TestCase):
     """The Go server's negative endpoints answer the JSON the frontend's Negative tab expects."""
 

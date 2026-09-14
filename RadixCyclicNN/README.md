@@ -45,6 +45,7 @@ and an optional GPU backend (torch) are built in.
 | The negative network feeds itself | `negative auto` (the Negative tab's *Automatic* card): the model writes texts of its own, a local **Ollama** model (or ChatGPT) marks each one out of 10 and says what is wrong with it, and everything below the pass mark blames the negative network - round after round, with nobody typing a failure in by hand. The positive model is only read from, so the loop can run beside whatever else is teaching it. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
+| Both networks on every answer | The pair is not something you have to ask for: `generate`, `predict` and `converse` run it by default, so nothing the tutor has already corrected goes out again. The model over-samples and the negative network vetoes; a vetoed continuation is dropped from `top`, a vetoed reply is left unsaid and the voice looks for another one. Every answer carries what was stopped and why, and `--no-guard` / `{"guard": false}` hands out what the positive model wrote. With no negative network, or one that has never been taught a failure, nothing is filtered and nothing is paid. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight and every activation amplitude flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
 | CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `frontend/` (Vite + React, prebuilt `dist` is served by the API). |
 | Checkpointing, saving, loading | JSON model files (gzip with `.gz`), `CheckpointManager` with rotation, `latest` pointer, restore and resume. |
@@ -183,10 +184,11 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 |---|---|
 | `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
-| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N` |
-| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first |
+| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N`; the guard flags below |
+| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; the guard flags below |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
-| `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up |
+| `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up; the guard flags below |
+| the guard (on `predict`, `generate`, `converse`) | the negative network filters what the model writes, by default: `--no-guard` (print it unfiltered), `--negative PATH` (default `model.negative.json` beside `--model`), `--threshold RISK`, `--min-coverage SHARE`, `--over-sample N`. It stands aside when there is no negative model file, or when the one there has never been taught a failure |
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
@@ -257,9 +259,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/tutor/lesson` | one round without training: the same settings plus `{"prefixes": [...]}` (skip the exercise writer and complete these) -> `{"source": "ollama"\|"chatgpt"\|"given", "exercises", "lessons": [{"exercise","continuation","sentence","grade"}], "report": report card}` (400 when `tutor_provider` is `chatgpt` and the server has no key, 502 when the teacher fails) |
 | `POST /api/tutor/plan` | the lessons a report card calls for: `{"report": {report card}` (default: the card at the end of the last run), `"count": 3, "topic", "level", "words", "threshold", "exercises", "drills", "tutor_provider", "tutor_model", "url"}` -> `{"plan": {"summary", "prompt"` (the brief: start the next run with it as `"brief"`)`, "upgrade": {"step": "hold"\|"stretch"\|"advance", "level", "words", "threshold", "drills", "note"}, "level", "topic", "source": "ollama"\|"chatgpt"\|"report card", "weak": [{"error","count","share","focus"}], "targets", "lessons": [{"focus","targets","topic","why","exercises","drills","prefixes"}]}, "source", "provider", "model", "report"}` (400 without a card, 502 when the teacher fails) |
 | `GET /api/job` / `POST /api/job/stop` | job status `{"id","type","state","progress","history","error",...}` / request a stop |
-| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`) |
-| `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included |
-| `POST /api/converse` | `{"opening","turns": 6,"mode": "beam"\|"sample","context": 12,"max_length": 60,"k": 5,"beam","temperature","step_penalty","seed","speakers": ["A","B"],"history": [utterances so far],"partner": kind in memory,"avoid_repeats": true}` -> `{"kind","partner","speakers","count","turns": [{"index","speaker","text","context","reply","cost","probability","reached_end","fresh","given","repeat","candidates","skipped","labels","node_ids","step_costs"}]}`; `history` continues a conversation (only the new turns come back) |
+| `POST /api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature","guard": true}` -> `{"kind","continuation","full_text","cost","probability","step_costs","path","node_ids","expanded","reached_end","guard"}`; `mode: "beam"` (both models), `k`, `beam` -> plus `top` / `bottom` (K entries each with `continuation`, `full_text`, `cost`, `probability`, `path`, `reached_end`). The guard keeps the survivors in `top` and the best of them is the continuation; when it vetoes every one of them the continuation is empty and `full_text` is the prefix |
+| `POST /api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed","guard": true}` -> `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}],"guard"}`; `beam` returns the `count` most likely complete texts (the prediction search run to END), every `text` is the whole text, prefix included. With the guard on, the model is asked for `count * over_sample` and the survivors come back (fewer than `count` when it vetoed too much) |
+| `POST /api/converse` | `{"opening","turns": 6,"mode": "beam"\|"sample","context": 12,"max_length": 60,"k": 5,"beam","temperature","step_penalty","seed","speakers": ["A","B"],"history": [utterances so far],"partner": kind in memory,"avoid_repeats": true,"guard": true}` -> `{"kind","partner","speakers","count","guard","turns": [{"index","speaker","text","context","reply","cost","probability","reached_end","fresh","given","repeat","candidates","skipped","vetoed","labels","node_ids","step_costs"}]}`; `history` continues a conversation (only the new turns come back) |
+| the `guard` of those three | `null` when nothing filtered the answer (no negative network, or one that has never been taught a failure), else `{"on": true,"vetoed","rejected": [verdicts],"verdicts","negative" (its stats),"config"}` plus `candidates` / `kept` / `asked` / `rate` / `refusals`. Send `"guard": false` to get what the positive model wrote |
 | `POST /api/score` | `{"text"}` -> `{"log_prob","per_char","chars","transitions","unknown_transitions"}` |
 | `POST /api/2nrl` | `{"bad": [...], "good": [...], "neg_epochs","pos_epochs","neg_lr","pos_lr", "bad_weights" \| "bad_ratings", "good_weights" \| "good_ratings"}` (or `bad_files` / `good_files` upload names) -> job; the weights (0..1 shares) or ratings (marks out of 10) scale each phase per text |
 | `POST /api/feedback` | rated texts: `{"good": [thumbs up], "bad": [thumbs down], "good_ratings": [10, 5], "bad_ratings": [...] (or "good_weights" / "bad_weights" as 0..1 shares), "neg_epochs": 2, "pos_epochs": 3, "neg_lr": 0.5, "pos_lr": 0.1}` (also `*_text`, `*_files`) -> `{"job", "action": "2nrl"\|"reward"\|"punish", "good", "bad", "good_weights", "bad_weights"}`: 2NRL when both kinds are given, reward-only on thumbs up alone, punish (negative phase, then invert) on thumbs down alone. A rating is more than a like: each text is learned in proportion to its mark (10 = the full rate, 0 skips it) |
@@ -1210,6 +1213,54 @@ also comes back from `POST /api/negative/filter` as a `warning` - what the
 negative network expects to go wrong from that prefix - whether or not
 anything was actually vetoed.
 
+### The guard: both networks on every answer
+
+The pair above is what `negative filter` runs when you ask for it.  It is also
+what `generate`, `predict` and `converse` run *without* being asked: the same
+two networks, in tandem, on every answer the model hands out.
+
+```bash
+python -m radixnet negative blame --text "a bird flew over the mat" --reason "mixed-up animals"
+python -m radixnet generate --count 3 --mode sample --seed 1 --max-length 28
+```
+
+```
+guard: model.negative.json (2.0000 blame over 1 reasons)
+#    cost    prob  end  text
+-  ------  ------  ---  ------------------------------
+1  2.4456  0.0867  yes  "the hill"
+2  5.0796  0.0062  no   "the dog sat sat sat sat sat "
+3  5.0244  0.0066  yes  "the dog sat on the mat"
+
+guard: 8 of 9 candidates passed the negative network
+rule     risk    peak   ratio  reason            vetoed
+-----  ------  ------  ------  ----------------  --------------------------
+blame  1.0000  1.0000  0.0917  mixed-up animals  "a bird flew over the mat"
+```
+
+The model was asked for nine texts rather than three, the sentence it had been
+taught to hate never reached the answer, and the veto says which fragment it
+was and who blamed it.  The same happens to a continuation (`predict` keeps
+the survivors in `top`, and comes back with nothing at all when every one of
+them is vetoed) and to a reply (`converse` leaves it unsaid and the voice
+looks for another one; each turn counts its own `vetoed`).
+
+Nothing is filtered silently and nothing is filtered for free:
+
+* with **no negative model file** beside the model, or one that has **never
+  been taught a failure**, the guard stands aside - the answer is exactly what
+  it was before, and `guard` is `null`.  An empty negative network is never
+  created just to guard an answer;
+* `--no-guard` (CLI), `{"guard": false}` (API) or the *Filter with the negative
+  network* checkbox (frontend) hands out what the positive model wrote;
+* `--threshold`, `--min-coverage` and `--over-sample` tune it per command, and
+  the Negative tab's settings move it for the server.
+
+The loops that *teach* the negative network are deliberately outside the
+guard: the critic (`negative auto`), the tutor and evolve all sample the
+positive model directly, because a reviewer that only ever saw what already
+passed the filter would have nothing left to teach.
+
 The negative model is an ordinary model file (`model.negative.json` beside the
 model, `--negative PATH` to move it) and an ordinary model kind, so
 `--kind negative train` blames, `info`, `checkpoints`, `save` / `load` and the
@@ -1315,6 +1366,7 @@ go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 
 go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
 go/bin/radixnet-count --model model.count.json negative why --text "the the the the cat"
 go/bin/radixnet-count --model model.count.json negative filter --count 3   # the pair: write, then veto
+go/bin/radixnet-count --model model.count.json generate --count 3          # ... and the same pair on every answer
 go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
 go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
 go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
@@ -1466,7 +1518,7 @@ Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/health`, `GET /api/status`, `GET /api/model`, `POST /api/model/select` (count only), `POST /api/model/weights` | as the Python server, plus `engine`, `workers` (0 = one goroutine per text), `goroutines`, `counting` (`racy` \| `exact`), `heap_bytes`, `memory_limit_bytes` |
 | `POST /api/train` | `{texts \| text \| files, whole_file, split: lines \| paragraphs \| pages \| file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}` -> a job; uploads stream through in chunks whatever their size; learning rates are accepted and ignored |
 | `GET /api/job`, `POST /api/job/stop` | one job at a time (409 while it runs); a job holds the model between epochs only, so predictions and the status poll keep answering |
-| `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model |
+| `POST /api/predict`, `/api/generate`, `/api/converse`, `/api/score` | same bodies and results as the Python count model, the guard included: all three run the pair by default and answer with the same `guard` report, and `{"guard": false}` turns it off |
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |
 | `GET /api/negative`, `POST /api/negative/blame`, `/clear`, `/judge`, `/filter`, `/forget`, `/settings`, `/reset`, `/save` | the negative network, same bodies and results as the Python server: the failures with the tutor's reasons, the verdicts with their blamed fragments, and the pair (the count model writes, the negative network vetoes by blame, peak or the likelihood ratio). Its file is `model.negative.json` beside the model path, interchangeable with Python's; `POST /api/save` writes it alongside the model |
 | `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models` | the English lessons, same bodies and records as the Python server: the teacher (`tutor_provider`: a local Ollama model or ChatGPT) sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` set the defaults, the key is the server's own `$OPENAI_API_KEY`). With `blame` every failed sentence also teaches the negative network what the teacher marked it down for |

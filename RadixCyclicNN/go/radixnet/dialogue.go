@@ -23,6 +23,7 @@ type Turn struct {
 	Repeat      bool      `json:"repeat"`
 	Candidates  int       `json:"candidates"`
 	Skipped     int       `json:"skipped"`
+	Vetoed      int       `json:"vetoed"`
 	Labels      []string  `json:"labels"`
 	NodeIDs     []int     `json:"node_ids"`
 	StepCosts   []float64 `json:"step_costs"`
@@ -73,6 +74,12 @@ type ConverseOptions struct {
 	History      []string
 	Partner      *Model
 	AvoidRepeats bool
+	// Veto is what a voice may not say: true for a candidate the speaker must
+	// not speak.  The conversation knows nothing about why - Filter.Converse
+	// passes its own judgement in (the negative network guarding the positive
+	// one), and a candidate it refuses is skipped exactly like one that had
+	// been said before, except that it may not even be the fallback.
+	Veto func(string) bool
 }
 
 // DefaultConverseOptions mirror the Python defaults.
@@ -108,11 +115,20 @@ func (m *Model) candidates(context, mode string, k, beam, maxLength int, stepPen
 	return found.Top, nil
 }
 
-func pick(cands []*PathResult, said map[string]bool, previous string, avoidRepeats bool) (*PathResult, int, bool) {
-	skipped := 0
+// pick is the first candidate that adds something, is not vetoed and (when
+// asked) is neither an utterance heard before nor an echo of the previous
+// line; the best repeat is the fallback.  A vetoed candidate is never the
+// fallback - that is the whole point of the veto.
+func pick(cands []*PathResult, said map[string]bool, previous string, avoidRepeats bool, veto func(string) bool) (*PathResult, int, bool, int) {
+	skipped, vetoed := 0, 0
 	var fallback *PathResult
 	for _, c := range cands {
 		if strings.TrimSpace(c.Text) == "" {
+			skipped++
+			continue
+		}
+		if veto != nil && veto(c.FullText) {
+			vetoed++
 			skipped++
 			continue
 		}
@@ -124,9 +140,9 @@ func pick(cands []*PathResult, said map[string]bool, previous string, avoidRepea
 			skipped++
 			continue
 		}
-		return c, skipped, false
+		return c, skipped, false, vetoed
 	}
-	return fallback, skipped, fallback != nil
+	return fallback, skipped, fallback != nil, vetoed
 }
 
 // Converse lets the model talk to itself (or to opts.Partner) for opts.Turns
@@ -188,7 +204,7 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 		previousKey := Normalize(previous)
 		ctx := TailContext(previous, opts.Context)
 		var spoken *PathResult
-		offered, skipped := 0, 0
+		offered, skipped, vetoed := 0, 0, 0
 		repeat := false
 		draws := 1
 		if mode == "sample" {
@@ -202,9 +218,10 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 						return nil, err
 					}
 					offered += len(cands)
-					var dropped int
-					spoken, dropped, repeat = pick(cands, said, previousKey, opts.AvoidRepeats)
+					var dropped, refused int
+					spoken, dropped, repeat, refused = pick(cands, said, previousKey, opts.AvoidRepeats, opts.Veto)
 					skipped += dropped
+					vetoed += refused
 					if spoken != nil && !repeat {
 						break
 					}
@@ -224,9 +241,10 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 					return nil, err
 				}
 				offered += len(cands)
-				var dropped int
-				freshPick, dropped, freshRepeat = pick(cands, said, previousKey, opts.AvoidRepeats)
+				var dropped, refused int
+				freshPick, dropped, freshRepeat, refused = pick(cands, said, previousKey, opts.AvoidRepeats, opts.Veto)
 				skipped += dropped
+				vetoed += refused
 				if freshPick != nil && !freshRepeat {
 					break
 				}
@@ -244,7 +262,7 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 		}
 		result = append(result, &Turn{Index: index, Speaker: speaker, Text: text, Context: ctx, Reply: spoken.Text,
 			Cost: spoken.Cost, Probability: spoken.Probability(), ReachedEnd: spoken.ReachedEnd, Fresh: ctx == "", Repeat: repeat,
-			Candidates: offered, Skipped: skipped, Labels: append([]string(nil), spoken.Labels...),
+			Candidates: offered, Skipped: skipped, Vetoed: vetoed, Labels: append([]string(nil), spoken.Labels...),
 			NodeIDs: append([]int(nil), spoken.NodeIDs...), StepCosts: append([]float64(nil), spoken.StepCosts...)})
 		saidList = append(saidList, text)
 		said[Normalize(text)] = true

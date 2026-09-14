@@ -352,6 +352,7 @@ class ModelService:
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
+        self.guard_config = FilterConfig()  # how strictly the negative network guards the output paths
         self._path_kind = model_class(kind).kind  # the kind ``model_path`` belongs to
         if self.model_path and os.path.isfile(self.model_path):
             self.model: GraphModel = load_model(self.model_path, backend=backend, device=device)
@@ -701,10 +702,68 @@ class ModelService:
         )
         return stats
 
-    def predict(self, prefix: str, **options: Any) -> dict:
-        """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each)."""
+    def guard(self, model: GraphModel | None = None) -> NegativeFilter | None:
+        """The pair on the way out: the negative network guarding ``model``'s output, or ``None``.
+
+        Every answer this service hands out - :meth:`generate`,
+        :meth:`predict`, :meth:`converse` - goes through this filter, so the
+        two networks work in tandem without anyone asking for it: the positive
+        model writes and the negative one, built from nothing but the tutor's
+        failures, vetoes what it recognises (:mod:`radixnet.duo`).
+
+        ``None`` - no guard, the output goes out as written - when there is
+        nothing to guard *with*: the negative network is the active model (it
+        cannot filter itself), there is none in memory and none saved beside
+        the model, or the one there has never been taught a failure and would
+        veto nothing.  An empty negative network is never *created* here - an
+        answer is not the place to bring one into being.  Call it with the
+        model lock held; the output paths do.
+        """
+        model = self.model if model is None else model
+        if isinstance(model, NegativeNet):
+            return None  # generating *from* the failures: there is no positive half to guard
+        negative = self._parked.get(NegativeNet.kind)
+        if negative is None:
+            path = self.model_path_for(NegativeNet.kind)
+            if not (path and os.path.isfile(path)):
+                return None
+            negative = self.negative_model()  # loads it from that file and parks it
+        if negative is model:
+            return None
+        pair = NegativeFilter(model, negative, self.guard_config)
+        return pair if pair.ready else None
+
+    @staticmethod
+    def _guard_report(pair: NegativeFilter, verdicts: list[dict], **extra: Any) -> dict:
+        """What the guard did, for the caller to show: the vetoes, with the reason and the fragment behind each."""
+        rejected = [v for v in verdicts if v["decision"] == "reject"]
+        return {
+            "on": True,
+            "vetoed": len(rejected),
+            "rejected": rejected,
+            "verdicts": verdicts,
+            "negative": pair.negative.stats(),
+            "config": pair.describe()["config"],
+            **extra,
+        }
+
+    def predict(self, prefix: str, *, guard: bool = True, **options: Any) -> dict:
+        """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each).
+
+        The negative network guards the answer (:meth:`guard`): the best
+        continuation it does *not* veto is the one that comes back, and when
+        it vetoes every one of them nothing does - ``continuation`` is empty,
+        ``full_text`` is the prefix alone and ``guard`` says why.
+        ``guard=False`` hands out what the positive model wrote, unfiltered.
+        """
         with self.session() as model:
             result = model.predict(prefix, **options)
+            pair = self.guard(model) if guard else None
+            report = None
+            if pair is not None:
+                result, verdicts = pair.rank(prefix, result)  # the survivors, best first
+                report = self._guard_report(pair, verdicts, candidates=len(verdicts),
+                                            kept=len(verdicts) - sum(v["decision"] == "reject" for v in verdicts))
         payload = {
             "prefix": prefix,
             "kind": model.kind,
@@ -717,6 +776,7 @@ class ModelService:
             "node_ids": list(result.node_ids),
             "expanded": result.expanded,
             "reached_end": result.reached_end,
+            "guard": report,
         }
         if isinstance(result, Prediction):
             payload.update(
@@ -725,14 +785,40 @@ class ModelService:
             )
         return payload
 
-    def generate(self, **options: Any) -> dict:
-        """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path."""
-        with self.session() as model:
-            results = model.generate(**options)
-        return {"samples": [_sample_dict(r) for r in results]}
+    def generate(self, guard: bool = True, **options: Any) -> dict:
+        """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path.
 
-    def converse(self, opening: str = "", turns: int = 6, partner: str | None = None, **options: Any) -> dict:
-        """The active model converses with itself, or with the model of another kind kept in memory (``partner``)."""
+        The negative network guards them (:meth:`guard`): the model is asked
+        for ``over_sample`` times as many as were wanted and what the negative
+        half recognises as failure never reaches the answer.  Fewer than
+        ``count`` samples come back when it vetoed too much - that is
+        information, and ``guard`` carries every veto with its reason.
+        ``guard=False`` returns what the positive model wrote, unfiltered.
+        """
+        with self.session() as model:
+            pair = self.guard(model) if guard else None
+            if pair is None:
+                return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
+            count = options.pop("count", 1)
+            outcome = pair.generate(count=count, **options)
+        return {
+            "samples": [_sample_dict(r) for r in outcome["results"]],
+            "guard": self._guard_report(
+                pair, outcome["verdicts"], candidates=outcome["candidates"], kept=len(outcome["kept"]),
+                asked=outcome["asked"], rate=outcome["rate"],
+            ),
+        }
+
+    def converse(
+        self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True, **options: Any,
+    ) -> dict:
+        """The active model converses with itself, or with the model of another kind kept in memory (``partner``).
+
+        The negative network guards every turn (:meth:`guard`): a reply it
+        vetoes is left unsaid and the voice looks for another one, exactly as
+        it does for a line it has already spoken.  Each turn counts its own
+        vetoes (``vetoed``) and ``guard`` carries them with their reasons.
+        """
         with self.session() as model:
             other: GraphModel | None = None
             if partner and partner.strip().lower() != model.kind:
@@ -745,8 +831,17 @@ class ModelService:
                     raise ApiError(
                         400, f"no {kind} model in memory to converse with; select that kind once to load it"
                     )
+            pair = self.guard(model) if guard else None
+            report = None
             try:
-                spoken = model.converse(opening, turns, partner=other, **options)
+                if pair is None:
+                    spoken = model.converse(opening, turns, partner=other, **options)
+                else:
+                    outcome = pair.converse(opening, turns, partner=other, **options)
+                    spoken = outcome["turns"]
+                    # ``vetoed`` counts the distinct texts refused, ``refusals`` how often one was (a turn may be offered
+                    # the same candidate again after its context was shortened)
+                    report = self._guard_report(pair, outcome["verdicts"], refusals=outcome["vetoed"])
             except (TypeError, ValueError) as exc:
                 raise ApiError(400, str(exc)) from exc
         speakers = list(options.get("speakers") or DEFAULT_SPEAKERS)
@@ -756,6 +851,7 @@ class ModelService:
             "speakers": speakers,
             "turns": [t.to_dict() for t in spoken],
             "count": len(spoken),
+            "guard": report,
         }
 
     def score(self, text: str) -> dict:
@@ -958,6 +1054,7 @@ class ModelService:
                     }
                 else:
                     result = pair.generate(count=count, **generate)
+                    result.pop("results")  # the walks behind the texts; JSON carries the texts
             except (TypeError, ValueError) as exc:
                 raise ApiError(400, str(exc)) from exc
             result["pair"] = pair.describe()
@@ -2093,6 +2190,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     prefix = f.text("prefix")
     return 200, svc.predict(
         prefix,
+        guard=f.flag("guard", True),
         length=f.integer("length", 20, minimum=0),
         mode=f.text("mode", "dijkstra"),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
@@ -2106,6 +2204,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.generate(
+        guard=f.flag("guard", True),
         count=f.integer("count", 1, minimum=0),
         max_length=f.integer("max_length", 60, minimum=0),
         mode=f.text("mode", "sample"),
@@ -2123,6 +2222,7 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         opening=f.text("opening", ""),
         turns=f.integer("turns", 6, minimum=0),
         partner=partner or None,
+        guard=f.flag("guard", True),
         mode=f.text("mode", "beam"),
         max_length=f.integer("max_length", 60, minimum=0),
         context=f.integer("context", 12, minimum=0),
@@ -3350,14 +3450,17 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict,
      "continue a prefix: {prefix, length, mode: dijkstra | beam | sample, to_end, step_penalty, temperature, max_length "
-     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations)}"),
+     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), guard (default on: "
+     "the negative network vetoes the continuations it recognises as failures)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
-     "dijkstra, temperature, seed, prefix, step_penalty, beam}"),
+     "dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the "
+     "negative network vetoes what it recognises as failure)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
-     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats}"),
+     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats, "
+     "guard (default on: a reply the negative network vetoes is left unsaid)}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl,
      "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "
