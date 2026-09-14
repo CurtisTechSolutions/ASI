@@ -170,7 +170,8 @@ commands:
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
-X
+  negative   the failures, and why: blame | clear | why | filter | reasons | forget | auto
+  codegen    write Python programs: the teacher tutors, the sandbox runs them, 2NRL follows
   invert     flip the sign of every reward
   image      images as text: info | encode | tutor | decode
   speech     teaching by talking: info | teach | tutor | decode
@@ -276,6 +277,8 @@ func main() {
 		cmdChatGPT(rest)
 	case "tutor":
 		cmdTutor(rest)
+	case "codegen":
+		cmdCodeGen(rest)
 	case "serve":
 		cmdServe(rest)
 	case "version":

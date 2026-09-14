@@ -336,3 +336,86 @@ func TeachReviews(negative *Model, reviews []Review, threshold float64, clearPas
 	report.Source, report.Threshold = source, threshold
 	return report, nil
 }
+
+// CodeReasons are the reason tags of a reviewed *program*.
+var CodeReasons = []string{"timeout", "crash", "wrong-output", "task-not-done", "style", "naming", DefaultReason}
+
+// CodeSeverity is how heavily each code failure is blamed (1 = one ordinary failure).
+var CodeSeverity = map[string]float64{
+	"timeout": 1.5, "crash": 1.5, "wrong-output": 1.25, "task-not-done": 1.0,
+	"style": 0.5, "naming": 0.5, DefaultReason: 1.0,
+}
+
+// CodeReason is why a code attempt was rejected, from the sandbox, the style
+// report and the judge, in the order those matter.
+func CodeReason(attempt *Attempt) string {
+	if attempt == nil {
+		return DefaultReason
+	}
+	run, style, verdict := attempt.Run, attempt.Style, attempt.Verdict
+	switch {
+	case run != nil && run.TimedOut:
+		return "timeout"
+	case run != nil && !run.OK:
+		return "crash"
+	case run != nil && run.ExpectedOK != nil && !*run.ExpectedOK:
+		return "wrong-output"
+	case verdict.Task != nil && !*verdict.Task:
+		return "task-not-done"
+	case !verdict.Naming || !style.NamingOK:
+		return "naming"
+	case !verdict.PEP8 || !style.PEP8OK:
+		return "style"
+	}
+	words := verdict.Critique
+	if strings.TrimSpace(words) == "" {
+		words = strings.Join(firstN(verdict.Issues, 3), "; ")
+	}
+	return Classify(words, ClassifyOptions{})
+}
+
+// FaultsFromAttempts turns a problem's attempts into faults and the texts that
+// clear blame: a rejected program is blamed for what the sandbox, the style
+// checker or the judge found, and the accepted ones clear.
+func FaultsFromAttempts(attempts []*Attempt, source string) ([]Fault, []string) {
+	faults := []Fault{}
+	correct := []string{}
+	for _, attempt := range attempts {
+		if attempt == nil || attempt.Text == "" {
+			continue
+		}
+		if attempt.Verdict.Correct {
+			correct = append(correct, attempt.Text)
+			continue
+		}
+		reason := CodeReason(attempt)
+		severity, ok := CodeSeverity[reason]
+		if !ok {
+			severity = 1
+		}
+		faults = append(faults, Fault{
+			Text: attempt.Text, Reason: reason, Severity: severity,
+			Note: attempt.Feedback(), Source: source,
+		})
+	}
+	return faults, correct
+}
+
+// TeachAttempts feeds the code-generation teacher's rejected attempts into the
+// negative network.
+func TeachAttempts(negative *Model, attempts []*Attempt, clearPasses bool, source string,
+	o TeachOptions) (*TeachReport, error) {
+	if source == "" {
+		source = "codegen"
+	}
+	faults, correct := FaultsFromAttempts(attempts, source)
+	if !clearPasses {
+		correct = nil
+	}
+	report, err := Teach(negative, faults, correct, o)
+	if err != nil {
+		return nil, err
+	}
+	report.Source = source
+	return report, nil
+}

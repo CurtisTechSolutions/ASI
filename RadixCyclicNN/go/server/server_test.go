@@ -626,7 +626,7 @@ func TestStaticAndErrors(t *testing.T) {
 	if status != 404 || !strings.Contains(doc["error"].(string), "unknown API endpoint") {
 		t.Fatalf("unknown endpoint: %d %v", status, doc)
 	}
-	status, doc = e.get("/api/codegen/history") // still Python-only: the sandbox runs Python programs
+	status, doc = e.post("/api/schedule/preview", map[string]any{"lr_schedule": "lr"}) // still Python-only
 	if status != 404 || !strings.Contains(doc["error"].(string), "not available on the Go server") {
 		t.Fatalf("python-only endpoint: %d %v", status, doc)
 	}

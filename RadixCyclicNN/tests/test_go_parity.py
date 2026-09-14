@@ -11,6 +11,7 @@ import array
 import json
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -774,6 +775,85 @@ class TestGoCriticParity(unittest.TestCase):
         self.assertEqual(a["bad"], b["bad"])
 
 
+class TestGoCodeGenParity(unittest.TestCase):
+    """One fake teacher, both code-generation trainers: the same prompts, the same attempts, the same solutions."""
+
+    def setUp(self):
+        try:  # the fake Ollama of the codegen tests plays teacher and judge for both sides
+            from test_codegen import start_fake
+        except ImportError:
+            from tests.test_codegen import start_fake
+        self.fake = start_fake(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_CODEGEN_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "codegen_py.count.json")
+        self.go_path = os.path.join(TMP.name, "codegen_go.count.json")
+        for path in (self.py_path, self.go_path):
+            for name in (path, path.replace(".count.json", ".count.negative.json")):
+                if os.path.exists(name):
+                    os.remove(name)
+        self.problems = os.path.join(TMP.name, "codegen_problems.txt")
+        with open(self.problems, "w", encoding="utf-8") as fh:
+            fh.write("Print the word hello.\n")
+        # the teacher's first program does not run; its fix does
+        self.script = ["```python\nprint(hello)\n```", '```python\nprint("hello")\n```']
+
+    def prompts(self):
+        """Every prompt so far, with the two things in them that cannot match masked out: the sandbox's own
+        scratch directory (a fresh one per run, named in the tracebacks) and how long a program took."""
+        out = []
+        for body in self.fake.requests:
+            if not body:
+                continue
+            prompt = re.sub(r"radixnet-sandbox-\w+", "radixnet-sandbox-X", body.get("prompt", ""))
+            out.append(re.sub(r"exit code (-?\d+), [\d.]+s", r"exit code \1, Ts", prompt))
+        return out
+
+    def test_both_trainers_ask_the_same_and_solve_the_same(self):
+        self.fake.solutions = list(self.script)
+        options = ("codegen", "--problems", self.problems, "--phase", "teacher", "--teacher-attempts", 2,
+                   "--sandbox-timeout", 20, "--blame")
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.fake.requests.clear()
+        self.fake.solutions = list(self.script)
+        b = go(*options, model=self.go_path, env=self.env)
+        go_prompts = self.prompts()
+
+        # the same conversation with the teacher and the judge, prompt for prompt
+        self.assertEqual(len(py_prompts), len(go_prompts))
+        for i, (first, second) in enumerate(zip(py_prompts, go_prompts)):
+            self.assertEqual(first, second, f"call {i} differs between the two trainers")
+        self.assertGreaterEqual(len(py_prompts), 3)  # write, judge the fix, judge again
+
+        # the same solution, found the same way
+        self.assertEqual(a["solutions"], b["solutions"])
+        self.assertEqual(a["solutions"], {"p1": 'Print the word hello.\nprint("hello")\n'})
+        self.assertEqual((a["solved"], b["solved"]), (1, 1))
+
+        # and the rejected program blamed the same reason on both sides
+        py_negative = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_negative = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual([r["reason"] for r in a["negative"]["reasons"]],
+                         [r["reason"] for r in b["negative"]["reasons"]])
+        self.assertEqual(py_negative["graph"]["weights"]["reasons"], go_negative["graph"]["weights"]["reasons"])
+        self.assertEqual(py_negative["graph"]["edges"]["reasons"], go_negative["graph"]["edges"]["reasons"])
+
+    def test_both_sandboxes_report_the_same_failure(self):
+        """The sandbox is the same Python bootstrap on both sides, so a crash reads the same."""
+        self.fake.solutions = ["```python\nraise ValueError('boom')\n```"]
+        options = ("codegen", "--problems", self.problems, "--phase", "teacher", "--teacher-attempts", 1,
+                   "--sandbox-timeout", 20)
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.solutions = ["```python\nraise ValueError('boom')\n```"]
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual((a["solved"], b["solved"]), (0, 0))
+        py_record = [r for r in a["records"] if r["kind"] == "problem"][0]
+        go_record = [r for r in b["records"] if r["kind"] == "problem"][0]
+        self.assertEqual(py_record["issues"], go_record["issues"])
+        self.assertEqual(py_record["correct"], go_record["correct"])
+
+
 class TestGoMediaParity(unittest.TestCase):
     """The media text formats: both sides must encode the same recording and the same picture identically.
 
@@ -994,13 +1074,14 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))
         status, doc, _ = self.client.post("/api/model/select", {"kind": "radix"})
         self.assertEqual(status, 400)
-        # what the Go server now serves too: evolve, the Ollama corpus / review, the automatic loop, images, speech
+        # what the Go server now serves too: evolve, the Ollama corpus / review, the automatic loop, images,
+        # speech and code generation
         for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history",
-                     "/api/images", "/api/speech"):
+                     "/api/images", "/api/speech", "/api/codegen/history"):
             status, doc, _ = self.client.get(path)
             self.assertEqual(status, 200, f"{path}: {doc}")
         # what is still Python-only is told so; unknown endpoints and wrong methods behave like the Python server
-        status, doc, _ = self.client.get("/api/codegen/history")
+        status, doc, _ = self.client.post("/api/schedule/preview", {"lr_schedule": "lr"})
         self.assertEqual(status, 404)
         self.assertIn("Go server", doc["error"])
         status, doc, _ = self.client.get("/api/nope")

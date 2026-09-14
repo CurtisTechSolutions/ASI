@@ -688,6 +688,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_counter.py` — the cyclic counters of section 28: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
+* `test_codegen.py` — code generation (section 17): the problem formats, the sandbox, the style check, the verdict, the trainer's phases, the API routes and the CLI.
 * `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
 * `test_guard.py` — the guard (section 24.7): `ready` / `rank` / `converse`, the three service methods, the three routes and the three CLI commands, on by default and off on request.
 * `test_speech.py` — the text format (packing, the header found behind a token and before a transcript, repair of a
@@ -1329,7 +1330,8 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 `go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
 beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
 CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `compress`, `weights`, `info`,
-`converse`, `correct`, `negative`, `tutor`, `evolve`, `ollama`, `chatgpt`, `checkpoints`, `bench`, `serve`). The
+`converse`, `correct`, `negative`, `codegen`, `tutor`, `evolve`, `ollama`, `chatgpt`, `checkpoints`, `bench`,
+`serve`). The
 Python implementation is untouched; the two share the `radixnet-count` model file.
 
 What is *not* ported:
@@ -1342,10 +1344,30 @@ What is *not* ported:
   those modules that *are* code - the waveform codecs, the text formats, the thumbnail encoder, an
   OpenAI-compatible transcription server - have no such excuse and are simply not done yet.
 * Still Python-only, and listed in `pythonOnly` so the Go server says so rather than 404ing blankly:
-  `codegen.py`, `tools.py` and `agent.py`.
+  `tools.py` and `agent.py`.
 * `schedule.py` is deliberately not ported, and would be dead code if it were: learning-rate schedules are a
   RadixNet feature, the count / reward model ignores learning rates entirely, and the Train tab already hides the
   schedule fields for it (`!countKind`).  Porting the expression evaluator would add a calculator nothing calls.
+
+`codegen.go` ports section 17, sandbox included, and the sandbox is the reason it can be ported at all: the
+programs are Python either way.  Go runs the *same bootstrap string* as Python does
+(`python3 -I -B -c <bootstrap>` under `unshare -rn`, with the rlimits set in the child), so a program sees the
+same interpreter, the same limits and the same isolation whichever language started it - and a traceback comes
+back cleaned the same way.  The rest follows: `ParseProblems` / `ParseProblemFile` / `LoadProblems` read the same
+problem files, `CheckStyle` shells out to a small Python helper for the AST rules (PEP 8 line and naming checks
+cannot be done on the text alone), `ExtractCode`, `TeacherGenerate`, `TeacherFix`, `JudgeWithLLM` and `Decide`
+speak the same prompts and the same verdict, and `CodeGenTrainer` runs the same teacher / model phases with the
+same records (`attempt`, `problem`, `round`).  Two differences, both of them the count model's:
+`CodeGenConfig.Strength` replaces Python's `neg_lr` / `pos_lr` / `batch_size` (the count model pushes by a
+strength, not a learning rate - the frontend already sends `strength` for the count kind and now does so for the
+Code tab too), and there is no `checkpoint_every` because the Go CLI has no checkpoint manager on this path.
+`blame.go` gains `CodeReasons`, `CodeSeverity`, `CodeReason`, `FaultsFromAttempts` and `TeachAttempts`, so
+`--blame` teaches the negative network why a program was rejected on both sides.  `cmd/radixnet-count/codegen.go`
+is the CLI command and `server/codegen.go` the four endpoints (`/api/codegen/start|history|solve|run`), which
+takes the **Code** tab off the frontend's `pythonOnly` list.
+`tests/test_go_parity.py::TestGoCodeGenParity` points both trainers at one fake teacher and holds them to the
+same conversation prompt for prompt (masking the two things that cannot match: the sandbox's scratch directory,
+which is named in tracebacks, and how long a program took), the same solutions and the same blame on disk.
 
 `speech.go`, `vision.go` and `recall.go` port the rest of the media path, and one thing about them is worth stating
 because it is the only place in this port where the two sides do not produce identical bytes:

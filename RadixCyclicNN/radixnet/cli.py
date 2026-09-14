@@ -2238,8 +2238,7 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
     console.say()
     printer = ProblemPrinter(console)
     stop = threading.Event()
-    trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client)
-    trainer = CodeGenTrainer(model, client, sandbox, config, negative=negative)
+    trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(problems, progress=printer, stop_event=stop, checkpoint_manager=manager),

@@ -153,13 +153,14 @@ type Service struct {
 	// guardConfig is how strictly the negative network guards the output paths
 	guardConfig radixnet.FilterConfig
 	// the teacher defaults of the tutor endpoints and the records of every tutor run
-	ollamaURL     string
-	ollamaModel   string
-	chatgptURL    string
-	chatgptModel  string
-	tutorHistory  []map[string]any
-	criticHistory []map[string]any
-	evolveHistory []map[string]any
+	ollamaURL      string
+	ollamaModel    string
+	chatgptURL     string
+	chatgptModel   string
+	tutorHistory   []map[string]any
+	criticHistory  []map[string]any
+	codegenHistory []map[string]any
+	evolveHistory  []map[string]any
 	// discriminator is the critic of the evolve loop (nil until first used)
 	discriminator *radixnet.Model
 	// epochDelay slows every epoch (tests: makes a job observable while running)

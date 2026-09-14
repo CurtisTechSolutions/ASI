@@ -278,12 +278,12 @@ func init() {
 }
 
 // pythonOnly lists endpoint prefixes the Python server implements and this one does not.
-var pythonOnly = []string{"/api/codegen", "/api/schedule/preview"}
+var pythonOnly = []string{"/api/schedule/preview"}
 
 // The tutor (/api/tutor, see tutor.go) is served here too: Ollama sets and
 // marks the exercises, this server's count / reward model answers them.  So are
-// the evolve loop (evolve.go), the Ollama corpus and review, and the Negative
-// tab's automatic loop (critic.go).
+// the evolve loop (evolve.go), the Ollama corpus and review, the Negative
+// tab's automatic loop (critic.go) and code generation (codegen.go).
 
 func rIndex(rq *request) (int, any, error) {
 	return 200, map[string]any{"engine": "go", "version": Version, "endpoints": endpointDocs}, nil
