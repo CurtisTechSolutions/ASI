@@ -87,6 +87,7 @@ export default function AgentPanel({ status }) {
   const [teach, setTeach] = useState(true);
   const [strict, setStrict] = useState(true);
   const [readReward, setReadReward] = useState(false);
+  const [blame, setBlame] = useState(false);
   const [blatantMode, setBlatantMode] = useState("fail_invert");
   const [blatantMargin, setBlatantMargin] = useState("0.5");
   const [blatantBoost, setBlatantBoost] = useState("4");
@@ -144,6 +145,7 @@ export default function AgentPanel({ status }) {
       teach,
       strict,
       read_reward: readReward,
+      blame,
       blatant_mode: blatantMode,
       blatant_margin: parseNumber(blatantMargin, 0.5),
       blatant_boost: parseNumber(blatantBoost, 4),
@@ -353,7 +355,16 @@ export default function AgentPanel({ status }) {
             onChange={setReadReward}
             disabled={running}
           />
+          <CheckField label="Teach the negative network" checked={blame} onChange={setBlame} disabled={running} />
         </div>
+        {blame ? (
+          <p className="muted">
+            Every failed attempt is also handed to the negative network: the judge&rsquo;s reason, the gap as the
+            severity, and — when a correct run of the same task exists — only the characters that differ from it, so
+            the shared task line and the calls that worked are never blamed. What it learns comes back here: a
+            candidate the network offers that walks a known failure is passed over for the next one.
+          </p>
+        ) : null}
         <fieldset className="schedule">
           <legend>Failures: train on them, then invert</legend>
           <div className="row">
@@ -452,6 +463,7 @@ export default function AgentPanel({ status }) {
                   <th>blatant</th>
                   <th>boost</th>
                   <th>2NRL</th>
+                  <th>blamed</th>
                   <th>seconds</th>
                 </tr>
               </thead>
@@ -470,6 +482,9 @@ export default function AgentPanel({ status }) {
                     <td>{fmtInt(r.blatant)}</td>
                     <td title={r.flipped ? `${fmtInt(r.flipped)} nodes changed` : undefined}>{fmtNum(r.boost_max, 2)}</td>
                     <td>{r.action || "–"}</td>
+                    <td title={r.negative_reasons ? Object.entries(r.negative_reasons).map(([k, v]) => `${k} x${v}`).join(", ") : undefined}>
+                      {r.negative_blamed === undefined ? "–" : `${fmtInt(r.negative_blamed)} / ${fmtInt(r.negative_edges)} edges`}
+                    </td>
                     <td>{fmtNum(r.seconds, 2)}</td>
                   </tr>
                 ))}

@@ -2046,3 +2046,103 @@ to a refused scheme — a byte cap; the format, the registry, the guards, `safe_
 `tests/test_agent.py` (a fake Ollama that plays all four roles and switches between native `tool_calls` and JSON,
 the fake website, and a *real* untrained network: criteria, both mediation paths, judging, teaching, the gap and
 the weighting, the whole loop, exploring, the API endpoints and the CLI).
+
+### 27.6 The failures feeding the negative network (`blame.faults_from_agent`)
+
+Section 24 applied to tool use: the judge is the tutor, and every attempt it rejects becomes blame. Reasons are
+`AGENT_REASONS` (`no-call`, `bad-call`, `tool-error`, `no-answer`, then the judge's own words through `classify`),
+picked by `agent_reason(attempt)` in the order of *how far it got*, and the severity of an attempt comes from its
+gap (`severity_from_gap`: 0.25 at a near miss, 2.0 for an attempt that answered nothing).
+
+`faults_from_agent(attempts, correction=, threshold=, source=, steps=)` blames a failure at every granularity it
+went wrong at, because they are different failures:
+
+* the **transcript**, for the answer. When a correct run of the same task exists — usually the teacher's
+  demonstration — it rides along as the `correction`, so `teach` routes the fault through `NegativeNet.correct` and
+  only the characters that differ from a run that worked are blamed. The shared task line and the calls that
+  worked never become evidence of anything.
+* each **emission the mediator had to repair** (`bad-call`, severity 0.75). What the network wrote is the failure,
+  and it is *not* in the transcript — which holds the repaired call instead. Blaming the transcript for those
+  characters would teach the network that a well-formed call is a mistake.
+* each **call the network wrote itself that the tool refused** (`tool-error`): it chose that call and it did not
+  work. A call the *mediator* wrote is not the network's fault and is not blamed.
+
+The text used as the correction is left out of the cleared set: `correct` already clears what the two runs share,
+and clearing it again would take off the blame the diff has just placed.
+
+`AgentTrainer(negative=...)` calls `blame.teach_agent` after every task and adds `negative_blamed`,
+`negative_edges`, `negative_cleared` and `negative_reasons` to the task record; the journal records `agent` or
+`explore` as the source. What it learns comes back the other way: `AgentConfig.avoid_blamed` (on by default when a
+negative network is attached) puts every candidate the network offers through `NegativeNet.judge` first, and one it
+`reject`s is passed over for the next candidate, counted as `AgentTrainer.avoided`. The failures the agent finds
+therefore stop it repeating them. `agent --blame` / `explore --blame` (with `--no-avoid` to keep offering them) and
+`POST /api/agent/start` / `/api/agent/explore` `{"blame": true}` switch it on; the Agent tab has the checkbox.
+
+---
+
+## 28. A real browser (`browser.py`) — Chrome over the WebDriver protocol
+
+`urllib` reads a document; it cannot read a page that draws itself. `BrowserClient` runs the page in **Chrome** and
+hands back the DOM once its scripts have run, so `web_fetch` / `web_links` / `web_search` see what a person sees.
+
+WebDriver is HTTP with JSON bodies, so nothing is imported: the client starts `chromedriver` itself and talks to it
+with the standard library, the way `OllamaClient` talks to Ollama. `selenium` speaks the same protocol to the same
+binary and works too, but is not required and is not used.
+
+```python
+DEFAULT_PAGE_TIMEOUT = 30.0 ; DEFAULT_WINDOW = (1280, 900) ; SETTLE_SECONDS = 0.25
+class BrowserError(Exception)
+chromedriver_path() / chrome_path()   # $RADIXNET_CHROMEDRIVER / $RADIXNET_CHROME, then PATH, then a
+                                      # Playwright browser directory (.../chromium-1194/chrome-linux/chrome)
+describe() -> {"available", "chromedriver", "chrome", "chromedriver_version", "chrome_version", "headless", "error"}
+browser_available() -> bool
+class BrowserClient(page_timeout=30, window=(1280, 900), settle=0.25, headless=True, driver=None, chrome=None,
+                    endpoint=None)
+    .get(url) -> {"url", "title", "html", "status"}   # navigate, wait for readyState, then the outerHTML
+    .script(source, *args) ; .close() ; .describe() ; context manager ; .running ; .pages
+```
+
+chromedriver refuses to drive a Chrome of a different major version, which is far and away the most common way
+this fails, so `describe()` reads both versions and says so itself rather than leaving a raw WebDriver error
+nobody can act on. `endpoint` (or `$RADIXNET_WEBDRIVER`) points at a WebDriver that is already running — a Selenium
+Grid, a `selenium/standalone-chrome` container, a chromedriver of your own — and then nothing is started or stopped
+here and the remote browser's own binary is used. Headless by default, `--no-sandbox` added when running as root
+(containers), images off, one session opened on the first page and reused, stopped by `close()` and at exit.
+
+`WebClient(browser=...)` routes `fetch` through it (`default_toolbox(..., browser=...)`, `--browser`,
+`{"browser": true}` on `/api/tools/call`, `serve --browser`). The address guards run **first** either way: a
+browser executes whatever a page sends it, so this is isolation from nothing — untrusted browsing belongs in the
+Docker image. `radixnet tools browser` reports what would be driven without starting it; the API's `GET /api/tools`
+carries the same under `"browser"`, and the server keeps one Chrome for every request (`ModelService.browser`),
+closed with the server. Tests (`tests/test_browser.py`) drive a **fake WebDriver** over HTTP so the whole protocol
+runs without a browser, and skip the one real-Chrome test when the versions do not match.
+
+---
+
+## 29. The Model Context Protocol (`mcp.py`) — the tools and the network, to any client
+
+`radixnet mcp` speaks MCP on stdin / stdout, so any MCP client (Claude Desktop, an editor, another agent) can use
+this instance. Two things are offered, and the second is the point:
+
+* the **tools** of section 27.1 — the same registry the network calls by writing text;
+* the **network** (`model_tools`) — `radixnet_predict`, `radixnet_generate`, `radixnet_score`, `radixnet_stats`,
+  `radixnet_judge` (the negative network's verdict on a text: has this way of going wrong been seen before, and
+  why) and `radixnet_solve` (one task through the whole agent loop — criteria, tool calls, a judged answer). A
+  client can ask *this* network what it thinks, not just borrow its browser.
+
+MCP is JSON-RPC 2.0 over a stream, so this is the standard library: newline-delimited JSON, `initialize`,
+`tools/list`, `tools/call`, `ping` and the `notifications/*` that take no answer. `McpServer.handle(message)` turns
+one request object into one response object (`None` for a notification), which is how it is tested; `run(in, out)`
+is the stream loop. A tool that *fails* is a result with `isError: true`, not a protocol error — the client shows
+it to its model — while an unknown tool or unreadable arguments are `INVALID_PARAMS`. Nothing is ever printed on
+stdout but the protocol; the log goes to stderr.
+
+```
+radixnet --model model.json mcp                       # tools + the network
+radixnet mcp --no-model --offline --python-tool       # the sandbox alone
+radixnet mcp --browser                                # browsing in a real Chrome
+```
+
+```json
+{"mcpServers": {"radixnet": {"command": "python", "args": ["-m", "radixnet", "--model", "model.json", "mcp"]}}}
+```

@@ -2324,8 +2324,17 @@ def build_toolbox(args: argparse.Namespace) -> Any:
         from .codegen import Sandbox
 
         sandbox = Sandbox(timeout=args.sandbox_timeout, isolate_network=not args.no_network_isolation)
+    browser = None
+    if getattr(args, "browser", False) and not args.offline:
+        from .browser import BrowserClient, describe as describe_browser
+
+        found = describe_browser()
+        if not found["available"]:
+            raise CliError(f"--browser: {found['error']}")
+        browser = BrowserClient(page_timeout=args.page_timeout, headless=not args.no_headless)
     try:
-        return default_toolbox(web, sandbox=sandbox, upload_dir=args.upload_dir or None, offline=args.offline)
+        return default_toolbox(web, sandbox=sandbox, upload_dir=args.upload_dir or None, offline=args.offline,
+                               browser=browser)
     except (ValueError, TypeError) as exc:
         raise CliError(str(exc)) from exc
 
@@ -2343,6 +2352,7 @@ def _agent_config(args: argparse.Namespace, manager: Any) -> Any:
         teach_on_failure=not args.no_teach, observation_chars=args.observation_chars,
         twonrl_per=getattr(args, "twonrl_per", "task"), replay=not args.no_replay, read_reward=args.read_reward,
         blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
+        avoid_blamed=not args.no_avoid,
         neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
         batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager), seed=args.seed or 0,
     )
@@ -2353,7 +2363,8 @@ def _agent_config(args: argparse.Namespace, manager: Any) -> Any:
     return config
 
 
-def _agent_preamble(console: Console, args, model, origin, config, client, toolbox, source: str, out: str) -> None:
+def _agent_preamble(console: Console, args, model, origin, config, client, toolbox, source: str, out: str,
+                    neg_origin: Any = None) -> None:
     console.pairs([
         ("model", origin.describe()),
         ("backend", backend_label(model)),
@@ -2363,9 +2374,12 @@ def _agent_preamble(console: Console, args, model, origin, config, client, toolb
         ("judge", (config.judge_model or config.agent_model) if config.use_judge else "off (the known answer only)"),
         ("mediation", f"{config.mediation} (the LLM repairs the calls the network cannot write yet)"),
         ("steps", f"{config.max_steps} tool calls per attempt, {config.model_attempts} attempt(s) by the network"
-                  + (f", then the teacher demonstrates" if config.teach_on_failure else ", no teaching")),
+                  + (", then the teacher demonstrates" if config.teach_on_failure else ", no teaching")),
         ("failure", f"{config.blatant_mode}: margin={config.blatant_margin:g} boost={config.blatant_boost:g} "
                     f"(train on the failures the harder the worse they are, then invert)"),
+        *([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}"
+                              + ("" if config.avoid_blamed else "; still offering what it has seen fail"))]
+          if neg_origin is not None else []),
         ("2NRL", f"negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
                  f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}"),
         ("output", out),
@@ -2387,6 +2401,19 @@ def cmd_tools(args: argparse.Namespace, console: Console) -> dict:
              for t in toolbox.tools()],
         )
         return {"tools": toolbox.describe(), "offline": args.offline}
+    if args.action == "browser":
+        from .browser import describe as describe_browser
+
+        found = describe_browser()
+        console.pairs([
+            ("available", found["available"]),
+            ("chromedriver", f"{found['chromedriver'] or '-'} ({found['chromedriver_version'] or 'no version'})"),
+            ("chrome", f"{found['chrome'] or '-'} ({found['chrome_version'] or 'no version'})"),
+        ])
+        if found["error"]:
+            console.say()
+            console.say(found["error"])
+        return found
     if args.action == "describe":
         try:
             tool = toolbox.get(args.tool)
@@ -2427,6 +2454,32 @@ def cmd_tools(args: argparse.Namespace, console: Console) -> dict:
     return result.to_dict()
 
 
+def cmd_mcp(args: argparse.Namespace, console: Console) -> None:
+    """Serve the tools and the network over MCP on stdin / stdout."""
+    from .mcp import McpServer, model_tools
+
+    toolbox = build_toolbox(args)
+    model = negative = client = None
+    if not args.no_model:
+        model, origin = open_model(args, console, required=False)
+        if args.blame or os.path.isfile(negative_path(args)):
+            negative, _neg_origin = open_negative(args, console, required=False)
+        if not args.no_solve:
+            client = _ollama_client_for(args, args.agent_model or None)
+        for tool in model_tools(model, toolbox=toolbox, client=client, negative=negative):
+            toolbox.register(tool)
+    # stdout carries the protocol, so everything a person reads goes to stderr
+    console.note(f"radixnet MCP server: {len(toolbox)} tool(s) on stdin/stdout")
+    console.note("  " + ", ".join(toolbox.names()))
+    if model is not None:
+        console.note(f"  model: {origin.describe()}" + (", negative network attached" if negative else ""))
+    try:
+        McpServer(toolbox).run(log=sys.stderr)
+    except KeyboardInterrupt:
+        pass
+    return None
+
+
 def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
     """Solve a list of tasks with tools: criteria, attempts, judging, teaching, 2NRL."""
     from .agent import AgentTrainer, load_tasks
@@ -2441,12 +2494,14 @@ def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
     toolbox = build_toolbox(args)
     client = _ollama_client_for(args, config.agent_model)
     model, origin = open_model(args, console, required=False)
+    negative, neg_origin = (open_negative(args, console, required=False) if args.blame else (None, None))
     out = args.out or args.model
     _agent_preamble(console, args, model, origin, config, client, toolbox,
-                    f"{len(tasks)} from {args.tasks}, {config.rounds} round(s) of {' -> '.join(config.phases)}", out)
+                    f"{len(tasks)} from {args.tasks}, {config.rounds} round(s) of {' -> '.join(config.phases)}", out,
+                    neg_origin)
     printer = TaskPrinter(console)
     stop = threading.Event()
-    trainer = AgentTrainer(model, client, toolbox, config)
+    trainer = AgentTrainer(model, client, toolbox, config, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(tasks, progress=printer, stop_event=stop, checkpoint_manager=manager),
@@ -2455,7 +2510,8 @@ def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
     except (OllamaError, ValueError) as exc:
         raise CliError(str(exc)) from exc
     saved = _finish_training(console, model, out, interrupted, printer, "task")
-    return _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+    return _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model,
+                         negative)
 
 
 def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
@@ -2468,16 +2524,17 @@ def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
     toolbox = build_toolbox(args)
     client = _ollama_client_for(args, config.agent_model)
     model, origin = open_model(args, console, required=False)
+    negative, neg_origin = (open_negative(args, console, required=False) if args.blame else (None, None))
     out = args.out or args.model
     steps = args.steps
     _agent_preamble(console, args, model, origin, config, client, toolbox,
-                    f"chosen by the network: {steps or 'until Ctrl-C'} step(s)", out)
+                    f"chosen by the network: {steps or 'until Ctrl-C'} step(s)", out, neg_origin)
     if args.seed_url:
         trailer = list(args.seed_url)
         console.note(f"starting frontier: {', '.join(trailer)}")
     printer = TaskPrinter(console)
     stop = threading.Event()
-    trainer = AgentTrainer(model, client, toolbox, config)
+    trainer = AgentTrainer(model, client, toolbox, config, negative=negative)
     trainer.frontier.extend(args.seed_url or ())
     try:
         records, interrupted = run_interruptible(
@@ -2487,7 +2544,8 @@ def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
     except (OllamaError, ValueError) as exc:
         raise CliError(str(exc)) from exc
     saved = _finish_training(console, model, out, interrupted, printer, "step")
-    doc = _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+    doc = _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model,
+                        negative)
     doc["frontier"] = list(trainer.frontier)
     doc["visited"] = list(trainer.visited)
     console.say(f"{len(trainer.visited)} page(s) read, {len(trainer.frontier)} still on the frontier")
@@ -2503,7 +2561,8 @@ def _ollama_client_for(args: argparse.Namespace, model: str) -> Any:
         raise CliError(str(exc)) from exc
 
 
-def _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model) -> dict:
+def _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model,
+                  negative: Any = None) -> dict:
     """The shared summary and JSON document of `agent` and `explore`."""
     done = [r for r in records if r.get("kind") in ("task", "explore")]
     solved = sum(1 for r in done if r.get("correct"))
@@ -2514,13 +2573,19 @@ def _agent_report(console, args, origin, out, config, toolbox, trainer, records,
     console.say(
         f"{solved}/{len(done)} task(s) solved ({by_model} by the network); {own}/{calls} tool call(s) written by the "
         f"network itself" + (f" ({own / calls:.0%})" if calls else "") + f"; {fails} failure(s) trained on"
+        + (f"; {trainer.avoided} candidate(s) passed over as known failures" if trainer.avoided else "")
     )
     doc = {
         "model": origin.to_dict(), "out": out, "config": config.to_dict(), "tools": toolbox.names(),
         "records": records, "attempts": trainer.history, "solved": solved, "model_solved": by_model,
         "calls": calls, "own_calls": own, "autonomy": (own / calls) if calls else None, "failures": fails,
         "criteria": trainer.criteria, "solutions": trainer.solved, "interrupted": interrupted, "saved": saved,
-        "stats": model.stats(),
+        "stats": model.stats(), "avoided": trainer.avoided,
+        "negative": None if negative is None else {
+            "blamed": sum(r.get("negative_blamed") or 0 for r in done),
+            "edges": sum(r.get("negative_edges") or 0 for r in done),
+            **_save_negative(console, negative, negative_path(args)),
+        },
     }
     if getattr(args, "report", None):
         with open(args.report, "w", encoding="utf-8") as fh:
@@ -2754,7 +2819,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     tool_options = {
         "offline": args.offline, "allow_private": args.allow_private, "search_url": args.search_url or None,
         "web_timeout": args.web_timeout, "max_bytes": args.max_bytes, "python_tool": args.python_tool,
-        "sandbox_timeout": args.sandbox_timeout,
+        "sandbox_timeout": args.sandbox_timeout, "browser": args.browser, "page_timeout": args.page_timeout,
     }
     doc = {
         "host": args.host,
@@ -2934,6 +2999,12 @@ def _add_tool_options(parser: argparse.ArgumentParser, upload_dir: bool = True) 
                        help="seconds to wait for one page")
     group.add_argument("--max-bytes", type=_int_at_least(1024), default=2_000_000, metavar="N",
                        help="most bytes read from one page")
+    group.add_argument("--browser", action="store_true",
+                       help="draw pages in a real headless Chrome (WebDriver) instead of fetching them, so a site "
+                            "that renders itself with JavaScript is readable")
+    group.add_argument("--no-headless", action="store_true", help="show the browser window (--browser)")
+    group.add_argument("--page-timeout", type=_float_at_least(1.0), default=30.0, metavar="SECONDS",
+                       help="seconds a page may take to draw (--browser)")
     group.add_argument("--python-tool", action="store_true", help="also offer the sandboxed `python` tool")
     group.add_argument("--sandbox-timeout", type=_float_at_least(0.1), default=10.0, metavar="SECONDS",
                        help="seconds a sandboxed program may run (--python-tool)")
@@ -2989,6 +3060,15 @@ def _add_agent_options(parser: argparse.ArgumentParser) -> None:
                             "failure counts as blatant")
     group.add_argument("--blatant-boost", type=_float_at_least(1.0), default=4.0, metavar="X",
                        help="largest learning-rate multiplier a failure can earn")
+
+    group = parser.add_argument_group("negative network")
+    group.add_argument("--blame", action="store_true",
+                       help="teach the negative network why each attempt failed: the judge's reason, the gap as the "
+                            "severity, and - when a correct run exists - only the characters that differ from it")
+    group.add_argument("--no-avoid", action="store_true",
+                       help="with --blame, still offer candidates the negative network has seen fail")
+    group.add_argument("--negative", metavar="PATH",
+                       help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
 
     group = parser.add_argument_group("2NRL options")
     group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (failure) phase")
@@ -3872,6 +3952,15 @@ def build_parser() -> argparse.ArgumentParser:
     a = actions.add_parser("list", help="list the tools and their arguments", formatter_class=_HelpFormatter)
     _add_tool_options(a)
     a.set_defaults(handler=cmd_tools)
+    a = actions.add_parser(
+        "browser", help="what --browser would drive: the chromedriver and Chrome found, and their versions",
+        description="Report the Chrome and chromedriver the --browser option would use, without starting them.\n"
+                    "They must share a major version; $RADIXNET_CHROMEDRIVER and $RADIXNET_CHROME override the search.",
+        formatter_class=_HelpFormatter,
+    )
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+
     a = actions.add_parser("describe", help="one tool in detail, with its JSON schema", formatter_class=_HelpFormatter)
     a.add_argument("--tool", required=True, metavar="NAME", help="the tool to describe")
     _add_tool_options(a)
@@ -3931,6 +4020,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, criteria, solutions)")
     p.set_defaults(handler=cmd_explore)
+
+    p = command(
+        "mcp", "serve the tools and the network over the Model Context Protocol (stdio)",
+        "Speak MCP on stdin / stdout so any MCP client - Claude Desktop, an editor, another agent - can use\n"
+        "this instance: the external tools (browsing, the calculator, optionally the sandbox and the uploaded\n"
+        "files) and the network itself (predict, generate, score, stats, solve a task through the agent loop,\n"
+        "and judge a text against the negative network).  Nothing is printed on stdout but the protocol.",
+    )
+    p.add_argument("--no-model", action="store_true", help="offer the external tools only, without the network")
+    p.add_argument("--no-solve", action="store_true",
+                   help="do not offer radixnet_solve (which needs an LLM for the criteria and the judging)")
+    p.add_argument("--blame", action="store_true",
+                   help="load the negative network even when its file does not exist yet (radixnet_judge)")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    p.add_argument("--agent-model", metavar="NAME", help="Ollama model for radixnet_solve (default: the usual one)")
+    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one answer")
+    _add_tool_options(p)
+    p.set_defaults(handler=cmd_mcp)
 
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url

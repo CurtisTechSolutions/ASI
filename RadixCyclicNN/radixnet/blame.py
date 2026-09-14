@@ -38,6 +38,8 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 __all__ = [
+    "AGENT_REASONS",
+    "AGENT_SEVERITY",
     "CODE_REASONS",
     "CODE_SEVERITY",
     "DEFAULT_REASON",
@@ -47,15 +49,19 @@ __all__ = [
     "RECALL_OVERRUN",
     "RECALL_TRUNCATED",
     "SPEECH_REASONS",
+    "agent_reason",
     "classify",
     "code_reason",
+    "faults_from_agent",
     "faults_from_attempts",
     "faults_from_lessons",
     "faults_from_recall",
     "faults_from_reviews",
     "recall_reason",
+    "severity_from_gap",
     "severity_from_rating",
     "teach",
+    "teach_agent",
     "teach_attempts",
     "teach_lessons",
     "teach_recall",
@@ -89,6 +95,24 @@ CODE_REASONS = (
     DEFAULT_REASON,
 )
 """Reason tags for reviewed *programs*."""
+
+AGENT_REASONS = (
+    "no-call",
+    "bad-call",
+    "tool-error",
+    "no-answer",
+    DEFAULT_REASON,
+)
+"""Reason tags for an attempt at a task with *tools* (the order :func:`agent_reason` tries them in)."""
+
+AGENT_SEVERITY = {
+    "no-call": 1.0,
+    "bad-call": 0.75,   # one step of one attempt, not the whole attempt
+    "tool-error": 1.0,
+    "no-answer": 1.5,
+    DEFAULT_REASON: 1.0,
+}
+"""How heavily each tool-use failure is blamed (1 = one ordinary failure)."""
 
 CODE_SEVERITY = {
     "timeout": 1.5,
@@ -231,6 +255,44 @@ def recall_reason(facts: Any) -> str:
     return "none"
 
 
+def agent_reason(attempt: Any) -> str:
+    """Why an agent attempt was rejected, read from how far through the task it got.
+
+    The order is how far it got: a network that never called anything is not
+    also judged on the answer it never gave, and one whose calls had to be
+    written for it is not blamed for the tool failing afterwards.  When it did
+    get through, the judge's own words decide (:func:`classify`).
+    """
+    data = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt or {})
+    steps = list(data.get("steps") or ())
+    verdict = data.get("verdict") or {}
+    if not steps:
+        return "no-call"
+    if any((s or {}).get("source") == "mediator" for s in steps):
+        return "bad-call"  # what it wrote could not be read as a call; the mediator had to step in
+    if any((s or {}).get("ok") is False for s in steps):
+        return "tool-error"
+    if not data.get("answer"):
+        return "no-answer"
+    return classify(
+        verdict.get("critique") or "; ".join(str(i) for i in (verdict.get("issues") or [])[:3]),
+        rating=verdict.get("score"),
+    )
+
+
+def severity_from_gap(gap: float | None, floor: float = 0.25, ceiling: float = 2.0) -> float:
+    """How heavily a failure is blamed, from how badly it failed (``gap`` in ``[0, 1]``).
+
+    The agent's own measure of a failure (:meth:`radixnet.agent.AgentTrainer.gap_of`
+    - the share of the acceptance criteria missed, or how far below the pass
+    score the judge put it) on the same scale
+    :func:`severity_from_rating` maps ratings onto.
+    """
+    if gap is None:
+        return 1.0
+    return floor + (ceiling - floor) * max(0.0, min(1.0, float(gap)))
+
+
 def _fault(text: str, reason: str, severity: float, note: str, source: str) -> dict:
     return {"text": text, "reason": reason, "severity": float(severity), "note": note, "source": source}
 
@@ -291,6 +353,90 @@ def faults_from_attempts(attempts: Iterable[Any], source: str = "codegen") -> tu
         )
         faults.append(_fault(text, reason, CODE_SEVERITY.get(reason, 1.0), note, source))
     return faults, correct
+
+
+def faults_from_agent(
+    attempts: Iterable[Any],
+    *,
+    correction: str | None = None,
+    threshold: float = 6.0,
+    source: str = "agent",
+    steps: bool = True,
+) -> tuple[list[dict], list[str]]:
+    """``(faults, correct_texts)`` from :class:`radixnet.agent.Attempt` objects (or their dicts).
+
+    A failed attempt is blamed at every granularity it went wrong at, because
+    they are different failures and the network has to be able to tell them
+    apart:
+
+    * the **transcript** as a whole, for how badly it failed
+      (:func:`severity_from_gap`) and for what the judge said about the answer.
+      ``correction`` is the transcript of a correct run of the same task -
+      usually the teacher's demonstration - which routes the fault through
+      :meth:`radixnet.negative.NegativeNet.correct`, so only the characters
+      that differ from a run that worked are blamed;
+    * each **emission the mediator had to repair** (``bad-call``): what the
+      network actually wrote is the failure, and it never appears in the
+      transcript, which holds the repaired call instead.  Blaming the
+      transcript for those characters would teach the network that a
+      well-formed call is a mistake;
+    * each **call the network wrote itself that the tool refused**
+      (``tool-error``): it chose that call and it did not work.
+
+    ``steps=False`` keeps only the attempt-level faults.
+    """
+    faults: list[dict] = []
+    correct: list[str] = []
+    seen: set[str] = set()
+    for attempt in attempts or []:
+        data = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt or {})
+        text = str(getattr(attempt, "text", None) or data.get("text") or "")
+        verdict = data.get("verdict") or {}
+        if data.get("correct") or verdict.get("correct"):
+            if text:
+                correct.append(text)
+            continue
+        note = str(verdict.get("critique") or "")
+        issues = [str(i) for i in (verdict.get("issues") or [])]
+        if issues:
+            note = (note + " Unmet: " + "; ".join(issues[:4])).strip()
+        if text:
+            gap = data.get("gap")
+            fault = _fault(
+                text,
+                agent_reason(attempt),
+                severity_from_gap(gap) if gap is not None
+                else severity_from_rating(verdict.get("score"), threshold),
+                note or "the attempt was judged incorrect",
+                source,
+            )
+            if correction and correction != text:
+                fault["correction"] = correction
+            faults.append(fault)
+        if not steps:
+            continue
+        for step in data.get("steps") or ():
+            step = step or {}
+            if step.get("source") == "mediator":
+                emission = " ".join(str(step.get("emission") or "").split())
+                if len(emission) >= 3 and emission not in seen:
+                    seen.add(emission)
+                    faults.append(_fault(
+                        emission, "bad-call", AGENT_SEVERITY["bad-call"],
+                        f"could not be read as a call to {step.get('tool')}, which the mediator had to write instead",
+                        source,
+                    ))
+            elif step.get("ok") is False and step.get("source") == "model":
+                call = str(step.get("text") or "").strip()
+                if call and call not in seen:
+                    seen.add(call)
+                    faults.append(_fault(
+                        call, "tool-error", AGENT_SEVERITY["tool-error"],
+                        str(step.get("error") or "the tool refused the call"), source,
+                    ))
+    # `correct` already clears everything a correction shares with the failure structure, so the text
+    # used as one must not be cleared a second time: it would take off the blame the diff just placed.
+    return faults, [t for t in correct if t != correction]
 
 
 def faults_from_lessons(lessons: Iterable[Any], threshold: float = 6.0, source: str = "tutor") -> tuple[list[dict], list[str]]:
@@ -482,6 +628,17 @@ def teach_recall(negative: Any, lessons: Iterable[Any], *, threshold: float = 6.
     faults, passed = faults_from_recall(lessons, threshold, source)
     report = teach(negative, faults, passed if clear_passes else (), **options)
     report.update(source=source, threshold=float(threshold), faults=faults, passed=len(passed))
+    return report
+
+
+def teach_agent(negative: Any, attempts: Iterable[Any], *, correction: str | None = None, threshold: float = 6.0,
+                clear_passes: bool = True, source: str = "agent", steps: bool = True, **options: Any) -> dict:
+    """Feed one task's attempts at using tools into the negative network (see :func:`faults_from_agent`)."""
+    faults, correct = faults_from_agent(
+        attempts, correction=correction, threshold=threshold, source=source, steps=steps,
+    )
+    report = teach(negative, faults, correct if clear_passes else (), **options)
+    report.update(source=source, threshold=float(threshold), faults=faults, passed=len(correct))
     return report
 
 

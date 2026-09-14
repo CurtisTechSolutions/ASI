@@ -330,8 +330,10 @@ class ModelService:
         self.tool_options: dict[str, Any] = {
             "offline": False, "allow_private": False, "search_url": None, "web_timeout": 20.0,
             "max_bytes": 2_000_000, "python_tool": False, "sandbox_timeout": 10.0,
+            "browser": False, "page_timeout": 30.0,
             **(tool_options or {}),
         }
+        self._browser: Any = None  # one headless Chrome for the whole server, started on first use
         self.backend_name = backend
         self.device = device
         self.seed = int(seed)
@@ -1386,12 +1388,14 @@ class ModelService:
         web_timeout: float | None = None,
         max_bytes: int | None = None,
         python_tool: bool | None = None,
+        browser: bool | None = None,
     ) -> ToolBox:
         """The tools of one request: the server's defaults with the request's overrides applied."""
         options = dict(self.tool_options)
         for key, value in (
             ("offline", offline), ("allow_private", allow_private), ("search_url", search_url),
             ("web_timeout", web_timeout), ("max_bytes", max_bytes), ("python_tool", python_tool),
+            ("browser", browser),
         ):
             if value is not None:
                 options[key] = value
@@ -1403,29 +1407,58 @@ class ModelService:
                     allow_private=options["allow_private"], search_url=options["search_url"] or None,
                 )
             sandbox = Sandbox(timeout=options["sandbox_timeout"]) if options["python_tool"] else None
-            return default_toolbox(web, sandbox=sandbox, upload_dir=self.upload_dir, offline=options["offline"])
+            drawn_by = self.browser(options["page_timeout"]) if options["browser"] and not options["offline"] else None
+            return default_toolbox(web, sandbox=sandbox, upload_dir=self.upload_dir, offline=options["offline"],
+                                   browser=drawn_by)
         except (ValueError, TypeError) as exc:
             raise ApiError(400, str(exc)) from exc
 
+    def browser(self, page_timeout: float = 30.0) -> Any:
+        """The one headless Chrome of this server, started on first use and shared by every request.
+
+        A browser takes a second or two to start, so one per request would be
+        unusable; it is stopped with the server.
+        """
+        from .browser import BrowserClient, describe as describe_browser
+
+        with self._upload_lock:  # any lock will do: this only guards the one-time construction
+            if self._browser is None:
+                found = describe_browser()
+                if not found["available"]:
+                    raise ApiError(400, f"the browser is not available: {found['error']}")
+                self._browser = BrowserClient(page_timeout=page_timeout)
+            return self._browser
+
     def describe_tools(self) -> dict:
+        from .browser import describe as describe_browser
+
         box = self.toolbox()
         return {
             "tools": box.describe(), "names": box.names(), "count": len(box),
             "options": dict(self.tool_options), "upload_dir": self.upload_dir,
             "call_format": '<tool>name {"argument": "value"}</tool>',
+            "browser": describe_browser(),
         }
 
     def call_tool(self, toolbox: ToolBox, name: str, arguments: dict) -> dict:
         """Run one tool outside any job (the model lock is not taken: no tool touches the model)."""
         return toolbox.call(name, arguments).to_dict()
 
-    def start_agent(self, tasks: list[Task], config: AgentConfig, client: OllamaClient, toolbox: ToolBox) -> dict:
-        """Start an ``agent`` job: criteria, tool calls, judging, teaching and 2NRL over ``tasks``."""
+    def start_agent(
+        self, tasks: list[Task], config: AgentConfig, client: OllamaClient, toolbox: ToolBox, blame: bool = False,
+    ) -> dict:
+        """Start an ``agent`` job: criteria, tool calls, judging, teaching and 2NRL over ``tasks``.
+
+        With ``blame`` the judge also teaches the negative network: every failed
+        attempt is blamed for what went wrong in it, and the correct run of the
+        same task is the correction the diff is taken against.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
-            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock)
+            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock, negative=negative)
             trainer.run(
                 tasks, progress=self._progress(job, self._agent_history), stop_event=job.stop_event,
                 checkpoint_manager=manager,
@@ -1434,14 +1467,20 @@ class ModelService:
         return self._start_job("agent", work)
 
     def start_explore(
-        self, steps: int | None, config: AgentConfig, client: OllamaClient, toolbox: ToolBox, seeds: list[str] | None = None
+        self, steps: int | None, config: AgentConfig, client: OllamaClient, toolbox: ToolBox,
+        seeds: list[str] | None = None, blame: bool = False,
     ) -> dict:
-        """Start an ``explore`` job: the network chooses every task itself (``steps`` ``None`` / 0 = until stopped)."""
+        """Start an ``explore`` job: the network chooses every task itself (``steps`` ``None`` / 0 = until stopped).
+
+        ``blame`` teaches the negative network from every failure it finds
+        along the way, exactly as :meth:`start_agent` does.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
-            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock)
+            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock, negative=negative)
             trainer.frontier.extend(seeds or ())
             trainer.explore(
                 steps=steps, progress=self._progress(job, self._agent_history), stop_event=job.stop_event,
@@ -1525,7 +1564,10 @@ class ModelService:
     # -- lifecycle -----------------------------------------------------------
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """Stop a running job and wait (bounded) for its thread to finish."""
+        """Stop a running job and wait (bounded) for its thread to finish; close the browser if one was started."""
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            browser.close()
         job = self._job
         if job is None or not job.running:
             return
@@ -2983,6 +3025,7 @@ def _toolbox_from(svc: ModelService, f: Fields, q: dict | None = None) -> ToolBo
 
     return svc.toolbox(
         offline=flag("offline"), allow_private=flag("allow_private"), python_tool=flag("python_tool"),
+        browser=flag("browser"),
         search_url=f.text("search_url", None), web_timeout=f.number("web_timeout", None, minimum=0.1),
         max_bytes=f.integer("max_bytes", None, minimum=1024),
     )
@@ -3026,6 +3069,8 @@ def _agent_config(f: Fields) -> AgentConfig:
         blatant_mode=blatant,
         blatant_margin=f.number("blatant_margin", d.blatant_margin, minimum=0.001),
         blatant_boost=f.number("blatant_boost", d.blatant_boost, minimum=1.0),
+        avoid_blamed=f.flag("avoid_blamed", d.avoid_blamed),
+        avoid_threshold=f.number("avoid_threshold", d.avoid_threshold, minimum=0.0),
         neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
         pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
         neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
@@ -3098,8 +3143,10 @@ def _r_agent_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     config = _agent_config(f)
     toolbox = _toolbox_from(svc, f)
     client = _agent_client(svc, f, config)
-    job = svc.start_agent(tasks, config, client, toolbox)
-    return 202, {"job": job, "tasks": [t.to_dict() for t in tasks], "tools": toolbox.names(), "config": config.to_dict()}
+    blame = f.flag("blame", False)
+    job = svc.start_agent(tasks, config, client, toolbox, blame=blame)
+    return 202, {"job": job, "tasks": [t.to_dict() for t in tasks], "tools": toolbox.names(),
+                 "config": config.to_dict(), "blame": blame}
 
 
 def _r_agent_explore(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3108,8 +3155,10 @@ def _r_agent_explore(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     client = _agent_client(svc, f, config)
     steps = f.integer("steps", 10, minimum=0)
     seeds = [s for s in f.texts_optional("seed_urls", "seed_url") if s.strip()]
-    job = svc.start_explore(steps or None, config, client, toolbox, seeds)
-    return 202, {"job": job, "steps": steps or None, "seeds": seeds, "tools": toolbox.names(), "config": config.to_dict()}
+    blame = f.flag("blame", False)
+    job = svc.start_explore(steps or None, config, client, toolbox, seeds, blame=blame)
+    return 202, {"job": job, "steps": steps or None, "seeds": seeds, "tools": toolbox.names(),
+                 "config": config.to_dict(), "blame": blame}
 
 
 def _r_agent_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3462,13 +3511,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the external tools the network can call by writing <tool>name {...}</tool>: names, arguments, JSON schemas"),
     ("POST", "/api/tools/call", _r_tool_call,
      "call one tool directly: {tool, arguments} or {call: 'name {\"arg\": \"value\"}'} + tool overrides "
-     "{offline, allow_private, search_url, web_timeout, max_bytes, python_tool} -> the ToolResult"),
+     "{offline, allow_private, search_url, web_timeout, max_bytes, python_tool, browser} -> the ToolResult"),
     ("POST", "/api/agent/start", _r_agent_start,
      "start an agent job over tasks: {tasks | tasks_text | task_files, phase: model|teacher|both, rounds, max_steps, "
-     "mediation: repair|always|never, criteria, judge, teach, blatant_mode, blatant_margin, blatant_boost, 2NRL options}"),
+     "mediation: repair|always|never, criteria, judge, teach, blame (teach the negative network from the failures), "
+     "blatant_mode, blatant_margin, blatant_boost, 2NRL options}"),
     ("POST", "/api/agent/explore", _r_agent_explore,
-     "start an explore job - the network chooses every task itself: {steps (0 = until stopped), seed_urls, ...the "
-     "agent options}"),
+     "start an explore job - the network chooses every task itself: {steps (0 = until stopped), seed_urls, blame, "
+     "...the agent options}"),
     ("GET", "/api/agent/history", _r_agent_history, "criteria / step / attempt / task records of all agent and explore runs"),
     ("POST", "/api/agent/criteria", _r_agent_criteria,
      "the acceptance criteria the LLM writes for {tasks}, without attempting anything"),

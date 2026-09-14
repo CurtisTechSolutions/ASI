@@ -7,11 +7,15 @@ a page that is larger than the byte cap.  Nothing here reaches the network —
 which is exactly the guard the tests also check refuses by default.
 """
 
+import contextlib
 import json
 import os
+import socket
 import sys
 import threading
 import unittest
+import unittest.mock
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -126,6 +130,38 @@ def local_web(site, **kwargs):
     kwargs.setdefault("allow_private", True)
     kwargs.setdefault("search_url", site.url + "/search?q={query}")
     return WebClient(**kwargs)
+
+
+@contextlib.contextmanager
+def _no_dns():
+    """Every name lookup fails, as it does in a process whose DNS goes through a proxy."""
+    def fail(*args, **kwargs):
+        raise OSError(-2, "Name or service not known")
+
+    with unittest.mock.patch.object(socket, "getaddrinfo", fail):
+        yield
+
+
+@contextlib.contextmanager
+def _resolves_to(address):
+    """Every name resolves to one address (a DNS sinkhole, or an internal answer)."""
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    infos = [(family, socket.SOCK_STREAM, 6, "", (address, 0))]
+    with unittest.mock.patch.object(socket, "getaddrinfo", lambda *a, **k: infos):
+        yield
+
+
+@contextlib.contextmanager
+def _proxies(mapping):
+    with unittest.mock.patch.object(urllib.request, "getproxies", lambda: dict(mapping)), \
+         unittest.mock.patch.object(urllib.request, "proxy_bypass", lambda host: False):
+        yield
+
+
+@contextlib.contextmanager
+def _no_proxies():
+    with _proxies({}):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -369,9 +405,37 @@ class WebClientGuardTests(unittest.TestCase):
                 self.web.check(url)
             self.assertIn("private", str(ctx.exception))
 
-    def test_unresolvable_host_is_refused(self):
-        with self.assertRaises(WebError):
-            self.web.check("http://no-such-host.invalid/")
+    def test_unresolvable_host_is_refused_when_nothing_else_can_resolve_it(self):
+        with _no_dns(), _no_proxies():
+            with self.assertRaises(WebError) as ctx:
+                self.web.check("https://example.com/")
+        self.assertIn("cannot be resolved here", str(ctx.exception))
+
+    def test_a_host_this_process_cannot_resolve_still_goes_through_a_proxy(self):
+        # behind a proxy (Docker, a corporate network, a sandbox) the proxy resolves the name and
+        # this process often has no DNS at all; refusing there would make browsing impossible
+        with _no_dns(), _proxies({"https": "http://127.0.0.1:3128"}):
+            self.assertEqual(self.web.check("https://example.com/"), "https://example.com/")
+
+    def test_each_refusal_says_which_kind_of_address_it_is(self):
+        for address, expected in (
+            ("0.0.0.0", "an unspecified address"),  # what a DNS sinkhole answers with
+            ("127.0.0.1", "a loopback address"),
+            ("169.254.169.254", "a link-local address"),  # the cloud metadata endpoint
+            ("10.1.2.3", "a private address"),
+        ):
+            with _resolves_to(address):
+                with self.assertRaises(WebError) as ctx:
+                    self.web.check("https://example.com/")
+            message = str(ctx.exception)
+            self.assertIn(expected, message)
+            self.assertIn(address, message)
+            self.assertIn("allow_private", message)
+
+    def test_allow_private_skips_the_check_entirely(self):
+        web = WebClient(allow_private=True)
+        with _resolves_to("127.0.0.1"):
+            self.assertEqual(web.check("https://example.com/"), "https://example.com/")
 
     def test_scheme_and_credentials(self):
         with self.assertRaises(WebError):

@@ -210,11 +210,16 @@ class Step:
     def repaired(self) -> bool:
         return self.source == "mediator"
 
+    @property
+    def text(self) -> str:
+        """The call as it appears in the transcript."""
+        return call_text(self.call.name, self.call.arguments)
+
     def to_dict(self) -> dict:
         return {
             "index": self.index, "tool": self.call.name, "arguments": self.call.arguments, "source": self.source,
             "ok": self.result.ok, "output": self.result.output[:500], "error": self.result.error,
-            "seconds": round(self.result.seconds, 4), "emission": self.emission[:200],
+            "seconds": round(self.result.seconds, 4), "emission": self.emission[:200], "text": self.text,
         }
 
 
@@ -260,6 +265,8 @@ class Attempt:
     text: str
     verdict: Verdict
     seconds: float = 0.0
+    gap: float | None = None
+    """How badly it failed, in ``[0, 1]`` (:meth:`AgentTrainer.gap_of`); ``None`` until it is judged."""
 
     @property
     def calls(self) -> int:
@@ -293,7 +300,7 @@ class Attempt:
             "index": self.index, "source": self.source, "answer": self.answer, "calls": self.calls,
             "own_calls": self.own_calls, "autonomy": self.autonomy, "steps": [s.to_dict() for s in self.steps],
             "verdict": self.verdict.to_dict(), "correct": self.verdict.correct, "text_chars": len(self.text),
-            "seconds": self.seconds,
+            "text": self.text, "gap": self.gap, "seconds": self.seconds,
         }
 
 
@@ -700,6 +707,8 @@ class AgentConfig:
     replay: bool = True
     replay_limit: int = 64
     read_reward: bool = False     # also fine-tune on the text of the pages that were read
+    avoid_blamed: bool = True     # skip a candidate the negative network has seen fail (when one is attached)
+    avoid_threshold: float = 1.0  # the risk at which it is passed over
     blatant_mode: str = "fail_invert"  # "none" | "fail_invert" | "activation" | "state" (section 9.1)
     blatant_margin: float = 0.5   # the gap at which a failure counts as blatant (1 = missed everything)
     blatant_boost: float = 4.0    # the largest learning-rate multiplier a failure can earn
@@ -741,6 +750,8 @@ class AgentConfig:
             raise ValueError("blatant_boost must be >= 1")
         if not 0 < self.pass_score <= 10:
             raise ValueError("pass_score must be in (0, 10]")
+        if self.avoid_threshold < 0:
+            raise ValueError("avoid_threshold must be >= 0")
         if self.observation_chars < 0 or self.replay_limit < 0 or self.checkpoint_every < 0:
             raise ValueError("observation_chars, replay_limit and checkpoint_every must be >= 0")
         if self.neg_epochs < 0 or self.pos_epochs < 0 or self.neg_lr < 0 or self.pos_lr < 0:
@@ -777,12 +788,17 @@ class AgentTrainer:
         toolbox: ToolBox,
         config: AgentConfig | None = None,
         external: Callable[[], Any] | None = None,
+        negative: Any = None,
     ) -> None:
         if not len(toolbox):
             raise ValueError("the toolbox is empty: there is nothing for the network to call")
         self.model = model
         self.client = client
         self.toolbox = toolbox
+        self.negative = negative
+        """Optional :class:`~radixnet.negative.NegativeNet`: here the judge is its tutor, so every failed
+        attempt is blamed for what went wrong in it and the correct run clears blame.  When one is attached
+        the network also stops repeating the ways of going wrong it already knows (:meth:`_blamed`)."""
         self.config = config or AgentConfig()
         self.config.validate()
         self._external = external or nullcontext
@@ -794,6 +810,9 @@ class AgentTrainer:
         self.visited: list[str] = []
         self.pages: list[str] = []
         self.rng = random.Random(self.config.seed)
+        self.avoided = 0
+        """Candidates passed over because the negative network had seen them fail."""
+        self._exploring = False
         self._stop = threading.Event()
 
     # -- helpers -------------------------------------------------------------
@@ -891,6 +910,9 @@ class AgentTrainer:
         candidates = [] if cfg.mediation == "always" else self._emissions(transcript, attempt_index)
         broken: ToolCall | None = None
         for emission in candidates:
+            if self._blamed(emission):  # the negative network has seen this go wrong: try the next one
+                self.avoided += 1
+                continue
             answer_at = emission.find(ANSWER_OPEN)
             call_at = emission.find(CALL_OPEN)
             if answer_at >= 0 and (call_at < 0 or answer_at < call_at):
@@ -1074,6 +1096,42 @@ class AgentTrainer:
         self.pages.clear()
         return result
 
+    def _teach_negative(self, attempts: list[Attempt], correct: Attempt | None) -> dict | None:
+        """Hand this task's failures to the negative network: here the judge is its tutor.
+
+        The correct run of the same task — usually the teacher's demonstration —
+        rides along as the *correction*, so a failed transcript is blamed only
+        for the characters that differ from one that worked, and it clears
+        blame off everything the two share.  Returns ``None`` when no negative
+        network is attached.
+        """
+        if self.negative is None or not attempts:
+            return None
+        from . import blame  # local import: the negative network need not be loaded to use tools
+
+        with self._external():
+            return blame.teach_agent(
+                self.negative, attempts,
+                correction=correct.text if correct is not None else None,
+                threshold=self.config.pass_score,
+                source="explore" if self._exploring else "agent",
+            )
+
+    def _blamed(self, text: str) -> bool:
+        """True when the negative network recognises this as a way of going wrong it has seen before.
+
+        What the failures taught it comes back here: a candidate the network
+        offers that walks a known failure is passed over for the next one, so
+        it stops repeating the mistakes the judge has already ruled on.
+        """
+        if self.negative is None or not self.config.avoid_blamed or len(text.strip()) < 3:
+            return False
+        try:
+            verdict = self.negative.judge(text, threshold=self.config.avoid_threshold)
+        except Exception:  # noqa: BLE001 - a network that cannot judge never vetoes
+            return False
+        return verdict.get("verdict") == "reject"
+
     def _punish_weighted(self, bad: list[str], weights: list[float]) -> list[dict]:
         """Nothing went right: the negative passes (heaviest failure first), then the inversion."""
         cfg = self.config
@@ -1134,6 +1192,7 @@ class AgentTrainer:
                     break
                 attempt = self.solve_with_model(task, index, progress, phase)
                 attempt.verdict = self.judge(task, criteria, attempt)
+                attempt.gap = self.gap_of(attempt, criteria)
                 attempts.append(attempt)
                 self._emit_attempt(progress, phase, round_no, task, attempt)
                 if attempt.verdict.correct:
@@ -1144,6 +1203,7 @@ class AgentTrainer:
             for _try in range(cfg.teacher_attempts):
                 attempt = self.solve_with_teacher(task, criteria, len(attempts), feedback)
                 attempt.verdict = self.judge(task, criteria, attempt)
+                attempt.gap = self.gap_of(attempt, criteria)
                 attempts.append(attempt)
                 taught = True
                 self._emit_attempt(progress, phase, round_no, task, attempt)
@@ -1153,7 +1213,8 @@ class AgentTrainer:
         correct = next((a for a in attempts if a.verdict.correct), None)
         good = [a.text for a in attempts if a.verdict.correct]
         failures = [
-            Failure(a.text, self.gap_of(a, criteria), task.id, a.source) for a in attempts if not a.verdict.correct
+            Failure(a.text, a.gap if a.gap is not None else self.gap_of(a, criteria), task.id, a.source)
+            for a in attempts if not a.verdict.correct
         ]
         if correct is not None:
             self.solved[task.id] = correct.text
@@ -1172,6 +1233,12 @@ class AgentTrainer:
             "gap_max": max((f.gap for f in failures), default=None),
             "seconds": time.perf_counter() - t0,
         }
+        blamed = self._teach_negative(attempts, correct)
+        if blamed is not None:
+            record["negative_blamed"] = blamed["blamed"]
+            record["negative_edges"] = blamed["edges"]
+            record["negative_reasons"] = blamed["reasons"]
+            record["negative_cleared"] = blamed["cleared"]
         return record, failures, good
 
     # -- driving -------------------------------------------------------------------
@@ -1260,6 +1327,7 @@ class AgentTrainer:
         """
         cfg = self.config
         self._stop = stop_event if stop_event is not None else threading.Event()
+        self._exploring = True
         records: list[dict] = []
         index = 0
         while not self._stopped() and (not steps or index < steps):

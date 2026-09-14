@@ -578,20 +578,57 @@ DEFAULT_SEARCH_URL = (
 """Search endpoint; ``{query}`` is replaced by the URL-encoded query. JSON answers are understood too."""
 
 
-def _is_private(host: str) -> bool:
-    """True when ``host`` resolves to a loopback / private / link-local / reserved address (SSRF guard)."""
+_ADDRESS_KINDS = (
+    ("is_unspecified", "an unspecified address (0.0.0.0 usually means DNS is blocking the name)"),
+    ("is_loopback", "a loopback address"),
+    ("is_link_local", "a link-local address"),
+    ("is_multicast", "a multicast address"),
+    ("is_private", "a private address"),
+    ("is_reserved", "a reserved address"),
+)
+"""Address kinds the web tools refuse, most diagnosable first (127.0.0.1 is loopback *and* private)."""
+
+
+def _address_problem(host: str) -> str | None:
+    """Why ``host`` must not be fetched, in words, or ``None`` when it is an ordinary public host.
+
+    The three reasons a host is refused are kept apart on purpose: a name that
+    does not resolve, a name that resolves to somewhere internal, and a name
+    that resolves to something that is not an address at all are very different
+    problems, and one message for all three leaves nobody any the wiser.
+    """
     try:
         infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return True  # cannot resolve it -> do not let the request out
+    except OSError as exc:
+        return f"cannot be resolved here ({exc.strerror or exc})"
     for info in infos:
         try:
             address = ipaddress.ip_address(info[4][0])
         except ValueError:
-            return True
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast:
-            return True
-    return False
+            return f"resolves to {info[4][0]!r}, which is not an IP address"
+        for flag, what in _ADDRESS_KINDS:
+            if getattr(address, flag, False):
+                return f"resolves to {address}, {what}"
+    return None
+
+
+def _proxy_for(url: str) -> str | None:
+    """The proxy this URL would go through (``None`` when it goes out directly).
+
+    When there is one, *it* resolves the host name — this process may have no
+    DNS at all, which is the normal case inside Docker and behind a corporate
+    or sandbox proxy.
+    """
+    parts = urllib.parse.urlsplit(url)
+    proxy = urllib.request.getproxies().get(parts.scheme)
+    if not proxy:
+        return None
+    try:
+        if urllib.request.proxy_bypass(parts.netloc):
+            return None
+    except (OSError, ValueError, AttributeError):
+        pass
+    return proxy
 
 
 class WebClient:
@@ -604,7 +641,8 @@ class WebClient:
     range.
     """
 
-    __slots__ = ("timeout", "max_bytes", "max_redirects", "user_agent", "allow_private", "search_url", "fetched")
+    __slots__ = ("timeout", "max_bytes", "max_redirects", "user_agent", "allow_private", "search_url", "fetched",
+                 "browser")
 
     def __init__(
         self,
@@ -614,6 +652,7 @@ class WebClient:
         user_agent: str | None = None,
         allow_private: bool = False,
         search_url: str | None = None,
+        browser: Any = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be > 0")
@@ -626,6 +665,10 @@ class WebClient:
         self.allow_private = bool(allow_private)
         self.search_url = search_url or DEFAULT_SEARCH_URL
         self.fetched = 0
+        self.browser = browser
+        """Optional :class:`~radixnet.browser.BrowserClient`: pages are then drawn by a real Chrome,
+        so a site that renders itself with JavaScript is readable.  The address guards run first
+        either way."""
 
     # -- transport -----------------------------------------------------------
 
@@ -643,13 +686,25 @@ class WebClient:
             raise WebError("URLs with credentials are refused")
         if not parts.hostname:
             raise WebError(f"no host in {text!r}")
-        if not self.allow_private and _is_private(parts.hostname):
-            raise WebError(f"refusing {parts.hostname}: it is a private, loopback or unresolvable address")
+        if not self.allow_private:
+            problem = _address_problem(parts.hostname)
+            # A host this process cannot resolve is still fetchable when a proxy does the resolving,
+            # and refusing it there would make browsing impossible rather than safer.
+            if problem and problem.startswith("cannot be resolved") and _proxy_for(text):
+                problem = None
+            if problem:
+                raise WebError(
+                    f"refusing {parts.hostname}: it {problem}"
+                    + (" - pass allow_private (--allow-private) to fetch it anyway"
+                       if not problem.startswith("cannot be resolved") else "")
+                )
         return urllib.parse.urlunsplit(parts)
 
     def fetch(self, url: str) -> dict:
         """``{"url", "status", "content_type", "bytes", "truncated", "body"}`` for one page."""
         target = self.check(url)
+        if self.browser is not None:
+            return self._fetch_with_browser(target)
         seen = [target]
         for _hop in range(self.max_redirects + 1):
             request = urllib.request.Request(
@@ -691,6 +746,27 @@ class WebClient:
                 "bytes": len(raw[: self.max_bytes]), "truncated": truncated, "body": body,
             }
         raise WebError(f"too many redirects starting at {url}")
+
+    def _fetch_with_browser(self, target: str) -> dict:
+        """The same answer as :meth:`fetch`, drawn by Chrome (see :mod:`radixnet.browser`).
+
+        WebDriver does not report the HTTP status, so a page that loaded is
+        ``200``; a page that did not raises instead.
+        """
+        from .browser import BrowserError
+
+        try:
+            page = self.browser.get(target)
+        except BrowserError as exc:
+            raise WebError(f"cannot open {target} in the browser: {exc}") from exc
+        body = page["html"]
+        truncated = len(body) > self.max_bytes
+        self.fetched += 1
+        return {
+            "url": page["url"], "status": page.get("status", 200), "content_type": "text/html",
+            "bytes": len(body[: self.max_bytes].encode("utf-8", "replace")), "truncated": truncated,
+            "body": body[: self.max_bytes],
+        }
 
     # -- pages ---------------------------------------------------------------
 
@@ -970,16 +1046,21 @@ def default_toolbox(
     sandbox: Any = None,
     upload_dir: str | None = None,
     offline: bool = False,
+    browser: Any = None,
     extra: Iterable[Tool] = (),
 ) -> ToolBox:
     """The built-in tools: browsing (unless ``offline``), the calculator, and — when given — ``python`` / ``read_file``.
 
     ``web`` defaults to a fresh :class:`WebClient`; pass one to change the
     timeout, the byte cap, the search endpoint or ``allow_private``.
+    ``browser`` is a :class:`~radixnet.browser.BrowserClient` the pages are
+    drawn in, for sites that render themselves with JavaScript.
     """
     box = ToolBox()
     if not offline:
         client = web or WebClient()
+        if browser is not None:
+            client.browser = browser
         box.register(_tool_web_search(client))
         box.register(_tool_web_fetch(client))
         box.register(_tool_web_links(client))
