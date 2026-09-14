@@ -114,7 +114,7 @@ class SineActivation:            # convenience object (used by tests/docs, not i
     def __call__(self, x) -> float
     def derivative(self, x) -> float
     def partials(self, x) -> tuple
-    def inverted(self) -> "SineActivation"     # a -> -a
+    def inverted(self) -> "SineActivation"     # a -> -a AND k -> -k (the negation of the unit: f = a*sin(u)+k)
     def to_dict(self) -> dict ; @classmethod from_dict(cls, d)
 
 def edge_signal(w: float, fp: float, fc: float) -> float    # w * fp * fc  ("activation of child * activation of parent")
@@ -285,7 +285,9 @@ def compress(self) -> int
     # Repeatedly merge all mergeable unary chains until none remain. Returns number of merges.
 
 def invert(self) -> None
-    # w -> -w for every alive edge, a -> -a for every node (incl. START/END), inverted = not inverted, version += 1
+    # w -> -w for every alive edge; a -> -a AND k -> -k for every node (incl. START/END), which is the exact
+    # negation of the unit: f = a*sin(b(x-h))+k, so flipping `a` alone leaves -f + 2k and only negates while
+    # k == 0 - and k is learned (df/dk = 1). Then inverted = not inverted, version += 1
 
 def child_scores(self, p: int) -> list[tuple[int, float]]     # [(child_id, score)], score = w * f_p * f_c
 def child_probs(self, p: int) -> list[tuple[int, float]]      # softmax over child_scores (numerically stable)

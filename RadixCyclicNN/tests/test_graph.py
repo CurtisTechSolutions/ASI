@@ -548,6 +548,53 @@ class TestSerialisation(unittest.TestCase):
 
 
 class TestInvert(unittest.TestCase):
+    def test_invert_negates_every_edge_signal_with_learned_offsets(self):
+        """The property 2NRL rests on: inversion negates every score, so every ranking reverses.
+
+        A node's activation is ``a * sin(b(x - h)) + k``.  Negating ``a`` alone leaves
+        ``-f(x) + 2k``, so with a learned ``k`` the edge signal ``w * f_p * f_c`` does not
+        change sign cleanly and the most likely continuation does not become the least
+        likely.  ``k`` is learned, so this is the case that matters; a graph that has only
+        been observed still has ``k = 0`` everywhere and cannot see the difference.
+        """
+        g = RadixCyclicGraph(seed=17)
+        for t in ["the cat sat on the mat", "the cat ran on the rug", "the dog sat"]:
+            g.observe_sequence(ENC.encode(t))
+        rng = random.Random(5)
+        for n in g.alive_nodes():  # stand in for training, which moves k off 0
+            g.k[n] = rng.uniform(-0.5, 0.5)
+            g.a[n] = rng.uniform(-1.5, 1.5)
+        g.version += 1
+
+        before = {p: g.child_scores(p) for p in g.alive_nodes() if g.children[p]}
+        self.assertTrue(before, "need at least one node with children")
+        g.invert()
+        for p, scores in before.items():
+            after = dict(g.child_scores(p))
+            for c, s in scores:
+                self.assertAlmostEqual(after[c], -s, places=12, msg=f"edge {p}->{c} not negated")
+            ranked = [c for c, _ in sorted(scores, key=lambda t: -t[1])]
+            now = [c for c, _ in sorted(g.child_scores(p), key=lambda t: -t[1])]
+            self.assertEqual(now, ranked[::-1], f"ranking of {p} did not reverse")
+        g.invert()  # and it is still its own inverse
+        for p, scores in before.items():
+            self.assertEqual(g.child_scores(p), scores)
+
+    def test_flip_nodes_half_makes_a_node_neutral(self):
+        """``amount`` 0.5 zeroes the unit's output, which needs the offset scaled too."""
+        g = RadixCyclicGraph(seed=4)
+        g.observe_sequence(ENC.encode("the cat sat"))
+        n = next(i for i in g.alive_nodes() if i >= FIRST)
+        g.k[n], g.a[n] = 0.3, -1.2
+        g.version += 1
+        full = g.activation_of(n)
+        self.assertEqual(g.flip_nodes({n: 0.5}, "activation"), 1)
+        self.assertAlmostEqual(g.activation_of(n), 0.0, places=15)
+        g.k[n], g.a[n] = 0.3, -1.2
+        g.version += 1
+        g.flip_nodes({n: 1.0}, "activation")  # a full flip is an exact negation
+        self.assertAlmostEqual(g.activation_of(n), -full, places=15)
+
     def test_invert_flips_signs(self):
         g = RadixCyclicGraph(seed=17)
         for t in ["the cat sat", "the dog"]:
