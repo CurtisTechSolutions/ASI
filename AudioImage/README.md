@@ -32,6 +32,7 @@ down differently — `decode` turns it back into a WAV.
 - [The commands](#the-commands)
 - [The picture format](#the-picture-format)
 - [Choosing the settings](#choosing-the-settings)
+- [In the browser](#in-the-browser)
 - [Using it as a library](#using-it-as-a-library)
 - [How it works](#how-it-works)
 - [Dependencies and speed](#dependencies-and-speed)
@@ -126,6 +127,35 @@ the phase you deliberately threw away.
 Noise is the hardest case, and for a good reason: noise is *nothing but* phase
 relationships, so there is least to recover.
 
+## In the browser
+
+```bash
+python3 -m audioimage serve          # then open http://127.0.0.1:8080/
+```
+
+One page, no build step, no npm — it is three files of plain HTML, CSS and
+JavaScript served by :mod:`http.server`, and every button is one of the
+commands above.
+
+What the page adds is the part that only makes sense live:
+
+- **a playhead that runs across the plane** while the sound plays, so you can
+  see where in the picture you are hearing;
+- **click anywhere on the plane to seek** there;
+- **a readout** of the time, frequency, intensity and dB under the cursor;
+- **a brush** — paint straight onto the plane and decode it to hear what you
+  drew, which is the metadata-free path in the section above made interactive;
+- **playback of the original and the decoded clip side by side**, on the same
+  picture, so the difference is audible rather than described.
+
+Anything the browser can decode (MP3, M4A, OGG, FLAC) is converted to mono WAV
+in the page before it is sent, so the server only has to understand one format.
+The microphone works too.
+
+The server listens on 127.0.0.1 by default. Putting it on a public interface
+hands anyone who can reach it a way to spend your CPU on Griffin-Lim, so
+`--host` has to be given deliberately.
+
 ## The commands
 
 ```
@@ -136,6 +166,7 @@ audioimage roundtrip  both, and measure what survived
 audioimage view       a labelled chart of a clip or a picture
 audioimage waveform   the samples themselves
 audioimage info       describe a WAV or a picture
+audioimage serve      open the whole tool in a browser
 ```
 
 Global options work before or after the command: `--json` (one JSON document on
@@ -240,6 +271,7 @@ The layers underneath are usable on their own:
 | `audioimage.colormap` | intensity to colour, and back |
 | `audioimage.render` | labelled views and waveform plots |
 | `audioimage.synth` | tones, sweeps, noise, chords, melodies |
+| `audioimage.server` | the HTTP API and the page, on `http.server` |
 | `audioimage.font` | a 5x7 bitmap font, so views can label themselves |
 
 ## How it works
@@ -296,14 +328,15 @@ picture's distinct colours in one vectorised pass instead.
 ## Tests
 
 ```bash
-make test                 # 236 tests
+make test                 # 267 tests
 make test-python          # the same, on the standard-library backend
 ```
 
 They cover the transforms against a naive DFT, exact STFT reconstruction,
 Griffin-Lim convergence, both backends agreeing value for value, PNG and WAV
 round trips at every supported depth, plane invertibility, colour-map inversion
-determinism, every CLI command and its error paths. When Pillow is installed,
+determinism, every CLI command and its error paths, and every HTTP route
+including its refusals and a directory-traversal attempt. When Pillow is installed,
 two extra tests check that it reads the PNGs this package writes and that this
 package reads the PNGs it writes; when it is not, they skip.
 

@@ -37,7 +37,7 @@ FLAGS      ?=
 ENCODE_FLAGS := --n-fft $(N_FFT) --hop $(HOP) --window $(WINDOW) --scale $(SCALE) \
                 --top-db $(TOP_DB) --freq-scale $(FREQ_SCALE) --colormap $(COLORMAP) --depth $(DEPTH)
 
-.PHONY: help tone encode decode roundtrip view waveform info demo test test-python \
+.PHONY: help tone encode decode roundtrip view waveform info serve demo test test-python \
         lint clean sample backends
 
 help: ## List every target
@@ -67,6 +67,11 @@ view: | $(OUT) ## Draw a labelled chart of $(WAV) into $(OUT)/view.png
 
 waveform: | $(OUT) ## Draw the samples of $(WAV) into $(OUT)/waveform.png
 	$(AUDIOIMAGE) waveform $(WAV) -o $(OUT)/waveform.png $(FLAGS)
+
+HOST ?= 127.0.0.1
+PORT ?= 8080
+serve: ## Open the whole tool in a browser on $(HOST):$(PORT)
+	$(AUDIOIMAGE) --backend $(BACKEND) serve --host $(HOST) --port $(PORT)
 
 info: ## Describe $(PNG)
 	$(AUDIOIMAGE) info $(PNG)

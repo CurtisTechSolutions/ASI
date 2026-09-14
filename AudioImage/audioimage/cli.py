@@ -6,6 +6,7 @@
     audioimage roundtrip tune.wav            # both, and how much survived
     audioimage view tune.wav -o view.png     # the same plane, labelled
     audioimage info tune.png
+    audioimage serve                         # the same thing, in a browser
 
 Every command prints a short human-readable report by default and, with
 ``--json``, exactly one JSON document on stdout - progress and notices then go
@@ -39,6 +40,7 @@ from .dsp import WINDOWS
 from .png import Image, PngError, SIGNATURE, read_png, write_png
 from .render import ViewConfig, render_view, render_waveform
 from .spectrogram import FREQ_SCALES, ORIGINS, SCALES, PlaneConfig
+from .server import DEFAULT_HOST, DEFAULT_PORT, frontend_dir, run_server
 from .synth import KINDS, generate
 from .wav import Audio, WavError, read_wav, write_wav
 
@@ -418,6 +420,38 @@ def cmd_info(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Put the whole tool behind a page in the browser."""
+    directory = frontend_dir(args.frontend_dir)
+    if not os.path.isfile(os.path.join(directory, "index.html")):
+        _die(f"the front end is not in {directory}")
+    url = f"http://{args.host}:{args.port}/"
+    payload = {
+        "command": "serve",
+        "host": args.host,
+        "port": args.port,
+        "url": url,
+        "frontend": directory,
+        "backend": describe_backends(),
+    }
+    _report(
+        args,
+        payload,
+        [
+            f"audioimage {__version__} is serving on {url}",
+            f"  front end  {directory}",
+            f"  transforms {describe_backends()['selected']}",
+            "  press Ctrl-C to stop",
+        ],
+    )
+    sys.stdout.flush()
+    try:
+        run_server(args.host, args.port, directory, backend=args.backend, quiet=args.quiet)
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        pass
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # the parser
 # ---------------------------------------------------------------------------
@@ -544,6 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-axes", action="store_true", help="no axes or labels")
     _add_global_options(p, suppress=True)
     p.set_defaults(func=cmd_waveform)
+
+    p = subs.add_parser("serve", help="open the whole tool in a browser")
+    p.add_argument("--host", default=DEFAULT_HOST, help=f"interface to listen on (default: {DEFAULT_HOST})")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port (default: {DEFAULT_PORT})")
+    p.add_argument("--frontend-dir", default=None, help="serve the page from here instead of the packaged copy")
+    _add_global_options(p, suppress=True)
+    p.set_defaults(func=cmd_serve)
 
     p = subs.add_parser("info", help="describe a WAV or a picture")
     p.add_argument("input", help="the file to describe")

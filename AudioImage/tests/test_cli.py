@@ -52,7 +52,7 @@ class TestParser(unittest.TestCase):
         self.assertTrue(actions)
         self.assertEqual(
             set(actions[0].choices),
-            {"tone", "encode", "decode", "roundtrip", "view", "waveform", "info"},
+            {"tone", "encode", "decode", "roundtrip", "view", "waveform", "info", "serve"},
         )
 
 
