@@ -42,7 +42,7 @@ is implemented against. Read it fully before writing code.
 | Embedding space, information clustering — chess and checkers cluster closer than talking to your boss | Similarity is **shared prefix depth weighted by information gain** (§21), with forest proximity (§20.3) as the robust version. Chess/checkers agree on seven axes before diverging; chess and a difficult conversation diverge at axis 0. §21 projects the signatures to a 2D plane by classical MDS, which is the "plane of existence" made literal and is what the frontend renders. |
 | Multiple different problems in one | One structure answers all four. The tree's levels are the axes of game-space; descending it is a decision tree; prefix overlap is the clustering metric; a forest of trees with randomised axis orderings is the random forest (§18). |
 | An n-dimensional trie — a tree with ending states, with the game encoded into each path | §19. `n` is the number of game-space axes; each contributes one level; a root→node path is the game's **rule signature**; an ending state is a **game class** holding the induced rule set. |
-| A radix tree with the mechanics of a trie | §19.1. Path compression from the radix tree so only the axes that actually *discriminate* cost a node; terminal-on-internal nodes from the trie so a general game class can be a strict prefix of a specific one. Neither structure alone can hold both properties. Split and merge follow `RadixCyclicNN/DESIGN.md` §5.2 exactly. |
+| A radix tree with the mechanics of a trie | §19.1. Path compression from the radix tree so only the mechanics that actually *discriminate* cost a node; terminal-on-internal nodes from the trie so a general game class can be a strict prefix of a specific one. Neither structure alone can hold both properties. Split and merge follow `RadixCyclicNN/DESIGN.md` §5.2 exactly. |
 | Or invert the problem — it could be a random forest | §20. Axis ordering is not unique, so a single tree is a single arbitrary ordering. `T` trees over randomised orderings and bootstrapped corpora, with Breiman proximity as the similarity measure. This is the robust version of §19 and the two agree where both apply. |
 | Play chess and checkers with the same input and output size, with a game modifier | §22.4-22.5. Score **one candidate at a time**, so action-space size never touches the geometry. Input is `F_state ⊕ F_cand ⊕ F_mod` = 512; output is a fixed 3 units for every game. The **modifier** is the mechanic set hashed into 128 dims, and because hashing a set preserves overlap, similar games land at nearby points — so transfer is a consequence of the encoding rather than a mechanism bolted on. |
 | Validity first, then a separate grade for the move | §22.6. Two heads on one micro: `p_valid` (legal?) trained by GREN from oracle refusals — binary, instant, abundant, **transferable**; `grade` (good?) trained by GTMNN from Shapley credit — sparse, delayed, game-specific. This is what actually compresses chess, go and checkers into one space, and it makes "understand the game, then play it" true inside a single micro rather than only at the system level. |
@@ -1220,7 +1220,7 @@ def insert(self, signature: tuple, game: int, rules: RuleSet) -> int
 
 def split(self, node: int, i: int) -> tuple[int, int]
     # node keeps segment[:i]; a new node B takes segment[i:]. B inherits node's children,
-    # terminal flag, game and rules; node becomes non-terminal. Follows RadixCyclicNN §5.2.
+    # terminal flag, game and rules; node becomes non-terminal. Follows `RadixCyclicNN/DESIGN.md` §5.2.
 
 def merge_child(self, p: int) -> bool
     # Merge p's single child c into p when: len(children[p]) == 1, len(parents of c) == 1,
@@ -1410,7 +1410,7 @@ def calibrate(rules: RuleSet, evidence: Evidence) -> tuple[float, float]
 `GamePackage.alphabet` becomes GTMNN's `Alphabet`, and `legality` masks micro
 repertoires: `MicroPool.note_symbol` (`GTMNN/DESIGN.md` §7.5) may not promote an
 action the rule set calls illegal into a repertoire slot. GTMNN already masks
-unfilled slots to `-inf` before its softmax (§7.3), so illegal actions use the
+unfilled slots to `-inf` before its softmax (`GTMNN/DESIGN.md` §7.3), so illegal actions use the
 existing mechanism and need no new code on that side — **a micro is structurally
 incapable of naming an illegal move.**
 
@@ -1446,7 +1446,7 @@ micro output (fixed, 3 units, every game)
 ### 22.5 The game modifier
 
 The modifier is the mechanic set (§8) hashed into `F_mod` dimensions by the same
-signed hashing as `FeatureHasher` (§6.2 of this document, §6.2 of GTMNN's):
+signed hashing as GTMNN's `FeatureHasher` (`GTMNN/DESIGN.md` §6.2):
 
 ```python
 def modifier(mechanics: frozenset[int], dim: int = 128) -> array('d')
@@ -1524,13 +1524,13 @@ these changes there, listed so they are unambiguous rather than inferred:
 
 | GTMNN section | change |
 |---|---|
-| §6.2 `FeatureHasher` | `F = 256` becomes `F = 512`, partitioned `F_state=256 ⊕ F_cand=128 ⊕ F_mod=128` (§22.4). The hashing itself is unchanged. |
-| §7.1 `MicroPool` | output width `K+1` becomes a fixed **3** (`p_valid`, `grade`, `abstain`). `repertoire` stops being a learned array of symbol ids and becomes the per-step candidate shortlist. |
-| §7.3 forward | two heads instead of one softmax; `p_valid` sigmoid, `grade` linear, `abstain` as before. |
-| §7.4 `learn` | two loss terms, trained in separate passes: validity against GREN's oracle labels, grade against Shapley credit. |
-| §7.5 `note_symbol` | becomes `note_mechanic`: specialisation is tracked against the mechanics a candidate exhibits, not the symbol it names. |
-| §6.3 receptive fields | draw with an explicit `universal_fraction` (default 0.5): that share of micros sample their `R` indices from `F_state ⊕ F_cand` **only** and are therefore game-blind and transfer everywhere; the rest may read modifier bits and specialise. Leaving the split to chance would make ~92% of micros game-aware at these widths, which is the wrong balance and not a decision worth making by accident. Evolution (§17) then moves the balance by which kind earns. |
-| §17.1 culling | asymmetric weighting of validity error against grade error, per §22.6.3. |
+| GTMNN §6.2 `FeatureHasher` | `F = 256` becomes `F = 512`, partitioned `F_state=256 ⊕ F_cand=128 ⊕ F_mod=128` (§22.4). The hashing itself is unchanged. |
+| GTMNN §7.1 `MicroPool` | output width `K+1` becomes a fixed **3** (`p_valid`, `grade`, `abstain`). `repertoire` stops being a learned array of symbol ids and becomes the per-step candidate shortlist. |
+| GTMNN §7.3 forward | two heads instead of one softmax; `p_valid` sigmoid, `grade` linear, `abstain` as before. |
+| GTMNN §7.4 `learn` | two loss terms, trained in separate passes: validity against GREN's oracle labels, grade against Shapley credit. |
+| GTMNN §7.5 `note_symbol` | becomes `note_mechanic`: specialisation is tracked against the mechanics a candidate exhibits, not the symbol it names. |
+| GTMNN §6.3 receptive fields | draw with an explicit `universal_fraction` (default 0.5): that share of micros sample their `R` indices from `F_state ⊕ F_cand` **only** and are therefore game-blind and transfer everywhere; the rest may read modifier bits and specialise. Leaving the split to chance would make ~92% of micros game-aware at these widths, which is the wrong balance and not a decision worth making by accident. Evolution (§17) then moves the balance by which kind earns. |
+| GTMNN §17.1 culling | asymmetric weighting of validity error against grade error, per §22.6.3. |
 
 `universal_fraction` is the parameter this whole composition turns on, and
 nothing here predicts its right value. It is §32.8.
