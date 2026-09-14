@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+out/
+# generated audio and pictures, except the committed sample clip
+data/*.wav
+data/*.png
+!data/sample.wav
