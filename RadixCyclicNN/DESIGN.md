@@ -1101,6 +1101,37 @@ judgement starts the table and a later pass only updates it, the same edge is ri
 another and its cost follows, the round trip, compression, the scale off), and
 `tests/test_go_parity.py::test_judged_paths_price_the_same_step_differently` for the two implementations.
 
+### 16.6 Node ratios (`CountRewardGraph.node_ratios`) — the same numbers, read from the node
+
+16.5 keys a judgement by who called the step. This reads the graph the other way round: one node, and what its
+traffic and its reward look like shared out over the nodes on either side of it. Nothing new is stored - it is a
+view over `edge_count`, `edge_reward` and the path table - so it costs nothing until it is asked for.
+
+* **The two sides.** `node_ratios(node)` returns `from` (a row per previous node: the in-edge that arrives) and
+  `to` (a row per next node: the out-edge that leaves), plus `in_totals` / `out_totals` over each. The pairs are
+  sorted by neighbour id before anything is summed, so both implementations add the shares up in the same order
+  and write the same floats; the rows then come back most walked first (`-seen`, `-reward`, `node`).
+* **The shares.** `seen_ratio` is the edge's share of the traversals on *its side* (the exact totals, so a wrapped
+  counter still divides correctly). `reward_ratio` is its share of the reward on that side, taken over the
+  magnitudes and kept **signed**: `r / sum|r|`, so a penalty reads as a negative share of the pressure on the node
+  and an arm holding all of it reads ±1. The denominators are the side's own, not `count[node]`: a node is entered
+  without an in-edge whenever a text starts on it.
+* **The verdicts.** `edge_paths(edge)` sums the path table over every caller that reached an edge, giving
+  `path_seen` (how much of the edge's traffic a judged context has been watching, `path_ratio` as a share of the
+  edge's traversals) and `correct` / `incorrect` / `correct_ratio`. So 16.5 answers "was this step right *after
+  that word*" and this answers "of everything leaving this node, how much went the way that was right".
+* **What reports it.** `node_ratio_rows(limit, node)` orders the nodes by visit count; `radixnet nodes` /
+  `radixnet-count nodes` (`--limit`, `--node LABEL`, a node label or a trigram it holds) print both sides, and
+  `GET /api/nodes?limit=20&node=LABEL` returns them - 404 for a label the graph does not hold. The Graph tab
+  fetches the same endpoint when a node is clicked. Counts are reported as the odometer reading plus its resets
+  (`seen` / `seen_resets`, `visits` / `visit_resets`), the convention `/api/graph` already uses.
+
+Tests: `tests/test_countnet.py::TestNodeRatios` and `go/radixnet/nodes_test.go` (each side's shares add up to one,
+the reward share is signed and its magnitudes add up to one, the judged paths land on the arm that was walked, an
+unjudged graph has the shares but no verdicts, the shares are of the side and not of the visits, the table is most
+visited first), the endpoint in both server test suites, and
+`tests/test_go_parity.py::test_a_node_is_read_the_same_way_from_both_sides`.
+
 ---
 
 ## 17. Code generation (`codegen.py`) — sandbox, LLM tutor and judge, 2NRL rewards

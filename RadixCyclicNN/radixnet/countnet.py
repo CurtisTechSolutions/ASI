@@ -78,6 +78,24 @@ def _walks(transitions: Sequence[tuple[int, int]]) -> list[list[tuple[int, int]]
     return walks
 
 
+def _side_totals(rows: Sequence[dict]) -> dict:
+    """What a whole in- or out-side of a node did, over the rows in the order they are reported."""
+    seen = correct = incorrect = path_seen = 0
+    reward = 0.0
+    for row in rows:
+        seen += row["seen"]
+        reward += row["reward"]
+        path_seen += row["path_seen"]
+        correct += row["correct"]
+        incorrect += row["incorrect"]
+    judged = correct + incorrect
+    return {
+        "edges": len(rows), "seen": seen, "reward": reward, "path_seen": path_seen,
+        "correct": correct, "incorrect": incorrect,
+        "correct_ratio": (correct / judged) if judged else None,
+    }
+
+
 def _by_amount(rewards: dict[int, float]) -> dict[float, list[int]]:
     """Group edges by the reward they are owed (first-seen order, so the graph moves once per amount)."""
     groups: dict[float, list[int]] = {}
@@ -319,6 +337,95 @@ class CountRewardGraph(RadixCyclicGraph):
                 if 0 <= edge < len(self.edge_parent):
                     parents.add(self.edge_parent[edge])
         return self._path_parents
+
+    # -- a node against its neighbours ---------------------------------------
+
+    def edge_paths(self, edge: int) -> tuple[int, int, int]:
+        """``(seen, correct, incorrect)`` of one edge, summed over every caller that reached it."""
+        seen = correct = incorrect = 0
+        for prev in self._by_edge.get(edge, ()):
+            row = self.paths.get((prev, edge))
+            if row is not None:
+                seen += row[0]
+                correct += row[1]
+                incorrect += row[2]
+        return seen, correct, incorrect
+
+    def _side_rows(self, pairs: Sequence[tuple[int, int]]) -> list[dict]:
+        """One row per neighbour of a node: its share of the side's traffic and of the side's reward."""
+        pairs = sorted(pairs)  # by neighbour id, so both languages add the shares up in the same order
+        traversals = {e: self._edge_traversals_f(e) for _n, e in pairs}
+        total = 0.0
+        for _n, e in pairs:  # an explicit left-to-right sum: the Go port adds them in the same order
+            total += traversals[e]
+        mass = 0.0
+        for _n, e in pairs:
+            mass += abs(float(self.edge_reward[e]))
+        rows = []
+        for n, e in pairs:
+            path_seen, correct, incorrect = self.edge_paths(e)
+            judged = correct + incorrect
+            reward = float(self.edge_reward[e])
+            rows.append({
+                "node": n,
+                "label": self.labels[n] if 0 <= n < len(self.labels) else "",
+                "edge": e,
+                "seen": self.edge_count[e],
+                "seen_resets": self.edge_count_resets.get(e, 0),
+                "seen_ratio": (traversals[e] / total) if total else 0.0,
+                "reward": reward,
+                "reward_ratio": (reward / mass) if mass else 0.0,
+                "path_seen": path_seen,
+                "path_ratio": (path_seen / traversals[e]) if traversals[e] else None,
+                "correct": correct,
+                "incorrect": incorrect,
+                "correct_ratio": (correct / judged) if judged else None,
+            })
+        rows.sort(key=lambda r: (-r["seen"], -r["reward"], r["node"]))
+        return rows
+
+    def node_ratios(self, node: int) -> dict | None:
+        """One node against the nodes around it, or ``None`` when it is not a live node.
+
+        ``from`` is a row per previous node - the edge that arrives here - and
+        ``to`` a row per next node, the edge that leaves.  Within a side,
+        ``seen_ratio`` is that edge's share of the side's traversals and
+        ``reward_ratio`` its share of the side's reward *magnitude*, signed, so
+        a penalty reads as a negative share of the pressure on the node and the
+        two sides can be compared without the signs cancelling out.
+        ``path_ratio`` is how much of the edge's traffic a judged context has
+        been watching, and ``correct`` / ``incorrect`` are what those contexts
+        made of it, summed over every caller.
+
+        The denominators are the side's own, not the node's visits: a node is
+        entered without an in-edge whenever a text starts on it, so ``visits``
+        can be larger than everything ``from`` adds up to.
+        """
+        if not (0 <= node < len(self.alive)) or not self.alive[node]:
+            return None
+        rows_in = self._side_rows(list(self.parents[node].items()))
+        rows_out = self._side_rows(list(self.children[node].items()))
+        return {
+            "node": node,
+            "label": self.labels[node],
+            "visits": self.count[node],
+            "visit_resets": self.count_resets.get(node, 0),
+            "from": rows_in,
+            "to": rows_out,
+            "in_totals": _side_totals(rows_in),
+            "out_totals": _side_totals(rows_out),
+        }
+
+    def node_ratio_rows(self, limit: int = 0, node: int | None = None) -> list[dict]:
+        """:meth:`node_ratios` of the most visited nodes (``node``: only that one); ``limit`` 0 = all."""
+        if node is not None:
+            one = self.node_ratios(node)
+            return [one] if one is not None else []
+        order = [i for i in range(len(self.alive)) if self.alive[i]]
+        order.sort(key=lambda i: (-self.node_count(i), i))
+        if limit > 0:
+            order = order[:limit]
+        return [self.node_ratios(i) for i in order]
 
     def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
         """``[(child, edge, -log prob)]`` of ``p``'s out-edges, as seen by a walk that arrived from ``prev``.
@@ -1091,6 +1198,10 @@ class CountRewardNet(GraphModel):
     def paths(self, limit: int = 20, node: int | None = None) -> list[dict]:
         """The judged paths: ``[{"prev","edge","seen","correct","incorrect","correct_ratio","seen_ratio","term"}]``."""
         return self.graph.path_contexts(limit=limit, node=node)
+
+    def node_ratios(self, limit: int = 20, node: int | None = None) -> list[dict]:
+        """Each node against its neighbours: ``[{"node","label","visits","from","to","in_totals","out_totals"}]``."""
+        return self.graph.node_ratio_rows(limit=limit, node=node)
 
     # -- prediction ----------------------------------------------------------
 

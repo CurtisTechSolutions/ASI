@@ -913,6 +913,27 @@ class ModelService:
                 "path_scale": graph.weight_config()["path_scale"],
             }
 
+    def node_ratios(self, limit: int = 20, node: str | None = None) -> dict:
+        """Each node against the nodes around it: its traffic and its reward, shared out both ways."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "node_ratios"):
+                raise ApiError(400, f"the {model.kind} model does not count node ratios")
+            graph = model.graph
+            wanted = None
+            if node:
+                wanted = next((i for i, label in enumerate(graph.labels) if label == node and graph.alive[i]), None)
+                if wanted is None:
+                    found = graph.lookup(node) if len(node) == 3 else None
+                    if found is None:
+                        raise ApiError(404, f"no node labelled {node!r}: give a node label, or one of its trigrams")
+                    wanted = found[0]
+            return {
+                "nodes": model.node_ratios(limit=limit, node=wanted), "limit": limit,
+                "node": node, "total_nodes": graph.num_nodes(), "totals": graph.path_totals(),
+            }
+
     # -- the negative network ------------------------------------------------
 
     def negative_model(self) -> NegativeNet:
@@ -2679,6 +2700,16 @@ def _r_paths(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.paths(limit)
 
 
+def _r_nodes(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["20"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    node = q.get("node", [None])[-1]
+    return 200, svc.node_ratios(limit, node)
+
+
 def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.history()
 
@@ -3726,6 +3757,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "count model: the judged paths (?limit=50) - what each step did in the context it was taken from: "
      "{totals, path_scale, paths: [{after, parent_label, child_label, seen, correct, incorrect, correct_ratio, "
      "seen_ratio, term}]}"),
+    ("GET", "/api/nodes", _r_nodes,
+     "count model: each node against the nodes around it (?limit=20, ?node=LABEL) - {nodes: [{node, label, visits, "
+     "from: [{label, seen, seen_ratio, reward, reward_ratio, path_seen, path_ratio, correct, incorrect, "
+     "correct_ratio}], to: [...], in_totals, out_totals}]}"),
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload,

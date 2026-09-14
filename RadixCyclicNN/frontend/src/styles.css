@@ -1513,3 +1513,22 @@ ul.log ol.criteria {
 .statusbar b.bad {
   color: var(--danger);
 }
+
+/* A node against its neighbours: the reward a way in or out carries, and the judged walks on it. */
+.node-ratios {
+  margin-top: 6px;
+}
+
+table.data th.text {
+  text-align: left;
+}
+
+table.data td.ok,
+table.data b.ok {
+  color: var(--ok);
+}
+
+table.data td.bad,
+table.data b.bad {
+  color: var(--danger);
+}

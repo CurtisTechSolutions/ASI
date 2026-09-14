@@ -271,6 +271,33 @@ class TestGoParity(unittest.TestCase):
         self.assertGreater(a_stats["path_correct"], 0)
         self.assertGreater(a_stats["path_incorrect"], 0)
 
+    def test_a_node_is_read_the_same_way_from_both_sides(self):
+        """The node ratios: both languages share a node's traffic and its reward out the same way."""
+        py_path = os.path.join(TMP.name, "ratios_py.count.json")
+        go_path = os.path.join(TMP.name, "ratios_go.count.json")
+        corpus = os.path.join(TMP.name, "ratios_corpus.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write("the cat sat on the mat\na cat ran to the park\nthe cat sat on the log\n")
+        for path, run in ((py_path, py), (go_path, go)):
+            run("--seed", 1, *(("--kind", "count") if run is py else ()), "train", "--data", corpus, "--epochs", 2, model=path)
+            run("correct", "--wrong", "the cat ran to the mat", "--right", "the cat sat on the mat", model=path)
+        a = py("nodes", "--limit", 0, model=py_path)["nodes"]
+        b = go("nodes", "--limit", 0, model=go_path)["nodes"]
+        self.assertEqual(len(a), len(b))
+        for i, (x, y) in enumerate(zip(a, b)):  # == over the parsed rows: Go writes 0 where Python writes 0.0
+            self.assertEqual(x, y, f"node row {i}")
+        branch = next((row for row in a if len(row["to"]) > 1 and row["out_totals"]["incorrect"]), None)
+        self.assertIsNotNone(branch, "the correction should have split a branch's verdicts")
+        self.assertAlmostEqual(sum(r["seen_ratio"] for r in branch["to"]), 1.0)
+        self.assertAlmostEqual(sum(abs(r["reward_ratio"]) for r in branch["to"]), 1.0)
+        self.assertTrue(any(r["reward_ratio"] > 0 for r in branch["to"]))
+        self.assertTrue(any(r["reward_ratio"] < 0 for r in branch["to"]))
+        # and asking for that one node by its label reads the same on both sides
+        one_py = py("nodes", "--node", branch["label"], model=py_path)["nodes"]
+        one_go = go("nodes", "--node", branch["label"], model=go_path)["nodes"]
+        self.assertEqual(one_py, one_go)
+        self.assertEqual([row["node"] for row in one_py], [branch["node"]])
+
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")
         go_path = os.path.join(TMP.name, "fb_go.count.json")

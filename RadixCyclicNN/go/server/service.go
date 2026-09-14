@@ -34,6 +34,10 @@ func badRequest(format string, args ...any) error {
 	return &apiError{400, fmt.Sprintf(format, args...)}
 }
 
+func notFound(format string, args ...any) error {
+	return &apiError{404, fmt.Sprintf(format, args...)}
+}
+
 func utcNow() string { return time.Now().UTC().Format("2006-01-02T15:04:05-07:00") }
 
 func splitTexts(content, unit string, pageLines int) []string {
@@ -807,6 +811,58 @@ func (s *Service) Paths(limit int) (map[string]any, error) {
 		return nil, err
 	}
 	return out.(map[string]any), nil
+}
+
+// NodeRatios is each node against the nodes around it: its traffic and its
+// reward, shared out over the previous and the next nodes.
+func (s *Service) NodeRatios(limit int, node string) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		wanted := -1
+		if node != "" {
+			for i := 0; i < g.NumNodeIDs(); i++ {
+				if g.Label(i) == node {
+					wanted = i
+					break
+				}
+			}
+			if wanted < 0 {
+				found, _, ok := g.Lookup(node)
+				if !ok {
+					return nil, notFound("no node labelled %q: give a node label, or one of its trigrams", node)
+				}
+				wanted = found
+			}
+		}
+		totals := g.PathTotals()
+		rows := g.NodeRatioRows(limit, wanted)
+		if rows == nil {
+			rows = []radixnet.NodeStats{}
+		}
+		return map[string]any{
+			"nodes": rows, "limit": limit, "node": nodeQuery(node), "total_nodes": g.NumNodes(),
+			"totals": map[string]any{
+				"contexts": totals.Contexts, "judged": totals.Judged, "seen": totals.Seen,
+				"correct": totals.Correct, "incorrect": totals.Incorrect,
+			},
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// nodeQuery echoes the ?node= that was asked for - null when none was, as the
+// Python server reports it.
+func nodeQuery(node string) any {
+	if node == "" {
+		return nil
+	}
+	return node
 }
 
 func (s *Service) Graph(limit int) (map[string]any, error) {

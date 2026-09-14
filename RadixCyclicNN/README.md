@@ -41,6 +41,7 @@ and an optional GPU backend (torch) are built in.
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. |
 | Judgements follow the path, not the edge | An edge is right in one sentence and wrong in the next, so a verdict is not filed against the edge but against the **caller that reached it**: the key is the node *before* the edge's parent, so `the cat -> sat` and `a cat -> sat` are counted apart (`paths`, `GET /api/paths`). A correction only rewards a path when the whole answer was right - one wrong word and nothing on that walk is rewarded - and each context keeps `correct`, `incorrect` and how often it has been walked since (`seen`). The search pays for what it learns there: `path_scale · log((correct + ½) / (incorrect + ½))` joins the edge weight before the softmax, so a step that was right *from here* is cheaper here and nowhere else. |
+| A node sees itself from where it stands | An edge's counters say what that step did, not what it did *here*, among the other ways out of the same node. `nodes` / `GET /api/nodes` / clicking a node in the Graph tab shares a node out both ways: a row per previous node and a row per next node, each with its share of that side's traffic, its **signed** share of that side's reward - a penalty reads as a negative share of the pressure on the node - and what the judged paths on it came to. The denominators are the side's own, not the node's visits: a node is entered without an in-edge whenever a text starts on it. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
 | The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
@@ -210,6 +211,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--topic TEXT`, `--rounds 3`, `--batches 1` (auto run: batches of `--rounds` rounds, each planned from the one before; 0 = until Ctrl-C), `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--brief TEXT` (what this batch is being taught to: the prompt the last report card led to), `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0` (what the unchanged words still earn; a whole path is only rewarded when the answer was right), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `paths` | count model: the judged paths - `--limit 20`, `--node LABEL` (only the paths leaving one node). Each line is `prev -> parent -> child`, its correct / incorrect counter, how often it has been walked since (`seen`) and what that says about the edge (`seen ratio`, `correct ratio`) |
+| `nodes` | count model: each node against the nodes around it - `--limit 10`, `--node LABEL`. A row per previous node and a row per next node, each with its share of that side's traffic (`seen %`) and of that side's reward (`reward %`, signed), how much of the edge a judged context has been watching, and what those contexts made of it |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image tutor FILE...` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `tutor FILE...`: the recall tutor - ask it to draw back what it was shown and mark what comes back, `--size`, `--encoder`, `--lead 16` (payload characters the opening gives away, so it knows which picture), `--length`, `--attempts`, `--mode`, `--threshold 6`, `--train`, `--blame` / `--negative PATH`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
@@ -294,6 +296,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`). Every count comes with its `count_resets` / `total_traversals_resets`: counters are cyclic, so the exact number of events is `resets × 10^15 + count` |
 | `GET /api/history` | training history |
 | `GET /api/paths?limit=50` | count model: the judged paths, most walked first - `prev` / `parent` / `child`, `correct`, `incorrect`, `seen`, `seen_ratio`, `correct_ratio`, and the totals over the whole graph |
+| `GET /api/nodes?limit=20` | count model: each node against the nodes around it (`?node=LABEL` for one) - `{nodes: [{node, label, visits, from: [...], to: [...], in_totals, out_totals}]}`, a row per previous and per next node with `seen_ratio`, `reward_ratio`, `path_ratio` and `correct_ratio` |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
 
 ```bash
@@ -511,6 +514,52 @@ after   step          correct  incorrect  seen  correct %  seen %  term
 "the"   he  -> e c          3          1     7  75%        13%     +1.253
 "a c"   ca  -> at           4          0     6  100%       22%     +2.197
 ```
+
+### A node from where it stands
+
+The same numbers read the other way round. An edge's counters say what that
+step did; they do not say what it did *here*, among the other ways out of the
+same node. `nodes` shares a node out over its neighbours - a row per previous
+node, a row per next node - and each row carries:
+
+* **seen %** - that edge's share of the traversals on its side of the node.
+* **reward %** - that edge's share of the reward on its side, **signed**: the
+  shares are taken over the magnitudes, so a penalty reads as a negative share
+  of the pressure on the node and the two sides compare without the signs
+  cancelling out. One arm holding all of it reads ±100%.
+* **judged / of edge** - how much of that edge's traffic a judged context has
+  been watching (`paths` above counts the same walks, keyed by who called
+  them).
+* **correct / wrong** and **correct %** - what those contexts came to, summed
+  over every caller.
+
+The denominators are the side's own, not the node's visits: a node is entered
+without an in-edge whenever a text starts on it, so a node can be visited more
+often than everything arriving at it adds up to.
+
+```bash
+python -m radixnet --model model.count.json nodes --limit 10        # the most visited nodes
+python -m radixnet --model model.count.json nodes --node "at "      # one node, by label or by a trigram it holds
+go/bin/radixnet-count --model model.count.json nodes --node "at "
+curl 'localhost:8000/api/nodes?node=at%20'
+```
+
+```
+"at "  visited 12x  (2 in, 3 out)
+      node      seen  seen %  reward  reward %  judged  of edge  correct  wrong  correct %
+----  --------  ----  ------  ------  --------  ------  -------  -------  -----  ---------
+from  " cat"       7  58%     +0.00   0%             0  0%             0      0  -
+from  "t sat"      5  42%     +1.00   100%           1  20%            1      0  100%
+to    "t sat"      5  42%     +1.00   33%            1  20%            1      0  100%
+to    "t on "      5  42%     +1.00   33%            1  20%            1      0  100%
+to    "t ran "     2  17%     -1.00   -33%           1  50%            0      1  0%
+```
+
+That is the branch after *the cat* / *a cat*, once one answer has been
+corrected: 42% of what leaves it goes to `t sat`, which earns a third of the
+reward on that side and was right the one time it was judged, and 17% goes to
+`t ran `, which carries a third of it as a penalty and was wrong. The Graph tab
+shows the same table when a node is clicked.
 
 The mistakes of a round add up to a **report card** (marks, pass rate, an error
 histogram and the weakest points). With `--adapt` (on by default) the weakest
@@ -1729,7 +1778,7 @@ with the audio - which is what the page dictates anyway.
 | `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
-| `GET /api/graph`, `GET /api/history`, `GET /api/paths` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`; the judged paths come back with the same counters and the same order) |
+| `GET /api/graph`, `GET /api/history`, `GET /api/paths`, `GET /api/nodes` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`; the judged paths and the node ratios come back with the same counters, the same shares and the same order) |
 | `POST /api/evolve/start`, `POST /api/evolve/stop`, `GET /api/evolve/history` | the self-upgrade loop, same bodies and records as the Python server: the model generates, a discriminator judges, 2NRL follows; `blatant_mode` picks how failures drive the update and `blame` lets the critic teach the negative network. The discriminator lives beside the model as `discriminator.json` |
 | `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review` | a corpus written to order (`train` starts a job on the lines) and the adversarial review, which with `blame` teaches the negative network what failed and why |
 | `POST /api/negative/auto`, `GET /api/negative/auto/history` | the Negative tab, automatic: a `critic` job of write → review → blame, same bodies and records as the Python server |

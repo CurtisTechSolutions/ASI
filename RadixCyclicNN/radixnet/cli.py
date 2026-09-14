@@ -33,6 +33,7 @@ from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
+from .encoding import WINDOW
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -1521,7 +1522,8 @@ def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
         raise CliError(f"{args.model} holds a {model.kind} model; path counters belong to the count model")
     graph = model.graph
     totals = graph.path_totals()
-    rows = model.paths(limit=args.limit)
+    node = _resolve_node(graph, args.node) if getattr(args, "node", None) else None
+    rows = model.paths(limit=args.limit, node=node)
     console.pairs([
         ("model", origin.describe()),
         ("contexts", f"{totals['contexts']} ({totals['judged']} judged)"),
@@ -1544,6 +1546,62 @@ def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
         ] for row in rows],
     )
     return {"totals": totals, "paths": rows, "stats": model.stats()}
+
+
+def _resolve_node(graph, text: str) -> int:
+    """A node id from a label the user typed: the whole label first, then the trigram it holds."""
+    wanted = str(text)
+    for node, label in enumerate(graph.labels):
+        if label == wanted and graph.alive[node]:
+            return node
+    found = graph.lookup(wanted) if len(wanted) == WINDOW else None
+    if found is None:
+        raise CliError(f"no node labelled {wanted!r}: give a node label, or one of its trigrams")
+    return found[0]
+
+
+def _ratio_cell(value: float | None) -> str:
+    """A ratio as a percentage, or ``-`` when there was nothing to divide by."""
+    return "-" if value is None else f"{value * 100:.0f}%"
+
+
+def cmd_nodes(args: argparse.Namespace, console: Console) -> dict:
+    """Each node against the nodes around it: what share of its traffic and of its reward goes each way."""
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "node_ratios"):
+        raise CliError(f"{args.model} holds a {model.kind} model; node ratios belong to the count model")
+    graph = model.graph
+    node = _resolve_node(graph, args.node) if args.node else None
+    rows = model.node_ratios(limit=args.limit, node=node)
+    totals = graph.path_totals()
+    console.pairs([
+        ("model", origin.describe()),
+        ("nodes", f"{graph.num_nodes()} alive, {len(rows)} shown"),
+        ("counted", f"{totals['correct']} correct / {totals['incorrect']} incorrect "
+                    f"over {totals['judged']} judged context(s) of {totals['contexts']}"),
+    ])
+    if not rows:
+        console.say()
+        console.say("no such node" if args.node else "the graph is empty: train something first")
+        return {"nodes": [], "stats": model.stats()}
+    for row in rows:
+        console.say()
+        console.say(f"{quote(row['label'])}  visited {row['visits']}x  "
+                    f"({row['in_totals']['edges']} in, {row['out_totals']['edges']} out)")
+        table = []
+        for side, label in (("from", "from"), ("to", "to")):
+            for r in row[side]:
+                table.append([
+                    label, quote(r["label"]), r["seen"], _ratio_cell(r["seen_ratio"]),
+                    f"{r['reward']:+.2f}", _ratio_cell(r["reward_ratio"]),
+                    r["path_seen"], _ratio_cell(r["path_ratio"]),
+                    r["correct"], r["incorrect"], _ratio_cell(r["correct_ratio"]),
+                ])
+        console.table(
+            ["", "node", "seen", "seen %", "reward", "reward %", "judged", "of edge", "correct", "wrong", "correct %"],
+            table,
+        )
+    return {"nodes": rows, "stats": model.stats()}
 
 
 def _step_label(graph, edge: int) -> str:
@@ -3871,7 +3929,21 @@ def build_parser() -> argparse.ArgumentParser:
         "edge's traffic came through them (seen %) and the term they add to the weight.",
     )
     p.add_argument("--limit", type=nonneg_int, default=20, help="rows to show, most judged first (0 = all)")
+    p.add_argument("--node", metavar="LABEL", help="only the steps leaving this node (a node label, or a trigram it holds)")
     p.set_defaults(handler=cmd_paths)
+
+    # nodes ----------------------------------------------------------------
+    p = command(
+        "nodes", "each node against the nodes around it",
+        "What a node's traffic and its reward look like from where it stands: a row per previous node and a row\n"
+        "per next node, each with its share of that side (seen %, reward %) and what the judged paths made of\n"
+        "it.  The shares are of the side, not of the node - a node is entered without an in-edge whenever a\n"
+        "text starts on it - and the reward share is signed, so a penalty reads as a negative share of the\n"
+        "pressure on the node.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=10, help="nodes to show, most visited first (0 = all)")
+    p.add_argument("--node", metavar="LABEL", help="only this node (a node label, or a trigram it holds)")
+    p.set_defaults(handler=cmd_nodes)
 
     # correct --------------------------------------------------------------
     p = command(
