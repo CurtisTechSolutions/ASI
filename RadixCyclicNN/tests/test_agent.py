@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radixnet import RadixNet  # noqa: E402
+from radixnet import RadixNet, blame  # noqa: E402
 from radixnet.agent import (  # noqa: E402
     AgentConfig,
     AgentTrainer,
@@ -37,6 +37,7 @@ from radixnet.agent import (  # noqa: E402
     teach_task,
     write_criteria,
 )
+from radixnet.negative import NegativeNet  # noqa: E402
 from radixnet.ollama import OllamaClient, OllamaError  # noqa: E402
 from radixnet.tools import ToolBox, default_toolbox  # noqa: E402
 
@@ -618,6 +619,179 @@ class ExploreTests(AgentCase):
         out = trainer.explore(steps=1)
         self.assertIn(out[0]["action"], ("2nrl", "reward", "punish"))
         self.assertGreater(self.model.graph.num_nodes(), 2)
+
+
+# ---------------------------------------------------------------------------
+# the negative network: the failures the agent finds
+# ---------------------------------------------------------------------------
+
+WRONG = (
+    'TASK: How many legs does a cat have?\n<tool>web_fetch {"url": "http://x/cats"}</tool>\n'
+    "<result>A cat has four legs.</result>\n<answer>A cat has seven legs.</answer>\n"
+)
+RIGHT = WRONG.replace("seven", "four")
+
+
+_A_STEP = {"source": "model", "ok": True, "tool": "web_fetch", "emission": '<tool>web_fetch {"url": "http://x/cats"}</tool>',
+           "text": '<tool>web_fetch {"url": "http://x/cats"}</tool>\n'}
+
+
+def _attempt_dict(text, *, correct=False, gap=0.9, steps=(_A_STEP,), critique="the number is false", score=1.0,
+                  answer="an answer"):
+    """One attempt as the agent reports it; by default it called a tool and got an answer back."""
+    return {
+        "text": text, "correct": correct, "gap": gap, "answer": answer, "steps": list(steps),
+        "verdict": {"correct": correct, "score": score, "critique": critique, "issues": ["names four"]},
+    }
+
+
+class FaultsFromAgentTests(unittest.TestCase):
+    def test_the_judge_names_the_reason_and_the_gap_sets_the_severity(self):
+        faults, passed = blame.faults_from_agent([_attempt_dict(WRONG)])
+        self.assertEqual([f["reason"] for f in faults], ["false"])
+        self.assertAlmostEqual(faults[0]["severity"], blame.severity_from_gap(0.9))
+        self.assertIn("names four", faults[0]["note"])
+        self.assertEqual(faults[0]["source"], "agent")
+        self.assertEqual(passed, [])
+
+    def test_a_correct_run_of_the_same_task_becomes_the_correction(self):
+        faults, passed = blame.faults_from_agent(
+            [_attempt_dict(WRONG), _attempt_dict(RIGHT, correct=True, gap=0.0)], correction=RIGHT,
+        )
+        self.assertEqual(faults[0]["correction"], RIGHT)
+        # the correction already clears what the two share: clearing it again would undo the diff's blame
+        self.assertEqual(passed, [])
+
+    def test_without_a_correction_the_correct_run_clears(self):
+        _faults, passed = blame.faults_from_agent([_attempt_dict(WRONG), _attempt_dict(RIGHT, correct=True)])
+        self.assertEqual(passed, [RIGHT])
+
+    def test_a_repaired_emission_is_blamed_for_itself(self):
+        # the transcript holds the mediator's *correct* call, so blaming it there would teach the
+        # network that a well-formed call is a mistake; what it actually wrote is the failure
+        steps = [{"source": "mediator", "ok": True, "tool": "web_fetch", "emission": "wbf tch {{{", "text": "<tool>web_fetch {}</tool>\n"}]
+        faults, _passed = blame.faults_from_agent([_attempt_dict(WRONG, steps=steps)])
+        step_fault = next(f for f in faults if f["text"] == "wbf tch {{{")
+        self.assertEqual(step_fault["reason"], "bad-call")
+        self.assertEqual(step_fault["severity"], blame.AGENT_SEVERITY["bad-call"])
+        self.assertIn("web_fetch", step_fault["note"])
+        # the transcript holds the mediator's repaired call, so that text is never the one blamed for it
+        self.assertNotIn('<tool>web_fetch {}</tool>', [f["text"] for f in faults])
+
+    def test_a_failed_call_the_network_wrote_itself_is_blamed(self):
+        steps = [{"source": "model", "ok": False, "tool": "web_fetch", "error": "refusing 10.0.0.1",
+                  "text": '<tool>web_fetch {"url": "http://10.0.0.1/"}</tool>\n'}]
+        faults, _passed = blame.faults_from_agent([_attempt_dict(WRONG, steps=steps)])
+        step_fault = next(f for f in faults if "10.0.0.1" in f["text"])
+        self.assertEqual(step_fault["reason"], "tool-error")
+        self.assertIn("refusing", step_fault["note"])
+        self.assertEqual(step_fault["severity"], blame.AGENT_SEVERITY["tool-error"])
+
+    def test_a_failed_call_the_mediator_wrote_is_not_the_networks_fault(self):
+        steps = [{"source": "mediator", "ok": False, "tool": "web_fetch", "error": "boom", "emission": "", "text": "<tool>x {}</tool>\n"}]
+        faults, _passed = blame.faults_from_agent([_attempt_dict(WRONG, steps=steps)])
+        # only the attempt itself: the call was the mediator's, and the empty emission is too short to blame
+        self.assertEqual([f["text"] for f in faults], [WRONG])
+
+    def test_steps_false_keeps_only_the_attempt(self):
+        steps = [{"source": "mediator", "ok": True, "emission": "wbf tch {{{", "tool": "web_fetch"}]
+        faults, _passed = blame.faults_from_agent([_attempt_dict(WRONG, steps=steps)], steps=False)
+        self.assertEqual(len(faults), 1)
+
+    def test_agent_reason_reads_how_far_it_got(self):
+        self.assertEqual(blame.agent_reason(_attempt_dict(WRONG, steps=())), "no-call")
+        self.assertEqual(blame.agent_reason(_attempt_dict(WRONG)), "false")  # it got all the way to a wrong answer
+        self.assertEqual(blame.agent_reason(_attempt_dict(WRONG, steps=[{"source": "mediator", "ok": True}])), "bad-call")
+        self.assertEqual(blame.agent_reason(_attempt_dict(WRONG, steps=[{"source": "model", "ok": False}])), "tool-error")
+        self.assertEqual(
+            blame.agent_reason(_attempt_dict(WRONG, steps=[{"source": "model", "ok": True}], answer=None)), "no-answer"
+        )
+        self.assertEqual(blame.agent_reason(_attempt_dict(WRONG, steps=[{"source": "model", "ok": True}])), "false")
+
+    def test_severity_from_gap(self):
+        self.assertAlmostEqual(blame.severity_from_gap(0.0), 0.25)
+        self.assertAlmostEqual(blame.severity_from_gap(1.0), 2.0)
+        self.assertAlmostEqual(blame.severity_from_gap(None), 1.0)
+        self.assertAlmostEqual(blame.severity_from_gap(5.0), 2.0)  # clamped
+
+
+class TeachNegativeTests(unittest.TestCase):
+    def test_only_the_characters_that_differ_from_a_correct_run_are_blamed(self):
+        negative = NegativeNet(seed=0)
+        report = blame.teach_agent(
+            negative, [_attempt_dict(WRONG), _attempt_dict(RIGHT, correct=True, gap=0.0)], correction=RIGHT,
+        )
+        self.assertEqual(report["blamed"], 1)
+        self.assertEqual(report["reasons"], {"false": 1})
+        blamed = {c["fragment"] for c in negative.crossings(WRONG) if (c.get("evidence") or 0) > 0}
+        self.assertTrue(blamed, "the wrong word should carry evidence")
+        self.assertTrue(any("sev" in f or "ev" in f for f in blamed), blamed)
+        # the task line is shared with the correct run, so it is never evidence of anything
+        self.assertEqual(negative.judge("TASK: How many legs does a cat have?")["verdict"], "pass")
+        self.assertEqual(negative.judge(RIGHT)["verdict"], "pass")
+        self.assertGreater(negative.judge("A cat has seven legs.")["risk"], 0.0)
+
+
+class TrainerNegativeTests(AgentCase):
+    def setUp(self):
+        super().setUp()
+        self.negative = NegativeNet(seed=3)
+
+    def trainer(self, **options):
+        return AgentTrainer(
+            self.model, self.client, self.toolbox, AgentConfig(**{**FAST, **options}), negative=self.negative,
+        )
+
+    def test_a_run_blames_its_failures_and_reports_what_it_taught(self):
+        record = next(r for r in self.trainer().run([self.task()]) if r["kind"] == "task")
+        self.assertGreaterEqual(record["negative_blamed"], 1)
+        self.assertGreater(record["negative_edges"], 0)
+        self.assertTrue(record["negative_reasons"])
+        self.assertGreater(self.negative.graph.total_blame, 0.0)
+        self.assertTrue(self.negative.recent(1))
+        self.assertEqual(self.negative.recent(1)[0]["source"], "agent")
+
+    def test_exploring_records_its_own_source(self):
+        self.trainer().explore(steps=1)
+        self.assertEqual(self.negative.recent(1)[0]["source"], "explore")
+
+    def test_no_negative_network_means_no_blame_keys(self):
+        plain = AgentTrainer(self.model, self.client, self.toolbox, AgentConfig(**FAST))
+        record = next(r for r in plain.run([self.task()]) if r["kind"] == "task")
+        self.assertNotIn("negative_blamed", record)
+
+    def test_a_candidate_the_negative_network_has_seen_fail_is_passed_over(self):
+        trainer = self.trainer(max_steps=1, mediation="never")
+        known = '<tool>calculator {"expression": "1+1"}</tool>'
+        self.negative.blame([known], reason="tool-error", severity=5.0)
+        trainer._emissions = lambda transcript, index: [known, '<tool>web_fetch {"url": "%s/cats"}</tool>' % self.site.url]
+        call, source, _emission, _answer = trainer._next_call(self.task(), "TASK: x\n", 0, 0)
+        self.assertEqual(call.name, "web_fetch")  # the blamed candidate was skipped for the next one
+        self.assertEqual(source, "model")
+        self.assertEqual(trainer.avoided, 1)
+
+    def test_the_veto_can_be_turned_off(self):
+        trainer = self.trainer(max_steps=1, mediation="never", avoid_blamed=False)
+        known = '<tool>calculator {"expression": "1+1"}</tool>'
+        self.negative.blame([known], reason="tool-error", severity=5.0)
+        trainer._emissions = lambda transcript, index: [known]
+        call, _source, _emission, _answer = trainer._next_call(self.task(), "TASK: x\n", 0, 0)
+        self.assertEqual(call.name, "calculator")
+        self.assertEqual(trainer.avoided, 0)
+
+    def test_the_veto_never_fires_without_a_negative_network(self):
+        plain = AgentTrainer(self.model, self.client, self.toolbox, AgentConfig(**FAST))
+        self.assertFalse(plain._blamed("anything at all"))
+
+    def test_a_negative_network_that_cannot_judge_never_vetoes(self):
+        trainer = self.trainer()
+
+        class Broken:
+            def judge(self, *args, **kwargs):
+                raise RuntimeError("no")
+
+        trainer.negative = Broken()
+        self.assertFalse(trainer._blamed("some candidate"))
 
 
 # ---------------------------------------------------------------------------

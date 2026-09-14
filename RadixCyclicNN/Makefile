@@ -70,6 +70,8 @@ CODEGEN_MODEL ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_MODEL),gemma4)
 CODEGEN_URL ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_URL),$(OLLAMA_URL))
 CODEGEN_MODEL ?= gemma4
 TASKS       ?= data/sample_tasks.txt
+BLAME       ?=
+BROWSER     ?=
 STEPS       ?= 10
 AGENT_MODEL ?=
 MAX_STEPS   ?= 6
@@ -94,7 +96,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         speech-info speech-teach speech-listen speech-tutor speech-decode \
-        tools agent explore explore-forever \
+        tools agent explore explore-forever mcp \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -297,7 +299,8 @@ speech-tutor: ## Ask the model to say AUDIO back, mark what comes back and blame
 speech-decode: ## Turn an encoded or predicted waveform text (TEXT=...) back into AUDIO
 	$(RADIXNET) $(GLOBAL) speech decode --text "$(TEXT)" --out $(AUDIO)
 OLLAMA_FLAGS_URL := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),)
-AGENT_FLAGS := $(OLLAMA_FLAGS_URL) $(if $(AGENT_MODEL),--agent-model $(AGENT_MODEL),) --max-steps $(MAX_STEPS)
+AGENT_FLAGS := $(OLLAMA_FLAGS_URL) $(if $(AGENT_MODEL),--agent-model $(AGENT_MODEL),) --max-steps $(MAX_STEPS) \
+               $(if $(BLAME),--blame,) $(if $(BROWSER),--browser,)
 
 ##@ Tool use (browsing + Ollama criteria, judging and teaching)
 tools: ## List the external tools the network can call
@@ -311,6 +314,9 @@ explore: ## Let the network choose its own tasks and browse for STEPS steps
 
 explore-forever: ## Explore until Ctrl-C (the model is saved on stop)
 	$(MAKE) explore STEPS=0
+
+mcp: ## Serve the tools and the network over the Model Context Protocol (stdio)
+	$(RADIXNET) $(GLOBAL) mcp
 
 ##@ Serve (local)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)

@@ -35,6 +35,7 @@ and an optional GPU backend (torch) are built in.
 | Teach it by talking to it | `speech`, the Speech tab and `POST /api/speech/teach`: the browser records the microphone and dictates the words (Web Speech API; faster-whisper, openai-whisper or an OpenAI-compatible transcription server do it on the server side), and **one utterance becomes two texts behind the same unique token** - `<speech:9f2a1c7d> the cat sat on the mat` and `<speech:9f2a1c7d> aud:mu:8000x1:<base64>`, the waveform itself with every sample quantised to one mu-law byte. Both are trained on, so the words and the sound leave the same node of the graph; `speech decode` plays a predicted waveform back. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | External tools, browsing, exploring on its own | `agent` / `explore` and the Agent tab: the network calls tools by *writing* them (`<tool>web_fetch {"url": "..."}</tool>`) and reads the answer back as `<result>...</result>`, so a whole attempt is one training text. Ollama writes the acceptance criteria before anything is attempted, repairs the calls the network cannot write yet, judges the answer against those criteria and demonstrates with the same real tools when it failed; then 2NRL trains on the failures — the harder the worse they were — inverts, and fine-tunes on what was right. `explore` lets the network choose every task itself and follow what it finds. |
+| A real browser, and MCP | `--browser` draws each page in a headless **Chrome** over the WebDriver protocol (no driver library: `chromedriver` is started and spoken to with the standard library), so a page that renders itself with JavaScript is readable. `radixnet mcp` serves the tools **and** the network — predict, generate, score, judge against the negative network, solve a task through the agent loop — over the Model Context Protocol, so any MCP client can use this instance. |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -207,11 +208,12 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0.25` (what the unchanged words still earn), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image tutor FILE...` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `tutor FILE...`: the recall tutor - ask it to draw back what it was shown and mark what comes back, `--size`, `--encoder`, `--lead 16` (payload characters the opening gives away, so it knows which picture), `--length`, `--attempts`, `--mode`, `--threshold 6`, `--train`, `--blame` / `--negative PATH`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
-| `codegen --problems FILE` | `--blame` / `--negative PATH` (the sandbox and the judge teach the negative network), `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
-| `tools list \| describe \| call` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`; tool options below. The Go CLI has the same three actions and the same flags |
-| `agent --tasks FILE` | `--phase model\|teacher\|both`, `--rounds`, `--twonrl-per task\|round`, `--agent-model`, `--judge-model`, `--url`, `--timeout`, `--criteria 4`, `--lenient`, `--no-judge`, `--mediation repair\|always\|never`, `--no-teach`, `--max-steps 6`, `--model-attempts 2`, `--teacher-attempts 1`, `--sample-first`, `--temperature`, `--max-length 200`, `--observation-chars 600`, `--read-reward`, `--no-replay`, `--blatant-mode fail_invert\|activation\|state\|none`, `--blatant-margin 0.5`, `--blatant-boost 4`, 2NRL options, checkpoint options, tool options, `--out`, `--report FILE` |
+| `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
+| `tools list \| describe \| call \| browser` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`, `browser` (what `--browser` would drive); tool options below. The Go CLI has the same three actions and the same flags |
+| `agent --tasks FILE` | `--phase model\|teacher\|both`, `--rounds`, `--twonrl-per task\|round`, `--agent-model`, `--judge-model`, `--url`, `--timeout`, `--criteria 4`, `--lenient`, `--no-judge`, `--mediation repair\|always\|never`, `--no-teach`, `--max-steps 6`, `--model-attempts 2`, `--teacher-attempts 1`, `--sample-first`, `--temperature`, `--max-length 200`, `--observation-chars 600`, `--read-reward`, `--no-replay`, `--blatant-mode fail_invert\|activation\|state\|none`, `--blatant-margin 0.5`, `--blatant-boost 4`, `--blame` (teach the negative network from every failure), `--no-avoid`, `--negative PATH`, 2NRL options, checkpoint options, tool options, `--out`, `--report FILE` |
 | `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option. `agent` and `explore` are in the Go CLI too (`--strength` in place of the learning rates) |
-| tool options (`tools`, `agent`, `explore`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted), `--web-timeout 20`, `--max-bytes 2000000`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
+| `mcp` | serve the tools and the network over the Model Context Protocol (stdio): `--no-model`, `--no-solve`, `--blame`, `--negative PATH`, `--agent-model`, `--url`, tool options |
+| tool options (`tools`, `agent`, `explore`, `mcp`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted), `--web-timeout 20`, `--max-bytes 2000000`, `--browser` (draw pages in a real headless Chrome), `--no-headless`, `--page-timeout 30`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -279,8 +281,8 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
 | `GET /api/tools` | the external tools the network can call: names, arguments, JSON schemas, the call format |
-| `POST /api/tools/call` | `{"tool", "arguments"}` or `{"call": "web_fetch {\"url\": \"...\"}"}` (+ `offline`, `allow_private`, `search_url`, `web_timeout`, `max_bytes`, `python_tool`) -> the tool result; a failing tool is 200 with `ok: false` |
-| `POST /api/agent/start` | `{"tasks" \| "tasks_text" \| "task_files", "phase", "rounds", "max_steps", "mediation", "criteria", "judge", "teach", "blatant_mode", "blatant_margin", "blatant_boost", 2NRL options}` -> job |
+| `POST /api/tools/call` | `{"tool", "arguments"}` or `{"call": "web_fetch {\"url\": \"...\"}"}` (+ `offline`, `allow_private`, `search_url`, `web_timeout`, `max_bytes`, `python_tool`, `browser`) -> the tool result; a failing tool is 200 with `ok: false` |
+| `POST /api/agent/start` | `{"tasks" \| "tasks_text" \| "task_files", "phase", "rounds", "max_steps", "mediation", "criteria", "judge", "teach", "blatant_mode", "blatant_margin", "blatant_boost", "blame" (teach the negative network from the failures), 2NRL options}` -> job |
 | `POST /api/agent/explore` | the network chooses every task: `{"steps"` (0 = until stopped)`, "seed_urls", ...}` -> job |
 | `GET /api/agent/history` | criteria / step / attempt / task records of all agent and explore runs |
 | `POST /api/agent/criteria` | `{"tasks"}` -> the acceptance criteria the LLM writes, nothing attempted |
@@ -731,6 +733,55 @@ nodes along a failed transcript locally, and blatant failures then leave the
 2NRL garbage set. Nothing failed: the correct run is rewarded and nothing is
 inverted.
 
+### The failures feed the negative network
+
+`agent --blame` / `explore --blame` hands every failure the judge finds to the
+[negative network](#the-negative-network-what-went-wrong-and-why), so the
+network keeps a second graph of *what going wrong looks like here*. Each failure
+is blamed at the granularity it happened at, because they are different
+failures:
+
+* the **transcript**, for the answer — and when a correct run of the same task
+  exists (usually the teacher's demonstration) it rides along as the
+  *correction*, so only the characters that differ from a run that worked are
+  blamed. The shared task line and the calls that worked never become evidence;
+* the **emission the mediator had to repair** (`bad-call`) — what the network
+  actually wrote, which is *not* in the transcript (that holds the repaired
+  call). Blaming the transcript for it would teach the network that a
+  well-formed call is a mistake;
+* the **call the network wrote itself that the tool refused** (`tool-error`).
+  A call the mediator wrote is not the network's fault and is not blamed.
+
+The reason comes from how far the attempt got (`no-call`, `bad-call`,
+`tool-error`, `no-answer`, then the judge's own words) and the severity from its
+gap. What it learns comes straight back: every candidate the network offers is
+put through the negative network first, and one it recognises as a known failure
+is passed over for the next candidate (`--no-avoid` turns that off). The task
+records carry `negative_blamed`, `negative_edges` and `negative_reasons`, and
+`radixnet negative reasons` shows the table.
+
+### Browsing in a real Chrome
+
+Plain fetching reads a document; it cannot read a page that draws itself.
+`--browser` runs each page in a real headless **Chrome** and reads the DOM after
+its scripts have run, so a search engine or a single-page app becomes readable:
+
+```bash
+python -m radixnet tools browser                       # what would be driven, and its versions
+python -m radixnet tools call --tool web_fetch --arg url=https://example.com --browser
+python -m radixnet explore --steps 20 --browser
+```
+
+WebDriver is an HTTP protocol, so nothing is installed: `radixnet` starts
+`chromedriver` itself and talks to it with the standard library. It needs a
+`chromedriver` and a Chrome **of the same major version** — the usual reason
+this fails — and says so plainly when they differ. `$RADIXNET_CHROMEDRIVER` and
+`$RADIXNET_CHROME` override the search, and `$RADIXNET_WEBDRIVER` (or
+`endpoint=`) points at a WebDriver that is already running, such as a
+`selenium/standalone-chrome` container or a Selenium Grid. The address guards
+still run first; a browser executes whatever a page sends it, so untrusted
+browsing belongs in the Docker image.
+
 ### Exploring on its own
 
 `radixnet explore` takes the tasks away and lets the network choose them. Each
@@ -773,6 +824,39 @@ no training, reporting the transcript, the verdict and the gap). The frontend's
 **Agent** tab drives all of it: the mode, the tool list, the loop and mediation
 options, the failure settings, a live log of criteria, proposals, tool calls
 (tagged by who wrote each one) and attempts, and a table of finished tasks.
+
+## MCP: the tools and the network, to any client
+
+`radixnet mcp` speaks the **Model Context Protocol** on stdin / stdout, so any
+MCP client — Claude Desktop, an editor, another agent — can use this instance.
+It offers the external tools (browsing, the calculator, optionally the sandbox
+and the uploaded files) *and* the network itself:
+
+| Tool | What it does |
+|---|---|
+| `radixnet_predict` | continue a prefix (dijkstra, beam or sample) |
+| `radixnet_generate` | whole texts from the prediction search |
+| `radixnet_score` | how likely the network thinks a text is, per character |
+| `radixnet_stats` | size, compression, training history, backend |
+| `radixnet_judge` | the negative network's verdict: has this way of going wrong been seen here before, and why |
+| `radixnet_solve` | one task through the whole agent loop — acceptance criteria, tool calls, a judged answer |
+
+```bash
+python -m radixnet --model model.json mcp        # tools + the network
+python -m radixnet mcp --no-model --offline      # the calculator alone
+python -m radixnet mcp --browser                 # browsing in a real Chrome
+```
+
+Point a client at it the usual way:
+
+```json
+{"mcpServers": {"radixnet": {"command": "python", "args": ["-m", "radixnet", "--model", "model.json", "mcp"]}}}
+```
+
+MCP is JSON-RPC 2.0 over a stream, so this is the standard library and nothing
+else. A tool that fails comes back as a result with `isError`, not a protocol
+error, so the client can show it to its model; nothing is ever written to stdout
+but the protocol, and the log goes to stderr.
 
 ## Two models: RadixNet and the count / reward model
 
@@ -1684,7 +1768,7 @@ make go-test     # cd go && go test -race ./...
 RadixCyclicNN/
   radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, model, countnet, negative,
                       blame, duo, diff, schedule, gan, checkpoint, bench, cli, api, llm, ollama, chatgpt,
-                      tutor, recall, critic, codegen, tools, agent, vision, speech, dialogue, chat
+                      tutor, recall, critic, codegen, tools, agent, browser, mcp, vision, speech, dialogue, chat
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
