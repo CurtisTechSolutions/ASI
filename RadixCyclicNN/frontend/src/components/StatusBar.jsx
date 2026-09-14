@@ -119,6 +119,16 @@ export default function StatusBar({ onStatus }) {
           traversals <b>{fmtInt(s.total_traversals)}</b> · window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
         </span>
       ) : null}
+      {s.kind === "resonant" ? (
+        <span className="stat" title="How tightly the edges are locked to a phase, over how many positions on the ring">
+          coherence <b>{fmtNum(s.coherence_mean, 3)}</b> · <b>{fmtInt(s.buckets)}</b> phases
+        </span>
+      ) : null}
+      {s.kind === "resonant" ? (
+        <span className="stat" title="Phase-locked cycles met in training, and the signatures the metacognitive layer learned">
+          cycles <b>{fmtInt(s.cycles_seen)}</b> · signatures <b>{fmtInt(s.meta && s.meta.signatures)}</b>
+        </span>
+      ) : null}
       <span className={`stat job ${jobState}`}>
         job{" "}
         <b>

@@ -1017,3 +1017,143 @@ without `whole_file`, graph, save / load / reset, checkpoints in the Python layo
 and `tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `tests/test_api.py`, a
 model saved by the server loaded in Python with identical predictions, ZIP uploads, `split: paragraphs`, and the
 Python `CheckpointManager` reading the server's checkpoints).
+
+## 24. The resonant model (`resonance.py`, `metacog.py`, `phasesearch.py`) — an analog phase, and cycles that hand off
+
+A third kind on the same self-compressing graph, selectable at run time
+(`--kind resonant`, `POST /api/model/select {kind: "resonant"}`, the header selector).  It takes up the two research
+notes the other two kinds leave on the table.
+
+`Research/SineWaveActivationFunction.md` says a brain is an *analog computer*, so sine waves are how information is
+encoded.  `RadixNet` reads that as a **pointwise** sine — every node passes its state through `-sin(z/3)`.  This model
+reads the other half: a sine has a **phase**, phases **add** along a path, and signals that meet in phase reinforce
+while signals that meet in antiphase cancel.  `Research/CyclesAreAFeature.md` says cycles are a feature and that *when
+we encounter a cycle we use metacognition or another part of the brain instead*.  The phase is what makes that
+actionable, and `metacog.py` is that other part.
+
+### 24.1 The phase — a ring counter the text itself turns
+
+A walk carries one number more than the node it stands on: its phase, one of `buckets` positions on a ring (so the
+model is a finite automaton over `(node, phase)`, not an approximation of a continuous system).  Every **trigram**
+advances it by a fixed integer:
+
+```
+advance(t) = round(buckets / period + kick_scale * trigram_phase(t) * buckets / TAU)   (mod buckets)
+```
+
+* `buckets / period` is a **clock**: with the default `period == buckets` one character is one bucket, so the phase
+  says where in the rhythm the walk is — how far into a line, a word, an indent.
+* `trigram_phase(t)` is a **kick**: a stable BLAKE2b hash of the trigram, in `[0, TAU)` (not `hash()`, which is
+  randomised per process and would make a saved model read differently after a restart).  `kick_scale = 0` (the
+  default) leaves a pure position clock — dense, quickly learned; turning it up makes the phase a rolling signature
+  of the whole path — real long-range context on a three-character graph — at the price of far sparser statistics
+  per phase.
+
+Defining the advance **per trigram and summing** is what makes the phase survive the radix operations:
+`ResonantGraph.advance[n] = label_advance(labels[n])` is the sum over the trigrams a node's label covers, a split and
+a merge move trigrams between labels but never change which trigrams exist, so `split` and `merge_child` leave the
+total across the path exactly where it was (`node_advance` forces 0 on START/END, whose labels `"<s>"` / `"</s>"` are
+long enough to look like ordinary ones).  It also makes the phase a function of the emitted text alone —
+`text_bucket(text)` — so a prediction's starting phase is read straight off the prefix with no walk, and it is
+exactly the phase a walk that emitted that prefix would carry.
+
+### 24.2 The edges — a circular mean, and coherence for free
+
+An edge does not learn a phase *offset*; it learns the phases at which it was actually taken.  Each traversal at
+bucket `b` adds the unit vector of that bucket to the edge's accumulator `(edge_cx, edge_cy)` with weight `edge_cw`:
+
+```
+mu        = atan2(cy, cx)                        # the mean phase at which this transition fires
+coherence = hypot(cx, cy) / (cw + concentration) # how consistently, in [0, 1]
+score(p -> c | psi) = amp_scale * log(share of the parent) + reward_scale * reward
+                    + resonance_scale * coherence * cos(psi - mu)
+```
+
+`share` is the edge's smoothed share of its parent's traversals (`(count + 0.5) / (parent total + 0.5 * degree)`), so
+with `resonance_scale = 0` the model *is* a clean smoothed frequency model and the phase adds to it.  `concentration`
+(default 2) shrinks the resultant length, so a single traversal — whose resultant length is exactly 1 — reads as an
+opinion, not a certainty.  `coherence` is free confidence: it measures how **context-dependent** a transition is,
+with nothing added to the model to measure it.  An incoherent edge falls back to plain frequency; a coherent one is
+cheap in phase and dear out of phase.  Children are drawn by a softmax over those scores, so
+`P(child | parent, phase)` — the first distribution here that depends on more than the parent.
+
+Every node is created with `a = 0, k = 1`, so its activation is the constant 1 and the base class's phase-free
+scores, probabilities, costs, splits and merges all keep working; they read as the model's **phase-marginal** — what
+it believes before the phase is taken into account.
+
+Learning is counting: a traversal, a unit vector, a reward.  No gradient, no learning rate, no ordering effect
+(`TrainConfig.lr` / `act_lr` / `batch_size` are accepted and ignored; feedback magnitude is `strength`).
+`invert()` negates the accumulators, which rotates every `mu` by `pi`: what resonated now cancels — 2NRL's inversion
+in one line and with an exact meaning.  `reward` counts a traversal, adds `+strength` and *sharpens* the phase lock;
+`punish` subtracts and *decoheres* it (taking away the context in which the path was right, this model's own way of
+forgetting); `invert_paths` rotates a failed path's edges into antiphase (`activation`) or decoheres them (`state`).
+
+### 24.3 Cycles — the handoff
+
+Coming back to a node at a **new** phase is progress: the signal has moved on.  Coming back at the **same** phase is a
+true loop that would repeat for ever.  So the phase is exactly what separates productive recurrence from being stuck,
+and only the second kind is a cycle worth a decision.
+
+`metacog.MetaLayer` holds, per **cycle signature** — the re-entered node's first trigram and how many steps the loop
+closes over, clamped at 8, e.g. `"lol:4"` — a score for each of three actions: `ride` (go round again: right for
+`"aaa"`, `"lol lol lol"`, `"----"`, indentation), `escape` (take the cheapest child that does not close the loop) and
+`abort` (walk to END).  The scores are learned the way everything else here is: while training walks a real text,
+every step where a child *would* close a phase-locked cycle is a decision the text made, and whatever it did scores
+`+1`.  The policy is a softmax over `sign(s) * log1p(|s| / smoothing)` — evidence, not logits — so with the default
+`smoothing = 1` it is exactly add-one smoothing over the counts: ten observations are confident, a hundred more so,
+one is barely an opinion, and an untrained layer is uniform (costing `log 3` whatever the walk does, which changes no
+ranking).  Unseen signatures fall back to a prior summed over every cycle the model has met.  `invert()` negates
+every score, so 2NRL flips the layer with the graph.
+
+### 24.4 The search (`phasesearch.py`)
+
+A state is `(node, chars_emitted, phase_bucket)`.  The cost of an edge now depends on the whole path that led to it,
+and the search is still exact: the product graph is finite (`buckets` times bigger), so optimal substructure holds.
+`kick_scale = 0` makes the phase a function of the emitted length alone and the product collapses back to the
+ordinary unrolled graph at no extra cost.
+
+* `phase_dijkstra` — the cheapest path, same contract as `search.dijkstra_predict` (goal, cap, fallback,
+  `include_context`).  **No metacognition**: an exact search cannot depend on which path reached a state.
+* `phase_beam` — the `k` cheapest and `k` dearest complete paths, same two-beam shape as `beam.beam_predict`.  Every
+  entry carries the `(node, phase)` states already on its path, so a cycle is detected *per path*: the tightest loop
+  names the signature, the child that closes it takes the layer's `ride` cost, END takes `abort` and every other
+  child takes `escape`.  Nothing is forbidden — a cycle the corpus rides stays cheap to ride.
+* `phase_walk` — one stochastic walk, layer included.
+
+`ResonantNet.predict(prefix, mode="beam" | "dijkstra" | "sample", k, beam, ...)` is those three; `mode` defaults to
+`"beam"` so the layer runs.  `score` walks the text `START -> ... -> END` carrying the phase, charges
+`log(UNKNOWN_PROB)` for an unknown trigram or a missing edge exactly as `GraphModel.score` does (so an unseen text
+scores *worse* than a trained one instead of looking deterministic) and never changes the model.
+`generate` is the inherited prediction-search-to-END.
+
+### 24.5 What it changes, measured
+
+Train `["the cat sat down", "a big cat ran away"]` and look at the node `"at "`, which three different contexts reach.
+Phase-free its three children are exactly `1/3` each — the model cannot tell them apart.  Per phase they are not:
+`"t sat"` is `0.807` at bucket 5, `"t down"` `0.807` at bucket 3, `"t ran aw"` `0.691` at bucket 0.  End to end the
+model continues `"the cat "` with `"sat down"` and `"a big cat "` with `"ran away"`; the identical model with
+`resonance_scale = 0` answers `"ran away"` to both (`tests/test_resonance.py`).
+
+### 24.6 Wiring
+
+`ResonantGraph.to_dict` adds `edges.cx / cy / cw / reward` in the same edge order as the base, and `weights` (the
+seven settings plus `total_traversals`); `from_dict` rebuilds `advance` from the labels.  `ResonantNet.to_dict` adds
+`metacog`.  `format` is `"radixnet-resonant"`, so `load_model`, `model_from_dict`, the checkpointer and `POST
+/api/load` restore it like any other kind.  CLI: `--kind resonant` (default file `model.resonant.json`), `weights`
+takes `--buckets / --period / --kick-scale / --resonance-scale / --amp-scale / --reward-scale / --concentration` and
+**rejects** another kind's options by name instead of ignoring them, `info` shows the phase, the coherence and the
+layer, `2nrl` describes the three phases.  API: `/api/model/weights` and `/api/reset` take the same settings (the
+model rejects the ones it does not know), `/api/graph` reports `coherence` and `mu` per edge, `advance` per node and
+`buckets` on the view, `/api/status` carries `coherence_mean`, `cycles_seen` and `meta`.  Frontend: the header
+selector picks it up from `status.kinds` on its own; `util.countingKind` hides the learning-rate and schedule fields
+and shows the `strength` field for every kind that learns by counting (only the count model aliases `dijkstra` to the
+beam — on this model `dijkstra` is a real, exact mode), the status bar adds coherence / phases and cycles /
+signatures, and the Evolve tab describes the failure modes in this model's terms.
+
+Tests: `tests/test_resonance.py` — the phase (stability, sentinels, invariance under split and merge, clock vs kick,
+`text_bucket`), the graph (unit activations, coherence growth and shrinkage, resonance in and out of phase,
+`invert` / `rotate` / `sharpen`, `configure` rephasing), the layer (uniform when untrained, add-one policy, punish,
+invert, prior fallback, round trip), the net (records, falling loss, the three prediction modes, generation, scoring,
+cycle learning, the layer moving the beam while Dijkstra ignores it, reward / punish / decohere, 2NRL with weights,
+`invert_paths`, stats, argument validation), persistence (file, gzip, wrong kind, checkpoints), the kind registry,
+the evolver and `converse`, the CLI and the HTTP API.

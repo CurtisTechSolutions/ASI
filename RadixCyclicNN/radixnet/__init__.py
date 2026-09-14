@@ -34,12 +34,16 @@ from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict
 from .countnet import CountRewardGraph, CountRewardNet
+from .metacog import MetaLayer
+from .resonance import ResonantGraph, ResonantNet, trigram_phase
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
+from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .search import PathResult, dijkstra_predict, sample_walk
 
 __all__ = [
     "__version__",
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
+    "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",
     "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
     "get_backend", "describe_backends", "torch_available",
@@ -50,4 +54,5 @@ __all__ = [
     "END_LABEL", "START_LABEL", "WINDOW",
     "END", "START", "RadixCyclicGraph",
     "PathResult", "dijkstra_predict", "sample_walk",
+    "phase_beam", "phase_dijkstra", "phase_walk",
 ]

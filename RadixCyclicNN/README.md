@@ -27,6 +27,7 @@ and an optional GPU backend (torch) are built in.
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
+| Resonant model | a third algorithm on the same graph (`--kind resonant`): a walk carries an analog **phase** advanced by every trigram (a position clock plus a hash kick), edges learn the phase at which they fire and how **coherently**, and the score adds `resonance_scale · coherence · cos(phase − mu)` to the edge's share of its node. Prediction searches `(node, chars, phase)`. A **phase-locked** cycle - back to the same node at the same phase - hands the decision to a metacognitive layer that learned from the corpus whether to ride the loop, escape it or stop. |
 | Go port of the count / reward model | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
@@ -142,21 +143,22 @@ Behind a registry mirror, pass `--build-arg PYTHON_IMAGE=... --build-arg NODE_IM
 ## CLI reference
 
 Global options (before or after the command): `--model PATH` (default
-`model.json`, gzip when the name ends with `.gz`), `--kind radix|count` (the
-algorithm of a *new* model; a file's own kind wins; with `count` the default
-model file is `model.count.json`), `--backend auto|python|torch`,
+`model.json`, gzip when the name ends with `.gz`), `--kind radix|count|resonant`
+(the algorithm of a *new* model; a file's own kind wins; the default model file
+follows the kind - `model.count.json`, `model.resonant.json`),
+`--backend auto|python|torch`,
 `--device cpu|cuda|mps`, `--seed N`, `--json` (one JSON document on stdout).
 
 | Command | Main options |
 |---|---|
 | `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
-| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (both models; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N` |
+| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (every kind; the count and resonant models' default): `--k 5` (top K and bottom K continuations in one search), `--beam N`. On the resonant model `dijkstra` is the exact search over `(node, chars, phase)` and runs without the metacognitive layer |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up |
-| `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
-| `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
+| `weights` | show or change the score function of the kind that has one, then recompute every weight and save. Count model: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N`. Resonant model: `--buckets`, `--period`, `--kick-scale`, `--resonance-scale`, `--amp-scale`, `--reward-scale`, `--concentration`. Another kind's options are rejected by name |
+| `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count and resonant models), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
 | `evolve --data FILE` | `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
@@ -180,9 +182,9 @@ at a time, and mutating requests answer 409 while it runs.
 | Method and path | Body / result |
 |---|---|
 | `GET /api/health` | `{"ok": true, "version"}` |
-| `GET /api/status` | model statistics (with the active `kind`), current job, available backends, model path |
+| `GET /api/status` | model statistics (with the active `kind`), current job, available backends, model path; the resonant model adds `buckets`, `coherence_mean` / `coherence_max`, `cycles_seen` and `meta` (the metacognitive layer) |
 | `GET /api/model` | `{"kind", "label", "kinds": [{"kind","label","description"}], "model_path", "paths", "in_memory"}` |
-| `POST /api/model/select` | `{"kind": "radix"\|"count"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
+| `POST /api/model/select` | `{"kind": "radix"\|"count"\|"resonant"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
@@ -209,7 +211,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` |
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
-| `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
+| `POST /api/model/weights` | the active model's score function - count: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}`; resonant: `{"buckets", "period", "kick_scale", "resonance_scale", "amp_scale", "reward_scale", "concentration"}` -> `{"weights", "stats"}`; every edge weight is recomputed (400 for RadixNet, and for an option of another kind) |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
 | `GET /api/history` | training history |
@@ -359,21 +361,21 @@ no training) and `POST /api/codegen/run` (sandbox only). The frontend's Code
 tab drives all of it: problems (typed or uploaded), live attempt / problem /
 round records, a "try a problem" box and a sandbox runner.
 
-## Two models: RadixNet and the count / reward model
+## Three models: RadixNet, the count / reward model and the resonant model
 
 The selector at the top of the frontend (and `--kind` in the CLI, `POST
-/api/model/select` in the API) chooses the algorithm.  Both live on the same
+/api/model/select` in the API) chooses the algorithm.  All three live on the same
 self-compressing cyclic graph and share encoding, prefix location, sampling,
 scoring, compression, checkpoints and persistence; a model file records its
 kind, so `load` always restores the right one.
 
-| | RadixNet (`radix`) | Count / reward (`count`) |
-|---|---|---|
-| edge weight | learned by the one-hop rule together with the per-node sine activations | a **dual frequency function**: the edge's share of its node's traversals, all time (`R_all`) and inside a sliding window of the last N traversals (`R_recent`), plus rewards - `global_scale · log R_all + window_scale · log R_recent + reward_scale · reward` (+ an optional `count_scale · log(1 + traversals)`); no gradient, no learning rate |
-| training | epochs over mini-batches with `lr` / `act_lr` (and their schedules) | every epoch counts one more traversal of each text's path (all time, in the sliding window and in the global total) |
-| feedback (thumbs, 2NRL, codegen judge, adversarial review) | train on the bad texts, invert, fine-tune on the good ones | `punish`: reward −= `strength` on every edge of a bad path; `reward`: a traversal plus reward += `strength`; nothing is inverted |
-| `invert` | flips every weight and activation amplitude | flips the sign of every reward |
-| prediction | Dijkstra's cheapest path (or sampling) | a beam search that returns the **top K** (most likely) and **bottom K** (least likely) continuations of one prefix in one call; the best one is the prediction |
+| | RadixNet (`radix`) | Count / reward (`count`) | Resonant (`resonant`) |
+|---|---|---|---|
+| edge weight | learned by the one-hop rule together with the per-node sine activations | a **dual frequency function**: the edge's share of its node's traversals, all time (`R_all`) and inside a sliding window of the last N traversals (`R_recent`), plus rewards - `global_scale · log R_all + window_scale · log R_recent + reward_scale · reward` (+ an optional `count_scale · log(1 + traversals)`); no gradient, no learning rate | the edge's share of its node's traversals **plus a resonance**: `amp_scale · log share + reward_scale · reward + resonance_scale · coherence · cos(phase − mu)`, where `mu` is the mean phase at which the edge fired and `coherence` how consistently; no gradient, no learning rate |
+| training | epochs over mini-batches with `lr` / `act_lr` (and their schedules) | every epoch counts one more traversal of each text's path (all time, in the sliding window and in the global total) | every epoch walks each text carrying its **phase** and counts each traversal into its edge's circular mean; the cycle decisions the text made train the metacognitive layer beside it |
+| feedback (thumbs, 2NRL, codegen judge, adversarial review) | train on the bad texts, invert, fine-tune on the good ones | `punish`: reward −= `strength` on every edge of a bad path; `reward`: a traversal plus reward += `strength`; nothing is inverted | `punish` penalises **and decoheres** a path (its phase lock is scrambled), `reward` rewards and sharpens; 2NRL trains on the bad texts, inverts, then relocks on the good ones |
+| `invert` | flips every weight and activation amplitude | flips the sign of every reward | rotates every edge's mean phase by `pi` - what resonated now cancels - and flips the layer with it |
+| prediction | Dijkstra's cheapest path (or sampling) | a beam search that returns the **top K** (most likely) and **bottom K** (least likely) continuations of one prefix in one call; the best one is the prediction | the same two beams over `(node, chars, phase)`, with a **phase-locked cycle handed to the metacognitive layer**; `dijkstra` is the exact cheapest path over that product graph and runs without the layer |
 
 ```bash
 python -m radixnet --kind count train --data data/sample_corpus.txt --epochs 3     # -> model.count.json
@@ -408,6 +410,75 @@ The server keeps the model of each kind in memory: switching kinds parks the
 active model (unsaved work included) and brings the other one back, loading
 its file (`model.json` / `model.count.json`) or creating a fresh one the
 first time.
+
+### The resonant model: an analog phase, and cycles that hand off
+
+`RadixNet` reads *"a brain is an analog computer, so sine waves are how
+information is encoded"* as a **pointwise** sine - every node passes its state
+through `-sin(z/3)`.  This model reads the other half: a sine has a **phase**,
+phases **add** along a path, and signals that meet in phase reinforce while
+signals that meet in antiphase cancel.
+
+A walk therefore carries one number more than the node it stands on: its phase,
+one of `--buckets` positions on a ring.  Every trigram advances it by a fixed
+amount - a **clock** (`buckets / period`: with the default one character is one
+bucket, so the phase says where in the rhythm the walk is) plus a **kick**,
+`--kick-scale` times a stable hash of the trigram itself.  With
+`kick_scale = 0` (the default) the phase is pure position: dense and quickly
+learned.  Turn it up and the phase becomes a rolling signature of the whole
+path - long-range context on a three-character graph - at the price of far
+sparser statistics per phase.
+
+An edge does not learn a phase offset; it learns *the phases at which it was
+actually taken*, as a circular mean.  That gives `mu` (where it fires) and
+**coherence** (how consistently, in `[0, 1]`) - free confidence, measuring how
+context-dependent a transition is with nothing added to measure it.  An
+incoherent edge falls back to plain frequency; a coherent one is cheap in phase
+and dear out of phase.
+
+**What that buys.**  Train on `"the cat sat down"` and `"a big cat ran away"`.
+Three contexts reach the node `"at "`, and phase-free its three children are
+exactly `1/3` each - the model cannot tell them apart.  Per phase they are not:
+
+```
+bucket 0   t sat 0.154   t down 0.154   t ran away 0.691
+bucket 3   t sat 0.097   t down 0.807   t ran away 0.097
+bucket 5   t sat 0.807   t down 0.097   t ran away 0.097
+```
+
+so the model continues `"the cat "` with `"sat down"` and `"a big cat "` with
+`"ran away"` - while the identical model with `--resonance-scale 0` answers
+`"ran away"` to both.
+
+**Cycles are a decision, not a hazard.**  Coming back to a node at a *new* phase
+is progress: the signal has moved on.  Coming back at the *same* phase is a loop
+that would repeat for ever.  Only the second kind is a cycle worth deciding
+about, and when the search meets one it stops asking the graph and asks the
+**metacognitive layer**, which holds a learned policy per cycle signature (the
+re-entered node's first trigram and how long the loop is, e.g. `lol:4`):
+
+* `ride` - go round again (right for `aaa`, `lol lol lol`, `----`, indentation),
+* `escape` - take the cheapest child that does not close the loop,
+* `abort` - stop here.
+
+Those are learned by counting what the corpus did at that exact cycle, so a
+cycle the corpus rides stays cheap to ride and one it never rides becomes
+expensive.  Nothing is forbidden.  `info` reports the signatures learned, the
+status bar shows coherence and cycles, and `invert` flips the layer with the
+graph so 2NRL covers it too.
+
+```bash
+python -m radixnet --kind resonant train --data data/sample_corpus.txt --epochs 3   # -> model.resonant.json
+python -m radixnet --model model.resonant.json predict --prefix 'the ' --length 20 --mode beam --k 5
+python -m radixnet --model model.resonant.json weights --kick-scale 1.0 --buckets 16
+python -m radixnet --model model.resonant.json info
+```
+
+`weights` shows or changes `--buckets`, `--period`, `--kick-scale`,
+`--resonance-scale`, `--amp-scale`, `--reward-scale` and `--concentration`
+(which shrinks a thinly observed edge's coherence, so one traversal is not
+mistaken for certainty), and rejects another kind's options by name rather than
+ignoring them.
 
 ## Learning-rate schedules (graph functions)
 
@@ -661,8 +732,8 @@ make go-test     # cd go && go test -race ./...
 
 ```
 RadixCyclicNN/
-  radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
-                      checkpoint, bench, cli, api, ollama, codegen
+  radixnet/           activation, encoding, graph, backend(+torch), search, beam, phasesearch, model, countnet,
+                      resonance, metacog, schedule, gan, checkpoint, bench, cli, api, ollama, codegen
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)
@@ -680,6 +751,8 @@ RadixCyclicNN/
 * **"invert the network"** (2NRL) flips the sign of every edge weight and every activation amplitude `a`, which negates every edge signal: the most likely continuation becomes the least likely. Two inversions are the identity.
 * **Prediction prefers short, confident completions** because the cost is summed per edge; `--step-penalty` and `--length` / `--to-end` steer that, and `--mode sample` gives diverse output for the GAN loop.
 * **Self-compression is lossy on purpose**: merging a unary chain keeps the parent's parameters; the chain was deterministic (probability 1, cost 0), so predictions are unchanged.
+* **The resonant model's phase is defined per trigram, not per node**, so a node's advance is the sum over the trigrams its label covers. A split and a merge move trigrams between labels but never change which trigrams exist, so compression leaves the phase exactly where it was - and the phase of any text is a function of the text alone, no walk needed.
+* **A phase-locked cycle is the only cycle worth a decision**: returning to a node at a new phase is progress, returning at the same phase repeats for ever. That is what the metacognitive layer is asked about, and its answer is a cost, never a prohibition.
 
 ## License
 

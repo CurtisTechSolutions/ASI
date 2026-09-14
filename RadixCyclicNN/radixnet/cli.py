@@ -44,8 +44,11 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "beam", "sample")
-KINDS = ("radix", "count")
+KINDS = ("radix", "count", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
+DEFAULT_RESONANT_MODEL = "model.resonant.json"
+KIND_MODELS = {"count": DEFAULT_COUNT_MODEL, "resonant": DEFAULT_RESONANT_MODEL}
+"""Default ``--model`` per kind, so one kind never overwrites another's default file."""
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -746,6 +749,12 @@ def _phase_pairs(model: GraphModel, args: argparse.Namespace) -> list[tuple[str,
             ("negative", f"{args.neg_epochs} pass(es): reward -= {args.strength} on every edge of the bad paths"),
             ("positive", f"{args.pos_epochs} pass(es): traversal counted and reward += {args.strength} on the good paths"),
         ]
+    if model.kind == "resonant":
+        return [
+            ("negative", f"{args.neg_epochs} pass(es): lock the phases onto the bad paths"),
+            ("invert", "rotate every edge's mean phase by pi - what resonated now cancels"),
+            ("positive", f"{args.pos_epochs} pass(es): relock the phases on the good paths, reward += {args.strength}"),
+        ]
     return [
         ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
         ("positive", f"epochs={args.pos_epochs} lr={args.pos_lr} act_lr={args.pos_lr / 10}"),
@@ -914,14 +923,34 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+_WEIGHT_OPTIONS = {
+    "count": ("count_scale", "global_scale", "window_scale", "reward_scale", "window"),
+    "resonant": ("buckets", "period", "kick_scale", "resonance_scale", "amp_scale", "reward_scale", "concentration"),
+}
+"""Which ``weights`` options each kind understands."""
+
+_ALL_WEIGHT_OPTIONS = {name for names in _WEIGHT_OPTIONS.values() for name in names}
+
+
+def _flag(name: str) -> str:
+    return "--" + name.replace("_", "-")
+
+
 def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
     model, origin = open_model(args, console, required=True)
-    if model.kind != "count":
-        raise CliError(f"{args.model} holds a {model.kind} model; the weight function belongs to the count model (--kind count)")
-    options = {
-        "count_scale": args.count_scale, "global_scale": args.global_scale, "window_scale": args.window_scale,
-        "reward_scale": args.reward_scale, "window": args.window,
-    }
+    if model.kind not in _WEIGHT_OPTIONS:
+        raise CliError(
+            f"{args.model} holds a {model.kind} model; the weight function belongs to the count and resonant "
+            f"models (--kind count / --kind resonant)"
+        )
+    mine = _WEIGHT_OPTIONS[model.kind]
+    stray = sorted(n for n in _ALL_WEIGHT_OPTIONS - set(mine) if getattr(args, n, None) is not None)
+    if stray:
+        raise CliError(
+            f"{', '.join(_flag(n) for n in stray)} do(es) not apply to the {model.kind} model; it takes "
+            f"{', '.join(_flag(n) for n in mine)}"
+        )
+    options = {name: getattr(args, name, None) for name in mine}
     changes = {k: v for k, v in options.items() if v is not None}
     saved = None
     if changes:
@@ -932,14 +961,31 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
         saved = save_model(model, args.out or args.model)
     config = model.weight_config()
     stats = model.stats()
+    if model.kind == "resonant":
+        rows = [
+            ("function", "amp_scale * log(share of the parent) + reward_scale * reward "
+                         "+ resonance_scale * coherence * cos(phase - mu)"),
+            ("buckets", f"{config['buckets']} phases on the ring"),
+            ("period", f"{fmt(config['period'])} characters per turn of the clock"),
+            ("kick_scale", f"{fmt(config['kick_scale'])} (0 = the phase is the position; > 0 = it carries the path)"),
+            ("resonance_scale", config["resonance_scale"]),
+            ("amp_scale", config["amp_scale"]),
+            ("reward_scale", config["reward_scale"]),
+            ("concentration", f"{fmt(config['concentration'])} (shrinks a thinly observed edge's coherence)"),
+            ("coherence", f"mean {fmt(stats['coherence_mean'])}, max {fmt(stats['coherence_max'])}"),
+        ]
+    else:
+        rows = [
+            ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
+            ("count_scale", config["count_scale"]),
+            ("global_scale", config["global_scale"]),
+            ("window_scale", config["window_scale"]),
+            ("reward_scale", config["reward_scale"]),
+            ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        ]
     console.pairs([
         ("model", origin.describe()),
-        ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
-        ("count_scale", config["count_scale"]),
-        ("global_scale", config["global_scale"]),
-        ("window_scale", config["window_scale"]),
-        ("reward_scale", config["reward_scale"]),
-        ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        *rows,
         ("total traversals", stats["total_traversals"]),
         ("changed", ", ".join(f"{k}={v}" for k, v in changes.items()) if changes else "nothing"),
         ("saved", saved["path"] if saved else "-"),
@@ -1135,6 +1181,15 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
            ("weights", f"global_scale={fmt(stats['global_scale'])} window_scale={fmt(stats['window_scale'])} "
                        f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])}")]
           if model.kind == "count" else []),
+        *([("traversals", f"{stats['total_traversals']} total"),
+           ("phase", f"{stats['buckets']} buckets, period {fmt(stats['weights']['period'])} chars, "
+                     f"kick_scale {fmt(stats['weights']['kick_scale'])}"),
+           ("coherence", f"mean {fmt(stats['coherence_mean'])}, max {fmt(stats['coherence_max'])}"),
+           ("metacognition", f"{stats['meta']['signatures']} cycle signature(s) from {stats['cycles_seen']} cycle(s); "
+                             f"{', '.join(f'{a}={fmt(v)}' for a, v in stats['meta']['totals'].items())}"),
+           ("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
+                       f"{stats['feedback_passes']} feedback pass(es)")]
+          if model.kind == "resonant" else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -1545,9 +1600,10 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="RNG seed for a newly created model (default 0) and for `generate` sampling")
     group.add_argument("--kind", choices=KINDS, default=default(None),
                        help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
-                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction); a "
-                            "loaded file's own kind always wins.  With --kind count the default --model is "
-                            f"{DEFAULT_COUNT_MODEL}")
+                            "reward model (edge weight = the edge's share of its node's traversals plus rewards), "
+                            "resonant = the phase model (edges learn the phase at which they fire; a phase-locked "
+                            "cycle goes to the metacognitive layer); a loaded file's own kind always wins.  The "
+                            f"default --model follows the kind ({DEFAULT_COUNT_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 
@@ -1774,11 +1830,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # weights --------------------------------------------------------------
     p = command(
-        "weights", "count model: show or change the dual frequency weight function",
+        "weights", "count / resonant model: show or change the score function",
         "The count / reward model weighs an edge by its share of its node's traversals - all time and inside a\n"
         "sliding window of the last --window traversals - plus its rewards:\n"
         "  weight = global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward\n"
         "         (+ count_scale * log(1 + count), off by default).\n"
+        "The resonant model adds the phase to that share:\n"
+        "  score  = amp_scale * log(share) + reward_scale * reward + resonance_scale * coherence * cos(phase - mu)\n"
+        "with the phase one of --buckets positions on a ring, advanced by --period characters per turn plus\n"
+        "--kick-scale times each trigram's own phase (0 = a pure position clock, > 0 = a rolling signature of\n"
+        "the path) and --concentration shrinking a thinly observed edge's coherence towards 0.\n"
         "Without options the current function and the tracked totals are shown; with options the model is\n"
         "changed, every weight recomputed and the model saved.",
     )
@@ -1786,7 +1847,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--global-scale", type=float, metavar="X", help="weight of the all-time share log(R_all)")
     p.add_argument("--window-scale", type=float, metavar="X", help="weight of the sliding-window share log(R_recent)")
     p.add_argument("--reward-scale", type=float, metavar="X", help="weight of the rewards")
-    p.add_argument("--window", type=pos_int, metavar="N", help="traversals the sliding window remembers")
+    p.add_argument("--window", type=pos_int, metavar="N", help="count model: traversals the sliding window remembers")
+    p.add_argument("--buckets", type=pos_int, metavar="N", help="resonant model: phases on the ring")
+    p.add_argument("--period", type=nonneg_float, metavar="X", help="resonant model: characters per turn of the clock")
+    p.add_argument("--kick-scale", type=float, metavar="X",
+                   help="resonant model: how much each trigram's own phase kicks the clock (0 = position only)")
+    p.add_argument("--resonance-scale", type=float, metavar="X", help="resonant model: weight of the resonance term")
+    p.add_argument("--amp-scale", type=float, metavar="X", help="resonant model: weight of the log share")
+    p.add_argument("--concentration", type=nonneg_float, metavar="X",
+                   help="resonant model: shrinkage of a thinly observed edge's coherence")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_weights)
 
@@ -2056,8 +2125,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse: --help / --version (0) or a usage error (1)
         return exc.code if isinstance(exc.code, int) else (EXIT_OK if exc.code is None else EXIT_ERROR)
-    if getattr(args, "kind", None) == "count" and args.model == DEFAULT_MODEL:
-        args.model = DEFAULT_COUNT_MODEL  # a count model does not overwrite the radix default file
+    if args.model == DEFAULT_MODEL:
+        # a count / resonant model does not overwrite the radix default file
+        args.model = KIND_MODELS.get(getattr(args, "kind", None), DEFAULT_MODEL)
     console = Console(bool(args.json))
     try:
         doc = args.handler(args, console)

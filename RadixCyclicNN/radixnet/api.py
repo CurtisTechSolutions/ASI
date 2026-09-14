@@ -420,7 +420,7 @@ class ModelService:
 
     @property
     def kind(self) -> str:
-        """The active model's kind (``"radix"`` or ``"count"``)."""
+        """The active model's kind (``"radix"``, ``"count"`` or ``"resonant"``)."""
         return self.model.kind
 
     def model_path_for(self, kind: str) -> str | None:
@@ -445,7 +445,7 @@ class ModelService:
             "model_path": self.model_path_for(self.kind),
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
             "in_memory": sorted({self.kind, *self._parked}),
-            "weights": self.model.weight_config() if self.kind == "count" else None,
+            "weights": self.model.weight_config() if hasattr(self.model, "weight_config") else None,
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -720,14 +720,17 @@ class ModelService:
     def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
         """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
 
-        ``options`` (count model only): ``count_scale``, ``global_scale``,
-        ``window_scale``, ``reward_scale``, ``window``.
+        ``options`` are the score-function settings of the kind that has them:
+        ``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``
+        and ``window`` for the count model; ``buckets``, ``period``,
+        ``kick_scale``, ``resonance_scale``, ``amp_scale``, ``reward_scale``
+        and ``concentration`` for the resonant one.
         """
         self._ensure_idle()
         cls = model_class(kind or self.kind)
         extra = {k: v for k, v in options.items() if v is not None}
-        if extra and cls.kind != "count":
-            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) apply to the count model only")
+        if extra and not hasattr(cls, "weight_config"):
+            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) do not apply to the {cls.kind} model")
         try:
             model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
         except (TypeError, ValueError) as exc:
@@ -735,10 +738,14 @@ class ModelService:
         return self._replace_model(model)
 
     def configure_weights(self, **options: Any) -> dict:
-        """Change the count model's dual frequency function (400 for RadixNet); returns the config and stats."""
+        """Change the active model's score function (400 for RadixNet); returns the config and stats.
+
+        The count model takes the dual frequency function's scales, the
+        resonant one its phase and resonance settings.
+        """
         with self.mutating() as model:
-            if model.kind != "count":
-                raise ApiError(400, "the weight function can be configured on the count model only (select it first)")
+            if not hasattr(model, "configure_weights"):
+                raise ApiError(400, f"the {model.kind} model has no configurable weight function (select another kind first)")
             try:
                 config = model.configure_weights(**{k: v for k, v in options.items() if v is not None})
             except ValueError as exc:
@@ -1066,9 +1073,11 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     edge_count = graph.edge_count
     edge_reward = getattr(graph, "edge_reward", None)
     shares_of = getattr(graph, "shares", None)
+    window_counts = getattr(graph, "window_edge_count", None)   # the count model only
+    advance = getattr(graph, "advance", None)                   # the resonant model only
     edges = []
     for p in ids:
-        shares = {e: (all_, recent) for _c, e, all_, recent in shares_of(p)} if shares_of is not None else {}
+        shares = {e: (first, second) for _c, e, first, second in shares_of(p)} if shares_of is not None else {}
         for c, e, cost in graph.child_costs(p):
             if c in chosen:
                 edge = {
@@ -1077,8 +1086,11 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
                 }
                 if edge_reward is not None:
                     edge["reward"] = edge_reward[e]
+                if window_counts is not None:
                     edge["share"], edge["recent_share"] = shares.get(e, (0.0, 0.0))
-                    edge["recent_count"] = graph.window_edge_count[e]
+                    edge["recent_count"] = window_counts[e]
+                elif advance is not None:
+                    edge["coherence"], edge["mu"] = shares.get(e, (0.0, 0.0))
                 edges.append(edge)
     edges.sort(key=lambda d: (d["source"], d["target"]))
     view = {
@@ -1087,8 +1099,13 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     }
     if edge_reward is not None:
         view["total_traversals"] = graph.total_traversals
+    if window_counts is not None:
         view["window_traversals"] = graph.window_traversals
         view["window"] = graph.window
+    if advance is not None:
+        view["buckets"] = graph.buckets
+        for node in nodes:
+            node["advance"] = advance[node["id"]]
     return view
 
 
@@ -1637,12 +1654,22 @@ def _r_load(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _weight_options(f: Fields) -> dict:
+    """Score-function settings of every kind that has one; the model rejects the ones it does not know."""
     return {
+        # count model
         "count_scale": f.number("count_scale", None),
         "global_scale": f.number("global_scale", None),
         "window_scale": f.number("window_scale", None),
-        "reward_scale": f.number("reward_scale", None),
         "window": f.integer("window", None, minimum=1),
+        # resonant model
+        "buckets": f.integer("buckets", None, minimum=1),
+        "period": f.number("period", None),
+        "kick_scale": f.number("kick_scale", None),
+        "resonance_scale": f.number("resonance_scale", None),
+        "amp_scale": f.number("amp_scale", None),
+        "concentration": f.number("concentration", None),
+        # both
+        "reward_scale": f.number("reward_scale", None),
     }
 
 
@@ -2073,9 +2100,13 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
     ("POST", "/api/reset", _r_reset,
-     "replace the model with a fresh one: {seed, kind, count model: count_scale, global_scale, window_scale, reward_scale, window}"),
+     "replace the model with a fresh one: {seed, kind, and the kind's score-function settings - count: "
+     "count_scale, global_scale, window_scale, reward_scale, window; resonant: buckets, period, kick_scale, "
+     "resonance_scale, amp_scale, reward_scale, concentration}"),
     ("POST", "/api/model/weights", _r_model_weights,
-     "count model: change the dual frequency function {count_scale, global_scale, window_scale, reward_scale, window} -> {weights, stats}"),
+     "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
+     "window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, concentration} "
+     "-> {weights, stats}"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),

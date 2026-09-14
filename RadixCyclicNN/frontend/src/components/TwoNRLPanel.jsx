@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
-import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, yesNo } from "../util.js";
+import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import UploadPicker from "./UploadPicker.jsx";
@@ -66,7 +66,7 @@ export default function TwoNRLPanel({ status }) {
   const { job, running, busy, error, start, stop, clearError } = useJob("2nrl");
 
   const anyJobRunning = jobIsRunning(status) || running;
-  const countKind = Boolean(status && status.kind === "count");
+  const countKind = countingKind(status);  // the count and resonant models take a strength, not a learning rate
   const otherJobRunning = jobIsRunning(status) && !running;
 
   async function handleStart(event) {

@@ -367,7 +367,7 @@ class TestPersistenceAndKinds(unittest.TestCase):
             model_from_dict({"format": "nope"})
 
     def test_kind_registry(self):
-        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count"])
+        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "resonant"])
         self.assertIs(model_class("count"), CountRewardNet)
         self.assertIs(model_class(None), RadixNet)
         self.assertIs(model_class(" Radix "), RadixNet)
@@ -432,7 +432,7 @@ class TestApi(unittest.TestCase):
         status, data, _ = self.client.get("/api/model")
         self.assertEqual(status, 200)
         self.assertEqual(data["kind"], "radix")
-        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count"])
+        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "resonant"])
         self.assertEqual(data["paths"]["count"], os.path.join(self.tmp.name, "model.count.json"))
         data = self.select("count")
         self.assertEqual((data["kind"], data["origin"]), ("count", "new"))
@@ -504,7 +504,7 @@ class TestApi(unittest.TestCase):
         self.select("radix")
         status, data, _ = self.client.post("/api/model/weights", {"window": 10})
         self.assertEqual(status, 400)
-        self.assertIn("count model", data["error"])
+        self.assertIn("weight function", data["error"])
         status, data, _ = self.client.post("/api/reset", {"kind": "radix", "window": 10})
         self.assertEqual(status, 400)
 

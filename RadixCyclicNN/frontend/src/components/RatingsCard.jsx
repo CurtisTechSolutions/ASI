@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.js";
-import { fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
+import { countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { NumberField } from "./Fields.jsx";
@@ -92,7 +92,7 @@ export default function RatingsCard({ ratings, onClear, onRemove, feedback, stat
   const [strength, setStrength] = useState("1");
   const [lastAction, setLastAction] = useState(null);
   const { job, running, busy, error: jobError, start, stop, clearError } = feedback;
-  const countKind = Boolean(status && status.kind === "count");
+  const countKind = countingKind(status);  // the count and resonant models take a strength, not a learning rate
   const otherJobRunning = jobIsRunning(status) && !running;
   const ups = ratings.filter((r) => r.rating === "up");
   const downs = ratings.filter((r) => r.rating === "down");
