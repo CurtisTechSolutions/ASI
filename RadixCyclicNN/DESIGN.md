@@ -1339,8 +1339,11 @@ What is *not* ported:
   `faster-whisper` / `whisper`) and the **torch backend**: Python ML packages, not code to translate.  The parts of
   those modules that *are* code - the waveform codecs, the text formats, the thumbnail encoder, an
   OpenAI-compatible transcription server - have no such excuse and are simply not done yet.
-* Still Python-only for now, and listed in `pythonOnly` so the Go server says so rather than 404ing blankly:
-  `codegen.py`, `schedule.py`, `tools.py` and `agent.py`.
+* Still Python-only, and listed in `pythonOnly` so the Go server says so rather than 404ing blankly:
+  `codegen.py`, `tools.py` and `agent.py`.
+* `schedule.py` is deliberately not ported, and would be dead code if it were: learning-rate schedules are a
+  RadixNet feature, the count / reward model ignores learning rates entirely, and the Train tab already hides the
+  schedule fields for it (`!countKind`).  Porting the expression evaluator would add a calculator nothing calls.
 
 `speech.go`, `vision.go` and `recall.go` port the rest of the media path, and one thing about them is worth stating
 because it is the only place in this port where the two sides do not produce identical bytes:

@@ -637,7 +637,11 @@ func DescribeSpeech() map[string]any {
 		"engine": "go", "codecs": SpeechCodecs, "default_codec": DefaultSpeechCodec,
 		"default_rate": DefaultSpeechRate, "token": SpeechToken,
 		"token_example": UtteranceToken("example", true),
-		"backends":      []string{"given"},
+		// the keys the Speech tab reads, answered truthfully for this build: the
+		// words come with the audio, and nothing here shells out to ffmpeg
+		"faster_whisper": false, "whisper": false, "whisper_model": "", "server_url": nil,
+		"auto": "given", "given_always": true, "ffmpeg": false, "recorders": []string{},
+		"backends": []string{"given"},
 		"backends_note": "transcription backends are Python-only (faster-whisper / openai-whisper are Python " +
 			"packages): send the words with the audio, which is what the browser's dictation does",
 		"text_format": speechHeader + ":<codec>:<rate>x<channels>:<base64 of one byte per sample>",

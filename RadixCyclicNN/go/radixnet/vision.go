@@ -269,7 +269,11 @@ func fitPayload(payload []byte, length int) ([]byte, bool) {
 func DescribeVision() map[string]any {
 	return map[string]any{
 		"engine": "go", "encoders": ImageEncoders, "auto": "tiny", "default_size": DefaultImageSize,
-		"sd": false, "resampling": "box",
+		// the keys the Images tab reads: this build decodes PNG / JPEG / GIF with
+		// the standard library, and has no diffusion weights to load
+		"pillow": true, "torch": false, "diffusers": false, "sd_model": "", "sd_loaded": false,
+		"sd_error": "the Stable Diffusion encoder needs torch and diffusers: use the Python server for it",
+		"sd":       false, "resampling": "box",
 		"resampling_note": "Python's thumbnail uses Pillow's Lanczos filter and this one a box filter, so the " +
 			"same image gives a different (equally valid) text on each side; the format itself is shared, and " +
 			"either side reads, trains on and decodes the other's texts",
