@@ -2,8 +2,6 @@
 
 *Double-Negative Reinforcement Learning*
 
-**A training procedure derived from autodidactic practice**
-
 Mason Curtis — Curtis Tech Solutions
 Working paper · September 2026
 
@@ -11,632 +9,688 @@ Working paper · September 2026
 
 ## Abstract
 
-2NRL — *Double-Negative Reinforcement Learning* — is a three-phase training
-procedure: **train on the failures at full rate,
-invert the network, then fine-tune on the correct data at a reduced rate.** It
-inverts the conventional treatment of wrong examples. Where negative sampling,
-unlikelihood training and contrastive objectives all move a model *away* from
-a wrong answer, 2NRL moves the model *toward* the wrong answer — deliberately,
-completely — and then negates the representation it built.
+I train on the failures at full rate, invert the whole network, then fine-tune on
+the correct data at a lower rate. That is 2NRL — *Double-Negative Reinforcement
+Learning*, for the two negatives in it — and it inverts the usual treatment of
+wrong examples. Negative sampling, unlikelihood training and
+contrastive objectives all move a model *away* from a wrong answer. I move the
+model *toward* the wrong answer — deliberately, all the way — and then negate
+what it built.
 
-The procedure is not derived from the literature. It is a formalisation of how
-its author learned, being self-taught: *fail consistently, then do the inverse of
-what failed; explore widely until a thread appears, then tighten and iterate.*
-The first half is implemented and is what this paper is mostly about; the second
-is a schedule over search breadth that the system does not yet have (§5).
+I did not get this from the literature. It is how I taught myself: fail
+consistently, then do the inverse of what failed; explore widely until a thread
+appears, then tighten and iterate. The first half is implemented and is most of
+this paper. The second half is a schedule over search breadth that I have not
+built yet, and §6 says so plainly.
 
-This paper states the procedure precisely, gives the mechanism that makes
-inversion a coherent operation rather than a destructive one, and identifies its
-governing condition. That condition falls directly out of the author's own
-phrasing. The word **consistently** is load-bearing: the information recoverable
-by inverting a failure is bounded by how *low-entropy* that failure is. A
-systematic failure inverts into a usable signal. A random failure inverts into
-nothing. This yields the paper's central claim in falsifiable form, and a
-three-arm experiment that settles it with tooling the implementation already has.
+The important part of this paper is the condition, and it came out of my own
+sentence when I looked at it properly. The load-bearing word is **consistently**.
+What you can recover by inverting a failure is bounded by how *low-entropy* that
+failure is. Fail the same way every time and the inversion hands you something.
+Fail randomly and it hands you nothing, because the negation of noise is noise.
+That makes the claim falsifiable, and §11 gives the experiment — three arms, all
+of which my existing tooling can run.
 
-We are explicit about status: 2NRL is implemented, in production use inside a
-perpetual self-improvement loop, and its directional effect is asserted by
-tests. It has **not** been measured against a baseline. Section 8 says what that
-would take.
+On status, blunt: 2NRL is implemented, it is running inside a perpetual
+self-improvement loop, and the tests assert that it does what it says. **It has
+never been measured against a baseline.** §10 is what that would take.
 
 ---
 
-## 1. Origin
-
-Most learning algorithms are proposed, then justified. This one was *lived*,
-then written down.
-
-The author is self-taught and describes the process that produced that education
-as a repeating cycle:
+## 1. The original note
 
 > I learned by failing consistently, then doing the inverse/opposite. Once I
 > found a thread to pull on, I would pull hard.
 
-Three commitments are contained in that sentence, and 2NRL implements each:
-
-1. **Failure is the primary input**, not an error to be minimised away. You go
-   into it.
-2. **The correction is inversion**, not gradual adjustment. Having understood
-   what does not work, you do the opposite of it.
-3. **Exploration narrows once it finds something.** In the author's fuller
-   account: *explore rapidly and widely until you find a thread, then tighten the
-   exploration and iterate.* Breadth first, then depth on whatever the breadth
-   turned up.
-
-The first two are implemented; the third, as §5 sets out, is not. The claim of
-this paper is that these are implementable as an update rule,
-that the rule is well-defined given an architecture in which inversion is
-meaningful, and that its efficacy is governed by a single measurable property of
-the failure distribution.
+That was the whole thing. Everything below is what I meant by it.
 
 ---
 
-## 2. The procedure
+## 2. Where it came from: how I taught myself
 
-Let $M$ be a model with parameters $\theta$. Let $B$ be a set of *failures* —
-wrong, garbage or rejected outputs — and $G$ a set of correct examples.
+Most learning algorithms get proposed and then justified. This one I lived first
+and wrote down afterwards.
 
-**2NRL**$(B, G)$:
+I am self-taught. I did not learn by being shown the right answer and copying it.
+I learned by going at something, getting it wrong, going at it again the same way
+and getting it wrong the same way — and then, once I could see the *shape* of
+what I was doing wrong, doing the opposite of that. Not a small adjustment away
+from it. The opposite.
 
-| Phase | Operation | Rate |
+Then, when something finally moved, I stopped casting around and went hard at
+that one thing until it gave.
+
+Three commitments are in there, and they need separating, because they are not
+the same idea:
+
+1. **Failure is the input, not the error term.** You do not minimise it away. You
+   go into it until you understand it.
+2. **The correction is inversion, not adjustment.** Once you know what does not
+   work, you do the reverse of it. A small step away from a wrong answer is still
+   near the wrong answer.
+3. **Exploration narrows once it finds something.** Explore rapidly and widely
+   until you find a thread; then tighten the exploration and iterate on it.
+   Breadth first, then depth on whatever the breadth turned up.
+
+The first two are implemented, and they are 2NRL. The third is not, and §6 is
+about that gap rather than about pretending it is closed.
+
+---
+
+## 3. The procedure
+
+Take a model `M` with parameters `θ`. Take `B`, a set of failures — wrong,
+garbage or rejected outputs — and `G`, a set of correct examples.
+
+**2NRL(B, G)** is three phases:
+
+| Phase | What happens | Rate |
 |---|---|---|
-| 1. Negative | Train $M$ **on** $B$, maximising $p_\theta(B)$ | $\eta^-$ (full) |
-| 2. Inversion | $\theta \leftarrow \mathcal{I}(\theta)$ | — |
-| 3. Positive | Fine-tune $M$ on $G$ | $\eta^+ \ll \eta^-$ |
+| 1. Negative | Train `M` **on** `B`. Maximise `p(B)`. | `η⁻` (full) |
+| 2. Inversion | `θ → I(θ)` | — |
+| 3. Positive | Fine-tune `M` on `G` | `η⁺`, much smaller |
 
-In the reference implementation $\eta^- = 0.05$ and $\eta^+ = 0.01$ — a 5:1
-ratio — with the activation-parameter rate at $\eta^+/10$ in phase 3.
+In my implementation `η⁻ = 0.05` and `η⁺ = 0.01` — a 5:1 ratio — with the
+activation parameters moving at `η⁺/10` in phase 3.
 
-Note what phase 1 is *not*. It is not a penalty, not a negated gradient, not a
-repulsion term. It is **ordinary training on the wrong answer**, at the full
-learning rate, until the model reproduces it. The model is made to fail well
-before it is made to succeed.
+Be clear about what phase 1 is **not**. It is not a penalty. It is not a negated
+gradient. It is not a repulsion term. It is **ordinary training on the wrong
+answer, at full learning rate, until the model reproduces it.** I make the model
+fail well before I make it succeed.
 
-### 2.1 The name
+### 3.1 The name
 
-**2NRL is Double-Negative Reinforcement Learning.** The `2N` is two negatives,
-and they are phases 1 and 2 of the table above:
+2NRL is **Double-Negative Reinforcement Learning**. The `2N` is the two
+negatives, and they are the first two rows of that table:
 
-1. **A negative input** — the training data is the failures, and the model is
-   trained *on* them rather than away from them.
-2. **A negative operation** — the representation just built is negated.
+1. **A negative input** — the data is the failures, and I train *on* them rather
+   than away from them.
+2. **A negative operation** — I negate what that training built.
 
-Two negations compose to an affirmation. That is not wordplay; it is the reason
-the procedure has a *destination* rather than merely a direction, which is the
-whole argument of §3.2. One negative — the conventional push of probability mass
-off a wrong answer — leaves the model anywhere at all. $\neg\neg P$ returns to
-$P$.
+Two negatives make a positive. That is not a pun; it is the reason the procedure
+*arrives* somewhere instead of merely leaving somewhere, which is the argument of
+§4.2. One negative — push the mass off the wrong answer — leaves the model
+anywhere at all. `¬¬P` comes back to `P`.
 
-The third phase is not a third negative. It is the positive consolidation, which
-is why "double" and "three-phase" are not in tension: two of the three phases are
-negations and the last one is not.
+The third phase is not a third negative. It is the positive one, which is why
+"double" and "three phases" do not contradict each other: two of the three are
+negations and the last is not.
 
-The name also states the procedure's precondition. Double-negative *elimination*
-— $\neg\neg P \Rightarrow P$ — holds only where the negation is well defined,
-and two things have to be true for that. Most of this paper is about them:
+The name also states the condition. Double-negative *elimination* — `¬¬P ⟹ P` —
+only holds where the negation is well defined, and two things have to be true for
+that. Most of this paper is about them:
 
-- **The negation of a learned structure must itself be a coherent structure**
-  (§3.3). Here it is, and exactly so: flipping the amplitude sign of a sine
-  activation is an exact negation of that unit, to machine precision, so
-  $\neg\neg$ returns precisely where it started rather than approximately. An
-  architecture whose units cannot be negated cleanly has no double negative to
-  eliminate.
-- **The failure being negated must be consistent** (§4). A systematic failure has
-  a coherent opposite. Noise does not — $\neg(\text{noise})$ is not a location,
-  and negating it twice restores nothing.
+- **The negation of a learned structure has to be a coherent structure** (§4.3).
+  Mine is, and exactly: flipping the amplitude sign of a sine activation negates
+  that unit to machine precision, so `¬¬` comes back to precisely where it
+  started rather than approximately. An architecture whose units cannot be
+  negated cleanly has no double negative to eliminate.
+- **The failure has to be consistent** (§5). A systematic failure has a coherent
+  opposite. Noise does not — `¬(noise)` is not a place, and negating it twice
+  restores nothing.
 
-So the name carries the claim rather than just labelling it. Where either
-condition fails, 2NRL is a double negative in the looser English sense: two
-negations that leave the meaning muddled instead of restored.
+So the name carries the claim rather than labelling it. Where either condition
+fails, 2NRL is a double negative in the looser English sense: two negations that
+muddle the meaning instead of restoring it.
 
 ---
 
-## 3. Why inversion, and why it is coherent here
+## 4. Why inversion, and why it works in this architecture
 
-### 3.1 The problem with moving away
+### 4.1 The problem with moving away
 
-Consider the conventional treatment. To discourage a wrong output $x^-$, one
-applies $-\nabla_\theta \log p_\theta(x^-)$ — pushing probability mass off it.
+The conventional move is to apply `−∇ log p(x⁻)` and push probability mass off
+the wrong answer.
 
-This is a **repulsive** force, and repulsion is under-determined. It specifies a
-direction to leave but no destination to arrive at. The mass displaced from
-$x^-$ is redistributed by whatever the model's inductive bias happens to be, and
-in a large output space the overwhelming majority of the places it can go are
-*also wrong*. "Not that" is a weak constraint when the alternatives number in the
-millions.
+That is a *repulsive* force, and repulsion is under-determined. It tells you a
+direction to leave. It does not tell you where to arrive. The mass you displace
+goes wherever the model's inductive bias happens to send it, and in a large
+output space almost everywhere it can go is *also wrong*. "Not that" is a weak
+instruction when there are millions of alternatives, and most of them are bad
+too.
 
-### 3.2 What inversion buys
+That is what is actually wrong with the standard treatment, and it matches what I
+found teaching myself. Being told I was wrong never helped much. Working out
+*exactly how* I was wrong did, because the opposite of a specific mistake is a
+specific instruction.
 
-2NRL replaces the repulsive force with a two-step construction:
+### 4.2 What inversion buys
 
-1. **Represent the failure precisely.** After phase 1 the model does not hold a
-   direction pointing away from the failure; it holds the failure itself, as a
-   well-formed configuration of parameters. The failure mode has become a
-   *location* in parameter space, not a gradient.
-2. **Negate it.** Inversion maps that location to its opposite.
+So I replace the repulsion with two steps:
 
-The gain is one of determinacy. Repulsion answers "where not to be"; inversion
-answers "where to be instead" — provided the negation of a learned structure is
-itself a coherent structure. That is an architectural precondition, not a
-universal fact, and it is met here.
+1. **Represent the failure precisely.** After phase 1 the model is not holding a
+   direction pointing away from the failure. It is holding the failure itself, as
+   a well-formed set of parameters. The failure mode has become a *place*, not a
+   gradient.
+2. **Negate it.** Inversion maps that place to its opposite.
 
-### 3.3 The mechanism in RadixCyclicNN
+The gain is determinacy. Repulsion answers *where not to be*. Inversion answers
+*where to be instead* — as long as the negation of a learned structure is itself
+a coherent structure. That is an architectural precondition and not a free fact,
+and my architecture happens to satisfy it. That is not luck; I built the two
+together.
 
-The host architecture scores a transition between graph nodes $p$ and $c$ as
+### 4.3 The mechanism
 
-$$s(p \to c) = W_{pc} \cdot f_p(z_p) \cdot f_c(z_c)$$
+The network scores a transition between nodes `p` and `c` as
 
-the edge weight times the activations of **both** endpoints. Each node's
-activation is a parametric sine $f(x) = a\sin(b(x-h)) + k$.
+```
+score(p → c) = W[p,c] · f_p(z_p) · f_c(z_c)
+```
+
+the edge weight times the activations of **both** endpoints. Every node's
+activation is a parametric sine, `f(x) = a·sin(b(x − h)) + k`
+(see [the sine paper](SineWaveActivationFunction.md)).
 
 Inversion is then two sign flips:
 
-$$\mathcal{I}: \quad W \mapsto -W, \qquad a \mapsto -a \ \ \text{for every node}$$
+```
+W → −W          for every edge
+a → −a          for every node
+```
 
-Negating $W$ flips the product once; negating both endpoint amplitudes flips it
+Negating `W` flips the product once. Negating both endpoint amplitudes flips it
 twice more. Net effect: **every edge signal changes sign.** The softmax over a
-node's children reverses its ordering, and the most likely continuation becomes
-the least likely. The operation is exact, is $O(N + E)$, and is its own inverse —
-applying it twice is the identity, which the test suite asserts.
+node's children reverses its order, and the most likely continuation becomes the
+least likely. The operation is exact, costs `O(N + E)`, and is its own inverse —
+run it twice and you are back where you started, which the tests assert.
 
-This is why the architecture and the algorithm are not separable. 2NRL requires
-an inversion operator that is (i) cheap, (ii) exactly order-reversing, and
-(iii) involutive. The bilinear-signed-score design supplies one. In an
-architecture with, say, ReLU activations and unsigned attention weights, no such
-operator exists, and 2NRL as stated cannot be run at all.
+This is why the architecture and the algorithm do not come apart. 2NRL
+needs an inversion operator that is cheap, exactly order-reversing, and
+involutive. A signed bilinear score gives me one. Put ReLU activations and
+unsigned weights in there and no such operator exists — 2NRL cannot be run at
+all. The sine's sign parameter is what makes negating a unit a *parameter*
+change rather than a structural one.
 
-### 3.4 Why the positive phase must be gentler
+### 4.4 Why the positive phase has to be gentler
 
-Inversion is a **global, coarse** operation. It gets the direction right and the
-details wrong: it reverses *everything*, including the parts of the model that
-were fine. Phase 3 repairs the details.
+Inversion is global and blunt. It gets the direction right and the details wrong,
+because it reverses *everything* — including the parts of the model that were
+fine. Phase 3 repairs the details.
 
-The rate ratio is therefore not a tuning convenience but a structural
-requirement. If $\eta^+ \gtrsim \eta^-$, phase 3 overwrites the inversion and the
-procedure degenerates into ordinary supervised learning with a wasteful
-pre-phase. The 5:1 default encodes a division of labour: **the inversion does
-the work; the fine-tune polishes.**
+So the rate ratio is not a tuning convenience, it is structural. If `η⁺` gets
+close to `η⁻`, phase 3 overwrites the inversion and the whole thing degenerates
+into ordinary supervised learning with an expensive pointless pre-phase. The 5:1
+default says who does what: **the inversion does the work, the fine-tune
+polishes.**
 
 ---
 
-## 4. The governing condition: failure must be consistent
+## 5. The governing condition: the failure has to be consistent
 
-This is the paper's central claim, and it is already present — precisely — in the
-author's own sentence. Not "failing". *Failing consistently.*
+This is the part that matters most, and it only came clear on going back to the
+original sentence. Not "failing". *Failing consistently.*
 
-### 4.1 Statement
+### 5.1 The claim
 
-Let $q$ be the distribution of the model's failures and $p$ the target
-distribution. Phase 1 fits $\theta$ to $q$. Phase 2 negates it. The question is
-how much of $p$ that recovers.
+Let `q` be the distribution of the model's failures. Phase 1 fits `θ` to `q`.
+Phase 2 negates it. The question is how much of the target that recovers.
 
-**Claim.** The information made available by inverting a failure distribution is
-bounded above by that distribution's negative entropy. Writing $H(q)$ for the
-entropy of the failure mode:
+**What you can recover by inverting a failure distribution is bounded by that
+distribution's negative entropy.** Write `H(q)` for the entropy of the failure
+mode:
 
-- $H(q)$ **low** — failure is *systematic*. The model consistently makes the
-  same kind of mistake. Phase 1 captures a sharp, specific structure; its
-  negation is correspondingly sharp and specific. Inversion is informative.
-- $H(q)$ **high** — failure is *random*. Phase 1 fits noise. The negation of
-  noise is noise. Inversion recovers nothing, and phases 1–2 have merely
-  perturbed the model at full learning rate for no return.
+- **`H(q)` low — the failure is systematic.** The model makes the same kind of
+  mistake every time. Phase 1 captures a sharp, specific structure, and its
+  negation is just as sharp and just as specific. The inversion tells you
+  something.
+- **`H(q)` high — the failure is random.** Phase 1 fits noise. The negation of
+  noise is noise. You recover nothing, and phases 1–2 have kicked the model at
+  full learning rate for no return.
 
-In the limiting case, $q$ uniform: training on uniform noise moves the model
-toward uniform, inverting uniform yields uniform, and 2NRL reduces to a costly
-no-op followed by ordinary fine-tuning.
+Take the limit: if `q` is uniform, training on uniform noise moves the model
+toward uniform, inverting uniform gives uniform, and 2NRL has reduced to an
+expensive no-op followed by ordinary fine-tuning.
 
-### 4.2 Consequence
+### 5.2 What follows from it
 
-2NRL is **not** a general-purpose replacement for supervised learning. It is a
-procedure with a precondition, and the precondition is a property of the
-*failures*, not of the task, the model or the data.
+2NRL is **not** a drop-in replacement for supervised learning. It is a procedure
+with a precondition, and the precondition is a property of the *failures* — not
+of the task, not of the model, not of the data.
 
-This reframes what the practitioner must supply. The question is no longer
-"do I have wrong examples?" but **"are my wrong examples wrong in a consistent
-way?"** Hand-written garbage that embodies a specific error mode is a good
-negative set. Randomly corrupted text is a poor one, even though both are
-"wrong".
+That changes the question a practitioner has to answer. It is not "do I have
+wrong examples?" It is **"are my wrong examples wrong in a consistent way?"**
+Hand-written garbage embodying one specific error mode is a good negative set.
+Randomly corrupted text is a bad one. Both are "wrong"; only one of them is
+*informative*.
 
-It also explains something in the author's account that would otherwise look
-like an incidental detail. One does not learn from failing *once*, nor from
-failing *variously*. One learns from failing the *same way* repeatedly, until
-the shape of the failure is clear enough to be negated. The repetition is what
-drives the entropy down. Consistency is not a description of the author's
-persistence — it is the mechanism's operating condition.
+It also explains something in my own account that I had been treating as
+incidental. You do not learn from failing *once*, and you do not learn from
+failing *variously*. You learn from failing the *same way* repeatedly, until the
+shape of it is clear enough to be negated. The repetition is what drives the
+entropy down. Consistency is not a description of how stubborn I was — it is the
+mechanism's operating condition — and it was in the sentence before the reason
+for it was.
 
-### 4.3 Where the implementation already respects this
+### 5.3 The implementation already respects this, by accident
 
-Every source of negative examples in the system produces *structured* garbage,
-never random noise:
+Every source of negatives in the system produces *structured* garbage, never
+random noise:
 
-- A language model asked for lines that are **deliberately wrong** — "false
-  facts, scrambled reasoning" — which is a coherent error mode, not corruption.
-- Generated samples that a discriminator scored **below the real distribution** —
+- An LLM asked for lines that are **deliberately wrong** — false facts, scrambled
+  reasoning. That is a coherent error mode, not corruption.
+- Generated samples a discriminator scored **below the real distribution** —
   failures the model actually makes, which are by construction its systematic
   ones.
 - Programs that **failed a sandbox or a judge** — wrong for a specific,
   reproducible reason.
 
-This was not designed against the entropy condition; it fell out of building
-the thing. That the condition retrodicts the design choices is weak evidence for
-it, and worth recording as such.
+I did not design any of that against the entropy condition. It fell out of
+building the thing. That the condition retrodicts choices I made for other
+reasons is weak evidence for it, and I am recording it as weak.
 
 ---
 
-## 5. Finding the thread: exploration, not effort
+## 6. Finding the thread: exploration, not effort
 
-The third commitment is the one the implementation has **not** captured, and the
-gap is worth stating precisely because the obvious reading of it is wrong.
+The third commitment is the one I have **not** built. The gap is worth stating
+precisely, because the obvious reading of that sentence is wrong.
 
-### 5.1 What it is not
+### 6.1 What it is not
 
-"Once I found a thread to pull on, I would pull hard" invites reading as a
-weighting: pursue the promising example harder than the routine one. The system
-does contain such a mechanism, and it is genuinely useful, so it is worth
-describing before setting it aside.
+"Once I found a thread to pull on, I would pull hard" reads like a weighting:
+pursue the promising example harder than the routine one. The system does contain
+a mechanism like that, and it is useful, so it is worth describing before setting
+it aside.
 
-In the self-improvement loop each generated sample is scored against the real
-distribution, giving a gap $g = \bar{s}_{\text{real}} - s(x)$. Samples with
-$g > 0$ are failures; those past a margin are **blatant**. The negative phase then
-runs one pass per distinct weight
+In the self-improvement loop every generated sample is scored against the real
+distribution, giving a gap `g = real_mean − score(x)`. Samples with `g > 0` are
+failures; past a margin they are *blatant*. The negative phase then runs one pass
+per distinct weight
 
-$$w = \min\left(\text{boost},\ 1 + g/\text{margin}\right), \qquad
-\eta^- \leftarrow w \cdot \eta^-$$
+```
+w = min(boost, 1 + g / margin),      η⁻ ← w · η⁻
+```
 
-heaviest first, with the activation-parameter rate scaled identically. The worse
-the failure, the harder the model is driven to reproduce it — including its
-activation parameters — before the inversion turns all of it around. The system
-fails blatantly, on purpose, in proportion to how blatant the failure was. A
-generation with no failures does not invert at all.
+heaviest first, with the activation parameters scaled the same way. The worse the
+failure, the harder I drive the model to reproduce it — activation functions
+included — before the inversion turns all of it around. The system fails
+blatantly, on purpose, in proportion to how blatant the failure was. A generation
+with nothing wrong in it does not invert at all.
 
-A positive-side analogue exists too: feedback is no longer a binary thumb but a
-mark out of 10, so a 9-out-of-10 result is learned nine tenths as hard as a
-perfect one and a 0 is skipped. Every judge in the system — LLM grader, sandbox,
-discriminator, human — expresses confidence rather than only direction.
+There is a positive-side analogue too: feedback is a mark out of 10 rather than a
+thumb, so a 9-out-of-10 result is learned nine tenths as hard as a perfect one and
+a 0 is skipped. Every judge in the system — LLM grader, sandbox, discriminator,
+human — can express confidence and not just direction.
 
-Both are sound mechanisms, and both belong to §2's two training phases: they say
-*how hard* to represent an example. **Neither is the third commitment.**
+Both are sound, and both belong to §3's two training phases: they say *how hard*
+to represent an example. **Neither of them is the third commitment.**
 
-### 5.2 What it actually is
+### 6.2 What it actually is
 
-The author's fuller account is a statement about **search**, not about rates:
+What I meant is a statement about **search**, not about rates:
 
 > Explore rapidly and widely until you find a thread, then tighten up the
-> exploration and iterate/fine-tune.
+> exploration and iterate.
 
-That is an *annealing schedule over exploration breadth*. Early on, sample
-widely and cheaply — many candidates, high temperature, little commitment. When
-something promising appears, **narrow**: fewer candidates, lower temperature,
-concentrated on the region that produced it, and iterate there.
+That is an annealing schedule over exploration *breadth*. Early on, sample widely
+and cheaply — many candidates, high temperature, no commitment. When something
+promising shows up, **narrow**: fewer candidates, lower temperature, concentrated
+on whatever produced it, and iterate there.
 
 The distinction matters because the two are independent. Learning-rate weighting
 decides how much a given example moves the model. Exploration breadth decides
-*which examples are ever seen*. One can be maximal while the other is minimal.
-Wide-then-narrow is a policy about where to look; boosting is a policy about what
-to do once you have looked.
+*which examples are ever seen at all*. Either can be maximal while the other is
+minimal. Wide-then-narrow is a policy about where to look; boosting is a policy
+about what to do once you have looked.
 
-### 5.3 The gap
+### 6.3 The gap
 
-Every parameter governing breadth in this system — `temperature`, `k`, `beam`,
+Every parameter that governs breadth in my system — `temperature`, `k`, `beam`,
 the sample `count`, `step_penalty` — is **fixed for the duration of a call** and
-chosen by the caller. Nothing narrows as a run proceeds, and nothing detects that
-a thread has appeared. A long self-improvement or tutoring run explores exactly
-as widely in its final generation as in its first.
+chosen by whoever made the call. Nothing narrows as a run proceeds. Nothing
+detects that a thread has appeared. A long self-improvement or tutoring run
+explores exactly as widely in its last generation as in its first, which is not
+how I work and not what I described.
 
-Two pieces of the machinery already exist, pointed elsewhere:
+Two pieces of the machinery already exist, pointed at the wrong thing:
 
 * **The schedule evaluator.** Learning rates are already expressible as sandboxed
   functions of the epoch, with linear, geometric, cosine, step and warm-up
-  helpers, a live preview and a reverse switch. The same evaluator applied to
-  `temperature`, `k` and `beam` would *be* the annealing schedule. It governs the
-  wrong quantity.
+  helpers, a live preview and a reverse switch. Point that same evaluator at
+  `temperature`, `k` and `beam` and it *is* the annealing schedule. It currently
+  governs the wrong quantity.
 * **Local re-exploration.** A conversational voice that catches itself looping
-  backs up and widens its search — $k \times (\text{step} + 2)$ candidates, more
-  the further back it goes. That is deliberately the opposite direction, and
-  correctly so: it is local recovery from a dead end, not the global schedule.
-  The two are compatible and would compose.
+  backs up and widens its search — `k × (step + 2)` candidates, more the further
+  back it goes. That is deliberately the opposite direction, and correctly so:
+  it is local recovery from a dead end, not the global schedule. The two compose
+  rather than conflict.
 
-### 5.4 The harder half: what counts as finding a thread?
+### 6.4 The harder half: what counts as finding a thread?
 
 A schedule needs a trigger, and this is the genuinely open part. "A thread
-appeared" is doing real work in the description and has no obvious formalisation.
-Candidates, none yet tested:
+appeared" is doing real work in that sentence and resists formalising.
+Candidates, none of them tested:
 
-* **A score threshold** — the first sample to clear some bar. Simple, and
-  sensitive to a bar that has to be set in advance.
+* **A score threshold** — the first sample to clear a bar. Simple, and it depends
+  on a bar somebody has to set in advance.
 * **A plateau break** — narrow when the best-so-far improves after a stretch of
-  not improving. Detects surprise rather than quality, which is closer to what a
-  thread *is*.
-* **A run of passes** — narrow after $n$ consecutive successes in one region.
-  Robust, but slow to notice a single strong signal.
-* **Discriminator disagreement** — narrow where the positive and negative models
-  disagree most sharply, that being where the information is.
+  not improving. That detects *surprise* rather than quality, which is closer to
+  what a thread actually is.
+* **A run of passes** — narrow after *n* consecutive successes in one region.
+  Robust, slow to notice a single strong signal.
+* **Discriminator disagreement** — narrow where the positive and negative
+  networks disagree most sharply, on the grounds that disagreement is where the
+  information is.
 
-Without a detector the schedule has nothing to key on, so this is the part to
-settle first. It is also the part where the human account is least directly
-transferable: the author's recognition of a thread was a judgement, and the whole
-exercise of this project is to ask what such a judgement is made of.
+Without a detector the schedule has nothing to key on, so this is what to settle
+first. It is also where my own account transfers least well. I knew a thread when
+I saw one, and that was a judgement — which is exactly the kind of thing this
+whole project exists to take apart.
 
 ---
 
-## 6. The negative phase made permanent
+## 7. The negative phase, made permanent
 
-2NRL as stated in §2 is *transient*. Phase 1 builds a representation of the
-failure, phase 2 negates it, and the representation itself is gone — what remains
-is its effect on the weights. The knowledge that a particular fragment tends to be
-wrong survives only as a diffuse change, unnameable and unqueryable.
+2NRL as stated in §3 is *transient*. Phase 1 builds a representation of the
+failure, phase 2 negates it, and then the representation is gone — all that
+survives is its effect on the weights. The knowledge that some particular
+fragment tends to be wrong lives on only as a diffuse change, with no name and no
+way to query it.
 
 The implementation has since taken the obvious next step: **keep it.**
 
-### 6.1 A standing model of failure
+### 7.1 A standing model of failure
 
-A second network is maintained alongside the first. It has the same structure —
-the same self-compressing cyclic graph, the same trigram windows, the same
-searches — but every node and edge in it exists *because something went wrong
-there*. Each edge accumulates the blame charged against it, how often it failed,
-and how much **cleared** text has crossed it. The net evidence is
+I now keep a second network beside the first. Same structure — the same
+self-compressing cyclic graph, the same trigram windows, the same searches — but
+every node and edge in it exists *because something went wrong there*. Each edge
+accumulates the blame charged against it, how often it failed, and how much
+**cleared** text has crossed it. The net evidence is
 
-$$\text{evidence} = \max(0,\ \text{blame} - \lambda \cdot \text{clear})$$
+```
+evidence = max(0, blame − λ · clear)
+```
 
-so a fragment appearing in good and bad output alike stops carrying the verdict.
-Weights are an edge's share of the failure mass leaving its parent, so a softmax
-over them is the **failure distribution**: this network predicts the ways to fail
-from a prefix, exactly as the positive model predicts the ways to succeed.
+so a fragment that turns up in good and bad output alike stops carrying the
+verdict. Weights are an edge's share of the failure mass leaving its parent, so a
+softmax over them is the **failure distribution**. This network predicts the ways
+to fail from a prefix, exactly as the positive one predicts the ways to succeed.
 
-### 6.2 What this changes about the argument
+### 7.2 What that changes about the argument
 
-Three things, and each is a strengthening rather than a replacement.
+Three things, and each strengthens §4 and §5 rather than replacing them.
 
-**Failure becomes queryable.** §3.2 argued that inversion's value is turning an
+**Failure becomes queryable.** §4.2 said inversion's value is turning an
 under-determined "away" into a determined "toward". A persistent failure model
-goes further: one can ask of an arbitrary candidate *how* likely it is to be
-wrong, and *which fragment* carries the risk. That is not available from a
-transient phase at all.
+goes further: I can ask of any candidate *how* likely it is to be wrong and
+*which fragment* carries the risk. A transient phase cannot answer that at all.
 
-**The entropy condition becomes measurable rather than assumed.** §4 claims the
+**The entropy condition becomes measurable instead of assumed.** §5 claims the
 recoverable information is bounded by the failure distribution's negative
-entropy, and §4.3 could only observe that the implementation happens to generate
-structured garbage. With an explicit model of $q$, its concentration is a
-property one can compute. Q-E in §11 — estimate $H(q)$ online and skip the
-inversion when the garbage is too diffuse to be worth inverting — becomes
-straightforwardly implementable.
+entropy, and §5.3 could only point out that my implementation happens to produce
+structured garbage. With an explicit model of `q`, its concentration is something
+I can compute. Estimating `H(q)` online and skipping phases 1–2 when the garbage
+is too diffuse to be worth inverting stops being a nice idea and becomes
+straightforward.
 
-**Correction can be placed precisely.** A grade originally reached the graph as
-two verdicts on two whole sentences: the attempt was garbage, the correction was
+**Correction can be placed precisely.** A grade used to reach the graph as two
+verdicts on two whole sentences: the attempt was garbage, the correction was
 gospel. But most of a corrected sentence is word for word what the model wrote,
 so the whole-sentence penalty *taxed the parts that were right*. Blame is now
 placed by alignment — only the characters the teacher actually changed are
-charged, the rest are cleared, and a fragment both sentences walk is rewarded
+charged, the rest are cleared, and a fragment both sentences walk gets rewarded
 rather than penalised.
 
-This last point deserves emphasis, because it qualifies §2. 2NRL's negative phase
-trains on the failure *as a unit*. That is correct when the failure is a unit — a
-rejected program, a hallucinated line, a fabricated fact. It is wrong when the
-failure is local to a larger, mostly correct output. The persistent model
-supports the granularity the transient phase cannot.
+That last point qualifies §3, and leaving it unsaid would be dishonest. 2NRL's
+negative phase trains on the failure *as a unit*. That is correct when the
+failure *is* a unit — a rejected program, a hallucinated line, a fabricated fact.
+It is wrong when the failure is local to a larger, mostly correct output. The
+persistent model supports a granularity the transient phase cannot.
 
-### 6.3 The pair at output time
+### 7.3 The pair at output time
 
-Both networks now run on every answer by default: the positive model
-over-samples, the negative one vetoes by accumulated blame, by peak blame on a
-single fragment, or by the likelihood ratio
-$\log P_{\text{neg}} - \log P_{\text{pos}}$, behind a coverage gate so text the
-system has never failed is never vetoed on no evidence.
+Both networks now run on every answer by default. The positive model
+over-samples; the negative one vetoes — by accumulated blame, by peak blame on a
+single fragment, or by the likelihood ratio `log P_neg − log P_pos` — behind a
+coverage gate, so text the system has never failed is never vetoed on no
+evidence.
 
-This is the adversarial idea relocated from *training time* to *inference time*.
-The discriminator no longer only shapes the generator's weights; it sits on the
-output path and refuses. Notably, the loops that *teach* the failure model
-deliberately read the positive model **unfiltered** — a reviewer that only ever
-saw what already passed the filter would have nothing left to teach.
+This is the adversarial idea moved from *training time* to *inference time*. The
+discriminator no longer only shapes the generator's weights; it sits on the
+output path and refuses. One detail matters: the loops that *teach* the failure
+model deliberately read the positive model **unfiltered**, because a reviewer
+that only ever saw what already passed the filter would have nothing left to
+teach.
 
-### 6.4 The open question this raises
+### 7.4 The question this raises, which I have not settled
 
-If a failure can be kept, named, and vetoed against, what is the transient
-negative-phase-and-invert still buying?
+If a failure can be kept, named and vetoed against, what is the transient
+invert-and-discard still buying?
 
-Two defensible answers, and the paper does not settle between them:
+Two defensible answers, and I do not yet know which is right:
 
 * **They do different jobs.** Inversion changes what the model *tends to
-  produce*; the failure model changes what is *allowed out*. A generation
-  process that never proposes the failure is cheaper than one that proposes and
-  filters it, and only inversion does the former.
-* **The failure model subsumes it.** Inversion is a global, blunt operation
-  (§10, item 2) that reverses the correct parts of the model along with the
-  incorrect ones and relies on the positive phase to repair the damage. A precise,
-  persistent, local account of failure may simply be the better instrument, with
-  inversion a historical step toward it.
+  produce*. The failure model changes what is *allowed out*. A generator that
+  never proposes the failure is cheaper than one that proposes it and filters it,
+  and only inversion does the former.
+* **The failure model subsumes it.** Inversion is global and blunt (§12, item 2),
+  reverses the correct parts along with the incorrect ones, and leans on phase 3
+  to repair the damage. A precise, persistent, local account of failure may
+  simply be the better instrument, with inversion a step on the way to it.
 
-Settling this needs the same thing §9 needs: a measurement. The experiment in
-§9.1 extends naturally — add an arm in which the negative set trains a
-persistent failure model and guards the output, with no inversion anywhere, and
-compare.
+Settling it needs what §10 needs — a measurement. The experiment in §11 extends
+naturally: add an arm where the negative set trains a persistent failure model
+and guards the output, with no inversion anywhere, and compare.
 
 ---
 
-## 7. Relation to existing work
+## 8. Where this sits next to existing work
 
-The project's stated method is to set current research aside and rebuild from
-first principles. A paper should still say where its neighbours are, if only to
-locate what is actually new.
+My method is to set the current literature aside and rebuild from first
+principles, and I stand by that. The neighbours are still worth naming, if only
+to be clear about what is actually new here and what is not.
 
-| Approach | Treatment of wrong examples | Difference from 2NRL |
+| Approach | What it does with wrong examples | How 2NRL differs |
 |---|---|---|
-| **Negative sampling** (word2vec and descendants) | Gradient *away* from sampled negatives | Repulsive; never inverts; negatives are sampled, not the model's own failures |
-| **Unlikelihood training** | Explicit penalty term on unwanted continuations | Repulsive; a loss modification, not a phase structure |
-| **Contrastive learning** | Pull positives together, push negatives apart in embedding space | Operates on a metric embedding; no inversion operator; requires paired data |
-| **GAN generators** | Discriminator signal backpropagated to the generator | Generator updated by *gradient*; 2NRL's generator is updated by *inversion*. 2NRL is used inside a GAN-style loop here, but the two are orthogonal |
-| **Hopfield unlearning** (Crick–Mitchison "reverse learning"; Hopfield, Feinstein & Palmer 1983) | Anti-Hebbian update on spurious attractors to remove them | **The nearest prior art.** Both deliberately train toward an unwanted state, then reverse. But unlearning *subtracts a specific pattern*; 2NRL *negates the entire parameter set globally*, and then fine-tunes |
-| **Self-correction / learning from mistakes** (LLM literature) | Mistakes fed back as context or as preference pairs | Operates at the data or prompt level; parameters are never inverted |
+| **Negative sampling** (word2vec and descendants) | Gradient *away* from sampled negatives | Repulsive; never inverts; the negatives are sampled rather than being the model's own failures |
+| **Unlikelihood training** | A penalty term on unwanted continuations | Repulsive; a loss modification rather than a phase structure |
+| **Contrastive learning** | Pull positives together, push negatives apart in an embedding | Works on a metric embedding; no inversion operator; needs paired data |
+| **GAN generators** | Discriminator signal backpropagated into the generator | The generator is updated by *gradient*. Mine is updated by *inversion*. I use 2NRL inside a GAN-style loop, but the two ideas are orthogonal |
+| **Hopfield unlearning** (Crick & Mitchison; Hopfield, Feinstein & Palmer, 1983) | Anti-Hebbian update on spurious attractors to remove them | **The nearest prior art, and worth naming as such.** Both deliberately train toward an unwanted state and then reverse. But unlearning *subtracts a specific pattern*; 2NRL *negates the entire parameter set* and then fine-tunes |
+| **Self-correction in LLMs** | Mistakes fed back as context or as preference pairs | Operates at the data or prompt level. Parameters are never inverted |
 
-The distinguishing feature is narrow and specific: **global sign inversion of
-the entire parameter set as a learning operator, positioned between a negative
-and a positive training phase.** Anti-Hebbian unlearning is the closest thing to
-it and is still local and subtractive rather than global and multiplicative.
+The distinguishing feature is narrow, and stating it narrowly: **global sign
+inversion of the entire parameter set, used as a learning operator, positioned
+between a negative and a positive training phase.** Anti-Hebbian unlearning is
+the closest thing to it and is still local and subtractive where mine is global
+and multiplicative.
 
-The honest summary: 2NRL's *ingredients* have relatives; its *composition* — go
+Honest summary: the *ingredients* of 2NRL have relatives. The *composition* — go
 all the way into the failure, negate everything, then repair gently — does not
 appear to be standard.
 
 ---
 
-## 8. Implementation
+## 9. Where it is used
 
-2NRL is implemented in `RadixCyclicNN` and is the learning primitive the rest of
-the system is shaped around. Every feedback source in the project — human thumbs
-up/down, LLM judgements, sandbox results, discriminator scores — is funnelled
-into the same $(B, G)$ pair, because that is the interface learning takes.
+2NRL is implemented in `RadixCyclicNN` and it is the primitive the rest of the
+system is shaped around. Every feedback source — a human thumb, an LLM
+judgement, a sandbox result, a discriminator score — is funnelled into the same
+`(bad, good)` pair, because that is the interface learning takes.
 
 It now runs in eight places:
 
-1. **Directly** — CLI `2nrl`, `POST /api/2nrl`, the 2NRL panel.
-2. **Feedback** — rated texts dispatch to `two_nrl` (both sets rated),
-   `reward` (good only) or `punish` (bad only, i.e. a negative pass then an
-   inversion).
-3. **The self-improvement loop** — a discriminator sorts generated samples;
-   the worst become $B$, real corpus lines $G$; perpetually.
-4. **Code generation** — wrong programs are $B$, the working program is $G$,
-   with the sandbox providing a ground-truth verdict rather than an opinion.
+1. **Directly** — the `2nrl` command, `POST /api/2nrl`, the 2NRL panel.
+2. **Feedback** — rated texts dispatch to `two_nrl` when both sets are rated,
+   `reward` for good only, `punish` for bad only (a negative pass, then invert).
+3. **The self-improvement loop** — a discriminator sorts generated samples; the
+   worst become the garbage, real corpus lines the fine-tune set; forever.
+4. **Code generation** — wrong programs are the garbage, the working program is
+   the correction, and the sandbox gives a ground-truth verdict rather than an
+   opinion. This is the only reward in the system that is not ultimately
+   somebody's judgement.
 5. **The tutor** — an LLM writes a sentence opening, the model completes it, the
    LLM marks the completion out of 10 and supplies the correction. Failed
-   sentences are $B$ weighted by the mark; the corrections and drills are $G$.
+   sentences are garbage weighted by the mark; the corrections and drills are the
+   fine-tune pass.
 6. **The critic** — the model writes freely, a reviewer marks it, and everything
-   below the pass mark charges the failure model. This loop *only reads* the
-   positive model; it trains nothing.
-7. **Conversation with a language model** — the partner's own lines become $G$,
-   because in that exchange, at that moment, they are exactly what a good reply
-   would have looked like. A reply the model could only repeat is punished.
+   under the pass mark charges the failure model. This loop only *reads* the
+   positive model; it trains nothing, which is what makes it safe to leave
+   running.
+7. **Conversation with a language model** — the partner's own lines become the
+   good set, because in that exchange, at that moment, they are exactly what a
+   good reply would have looked like. A reply the model could only repeat is
+   punished.
 8. **The agent** — a whole tool-use attempt is one training text, so a failed
-   attempt is $B$ and a successful one $G$ with no new machinery at all.
+   attempt is garbage and a successful one is correct, with no new machinery.
 
-The eighth is worth noting for what it says about the interface. Because a tool
-call is *text the model writes*, an entire episode of planning, calling and
-answering reduces to a single string — and therefore to a single $(B, G)$
-element. Nothing about 2NRL had to change to accommodate agency.
+The eighth is worth dwelling on for what it says about the interface. Because a
+tool call is *text the network writes*, an entire episode of planning, calling and
+answering collapses to a single string — and therefore to a single element of a
+`(bad, good)` pair. Nothing about 2NRL had to change to accommodate agency, and I
+take that as a sign the interface is the right shape.
 
-A second model kind in the same system (a count/reward network) implements the
-2NRL *interface* with a different *mechanism*: penalise the bad paths, reward
-the good ones, **no inversion**. There, a negative reward already makes a path
-unlikely, so a global inversion would be a global answer to a local problem.
-This is an instructive boundary: 2NRL's inversion earns its place precisely
-where the model *cannot* express a local negative, and is redundant where it
-can.
+There is also a boundary worth recording. A second model kind in the same system
+— the count/reward network — implements the 2NRL *interface* with a different
+*mechanism*: penalise the bad paths, reward the good ones, **no inversion**.
+There, a negative reward already makes a path unlikely, so inverting the whole
+graph would be a global answer to a local problem. That is instructive:
+inversion earns its place precisely where the model *cannot* express a local
+negative, and is redundant where it can.
 
 ---
 
-## 9. Empirical status — and what would settle it
+## 10. Evidence: what I have, and what I do not
 
-**Stated plainly: 2NRL has not been measured against a baseline.**
+**Plainly: I have not measured 2NRL against a baseline.**
 
-What exists is a *directional* assertion, in `tests/test_model.py`: after
+What I have is a *directional* assertion, in `tests/test_model.py`. After
 `two_nrl(bad, good)`, a garbage continuation is less likely than it was before.
-That establishes the procedure does what it says. It does **not** establish that
-it beats training on $G$ alone, nor that it beats negative sampling on the same
-$(B, G)$.
+That establishes the procedure does what it says on the tin. It does **not**
+establish that it beats training on the good set alone, and it does not establish
+that it beats negative sampling on the same data.
 
-The claim in §4 is, however, cheaply falsifiable, and the implementation already
-contains every component needed.
+Better to say that than imply more. The argument in §4 and §5 is an argument, and
+arguments are worth something — but the claim in §5 is cheap to falsify and has
+been neither falsified nor confirmed. Everything needed is already in the
+repository.
 
-### 8.1 Proposed experiment: the entropy condition
+---
 
-**Hypothesis.** 2NRL's advantage over positive-only training is a decreasing
-function of the entropy of the negative set.
+## 11. Predictions, and what would change my mind
 
-**Design.** Fix a corpus $G$ and a held-out evaluation set. Construct three
-negative sets at matched size and matched character distribution, differing only
-in structure:
+### 11.1 The experiment
 
-| Arm | Negative set $B$ | Expected $H(q)$ |
+**Hypothesis.** 2NRL's advantage over positive-only training decreases as the
+entropy of the negative set rises.
+
+**Design.** Fix a corpus and a held-out evaluation set. Build three negative sets
+at matched size and matched character distribution, differing only in structure:
+
+| Arm | Negative set | Expected `H(q)` |
 |---|---|---|
 | **A — systematic** | Hand-written garbage embodying one consistent error mode (`data/sample_garbage.txt`) | low |
 | **B — semi-systematic** | An LLM asked for deliberately wrong lines (`ollama corpus --style garbage`) | medium |
-| **C — random** | Character-level corruption of $G$ at matched edit distance | high |
+| **C — random** | Character-level corruption of the corpus at matched edit distance | high |
 
-Against two controls: **D** positive-only training on $G$ at matched total
-compute, and **E** negative sampling on the same $(B, G)$ without inversion.
+Against two controls: **D**, positive-only training at matched total compute, and
+**E**, negative sampling on the same data without any inversion.
 
 **Measurement.** Held-out per-character log-probability. Matched compute across
-all arms, multiple seeds, variance reported.
+arms, multiple seeds, variance reported — the things I did not do on CartPole and
+got fairly criticised for.
 
 **Predictions.**
 
-- **P1.** A > D. Systematic failure, inverted, beats not using it.
-- **P2.** A > B > C. Advantage decreases monotonically with negative-set entropy.
-- **P3.** C ≈ D, or C < D. Random garbage yields no benefit, and may hurt —
-  phases 1–2 perturb the model at full rate for nothing.
-- **P4.** A > E. Inversion beats repulsion on identical data. *This is the load-
-  bearing comparison*; without it, 2NRL's advantage could be nothing more than
-  the negatives being used at all.
+- **P1.** A beats D. Systematic failure, inverted, beats not using it.
+- **P2.** A > B > C. The advantage falls monotonically as negative-set entropy
+  rises.
+- **P3.** C ≈ D, or C is *worse* than D. Random garbage buys nothing and may cost
+  something, because phases 1–2 kick the model at full rate for no return.
+- **P4.** A beats E. Inversion beats repulsion on identical data. **This is the
+  load-bearing comparison.** Without it, any advantage I claim could be nothing
+  more than the negatives being used at all.
 
-**P3 is the sharpest test.** Every competing account of why 2NRL might work —
-regularisation, escaping local minima, the extra compute of phase 1 — predicts
-that arm C helps roughly as much as arm A. Only the entropy account predicts
-C fails while A succeeds. If C matches A, §4 is wrong.
+### 11.2 What would change my mind
 
-### 8.2 Second experiment: the rate ratio
-
-§3.4 argues $\eta^-/\eta^+ > 1$ is structurally required, not merely tuned.
-Sweeping the ratio over $\{1/5, 1, 5, 25\}$ should show performance collapsing
-toward the positive-only baseline as the ratio approaches and passes 1. If the
-optimum sits at 1, the inversion is contributing nothing that the fine-tune is
-not immediately undoing.
-
----
-
-## 10. Limitations
-
-1. **The architectural precondition is strong.** 2NRL needs an exact,
-   cheap, involutive, order-reversing inversion operator. Most architectures do
-   not have one. The procedure may not be portable beyond signed bilinear
-   scoring of the kind used here.
-2. **Inversion is global and therefore blunt.** It reverses the correct parts of
-   the model along with the incorrect ones, and relies on phase 3 to repair the
-   damage. The system already contains a partial admission of this: a *local*
-   variant that flips alternating nodes along a single failed path, used instead
-   of a global inversion when a failure is severe but isolated. Local and global
-   correction are alternatives there, not layers — which suggests the global
-   operator is not always the right tool.
-
-   The local variant is also **provably** incomplete, which is worth stating
-   rather than glossing. Flipping the edges of a path means two-colouring it, and
-   a graph is two-colourable only if it has no odd cycle. A cyclic graph can close
-   one: on a 3-cycle the best any flip pattern achieves is two edges of three, and
-   on a self-loop, where `score(p → p) = w · f_p²`, flipping the node changes the
-   score by *exactly nothing*. The obstruction is exact. Allowing cycles is what
-   turns an operation that is clean on a DAG into one that is best-effort —
-   the same trade, in a different place.
-3. **No stopping rule.** "Fail, invert, repeat" describes a loop. In a human
-   life it terminates when the thing is learned. The self-improvement loop here
-   runs indefinitely with no convergence criterion and no held-out evaluation;
-   its only signal is a score gap from its own discriminator, which can widen
-   while output quality falls.
-4. **$n = 1$ on the human evidence.** The origin is one person's account of
-   their own learning. That is a genuine existence proof — the procedure
-   demonstrably produced a working education at least once — and it is not a
-   controlled result about human learning generally. It is offered here as the
-   *source* of the algorithm, not as evidence for it. The algorithm has to stand
-   on §9.
+- **If arm C matches arm A, §5 is wrong.** This is the sharp one. Every competing
+  explanation of why 2NRL might work — regularisation, escaping local minima, the
+  extra compute in phase 1 — predicts that random garbage helps about as much as
+  systematic garbage. Only the entropy account predicts C fails while A succeeds.
+  If C matches A, the mechanism is not what I say it is.
+- **If arm E matches arm A**, then inversion is doing nothing that repulsion does
+  not, and the interesting part of this paper collapses to "use your negatives".
+- **If the rate ratio optimum sits at 1**, §4.4 is wrong. Sweep `η⁻/η⁺` over
+  1/5, 1, 5, 25: performance should collapse toward the positive-only baseline as
+  the ratio approaches and passes 1. If it does not, the inversion is contributing
+  nothing that the fine-tune is not immediately undoing, and I should drop it.
+- **If a persistent failure model with no inversion anywhere matches full 2NRL**,
+  then §7.4's second answer is the right one, inversion was a step on the way, and
+  I should say so.
 
 ---
 
-## 11. Open questions
+## 12. Limitations, stated plainly
 
-**Q-B. What counts as finding a thread?** See §5.4. The wide-then-narrow
-schedule is well defined once there is a detector; the detector is the open part,
-and it is where the human account transfers least directly.
+1. **The architectural precondition is strong.** 2NRL needs an inversion operator
+   that is exact, cheap, involutive and order-reversing. Most architectures do
+   not have one. Whether this ports beyond signed bilinear scoring of the kind I
+   use is unknown, and I will not claim it does.
+2. **Inversion is global, and therefore blunt.** It reverses the correct parts of
+   the model along with the incorrect ones and leans on phase 3 to repair the
+   damage. The system already half-admits this: there is a *local* variant that
+   flips alternating nodes along one failed path, used instead of a global
+   inversion when a failure is severe but isolated. They are alternatives, not
+   layers — which tells me the global operator is not always the right tool.
 
-**Q-C. Is there a principled stopping rule?** What ended an iteration for the
-author — and can that be made a computable criterion?
+   The local variant is also **provably** incomplete, and the proof is short
+   enough to give. Flipping every edge of a path means two-colouring it, and a
+   graph is two-colourable only if it contains no odd cycle. A cyclic graph can
+   close one. On a 3-cycle the best any flip pattern manages is two edges out of
+   three; on a self-loop, where `score(p → p) = w · f_p²`, flipping the node
+   changes the score by *exactly nothing*. The obstruction is exact, not
+   approximate. Allowing cycles is what turns an operation that is clean on a DAG
+   into one that is best-effort — the same trade I made in
+   [the cycles paper](CyclesAreAFeature.md), showing up somewhere else.
+3. **No stopping rule.** "Fail, invert, repeat" describes a loop. In a life it
+   ends when the thing is learned. My self-improvement loop runs indefinitely
+   with no convergence criterion and no held-out evaluation, and its only signal
+   is a score gap from its own discriminator — which can widen while the output
+   gets worse. I know when I stopped: when the thing worked. I cannot yet make
+   that computable, and §6.4 is the same problem wearing a different hat.
+4. **Phase 1 depth is unexamined.** I train on the garbage for a fixed small
+   number of epochs. The entropy account in §5 implies phase 1 should run until
+   the failure mode is *well* represented, since a half-learned failure inverts
+   into a half-useful signal. There is probably an optimal depth and it probably
+   depends on `H(q)`. I have not looked.
+5. **n = 1 on the human side.** The origin of this is my account of my own
+   learning. That is a real existence proof — the procedure demonstrably produced
+   a working education at least once — and it is not a controlled result about
+   how people learn in general. I offer it as the *source* of the algorithm, not
+   as evidence for it. The algorithm has to stand on §11.
 
-**Q-D. Is phase 1 to convergence, or partial?** The implementation trains on $B$
-for a fixed small number of epochs. The entropy account of §4 implies phase 1
-should proceed until the failure mode is *well* represented, since a partially
-learned failure inverts into a partially useful signal. Is there an optimal
-depth, and does it depend on $H(q)$?
+---
 
-**Q-E. Can $H(q)$ be estimated online?** (See §6.2 — now tractable.) If the advantage is governed by the
-negative set's entropy, the system could *measure* it and skip phases 1–2 when
-the garbage is too diffuse to be worth inverting — making the precondition
-self-enforcing rather than a caveat in a paper.
+## 13. Summary
+
+- Train on the failures at full rate, invert the network, fine-tune on the
+  correct data gently. That is 2NRL, and it is how I taught myself, written down.
+- The name is the mechanism. **Double-Negative Reinforcement Learning**: trained
+  **on** the failure, then negated, and a positive phase after. Two negatives
+  make a positive, which is exactly why inversion gives a destination where
+  repulsion only gives a direction.
+- Moving *away* from a wrong answer is under-determined: it names a direction to
+  leave and no place to arrive. Going all the way into the failure and negating it
+  turns that into a destination.
+- Inversion is two sign flips — `W → −W`, `a → −a` — because the edge signal is
+  the product of the weight and both endpoints' activations. It is exact, cheap
+  and its own inverse. The sine's sign parameter is what makes it possible at all.
+- The condition is **consistency**, and it was in my own sentence before I
+  understood why. What inverting a failure can recover is bounded by that
+  failure's negative entropy. Systematic failure inverts into signal; random
+  failure inverts into nothing.
+- So the question to ask of a negative set is not "are these wrong?" but "are
+  these wrong *in the same way*?"
+- The negative phase has since been made permanent: a standing network that
+  models how text goes wrong, which makes failure queryable, makes the entropy
+  condition measurable, and lets blame be placed on the characters that were
+  actually wrong.
+- "Pull hard on the thread" is not a learning rate. It is a schedule over search
+  breadth — wide, then narrow once something moves — and I have not built it. The
+  hard part is not the schedule, it is detecting that a thread has appeared.
+- It has never been measured against a baseline. §11 is the experiment, and arm C
+  is the one that would tell me I am wrong.
 
 ---
 
@@ -660,14 +714,14 @@ Goodfellow, I. et al. (2014). Generative adversarial networks. *NeurIPS*.
 
 ## Companion documents
 
-- `RadixCyclicNN/DECISIONS.md` — D-009 (2NRL), D-010 (inversion), D-027
-  (proportional boosting), D-028 (local inversion), D-023 (the count model's
-  non-inverting variant).
-- `RadixCyclicNN/DESIGN.md` §8, §9.1 — the normative specification.
 - [`SineWaveActivationFunction.md`](SineWaveActivationFunction.md) — why every
-  unit carries a sign parameter, which is what makes §3.3's inversion operator a
+  unit carries a sign parameter, which is what makes §4.3's inversion operator a
   parameter change rather than a structural one. Without it 2NRL cannot run.
 - [`CyclesAreAFeature.md`](CyclesAreAFeature.md) — why inverting a *path* is a
-  two-colouring problem, and why odd cycles make it best-effort rather than
-  exact (see §10, item 2).
+  two-colouring problem, and why odd cycles make it best-effort rather than exact
+  (§12, item 2).
 - [`README.md`](README.md) — how the three papers depend on each other.
+- `RadixCyclicNN/DECISIONS.md` — D-009 (2NRL), D-010 (inversion), D-027
+  (proportional boosting), D-028 (local inversion), D-045 (the negative network),
+  D-067 (the breadth schedule I have not built).
+- `RadixCyclicNN/DESIGN.md` §8, §9.1 — the specification.
