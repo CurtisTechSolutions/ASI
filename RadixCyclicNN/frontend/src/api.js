@@ -58,6 +58,38 @@ async function request(method, path, body) {
 const get = (path) => request("GET", path);
 const post = (path, body = {}) => request("POST", path, body);
 
+/** Blob / File -> base64, in chunks so a long recording cannot blow the argument stack. */
+async function toBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/**
+ * POST audio to one of the /api/speech endpoints. A transcript travels in a
+ * JSON body (any length, any character); without one the bytes go up as
+ * multipart with the options in the query string, so a big file is not
+ * base64-inflated.
+ */
+async function sendAudio(path, audio, options = {}) {
+  const name = audio && audio.name ? audio.name : "utterance.wav";
+  const entries = Object.entries(options).filter(([, value]) => value !== undefined && value !== null && value !== "");
+  if (options.transcript) {
+    const body = { name, content_base64: await toBase64(audio) };
+    for (const [key, value] of entries) body[key] = value;
+    return post(path, body);
+  }
+  const form = new FormData();
+  form.append("file", audio, name);
+  const params = new URLSearchParams();
+  for (const [key, value] of entries) params.set(key, String(value));
+  const query = params.toString();
+  return post(`${path}${query ? `?${query}` : ""}`, form);
+}
+
 /**
  * Normalise a job payload. Job-starting endpoints answer {"job": {...}}, while
  * GET /api/job and the stop endpoints answer with the job status itself; both
@@ -114,6 +146,27 @@ export const api = {
     return post("/api/uploads", form);
   },
   deleteUpload: (name) => post("/api/uploads/delete", { name }),
+  /**
+   * The negative network (see NegativePanel): the failures only, blamed with the tutor's reasons, and the filter it
+   * forms with the positive model.
+   */
+  negative: () => get("/api/negative"),
+  negativeBlame: (body) => post("/api/negative/blame", body),
+  negativeClear: (body) => post("/api/negative/clear", body),
+  negativeJudge: (body) => post("/api/negative/judge", body),
+  negativeFilter: (body) => post("/api/negative/filter", body),
+  negativeForget: (body) => post("/api/negative/forget", body),
+  negativeSettings: (body) => post("/api/negative/settings", body),
+  negativeReset: (body = {}) => post("/api/negative/reset", body),
+  negativeSave: (body = {}) => post("/api/negative/save", body),
+  /**
+   * The Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and
+   * every failure blame the negative network. Body: rounds (0 = until stopped), count, prefix, max_length,
+   * temperature, threshold, context, provider, reviewer_model, url, timeout, clear_passes, epochs, seed.
+   */
+  negativeAuto: (body) => post("/api/negative/auto", body),
+  /** Round / report records of all automatic runs (the job's own history while one is running). */
+  negativeAutoHistory: () => get("/api/negative/auto/history"),
   /** Ollama (see OllamaPanel). `url` optionally overrides the server's configured Ollama URL. */
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
@@ -132,6 +185,58 @@ export const api = {
     return post(`/api/images/encode${query ? `?${query}` : ""}`, form);
   },
   imageDecode: (text, encoder) => post("/api/images/decode", encoder ? { text, encoder } : { text }),
+  /**
+   * The recall tutor: ask the network to draw back a picture it was shown and mark what comes back.
+   * Options: size, encoder, lead, length, attempts, mode, temperature, threshold, blame.
+   */
+  imageTutor: (file, options = {}) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+    }
+    const query = params.toString();
+    return post(`/api/images/tutor${query ? `?${query}` : ""}`, form);
+  },
+  /** English lessons (see TutorPanel): the tutor writes the prefix, the network completes it, the tutor marks it. */
+  tutor: () => get("/api/tutor"),
+  tutorStart: (body) => post("/api/tutor/start", body),
+  tutorHistory: () => get("/api/tutor/history"),
+  /** One round of exercises, completions and grades without training (a dry run). */
+  tutorLesson: (body) => post("/api/tutor/lesson", body),
+  /** The lessons to run next, planned from a report card (the last run's own when none is sent). */
+  tutorPlan: (body) => post("/api/tutor/plan", body),
+  /** Is ChatGPT usable on the server (its own OPENAI_API_KEY), and which models the key has. */
+  chatgptModels: () => get("/api/chatgpt/models"),
+  /** Speech (see SpeechPanel): the transcript and the waveform of one utterance, behind one unique token. */
+  speech: () => get("/api/speech"),
+  /** Speech to text only. `audio` is a File or a Blob; `transcript` is what the browser already dictated. */
+  speechTranscribe: (audio, options = {}) => sendAudio("/api/speech/transcribe", audio, options),
+  /**
+   * Teach one utterance: the words and the waveform. Options: transcript, rate, codec, normalise,
+   * waveform, pair, token, unique, backend, language, train, epochs, lr, batch_size, save_as.
+   */
+  speechTeach: (audio, options = {}) => sendAudio("/api/speech/teach", audio, options),
+  /**
+   * The recall tutor: ask the network to say back an utterance it was taught and mark what comes back.
+   * Options: transcript, rate, codec, normalise, token, unique, lead, length, attempts, mode,
+   * temperature, threshold, listen_back, blame.
+   */
+  speechTutor: (audio, options = {}) => sendAudio("/api/speech/tutor", audio, options),
+  /** An encoded - or predicted - `aud:...` text back to audio that can be played. */
+  speechDecode: (text, codec) => post("/api/speech/decode", codec ? { text, codec } : { text }),
+  /** Code generation (see CodeGenPanel): sandbox runs, an Ollama or ChatGPT teacher / judge and 2NRL rewards. */
+  /** Tool use (see AgentPanel): the tools the network can call, and one direct call. */
+  tools: () => get("/api/tools"),
+  toolCall: (body) => post("/api/tools/call", body),
+  /** The agent loop: Ollama writes the acceptance criteria, mediates, judges and teaches; 2NRL learns. */
+  agentStart: (body) => post("/api/agent/start", body),
+  /** Self-directed browsing: the network chooses every task itself. */
+  agentExplore: (body) => post("/api/agent/explore", body),
+  agentHistory: () => get("/api/agent/history"),
+  agentCriteria: (body) => post("/api/agent/criteria", body),
+  agentSolve: (body) => post("/api/agent/solve", body),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama teacher / judge and 2NRL rewards. */
   codegenStart: (body) => post("/api/codegen/start", body),
   codegenHistory: () => get("/api/codegen/history"),

@@ -283,6 +283,77 @@ func TestVersionStampsStayExactAcrossAReset(t *testing.T) {
 	}
 }
 
+// The negative network counts failures; those counters wrap like every other.
+func TestNegativeFailCountsWrapAndRoundTrip(t *testing.T) {
+	m, err := NewNegativeModel(3, DefaultNegativeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := BlameOptions{Epochs: 1, Reason: "wrong tense"}
+	if _, err := m.Blame([]string{"the cat sat on the mat", "the dog ate the bone"}, opts); err != nil {
+		t.Fatal(err)
+	}
+	n := m.G.Neg
+	step := CounterLimit - 1
+	for e := range n.Fails {
+		n.Fails[e] += step
+	}
+	for id := range n.ReasonFails {
+		n.ReasonFails[id] += step
+	}
+	n.TotalFails.Add(step)
+	if _, err := m.Blame([]string{"the cat sat on the mat"}, opts); err != nil {
+		t.Fatal(err)
+	}
+	for e, c := range n.Fails {
+		if c < 0 || c >= CounterLimit {
+			t.Fatalf("edge %d fail count did not wrap: %d", e, c)
+		}
+	}
+	if len(n.FailsResets) == 0 || len(n.ReasonFailsResets) == 0 {
+		t.Fatal("no reset was recorded")
+	}
+	if n.TotalFails.Resets != 1 {
+		t.Fatalf("total fails went round %d times, want 1", n.TotalFails.Resets)
+	}
+
+	doc := m.G.ToDoc()
+	if doc.Edges.FailsResets == nil || doc.Weights.neg.Reasons.FailsResets == nil {
+		t.Fatal("a wrapped negative graph must write its reset arrays")
+	}
+	if doc.Weights.neg.TotalFailsResets != 1 {
+		t.Fatalf("total_fails_resets = %d, want 1", doc.Weights.neg.TotalFailsResets)
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back GraphDoc
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	g2, err := GraphFromDoc(&back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g2.Neg.TotalFails != n.TotalFails {
+		t.Fatalf("total fails changed on reload: %+v != %+v", g2.Neg.TotalFails, n.TotalFails)
+	}
+	// dead edges are compacted away by the save, so the documents are what must match
+	again := g2.ToDoc()
+	for e := range doc.Edges.Fails {
+		if again.Edges.Fails[e] != doc.Edges.Fails[e] || again.Edges.FailsResets[e] != doc.Edges.FailsResets[e] {
+			t.Fatalf("edge %d: (%d, %d) != (%d, %d)", e, again.Edges.Fails[e], again.Edges.FailsResets[e],
+				doc.Edges.Fails[e], doc.Edges.FailsResets[e])
+		}
+	}
+	for id := range doc.Weights.neg.Reasons.Fails {
+		if again.Weights.neg.Reasons.FailsResets[id] != doc.Weights.neg.Reasons.FailsResets[id] {
+			t.Fatalf("reason %d reset count changed on reload", id)
+		}
+	}
+}
+
 func TestLifetimeCountersWrapIntoTheirResetField(t *testing.T) {
 	m, err := NewModel(1, DefaultGraphOptions())
 	if err != nil {

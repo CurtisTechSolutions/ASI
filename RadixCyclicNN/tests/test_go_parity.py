@@ -48,19 +48,19 @@ def tearDownModule():
         TMP.cleanup()
 
 
-def go(*args, model, expect=0):
+def go(*args, model, expect=0, env=None):
     # --exact: atomic counting, so the numbers are reproducible and comparable with Python
     # (the default is one goroutine per text with plain, racy increments)
     cmd = [BINARY, "--json", "--exact", "--model", model, *[str(a) for a in args]]
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300, env=env)
     if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
     return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
-def py(*args, model):
+def py(*args, model, env=None):
     cmd = [sys.executable, "-m", "radixnet", "--json", "--model", model, *[str(a) for a in args]]
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600, env=env)
     if proc.returncode != 0:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stderr ---\n{proc.stderr}")
     return json.loads(proc.stdout)
@@ -240,6 +240,47 @@ class TestGoParity(unittest.TestCase):
         assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
         self.assertEqual(a_doc["weights"]["window_events"], b_doc["weights"]["window_events"])
 
+    def test_corrections_move_the_same_trigram_nodes(self):
+        """The tutor's correction: both sides align the sentences the same way and move the same edges."""
+        pairs = [
+            ("the cat sit on the mat", "the cat sits on the mat"),
+            ("the dogs run in the mat", "the dogs run in the park"),
+            ("a apple a day", "an apple a day"),
+            ("we was happy", "we were happy"),
+            ("the cat sat", "the cat sat on the mat"),
+            ("the mat on sat cat", "the cat sat on the mat"),
+            ("i have ate the bone", "i have eaten the bone"),
+            ("the cat sat on the mat", "the cat sat on the mat"),
+        ]
+        for wrong, right in pairs:  # the alignment itself, without a model
+            with self.subTest(wrong=wrong):
+                a = py("correct", "--wrong", wrong, "--right", right, "--dry-run", model=self.py_model)
+                b = go("correct", "--wrong", wrong, "--right", right, "--dry-run", model=self.go_model)
+                self.assertEqual(a["changes"], b["changes"])
+        py_path = os.path.join(TMP.name, "corr_py.count.json")
+        go_path = os.path.join(TMP.name, "corr_go.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.go_model, go_path)
+        for wrong, right in pairs:
+            a = py("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=py_path)
+            b = go("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=go_path)
+            for key in ("edits", "penalised", "rewarded", "kept", "wrong_chars", "right_chars", "changes"):
+                self.assertEqual(a[key], b[key], f"{key} for {wrong!r} -> {right!r}")
+            for key in ("penalty", "reward", "loss"):
+                self.assertLessEqual(abs(a[key] - b[key]), 1e-9, key)
+        a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertEqual(a_doc["nodes"]["labels"], b_doc["nodes"]["labels"])
+        self.assertEqual(a_doc["edges"]["reward"], b_doc["edges"]["reward"])
+        self.assertEqual(a_doc["edges"]["count"], b_doc["edges"]["count"])
+        self.assertEqual(a_doc["weights"]["window_events"], b_doc["weights"]["window_events"])
+        assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
+        a_stats = py("info", model=py_path)["stats"]
+        b_stats = go("info", model=go_path)["stats"]
+        for key in ("feedback_passes", "total_traversals", "window_traversals", "trained_texts"):
+            self.assertEqual(a_stats[key], b_stats[key], key)
+        for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
+            self.assertLessEqual(abs(a_stats[key] - b_stats[key]), 1e-9, key)
+
     def test_zip_corpus_streams_through_identically(self):
         """Both sides train from the same ZIP archive: Python unpacks it, Go streams it in chunks."""
         import io
@@ -282,6 +323,326 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(loaded.stats()["epochs_total"], 1)
         go("predict", "--prefix", "the", "--mode", "nope", model=path, expect=1)
         go("train", model=path, expect=1)  # --data is required
+
+
+class TestGoTutorParity(unittest.TestCase):
+    """One fake teacher, both tutors: the same prompts, the same marks, the same model afterwards."""
+
+    def setUp(self):
+        try:  # the fake Ollama of the tutor tests plays the English teacher for both sides
+            from test_tutor import start_fake
+        except ImportError:
+            from tests.test_tutor import start_fake
+        self.fake = start_fake(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_TUTOR_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "tutor_py.count.json")
+        self.go_path = os.path.join(TMP.name, "tutor_go.count.json")
+        for path in (self.py_path, self.go_path):
+            if os.path.exists(path):
+                os.remove(path)
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.py_path)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.go_path)
+
+    def calls(self):
+        """(system, prompt) of every Ollama call so far, so both sides' prompts can be compared."""
+        return [(body.get("system", ""), body.get("prompt", ""))
+                for _method, _path, body in self.fake.requests if body]
+
+    def test_both_tutors_ask_the_same_and_learn_the_same(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 2, "--exercises", 2, "--attempts", 1,
+                   "--mode", "beam", "--threshold", 9.5, "--drills", 2, "--neg-epochs", 1, "--pos-epochs", 1,
+                   "--strength", 1.0)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_calls = self.calls()
+
+        # the same conversation with the teacher: same system prompts, same exercises, same sentences to mark
+        self.assertEqual(len(py_calls), len(go_calls))
+        for i, (first, second) in enumerate(zip(py_calls, go_calls)):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        self.assertGreaterEqual(len(py_calls), 6)  # exercises + marking + drills, twice
+
+        # the same marks
+        self.assertEqual(a["report"]["lessons"], b["report"]["lessons"])
+        self.assertEqual(a["report"]["passed"], b["report"]["passed"])
+        self.assertEqual(a["report"]["errors"], b["report"]["errors"])
+        self.assertEqual(a["report"]["weakest"], b["report"]["weakest"])
+        self.assertLessEqual(abs(a["report"]["mean_score"] - b["report"]["mean_score"]), 1e-9)
+        self.assertEqual([l["sentence"] for l in a["lessons"]], [l["sentence"] for l in b["lessons"]])
+        self.assertEqual([l["grade"]["correction"] for l in a["lessons"]], [l["grade"]["correction"] for l in b["lessons"]])
+        self.assertEqual(len(a["lessons"]), 4)  # two rounds of two exercises
+
+        # and the same model: the grades reached the graph as the same rewards and penalties
+        py_doc, go_doc = load_json(self.py_path)["graph"], load_json(self.go_path)["graph"]
+        self.assertEqual(py_doc["edges"]["count"], go_doc["edges"]["count"])
+        assert_close(self, py_doc["edges"]["reward"], go_doc["edges"]["reward"], 1e-9)
+        assert_close(self, py_doc["edges"]["w"], go_doc["edges"]["w"], 1e-9)
+        py_stats, go_stats = a["stats"], b["stats"]
+        for key in ("twonrl_runs", "feedback_passes", "total_traversals", "nodes", "edges"):
+            self.assertEqual(py_stats[key], go_stats[key], key)
+        for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
+            self.assertLessEqual(abs(py_stats[key] - go_stats[key]), 1e-9, key)
+
+    def test_both_tutors_plan_the_same_next_lessons(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--dry-run", "--plan", 2)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_calls = self.calls()
+
+        # the report card is handed back to the teacher with the same words on both sides
+        self.assertEqual(len(py_calls), len(go_calls))
+        for i, (first, second) in enumerate(zip(py_calls, go_calls)):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        plan_prompts = [prompt for system, prompt in py_calls if "planning the next lessons" in system]
+        self.assertEqual(len(plan_prompts), 1)
+        self.assertIn("Lessons marked: 2", plan_prompts[0])
+
+        # and the same syllabus comes out, down to the brief the next batch would be taught to
+        self.assertEqual(a["plan"]["lessons"], b["plan"]["lessons"])
+        self.assertEqual(a["plan"]["targets"], b["plan"]["targets"])
+        self.assertEqual(a["plan"]["weak"], b["plan"]["weak"])
+        self.assertEqual((a["plan"]["level"], a["plan"]["source"]), (b["plan"]["level"], b["plan"]["source"]))
+        self.assertEqual(a["plan"]["summary"], b["plan"]["summary"])
+        self.assertEqual(a["plan"]["prompt"], b["plan"]["prompt"])
+        self.assertEqual(a["plan"]["upgrade"], b["plan"]["upgrade"])
+        self.assertEqual(a["plan"]["upgrade"]["step"], "hold")  # nothing passed at 9.5
+        self.assertEqual(a["plan"]["lessons"][0]["targets"], "agreement")
+        self.assertEqual([r["kind"] for r in a["records"]], [r["kind"] for r in b["records"]])
+
+    def test_both_tutors_teach_to_the_same_brief(self):
+        brief = "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run",
+                   "--brief", brief)
+        py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(len(py_calls), len(self.calls()))
+        for i, (first, second) in enumerate(zip(py_calls, self.calls())):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        written = [prompt for system, prompt in py_calls if "writing exercises" in system]
+        self.assertEqual(len(written), 1)
+        self.assertIn(f"The plan for this batch of lessons: {brief}", written[0])
+
+    def test_both_tutors_auto_run_the_same_way(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--dry-run", "--batches", 2)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+
+        # the same conversation: exercises, marking, the plan between the batches, then the second batch's exercises
+        self.assertEqual(len(py_calls), len(self.calls()))
+        for i, (first, second) in enumerate(zip(py_calls, self.calls())):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        self.assertEqual([r["kind"] for r in a["records"]], [r["kind"] for r in b["records"]])
+        self.assertEqual([r["kind"] for r in a["records"]], ["round", "report", "plan", "batch", "round", "report"])
+        started_py = [r for r in a["records"] if r["kind"] == "batch"]
+        started_go = [r for r in b["records"] if r["kind"] == "batch"]
+        self.assertEqual(started_py, started_go)  # the same brief, step, level, openings, pass mark and drills
+        self.assertEqual(started_py[0]["batch"], 2)
+        written = [prompt for system, prompt in py_calls if "writing exercises" in system]
+        self.assertEqual(len(written), 2)
+        self.assertIn(f"The plan for this batch of lessons: {started_py[0]['brief']}", written[1])
+
+    def test_dry_runs_agree_and_change_nothing(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam", "--dry-run")
+        before = load_json(self.py_path)["graph"]["edges"]["reward"]
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual([l["sentence"] for l in a["lessons"]], [l["sentence"] for l in b["lessons"]])
+        self.assertEqual(a["report"]["passed"], b["report"]["passed"])
+        self.assertIsNone(a["saved"])
+        self.assertEqual(b["saved"], "")
+        self.assertEqual(load_json(self.py_path)["graph"]["edges"]["reward"], before)
+        self.assertEqual(load_json(self.go_path)["graph"]["edges"]["reward"], before)
+
+
+class TestGoNegativeParity(unittest.TestCase):
+    """The negative network in both languages: the same blame, the same corrections, the same verdicts, and
+    each side reading the other's model file."""
+
+    def setUp(self):
+        self.py_model = os.path.join(TMP.name, f"neg_py_{self.id().rsplit('.', 1)[-1]}.count.json")
+        self.go_model = os.path.join(TMP.name, f"neg_go_{self.id().rsplit('.', 1)[-1]}.count.json")
+        self.py_negative = self.py_model.replace(".count.json", ".count.negative.json")
+        self.go_negative = self.go_model.replace(".count.json", ".count.negative.json")
+        for path in (self.py_negative, self.go_negative):
+            if os.path.exists(path):
+                os.remove(path)
+
+    def teach(self, model):
+        """The same three lessons on both sides: two whole failures and one correction."""
+        lessons = [
+            ("negative", "blame", "--text", "the the the the cat", "--reason", "repetition",
+             "--severity", 1.5, "--source", "review", "--note", "it repeats the same word"),
+            ("negative", "blame", "--text", "the cat cat cat sat", "--reason", "gibberish", "--source", "review"),
+            ("negative", "clear", "--text", "the cat sat on the mat"),
+        ]
+        runner = py if model == self.py_model else go
+        for args in lessons:
+            runner(*args, model=model)
+
+    def test_the_same_blame_and_the_same_verdicts(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py_doc, go_doc = load_json(self.py_negative), load_json(self.go_negative)
+        self.assertEqual(py_doc["format"], "radixnet-negative")
+        self.assertEqual(go_doc["format"], "radixnet-negative")
+        self.assertEqual(py_doc["kind"], go_doc["kind"])
+        p, g = py_doc["graph"], go_doc["graph"]
+        self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+        self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+        assert_close(self, p["edges"]["blame"], g["edges"]["blame"], 1e-12)
+        assert_close(self, p["edges"]["clear"], g["edges"]["clear"], 1e-12)
+        self.assertEqual(p["edges"]["fails"], g["edges"]["fails"])
+        self.assertEqual(p["edges"]["reasons"], g["edges"]["reasons"])
+        assert_close(self, p["edges"]["w"], g["edges"]["w"], 1e-12)
+        pw, gw = p["weights"], g["weights"]
+        for key in ("function", "kind", "share_scale", "blame_scale", "clear_scale", "smoothing",
+                    "total_blame", "total_fails", "total_clear"):
+            self.assertEqual(pw[key], gw[key], key)
+        self.assertEqual(pw["reasons"], gw["reasons"])
+        self.assertEqual(py_doc["filter"], go_doc["filter"])
+        self.assertEqual([e["reason"] for e in py_doc["log"]], [e["reason"] for e in go_doc["log"]])
+        self.assertEqual([e["note"] for e in py_doc["log"]], [e["note"] for e in go_doc["log"]])
+        # the same judgements, sentence for sentence
+        for text in ("the the the the cat", "the cat cat cat sat", "the cat sat on the mat", "a wholly unseen line"):
+            a = py("negative", "why", "--text", text, model=self.py_model)["verdicts"][0]
+            b = go("negative", "why", "--text", text, model=self.go_model)["verdicts"][0]
+            for key in ("verdict", "why", "transitions", "blamed", "known"):
+                self.assertEqual(a[key], b[key], f"{text}: {key}")
+            for key in ("risk", "peak", "coverage", "blame"):
+                self.assertAlmostEqual(a[key], b[key], places=9, msg=f"{text}: {key}")
+            self.assertEqual([r["reason"] for r in a["reasons"]], [r["reason"] for r in b["reasons"]], text)
+            self.assertEqual([s["fragment"] for s in a["spans"]], [s["fragment"] for s in b["spans"]], text)
+
+    def test_a_correction_blames_the_same_characters(self):
+        py("negative", "blame", "--text", "the cat sat here", "--reason", "other", model=self.py_model)
+        go("negative", "blame", "--text", "the cat sat here", "--reason", "other", model=self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 1, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 1, model=self.go_model)
+        for model in (self.py_model, self.go_model):
+            runner = py if model == self.py_model else go
+            runner("correct", "--wrong", "the cat sit on the mat", "--right", "the cat sits on the mat",
+                   "--blame", "--reason", "agreement", "--note", "the verb must agree", model=model)
+        a = py("negative", "why", "--text", "the cat sit on the mat", model=self.py_model)["verdicts"][0]
+        b = go("negative", "why", "--text", "the cat sit on the mat", model=self.go_model)["verdicts"][0]
+        self.assertEqual([s["fragment"] for s in a["spans"]], [s["fragment"] for s in b["spans"]])
+        self.assertEqual([s["reason"] for s in a["spans"]], [s["reason"] for s in b["spans"]])
+        self.assertAlmostEqual(a["risk"], b["risk"], places=9)
+        self.assertEqual(a["why"], b["why"])
+
+    def test_each_side_reads_the_other_s_negative_model(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        text = "the the the the cat"
+        # Go judges the model Python taught, and Python the one Go taught
+        crossed_go = go("negative", "why", "--text", text, "--negative", self.py_negative, model=self.go_model)["verdicts"][0]
+        crossed_py = py("negative", "why", "--text", text, "--negative", self.go_negative, model=self.py_model)["verdicts"][0]
+        own = py("negative", "why", "--text", text, model=self.py_model)["verdicts"][0]
+        for other in (crossed_go, crossed_py):
+            self.assertEqual(other["verdict"], own["verdict"])
+            self.assertAlmostEqual(other["risk"], own["risk"], places=9)
+            self.assertEqual(other["why"], own["why"])
+
+    def test_the_filter_agrees_on_what_to_veto(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        args = ("negative", "filter", "--text", "the the the the cat", "--text", "a rainy day in autumn")
+        a = py(*args, model=self.py_model)
+        b = go(*args, model=self.go_model)
+        self.assertEqual([v["decision"] for v in a["verdicts"]], [v["decision"] for v in b["verdicts"]])
+        self.assertEqual([v["rule"] for v in a["verdicts"]], [v["rule"] for v in b["verdicts"]])
+        self.assertEqual(a["kept"], b["kept"])
+        for x, y in zip(a["verdicts"], b["verdicts"]):
+            self.assertAlmostEqual(x["ratio"], y["ratio"], places=9)
+            self.assertAlmostEqual(x["peak"], y["peak"], places=9)
+            self.assertEqual(x["why"], y["why"])
+        # the peak rule fires on the same candidate in both
+        peak = ("negative", "filter", "--text", "the the the the cat", "--no-ratio", "--threshold", 1e9, "--peak", 1)
+        self.assertEqual(py(*peak, model=self.py_model)["verdicts"][0]["rule"],
+                         go(*peak, model=self.go_model)["verdicts"][0]["rule"])
+
+
+class TestGoServerNegative(unittest.TestCase):
+    """The Go server's negative endpoints answer the JSON the frontend's Negative tab expects."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import time
+        from tests.test_api import Client
+
+        cls.tmp = tempfile.TemporaryDirectory(prefix="radixnet-go-negative-")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        cls.model = os.path.join(cls.tmp.name, "model.count.json")
+        cls.proc = subprocess.Popen(
+            [BINARY, "--model", cls.model, "--exact", "serve", "--host", "127.0.0.1", "--port", str(port)],
+            cwd=GO_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        cls.client = Client(f"http://127.0.0.1:{port}")
+        for _ in range(200):
+            try:
+                if cls.client.get("/api/health")[0] == 200:
+                    break
+            except Exception:  # noqa: BLE001 - the server is still starting
+                pass
+            time.sleep(0.05)
+        else:
+            cls.tearDownClass()
+            raise AssertionError("the Go server did not start")
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "proc", None) is not None:
+            cls.proc.terminate()
+            try:
+                cls.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.proc.kill()
+        cls.tmp.cleanup()
+
+    def test_the_negative_endpoints(self):
+        status, data, _ = self.client.post("/api/negative/blame", {"texts": ["the the the the cat"],
+                                                                   "reason": "repetition", "note": "it repeats"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([r["reason"] for r in data["reasons"]], ["repetition"])
+        status, data, _ = self.client.get("/api/negative")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(set(data), {"path", "active", "stats", "reasons", "journal", "weights", "settings"})
+        self.assertEqual(data["stats"]["kind"], "negative")
+        self.assertEqual(data["journal"][0]["note"], "it repeats")
+        status, data, _ = self.client.post("/api/negative/judge", {"text": "the the the the cat"})
+        self.assertEqual(status, 200, data)
+        verdict = data["verdicts"][0]
+        self.assertEqual(verdict["verdict"], "reject")
+        self.assertLessEqual({"risk", "peak", "coverage", "blame", "reasons", "spans", "why"}, set(verdict))
+        status, data, _ = self.client.post("/api/negative/filter", {"texts": ["the the the the cat", "an unseen line"]})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([v["decision"] for v in data["verdicts"]], ["reject", "pass"])
+        self.assertIsNone(data["verdicts"][1]["rule"])
+        self.assertEqual(data["kept"], ["an unseen line"])
+        status, data, _ = self.client.post("/api/negative/settings", {"threshold": 2.0})
+        self.assertEqual(data["settings"]["threshold"], 2.0)
+        status, data, _ = self.client.post("/api/negative/save")
+        self.assertEqual(status, 200, data)
+        self.assertTrue(os.path.isfile(data["path"]))
+        from radixnet.model import load_model
+
+        self.assertEqual(load_model(data["path"]).kind, "negative")
 
 
 class TestGoServer(unittest.TestCase):

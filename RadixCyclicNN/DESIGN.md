@@ -22,6 +22,10 @@ imported lazily and never required.
 | Shortest path prediction (cost function + Dijkstra) | Edge cost `cost(p->c) = -log(softmax_over_children(p)[c]) + step_penalty` (>= 0). Prediction runs Dijkstra from the context node over the depth-unrolled graph and returns the cheapest path that emits the requested number of characters, or the cheapest path to the END node. |
 | Train & predict | `RadixNet.train / predict / generate / score`. |
 | Constantly self-upgrading (GAN idea) | `Evolver`: generator = the model, discriminator = a second `RadixNet`. Each generation: sample fakes, discriminator learns real-vs-fake via 2NRL, low-scoring fakes become the generator's "garbage" for 2NRL, real corpus samples are the fine-tune pass. Runs indefinitely in a background thread (API) or for N generations (CLI), checkpointing as it goes. |
+| The negative network | `NegativeNet` (section 24): a copy of the network keeping only its negative portions - every node and edge exists because something went wrong there, every edge keeps `blame`, `fails`, `clear` and the tutor's `reasons`, and the net evidence against it is `max(0, blame - clear)`. Trained on negative data only; `judge(text)` says how much of a text is built out of known failure, which reasons that blame carries and which fragments carry it. |
+| The negatives come from the tutor | `blame.py` (section 24.2): the English tutor's marked mistake and correction, the Ollama reviewer's critique and rating, the code sandbox / style checker / judge, the evolve discriminator and a person's thumbs down become faults `(text, reason, severity, note, correction)`. The negative network never invents a failure. |
+| A correction blames only what changed | `NegativeNet.correct(wrong, right)` (section 24.2): the same character alignment the count model's `correct` teaches from (`diff.py`) decides which steps are blamed - the words the teacher kept carry no verdict, and a blamed transition is never compressed away. |
+| The pair as a GAN at output time | `NegativeFilter` (section 24.3): the positive model over-samples candidates, the negative one vetoes them by blame or by the likelihood ratio `log P_negative - log P_positive`; what survives is returned ranked, what does not comes back with its reason. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) `invert()` the network, (3) fine-tune on correct data with a smaller learning rate. |
 | CLI / API / React frontend | `radixnet.cli` (argparse), `radixnet.api` (stdlib `http.server`, JSON), `frontend/` (Vite + React). |
 | Checkpointing / save / load | JSON (optionally gzip) model files, `CheckpointManager` with rotation + `latest` pointer + resume. |
@@ -42,18 +46,32 @@ RadixCyclicNN/
     __main__.py             `python -m radixnet` -> cli.main()
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder
-    counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 24)
+    counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
+    negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
+                            (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
+    blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
+    duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3)
     dialogue.py             Turn, converse - the model conversing with itself (section 22)
+    speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
+    recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
+    critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
     bench.py                benchmarks (chars/sec, predictions/sec)
+    llm.py                  provider layer: LLMClient / LLMError, make_client("ollama" | "chatgpt") (section 16)
+    ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16.1)
+    chatgpt.py              ChatGPT client over OpenAI's chat-completions API (section 16.2)
+    tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL, and the lesson
+                            plan the report card at the end calls for (section 16.3)
+    diff.py                 character diff of a sentence against its correction (section 16.4)
+    codegen.py              code generation with a sandbox, an LLM judge and 2NRL rewards (section 17)
     cli.py                  argparse CLI
     api.py                  HTTP JSON API + static file serving
   tests/                    unittest (run: `python -m unittest discover -s tests -v` from RadixCyclicNN/)
@@ -125,6 +143,15 @@ class Decoder:
 
 Round-trip property: `Decoder().decode_trigrams(Encoder().encode(t)) == t` for all `len(t) >= 3`.
 
+```python
+def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired)
+```
+
+The tail shared by the *media* text formats (`img:...`, section 21, and `aud:...`, section 25): a base64 payload the
+network **predicted** is rarely clean, so characters outside the alphabet are dropped, a single dangling character
+goes with them, the padding is completed and `repaired` reports whether any of that changed the text. The payload is
+returned as it decodes; each format pads or truncates it to the length it needs.
+
 ---
 
 ## 5. `graph.py` — RadixCyclicGraph
@@ -138,7 +165,7 @@ class RadixCyclicGraph:
     labels: list[str]            # labels[i] = label of node i; labels[0] = "<s>", labels[1] = "</s>"
     z: list[float]               # node state / pre-activation, learnable
     a, b, h, k: list[float]      # per-node activation params (defaults -1, 1/3, 0, 0)
-    count: list[int]             # times the node was visited in training - a cyclic counter (section 24)
+    count: list[int]             # times the node was visited in training - a cyclic counter (section 28)
     count_resets: dict[int, int] # node id -> how often its counter wrapped (absent = never; usually empty)
     alive: list[bool]            # False for nodes removed by merge (ids are never reused until compaction on save)
     children: list[dict[int, int]]  # children[p][c] = edge id e
@@ -150,14 +177,14 @@ class RadixCyclicGraph:
     trigram_index: dict[str, tuple[int, int]]   # trigram -> (node_id, offset); offset = index of the trigram inside the label
     rng: random.Random           # seeded
     inverted: bool = False
-    traversals: CyclicCounter    # every increment made to the counters above; bounds each of them (section 24)
+    traversals: CyclicCounter    # every increment made to the counters above; bounds each of them (section 28)
     version: CyclicCounter       # bumped on ANY structural or parameter change (cost caches key on it)
     structure_version: CyclicCounter  # bumped only on node/edge creation, removal, split, merge
 ```
 
 Every integer above that only ever grows is a **cyclic counter**: it goes back
 to 0 at `COUNTER_LIMIT` and the wrap is counted in the matching `_resets`
-(section 24). `node_count(i)` / `edge_traversals(e)` give the exact totals and
+(section 28). `node_count(i)` / `edge_traversals(e)` give the exact totals and
 `carry_counters()` does the wrapping.
 
 Node id 0 is START, 1 is END; both always exist, are never merged or split, and
@@ -233,7 +260,7 @@ def apply_node_params(self, params: NodeParams) -> None             # version +=
 def carry_counters(self, force: bool = False) -> int
     # The ONLY place the visit counters wrap: every counter that reached COUNTER_LIMIT goes back to 0 and
     # its reset is counted. Called at the end of every epoch and before a save; skipped after one comparison
-    # while `traversals` (which bounds every counter) has not wrapped. Returns how many wrapped. Section 24.
+    # while `traversals` (which bounds every counter) has not wrapped. Returns how many wrapped. Section 28.
 
 def node_count(self, i: int) -> int ; def edge_traversals(self, e: int) -> int
     # The exact counts across every reset: resets * COUNTER_LIMIT + the reading.
@@ -414,16 +441,26 @@ class RadixNet:
     def compress(self) -> int             # graph.compress()
 
     def two_nrl(self, bad: list[str], good: list[str], neg_epochs=3, pos_epochs=3, neg_lr=0.05, pos_lr=0.01,
-                progress=None, checkpoint_manager=None, stop_event=None) -> dict
+                progress=None, checkpoint_manager=None, stop_event=None,
+                bad_weights: list[float] | None = None, good_weights: list[float] | None = None) -> dict
         # phase 1: train(bad, epochs=neg_epochs, lr=neg_lr)                      -> "negative" records (phase="negative")
         # phase 2: invert()
         # phase 3: train(good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10) -> "positive" records (phase="positive")
         # records passed to progress carry "phase". returns {"negative": [...], "positive": [...], "inverted": graph.inverted}
         # meta_add(meta, "twonrl_runs", 1)
+        # bad_weights / good_weights (>= 0, one per text) make each phase a *rating* rather than one rate for all:
+        # _weight_groups groups texts of equal (3-decimal) weight, heaviest first, drops zeros, and runs one pass per
+        # group with lr * w (and act_lr * w; the positive phase pos_lr/10 * w). Those records carry "weight".
+        # How bad a failure was decides how hard it is pushed away, how good a text was how much of it is kept.
+
+    def reward(self, texts, *, epochs=3, lr=0.1, weights=None, ...) -> list[dict]
+        # thumbs up: a positive-phase pass (act_lr = lr / 10); weights turn it into a mark out of 1 per text
+    def punish(self, texts, *, epochs=2, lr=0.5, weights=None, ...) -> list[dict]
+        # thumbs down: a negative-phase pass, then invert(); weights rate the failures the same way
 
     def stats(self) -> dict   # {"nodes","edges","trigrams","compression_ratio","inverted","backend","device",
                               #  "epochs_total","trained_chars","trained_texts","twonrl_runs","history_len","last_loss"}
-                              # every lifetime counter is reported with its "<name>_resets" as well (section 24)
+                              # every lifetime counter is reported with its "<name>_resets" as well (section 28)
 
     def save(self, path: str) -> None
         # JSON; gzip if path endswith ".gz"; {"format": "radixnet", "version": 1, "saved_at", "meta", "history",
@@ -581,6 +618,12 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/uploads` | | `{"uploads": [{"name","bytes","chars","lines","modified"}], "upload_dir"}` — text files kept in the server's `upload_dir` (`--upload-dir`, default `uploads`; endpoints answer 400 when no directory is configured) |
 | POST `/api/uploads` | JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`; or `multipart/form-data` (every part with a filename, as bytes); or any other body with `?name=<file>` (raw bytes) | 201 `{"uploads": [record + "replaced": bool], "archives": [...]}`. Bytes that start with the ZIP magic are validated by `archive.extract_texts` (section 20) and stored as one `.zip` upload whose record carries `archive: true`, `files` (text entries), `skipped` and the summed `lines` / `chars`; `archives[]` summarises entries / extracted / skipped (path + reason); 400 for a corrupt archive, one without a text entry, (no size limit: neither the body limit nor an entry limit applies to uploads). Names are reduced to a safe base name (no traversal); UTF-8 with BOM dropped; same name replaces the file |
 | POST `/api/uploads/delete` | `{"name"}` | `{"deleted": name}` (404 when missing) |
+| GET `/api/speech` | | `speech.describe()`: the transcription backends and which one `auto` picks, ffmpeg, the microphone recorders, the codecs, the token and the text format (section 25) |
+| POST `/api/speech/transcribe` | audio bytes (a binary route like `/api/uploads`: multipart, a raw body named `speech`, or JSON `content_base64`) + `backend`, `language`, `asr_model`, `asr_url`, `transcript` from the query string or the JSON body | `{"transcript", "backend", "model", "language", "seconds", "name"}` |
+| POST `/api/speech/teach` | the same audio forms + `transcript` (what the browser dictated), `rate`, `codec`, `normalise`, `waveform`, `pair`, `token`, `unique`, `backend`, `language`, `asr_model`, `asr_url`, `train`, `epochs`, `lr`, `batch_size`, `save_as` | `{"token", "transcript", "asr", "audio", "texts", "chars", "pair", "name", "upload", "job"}`; 202 with a train job on the texts, `save_as` keeps them as one upload |
+| POST `/api/speech/tutor` | the same audio forms (encoded and quizzed in one call) *or* `{"texts": ["<speech:…> aud:…"]}` for utterances already encoded, + `transcript`, `rate`, `codec`, `normalise`, `token`, `unique`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `listen_back`, `blame` | the recall tutor of section 26: `{"modality", "lessons", "report", "negative"}` — each lesson carries the exercise, what was written back, the mark out of 10, the reason it failed and the facts behind it; `blame` teaches the negative network and fills `negative` |
+| POST `/api/images/tutor` | the same image forms *or* `{"texts": ["img:…"]}`, + `size`, `encoder`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `blame` | the same, for a picture it was shown |
+| POST `/api/speech/decode` | `{"text", "codec"}` | `{"wav_base64", "codec", "rate", "channels", "samples", "seconds", "bytes", "repaired"}` — an encoded *or predicted* waveform as playable audio |
 
 `/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
 | GET `/` and other paths | | serves `frontend_dir` if it exists (SPA fallback to `index.html`, correct mime types, no path traversal), else a minimal built-in HTML page explaining how to build the frontend |
@@ -610,6 +653,19 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any).
 * `ScorePanel.jsx` — score a text.
+* `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
+  (`MediaRecorder`) and dictates the words at the same time (`SpeechRecognition`, the Web Speech API); `audio.js`
+  decodes the recording with the Web Audio API, mixes it to mono, resamples it to 16 kHz and writes a 16-bit PCM WAV,
+  so the server reads it with the standard library alone and never needs ffmpeg for a browser recording. The panel
+  shows the clip with a player and a peak meter, the transcript in an editable box (corrected by hand, or left empty
+  for the server's Whisper), the waveform rate / codec / pair / unique-token / normalise switches and the training
+  settings; "Teach the model" posts `/api/speech/teach` with `train`, "Preview the texts" the same request without it,
+  and the result card shows the token, the ASR backend, the waveform's size and every text. A third card decodes any
+  `aud:` text - including a prediction - back into audio through `/api/speech/decode` and plays it.
+* `RecallCard.jsx` — the **What does it remember?** card, shared by the Speech and Images tabs (section 26): the
+  exercise settings (how much of the payload to ask for, the lead, attempts, mode, the pass mark, listen back, blame
+  it), one button, and the marked table — what was asked about, the mark out of 10, the agreement, the verdict and
+  the sentence saying what went wrong — with the report card above it and what the negative network was taught below.
 
 Plain readable CSS, responsive (single column under 800px). No TypeScript.
 
@@ -627,8 +683,36 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
-* `test_counter.py` — the cyclic counters of section 24: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
+* `test_counter.py` — the cyclic counters of section 28: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
+* `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
+* `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
+* `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
+* `test_speech.py` — the text format (packing, the header found behind a token and before a transcript, repair of a
+  cut-off prediction), unique tokens, `speech_texts`, both codecs (mu-law beats linear 8-bit on quiet audio, byte
+  round trips), resampling / downmixing / normalising, every WAV sample format the reader accepts (PCM 8/16/24/32,
+  IEEE float 32/64, A-law, mu-law, WAVE_FORMAT_EXTENSIBLE) and the ffmpeg hand-off, the waveform round trip
+  (encode → text → WAV → the same tone), transcription (a given transcript, the auto order, fakes with the
+  openai-whisper / faster-whisper / OpenAI-server interfaces, the error when nothing is installed), `teach` (both
+  texts share the token, pair / shared token / transcript-only, a failing ASR still teaches the waveform, the model
+  learns and continues what was spoken), recording (no recorder, `arecord` called and its file read), the four API
+  routes in all three body forms and the CLI actions. Runs without a microphone, ffmpeg or any ASR backend.
+* `test_critic.py` — the negative network feeding itself (section 24.6): the config and what it refuses, one round
+  (write → review → blame) against a scripted reviewer and against the fake Ollama server, the blame arriving sourced
+  to the loop with the critique kept, the mark setting the severity, what it passes not being blamed, rounds differing
+  because the seed advances, the report card and its trend, stopping between rounds rather than inside one,
+  `rounds=0` meaning until stopped, the positive model coming out untouched, `external` wrapping the slow call, the
+  `critic` job, the `/api/negative/auto` endpoint and the `negative auto` CLI (including `--json` staying parsable
+  because the progress goes to stderr).
+* `test_recall.py` — the recall tutor (section 26): the exercise (a spoken cue is the token and the header, an image
+  cue carries a lead, texts that are not encoded are skipped), every way a completion can be wrong in both
+  modalities (unreadable, truncated, overrun, garbled, silence / blank, clipping / noise, mishearing, distortion /
+  drift, and the two cases where a flat reference means flat is *not* a fault), the agreement curve, the mark (the
+  overrun penalty, the caps, the cost of a repair), the quiz over a real model and over a perfect one (attempts stop
+  at the first pass, the stop event, progress, a capped quiz marked against what it asked for), the report card, the
+  faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
+  neither Pillow nor a transcriber, so nothing in it is skipped.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
 ---
 
@@ -643,7 +727,23 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 
 ---
 
-## 16. Ollama integration (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
+## 16. LLM providers (`llm.py`, `ollama.py`, `chatgpt.py`) — a local model or ChatGPT
+
+Everything that asks an LLM a question — the code-generation tutor and its judge, the corpus and review helpers —
+takes a *client* and never looks at which provider it got:
+
+```python
+PROVIDERS = ("ollama", "chatgpt"); DEFAULT_PROVIDER = "ollama"
+class LLMError(Exception)             # the base of OllamaError and ChatGPTError: "the LLM did not work"
+class LLMClient(Protocol)             # .provider .url .model; .models() .available() .generate(...) .chat(...)
+normalise_provider(name) -> str       # "" -> "ollama"; aliases "openai" / "gpt" / "chat-gpt" -> "chatgpt"; else ValueError
+default_model(provider) / default_url(provider) -> str
+make_client(provider=None, url=None, model=None, timeout=None, api_key=None) -> LLMClient   # lazy imports
+provider_of(client) -> str            # the client's own label, "ollama" for anything unlabelled
+loads_lenient(raw) -> Any             # JSON from an LLM answer: tolerates code fences and prose around the object
+```
+
+### 16.1 Ollama (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
 
 Two ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
 
@@ -704,14 +804,266 @@ Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.intern
 
 Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, configurable failures) and `/api/chat`.
 
+### 16.2 ChatGPT (`chatgpt.py`) — the hosted alternative, same interface
+
+```python
+DEFAULT_URL   = $OPENAI_BASE_URL (or $OPENAI_API_BASE) or "https://api.openai.com/v1"
+DEFAULT_MODEL = $RADIXNET_OPENAI_MODEL or "gpt-4o-mini"
+DEFAULT_TIMEOUT = 120.0
+
+normalise_url(url)                    # "host" -> "https://host/v1"; refuses a plain-http remote host unless
+                                      # RADIXNET_OPENAI_ALLOW_INSECURE is set (a key must not travel in clear)
+api_key(explicit=None) -> str | None   # explicit, else $OPENAI_API_KEY, else the content of $OPENAI_API_KEY_FILE
+api_key_configured(explicit=None) -> bool                      # never returns the key itself
+class ChatGPTError(LLMError)          # .status .code .param from the API's {"error": {...}} body
+class ChatGPTClient(url=None, model=None, timeout=None, *, api_key=None)
+    .provider = "chatgpt"; .url .model .timeout .configured
+    .models() -> [{"name","id","owned_by","created"}]          # GET /models, sorted by name
+    .available() -> bool                                       # false without a key: nothing is sent
+    .generate(prompt, *, system=None, model=None, json_mode=False, options=None, timeout=None) -> str
+    .chat(messages, *, ...) -> str                             # POST /chat/completions, non-streaming
+```
+
+* The key is read per request and never stored in a config, a job record, a report or `repr`; the HTTP API has no
+  field for it (the server uses its own `$OPENAI_API_KEY`).
+* Ollama's `options` are translated (`num_predict` / `max_tokens` -> `max_completion_tokens`, `temperature`, `top_p`,
+  `seed`, `stop`, the penalties; unknown names dropped); `json_mode` sends `response_format: {"type": "json_object"}`.
+* A 400 that blames an optional field (`unsupported_parameter` / `unsupported_value` / "Unrecognized request
+  argument", by `param` or by name in the message) drops that field and asks again, so the reasoning models (no
+  `temperature`) and older ones (no `response_format`) work without configuration. Every field is dropped at most
+  once, so the loop terminates.
+* `available()` / `models()` also accept any OpenAI-compatible server through `$OPENAI_BASE_URL`; a loopback endpoint
+  is never reached through the environment's proxy, the hosted API always is.
+* `serve --chatgpt-url --chatgpt-model` set the API defaults; `/api/status` gains
+  `"chatgpt": {"url","model","configured"}` and `GET /api/chatgpt/models?url=` answers 200 always with
+  `{"available","configured","url","model","models","error"}`.
+* CLI: `radixnet [globals] chatgpt [--url URL] [--chatgpt-model NAME] [--timeout S] models|ask --prompt TEXT
+  [--system TEXT] [--temperature 0.7] [--json]`.
+* Docker: the API container takes `OPENAI_API_KEY`, `RADIXNET_OPENAI_MODEL` and `OPENAI_BASE_URL` (empty key =
+  ChatGPT tutoring stays off and the Code tab says so).
+* Tests (`tests/test_chatgpt.py`) use a fake OpenAI server (stdlib `http.server`) answering `/v1/models` and
+  `/v1/chat/completions`, recording the Authorization header, scripting tutor programs, judging by content and
+  rejecting configurable fields or whole requests.
+
+### 16.3 The tutor (`tutor.py`) — the teacher sets the exercise, the network answers, the teacher marks it
+
+The prediction process run without a human: `topic -> prefix (LLM) -> completion (the prediction search) -> grade
+(LLM) -> 2NRL`. Any provider client, one more loop: the teacher is a local Ollama model or ChatGPT
+(`tutor_provider`), and the marking follows it unless `grader_provider` names the other one.
+
+```python
+DEFAULT_TUTOR_MODEL = $RADIXNET_TUTOR_MODEL or DEFAULT_MODEL (ollama.py)
+default_tutor_model(provider) -> str      # DEFAULT_TUTOR_MODEL for ollama, the provider's own default otherwise
+ERROR_TYPES = ("none", "agreement", "tense", "article", "preposition", "plural", "pronoun", "word-order",
+               "spelling", "punctuation", "vocabulary", "fragment", "nonsense")   # "other" for anything else
+MODES = ("dijkstra", "beam", "sample");  TWONRL_PER = ("round", "lesson");  TEACHER_WEIGHT = 1.0
+
+def cue(prefix) -> str                    # the prefix with exactly one trailing space: what the search is given
+def overall_score(grammar, spelling, fluency, grammar_weight=0.6) -> float | None
+                                          # grammar_weight * grammar + (1 - grammar_weight) * mean(spelling, fluency)
+                                          # missing sub-marks drop out; grammar is taught, so grammar dominates
+
+@dataclass Exercise:  id, prefix, focus, answer        # .cue == cue(prefix)
+@dataclass Grade:     score, grammar, spelling, fluency, passed, error, correction, comment, graded_by
+                      # graded_by: the marking provider ("ollama" | "chatgpt"), "empty" or "unrated"
+@dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade
+
+def write_exercises(client, topic, count=5, *, focus=None, level="beginner", weak=(), words="3 to 6", model=None)
+    # JSON mode: {"exercises": [{"prefix", "focus", "answer"}]}; parse_exercises tolerates bare lists, plain lines,
+    # "opening" / "stem" instead of "prefix", trailing punctuation, duplicates and an answer without the prefix
+def drill_sentences(client, topic, count, *, weak=(), model=None) -> list[str]   # extra correct examples to imitate
+def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0.6, model=None, batch=10,
+                      external=None, graded_by=None)   # graded_by: the provider behind the client
+    # one JSON call per batch: {"grades": [{"index","grammar","spelling","fluency","error","correction","comment"}]}
+    # empty completion -> failed without asking (graded_by="empty", the exercise's own answer as the correction);
+    # unreadable answer -> score None, graded_by="unrated", counted as a failure
+def report_card(lessons) -> dict          # {"lessons","graded","passed","failed","pass_rate","mean_score",
+                                          #  "mean_grammar","mean_spelling","mean_fluency","errors","weakest"}
+```
+
+The report card at the end of a run is handed back to the teacher, which turns it into the syllabus of the
+lessons that follow:
+
+```python
+ERROR_FOCUS = {"agreement": "subject-verb agreement", "tense": "verb tenses", ...}   # what fixes each mistake
+LEVELS = ("beginner", "intermediate", "advanced");  DEFAULT_PLAN_LESSONS = 3
+WORDS_LADDER = ("3 to 6", "5 to 8", "7 to 12", "10 to 16");  UPGRADE_STEPS = ("hold", "stretch", "advance")
+STRONG_PASS_RATE = 0.8;  STRONG_SCORE = 8.0;  STRETCH_PASS_RATE = 0.5;  HOLD_DRILLS = 3
+
+@dataclass PlannedLesson:  focus, topic, why, targets, exercises, drills, prefixes
+@dataclass LessonPlan:     lessons, summary, prompt, upgrade, level, topic, weak, source   # .targets: what it drills
+
+def focus_for(error) -> str               # ERROR_FOCUS[_error_type(error)], "" for "none" and the unknown
+def weak_points(card, limit=3) -> list    # [{"error","count","share","focus"}] worst first, ties alphabetically;
+                                          # reads a card that went through JSON (float counts, the teacher's wording)
+def next_level(level, card) -> str        # one step up LEVELS when the card is strong, else level
+def next_words(words, steps=1) -> str     # one rung up WORDS_LADDER; a setting off the ladder is left alone
+def upgrade_from_card(card, *, level, words, threshold, drills) -> dict
+    # {"step", "level", "words", "threshold", "drills", "note"} - the incremental upgrade, read off the marks:
+    # "advance" (level up, longer openings, pass mark +1 capped at 9) at STRONG_PASS_RATE / STRONG_SCORE,
+    # "stretch" (longer openings) at STRETCH_PASS_RATE, else "hold": nothing harder, HOLD_DRILLS correct
+    # sentences to imitate.  A student who is failing never gets a harder exercise.
+def plan_brief(weak, upgrade, topic="") -> str   # "Drill a, b and c, worst first: ... <note> Keep the sentences
+                                          # about the sea." - the brief the marks alone write for the next batch
+def card_lines(card) -> list[str]         # the card as the teacher reads it (both languages word for word)
+def plan_from_card(card, *, topic, level, words, threshold, count=3, exercises=5, drills=0) -> LessonPlan
+    # no LLM: one lesson per weak point, worst first, why = "5 of 10 lessons (50%) were marked down for agreement.",
+    # plus the upgrade and plan_brief; a card with nothing to fix plans one lesson that keeps the topic
+def plan_lessons(client, card, *, topic, level, words, threshold, count=3, exercises=5, drills=0, model=None)
+    # JSON mode: {"summary", "prompt", "lessons": [{"focus", "targets", "topic", "why"}]}; parse_plan tolerates
+    # {"plan": [...]}, bare lists, plain lines, "point" / "skill" instead of "focus", "reason" instead of "why",
+    # "brief" / "instructions" instead of "prompt", and a "targets" in the teacher's own words (_error_type maps
+    # it back; a focus alone implies it).  plan_from_card is the floor: a weakness the answer skips takes the
+    # place of a lesson that drills nothing the card marked down (appended when there is none), a brief it does
+    # not write is the one the marks wrote, and an answer that cannot be read - or that names no mistake and says
+    # nothing about the student - leaves that plan standing.  How much harder the next batch gets is never read
+    # from the answer: upgrade_from_card decides it and the teacher is asked to repeat it in the brief, so the
+    # settings a plan carries are the ones the card earned.  `source`: the provider, or "report card".  A card of
+    # no lessons is a ValueError.
+```
+
+`LessonPlan.prompt` is the point of the plan: `TutorConfig.brief` (`--brief TEXT`, `{"brief": ...}`) hands it to
+`write_exercises` with **every** round of the run that follows (`"The plan for this batch of lessons: ..."` above
+the topic, the focus and the weak points), so one batch's report card is the next batch's instructions.
+
+`TutorConfig` (validated like every other config) holds the topic, `rounds`, `batches`, `exercises`, `attempts`,
+`focus`, `level`, `words`, `brief` (the previous batch's plan), the two providers and their model names (`tutor_provider`, `tutor_model`, `grader_provider`,
+`grader_model`; `__post_init__` normalises the providers and fills in the models they imply, and
+`resolved_grader_model` is what the marking runs on), the completion settings (`mode`, `length`, `max_length`, `temperature`,
+`to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `plan`, `teach_answer`,
+`learn`), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
+`min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`, `batch_size`, `strength`, `replay`, `replay_limit`,
+`checkpoint_every`).
+
+`TutorTrainer(model, client, config, external=None, grader_client=None).run(...)` per round — `client` is the
+teacher, the marking shares it unless `grader_client` is given or `grader_provider` names the other provider (then
+one is built from the environment), and every grade records which one marked it:
+
+1. `set_exercises` — the teacher writes the openings (with the previous round's weakest points as the syllabus when
+   `adapt`).
+2. `complete` — `model.predict(exercise.cue, ...)` per attempt (attempt 0 in `mode`, later ones sampled).
+3. `grade` — one call per `batch` sentences.
+4. `corrections_of` + `texts_of` + `learn` — a failure the teacher corrected is a `Correction(wrong, right,
+   weight_of(grade))` taught by `model.correct` (section 16.4), not a whole sentence in `bad`; `weight_of(grade) =
+   min_weight + (1 - min_weight) * (threshold - score) / threshold` (1 for an unrated one). What is left is the old
+   split: `bad` = the failures with no correction to align, `good` = the sentences that passed with
+   `reward_of(grade) = score / 10`, plus the model answers and the drill sentences at `TEACHER_WEIGHT`. A text
+   offered twice keeps its largest weight. Nothing is punished when the network wrote nothing (the prefix itself is
+   correct English). Both sides go into `two_nrl(bad_weights=, good_weights=)`, or `reward(weights=)` /
+   `punish(weights=)` when only one side exists, and `action` names what ran ("correct+2nrl"). The corrections join
+   the replay buffer like any taught text. `diff_corrections=False` goes back to the whole-sentence way;
+   `learn=False` reports what it would have taught and touches nothing.
+
+`run()` is a loop over **batches**: one batch is `rounds` rounds and the report card over them (its own lessons,
+not the run's).  With `batches` > 1 - or 0, which keeps going until the stop event - it closes the loop itself:
+`plan` from that card, `apply_plan(plan)` (the brief becomes `config.brief`, the upgrade sets `level`, `words`,
+`threshold` and `drills`, and `focus` is released because the brief carries the points of grammar in order), then
+the next batch, taught to it.  A batch that cannot be planned ends the run rather than repeating itself; a stop
+between batches never starts one, and the batch it stops in still reports.
+
+Records: `{"kind": "lesson", batch, round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
+spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds}` (`changes` is what
+the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
+...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
+`pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
+`plan = N` (`--plan N`, `POST /api/tutor/start {"plan": N}`) one more record closes the run:
+`{"kind": "plan", batch, rounds, ...LessonPlan.to_dict()}`, from `TutorTrainer.plan(card=None, count=N)` — the
+run's own report card unless one is given.  A teacher that cannot plan costs only a `note`; the lessons stand.
+An auto run plans between batches whether or not `plan` was asked for (`DEFAULT_PLAN_LESSONS` then), and announces
+each new batch with `{"kind": "batch", batch, step, brief, topic, level, words, threshold, drills, note}` — what
+`apply_plan` just set, so a reader always knows what is being taught.
+
+With `--blame` (`TutorTrainer(negative=...)`, `POST /api/tutor/start {"blame": true}`) every failed sentence of a
+round also teaches the **negative network** (section 24) why it failed: the mistake the teacher named is the reason,
+its mark the severity, its sentence of teaching the note, and the correction is diffed so only the characters it
+changed are blamed. The round records then carry `negative_blamed`, `negative_edges` and `negative_reasons`.
+
+CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
+mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
+the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons, the card and
+the plan.  `--plan [N]` (default 3) prints the planned lessons as a table, the step up, the brief, and the
+`tutor --brief ...` command that teaches the next batch to it; `--brief TEXT` is the other end of that loop, and
+`--batches N` (0 = until Ctrl-C) runs it automatically, printing one line per batch as it starts.
+
+CLI flags for the teacher: `--tutor-provider ollama|chatgpt` (`--provider`), `--tutor-model`, `--grader-provider`,
+`--grader-model`, `--url`, `--grader-url`; a `chatgpt` teacher without `$OPENAI_API_KEY` stops before anything is
+sent.
+
+API: `GET /api/tutor` (defaults, error types, modes, `levels`, `plan_lessons`, and `providers` — each teacher's url,
+model and whether it is `configured`), `POST /api/tutor/start` (job), `GET /api/tutor/history`,
+`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer) and `POST /api/tutor/plan`
+(`{report, count, topic, level, exercises, drills}` -> `{plan, source, provider, model, url, report}`; without
+`report` the card at the end of the last run — `ModelService.tutor_card()`, the last `"report"` record of the
+history — is used, and 400 says so when there is none). All of them take `tutor_provider` / `grader_provider` (and
+`url` / `grader_url`); a `chatgpt` teacher on a server without a key is refused with 400. The service releases the model
+lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
+teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with (ChatGPT: the server's
+`--chatgpt-model`).
+
+Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpoints) with a **Teacher** selector
+(Ollama or ChatGPT; the URL, the model placeholder and the notes follow it, and it says so when the server has no
+key), the settings ("Teach corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
+per round, the report card with the mistake histogram, a table of rounds (with what the corrections moved) and one
+of every lesson (marks, mistake, what the network wrote, the correction, the changed words struck out against what
+replaced them, the teacher's line).  **Plan** (`POST /api/tutor/plan`) sits under each report card - the dry run's
+and the run's - and a **Lesson plan** card closes the tab: the summary, the step up (`hold` / `stretch` /
+`advance` with its note), the brief for the next batch with **Teach the next batch** (which loads the brief and
+the upgraded level, openings, pass mark and drills into the settings above), the weak points as pills, and a row
+per planned lesson (the point of grammar, the mistake it fixes, the topic, the exercises, why) with *Use this
+lesson*, which loads that one lesson instead.  Both leave **Start lessons** to the user.  The form's **Brief** box
+and **Prefix words** field are `brief` and `words`; the **Plan** field is the run's own `plan` setting, so a run
+that ends with a `"plan"` record shows it in the same card without asking again.  **Batches** is the auto run: the
+button becomes *Start auto run*, the Rounds table gains a `batch` column, the report card is the last batch's, and
+every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
+per batch) so the settings show what the server is teaching.
+
+Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, answers drill requests and
+plans the next lessons; the parsers, the marking, the planner, the loop with a scripted model, the endpoints and
+the CLI), the ChatGPT teacher of
+`tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
+model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
+
+### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
+
+A grade used to reach the graph as two verdicts on two whole sentences: the attempt was garbage, the correction was
+gospel. Most of a corrected sentence is however word for word what the network wrote - the teacher changes a tense,
+an article, a plural - so the whole-sentence penalty taxed the trigrams that were right.
+
+`diff.edits(wrong, right)` aligns the two character by character: the shared prefix and suffix are trimmed, the
+middle is aligned by a longest-common-subsequence walk (`MAX_CELLS` guards a pathological pair, which then counts as
+one change), neighbouring edits of one kind are merged, and an equal run shorter than a trigram between two changes
+is swallowed (`MIN_EQUAL_RUN`), because no trigram fits in such a gap - "mat" -> "park", not "m" -> "p" and "t" ->
+"rk". `changed_spans` returns the half-open rune ranges each side disagrees on; an insertion is an *empty* span at
+the position where the text belongs. The Go port (`go/radixnet/diff.go`) is the same algorithm with the same
+tie-breaks, and `tests/test_go_parity.py` compares the two on a set of sentence pairs.
+
+`CountRewardNet.correct(wrong, right, strength=, weight=, reward=, keep=, count=)` turns that alignment into edge
+updates. Both sentences join the structure first (observing one can split a node the other's path runs through), and
+then every step of a traced path is charged with the characters it *writes*: the first step with the whole of its
+node's label, a later one with everything past the two characters it overlaps its parent by, and the step into END
+with the position just past the last character - where a sentence that stopped too early went wrong (`_steps_over`).
+The steps of `wrong` charged with a changed character lose `strength * weight`; the steps of `right` charged with
+one gain `strength * reward` and the rest of the correction `keep` times as much (0 teaches the fix alone, 1 is the
+old whole-sentence thumbs up); an edge both sentences walk is rewarded, never penalised. `count` traverses the
+correction once, as a training pass does. One `add_reward` call per distinct amount, so the weights are recomputed
+three times at most. Returns `{edits, changes, penalised, rewarded, kept, penalty, reward, loss, wrong_chars,
+right_chars}`.
+
+CLI `radixnet correct --wrong ... --right ...` (and `radixnet-count correct`) teaches one correction by hand and
+`--dry-run` prints the alignment alone. Tests: `tests/test_countnet.py::TestCorrections` and
+`go/radixnet/correct_test.go` (the alignment rebuilds both sentences, only the differing steps move, `keep` spreads
+the rest, an early end blames the step into END, a run of corrections keeps the graph sound), plus the cross-language
+parity case.
+
 ---
 
-## 17. Code generation (`codegen.py`) — sandbox, Ollama judge, 2NRL rewards
+## 17. Code generation (`codegen.py`) — sandbox, LLM tutor and judge, 2NRL rewards
 
 `problem -> Python program -> sandbox -> judge -> 2NRL`, in two semi-supervised phases over one problem list:
 
-* **teacher**: the Ollama model (`CodeGenConfig.teacher_model`, default `gemma4`, env `RADIXNET_CODEGEN_MODEL`) writes a
-  program (`teacher_generate`), the sandbox runs it, failures / rejections go back to the teacher (`teacher_fix`, up to
+* **teacher**: the tutor (`CodeGenConfig.teacher_provider`, `"ollama"` by default with `teacher_model` `gemma4` / env
+  `RADIXNET_CODEGEN_MODEL`, or `"chatgpt"` with that provider's default model, section 16.2) writes a program
+  (`teacher_generate`), the sandbox runs it, failures / rejections go back to the tutor (`teacher_fix`, up to
   `teacher_attempts` programs), the judge confirms. Learning: `two_nrl(bad=[texts of the wrong attempts], good=[text of the
   correct one])` — wrong answers first, then invert, then the correct answer.
 * **model**: the network continues `model_prompt.format(problem)` (default `"{problem}\n"`) into code — attempt 0 by the
@@ -735,17 +1087,27 @@ check_style(code) -> StyleReport(ok, syntax_ok, pep8_ok, naming_ok, issues)
     # before top-level defs; N801 CapWords classes, N802 snake_case functions, N803 arguments, N806 variables
     # (UPPER_CASE constants and CapWords aliases allowed)
 extract_code(text)            # the longest ```python block, else the text
-judge_with_ollama(client, problem, code, run, style, model=None) -> {"task","pep8","naming","score","issues","critique"}
+default_teacher_model(provider) -> str        # DEFAULT_TEACHER_MODEL for ollama, the provider's own default otherwise
+judge_with_llm(client, problem, code, run, style, model=None) -> {"task","pep8","naming","score","issues","critique"}
     # JSON-mode adversarial reviewer prompt with the task, program, execution result and the objective style report
-decide(run, style, llm, strictness) -> Verdict(correct, runs, task, pep8, naming, score, issues, critique, judged_by)
+decide(run, style, llm, strictness, judged_by=DEFAULT_PROVIDER) -> Verdict(correct, runs, task, pep8, naming, score,
+    issues, critique, judged_by)
     # correct = runs and expected_ok is not False and task is not False and (lenient or pep8 and naming and style.ok)
     # task: False when the program fails or the stdout differs; the LLM's answer when asked; True with matching
-    # expected output; None (counts as ok) when nothing can judge it. judged_by: sandbox | tests | ollama | none
-CodeGenConfig(teacher_model, judge_model, phases=("teacher","model"), rounds=1, teacher_attempts=3, model_attempts=4,
+    # expected output; None (counts as ok) when nothing can judge it.
+    # judged_by: sandbox | tests | ollama | chatgpt | none — an LLM verdict names the provider that gave it
+CodeGenConfig(teacher_provider="ollama", teacher_model="", judge_provider="", judge_model=None,
+    phases=("teacher","model"), rounds=1, teacher_attempts=3, model_attempts=4,
     first_attempt_dijkstra=True, temperature=1.0, max_length=800, strictness="strict", use_judge=True,
     fallback_teacher=True, twonrl_per="problem"|"round", replay=True, replay_limit=64, teacher_prompt=None,
     model_prompt="{problem}\n", neg_epochs=2, pos_epochs=3, neg_lr=0.5, pos_lr=0.1, batch_size=4, checkpoint_every=0)
-CodeGenTrainer(model, client, sandbox=None, config=None, external=None)
+    # __post_init__ normalises the providers (ValueError for anything else), fills teacher_model from the tutor's
+    # provider when blank and lets judge_provider default to the tutor's, so to_dict() / reports name the real models
+    .resolved_judge_model -> str          # judge_model, else the tutor's model (same provider) / that provider's default
+CodeGenTrainer(model, client, sandbox=None, config=None, external=None, judge_client=None)
+    # client is the tutor (any provider); the judge shares it unless judge_client is given or judge_provider names the
+    # other provider, in which case a client for it is built from the environment. Attempts are labelled with
+    # provider_of(client), verdicts with provider_of(judge_client), so a ChatGPT tutor can be judged by a local model.
     .evaluate(problem, code, source, index) -> Attempt      # sandbox + style + (if it runs and use_judge) the LLM judge
     .solve_with_teacher / .generate_with_model / .solve_with_model
     .learn(bad, good) -> {"bad","good","action": "2nrl"|"reward"|"punish"|None,"neg_loss","pos_loss"}
@@ -761,9 +1123,13 @@ CodeGenTrainer(model, client, sandbox=None, config=None, external=None)
 CLI `codegen --problems FILE` (section 11 of the README lists the options); the `ProblemPrinter` prints attempts as notes,
 problems as table rows and round summaries. API: `POST /api/codegen/start` (job "codegen"; problems from `problems`,
 `problems_text`, `problem_files` uploads), `GET /api/codegen/history`, `POST /api/codegen/solve` (one problem with the
-model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). Frontend: the
-"Code" tab. Tests (`tests/test_codegen.py`) use a fake Ollama whose teacher answers come from a scripted queue and whose
-judge rejects programs containing `BAD_ANSWER`.
+model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). `start` and
+`solve` take `teacher_provider` / `judge_provider` (and `url` / `judge_url` / `teacher_model` / `judge_model`); a
+`chatgpt` tutor on a server without a key is refused with 400 before anything is sent. Frontend: the "Code" tab, whose
+**Teacher** selector switches the provider (model, URL, notes and badges follow it). Tests (`tests/test_codegen.py`)
+use a fake Ollama whose teacher answers come from a scripted queue and whose judge rejects programs containing
+`BAD_ANSWER`; `tests/test_chatgpt.py` runs the same loop against the fake OpenAI server, including a ChatGPT tutor
+judged by a local model.
 
 ## 18. Learning-rate schedules (`schedule.py`) — rates as graph functions of the epoch
 
@@ -804,7 +1170,7 @@ call instead of spelling the rule out themselves.
 `CountRewardGraph(RadixCyclicGraph)` keeps more per-edge lists next to `edge_w` / `edge_count`: `edge_reward` and
 `window_edge_count` (traversals inside a sliding window, a deque `_window` of the last `window` edge ids traversed
 anywhere in the graph, default 10 000), plus the global `total_traversals` - a cyclic counter like every other
-(section 24); the window counts are bounded by `window` and so need no wrapping. `observe_sequence(count=True)` is
+(section 28); the window counts are bounded by `window` and so need no wrapping. `observe_sequence(count=True)` is
 overridden to `record_traversals` (all time, window, total) and recompute the weights. The weight is the *dual
 frequency function* (`edge_weight`): with `C_p` / `W_p` the all-time / windowed traversals leaving the parent over
 its `deg` children and `s = 0.5`, `R_all = (count + s) / (C_p + s * deg)`, `R_recent = (window_count + s) /
@@ -913,9 +1279,11 @@ may contain anything), completes the padding, pads or truncates the payload to t
 API: `GET /api/images` (`describe()`), `POST /api/images/encode` (a binary route like `/api/uploads`: multipart,
 raw body with a default name, or JSON `content_base64`; options from the query string or the JSON body: `size`,
 `encoder`, `train`, `save_as`, `epochs`, `lr`, `batch_size`; `train` starts a train job on the one text, `save_as`
-stores it as an upload so several images can be trained on together), `POST /api/images/decode`. CLI: `image info |
-encode | decode`. Frontend: the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image
-side by side with the original; train on it; save as upload; decode any pasted text such as a prediction).
+stores it as an upload so several images can be trained on together), `POST /api/images/decode`,
+`POST /api/images/tutor` (the recall tutor of section 26). CLI: `image info | encode | tutor | decode`. Frontend:
+the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image side by side with the
+original; train on it; save as upload; ask it for the picture back and blame what it misremembered; decode any
+pasted text such as a prediction).
 Dependencies: `pip install radixnet[images]` (pillow) or `radixnet[diffusion]` (pillow, torch, diffusers).
 
 ## 22. The model conversing with itself (`dialogue.py`) — replies are predictions picking up the last words
@@ -953,6 +1321,8 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 
 ## 23. The count / reward model in Go (`go/`) — goroutines over lines, paragraphs and pages
 
+(The negative network is ported too; section 24.5 covers what it adds to the types below.)
+
 `go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
 beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
 CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `weights`, `info`, `converse`). The
@@ -966,7 +1336,7 @@ Python dict order decides the softmax summation order -, trigram index, `Split` 
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`),
 `json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`), `counter.go` (the
-cyclic counters of section 24, identical to `radixnet/counter.py`).
+cyclic counters of section 28, identical to `radixnet/counter.py`).
 
 Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
 
@@ -993,20 +1363,46 @@ Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
 * **Predictions run their two beams side by side** whenever the bottom cap is known up front; `ScoreAll` scores
   texts in parallel; the loss is a parallel reduction.
 
-Streaming and chunking (`source.go`): a `TextSource` yields texts in order and can be re-read for every pass -
-`SliceSource` (in memory), `FileSource` (line by line, any line length, BOM and invalid UTF-8 repaired),
-`ZipSource` (`archive/zip` opened from disk: the central directory only, entries streamed on demand through
-`WalkZip` with the Python module's skip rules and an 8 KB NUL sniff for binaries), `MultiSource`.
-`Model.passesSource` consumes a source in chunks of `TrainOptions.ChunkSize` texts (default 8192, `--chunk`,
-`chunk_size`): the structure pass walks the chunks once; every epoch re-streams them - encode, trace and count
-with one goroutine per text, the sliding window in corpus order, rewards per chunk - and accumulates per-edge
-traversal counts so the loss (`weightedCost`, Σ traversals × cost / total) needs no list of transitions. Memory is
-one chunk plus the graph: a million-line ZIP (39 MB unpacked) trained at a flat 90 MB peak RSS. The server's
-`POST /api/uploads` streams multipart parts and raw bodies into the upload directory (`Uploads.StoreStream`: the
-first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming its entries), the listing
-inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline texts and `Uploads.Source`
-(ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be parsed whole, are capped at
-512 MB.
+Streaming and chunking (`source.go`, `pipeline.go`): a `TextSource` yields texts in order and can be re-read for
+every pass - `SliceSource` (in memory), `FileSource` (line by line, any line length, BOM and invalid UTF-8
+repaired), `ZipSource` (`archive/zip` opened from disk: the central directory only, entries streamed on demand
+through `WalkZip` with the Python module's skip rules and an 8 KB NUL sniff for binaries), `MultiSource`. A source
+that has natural parts (archive entries, the files of a set) also implements `PartSource`, so the parts are opened
+once and streamed independently. `Model.passesSource` consumes them in chunks of `TrainOptions.ChunkSize` texts
+(default 8192, `--chunk`, `chunk_size`): the structure pass walks the chunks once; every epoch re-streams them -
+encode, trace and count with one goroutine per text, the sliding window in corpus order, rewards per chunk - and
+accumulates per-edge traversal counts so the loss (`weightedCost`, Σ traversals × cost / total) needs no list of
+transitions. A `sequencer` restores corpus order by (part, chunk index) for the two steps that are ordered by
+nature - observing novel texts and applying the window / rewards - while everything else runs in any order.
+
+The reader never waits for a chunk it spawned, but it does wait for a slot: `TrainOptions.Inflight` (`--inflight`,
+`inflight`; default two per CPU) bounds the chunks in flight, and a chunk holds its slot from the moment it is read
+until the sequencer has applied it - a finished chunk waiting for its turn costs the same memory as one being
+counted. Without that bound the reader outruns the counting: 1.7 GB on a 39 MB archive, 3.2 GB with `ParallelParts`
+(a reader goroutine per part, `--parallel-parts`, off by default), against 393 MB now - and that pile-up is what
+killed the server on a big upload. Parallel parts cannot share one pool, since the slots would all be taken by
+parts the sequencer cannot reach yet while the part it waits for cannot start, so each open part gets its own
+budget of chunks and only a window of parts is open at a time; permits are taken in part order, so the oldest
+unfinished part always holds one and the pipeline cannot stall. The second half of that failure is the collector: Go grows the heap to
+about twice the live set before collecting, so `ApplyMemoryLimit` (`memlimit.go`) sets `debug.SetMemoryLimit` to
+80 % of the process's cgroup limit (its own path in `/proc/self/cgroup`, v2 and v1) or of `MemAvailable` at startup
+(`--memlimit SIZE`, `--memlimit off`, `GOMEMLIMIT` wins), which trades speed for staying inside the box. Measured
+on a 113 MB corpus (10,703 files, 421 K nodes, 2.34 M edges, 426 MB live heap): 1452 MB peak RSS with no limit,
+1027 MB at a 1 GiB limit for the same wall time, 767 MB at 512 MiB with the collector running continuously (peak
+RSS runs above the limit itself: it counts the runtime's unreturned spans and the page cache of the files being
+read and written, while the anonymous memory stays inside it). Run inside a 1 GiB cgroup, the same training is
+killed by the OOM killer after 26.9 s without a limit and finishes in 32.5 s at 908 MiB with the detected one -
+the failure the user hit, and the fix. Saving and loading stream through the file (`encodeCompact` into the gzip /
+temp file, `json.Decoder` out of it), the adjacency lists are two parallel slices with a map index only past
+degree 16 (a Go map per node cost more than the rest of the graph), the sliding window compacts in place and the
+read buffers are pooled, all of which keep the allocation rate off the collector's back.
+
+The server's `POST /api/uploads` streams multipart parts and raw bodies into the upload directory
+(`Uploads.StoreStream`: the first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming
+its entries), the listing inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline
+texts and `Uploads.Source` (ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be
+parsed whole, are capped at 512 MB. `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status
+bar can show how close a run is to its ceiling.
 
 Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
 with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),
@@ -1014,6 +1410,12 @@ weights (1e-12), predictions, generated texts, scores and conversation transcrip
 the other's file with identical results; feedback, invert and weight changes match too. `go test -race ./...`
 covers the Go module (RNG vectors against CPython, exact summation, structure invariants, lazy weights against a
 full recompute, 1 vs 8 workers giving the same model, search / generation / conversation, gzip round trips).
+`TestGoTutorParity` runs both tutors against one fake Ollama: the calls the teacher receives (system and user
+prompts, in order), the marks, the report card and the resulting graph must all match, a dry run on either side
+must change nothing, with `--plan N` the report card is read out to the teacher in the same words and both sides
+come back with the same syllabus (lessons, targets, weak points, level, summary, the brief and the upgrade), and
+with `--brief TEXT` both hand that brief to the exercise writer identically; `--batches 2` runs the whole loop on
+both sides and the batch records - brief, step, level, openings, pass mark, drills - must match.
 
 ### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
 
@@ -1028,10 +1430,32 @@ memory), `checkpoints.go` (the `CheckpointManager` layout: `ckpt-<tag>-<step:06d
 `index.json`, pruning to `--keep`). Section 12's contract holds for every count-model endpoint; `POST /api/train`
 additionally takes `split` (`lines | paragraphs | pages | file`) and `page_lines`, the units the goroutines fan out
 over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `workers` and `goroutines`; the Python-only
-endpoints (evolve, ollama, images, codegen, schedule preview) answer 404 with a message naming the Python server.
+endpoints (evolve, the ollama corpus / review calls, images, speech, codegen, schedule preview) answer 404 with a message
+naming the Python server.
+
+The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `plan.go`,
+`go/server/tutor.go`): the same prompts, the same records and the same endpoints (`GET /api/tutor`,
+`POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `POST /api/tutor/plan`,
+`GET /api/chatgpt/models`), with the count / reward model
+answering the exercises and `serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` (or
+`$OLLAMA_HOST` / `$RADIXNET_TUTOR_MODEL` / `$OPENAI_BASE_URL` / `$RADIXNET_OPENAI_MODEL`) setting the defaults.
+Both teachers are here as well: `LLMClient` is the interface `OllamaClient` and `ChatGPTClient` implement,
+`NewLLMClient(provider, ...)` builds one, `TutorConfig.TutorProvider` / `GraderProvider` choose them (resolved by
+`Resolve`, which `Validate` calls), and `$OPENAI_API_KEY` is read per request and never stored - the key is the
+server's own, never a request field. `radixnet-count tutor -tutor-provider chatgpt` is the CLI twin, `-plan N`
+included; `plan.go` is `weak_points` / `plan_from_card` / `plan_lessons` word for word - the same system prompt,
+the same report card read out to the teacher, the same fallbacks and the same JSON - so the parity test drives both
+CLIs against one fake teacher and compares the plan they come back with.
+The job releases the model lock around every LLM call, as the Python service does. Ratings reach the
+model through `WeightGroups` + `RewardWeighted` / `PunishWeighted` / `TwoNRLWeighted` (one pass per distinct
+weight, the reward or penalty scaled by it), which also back `good_ratings` / `bad_ratings` on `/api/2nrl` and
+`/api/feedback`. The corrections go the diff way here too: `go/radixnet/diff.go` is the same alignment as
+`diff.py` and `Model.Correct` (`go/radixnet/correct.go`) the same edge updates, down to the tie-breaks, so the
+tutor parity test finds the same rewards on both sides; `radixnet-count correct` is the CLI twin of
+`radixnet correct`.
 
 Frontend (`App.jsx`): `engineOf(status, health)` reads the engine; with `"go"` the Python-only tabs (Evolve, Ollama,
-Code, Images) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
+Code, Images - the Tutor tab stays, both servers run the lessons) are neither shown nor mounted, the header shows a **Go engine · N goroutines** badge, the status bar
 replaces the accelerator chips with `engine go · workers · goroutines` (`StatusBar.jsx`), and the Train tab
 (`TrainPanel.jsx`) offers **Texts are** `lines | paragraphs | pages` (+ lines per page): with paragraphs or pages
 the pasted text is sent whole as `text` together with `split`, and the server cuts it and the selected uploads.
@@ -1046,11 +1470,617 @@ Python `CheckpointManager` reading the server's checkpoints).
 
 ---
 
+## 24. The negative network (`negative.py`, `blame.py`, `duo.py`) — the failures, and why
+
+A second copy of the network that keeps only its **negative portions**: the same self-compressing cyclic graph, the
+same trigram window, the same Dijkstra / beam searches, but **every node and edge in it exists because something went
+wrong there**. It is a model kind like the others (`kind = "negative"`, `format = "radixnet-negative"`, default file
+`model.negative.json`), so `model_classes()`, `load_model`, checkpoints, `POST /api/model/select` and `--kind
+negative` all reach it; what makes it different is that it is trained on negative data alone and that every edge
+remembers *why*.
+
+### 24.1 `NegativeGraph(RadixCyclicGraph)`
+
+Per-edge lists beside `edge_w` / `edge_count` (appended in `_new_edge`, so they survive `split` and `merge_child`
+exactly as the counts do): `edge_blame` (summed severity), `edge_fails` (failing texts through the edge),
+`edge_clear` (how much cleared text crossed it) and `edge_reasons` (`{reason_id: blame}`, at most
+`MAX_EDGE_REASONS = 8` entries; the smallest is dropped when a ninth appears and the graph-level totals keep it).
+The graph owns the reason registry (`reasons`, `reason_ids`, `reason_blame`, `reason_fails`, `reason_id(label)`
+normalising tags to one lower-case line) and the totals `total_blame`, `total_fails`, `total_clear`.
+
+* `record_failure(edge_ids, severity, reason)` adds the severity to every listed alive edge, bumps its fail count and
+  its reason entry, updates the totals and recomputes the weights; `record_clear(edge_ids, weight)` does the same for
+  cleared text.
+* `evidence(e) = max(0, blame - clear_scale * clear)` — **blame and clearing cancel**, so an edge the tutor's passes
+  cross as often as its failures do carries no verdict at all. This is the only notion of evidence in the module:
+  the weight function, `judge` and the filter all read it.
+* `edge_weight(evidence, parent_evidence, degree) = share_scale * log((net + s) / (parent_net + s * deg)) +
+  blame_scale * log1p(net)` with `s = SMOOTHING = 0.5`, `share_scale = 1`, `blame_scale = 0`, `clear_scale = 1`.
+  `recompute_weights()` walks every parent once (O(E)) and bumps `version` so the cost cache refreshes;
+  `configure(**scales)` changes the function at run time and `weight_config()` describes it.
+* Every node is created with `a = 0, k = 1` (the sine activation is the constant 1), so the base class's score
+  `w * f_p * f_c` is the weight itself and `child_probs`, `child_costs`, Dijkstra, sampling, splits and merges work
+  unchanged. A softmax over the children is therefore `P(child | parent)` **under the failure distribution**.
+* `merge_child(p)` refuses to merge a unary chain whose edge carries blame or clearing: compression turns a
+  transition into a deterministic step *inside* a node, and a step inside a node has no edge to carry evidence, so a
+  correction that blamed a single transition would be folded away and forgotten. Everything the tutor never ruled on
+  still merges.
+* `forget(reason=None, factor=0.0)` scales one reason's blame (or all of it) down — `factor` 0 drops it, 0.5 halves
+  it — and returns `{reason, edges, blame_removed}`. `invert()` swaps `edge_blame` and `edge_clear` (the inverse of a
+  network of failures is a network of what passed) and toggles `inverted`.
+* `to_dict` / `from_dict` carry `edges.blame|fails|clear|reasons` (compacted in the same order as the base class's
+  edge arrays), the scales, the totals and the reason registry, and rebuild the weights on load.
+
+`RadixCyclicGraph.trace(trigrams)` (public wrapper around `_trace`) walks a sequence without creating, splitting or
+counting anything — what clearing and judging need.
+
+### 24.2 `NegativeNet(GraphModel)` and the tutor
+
+One `_pass(texts, cfg, blame=..., amount, reason, source, note)` routine underlies everything. A **blame** pass
+registers the texts structurally (`_register`: two passes, because a later text can split a node an earlier one
+pointed at), compresses, and then per epoch blames every transition of every text; a **clear** pass creates nothing
+and credits only the transitions a text shares with the existing failure structure (`_shared_edges`, built from
+`crossings`), so ordinary correct text — which will never walk a graph of failures end to end — still counts. Each
+pass appends a record (`phase: "negative" | "clear"`, `loss` = mean `-log P` of the transitions, `matched` /
+`unmatched`, `edges_touched`, `reason`, `severity`, `source`) and, for blame passes, a journal entry
+(`MAX_LOG_ENTRIES = 200`, newest kept: `at`, `text`, `reason`, `severity`, `source`, `note`).
+
+| Method | What it does |
+|---|---|
+| `blame(texts, reason, severity, source, note, epochs)` | learn a failure — the only operation that adds structure |
+| `clear(texts, weight, epochs)` | the tutor passed these: take blame off what they share, create nothing |
+| `train(texts, ...)` | **is** a blame pass (`lr` / `act_lr` / `batch_size` accepted and ignored) |
+| `punish` / `reward` | thumbs down = `blame` (reason `thumbs-down`), thumbs up = `clear` |
+| `two_nrl(bad, good, ...)` | blame `bad` (optionally per-text `bad_weights` scaling the severity), then clear `good`; no inversion |
+| `invert_paths(texts, amounts=...)` | the evolve loop's failures: blame each path by `strength * amount` |
+| `predict(prefix, ...)` | the beam search of section 19 over the failure distribution: the K most likely ways to go wrong (and the K least likely as `bottom`) |
+| `crossings(text)` | every transition of a text through the failure structure: `{index, start, end, fragment, parent, edge, blame, fails, clear, evidence, reason, reasons}`, `edge = None` where the network has never been |
+| `correct(wrong, right, reason=, severity=, ...)` | the tutor wrote the sentence out correctly: blame only the steps that wrote a character it struck out (`_steps_over` over `diff.changed_spans`), never an edge the correction walks too, and clear everything the correction shares with the failure structure |
+| `judge(text, threshold=, min_coverage=, spans=)` | the verdict (below) |
+| `reasons()` / `recent(limit)` / `forget(...)` | the reason table / the journal / drop or fade a reason |
+
+`judge` returns `{text, chars, transitions, known, blamed, coverage, blame, risk, peak, per_char, threshold,
+min_coverage, verdict, reasons, spans, why}`: `blame` is the summed evidence of the blamed transitions, **`risk` that sum over
+*all* of the text's transitions** (compression moves both together, so the ratio does not depend on it — repeating a
+failure blamed once scores about 1, sharing a third of one's transitions with it about 0.33), `coverage` the share
+of transitions that are known failures, `reasons` the aggregated reason histogram (each blamed edge contributes its
+reasons scaled by `evidence / blame`), `spans` the worst fragments with their character range (`start = i - 1`,
+`end = i + WINDOW` around the junction), and `verdict` is `"reject"` when `coverage >= min_coverage` **and**
+`risk >= threshold` (defaults 0.5 and 1.0), `"suspect"` when something failed but not enough, `"pass"` when nothing
+here ever failed; `peak` is the most evidence any single transition carries, which is what a correction moves and
+what the filter's `peak` rule reads. `why` says it in one sentence. Judging is counted in `meta` (`judgements`,
+`rejected`).
+
+`GraphModel._steps_over(grams, length, spans)` and `_touches` live in `model.py` (moved up from `countnet.py`, which
+inherits them): the edges of a traced text whose step wrote a character inside one of the changed spans, charging
+every step with the characters it adds and the step into END with the position just past the last one. Both
+corrections - the count model's reward-based `correct` and the negative network's blame-based one - mark the same
+characters, and so does the Go port.
+
+**`blame.py`** is where the negatives come from; nothing else may create them. A **fault** is
+`{text, reason, severity, note, source}` plus, when the tutor rewrote the sentence, `correction`.
+`faults_from_lessons(lessons, threshold)` reads a round of the English tutor (section 16.1): the mistake it named
+(`grade.error`, one of `tutor.ERROR_TYPES`) is the reason, its mark is the severity, its sentence of teaching is the
+note and its correction rides along so `teach` routes the fault through `NegativeNet.correct`; the sentences that
+passed, the corrections themselves and the teacher's model answers all clear blame.
+`classify(critique, verdict=, rating=)`
+picks a reason out of `REASONS` (`empty`, `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`,
+`contradiction`, `false`, `incoherent`, `off-topic`, `other`, plus `unrated`) by matching the tutor's own words;
+`severity_from_rating(rating, threshold)` maps 0 -> 2.0 and the pass threshold -> 0.25 (an unrated failure is 1.0);
+`code_reason(attempt)` reads the sandbox, the style report and the judge into `CODE_REASONS` (`timeout`, `crash`,
+`wrong-output`, `task-not-done`, `style`, `naming`) with the severities in `CODE_SEVERITY`; `recall_reason(facts)`
+does the same for the speech and image tutors of section 26, reading the round trip through the codec into
+`SPEECH_REASONS` (`unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`,
+`distortion`) and `IMAGE_REASONS` (the same four, then `blank`, `noise`, `drift`), with `RECALL_TRUNCATED` /
+`RECALL_OVERRUN` / `RECALL_AGREEMENT` as its boundaries.
+`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` / `faults_from_recall` turn a tutor's output
+into `(faults, passed)`, and `teach(negative, faults, passed)` (with the wrappers `teach_reviews`,
+`teach_attempts`, `teach_lessons` and `teach_recall`) blames each fault - through `correct` when it carries one -
+and clears the passes, returning `{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
+
+The call sites: `tutor --blame` / `TutorTrainer(negative=...)` / `POST /api/tutor/start {"blame": true}`, which
+blames every failed sentence of a round with the mistake the teacher named and adds `negative_blamed` /
+`negative_edges` / `negative_reasons` to its round records; `ollama review --blame` /
+`POST /api/ollama/review {"blame": true}` (the reviewer), `codegen --blame`
+/ `CodeGenTrainer(negative=...)`, which blames the rejected attempts of every problem and adds `negative_blamed` /
+`negative_reasons` to its problem records, `evolve --blame` / `Evolver(negative=...)`, which blames every fake the
+discriminator scored below the real texts (reason `blatant` past `blatant_margin`, else `discriminator`, severity
+`gap / margin` clamped to `[0.25, 2]`) and clears the real texts; `negative auto` / `POST /api/negative/auto`, the
+loop of section 24.6 that keeps the reviewer running so nobody has to type a failure in; `speech tutor --blame` /
+`image tutor --blame` /
+`POST /api/speech/tutor {"blame": true}` / `POST /api/images/tutor {"blame": true}`, which ask the network for a
+recording or a picture back and blame what it misremembered (section 26); and `POST /api/negative/blame` for a
+person.
+
+### 24.3 `duo.py` — the pair as a GAN at output time
+
+`NegativeFilter(positive, negative, config)` puts the two networks on one output path (`FilterConfig`: `threshold`,
+`min_coverage`, `ratio` (`None` = off), `peak` (`None` = off), `over_sample`, `strict`, `spans`, `learn`, `reason`). `judge(text)` merges
+the negative network's verdict with the likelihood ratio `negative.score(text)["per_char"] -
+positive.score(text)["per_char"]` — the discriminator logit of two generative models — and rejects when the blame
+rule fires, when `peak >= config.peak` (the evidence on one transition - a correction blames a handful of
+characters, so this is how a single corrected word vetoes an otherwise clean sentence), or, behind the same coverage
+gate, when `ratio >= config.ratio`; `rule` names which (`"blame"`, `"peak"`, `"ratio"`, `"suspect"` under `strict`). `filter(texts)` splits kept from rejected (blaming the rejects
+when `learn`, which is off by default: the tutor supplies the negatives, the filter only applies them).
+`generate(count, over_sample=, ...)` asks the positive model for `count * over_sample` candidates, filters them and
+returns the `count` survivors with the least blame plus every rejected verdict; `predict(prefix, ...)` filters the
+positive model's top-K continuations and adds `warning`, what the negative network predicts goes wrong from that
+prefix. `describe()` reports both halves and the settings.
+
+### 24.4 CLI, API, frontend, tests
+
+* CLI: `negative <action>` with `--negative PATH` (before or after the action; default `model.negative.json` derived
+  from `--model`): `blame`, `clear`, `why`, `filter`, `reasons`, `forget` — see the README's CLI table. `--blame`
+  (with `--negative`) on `tutor`, `correct` (one hand-written correction teaches both networks from the same diff),
+  `ollama review`, `codegen` and `evolve`. `--kind negative` makes it the ordinary model.  The Go CLI
+  (`radixnet-count negative <action>`, `tutor --blame`, `correct --blame`) has the same commands and flags
+  (section 24.5).
+* API: `GET /api/negative` (stats, reasons, journal, settings), `POST /api/negative/blame|clear|judge|filter|forget|
+  settings|reset|save`, plus `POST /api/negative/auto` + `GET /api/negative/auto/history` (the loop of section 24.6).
+  The service keeps exactly one negative network, in the same `_parked` store as the other
+  kinds, so selecting the `negative` kind hands back that very object; `positive_model()` finds the model it filters
+  (the active one, else a parked or saved positive kind, else 409). `POST /api/save` writes the negative network
+  beside the model when it holds blame.
+* Frontend: the **Negative** tab (`NegativePanel.jsx`) — **Automatic** (the reviewer on a loop, section 24.6; its
+  job history also refreshes the tables below, so the tab fills in by itself), run the pair, judge a text with its
+  blamed fragments marked (`<mark>`), blame / clear by hand, the reason table with per-reason *forget*, and the
+  journal; the Ollama tab's review card has a *teach the negative network* checkbox and reports what it learned.
+* Tests: `tests/test_negative.py` (weight function, evidence, blame / clear, corrections, judge, crossings,
+  prediction, forget, inversion, persistence, the kind registry, the API routes, the CLI group),
+  `tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
+  tutor, evolve and codegen hooks) and `tests/test_duo.py` (all three rules, the coverage gate, strict, learn,
+  generate / predict, the count model as the positive half).
+
+### 24.5 The negative network in Go (`go/radixnet/negative.go`, `blame.go`, `duo.go`)
+
+The Go port carries the negative network too, and the two implementations are held to the same numbers by
+`tests/test_go_parity.py::TestGoNegativeParity`: the same blame, the same corrections, the same file layout and the
+same verdicts character for character (the sentence a verdict carries is quoted the way Python's `repr()` quotes it,
+`pythonRepr`).  Go has one `Graph` type rather than a class hierarchy, so the negative arrays hang off it in an
+optional block:
+
+* `Graph.Neg *NegativeData` (nil on a count graph, so the count model pays nothing for it) holds `Blame`, `Fails`,
+  `Clear` and `Reasons` per edge - the last as a `[]ReasonBlame` of at most `MaxEdgeReasons` entries rather than a
+  map, because a map per edge is most of a graph's memory - plus the reason registry and the totals.  `newEdge`
+  grows them, `recomputeRow` routes to `recomputeNegativeRow`, `Invert` to `invertNegative`, `Configure` to
+  `ConfigureNegative` and `MergeChild` refuses to merge across an edge that carries evidence (`blocksMerge`).
+* `Model.Neg *Negative` holds the journal and the thresholds; `NewNegativeModel`, `IsNegative`, `Kind() ==
+  "negative"`, `Blame`, `Clear`, `BlameCorrection`, `Judge`, `Crossings`, `Reasons`, `Recent`, `Forget` and
+  `negativeStats` mirror the Python methods, and `stepsOver` (already there for the count model's `Correct`) marks
+  the same characters for both corrections.
+* `ToDoc` / `FromDoc` write and read the `radixnet-negative` format: `edges.blame|fails|clear|reasons`, the
+  `weights` block with the blame function and the reason registry, and the model-level `log` and `filter` blocks.
+  `Load` dispatches on the format, so either kind loads from either language.
+* `blame.go` is the Python `blame.py`: `Classify`, `SeverityFromRating`, `FaultsFromLessons`, `Teach` and
+  `TeachLessons` (the code-generation reasons stay in Python, which is where the sandbox lives).
+  `TutorTrainer.Negative` + `TeachNegative` blame every failed sentence of a round.
+* `duo.go` is `duo.py`: `FilterConfig` (pointers for "unset" and "off"), `NewFilter`, `Judge` with the blame, peak
+  and ratio rules, `Filter`, `Generate`, `Predict` and `Describe`.
+* `server/negative.go` adds the `/api/negative/*` endpoints and the tutor's `blame` flag; the service keeps one
+  negative network beside its model path, `POST /api/save` writes it alongside the model, and the frontend's
+  **Negative** tab is therefore no longer Python-only.
+* Go tests: `radixnet/negative_test.go`, `radixnet/blame_test.go`, `radixnet/duo_test.go`,
+  `server/negative_test.go`.
+
+---
+
+### 24.6 The negative network feeding itself (`critic.py`) — the reviewer on a loop
+
+Every source of negatives in section 24.2 arrives as a *side effect* of something else running: a tutor round, a code
+problem, a review, a recall quiz.  That left the Negative tab as the one surface where a person had to type a failure
+in by hand — which is exactly the kind of work a loop should be doing.
+
+`Critic(model, negative, client, config, external=...)` is that loop.  One round is three steps and nothing else:
+
+1. the **positive model** writes `count` texts of its own (`ollama.sample_texts`, a stochastic walk, optionally
+   continuing `prefix`);
+2. an **LLM reviewer** marks each one out of 10, passes or fails it against `threshold` and writes a one-sentence
+   critique (`ollama.adversarial_review`).  The client is any `LLMClient`, so `provider` picks a local Ollama model
+   (the default) or ChatGPT — `review_texts` only ever calls `generate`, which is why it never had to care;
+3. the failures **blame** and the passes **clear** (`blame.teach_reviews`, source `critic`): the critique picks the
+   reason through `classify`, the mark sets the severity through `severity_from_rating`.  Nothing new is invented —
+   this is the section 24.2 path, driven on a timer instead of by hand.
+
+`CriticConfig` carries those knobs plus `context` (what the reviewer is *told* the texts are meant to be — its
+yardstick, and worth setting, because "is this good?" means little without one), `clear_passes`, `epochs` and `seed`.
+The seed advances by the round number (`_seed`), so a seeded run is reproducible *and* its rounds differ; an unseeded
+one leaves the sampling alone.
+
+`run(rounds=None, progress=, stop_event=)` loops until the count is reached, or forever when it is 0 / `None`, and
+checks the stop event **between** rounds, so stopping finishes the round it is in rather than abandoning a half-taught
+one.  The records are the round records followed by one `report` (`report_card`): rounds, reviewed, blamed, cleared,
+edges, the mean mark, the pass rate, the reason histogram, and `trend` — the last round's mean mark minus the first's,
+positive when the reviewer is marking the model's output better than it did at the start.
+
+Two invariants are worth stating because they are what make the loop safe to leave running:
+
+* **the positive model is only read from.**  Nothing here trains, rewards, inverts or compresses it, so the loop can
+  run beside anything that *is* teaching it without fighting over the model;
+* **`external` wraps the slow call**, exactly as the English tutor does, so the server releases its model lock while
+  the reviewer thinks and readers keep being served.
+
+CLI: `negative auto` (`--rounds 0` runs until Ctrl-C, which finishes the round and saves; the per-round progress goes
+to stderr as a notice, so `--json` still writes one document to stdout).  API: `POST /api/negative/auto` starts a
+`critic` job over `ModelService.start_critic` — which quizzes `positive_model()` and teaches `negative_model()` —
+and `GET /api/negative/auto/history` is its record.  Frontend: the Negative tab's **Automatic** card, whose job
+history also drives a refresh of the reason table, the stats and the journal below it, so the tab fills in by itself
+as rounds land.  Tests: `tests/test_critic.py` — the config, one round, what reaches the negative network, the mark
+setting the severity, stopping between rounds, the report card, a real `OllamaClient` against the fake server, the
+job, the endpoint and the CLI.
+
+---
+
+## 25. Teaching by talking (`speech.py`) — the transcript and the waveform behind one unique token
+
+One utterance becomes **two texts that start with the same token**, and both are trained on:
+
+```
+<speech:9f2a1c7d> the cat sat on the mat
+<speech:9f2a1c7d> aud:mu:8000x1:gOXv7NgqFBAYTePu7dwvFRAXPuHu7d82FhAWNt/t7uE+FxAVL9zt7uNNGBAU…
+```
+
+`utterance_token(payload, unique=True)` is `SPEECH_TOKEN` (`<speech>`) with a short blake2b digest of the waveform
+text folded in, so the token is unique to that utterance, deterministic (the same recording always gets the same
+one) and **identical in both texts**: in the cyclic graph the words and the sound leave the *same* node, which is
+what ties them together. `unique=False` falls back to the bare `<speech>` for every utterance (one entry node for
+all speech), and an explicit `token=` overrides both. The token can never collide with the graph's `<s>` / `</s>`
+sentinels (no 3-character window of `<speech…>` equals `<s>`).
+
+`speech_texts(token, transcript, audio_text, pair=False) -> list[str]` builds them: the transcript (whitespace
+collapsed) when there is one, the waveform text when there is one, and with `pair` a third text - the waveform
+followed by its transcript - so the prediction search can run from the sound straight into the words.
+
+### The waveform as text
+
+`encode_audio(data, rate=8000, codec="auto", normalise=False) -> {"text", "codec", "rate", "channels", "samples",
+"seconds", "bytes", "chars", "normalised", "source"}`: the audio is decoded, mixed down to mono, resampled (linear
+interpolation - the next step quantises to a byte anyway), optionally peak-normalised to 0.99, quantised to one byte
+per sample and packed as `aud:<codec>:<rate>x<channels>:<base64>` (`pack_text` / `parse_text`).
+
+* `"mu"` (the default) — mu-law companding, `sign(x)·ln(1 + 255|x|)/ln(256)` mapped onto 256 levels: the classic
+  8-bit speech quantisation (G.711, WaveNet). Its relative error stays at ~2 % of the amplitude from full scale down
+  to a whisper, where linear 8-bit is already at 38 %, and it is a *stable* code (encoding a decoded byte gives the
+  same byte back).
+* `"pcm8"` — plain linear 8-bit, one signed byte per sample.
+
+`parse_text` looks for the header **anywhere** in the text, because a spoken text carries its token first and a
+paired one its transcript last; the payload runs from the header to the next whitespace and its base64 is repaired
+with `encoding.repair_base64` (section 4). `decode_text(text, codec=None) -> {"wav", "codec", "rate", "channels",
+"samples", "seconds", "bytes", "repaired"}` turns an encoded - or **predicted** - text back into a 16-bit PCM WAV
+(`wav_bytes`), so what the graph says can be listened to.
+
+`load_audio(data)` reads RIFF/WAVE itself: PCM 8 (unsigned) / 16 / 24 / 32, IEEE float 32 / 64, A-law and mu-law
+(the G.711 expansion tables), `WAVE_FORMAT_EXTENSIBLE` resolved through its SubFormat tag, chunks walked in order
+with the odd-length padding, a streamed `data` chunk of declared size 0 read to the end. Anything else (MP3, M4A,
+WebM/Opus, Ogg, FLAC) goes through `ffmpeg` when it is installed (`$RADIXNET_FFMPEG` overrides the binary); without
+it the error names the format it recognised from the magic bytes and says what to install. The browser never needs
+it: the Speech tab converts its recording to WAV itself (section 13).
+
+### Speech to text
+
+`transcribe(data, backend="auto", text="", language=None, model=None, url=None) -> {"transcript", "backend",
+"model", "language", "seconds"}` with `ASR_BACKENDS = (auto, given, faster-whisper, whisper, server)`:
+
+* `given` — the transcript comes from the caller (the browser's Web Speech API, `--text`, the API's `transcript`).
+  Always available; it is why the feature works with nothing installed, and under `auto` it wins over everything.
+* `faster-whisper` / `whisper` — the two local Whisper packages, the model (`$RADIXNET_WHISPER_MODEL`, default
+  `base`) loaded once per process and kept; a failed load is recorded in `.error` and raised as a `SpeechError`.
+* `server` — any OpenAI-compatible `/v1/audio/transcriptions` endpoint (whisper.cpp's server, Speaches, ...) posted
+  to with a hand-built multipart body over `urllib`; `$RADIXNET_ASR_URL`, `$RADIXNET_ASR_MODEL`,
+  `$RADIXNET_ASR_KEY` / `$OPENAI_API_KEY`. `auto` only reaches for it when a URL is configured, so nothing ever
+  blocks on a network call that was not asked for.
+
+Audio that is not a WAV is converted with ffmpeg before it reaches a backend (16 kHz, what Whisper wants anyway).
+
+### The flow
+
+`teach(data, transcript="", *, backend, language, asr_model, asr_url, rate, codec, normalise, waveform, pair,
+token, unique) -> {"token", "transcript", "asr", "audio", "texts", "chars", "pair"}` is what the CLI, the API and
+the frontend all call: encode the waveform, transcribe when no transcript was given, derive the token from the
+waveform text, build the texts. **A failing transcription is recorded, not raised** (`asr.error`): the waveform on
+its own is still worth learning, so talking to a machine without an ASR backend still teaches it something.
+
+`record(seconds, rate=16000, recorder=None)` records from the default input device with whichever of `arecord`,
+`rec` / `sox` and `ffmpeg` (`-f alsa` / `-f avfoundation`) is installed; `recorders()` lists them and `describe()`
+reports everything the feature can reach.
+
+CLI: `speech info | transcribe | teach | listen | tutor | decode` (`listen` records first, then runs `teach`;
+`--train` trains on the texts and saves; `tutor` is the recall tutor of section 26). API: `GET /api/speech`,
+`POST /api/speech/transcribe`, `POST /api/speech/teach`, `POST /api/speech/tutor`, `POST /api/speech/decode`
+(section 12). Frontend: the Speech tab (section 13). Dependencies: none for the waveform,
+the token and the browser's dictation; `pip install radixnet[speech]` (faster-whisper) or `radixnet[whisper]`
+(openai-whisper) for server-side transcription, ffmpeg for audio formats other than WAV.
+
+---
+
+## 26. The recall tutor (`recall.py`) — the tutor that needs no teacher
+
+Sections 16 and 24.2 all end at the same place: a negative needs something outside the network to look at an output
+and say it was wrong, **and why**.  For English that something has to be an LLM, because nobody knows in advance
+what the right sentence is.  For speech and images it does not, because **the right answer is on file**: an
+utterance or a picture was *encoded* into text (sections 25 and 11) before it was trained on, so asking the network
+to write that text out again is an exercise whose correction already exists.
+
+That is the whole idea of this module.  It is the same three steps the English tutor takes (section 16.2), with the
+codec in the marker's chair:
+
+1. **the exercise** — the opening of a text the network was taught.  `cue_of(text, lead)` is everything up to the
+   payload plus `lead` characters of it, and `DEFAULT_LEAD` differs by modality for one reason: a spoken text
+   carries a token of its own (`<speech:9f2a1c7d> aud:mu:8000x1:`), so the exercise can be the token alone — *what
+   did that utterance sound like?* — while an image header (`img:tiny:128x128:`) is the same for every picture of
+   that size, so without a lead there is nothing to say which one is wanted (16 characters by default);
+2. **the completion** — `quiz` runs the prediction search from the cue with a budget of `RECALL_OVERRUN` times what
+   is left, so rambling is bounded but detectable.  `length` caps how many payload characters are asked for and
+   **trims the reference to match**, because a capped quiz has to be a fair one;
+3. **the marking** — `check_speech` / `check_image` parse what came back with the modality's own `parse_text`, and
+   report facts rather than a verdict: `readable`, `repaired`, `written_bytes`, `expected_bytes`, `length_ratio`,
+   `agreement`, `flat`, `extreme`, the same two for the reference, and for speech `said` / `heard` / `match`.
+
+### Agreement, and the mark
+
+`_agreement` is the mean over the payload that was asked for of `max(0, 1 - |written - true| / TOLERANCE)`, with
+`TOLERANCE = 32` (one eighth of the byte range) and a byte that was never written counting as 0.  Two properties
+matter.  Truncation needs no separate penalty — the bytes that never arrived are already total disagreement — and
+the curve is *generous about the last bits of a quantised sample and unforgiving about noise*: an exact recall
+scores 1, one off by a quantisation step scores ~0.95, and random bytes score ~0.12.
+
+`mark(facts)` turns that into the mark out of 10, and adds the three things agreement cannot see:
+
+* what the network wrote **past** the end.  Agreement only asks whether the true bytes came back, so without
+  `score *= expected / written` a completion that recalled the payload perfectly and then rambled would score full
+  marks and never be blamed;
+* repairing the base64 costs a point;
+* silence, railing and wrong words are **caps** (2, 3 and 4 out of 10) rather than deductions, because they are
+  failures of a different kind from being slightly off — a waveform that decodes to nothing is not 90 % right
+  however its bytes line up.
+
+`grade(facts, correction, threshold)` is the marking proper: the mark, `passed`, the reason
+(`blame.recall_reason`), the original text as the **correction** and one sentence of teaching.  A pass carries no
+reason, no correction and no comment — exactly like the English tutor's grade, which is what lets
+`blame.faults_from_recall` read a `RecallLesson` the same way it reads a `Lesson`.
+
+### What can be wrong, in the order it matters
+
+`blame.recall_reason(facts)` names the single worst thing, and the order is the point: a completion that cannot be
+read at all is not *also* judged on its length, and one that stopped early is not blamed for the base64 it never
+got to.
+
+| reason (speech / image) | what it means |
+|---|---|
+| `unreadable` | it wrote something that is not an encoded waveform or image at all: the header is gone |
+| `truncated` / `overrun` | the payload is shorter than `RECALL_TRUNCATED` of the original, or longer than `RECALL_OVERRUN` |
+| `garbled` | the base64 had to be repaired before it could be read |
+| `silence` / `blank` | it decodes to nothing: a waveform whose peak is under `_FLAT_PEAK`, an image whose bytes have no spread |
+| `clipping` / `noise` | more than `_RAILED` of it sits against either end of the byte range |
+| `mishearing` | *speech only*: it decodes to speech, but the round trip transcribes to different words than were said |
+| `distortion` / `drift` | readable, the right length, decodes cleanly and simply wrong: agreement below `RECALL_AGREEMENT` |
+
+Both `flat` and `extreme` are compared against the *reference*: a recording that really was silent is not blamed for
+coming back silent.  `mishearing` only ever appears when both the words that were said and the words the round trip
+heard are known — `listen_back` decodes the recalled waveform and transcribes it, which needs an ASR backend and is
+therefore off by default.  Without it `match` is `None` and nothing is claimed about the words.
+
+### What it costs to run
+
+Nothing here needs Pillow, torch or a transcriber: the marking is over the payload bytes both codecs already
+produce, so the whole module works in an environment where neither the diffusion weights nor Whisper exist (which
+is why `tests/test_recall.py` skips nothing).  Decoding a *picture* to look at needs Pillow and `listen_back` needs
+a transcriber, but grading does not.
+
+The one real cost is the search: a second of 8 kHz audio is ~10 700 characters, so `length` is usually what you
+want.  It is why the option exists, and why it trims the reference too.
+
+### Feeding the negative network
+
+`blame.faults_from_recall(lessons, threshold, source)` is `faults_from_lessons` for these lessons: the reason is the
+grade's own error (falling back to `recall_reason` over the facts, then `DEFAULT_REASON`), the severity is
+`severity_from_rating` of the mark — the same curve the English tutor's marks go through — and the original text
+rides along as the correction.  So `teach` routes it to `NegativeNet.correct` and **only the characters the network
+actually got wrong are blamed**; the payload it did remember, and the original itself, clear blame.
+`blame.teach_recall` is the one call the CLI, the API and the frontend all make.
+
+CLI: `speech tutor FILE...` and `image tutor FILE...`, sharing `_add_recall_options` (`--lead`, `--length`,
+`--attempts`, `--mode`, `--temperature`, `--threshold`, `--train`, `--blame` / `--negative PATH`) and
+`_recall_tutor`, which trains first when asked, quizzes, prints the table and the report card, and saves the
+negative network beside the model.  API: `POST /api/speech/tutor` and `POST /api/images/tutor` over
+`ModelService.recall_quiz`, which quizzes `positive_model()` (quizzing the negative network itself is meaningless)
+and teaches `negative_model()` under the mutating lock when `blame` is set.  Frontend: the **What does it
+remember?** card (`RecallCard.jsx`), shared by the Speech and Images tabs.  Tests: `tests/test_recall.py` — the
+exercise, every way a completion can be wrong, the agreement curve, the mark, the loop over a real model, the
+faults, the CLI and the endpoints.
+## 27. Tool use (`tools.py`, `agent.py`) — the network browses, Ollama sets the bar and teaches
+
+The network cannot *decide* to call a function; it can only emit characters. So a tool call is text it writes and
+the observation is text it reads, which makes a whole attempt one ordinary training text — and therefore something
+2NRL can reward or punish as a unit:
+
+```
+TASK: How many legs does a cat have?
+<tool>web_search {"query": "cat anatomy legs"}</tool>
+<result>1. Cat - Wikipedia - https://en.wikipedia.org/wiki/Cat ...</result>
+<tool>web_fetch {"url": "https://en.wikipedia.org/wiki/Cat"}</tool>
+<result>Cat - Wikipedia The cat is a small domesticated carnivorous mammal ... four legs ...</result>
+<answer>A cat has four legs.</answer>
+```
+
+Around that the LLM plays four roles, and the role of solving the task is the last one it is given:
+
+```
+task -> acceptance criteria (LLM, written first) -> the network calls tools -> judge against the criteria (LLM)
+     -> teach with the same real tools when it failed (LLM) -> train on the failures, invert, fine-tune (2NRL)
+```
+
+### 27.1 `tools.py` — the call format, the registry, browsing
+
+```python
+CALL_OPEN/CLOSE = "<tool>"/"</tool>" ; RESULT_OPEN/CLOSE ; ANSWER_OPEN/CLOSE ; DEFAULT_OBSERVATION_CHARS = 600
+task_header(prompt) -> "TASK: <one line>\n"      # what every transcript starts with, and what `explore` continues
+call_text(name, arguments) -> '<tool>name {"a": "b"}</tool>\n'        # one line, JSON arguments, sorted keys
+result_text(output, limit=600) ; answer_text(answer) ; format_observation(result, limit)   # a failure -> "ERROR: ..."
+transcript_text(prompt, [(name, arguments, result)], answer=None, limit=600) -> one training text
+parse_arguments(raw, tool=None) -> dict   # JSON (truncated JSON repaired: the first line, then the missing "}),
+                                          # `key=value` pairs, or a bare value for a single-argument tool
+parse_call(text, toolbox=None) -> ToolCall | None   # the FIRST call; never drops what it cannot read: the
+                                          # ToolCall carries `error` so the caller can hand it to the mediator
+find_answer(text) -> str | None           # an unterminated <answer> still counts
+
+class ToolError(Exception)                                   # unknown tool, bad arguments, refused request
+Param(name, type: string|number|integer|boolean, description, required=True, default=None, enum=None)
+    .schema() .coerce(value)
+Tool(name, description, params=(), handler=None, network=False)
+    .signature() -> "name(a: string, [b: integer])"          # the line the prompts and the CLI show
+    .schema()    -> Ollama's / OpenAI's `tools` format       # what OllamaClient.chat(tools=...) sends
+    .coerce(arguments) -> dict                               # types, defaults, case-insensitive names, unknown dropped
+ToolCall(name, arguments, raw, span, error) ; ToolResult(tool, arguments, ok, output, error, seconds, meta)
+class ToolBox(tools=())
+    .register .remove .has .get .names .tools .describe .schemas .catalogue
+    .call(name, arguments) -> ToolResult       # NEVER raises: a failure is a result the model and the LLM can read
+    .run(call: ToolCall) -> ToolResult         # a broken call becomes a failed result
+```
+
+Browsing is `WebClient(timeout=20, max_bytes=2_000_000, max_redirects=4, user_agent=None, allow_private=False,
+search_url=None)`: `http`/`https` only, no credentials in the URL, no address that resolves into a private,
+loopback, link-local, reserved or multicast range (`allow_private` is for a local test server), redirects followed
+by hand so every hop is checked again, a byte cap and a timeout. `.fetch(url)` is the raw response, `.page(url)`
+adds `html_to_text` (title, text, absolute `http(s)` links; `<script>` / `<style>` / `<head>` dropped) and
+`.search(query, limit)` reads a JSON search API (SearxNG, Brave, ...) or an engine's HTML, unwrapping DuckDuckGo's
+redirects and dropping links back into the engine. `$RADIXNET_SEARCH_URL` (`{query}` is substituted) and
+`$RADIXNET_USER_AGENT` are the defaults.
+
+`default_toolbox(web=None, *, sandbox=None, upload_dir=None, offline=False, extra=()) -> ToolBox` installs
+`web_search(query, [limit])`, `web_fetch(url, [max_chars])` (its `meta.links` is what an exploration follows next),
+`web_links(url, [limit])`, `calculator(expression)` (`safe_eval`: an AST walk that allows numbers, operators and the
+`math` functions and nothing else), plus `python(code)` when a :class:`~radixnet.codegen.Sandbox` is given and
+`read_file(name, [max_chars])` when an upload directory is.
+
+### 27.2 `agent.py` — criteria, mediation, judging, teaching
+
+```python
+DEFAULT_AGENT_MODEL = $RADIXNET_AGENT_MODEL or the Ollama default ; PHASES = ("teacher", "model")
+MEDIATION = ("repair", "always", "never") ; MIN_EMISSION = 48 ; MAX_CRITERIA = 8
+Task(id, prompt, criteria=(), answer=None, seeds=()) ; parse_tasks ; parse_task_file(.txt|.json|.jsonl) ; load_tasks
+Step(index, call, result, source: "model"|"mediator"|"teacher", emission) ; Verdict(correct, score, met, critique, issues, judged_by)
+Attempt(index, source, steps, answer, text, verdict, seconds)  # .calls .own_calls .autonomy .feedback()
+Failure(text, gap, task, source)          # a failed transcript and how badly it failed (gap in [0, 1])
+
+write_criteria(client, task, *, model=None, count=4) -> list[str]
+    # JSON-mode, written BEFORE anything is attempted, so the bar does not depend on what the network produced.
+    # A task that carries its own criteria keeps them (the LLM is not asked at all); an unusable answer falls
+    # back to one criterion naming the task.
+mediate_call(client, emission, toolbox, task, transcript="", *, model=None, hint=None) -> ToolCall
+    # Ollama's native tool calling (chat with `tools`) first, then JSON mode for a model without it, then a
+    # fallback to the first network tool with the task as its argument. The arguments are coerced against the
+    # real schema; what still fails is reported on the call and executed as a failure.
+judge_attempt(client, task, criteria, transcript, answer, *, model=None) -> {"met", "score", "correct", "critique"}
+    # marks are read all-or-nothing (`_marks`): a partly readable list would misalign with the criteria
+teach_task(client, task, toolbox, *, model=None, max_steps=6, criteria=None, feedback=None, external, observation_chars)
+    -> (steps, answer)    # the LLM solves it with the REAL tools, so the demonstration is of things that happened
+propose_task(client, emission, *, model=None, frontier=(), visited=(), index=1) -> Task   # exploration (24.4)
+```
+
+`AgentConfig`: `agent_model`, `judge_model`, `phases=("model",)`, `rounds=1`, `max_steps=6` (tool calls per
+attempt), `model_attempts=2`, `teacher_attempts=1`, `first_attempt_dijkstra=True`, `candidates=5`,
+`temperature=1.0`, `max_length=200` (characters per step), `mediation="repair"`, `criteria_count=4`, `strict=True`,
+`use_judge=True`, `teach_on_failure=True`, `observation_chars=600`, `twonrl_per="task"|"round"`, `replay=True`,
+`replay_limit=64`, `read_reward=False`, `blatant_mode="fail_invert"`, `blatant_margin=0.5`, `blatant_boost=4.0`,
+`pass_score=6.0`, `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4`, `checkpoint_every=0`,
+`seed=0`.
+
+`AgentTrainer(model, client, toolbox, config=None, external=None)` (`external` is the context-manager factory the
+API passes as `ModelService.pause_lock`, entered around tool and LLM calls so readers are served while the network
+browses):
+
+* `_emissions(transcript, attempt_index)` — what the network offers to write next, most likely first. The first
+  attempt is the **beam search** (`predict(mode="beam", length=MIN_EMISSION, k=candidates)`), later attempts are
+  samples; candidates that closed their tag come first, because an unterminated call only *started* one. A single
+  cheapest path is no good here: Dijkstra accepts reaching END as a goal, so it answers with a couple of characters
+  that can never be a whole call.
+* `_next_call` — the first candidate that parses into a usable call (or gives an `<answer>`) is the network's own
+  move; only when none of them can be used does the mediator step in, and the repaired call is executed *and
+  written into the transcript*, so what the network learns is always well-formed. `mediation="always"` never asks
+  the network, `"never"` executes its broken call as a failure instead of repairing it.
+* `solve_with_model` / `solve_with_teacher` / `judge` / `criteria_for` — one attempt, one demonstration, one
+  verdict, the criteria (written once per task and remembered).
+* `run(tasks, progress=None, stop_event=None, checkpoint_manager=None)` — every round and phase; records of kind
+  `criteria`, `step`, `attempt`, `task` and `round`. A task record carries `correct`, `solved_by`, `model_solved`,
+  `taught`, `calls`, `own_calls`, **`autonomy`** (the share of calls the network wrote itself — the number that
+  says whether it is learning), `failures`, `blatant`, `boost_mean` / `boost_max`, `action` and `gap_max`.
+
+### 27.3 Failure first: how badly it failed decides how hard it is trained
+
+Section 9.1 applied to tool use. `gap_of(attempt, criteria)` puts every failure on `[0, 1]`: the share of the
+acceptance criteria it missed, or how far below `pass_score` the judge put it, whichever is worse; an attempt that
+answered nothing has a gap of 1, and every failure keeps a floor of 0.1 so that a near miss still trains. Then
+`learn(failures, good)`:
+
+* `blatant_mode="fail_invert"` (the default) — `two_nrl(bad, good, bad_weights=[min(blatant_boost, 1 + gap /
+  blatant_margin)])`: the negative phase runs one pass per distinct weight, heaviest first, so the worse an attempt
+  was the harder the network is pushed to reproduce it — to fail blatantly on purpose — before `invert()` turns
+  that into avoidance and the positive phase fine-tunes on the transcripts that were judged correct.
+* `"activation"` / `"state"` — `invert_paths(failures, mode, amounts=[min(1, gap / (2 * blatant_margin))])`
+  instead: every other node along a failed transcript is moved toward its negation, and blatant failures
+  (`gap > blatant_margin`) leave the 2NRL garbage set.
+* `"none"` — plain unweighted 2NRL.
+
+Nothing failed -> the correct transcripts are rewarded and **nothing is inverted**. Nothing was right -> the
+weighted negative passes run and the network is inverted (`_punish_weighted`). A transcript that is both a failure
+and a success (the same text reached twice) is never trained as garbage. `replay` adds earlier correct transcripts
+to every positive phase; `read_reward` adds the text of the pages that were read.
+
+### 27.4 `explore` — the network chooses its own tasks
+
+`AgentTrainer.explore(steps=10, progress=None, stop_event=None, checkpoint_manager=None)`; `steps` `None` or `0`
+runs until the stop event, like the GAN loop. Each step:
+
+1. `propose()` — the network continues `TASK:` (the prefix every transcript it has learned starts with) into
+   whatever it is reaching for, and `propose_task` turns that emission into one concrete question browsing can
+   settle, preferring the pages it has come across but not read (`frontier`) over the ones it has (`visited`).
+   The record of kind `proposal` keeps the raw emission beside the question, so what the network actually wrote is
+   visible.
+2. The ordinary `run_task` cycle: criteria, attempts, judging, teaching, and 2NRL after every step.
+3. `_note_urls` files the search results and page links of every tool result into `frontier` (capped at 200) and
+   the pages read into `visited`, so the exploration compounds instead of circling.
+
+### 27.5 CLI, API, frontend, tests
+
+CLI: `tools list | describe --tool NAME | call (--tool NAME --arg k=v ... | --call 'name {...}')`,
+`agent --tasks FILE` and `explore [--steps N] [--seed-url URL]`; `_add_tool_options` (`--offline`,
+`--allow-private`, `--search-url`, `--web-timeout`, `--max-bytes`, `--python-tool`, `--sandbox-timeout`,
+`--upload-dir`) and `_add_agent_options` (the LLM roles, the loop, `--blatant-mode|--blatant-margin|--blatant-boost`,
+the 2NRL rates) are shared; `serve` takes the tool options too. `TaskPrinter` prints criteria, proposals, calls and
+attempts as notes and every finished task as a row.
+
+API (`ModelService.toolbox(**overrides)`, `describe_tools`, `start_agent`, `start_explore`, `agent_history`;
+`/api/status` gains `"tools"`):
+
+| method & path | body | response |
+|---|---|---|
+| GET `/api/tools` | | `{"tools", "names", "count", "options", "upload_dir", "call_format"}` |
+| POST `/api/tools/call` | `{tool, arguments}` or `{call}` + tool overrides | the `ToolResult` (a failing tool is 200 with `ok: false`; an unknown tool 404) |
+| POST `/api/agent/start` | `{tasks \| tasks_text \| task_files, phase, rounds, ...}` | 202 `{"job", "tasks", "tools", "config"}` |
+| POST `/api/agent/explore` | `{steps, seed_urls, ...}` | 202 `{"job", "steps", "seeds", "tools", "config"}` |
+| GET `/api/agent/history` | | `{"history": [...]}` |
+| POST `/api/agent/criteria` | `{tasks}` | `{"tasks": [{task, prompt, criteria}], "model", "url"}` |
+| POST `/api/agent/solve` | `{task, source: model\|teacher}` | `{"criteria", "attempt", "transcript", "correct", "gap", "frontier", "tools"}` (no training) |
+
+Frontend: the **Agent** tab (`AgentPanel.jsx`) — the mode (tasks / explore), the tool list, the loop and mediation
+options, the failure fieldset of section 27.3, a live log of criteria, proposals, tool calls (tagged by who wrote
+them) and attempts, and a table of finished tasks with `own` calls, `failures`, `blatant` and `boost`.
+
+Tests: `tests/test_tools.py` (a fake website: pages, a JSON and an HTML search endpoint, redirects — including one
+to a refused scheme — a byte cap; the format, the registry, the guards, `safe_eval`, every built-in tool) and
+`tests/test_agent.py` (a fake Ollama that plays all four roles and switches between native `tool_calls` and JSON,
+the fake website, and a *real* untrained network: criteria, both mediation paths, judging, teaching, the gap and
+the weighting, the whole loop, exploring, the API endpoints and the CLI).
+
+---
 ## 24. Counter overflow (`counter.py`, `go/radixnet/counter.go`) — cyclic counters with a reset count
 
 Every number in the model that only ever counts up - traversals, node and edge
-visit counts, epochs, trained characters and texts, 2NRL runs, feedback passes,
-the version stamps - would eventually leave the range of whatever holds it:
+visit counts, the negative network's per-edge and per-reason `fails`, epochs,
+trained characters and texts, 2NRL runs, feedback passes, failures, clearings,
+judgements, rejections, the per-source tally, the version stamps - would
+eventually leave the range of whatever holds it:
 `int64` in the Go port, and long before that the 53-bit mantissa of the JSON
 number that carries it through a model file, the HTTP API and the frontend. So
 **no counter in the model is an unbounded integer.** Each one is a two-digit
@@ -1102,12 +2132,20 @@ sweep* at a safe point moves whatever crossed the limit into the resets:
   bounds each individual counter: while it has not wrapped, the sweep returns
   after one comparison. `force` sweeps anyway (used when loading a file).
 * `meta_add(meta, key, delta)` (`(*Model).metaAddInt`) — the lifetime counters
-  of `model.meta`, each wrapping into `<key>_resets`.
+  of `model.meta` listed in `META_COUNTERS`, each wrapping into `<key>_resets`;
+  `meta_add_keyed(meta, key, name, delta)` does the same for the `{name: count}`
+  maps of `META_COUNTER_MAPS` (`sources`), whose resets mirror it in
+  `<key>_resets`. `carry_meta(meta)` / `(*Model).carryMeta` wrap them all when a
+  file is loaded, in case it carries one that was never wrapped.
 * `CyclicCounter` / `Counter` scalars (`total_traversals`, `traversals`,
   `version`, `structure_version`) wrap as they are bumped; they are cheap.
 
+`NegativeGraph.carry_counters` extends the sweep to the negative network's
+`edge_fails` and `reason_fails`, bounded the same way by its `total_fails`.
+
 Per node / edge the reset counts live in a **sparse** map (`count_resets`,
-`edge_count_resets`), so the usual case - nothing ever came near the limit -
+`edge_count_resets`, `edge_fails_resets`, `reason_fails_resets`), so the usual
+case - nothing ever came near the limit -
 costs one comparison per entry and stores nothing. `split` copies a node's
 resets to the new node and the new internal edge; `merge_child` keeps the
 larger of the two *exact* counts; every ranking by visits (`_best_trigram`,
@@ -1118,10 +2156,10 @@ What crosses a boundary:
 
 | Where | Fields |
 |---|---|
-| model file (`format_version` 2) | `version` / `structure_version` / `traversals` and their `_resets`; `nodes.count_resets` and `edges.count_resets` (dense arrays, written only once something has wrapped); `weights.total_traversals_resets`; `meta.<counter>_resets` |
-| `GET /api/status`, `/api/model` | `epochs_total_resets`, `trained_chars_resets`, `trained_texts_resets`, `twonrl_runs_resets`, `feedback_passes_resets`, `total_traversals_resets` |
+| model file (`format_version` 2) | `version` / `structure_version` / `traversals` and their `_resets`; `nodes.count_resets` and `edges.count_resets` (dense arrays, written only once something has wrapped); `weights.total_traversals_resets`; `meta.<counter>_resets` and `meta.sources_resets`; on a negative graph also `edges.fails_resets`, `weights.total_fails_resets` and `weights.reasons.fails_resets` |
+| `GET /api/status`, `/api/model` | `epochs_total_resets`, `trained_chars_resets`, `trained_texts_resets`, `twonrl_runs_resets`, `feedback_passes_resets`, `total_traversals_resets`; on the negative network `failures_total_resets`, `cleared_total_resets`, `judgements_resets`, `rejected_resets`, `sources_resets`, `edge_fails_total` / `edge_fails_total_resets` and `fails_resets` per reason row |
 | `GET /api/graph` | `count_resets` per node and per edge, `total_traversals_resets` |
-| frontend | `fmtCounter(value, resets)` renders `1,234 (+2 resets)`; `counterTotal(value, resets)` is what node radius / edge opacity scale on |
+| frontend | `fmtCounter(value, resets)` renders `1,234 (+2 resets)` in the status bar, the Graph tab's tooltips and the Negative tab's counts; `counterTotal(value, resets)` is what node radius / edge opacity scale on |
 
 A format 1 file (written before any of this) loads unchanged: its counts are
 plain integers, are carried on the way in, and `traversals` is seeded with their

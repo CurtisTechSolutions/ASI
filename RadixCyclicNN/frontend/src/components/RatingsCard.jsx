@@ -23,10 +23,22 @@ export function clipText(text, width = 70) {
   return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat;
 }
 
+export const DEFAULT_MARK = 10;
+
+/** A mark out of 10 kept inside [0, 10]; anything unusable falls back to the default. */
+export function clampMark(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_MARK;
+  return Math.max(0, Math.min(10, n));
+}
+
 /**
  * Thumbs up / thumbs down ratings, one per distinct text, shared by the
  * Generate and Converse tabs. Pressing the active thumb again removes the
- * rating; ratings accumulate until they are trained on or cleared.
+ * rating; ratings accumulate until they are trained on or cleared. Every
+ * rating also carries a mark out of 10 (10 by default: a plain thumb) that
+ * says *how* good or bad the text is - the network then learns each text in
+ * proportion to its mark instead of treating every thumb alike.
  */
 export function useRatings() {
   const [ratings, setRatings] = useState([]);
@@ -40,12 +52,14 @@ export function useRatings() {
       const rest = prev.filter((r) => r.text !== text);
       const current = prev.find((r) => r.text === text);
       if (current && current.rating === rating) return rest;
-      return [...rest, { text, rating, ...extra }];
+      return [...rest, { text, rating, mark: current ? current.mark : DEFAULT_MARK, ...extra }];
     });
   }
+  const setMark = (text, mark) =>
+    setRatings((prev) => prev.map((r) => (r.text === text ? { ...r, mark } : r)));
   const remove = (text) => setRatings((prev) => prev.filter((r) => r.text !== text));
   const clear = () => setRatings([]);
-  return { ratings, setRatings, rate, ratingOf, remove, clear };
+  return { ratings, setRatings, rate, ratingOf, setMark, remove, clear };
 }
 
 /** The thumbs up / thumbs down pair for one text. */
@@ -84,7 +98,15 @@ export function RateButtons({ text, rating, disabled, onRate, label }) {
  * down alone), its epochs / learning rates, and the job's progress.
  * ``feedback`` is the panel's ``useJob("feedback")`` handle.
  */
-export default function RatingsCard({ ratings, onClear, onRemove, feedback, status, emptyText = "rate some samples first" }) {
+export default function RatingsCard({
+  ratings,
+  onClear,
+  onRemove,
+  onMark,
+  feedback,
+  status,
+  emptyText = "rate some samples first",
+}) {
   const [negEpochs, setNegEpochs] = useState("2");
   const [posEpochs, setPosEpochs] = useState("3");
   const [negLr, setNegLr] = useState("0.5");
@@ -104,8 +126,8 @@ export default function RatingsCard({ ratings, onClear, onRemove, feedback, stat
     setLastAction(null);
     const result = await start(() =>
       api.feedback({
-        ...(ups.length ? { good: ups.map((r) => r.text) } : {}),
-        ...(downs.length ? { bad: downs.map((r) => r.text) } : {}),
+        ...(ups.length ? { good: ups.map((r) => r.text), good_ratings: ups.map((r) => clampMark(r.mark)) } : {}),
+        ...(downs.length ? { bad: downs.map((r) => r.text), bad_ratings: downs.map((r) => clampMark(r.mark)) } : {}),
         neg_epochs: parseInteger(negEpochs, 2),
         pos_epochs: parseInteger(posEpochs, 3),
         neg_lr: parseNumber(negLr, 0.5),
@@ -131,17 +153,41 @@ export default function RatingsCard({ ratings, onClear, onRemove, feedback, stat
       </div>
       {action ? <p className="muted">{ACTION_TEXT[action]}.</p> : null}
       {ratings.length > 0 ? (
-        <ul className="ratings">
-          {ratings.map((r) => (
-            <li key={r.text}>
-              <span className={`badge ${r.rating}`}>{r.rating === "up" ? "👍" : "👎"}</span>
-              <code>{clipText(r.text)}</code>
-              <button type="button" className="link" disabled={running} onClick={() => onRemove(r.text)}>
-                remove
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="ratings">
+            {ratings.map((r) => (
+              <li key={r.text}>
+                <span className={`badge ${r.rating}`}>{r.rating === "up" ? "👍" : "👎"}</span>
+                <code>{clipText(r.text)}</code>
+                {onMark ? (
+                  <label className="mark">
+                    <span className="muted">{r.rating === "up" ? "how good" : "how bad"}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      step={1}
+                      value={r.mark ?? DEFAULT_MARK}
+                      disabled={running}
+                      aria-label={`mark out of 10 for ${clipText(r.text, 40)}`}
+                      onChange={(e) => onMark(r.text, e.target.value === "" ? "" : clampMark(e.target.value))}
+                    />
+                    <span className="muted">/ 10</span>
+                  </label>
+                ) : null}
+                <button type="button" className="link" disabled={running} onClick={() => onRemove(r.text)}>
+                  remove
+                </button>
+              </li>
+            ))}
+          </ul>
+          {onMark ? (
+            <p className="muted">
+              Each text is learned in proportion to its mark: 10 out of 10 uses the full learning rate, 5 half of
+              it, 0 skips the text.
+            </p>
+          ) : null}
+        </>
       ) : null}
       <div className="row">
         <NumberField label="Negative epochs" hint="thumbs down" value={negEpochs} onChange={setNegEpochs} min={0} step={1} disabled={running} />

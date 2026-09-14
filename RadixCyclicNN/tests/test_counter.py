@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from radixnet.counter import COUNTER_LIMIT, CyclicCounter, as_float, carry, carry_series, total  # noqa: E402
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.graph import RadixCyclicGraph  # noqa: E402
-from radixnet.model import RadixNet, meta_add, meta_counter  # noqa: E402
+from radixnet.model import RadixNet, meta_add, meta_add_keyed, meta_counter  # noqa: E402
+from radixnet.negative import NegativeNet  # noqa: E402
 
 TEXTS = ["the cat sat on the mat", "the dog ate the bone", "the cat ate the fish"]
 
@@ -263,6 +264,66 @@ class TestMetaCounters(unittest.TestCase):
         meta_add(model.meta, "twonrl_runs", 3)
         loaded = RadixNet.from_dict(json.loads(json.dumps(model.to_dict())))
         self.assertEqual(meta_counter(loaded.meta, "twonrl_runs").total, COUNTER_LIMIT + 2)
+
+
+class TestNegativeCounters(unittest.TestCase):
+    """The negative network counts failures; those counters wrap like every other."""
+
+    def net(self):
+        model = NegativeNet(seed=13)
+        model.train(["the cat sat on the mat", "the dog ate the bone"], epochs=1, reason="wrong tense")
+        return model
+
+    def test_fail_counts_wrap_and_keep_their_totals(self):
+        model = self.net()
+        graph = model.graph
+        step = COUNTER_LIMIT - 1
+        graph.edge_fails = [c + step for c in graph.edge_fails]
+        graph.reason_fails = [c + step for c in graph.reason_fails]
+        graph.total_fails += step
+        before = [graph.edge_failures(e) for e in range(len(graph.edge_fails))]
+
+        model.train(["the cat sat on the mat"], epochs=1, reason="wrong tense")
+
+        self.assertTrue(all(0 <= c < COUNTER_LIMIT for c in graph.edge_fails), "an edge fail count did not wrap")
+        self.assertTrue(all(0 <= c < COUNTER_LIMIT for c in graph.reason_fails), "a reason fail count did not wrap")
+        self.assertTrue(graph.edge_fails_resets and graph.reason_fails_resets, "no reset was recorded")
+        self.assertEqual(graph.total_fails.resets, 1)
+        for e, was in enumerate(before):
+            self.assertGreaterEqual(graph.edge_failures(e), was, "an edge lost its failure history")
+
+    def test_a_wrapped_negative_model_saves_and_loads_unchanged(self):
+        model = self.net()
+        graph = model.graph
+        graph.edge_fails = [c + COUNTER_LIMIT for c in graph.edge_fails]
+        graph.reason_fails = [c + COUNTER_LIMIT for c in graph.reason_fails]
+        graph.total_fails += COUNTER_LIMIT
+        graph.carry_counters(force=True)
+        doc = json.loads(json.dumps(model.to_dict()))
+        self.assertIn("fails_resets", doc["graph"]["edges"])
+        self.assertIn("fails_resets", doc["graph"]["weights"]["reasons"])
+        self.assertEqual(doc["graph"]["weights"]["total_fails_resets"], 1)
+
+        loaded = NegativeNet.from_dict(doc)
+        self.assertEqual(loaded.to_dict()["graph"]["edges"]["fails_resets"], doc["graph"]["edges"]["fails_resets"])
+        self.assertEqual(loaded.graph.total_fails, graph.total_fails)
+        self.assertEqual(loaded.graph.reason_table()[0]["fails_resets"], graph.reason_table()[0]["fails_resets"])
+
+    def test_its_lifetime_counters_and_the_source_tally_wrap(self):
+        model = self.net()
+        model.meta["judgements"] = COUNTER_LIMIT - 1
+        model.meta["failures_total"] = COUNTER_LIMIT - 1
+        meta_add_keyed(model.meta, "sources", "tutor", COUNTER_LIMIT - 1)
+        model.judge("the cat sat on the mat")
+        model.judge("something else entirely")
+        model.train(["the cat sat"], epochs=1, source="tutor")
+
+        stats = model.stats()
+        self.assertEqual(stats["judgements_resets"], 1)
+        self.assertLess(stats["judgements"], COUNTER_LIMIT)
+        self.assertEqual(stats["failures_total_resets"], 1)
+        self.assertEqual(stats["sources_resets"]["tutor"], 1)
+        self.assertLess(stats["sources"]["tutor"], COUNTER_LIMIT)
 
 
 if __name__ == "__main__":

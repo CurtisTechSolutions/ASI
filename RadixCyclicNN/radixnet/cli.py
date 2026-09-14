@@ -27,13 +27,19 @@ import threading
 from collections.abc import Callable, Sequence
 from typing import Any, NoReturn, TextIO, TypeVar
 
-from . import __version__
+from . import __version__, diff
 from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, transcript
+from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
+from .recall import DEFAULT_LEAD
+from .speech import ASR_BACKENDS as SPEECH_BACKENDS
+from .speech import DEFAULT_RATE as SPEECH_RATE
+from .speech import RECORDERS as SPEECH_RECORDERS
+from .speech import SPEECH_TOKEN as SPEECH_TOKEN_HELP
 
 __all__ = ["main", "build_parser", "CliError", "EXIT_OK", "EXIT_ERROR", "EXIT_ABORTED"]
 
@@ -44,8 +50,10 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "beam", "sample")
-KINDS = ("radix", "count")
+KINDS = ("radix", "count", "negative")
 DEFAULT_COUNT_MODEL = "model.count.json"
+DEFAULT_NEGATIVE_MODEL = "model.negative.json"
+DEFAULT_KIND_MODELS = {"count": DEFAULT_COUNT_MODEL, "negative": DEFAULT_NEGATIVE_MODEL}
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -337,6 +345,137 @@ class ProblemPrinter(_RowPrinter):
             learned = f", 2NRL per round: {record.get('action')}" if record.get("action") else ""
             self.console.note(
                 f"round {record.get('round')} [{record.get('phase')}]: {record.get('solved')}/{record.get('problems')} solved, "
+                f"{record.get('model_solved')} by the model{learned}"
+            )
+
+
+LESSON_COLUMNS: tuple[_Column, ...] = (
+    ("round", 5, ">"), ("exercise", 8, "<"), ("score", 6, ">"), ("gram", 6, ">"), ("spell", 6, ">"),
+    ("flu", 6, ">"), ("mark", 4, "<"), ("error", 12, "<"), ("sentence", 0, "<"),
+)
+
+
+class LessonPrinter(_RowPrinter):
+    """``progress`` callback for :meth:`TutorTrainer.run`: lessons as rows, rounds and the report card as notes."""
+
+    __slots__ = ("lessons", "corrections")
+
+    def __init__(self, console: Console) -> None:
+        super().__init__(console, LESSON_COLUMNS)
+        self.lessons = 0
+        self.corrections = 0
+
+    def __call__(self, record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "lesson":
+            self.lessons += 1
+            values = [
+                record.get("round"), clip(str(record.get("exercise")), 8), record.get("score"), record.get("grammar"),
+                record.get("spelling"), record.get("fluency"), "pass" if record.get("passed") else "fail",
+                clip(str(record.get("error") or "-"), 12),
+            ]
+            sentence = quote(clip(str(record.get("sentence", "")), 46))
+            pairs = list(zip([c[0] for c in LESSON_COLUMNS], values + [sentence]))
+            self.row(values + [sentence], _compact(f"lesson {record.get('exercise')}", pairs[2:]))
+            if not record.get("passed"):
+                self.corrections += 1
+                correction, comment = record.get("correction"), record.get("comment")
+                if correction:
+                    self.console.note(f"    correct: {quote(clip(str(correction), 80))}")
+                if comment:
+                    self.console.note(f"    teacher: {clip(str(comment), 100)}")
+        elif kind == "round":
+            weakest = ", ".join(record.get("weakest") or []) or "nothing"
+            learned = record.get("action") or "nothing to learn"
+            self.console.note(
+                f"round {record.get('round')}: {record.get('passed')}/{record.get('lessons')} passed, "
+                f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
+                f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
+            )
+        elif kind == "report":
+            self.console.note(
+                f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
+                f"mean {fmt(record.get('mean_score'))}"
+            )
+        elif kind == "batch":
+            self.console.note(
+                f"batch {record.get('batch')} ({record.get('step')}): {record.get('level')} level, openings of "
+                f"{record.get('words')} words, pass at {fmt(record.get('threshold'))}, "
+                f"{record.get('drills')} drill(s) - {clip(str(record.get('brief') or '-'), 100)}"
+            )
+        elif kind == "plan":
+            self.console.note(
+                f"lesson plan ({record.get('source')}): {len(record.get('lessons') or [])} lesson(s) at "
+                f"{record.get('level')} level, drilling {', '.join(record.get('targets') or []) or 'nothing in particular'}"
+            )
+        elif kind == "note":
+            self.console.note(f"note: {record.get('message')}")
+TASK_COLUMNS: tuple[_Column, ...] = (
+    ("phase", 7, "<"), ("step", 5, ">"), ("task", 12, "<"), ("tries", 5, ">"), ("result", 7, "<"),
+    ("by", 7, "<"), ("calls", 5, ">"), ("own", 5, ">"), ("fails", 5, ">"), ("blatant", 7, ">"),
+    ("boost", 6, ">"), ("action", 6, "<"), ("seconds", 8, ">"),
+)
+
+
+class TaskPrinter(_RowPrinter):
+    """``progress`` callback for :meth:`AgentTrainer.run` / :meth:`AgentTrainer.explore`.
+
+    Criteria, proposals and individual tool calls are printed as notes; every
+    finished task becomes a row.
+    """
+
+    __slots__ = ("attempts", "steps")
+
+    def __init__(self, console: Console) -> None:
+        super().__init__(console, TASK_COLUMNS)
+        self.attempts = 0
+        self.steps = 0
+
+    def __call__(self, record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "criteria":
+            self.console.note(f"  {record.get('task')}: {clip(str(record.get('prompt')), 70)}")
+            for i, criterion in enumerate(record.get("criteria") or (), 1):
+                self.console.note(f"    criterion {i}: {clip(str(criterion), 80)}")
+        elif kind == "proposal":
+            self.console.note(
+                f"  {record.get('task')} chose: {clip(str(record.get('prompt')), 70)} "
+                f"(frontier {record.get('frontier')}, visited {record.get('visited')})"
+            )
+            self.console.note(f"    from its own text: {quote(clip(str(record.get('emission') or ''), 60))}")
+        elif kind == "step":
+            self.steps += 1
+            detail = record.get("error") or clip(str(record.get("output") or ""), 60)
+            self.console.note(
+                f"    {record.get('task')} call {record.get('step')} [{record.get('source')}] "
+                f"{record.get('tool')} {'ok' if record.get('ok') else 'FAILED'}: {detail}"
+            )
+        elif kind == "attempt":
+            self.attempts += 1
+            score = f" score={fmt(record.get('score'))}" if record.get("score") is not None else ""
+            autonomy = record.get("autonomy")
+            own = f" own={fmt(autonomy)}" if autonomy is not None else ""
+            self.console.note(
+                f"    {record.get('task')} attempt {record.get('attempt')} [{record.get('source')}] "
+                f"{'correct' if record.get('correct') else 'failed'}{score}{own}: "
+                f"{quote(clip(str(record.get('answer') or '(no answer)'), 60))}"
+            )
+            if record.get("critique"):
+                self.console.note(f"      judge: {clip(str(record['critique']), 80)}")
+        elif kind in ("task", "explore"):
+            values = [
+                record.get("phase") if kind == "task" else "explore", record.get("step") or record.get("round"),
+                clip(str(record.get("task")), 12), record.get("attempts"),
+                "correct" if record.get("correct") else "failed", record.get("solved_by") or "-",
+                record.get("calls"), record.get("own_calls"), record.get("failures"), record.get("blatant"),
+                record.get("boost_max"), record.get("action") or "-", record.get("seconds"),
+            ]
+            pairs = list(zip([c[0] for c in TASK_COLUMNS], values))
+            self.row(values, _compact(f"task {record.get('task')}", pairs))
+        elif kind == "round":
+            learned = f", 2NRL per round: {record.get('action')}" if record.get("action") else ""
+            self.console.note(
+                f"round {record.get('round')} [{record.get('phase')}]: {record.get('solved')}/{record.get('tasks')} solved, "
                 f"{record.get('model_solved')} by the model{learned}"
             )
 
@@ -900,6 +1039,124 @@ def cmd_image_encode(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+def _recall_tutor(args: argparse.Namespace, console: Console, texts: list[str], labels: list[str],
+                  modality: str, said: list[str] | None = None) -> dict:
+    """The shared flow of `image tutor` and `speech tutor`: train, quiz, mark, blame.
+
+    The exercise is the opening of a text the network was taught; the answer is
+    on file, so nothing needs marking by an LLM - the completion is run back
+    through the codec and compared with the original.
+    """
+    from . import blame as blame_module
+    from . import recall
+
+    model, origin = open_model(args, console, required=False)
+    lead = args.lead if args.lead is not None else recall.DEFAULT_LEAD[modality]
+    rows = [
+        ("model", origin.describe()),
+        ("utterances" if modality == "speech" else "images", f"{len(texts)} ({sum(len(t) for t in texts)} chars)"),
+        ("exercise", f"the header plus {lead} payload character(s)" if lead
+                     else ("the token and the header alone" if modality == "speech" else "the header alone")),
+        ("asked for", f"{args.length} payload character(s)" if args.length else "the whole payload"),
+        ("attempts", f"{args.attempts} ({args.mode}, then sampled)"),
+        ("pass mark", f"{args.threshold:g}/10"),
+    ]
+    if modality == "speech" and args.listen_back:
+        rows.append(("listen back", "the recalled waveform is transcribed and compared with the words"))
+    console.pairs(rows)
+    if args.train:
+        console.say()
+        console.say(f"teaching it first: epochs={args.epochs} lr={args.lr} batch={args.batch_size}")
+        model.train(texts, epochs=args.epochs, lr=args.lr, batch_size=args.batch_size)
+    negative, neg_origin = (open_negative(args, console, required=False) if args.blame else (None, None))
+    if negative is not None:
+        console.say()
+        console.say(f"negative network: {neg_origin.describe()}")
+    console.say()
+    stop = threading.Event()
+    lessons, interrupted = run_interruptible(
+        lambda: recall.quiz(
+            model, texts, labels=labels, lead=args.lead, attempts=args.attempts, mode=args.mode,
+            temperature=args.temperature, length=args.length, threshold=args.threshold,
+            listen_back=(modality == "speech" and args.listen_back), said=said or [], stop_event=stop,
+        ),
+        stop, console, "lesson",
+    )
+    console.table(
+        ("what", "attempt", "mark", "agreement", "verdict", "why"),
+        [[
+            clip(lesson.exercise.label or lesson.exercise.id, 28), lesson.attempt,
+            f"{lesson.grade.score:.1f}", f"{lesson.grade.facts.get('agreement', 0.0) * 100:.0f}%",
+            "pass" if lesson.grade.passed else lesson.grade.error,
+            clip(lesson.grade.comment, 52) or "-",
+        ] for lesson in lessons],
+    )
+    card = recall.report_card(lessons)
+    console.say()
+    console.say(
+        f"report card: {card['passed']}/{card['lessons']} remembered, mean {fmt(card['mean_score'])}/10, "
+        f"{card['mean_agreement'] * 100:.0f}% agreement"
+        + (f"; {', '.join(f'{k} x{v}' for k, v in card['reasons'].items())}" if card["reasons"] else "")
+    )
+    doc: dict = {
+        "modality": modality, "lessons": [lesson.to_dict() for lesson in lessons], "report": card,
+        "interrupted": interrupted, "trained": bool(args.train), "saved": None, "negative": None,
+    }
+    if args.train and not interrupted:
+        doc["saved"] = save_model(model, args.model_out or args.model)
+        console.say(f"saved {args.model_out or args.model}")
+    if negative is not None:
+        report = blame_module.teach_recall(negative, lessons, threshold=args.threshold, source=modality)
+        console.say()
+        console.say(
+            f"blamed {report['blamed']} failure(s) over {report['edges']} edge(s); "
+            f"cleared {report['cleared']} fragment(s) from what it did remember"
+        )
+        doc["negative"] = _save_negative(console, negative, negative_path(args))
+        doc["negative"]["taught"] = {k: report[k] for k in ("blamed", "cleared", "edges", "reasons", "severity_mean")}
+    return doc
+
+
+def cmd_image_tutor(args: argparse.Namespace, console: Console) -> dict:
+    """Ask the network to draw back the pictures it was shown, and blame what it got wrong."""
+    from .vision import VisionError, encode_image
+
+    texts, labels = [], []
+    for path in args.file:
+        if not os.path.isfile(path):
+            raise CliError(f"image file not found: {path}")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        try:
+            texts.append(encode_image(data, size=args.size, encoder=args.encoder)["text"])
+        except VisionError as exc:
+            raise CliError(str(exc)) from exc
+        labels.append(os.path.basename(path))
+    return _recall_tutor(args, console, texts, labels, "image")
+
+
+def cmd_speech_tutor(args: argparse.Namespace, console: Console) -> dict:
+    """Ask the network to say back the utterances it was taught, and blame what it got wrong."""
+    from .speech import SpeechError, teach
+
+    texts, labels, said = [], [], []
+    for path in args.file:
+        data = read_audio_file(path)
+        try:
+            result = teach(data, transcript=args.text or "", backend=args.backend, language=args.language,
+                           asr_model=args.asr_model, asr_url=args.asr_url, rate=args.rate, codec=args.codec,
+                           normalise=args.normalise, token=args.token, unique=not args.shared_token)
+        except SpeechError as exc:
+            raise CliError(str(exc)) from exc
+        waveform = next((t for t in result["texts"] if "aud:" in t), "")
+        if not waveform:
+            raise CliError(f"{path} produced no waveform to remember")
+        texts.append(waveform)
+        labels.append(f"{os.path.basename(path)} {result['token']}")
+        said.append(result["transcript"])
+    return _recall_tutor(args, console, texts, labels, "speech", said)
+
+
 def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     from .vision import VisionError, decode_text
 
@@ -914,6 +1171,167 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("encoder", result["encoder"]),
         ("size", f"{result['width']}x{result['height']}"),
+        ("repaired", result["repaired"]),
+        ("written", args.out),
+    ])
+    return result
+
+
+def cmd_speech_info(args: argparse.Namespace, console: Console) -> dict:
+    from .speech import describe
+
+    info = describe()
+    console.pairs([
+        ("faster-whisper", info["faster_whisper"]),
+        ("whisper", info["whisper"]),
+        ("whisper model", info["whisper_model"]),
+        ("transcription server", info["server_url"] or "-" ),
+        ("auto picks", info["auto"] or "nothing installed: pass --text (or what the browser dictated)"),
+        ("ffmpeg", info["ffmpeg"]),
+        ("recorders", ", ".join(info["recorders"]) or "-"),
+        ("codecs", ", ".join(info["codecs"])),
+        ("default rate", f"{info['default_rate']} Hz"),
+        ("token", f"{info['token']} (unique: {info['token_example']})"),
+        ("text format", info["text_format"]),
+        ("audio formats", info["formats"]),
+    ])
+    return info
+
+
+def read_audio_file(path: str) -> bytes:
+    if not os.path.isfile(path):
+        raise CliError(f"audio file not found: {path}")
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def cmd_speech_transcribe(args: argparse.Namespace, console: Console) -> dict:
+    """Speech to text only: what the audio says, nothing trained."""
+    from .speech import SpeechError, transcribe
+
+    data = read_audio_file(args.file)
+    try:
+        result = transcribe(
+            data, backend=args.backend, text=args.text or "", language=args.language,
+            model=args.asr_model, url=args.asr_url,
+        )
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([
+        ("file", args.file),
+        ("backend", result["backend"]),
+        ("model", result["model"] or "-"),
+        ("language", result["language"] or "-"),
+        ("took", f"{result['seconds']:.2f}s"),
+    ])
+    console.say()
+    console.say(result["transcript"] or "(nothing was recognised)")
+    result["file"] = args.file
+    result["out"] = None
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(result["transcript"] + "\n")
+        result["out"] = args.out
+        console.say()
+        console.say(f"transcript written to {args.out}")
+    return result
+
+
+def _teach_from_audio(args: argparse.Namespace, console: Console, data: bytes, source: str) -> dict:
+    """The shared flow of `speech teach` and `speech listen`: transcribe, encode the waveform, train."""
+    from .speech import SpeechError, teach
+
+    try:
+        result = teach(
+            data, transcript=args.text or "", backend=args.backend, language=args.language,
+            asr_model=args.asr_model, asr_url=args.asr_url, rate=args.rate, codec=args.codec,
+            normalise=args.normalise, waveform=not args.no_waveform, pair=args.pair,
+            token=args.token, unique=not args.shared_token,
+        )
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    audio = result["audio"]
+    console.pairs([
+        ("source", source),
+        ("token", result["token"]),
+        ("transcript", result["transcript"] or "-"),
+        ("transcribed by", result["asr"]["backend"] or "-"),
+        ("transcription error", result["asr"]["error"] or "-"),
+        ("waveform", f"{audio['codec']} {audio['rate']} Hz, {audio['seconds']:.2f}s, {audio['bytes']} bytes"
+                     if audio else "-"),
+        ("texts", f"{len(result['texts'])} ({result['chars']} chars)"),
+    ])
+    if result["asr"]["error"]:
+        console.note(f"note: not transcribed ({result['asr']['error']}); only the waveform is learned")
+    for text in result["texts"]:
+        console.say()
+        console.say(text if len(text) <= 200 else text[:200] + f"… (+{len(text) - 200} chars)")
+    result["source"] = source
+    result["out"] = None
+    result["saved_audio"] = None
+    result["trained"] = None
+    if getattr(args, "save", None):
+        with open(args.save, "wb") as fh:
+            fh.write(data)
+        result["saved_audio"] = args.save
+        console.say()
+        console.say(f"audio written to {args.save}")
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(result["texts"]) + "\n")
+        result["out"] = args.out
+        console.say()
+        console.say(f"{len(result['texts'])} text(s) written to {args.out}")
+    if args.train:
+        if not result["texts"]:
+            raise CliError("nothing to train on: no transcript and no waveform")
+        model, origin = open_model(args, console, required=False)
+        out = args.model_out or args.model
+        console.say()
+        console.say(f"teaching {origin.describe()}: epochs={args.epochs} lr={args.lr} batch={args.batch_size}")
+        records = model.train(result["texts"], epochs=args.epochs, lr=args.lr, batch_size=args.batch_size)
+        saved = save_model(model, out)
+        result["trained"] = {
+            "epochs": len(records), "loss": records[-1]["loss"] if records else None,
+            "texts": len(result["texts"]), "saved": saved, "kind": model.kind,
+        }
+        console.say(f"trained {len(records)} epoch(s) on {len(result['texts'])} text(s); saved to {out}")
+    return result
+
+
+def cmd_speech_teach(args: argparse.Namespace, console: Console) -> dict:
+    return _teach_from_audio(args, console, read_audio_file(args.file), args.file)
+
+
+def cmd_speech_listen(args: argparse.Namespace, console: Console) -> dict:
+    """Talk to the model: record from the microphone, then teach it what was said and how it sounded."""
+    from .speech import SpeechError, record
+
+    console.note(f"recording {args.seconds:g}s from the microphone - speak now…")
+    try:
+        data = record(seconds=args.seconds, rate=args.record_rate, recorder=args.recorder)
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    console.note("recording finished")
+    return _teach_from_audio(args, console, data, f"microphone ({args.seconds:g}s)")
+
+
+def cmd_speech_decode(args: argparse.Namespace, console: Console) -> dict:
+    """An encoded - or predicted - waveform text back into a WAV file, so it can be listened to."""
+    from .speech import SpeechError, decode_text
+
+    text = args.text if args.text is not None else read_text_file(args.data)
+    try:
+        result = decode_text(text, codec=args.codec)
+    except SpeechError as exc:
+        raise CliError(str(exc)) from exc
+    with open(args.out, "wb") as fh:
+        fh.write(result.pop("wav"))
+    result["out"] = args.out
+    console.pairs([
+        ("codec", result["codec"]),
+        ("rate", f"{result['rate']} Hz x {result['channels']}"),
+        ("length", f"{result['seconds']:.2f}s ({result['samples']} samples)"),
         ("repaired", result["repaired"]),
         ("written", args.out),
     ])
@@ -953,6 +1371,25 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
     return {"weights": config, "changed": changes, "saved": saved, "stats": stats}
 
 
+def _marks(raw: str | None, texts: list[str], option: str) -> list[float] | None:
+    """``--good-ratings 8,10,6`` -> one weight per text (mark / 10), in the order the texts were collected."""
+    if not raw:
+        return None
+    try:
+        marks = [float(part) for part in raw.replace(" ", "").split(",") if part]
+    except ValueError as exc:
+        raise CliError(f"{option} must be a comma-separated list of marks out of 10: {exc}") from exc
+    if len(marks) != len(texts):
+        raise CliError(f"{option} has {len(marks)} mark(s) for {len(texts)} text(s)")
+    if any(not (0.0 <= mark <= 10.0) for mark in marks):
+        raise CliError(f"{option} marks must lie between 0 and 10")
+    return [mark / 10.0 for mark in marks]
+
+
+def _marks_label(raw: str | None) -> str:
+    return ", ".join(part for part in (raw or "").replace(" ", "").split(",") if part)
+
+
 def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     """Learn from rated texts: 2NRL when both kinds are given, reward on good alone, punish on bad alone."""
     good = list(args.good_text or [])
@@ -965,6 +1402,8 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     bad = [t for t in bad if t.strip()]
     if not good and not bad:
         raise CliError("nothing to learn from: give --good / --good-text (thumbs up) and/or --bad / --bad-text (thumbs down)")
+    good_weights = _marks(args.good_ratings, good, "--good-ratings")
+    bad_weights = _marks(args.bad_ratings, bad, "--bad-ratings")
     action = "2nrl" if good and bad else ("reward" if good else "punish")
     model, origin = open_model(args, console, required=False)
     out = args.out or args.model
@@ -978,8 +1417,8 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
         ("model", origin.describe()),
         ("kind", kind_label(model)),
         ("backend", backend_label(model)),
-        ("thumbs up", f"{len(good)} texts"),
-        ("thumbs down", f"{len(bad)} texts"),
+        ("thumbs up", f"{len(good)} texts" + (f", marks {_marks_label(args.good_ratings)}/10" if good_weights else "")),
+        ("thumbs down", f"{len(bad)} texts" + (f", marks {_marks_label(args.bad_ratings)}/10" if bad_weights else "")),
         ("action", wording[action]),
         *_phase_pairs(model, args),
         ("output", out),
@@ -993,16 +1432,17 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
             return model.two_nrl(
                 bad, good, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
                 pos_lr=args.pos_lr, progress=printer, stop_event=stop, batch_size=args.batch_size, strength=args.strength,
+                bad_weights=bad_weights, good_weights=good_weights,
             )
         if action == "reward":
             records = model.reward(
                 good, epochs=args.pos_epochs, lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
-                progress=printer, stop_event=stop,
+                weights=good_weights, progress=printer, stop_event=stop,
             )
             return {"negative": [], "positive": records, "inverted": model.graph.inverted}
         records = model.punish(
             bad, epochs=args.neg_epochs, lr=args.neg_lr, batch_size=args.batch_size, strength=args.strength,
-            progress=printer, stop_event=stop,
+            weights=bad_weights, progress=printer, stop_event=stop,
         )
         return {"negative": records, "positive": [], "inverted": model.graph.inverted}
 
@@ -1011,9 +1451,409 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     console.say(f"action: {action}; inverted: {fmt(result['inverted'])}")
     return {
         "model": origin.to_dict(), "out": out, "action": action, "good_texts": len(good), "bad_texts": len(bad),
+        "good_weights": good_weights, "bad_weights": bad_weights,
         "negative": result["negative"], "positive": result["positive"], "inverted": result["inverted"],
         "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
+
+
+def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
+    """Teach one correction: only the trigram nodes the two sentences disagree on move."""
+    wrong, right = str(args.wrong or ""), str(args.right or "")
+    if not wrong.strip() and not right.strip():
+        raise CliError("nothing to correct: give --wrong (what the network wrote) and --right (what it should say)")
+    changes = diff.summary(wrong, right, limit=0)
+    if args.dry_run:
+        console.pairs([("wrong", wrong), ("right", right), ("changes", len(changes))])
+        _print_changes(console, changes)
+        return {"wrong": wrong, "right": right, "changes": changes, "dry_run": True}
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "correct"):
+        raise CliError(f"the {kind_label(model)} model cannot learn from a diff; use feedback instead")
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("kind", kind_label(model)),
+        ("wrong", wrong),
+        ("right", right),
+        ("weights", f"penalty {args.weight}, reward {args.reward}, keep {args.keep}, strength {args.strength}"),
+        ("output", out),
+    ])
+    moved = model.correct(
+        wrong, right, strength=args.strength, weight=args.weight, reward=args.reward, keep=args.keep,
+        count=not args.no_count,
+    )
+    negative = blamed = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        blamed = negative.correct(
+            wrong, right, reason=args.reason, severity=args.weight * args.strength, source="cli",
+            note=args.note,
+        )
+    _print_changes(console, changes)
+    console.say(
+        f"moved: {moved['penalised']} step(s) penalised, {moved['rewarded']} taught, "
+        f"{moved['kept']} kept at {args.keep}"
+    )
+    if blamed is not None:
+        console.say(
+            f"negative network: {blamed['blamed']} step(s) blamed for {blamed['reason']}, {blamed['cleared']} cleared"
+        )
+    saved = save_model(model, out)
+    console.say(f"saved {out} ({saved['bytes']} bytes)")
+    return {
+        "model": origin.to_dict(), "out": out, "wrong": wrong, "right": right, **moved,
+        "changes": changes, "saved": saved, "stats": model.stats(),
+        "negative": None if negative is None else {"blamed": blamed, **_save_negative(console, negative, negative_path(args))},
+    }
+
+
+def _print_changes(console: Console, changes: list[dict]) -> None:
+    if not changes:
+        console.say("the two sentences are the same: nothing to teach")
+        return
+    console.say()
+    console.table(
+        ["change", "the network wrote", "the teacher wrote"],
+        [[change["op"], change["wrong"] or "-", change["right"] or "-"] for change in changes],
+    )
+# --------------------------------------------------------------------------
+# the negative network (the failures, and why)
+# --------------------------------------------------------------------------
+
+
+def negative_path(args: argparse.Namespace) -> str:
+    """``--negative``, else the negative model beside ``--model`` (``model.json`` -> ``model.negative.json``)."""
+    path = getattr(args, "negative", None)
+    if path:
+        return path
+    root, ext = os.path.splitext(args.model)
+    if ext == ".gz":
+        root, inner = os.path.splitext(root)
+        ext = inner + ext
+    return args.model if root.endswith(".negative") else f"{root}.negative{ext}"
+
+
+def open_negative(args: argparse.Namespace, console: Console, *, required: bool) -> tuple[Any, Origin]:
+    """Load the negative network from :func:`negative_path`, else create an empty one."""
+    from .negative import NegativeNet
+
+    path = negative_path(args)
+    if os.path.isfile(path):
+        model = load_model(path, backend=args.backend, device=args.device)
+        if model.kind != "negative":
+            raise CliError(f"{path} holds a {model.kind} model, not a negative one")
+        g = model.graph
+        return model, Origin("model", path, f"{fmt(g.total_blame)} blame over {len(g.reasons)} reasons")
+    if required:
+        raise CliError(
+            f"negative model file not found: {path} "
+            f"(teach it first with `{PROG} negative blame --text '...' --reason gibberish`)"
+        )
+    seed = effective_seed(args)
+    return NegativeNet(seed=seed), Origin("new", None, f"seed {seed}")
+
+
+def _negative_texts(args: argparse.Namespace, what: str) -> list[str]:
+    texts = list(getattr(args, "text", None) or [])
+    if getattr(args, "data", None):
+        texts += read_texts([args.data], what=what)
+    texts = [t for t in texts if t.strip()]
+    if not texts:
+        raise CliError(f"no texts to {what}: give --text TEXT (repeatable) or --data FILE")
+    return texts
+
+
+def _reason_rows(model: Any, limit: int = 10) -> list[list[Any]]:
+    return [[r["reason"], r["blame"], r["fails"], r["edges"], r["share"]] for r in model.reasons()[:limit]]
+
+
+def cmd_negative_blame(args: argparse.Namespace, console: Console) -> dict:
+    """Teach the negative network a failure: its reason, its severity and the tutor's own words."""
+    texts = _negative_texts(args, "blame")
+    model, origin = open_negative(args, console, required=False)
+    out = args.out or negative_path(args)
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("failures", f"{len(texts)} texts"),
+        ("reason", args.reason),
+        ("severity", args.severity),
+        ("source", args.source),
+        ("note", clip(args.note, 60) if args.note else "-"),
+        ("epochs", args.epochs),
+        ("output", out),
+    ])
+    console.say()
+    printer = EpochPrinter(console)
+    stop = threading.Event()
+    records, interrupted = run_interruptible(
+        lambda: model.blame(
+            texts, reason=args.reason, severity=args.severity, source=args.source, note=args.note,
+            epochs=args.epochs, progress=printer, stop_event=stop,
+        ),
+        stop, console, "epoch",
+    )
+    saved = _finish_training(console, model, out, interrupted, printer, "epoch")
+    console.say()
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(model))
+    return {
+        "model": origin.to_dict(), "out": out, "texts": len(texts), "reason": args.reason,
+        "severity": args.severity, "source": args.source, "records": records, "interrupted": interrupted,
+        "saved": saved, "reasons": model.reasons(), "stats": model.stats(),
+    }
+
+
+def cmd_negative_clear(args: argparse.Namespace, console: Console) -> dict:
+    """The tutor passed these texts: credit the edges they share with known failures, creating nothing."""
+    texts = _negative_texts(args, "clear")
+    model, origin = open_negative(args, console, required=True)
+    out = args.out or negative_path(args)
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("cleared", f"{len(texts)} texts"),
+        ("weight", args.weight),
+        ("epochs", args.epochs),
+        ("output", out),
+    ])
+    console.say()
+    printer = EpochPrinter(console)
+    stop = threading.Event()
+    records, interrupted = run_interruptible(
+        lambda: model.clear(texts, weight=args.weight, epochs=args.epochs, progress=printer, stop_event=stop),
+        stop, console, "epoch",
+    )
+    saved = _finish_training(console, model, out, interrupted, printer, "epoch")
+    last = records[-1] if records else {}
+    console.say(f"matched {last.get('matched', 0)} of {len(texts)} texts ({last.get('edges_touched', 0)} edges cleared)")
+    return {
+        "model": origin.to_dict(), "out": out, "texts": len(texts), "weight": args.weight, "records": records,
+        "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+    }
+
+
+def _print_verdict(console: Console, verdict: dict, spans: bool = True) -> None:
+    """One judgement as a block: the sentence, the reasons and the fragments to blame."""
+    console.pairs([
+        ("text", quote(clip(verdict["text"], 70))),
+        ("verdict", verdict.get("decision") or verdict["verdict"]),
+        ("risk", verdict["risk"]),
+        ("coverage", verdict["coverage"]),
+        ("blame", verdict["blame"]),
+        *([("ratio", verdict["ratio"])] if "ratio" in verdict else []),
+        ("why", verdict["why"]),
+    ])
+    if verdict["reasons"]:
+        console.say()
+        console.table(("reason", "blame", "share"), [[r["reason"], r["blame"], r["share"]] for r in verdict["reasons"]])
+    if spans and verdict["spans"]:
+        console.say()
+        console.table(
+            ("at", "fragment", "blame", "fails", "reason"),
+            [[f"{s['start']}..{s['end']}", quote(s["fragment"]), s["blame"], s["fails"], s["reason"]] for s in verdict["spans"]],
+        )
+
+
+def cmd_negative_why(args: argparse.Namespace, console: Console) -> dict:
+    """Why the negative network thinks a text went wrong: the reasons, and the fragments carrying them."""
+    texts = _negative_texts(args, "judge")
+    model, origin = open_negative(args, console, required=True)
+    console.pairs([("negative model", origin.describe()), ("texts", len(texts))])
+    verdicts = []
+    for text in texts:
+        verdict = model.judge(text, threshold=args.threshold, min_coverage=args.min_coverage, spans=args.spans)
+        verdicts.append(verdict)
+        console.say()
+        _print_verdict(console, verdict)
+    return {"model": origin.to_dict(), "verdicts": verdicts, "stats": model.stats()}
+
+
+def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
+    """The pair at work: the positive model writes, the negative one vetoes (or judge given texts)."""
+    from .duo import FilterConfig, NegativeFilter
+
+    negative, neg_origin = open_negative(args, console, required=True)
+    positive, pos_origin = open_model(args, console, required=True)
+    config = FilterConfig(
+        threshold=args.threshold, min_coverage=args.min_coverage, ratio=None if args.no_ratio else args.ratio,
+        peak=args.peak, over_sample=args.over_sample, strict=args.strict, spans=args.spans, learn=args.learn,
+    )
+    pair = NegativeFilter(positive, negative, config)
+    given = list(args.text or [])
+    if args.data:
+        given += read_texts([args.data], what="filterable")
+    console.pairs([
+        ("positive model", f"{pos_origin.describe()} [{kind_label(positive)}]"),
+        ("negative model", neg_origin.describe()),
+        ("source", f"{len(given)} given texts" if given else f"{args.count} generated ({args.mode}, x{args.over_sample})"),
+        ("threshold", f"risk >= {fmt(config.threshold if config.threshold is not None else negative.threshold)}"
+                      f", coverage >= {fmt(config.min_coverage if config.min_coverage is not None else negative.min_coverage)}"),
+        ("ratio", "off" if config.ratio is None else f">= {fmt(config.ratio)} nats/char"),
+        ("peak", "off" if config.peak is None else f">= {fmt(config.peak)} blame on one fragment"),
+        ("strict", config.strict),
+        ("learn", config.learn),
+    ])
+    if given:
+        outcome = pair.filter(given)
+        doc: dict[str, Any] = {
+            "texts": outcome["kept"], "kept": outcome["kept"], "verdicts": outcome["verdicts"],
+            "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
+            "candidates": len(given), "asked": len(given), "rate": outcome["rate"],
+        }
+    else:
+        doc = pair.generate(
+            count=args.count, mode=args.mode, max_length=args.max_length, temperature=args.temperature,
+            prefix=args.prefix, seed=args.seed, step_penalty=args.step_penalty,
+        )
+    console.say()
+    console.table(
+        ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
+        [
+            [v["decision"], v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
+             v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))]
+            for v in doc["verdicts"]
+        ],
+    )
+    console.say()
+    returned = doc.get("texts") or []
+    console.say(
+        f"{len(doc['verdicts'])} candidates: {len(doc['kept'])} passed the filter, {len(doc['rejected'])} vetoed"
+        + (f" (acceptance {fmt(doc['rate'])})" if doc.get("rate") is not None else "")
+        + (f"; returning the {len(returned)} cleanest" if len(returned) < len(doc["kept"]) else "")
+    )
+    for text in returned:
+        console.say(f"  {quote(text)}")
+    for verdict in doc["rejected"]:
+        console.say(f"  vetoed: {quote(clip(verdict['text'], 60))} - {verdict['why']}")
+    if config.learn:
+        saved = save_model(negative, negative_path(args))
+        console.say(f"saved {saved['path']} ({saved['bytes']} bytes)")
+        doc["saved"] = saved
+    doc["pair"] = pair.describe()
+    return doc
+
+
+def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
+    """The Negative tab, automatic: the model writes, an LLM reviews, the failures blame - round after round."""
+    from .chatgpt import api_key_configured
+    from .critic import Critic, CriticConfig
+    from .llm import LLMError, make_client
+
+    if args.provider == "chatgpt" and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT review, "
+            "or use --provider ollama"
+        )
+    config = CriticConfig(
+        rounds=args.rounds, count=args.count, prefix=args.prefix or "", max_length=args.max_length,
+        temperature=args.temperature, threshold=args.threshold, context=args.context or "",
+        provider=args.provider, reviewer_model=args.reviewer_model or "",
+        clear_passes=not args.no_clear, epochs=args.epochs, seed=effective_seed(args),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        client = make_client(config.provider, args.url, config.reviewer_model or None, args.timeout)
+    except (LLMError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    model, origin = open_model(args, console, required=True)
+    negative, neg_origin = open_negative(args, console, required=False)
+    out = args.out or negative_path(args)
+    console.pairs([
+        ("model", origin.describe()),
+        ("negative network", neg_origin.describe()),
+        ("reviewer", f"{config.provider}: {client.model} at {client.url}"),
+        ("rounds", "until stopped (Ctrl-C)" if not config.rounds else config.rounds),
+        ("per round", f"{config.count} text(s), {config.max_length} chars, temperature {config.temperature:g}"),
+        ("pass mark", f"{config.threshold:g}/10"),
+        ("context", clip(config.context, 60) if config.context else "-"),
+        ("passes clear", not args.no_clear),
+        ("output", out),
+    ])
+    console.say()
+    rows: list[list[Any]] = []
+    stop = threading.Event()
+
+    def show(record: dict) -> None:
+        if record.get("kind") != "round":
+            return
+        rows.append([
+            record["round"], record["texts"], record["passed"], record["failed"],
+            fmt(record["mean_rating"]), record["blamed"], record["cleared"], record["edges"],
+            ", ".join(f"{k} x{v}" for k, v in (record["reasons"] or {}).items()) or "-",
+        ])
+        console.note(
+            f"round {record['round']}: {record['failed']}/{record['texts']} failed, "
+            f"blamed {record['blamed']} over {record['edges']} edge(s), cleared {record['cleared']}"
+        )
+
+    critic = Critic(model, negative, client, config)
+    records, interrupted = run_interruptible(
+        lambda: critic.run(progress=show, stop_event=stop), stop, console, "round",
+    )
+    console.table(
+        ("round", "texts", "passed", "failed", "mean mark", "blamed", "cleared", "edges", "reasons"), rows,
+    )
+    card = records[-1] if records and records[-1].get("kind") == "report" else {}
+    console.say()
+    console.say(
+        f"{card.get('rounds', 0)} round(s): reviewed {card.get('reviewed', 0)}, blamed {card.get('blamed', 0)}, "
+        f"cleared {card.get('cleared', 0)}; mean mark {fmt(card.get('mean_rating'))}/10"
+        + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
+    )
+    return {
+        "config": config.to_dict(), "url": client.url, "reviewer": client.model,
+        "records": records, "report": card, "interrupted": interrupted,
+        "negative": _save_negative(console, negative, out),
+    }
+
+
+def cmd_negative_reasons(args: argparse.Namespace, console: Console) -> dict:
+    """Everything the tutor has blamed, and the journal of what it said."""
+    model, origin = open_negative(args, console, required=True)
+    stats = model.stats()
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("failures", stats["failures_total"]),
+        ("blame", stats["edge_blame_total"]),
+        ("cleared", stats["cleared_total"]),
+        ("nodes / edges", f"{stats['nodes']} / {stats['edges']}"),
+        ("judgements", f"{stats['judgements']} ({stats['rejected']} rejected)"),
+        ("sources", ", ".join(f"{k}={v}" for k, v in sorted(stats["sources"].items())) or "-"),
+        ("filter", f"risk >= {fmt(stats['threshold'])}, coverage >= {fmt(stats['min_coverage'])}"),
+    ])
+    console.say()
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(model, limit=args.limit))
+    journal = model.recent(args.log)
+    if journal:
+        console.say()
+        console.table(
+            ("when", "reason", "severity", "source", "text", "the tutor said"),
+            [[e["at"], e["reason"], e["severity"], e["source"] or "-", quote(clip(e["text"], 34)), clip(e["note"], 44)]
+             for e in journal],
+        )
+    return {"model": origin.to_dict(), "reasons": model.reasons(), "journal": journal, "stats": stats}
+
+
+def cmd_negative_forget(args: argparse.Namespace, console: Console) -> dict:
+    """The tutor can be wrong too: drop (or fade) the blame behind one reason, or all of it."""
+    model, origin = open_negative(args, console, required=True)
+    out = args.out or negative_path(args)
+    result = model.forget(args.reason, factor=args.factor)
+    saved = save_model(model, out)
+    console.pairs([
+        ("negative model", origin.describe()),
+        ("reason", result["reason"]),
+        ("keeping", f"{fmt(args.factor * 100)}% of its blame"),
+        ("edges", result["edges"]),
+        ("blame removed", result["blame_removed"]),
+        ("saved", f"{saved['path']} ({saved['bytes']} bytes)"),
+    ])
+    console.say()
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(model))
+    return {"model": origin.to_dict(), "out": out, **result, "saved": saved, "stats": model.stats()}
 
 
 def cmd_invert(args: argparse.Namespace, console: Console) -> dict:
@@ -1073,7 +1913,10 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
         seed=effective_seed(args),
         blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
     )
-    evolver = Evolver(generator, corpus, discriminator, config)
+    negative = neg_origin = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
+    evolver = Evolver(generator, corpus, discriminator, config, negative=negative)
     generations = args.generations or None
     out = args.out or args.model
     console.pairs([
@@ -1085,6 +1928,7 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
         ("config", f"samples={config.samples} real={config.real_per_generation} max_length={config.max_length} "
                    f"temperature={config.temperature} batch={config.batch_size}"),
         ("checkpoints", f"{manager.directory} every {every} generation(s), keep {manager.keep}" if manager else "off"),
+        *([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")] if negative is not None else []),
         ("output", out),
     ])
     console.say()
@@ -1099,7 +1943,9 @@ def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
     if args.discriminator:
         disc_saved = save_model(evolver.discriminator, args.discriminator)
         console.say(f"saved discriminator {args.discriminator} ({disc_saved['bytes']} bytes)")
+    negative_doc = _save_negative(console, negative, negative_path(args)) if negative is not None else None
     return {
+        "negative": negative_doc,
         "model": origin.to_dict(),
         "out": out,
         "corpus_texts": len(evolver.corpus),
@@ -1211,8 +2057,9 @@ def cmd_bench(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
-    from .codegen import PHASES, CodeGenConfig, CodeGenTrainer, Sandbox, load_problems
-    from .ollama import OllamaClient, OllamaError
+    from .chatgpt import api_key_configured
+    from .codegen import PHASES, CodeGenConfig, CodeGenTrainer, Sandbox, default_teacher_model, load_problems
+    from .llm import LLMError, make_client
 
     try:
         problems = load_problems(args.problems)
@@ -1220,8 +2067,11 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         raise CliError(f"cannot load problems from {args.problems}: {exc}") from exc
     phases = PHASES if args.phase == "both" else (args.phase,)
     manager = checkpoint_manager(args)
+    judge_provider = args.judge_provider or args.teacher_provider
     config = CodeGenConfig(
-        teacher_model=args.teacher_model or CodeGenConfig().teacher_model, judge_model=args.judge_model, phases=phases,
+        teacher_provider=args.teacher_provider, judge_provider=judge_provider,
+        teacher_model=args.teacher_model or default_teacher_model(args.teacher_provider),
+        judge_model=args.judge_model, phases=phases,
         rounds=args.rounds, teacher_attempts=args.teacher_attempts, model_attempts=args.model_attempts,
         first_attempt_dijkstra=not args.sample_first, temperature=args.temperature, max_length=args.max_length,
         strictness=args.strictness, use_judge=not args.no_judge, fallback_teacher=not args.no_fallback_teacher,
@@ -1230,39 +2080,55 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
         batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager),
     )
+    providers = {config.teacher_provider} | ({config.judge_provider} if config.use_judge else set())
+    if "chatgpt" in providers and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT tutor, "
+            "or use --teacher-provider ollama"
+        )
     try:
         config.validate()
-        client = OllamaClient(args.url, config.teacher_model, args.timeout)
+        client = make_client(config.teacher_provider, args.url, config.teacher_model, args.timeout)
+        if config.judge_provider == config.teacher_provider and not args.judge_url:
+            judge_client = client
+        else:
+            judge_client = make_client(config.judge_provider, args.judge_url, config.resolved_judge_model, args.timeout)
     except ValueError as exc:
         raise CliError(str(exc)) from exc
     sandbox = Sandbox(timeout=args.sandbox_timeout, memory_mb=args.memory_mb, isolate_network=not args.no_network_isolation)
     model, origin = open_model(args, console, required=False)
+    negative = neg_origin = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
     out = args.out or args.model
     console.pairs([
         ("model", origin.describe()),
         ("backend", backend_label(model)),
         ("problems", f"{len(problems)} from {args.problems}"),
         ("phases", " -> ".join(phases) + f", {config.rounds} round(s)"),
-        ("teacher", f"{config.teacher_model} at {client.url}"),
-        ("judge", (config.judge_model or config.teacher_model) if config.use_judge else "off (sandbox, expected output and tests only)"),
+        ("teacher", f"{config.teacher_provider}: {config.teacher_model} at {client.url}"),
+        ("judge", f"{config.judge_provider}: {config.resolved_judge_model} at {judge_client.url}" if config.use_judge
+                  else "off (sandbox, expected output and tests only)"),
         ("attempts", f"teacher={config.teacher_attempts} model={config.model_attempts}"
                      + ("" if config.fallback_teacher else ", no teacher fallback")),
         ("sandbox", f"timeout={sandbox.timeout:g}s memory={sandbox.memory_mb}MB network="
                     + ("isolated" if sandbox.network_isolated else "NOT isolated")),
         ("2NRL", f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
                  f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}, {config.strictness}"),
+        *([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")] if negative is not None else []),
         ("output", out),
     ])
     console.say()
     printer = ProblemPrinter(console)
     stop = threading.Event()
-    trainer = CodeGenTrainer(model, client, sandbox, config)
+    trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client)
+    trainer = CodeGenTrainer(model, client, sandbox, config, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(problems, progress=printer, stop_event=stop, checkpoint_manager=manager),
             stop, console, "problem",
         )
-    except OllamaError as exc:
+    except LLMError as exc:
         raise CliError(str(exc)) from exc
     saved = _finish_training(console, model, out, interrupted, printer, "problem")
     problem_records = [r for r in records if r.get("kind") == "problem"]
@@ -1277,11 +2143,160 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
         "records": records, "attempts": printer.attempts, "solved": solved, "model_solved": by_model,
         "solutions": trainer.solved, "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
+    if negative is not None:
+        doc["negative"] = _save_negative(console, negative, negative_path(args))
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
             json.dump({k: doc[k] for k in ("problems", "config", "records", "solutions", "solved", "model_solved")}, fh, indent=2)
         console.say(f"wrote report to {args.report}")
     return doc
+
+
+def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
+    from .chatgpt import api_key_configured
+    from .llm import LLMError, make_client
+    from .tutor import TutorConfig, TutorTrainer, default_tutor_model, report_card
+
+    manager = checkpoint_manager(args)
+    grader_provider = args.grader_provider or args.tutor_provider
+    config = TutorConfig(
+        topic=args.topic, rounds=args.rounds, exercises=args.exercises, attempts=args.attempts, focus=args.focus,
+        level=args.level, words=args.words, brief=args.brief or "",
+        tutor_provider=args.tutor_provider, grader_provider=grader_provider,
+        tutor_model=args.tutor_model or default_tutor_model(args.tutor_provider),
+        grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
+        temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
+        grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
+        plan=args.plan or 0, batches=args.batches,
+        teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
+        diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
+        pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
+        replay_limit=args.replay_limit, checkpoint_every=checkpoint_every(args, manager),
+    )
+    if "chatgpt" in (config.tutor_provider, config.grader_provider) and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT teach, "
+            "or use --tutor-provider ollama"
+        )
+    try:
+        config.validate()
+        client = make_client(config.tutor_provider, args.url, config.tutor_model, args.timeout)
+        if config.grader_provider == config.tutor_provider and not args.grader_url:
+            grader_client = client
+        else:
+            grader_client = make_client(config.grader_provider, args.grader_url, config.resolved_grader_model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("backend", backend_label(model)),
+        ("topic", config.topic + (f", drilling {config.focus}" if config.focus else "")),
+        ("lessons", f"{config.rounds} round(s) x {config.exercises} exercise(s) x {config.attempts} attempt(s)"),
+        ("teacher", f"{config.tutor_provider}: {config.tutor_model} at {client.url}"),
+        ("marker", f"{config.grader_provider}: {config.resolved_grader_model} at {grader_client.url}"),
+        ("completion", f"{config.mode}, length={config.length}, max={config.max_length}"
+                       + (f", temperature={fmt(config.temperature)}" if config.mode == "sample" else "")),
+        ("marking", f"pass at {fmt(config.threshold)}/10, grammar weight {fmt(config.grammar_weight)}, "
+                    f"{config.batch} per call" + (", adapting to the weakest points" if config.adapt else "")),
+        ("corrections", "from the diff with what the network wrote: only what changed moves"
+                        f" (the rest keeps {fmt(config.keep_weight)})" if config.diff_corrections
+                        else "as whole sentences (--no-diff-corrections)"),
+        ("2NRL", "off (--dry-run: the grades are reported, nothing is trained)" if args.dry_run else
+                 f"per {config.twonrl_per}: negative epochs={config.neg_epochs} lr={config.neg_lr}, positive "
+                 f"epochs={config.pos_epochs} lr={config.pos_lr}, batch={config.batch_size}, "
+                 f"garbage weight {fmt(config.min_weight)}..1"),
+        ("brief", clip(config.brief, 100) if config.brief else "none (--brief TEXT: the last plan's prompt)"),
+        ("plan", f"the teacher plans the next {config.plan} lesson(s) from the final report card"
+                 if config.plan else "no lesson plan (--plan N)"),
+        ("auto run", "one batch (--batches N to plan and teach the next ones)" if config.batches == 1 else
+                     (f"{config.batches} batches, each planned from the one before"
+                      if config.batches else "batches until stopped (Ctrl-C), each planned from the one before")),
+        ("output", "not saved (--dry-run)" if args.dry_run else out),
+    ])
+    console.say()
+    printer = LessonPrinter(console)
+    stop = threading.Event()
+    trainer = TutorTrainer(model, client, config, grader_client=grader_client)
+    negative = neg_origin = None
+    if args.blame:
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        console.say()
+    trainer = TutorTrainer(model, client, config, negative=negative)
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.run(progress=printer, stop_event=stop, checkpoint_manager=manager), stop, console, "round",
+        )
+    except LLMError as exc:
+        raise CliError(str(exc)) from exc
+    saved = None
+    if args.dry_run:
+        if interrupted:
+            console.note(f"stopped after {printer.seen} lesson(s)")
+        console.say()
+    else:
+        saved = _finish_training(console, model, out, interrupted, printer, "lesson")
+    card = report_card(trainer.lessons)
+    console.say()
+    console.pairs([
+        ("lessons", f"{card['passed']}/{card['lessons']} passed"
+                    + (f" ({100 * card['pass_rate']:.0f}%)" if card["pass_rate"] is not None else "")),
+        ("mean score", f"{fmt(card['mean_score'])}/10"),
+        ("grammar", fmt(card["mean_grammar"])),
+        ("spelling", fmt(card["mean_spelling"])),
+        ("fluency", fmt(card["mean_fluency"])),
+        ("mistakes", ", ".join(f"{name} x{count}" for name, count in card["errors"].items()) or "none"),
+        ("weakest", ", ".join(card["weakest"]) or "-"),
+    ])
+    # the plan that says what comes *after* the run: the one the last batch's card led to, if it was asked for
+    last_batch = max((r.get("batch", 1) for r in records if r.get("kind") == "report"), default=1)
+    plan = next(
+        (r for r in reversed(records) if r.get("kind") == "plan" and r.get("batch", 1) == last_batch), None
+    )
+    if plan is not None:
+        upgrade = plan.get("upgrade") or {}
+        console.say()
+        console.say(f"lesson plan ({plan['source']}): {plan['summary']}")
+        console.table(
+            ("#", "focus", "fixes", "topic", "exercises", "drills", "why"),
+            [
+                [i, lesson["focus"] or "-", lesson["targets"], lesson["topic"] or "-", lesson["exercises"],
+                 lesson["drills"], clip(str(lesson["why"] or "-"), 60)]
+                for i, lesson in enumerate(plan["lessons"], 1)
+            ],
+        )
+        console.pairs([
+            ("step up", f"{upgrade.get('step', '-')}: {upgrade.get('note', '-')}"),
+            ("brief", plan.get("prompt") or "-"),
+        ])
+        first = plan["lessons"][0]
+        console.say(
+            f"teach the next batch: {PROG} tutor --topic {quote(first['topic'] or config.topic)}"
+            + f" --level {upgrade.get('level', plan['level'])} --words {quote(str(upgrade.get('words', config.words)))}"
+            + f" --threshold {float(upgrade.get('threshold', config.threshold)):g}"
+            + f" --exercises {first['exercises']} --drills {upgrade.get('drills', config.drills)}"
+            + f" --brief {quote(plan.get('prompt') or '')}"
+        )
+    doc = {
+        "model": origin.to_dict(), "out": None if args.dry_run else out, "config": config.to_dict(),
+        "records": records, "lessons": [lesson.to_dict() for lesson in trainer.lessons], "report": card,
+        "plan": plan, "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+        "negative": _save_negative(console, negative, negative_path(args)) if negative is not None else None,
+    }
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump({k: doc[k] for k in ("config", "records", "lessons", "report", "plan")}, fh, indent=2)
+        console.say(f"wrote report to {args.report}")
+    return doc
+def _save_negative(console: Console, negative: Any, path: str) -> dict:
+    """Save the negative network and print what the tutor taught it."""
+    saved = save_model(negative, path)
+    console.say()
+    console.say(f"negative model: {saved['path']} ({saved['bytes']} bytes)")
+    console.table(("reason", "blame", "fails", "edges", "share"), _reason_rows(negative))
+    return {"path": path, "saved": saved, "reasons": negative.reasons(), "stats": negative.stats()}
 
 
 def _ollama_client(args: argparse.Namespace) -> Any:
@@ -1291,6 +2306,235 @@ def _ollama_client(args: argparse.Namespace) -> Any:
         return OllamaClient(args.url, args.ollama_model, args.timeout)
     except ValueError as exc:
         raise CliError(str(exc)) from exc
+
+
+# --------------------------------------------------------------------------
+# tool use: the network browses, Ollama sets the bar and teaches
+# --------------------------------------------------------------------------
+
+
+def build_toolbox(args: argparse.Namespace) -> Any:
+    """The toolbox a run gets from the command line: browsing, the calculator, the sandbox, uploads."""
+    from .tools import WebClient, default_toolbox
+
+    web = None
+    if not args.offline:
+        try:
+            web = WebClient(
+                timeout=args.web_timeout, max_bytes=args.max_bytes, allow_private=args.allow_private,
+                search_url=args.search_url or None,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    sandbox = None
+    if args.python_tool:
+        from .codegen import Sandbox
+
+        sandbox = Sandbox(timeout=args.sandbox_timeout, isolate_network=not args.no_network_isolation)
+    try:
+        return default_toolbox(web, sandbox=sandbox, upload_dir=args.upload_dir or None, offline=args.offline)
+    except (ValueError, TypeError) as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _agent_config(args: argparse.Namespace, manager: Any) -> Any:
+    from .agent import AgentConfig
+
+    config = AgentConfig(
+        agent_model=args.agent_model or AgentConfig().agent_model, judge_model=args.judge_model,
+        phases=("teacher", "model") if getattr(args, "phase", "model") == "both" else (getattr(args, "phase", "model"),),
+        rounds=getattr(args, "rounds", 1), max_steps=args.max_steps, model_attempts=args.model_attempts,
+        teacher_attempts=args.teacher_attempts, first_attempt_dijkstra=not args.sample_first,
+        temperature=args.temperature, max_length=args.max_length, mediation=args.mediation,
+        criteria_count=args.criteria, strict=not args.lenient, use_judge=not args.no_judge,
+        teach_on_failure=not args.no_teach, observation_chars=args.observation_chars,
+        twonrl_per=getattr(args, "twonrl_per", "task"), replay=not args.no_replay, read_reward=args.read_reward,
+        blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
+        neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
+        batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager), seed=args.seed or 0,
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    return config
+
+
+def _agent_preamble(console: Console, args, model, origin, config, client, toolbox, source: str, out: str) -> None:
+    console.pairs([
+        ("model", origin.describe()),
+        ("backend", backend_label(model)),
+        ("tasks", source),
+        ("tools", f"{len(toolbox)}: {', '.join(toolbox.names())}"),
+        ("ollama", f"{config.agent_model} at {client.url}"),
+        ("judge", (config.judge_model or config.agent_model) if config.use_judge else "off (the known answer only)"),
+        ("mediation", f"{config.mediation} (the LLM repairs the calls the network cannot write yet)"),
+        ("steps", f"{config.max_steps} tool calls per attempt, {config.model_attempts} attempt(s) by the network"
+                  + (f", then the teacher demonstrates" if config.teach_on_failure else ", no teaching")),
+        ("failure", f"{config.blatant_mode}: margin={config.blatant_margin:g} boost={config.blatant_boost:g} "
+                    f"(train on the failures the harder the worse they are, then invert)"),
+        ("2NRL", f"negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
+                 f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}"),
+        ("output", out),
+    ])
+    console.say()
+
+
+def cmd_tools(args: argparse.Namespace, console: Console) -> dict:
+    """List the tools, describe one, or call one directly (no model, no LLM)."""
+    from .tools import ToolError, parse_call
+
+    toolbox = build_toolbox(args)
+    if args.action == "list":
+        console.pairs([("tools", len(toolbox)), ("offline", args.offline)])
+        console.say()
+        console.table(
+            ("name", "network", "arguments", "description"),
+            [[t.name, t.network, ", ".join(p.name if p.required else f"[{p.name}]" for p in t.params), t.description]
+             for t in toolbox.tools()],
+        )
+        return {"tools": toolbox.describe(), "offline": args.offline}
+    if args.action == "describe":
+        try:
+            tool = toolbox.get(args.tool)
+        except ToolError as exc:
+            raise CliError(str(exc)) from exc
+        console.pairs([("tool", tool.signature()), ("network", tool.network), ("description", tool.description)])
+        console.say()
+        console.table(
+            ("argument", "type", "required", "default", "description"),
+            [[p.name, p.type, p.required, p.default, p.description] for p in tool.params],
+        )
+        console.say()
+        console.say(json.dumps(tool.schema(), indent=2))
+        return {"tool": tool.to_dict(), "schema": tool.schema()}
+    # call
+    if args.call:
+        call = parse_call(args.call if args.call.startswith("<tool>") else f"<tool>{args.call}</tool>", toolbox)
+        if call is None or not call.ok:
+            raise CliError(call.error if call is not None else f"no tool call in {args.call!r}")
+        name, arguments = call.name, call.arguments
+    else:
+        if not args.tool:
+            raise CliError("`tools call` needs --tool NAME (with --arg) or --call '<tool>name {...}</tool>'")
+        name = args.tool
+        arguments = {}
+        for pair in args.arg or ():
+            key, sep, value = pair.partition("=")
+            if not sep:
+                raise CliError(f"--arg expects name=value, got {pair!r}")
+            arguments[key.strip()] = value
+    result = toolbox.call(name, arguments)
+    console.pairs([("tool", result.tool), ("arguments", json.dumps(result.arguments, ensure_ascii=False)),
+                   ("ok", result.ok), ("seconds", f"{result.seconds:.3f}")])
+    console.say()
+    console.say(result.output if result.ok else f"ERROR: {result.error}")
+    if not result.ok:
+        raise CliError(f"{result.tool}: {result.error}")
+    return result.to_dict()
+
+
+def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
+    """Solve a list of tasks with tools: criteria, attempts, judging, teaching, 2NRL."""
+    from .agent import AgentTrainer, load_tasks
+    from .ollama import OllamaError
+
+    try:
+        tasks = load_tasks(args.tasks)
+    except (OSError, ValueError) as exc:
+        raise CliError(f"cannot load tasks from {args.tasks}: {exc}") from exc
+    manager = checkpoint_manager(args)
+    config = _agent_config(args, manager)
+    toolbox = build_toolbox(args)
+    client = _ollama_client_for(args, config.agent_model)
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    _agent_preamble(console, args, model, origin, config, client, toolbox,
+                    f"{len(tasks)} from {args.tasks}, {config.rounds} round(s) of {' -> '.join(config.phases)}", out)
+    printer = TaskPrinter(console)
+    stop = threading.Event()
+    trainer = AgentTrainer(model, client, toolbox, config)
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.run(tasks, progress=printer, stop_event=stop, checkpoint_manager=manager),
+            stop, console, "task",
+        )
+    except (OllamaError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    saved = _finish_training(console, model, out, interrupted, printer, "task")
+    return _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+
+
+def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
+    """Browse on the network's own initiative: it picks every task, the LLM judges and teaches it."""
+    from .agent import AgentTrainer
+    from .ollama import OllamaError
+
+    manager = checkpoint_manager(args)
+    config = _agent_config(args, manager)
+    toolbox = build_toolbox(args)
+    client = _ollama_client_for(args, config.agent_model)
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    steps = args.steps
+    _agent_preamble(console, args, model, origin, config, client, toolbox,
+                    f"chosen by the network: {steps or 'until Ctrl-C'} step(s)", out)
+    if args.seed_url:
+        trailer = list(args.seed_url)
+        console.note(f"starting frontier: {', '.join(trailer)}")
+    printer = TaskPrinter(console)
+    stop = threading.Event()
+    trainer = AgentTrainer(model, client, toolbox, config)
+    trainer.frontier.extend(args.seed_url or ())
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.explore(steps=steps, progress=printer, stop_event=stop, checkpoint_manager=manager),
+            stop, console, "step",
+        )
+    except (OllamaError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    saved = _finish_training(console, model, out, interrupted, printer, "step")
+    doc = _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+    doc["frontier"] = list(trainer.frontier)
+    doc["visited"] = list(trainer.visited)
+    console.say(f"{len(trainer.visited)} page(s) read, {len(trainer.frontier)} still on the frontier")
+    return doc
+
+
+def _ollama_client_for(args: argparse.Namespace, model: str) -> Any:
+    from .ollama import OllamaClient
+
+    try:
+        return OllamaClient(args.url, model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model) -> dict:
+    """The shared summary and JSON document of `agent` and `explore`."""
+    done = [r for r in records if r.get("kind") in ("task", "explore")]
+    solved = sum(1 for r in done if r.get("correct"))
+    by_model = sum(1 for r in done if r.get("model_solved"))
+    calls = sum(r.get("calls") or 0 for r in done)
+    own = sum(r.get("own_calls") or 0 for r in done)
+    fails = sum(r.get("failures") or 0 for r in done)
+    console.say(
+        f"{solved}/{len(done)} task(s) solved ({by_model} by the network); {own}/{calls} tool call(s) written by the "
+        f"network itself" + (f" ({own / calls:.0%})" if calls else "") + f"; {fails} failure(s) trained on"
+    )
+    doc = {
+        "model": origin.to_dict(), "out": out, "config": config.to_dict(), "tools": toolbox.names(),
+        "records": records, "attempts": trainer.history, "solved": solved, "model_solved": by_model,
+        "calls": calls, "own_calls": own, "autonomy": (own / calls) if calls else None, "failures": fails,
+        "criteria": trainer.criteria, "solutions": trainer.solved, "interrupted": interrupted, "saved": saved,
+        "stats": model.stats(),
+    }
+    if getattr(args, "report", None):
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump({k: doc[k] for k in ("config", "tools", "records", "criteria", "solutions", "solved", "autonomy")},
+                      fh, indent=2, default=str)
+        console.say(f"wrote report to {args.report}")
+    return doc
 
 
 def cmd_ollama_models(args: argparse.Namespace, console: Console) -> dict:
@@ -1401,6 +2645,23 @@ def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     )
     doc: dict[str, Any] = dict(result)
     doc["two_nrl"] = None
+    doc["negative"] = None
+    if args.blame:
+        from . import blame
+
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.say()
+        console.pairs([("negative model", neg_origin.describe()), ("blaming", f"{len(result['bad'])} failed texts")])
+        report = blame.teach_reviews(negative, result, threshold=args.threshold, source="review")
+        console.say(
+            f"blamed {report['blamed']} texts over {report['edges']} edges "
+            f"(mean severity {fmt(report['severity_mean'])}), cleared {report['cleared']} of {report['passed']} passed"
+        )
+        doc["negative"] = {
+            "blamed": report["blamed"], "cleared": report["cleared"], "edges": report["edges"],
+            "reasons": report["reasons"], "lessons": report["lessons"],
+            **_save_negative(console, negative, negative_path(args)),
+        }
     if args.apply_two_nrl:
         bad = list(result["bad"])
         good = list(result["good"])
@@ -1436,12 +2697,72 @@ def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     return doc
 
 
+def _chatgpt_client(args: argparse.Namespace) -> Any:
+    from .chatgpt import ChatGPTClient, api_key_configured
+
+    if not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE, a file holding it) and try again"
+        )
+    try:
+        return ChatGPTClient(args.url, args.chatgpt_model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def cmd_chatgpt_models(args: argparse.Namespace, console: Console) -> dict:
+    from .chatgpt import ChatGPTError
+
+    client = _chatgpt_client(args)
+    try:
+        models = client.models()
+    except ChatGPTError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([("endpoint", client.url), ("default model", client.model), ("models", len(models))])
+    console.say()
+    if models:
+        console.table(("name", "owner", "created"), [[m["name"], m.get("owned_by"), _epoch(m.get("created"))] for m in models])
+    else:
+        console.say("the key has access to no models")
+    return {"url": client.url, "model": client.model, "models": models}
+
+
+def cmd_chatgpt_ask(args: argparse.Namespace, console: Console) -> dict:
+    from .chatgpt import ChatGPTError
+
+    client = _chatgpt_client(args)
+    console.pairs([("model", f"{client.model} at {client.url}"), ("prompt", quote(clip(args.prompt, 60)))])
+    console.say()
+    try:
+        answer = client.generate(
+            args.prompt, system=args.system, json_mode=args.json_answer, options={"temperature": args.temperature}
+        )
+    except ChatGPTError as exc:
+        raise CliError(str(exc)) from exc
+    console.say(answer.strip())
+    return {"url": client.url, "model": client.model, "prompt": args.prompt, "answer": answer}
+
+
+def _epoch(value: Any) -> Any:
+    """A unix timestamp as a date (anything else unchanged)."""
+    if isinstance(value, (int, float)) and value > 0:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(float(value), timezone.utc).strftime("%Y-%m-%d")
+    return value
+
+
 def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     try:
         from . import api
     except ImportError as exc:
         raise CliError(f"API module unavailable: {exc}") from exc
     frontend_dir = _resolve_frontend_dir(args.frontend_dir)
+    tool_options = {
+        "offline": args.offline, "allow_private": args.allow_private, "search_url": args.search_url or None,
+        "web_timeout": args.web_timeout, "max_bytes": args.max_bytes, "python_tool": args.python_tool,
+        "sandbox_timeout": args.sandbox_timeout,
+    }
     doc = {
         "host": args.host,
         "port": args.port,
@@ -1458,6 +2779,10 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         "seed": effective_seed(args),
         "ollama_url": args.ollama_url,
         "ollama_model": args.ollama_model,
+        "chatgpt_url": args.chatgpt_url,
+        "chatgpt_model": args.chatgpt_model,
+        "chatgpt_configured": _chatgpt_configured(),
+        "tools": tool_options,
         "version": __version__,
     }
     console.pairs([
@@ -1468,6 +2793,11 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         ("frontend", frontend_dir + ("" if doc["frontend_built"] else " (not built: run `npm install && npm run build` in frontend/)")),
         ("backend", args.backend + (f" on {args.device}" if args.device else "")),
         ("ollama", f"{args.ollama_model or '$RADIXNET_OLLAMA_MODEL'} at {args.ollama_url or '$OLLAMA_HOST'}"),
+        ("chatgpt", f"{args.chatgpt_model or '$RADIXNET_OPENAI_MODEL'} at {args.chatgpt_url or '$OPENAI_BASE_URL'}"
+                    + (" (key set)" if doc["chatgpt_configured"] else " (no OPENAI_API_KEY: ChatGPT tutoring is off)")),
+        ("tools", "offline" if args.offline else "browsing"
+                  + (", sandboxed python" if args.python_tool else "")
+                  + (", private addresses allowed" if args.allow_private else "")),
     ])
     console.say("press Ctrl-C to stop")
     if console.json_mode:
@@ -1476,9 +2806,16 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         host=args.host, port=args.port, model_path=args.model, checkpoint_dir=args.checkpoint_dir,
         frontend_dir=frontend_dir, backend=args.backend, device=args.device, seed=effective_seed(args),
         upload_dir=args.upload_dir, ollama_url=args.ollama_url, ollama_model=args.ollama_model,
-        kind=getattr(args, "kind", None),
+        chatgpt_url=args.chatgpt_url, chatgpt_model=args.chatgpt_model, kind=getattr(args, "kind", None),
+        tool_options=tool_options,
     )
     return None
+
+
+def _chatgpt_configured() -> bool:
+    from .chatgpt import api_key_configured
+
+    return api_key_configured()
 
 
 # --------------------------------------------------------------------------
@@ -1552,11 +2889,121 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="RNG seed for a newly created model (default 0) and for `generate` sampling")
     group.add_argument("--kind", choices=KINDS, default=default(None),
                        help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
-                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction); a "
-                            "loaded file's own kind always wins.  With --kind count the default --model is "
-                            f"{DEFAULT_COUNT_MODEL}")
+                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction), "
+                            "negative = the negative network (failures only, blamed with the tutor's reasons); a "
+                            "loaded file's own kind always wins.  With --kind count / negative the default --model is "
+                            f"{DEFAULT_COUNT_MODEL} / {DEFAULT_NEGATIVE_MODEL}")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
+
+
+def _add_recall_options(parser: argparse.ArgumentParser, modality: str) -> None:
+    """The options both recall tutors share: the exercise, the marking and the blaming."""
+    group = parser.add_argument_group("recall options")
+    group.add_argument("--lead", type=nonneg_int, metavar="N",
+                       help=f"payload characters the exercise gives away (default: {DEFAULT_LEAD[modality]}"
+                            + ("; the utterance's own token already says which one is wanted)" if modality == "speech"
+                               else "; an image header alone does not say which picture is wanted)"))
+    group.add_argument("--length", type=nonneg_int, default=0, metavar="N",
+                       help="ask for only the first N payload characters (0: all of it); the marking compares "
+                            "against exactly that much, so a short quiz is still a fair one")
+    group.add_argument("--attempts", type=pos_int, default=1,
+                       help="tries per exercise (the first in --mode, the rest sampled); it stops at the first pass")
+    group.add_argument("--mode", choices=("beam", "dijkstra", "sample"), default="beam", help="how the first attempt is written")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the later attempts")
+    group.add_argument("--threshold", type=nonneg_float, default=6.0, metavar="MARK", help="pass mark out of 10")
+    group.add_argument("--train", action="store_true",
+                       help="teach it the texts first, then ask for them back (off: test what it already knows)")
+    group.add_argument("--epochs", type=nonneg_int, default=3, help="training epochs with --train")
+    group.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train")
+    group.add_argument("--batch-size", type=pos_int, default=8, help="batch size with --train")
+    group.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
+    group.add_argument("--blame", action="store_true",
+                       help="teach the negative network why each failure failed; what it remembered clears blame")
+    _add_negative_option(parser, top_level=False)
+
+
+def _add_negative_option(parser: argparse.ArgumentParser, top_level: bool) -> None:
+    """``--negative PATH``; the action copies suppress their default so the group's value survives."""
+    parser.add_argument(
+        "--negative", metavar="PATH", default=None if top_level else argparse.SUPPRESS,
+        help=f"negative model file (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)",
+    )
+def _add_tool_options(parser: argparse.ArgumentParser, upload_dir: bool = True) -> None:
+    """Which tools exist and how the browsing behaves (shared by `tools`, `agent`, `explore` and `serve`)."""
+    group = parser.add_argument_group("tool options")
+    group.add_argument("--offline", action="store_true", help="no web tools at all (the calculator and the local tools only)")
+    group.add_argument("--allow-private", action="store_true",
+                       help="allow private / loopback addresses (refused by default; needed for a local test server)")
+    group.add_argument("--search-url", metavar="URL",
+                       help="search endpoint; {query} is replaced by the query (default: $RADIXNET_SEARCH_URL or DuckDuckGo)")
+    group.add_argument("--web-timeout", type=_float_at_least(0.1), default=20.0, metavar="SECONDS",
+                       help="seconds to wait for one page")
+    group.add_argument("--max-bytes", type=_int_at_least(1024), default=2_000_000, metavar="N",
+                       help="most bytes read from one page")
+    group.add_argument("--python-tool", action="store_true", help="also offer the sandboxed `python` tool")
+    group.add_argument("--sandbox-timeout", type=_float_at_least(0.1), default=10.0, metavar="SECONDS",
+                       help="seconds a sandboxed program may run (--python-tool)")
+    group.add_argument("--no-network-isolation", action="store_true",
+                       help="do not run sandboxed programs in a separate network namespace (--python-tool)")
+    if upload_dir:  # `serve` has its own --upload-dir, which the read_file tool uses as well
+        group.add_argument("--upload-dir", metavar="DIR", help="also offer the `read_file` tool over the files in DIR")
+
+
+def _add_agent_options(parser: argparse.ArgumentParser) -> None:
+    """The LLM's four roles, the loop, the failure weighting and 2NRL (shared by `agent` and `explore`)."""
+    from .agent import BLATANT_MODES, DEFAULT_AGENT_MODEL, MEDIATION
+
+    group = parser.add_argument_group("ollama options")
+    group.add_argument("--agent-model", metavar="NAME",
+                       help=f"model that writes the criteria, mediates, judges and teaches "
+                            f"(default: $RADIXNET_AGENT_MODEL or {DEFAULT_AGENT_MODEL})")
+    group.add_argument("--judge-model", metavar="NAME", help="a different model for judging (default: --agent-model)")
+    group.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+    group.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS",
+                       help="seconds to wait for one Ollama answer (default: 120)")
+    group.add_argument("--criteria", type=pos_int, default=4, metavar="N", help="acceptance criteria to ask for per task")
+    group.add_argument("--lenient", action="store_true",
+                       help="accept an answer the judge calls correct even when it left a criterion unmet")
+    group.add_argument("--no-judge", action="store_true",
+                       help="no LLM judge: an answer is correct only when it contains the task's known answer")
+    group.add_argument("--mediation", choices=MEDIATION, default="repair",
+                       help="repair: the LLM fixes only the calls the network cannot write; always: every call is the "
+                            "LLM's; never: the network's broken calls are executed and learned from as failures")
+    group.add_argument("--no-teach", action="store_true", help="never let the LLM demonstrate a task the network failed")
+
+    group = parser.add_argument_group("loop options")
+    group.add_argument("--max-steps", type=pos_int, default=6, help="tool calls the network may make per attempt")
+    group.add_argument("--model-attempts", type=pos_int, default=2, help="attempts by the network per task")
+    group.add_argument("--teacher-attempts", type=pos_int, default=1, help="demonstrations the LLM may try per task")
+    group.add_argument("--sample-first", action="store_true",
+                       help="sample the first emission too (default: the first one is the cheapest path)")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the network")
+    group.add_argument("--max-length", type=pos_int, default=200, help="characters the network writes per step")
+    group.add_argument("--observation-chars", type=nonneg_int, default=600,
+                       help="characters of a tool's output written into the transcript")
+    group.add_argument("--read-reward", action="store_true",
+                       help="also fine-tune on the text of the pages that were read, not only on the transcripts")
+    group.add_argument("--no-replay", action="store_true", help="do not add earlier correct transcripts to every positive phase")
+
+    group = parser.add_argument_group("failure options (train on failures, then invert)")
+    group.add_argument("--blatant-mode", choices=BLATANT_MODES, default="fail_invert",
+                       help="fail_invert: train on every failure with learning rates scaled by how badly it failed, "
+                            "then invert and fine-tune; activation / state: instead negate the nodes on the failed "
+                            "path itself; none: plain unweighted 2NRL")
+    group.add_argument("--blatant-margin", type=_float_at_least(0.001), default=0.5, metavar="GAP",
+                       help="the gap (0-1: share of the criteria missed, or how far below the pass score) at which a "
+                            "failure counts as blatant")
+    group.add_argument("--blatant-boost", type=_float_at_least(1.0), default=4.0, metavar="X",
+                       help="largest learning-rate multiplier a failure can earn")
+
+    group = parser.add_argument_group("2NRL options")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (failure) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (correct) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1,
+                       help="learning rate of the positive phase (activation parameters use a tenth)")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
 
 
 def _add_checkpoint_options(parser: argparse.ArgumentParser, unit: str) -> None:
@@ -1565,6 +3012,51 @@ def _add_checkpoint_options(parser: argparse.ArgumentParser, unit: str) -> None:
     group.add_argument("--checkpoint-every", type=nonneg_int, metavar="N",
                        help=f"checkpoint every N {unit}s (default: every {unit} when --checkpoint-dir is given, else off)")
     group.add_argument("--keep", type=pos_int, default=5, help="checkpoints to keep in --checkpoint-dir")
+
+
+def _add_asr_options(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("transcription options")
+    group.add_argument("--backend", choices=SPEECH_BACKENDS, default="auto",
+                       help="speech-to-text backend (auto: a given transcript, then faster-whisper, whisper, "
+                            "a configured server)")
+    group.add_argument("--language", metavar="CODE", help="language hint for the backend, e.g. en")
+    group.add_argument("--asr-model", metavar="NAME",
+                       help="Whisper model size / the server's model name ($RADIXNET_WHISPER_MODEL, $RADIXNET_ASR_MODEL)")
+    group.add_argument("--asr-url", metavar="URL",
+                       help="OpenAI-compatible /v1/audio/transcriptions endpoint ($RADIXNET_ASR_URL)")
+
+
+def _add_speech_encode_options(parser: argparse.ArgumentParser) -> None:
+    """How an utterance becomes text: the waveform quantisation and the token it hangs off."""
+    group = parser.add_argument_group("waveform options")
+    group.add_argument("--rate", type=pos_int, default=SPEECH_RATE,
+                       help="resample the waveform to this many samples per second before quantising")
+    group.add_argument("--codec", choices=("auto", "mu", "pcm8"), default="auto",
+                       help="waveform quantisation (auto = mu-law)")
+    group.add_argument("--normalise", action="store_true", help="scale a quiet recording up to full range first")
+    group = parser.add_argument_group("token options")
+    group.add_argument("--token", metavar="TEXT", help="use this token instead of <speech:digest>")
+    group.add_argument("--shared-token", action="store_true",
+                       help=f"use the plain {SPEECH_TOKEN_HELP} for every utterance instead of a unique one")
+
+
+def _add_speech_teach_options(parser: argparse.ArgumentParser) -> None:
+    """Everything `speech teach` and `speech listen` share: the transcript, the waveform, the token, training."""
+    _add_asr_options(parser)
+    parser.add_argument("--text", metavar="TEXT",
+                        help="the transcript (what you said); skips the transcription backends")
+    _add_speech_encode_options(parser)
+    group = parser.add_argument_group("waveform options")
+    group.add_argument("--no-waveform", action="store_true", help="learn the transcript only, not the sound")
+    group.add_argument("--pair", action="store_true",
+                       help="also learn one text of the waveform followed by its transcript (sound -> words)")
+    parser.add_argument("--out", metavar="PATH", help="write the texts (one per line) to this file")
+    group = parser.add_argument_group("training options")
+    group.add_argument("--train", action="store_true", help="train the model on the texts, then save it")
+    group.add_argument("--epochs", type=nonneg_int, default=3, help="training epochs with --train")
+    group.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train")
+    group.add_argument("--batch-size", type=pos_int, default=8, help="batch size with --train")
+    group.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
 
 
 def _add_two_nrl_options(parser: argparse.ArgumentParser, neg_epochs: int, pos_epochs: int, batch_size: int) -> None:
@@ -1768,6 +3260,22 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--model-out", metavar="PATH", help="where to save the model with --train (default: --model)")
     a.set_defaults(handler=cmd_image_encode)
     a = actions.add_parser(
+        "tutor", help="ask the network to draw back the pictures it was shown, and blame what it gets wrong",
+        description="Encode each image, give the network the header and a few characters of the payload, and\n"
+                    "let it write the rest.  What comes back is compared with the original: the mark out of 10\n"
+                    "is the agreement over the payload, and a failure is named (unreadable, truncated, overrun,\n"
+                    "garbled, blank, noise, drift).  No LLM marks anything - the right answer is the picture.\n"
+                    "With --blame each failure teaches the negative network why, blaming only the characters\n"
+                    "the network actually got wrong.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", nargs="+", metavar="FILE", help="image file(s) to ask it about")
+    a.add_argument("--size", type=pos_int, default=128, help="resize to SIZE x SIZE (a multiple of 8) before encoding")
+    a.add_argument("--encoder", choices=("auto", "sd", "tiny"), default="auto", help="the encoder (auto = sd when it loads)")
+    _add_recall_options(a, "image")
+    a.set_defaults(handler=cmd_image_tutor)
+
+    a = actions.add_parser(
         "decode", help="decode an encoded or predicted text back to a PNG",
         description="Turn `img:<encoder>:<w>x<h>:<base64>` back into an image (a cut-off tail is padded).",
         formatter_class=_HelpFormatter,
@@ -1778,6 +3286,88 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--encoder", choices=("sd", "tiny"), help="override the encoder named in the text")
     a.add_argument("--out", required=True, metavar="PNG", help="where to write the image")
     a.set_defaults(handler=cmd_image_decode)
+
+    # speech ---------------------------------------------------------------
+    p = command(
+        "speech", "teach the model by talking to it: the transcript and the waveform behind one unique token",
+        "Speech to text plus the sound itself.  One utterance becomes two texts that start with the\n"
+        "same unique token - `<speech:9f2a1c7d> the cat sat on the mat` and\n"
+        "`<speech:9f2a1c7d> aud:mu:8000x1:<base64>` - so the words and the waveform leave the same node\n"
+        "of the graph.  The transcript comes from faster-whisper / openai-whisper / an OpenAI-compatible\n"
+        "/v1/audio/transcriptions server, or from --text (what the browser's Speech tab dictated, or what\n"
+        "you know you said); the waveform is mixed to mono, resampled and quantised to one mu-law byte per\n"
+        "sample.  `listen` records from the microphone first, `decode` turns a predicted waveform back into\n"
+        "a WAV file.  WAV is read directly; other formats need ffmpeg.",
+    )
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+    a = actions.add_parser("info", help="which transcription backends, recorders and codecs are available",
+                           description="Report the speech backends and their dependencies.", formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_speech_info)
+
+    a = actions.add_parser(
+        "transcribe", help="speech to text: print what an audio file says",
+        description="Transcribe FILE and print the words (nothing is trained; use `teach` for that).",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", metavar="FILE", help="audio file (WAV directly; MP3, M4A, WebM, Ogg, FLAC ... need ffmpeg)")
+    _add_asr_options(a)
+    a.add_argument("--text", metavar="TEXT", help="a transcript you already have (used instead of a backend)")
+    a.add_argument("--out", metavar="PATH", help="write the transcript to this file")
+    a.set_defaults(handler=cmd_speech_transcribe)
+
+    a = actions.add_parser(
+        "teach", help="teach the model an audio file: the transcript and the waveform",
+        description="Transcribe FILE, encode its waveform, and (with --train) learn both texts.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", metavar="FILE", help="audio file (WAV directly; other formats need ffmpeg)")
+    _add_speech_teach_options(a)
+    a.set_defaults(handler=cmd_speech_teach)
+
+    a = actions.add_parser(
+        "listen", help="record from the microphone, then teach the model what was said",
+        description="Record --seconds of audio (arecord, rec / sox or ffmpeg), then run the `teach` flow on it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--seconds", type=nonneg_float, default=5.0, help="how long to record")
+    a.add_argument("--record-rate", type=pos_int, default=16000, help="sample rate to record at (before resampling)")
+    a.add_argument("--recorder", choices=SPEECH_RECORDERS, help="force one recorder (default: the first installed)")
+    a.add_argument("--save", metavar="WAV", help="also keep the recording in this file")
+    _add_speech_teach_options(a)
+    a.set_defaults(handler=cmd_speech_listen)
+
+    a = actions.add_parser(
+        "tutor", help="ask the network to say back the utterances it was taught, and blame what it gets wrong",
+        description="Encode each recording, give the network the utterance's own token and the waveform header,\n"
+                    "and let it write the samples back.  What comes back is run through the codec and compared\n"
+                    "with the original: the mark out of 10 is the agreement over the waveform, and a failure is\n"
+                    "named (unreadable, truncated, overrun, garbled, silence, clipping, mishearing, distortion).\n"
+                    "No LLM marks anything - the right answer is the recording.  With --listen-back the recalled\n"
+                    "waveform is transcribed too, so one that decodes to different words is a mishearing.  With\n"
+                    "--blame each failure teaches the negative network why, blaming only the characters it got\n"
+                    "wrong.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", nargs="+", metavar="FILE", help="audio file(s) to ask it about")
+    a.add_argument("--listen-back", action="store_true",
+                   help="transcribe what it said back and compare the words (needs a transcription backend)")
+    _add_asr_options(a)
+    a.add_argument("--text", metavar="TEXT", help="a transcript you already have (used instead of a backend)")
+    _add_speech_encode_options(a)
+    _add_recall_options(a, "speech")
+    a.set_defaults(handler=cmd_speech_tutor)
+
+    a = actions.add_parser(
+        "decode", help="turn an encoded or predicted waveform text back into a WAV file",
+        description="Turn `aud:<codec>:<rate>x<channels>:<base64>` back into audio (a cut-off tail is padded).",
+        formatter_class=_HelpFormatter,
+    )
+    source = a.add_mutually_exclusive_group(required=True)
+    source.add_argument("--text", metavar="TEXT", help="the encoded text")
+    source.add_argument("--data", metavar="FILE", help="a file holding the encoded text")
+    a.add_argument("--codec", choices=("mu", "pcm8"), help="override the codec named in the text")
+    a.add_argument("--out", required=True, metavar="WAV", help="where to write the audio")
+    a.set_defaults(handler=cmd_speech_decode)
 
     # weights --------------------------------------------------------------
     p = command(
@@ -1804,12 +3394,19 @@ def build_parser() -> argparse.ArgumentParser:
         "2NRL (train on the bad texts, invert, fine-tune on the good ones).  Only good: reward (a positive-phase\n"
         "pass).  Only bad: punish (a negative-phase pass, then the network is inverted so those texts become\n"
         "unlikely).  The count / reward model penalises / rewards the rated paths by --strength instead (no\n"
-        "inversion).  The same rule the frontend's Generate tab uses for its ratings.",
+        "inversion).  A rating is more than a thumb: --good-ratings / --bad-ratings give a mark out of 10 per\n"
+        "text and the network learns each one in proportion to it.  The same rule the frontend's Generate tab\n"
+        "uses for its ratings.",
     )
     p.add_argument("--good", metavar="FILE", help="thumbs-up texts, one per line")
     p.add_argument("--bad", metavar="FILE", help="thumbs-down texts, one per line")
     p.add_argument("--good-text", action="append", metavar="TEXT", help="a thumbs-up text (repeatable)")
     p.add_argument("--bad-text", action="append", metavar="TEXT", help="a thumbs-down text (repeatable)")
+    p.add_argument("--good-ratings", metavar="MARKS",
+                   help="how good each thumbs-up text is: comma-separated marks out of 10, one per text "
+                        "(--good-text first, then the lines of --good); 10 = the full learning rate, 0 skips it")
+    p.add_argument("--bad-ratings", metavar="MARKS",
+                   help="how bad each thumbs-down text is: comma-separated marks out of 10, one per text")
     group = p.add_argument_group("2NRL options")
     group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (punish) phase")
     group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (reward) phase")
@@ -1820,6 +3417,183 @@ def build_parser() -> argparse.ArgumentParser:
                        help="count model: reward / penalty added to every edge of a rated path per pass (radix: ignored)")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_feedback)
+
+    # correct --------------------------------------------------------------
+    p = command(
+        "correct", "teach one correction: only what changed moves",
+        "Align what the network wrote (--wrong) with what it should have written (--right) character by\n"
+        "character and move only the trigram nodes the two disagree on: the steps that wrote the struck-out\n"
+        "characters are penalised, the steps that write the teacher's version are rewarded, and the words both\n"
+        "sentences share keep what they earned.  --keep gives the rest of the correction a smaller reward (1\n"
+        "is the old whole-sentence thumbs up, 0 teaches the fix alone).  This is what the tutor does with\n"
+        "every correction its teacher writes; --dry-run only shows the alignment.",
+    )
+    p.add_argument("--wrong", metavar="TEXT", required=True, help="what the network wrote")
+    p.add_argument("--right", metavar="TEXT", required=True, help="what it should have written")
+    p.add_argument("--strength", type=nonneg_float, default=1.0, help="magnitude of one unit of feedback")
+    p.add_argument("--weight", type=nonneg_float, default=1.0, help="how bad the attempt was: the penalty is strength x weight")
+    p.add_argument("--reward", type=nonneg_float, default=1.0, help="what the correction is worth")
+    p.add_argument("--keep", type=nonneg_float, default=0.25, help="what the unchanged part of the correction still earns")
+    p.add_argument("--no-count", action="store_true", help="do not traverse the correction (it is counted by default)")
+    p.add_argument("--dry-run", action="store_true", help="show the alignment without touching the model")
+    p.add_argument("--blame", action="store_true",
+                   help="also teach the negative network: the same diff, blaming only the characters you changed")
+    p.add_argument("--reason", default="corrected", metavar="TAG", help="reason recorded with --blame")
+    p.add_argument("--note", default="", metavar="TEXT", help="your own words, kept in the negative network's journal")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_correct)
+    # negative -------------------------------------------------------------
+    p = command(
+        "negative", "the negative network: failures, why they failed, and the filter",
+        "A copy of the network that keeps only its negative portions: every node and edge in it exists\n"
+        "because something went wrong there, and every edge remembers why - the reasons the tutor gave\n"
+        "(the Ollama reviewer, the code judge, a thumbs down, the evolve discriminator) with the blame\n"
+        "each one carries.  `blame` teaches it a failure, `clear` lets text the tutor passed take blame\n"
+        "back off the fragments it shares, `why` explains a text, `reasons` lists what the tutor said\n"
+        "and `filter` runs the pair: the positive model writes, the negative one vetoes.\n"
+        "The negative model lives beside --model (model.json -> model.negative.json) unless --negative\n"
+        "says otherwise; it is also an ordinary model kind, so `--kind negative train` blames as well.",
+    )
+    _add_negative_option(p, top_level=True)
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+
+    a = actions.add_parser(
+        "blame", help="learn a failure: the text, its reason and its severity",
+        description="Teach the negative network that these texts went wrong.  --reason is the tutor's verdict\n"
+                    "(gibberish, repetition, wrong-output, thumbs-down, ...), --note its own words (kept in the\n"
+                    "journal) and --severity how badly it failed (1 = one ordinary failure).  This is the only\n"
+                    "operation that adds structure to the negative network.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--text", action="append", metavar="TEXT", help="a failed text (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="failed texts, one per line")
+    a.add_argument("--reason", default="unspecified", metavar="TAG", help="why it failed (the tutor's verdict)")
+    a.add_argument("--severity", type=nonneg_float, default=1.0, help="how heavily to blame it (1 = one ordinary failure)")
+    a.add_argument("--source", default="cli", metavar="NAME", help="who says so (review, codegen, evolve, frontend, cli)")
+    a.add_argument("--note", default="", metavar="TEXT", help="the tutor's own words, kept in the journal")
+    a.add_argument("--epochs", type=pos_int, default=1, help="blame passes over the texts")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative model (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_blame)
+
+    a = actions.add_parser(
+        "clear", help="the tutor passed these texts: take blame off what they share",
+        description="Credit the edges these texts share with known failures.  Net evidence is blame minus\n"
+                    "clearing, so a fragment that shows up in good and bad output alike stops carrying the\n"
+                    "verdict.  Nothing is created: text the failure structure cannot walk simply does not match.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--text", action="append", metavar="TEXT", help="a passed text (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="passed texts, one per line")
+    a.add_argument("--weight", type=nonneg_float, default=1.0, help="how much blame one pass cancels")
+    a.add_argument("--epochs", type=pos_int, default=1, help="clearing passes over the texts")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative model (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_clear)
+
+    a = actions.add_parser(
+        "why", help="why a text looks like a failure (reasons and the fragments to blame)",
+        description="Walk texts through the failure structure: how much of each is built out of known failure\n"
+                    "(risk and coverage), which reasons that blame carries and which fragments carry it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--text", action="append", metavar="TEXT", help="a text to judge (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="texts to judge, one per line")
+    a.add_argument("--threshold", type=nonneg_float, metavar="RISK", help="reject at this blame per transition (default: the model's)")
+    a.add_argument("--min-coverage", type=nonneg_float, metavar="SHARE", help="known-failing share needed before rejecting")
+    a.add_argument("--spans", type=nonneg_int, default=5, help="blamed fragments to show")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_why)
+
+    a = actions.add_parser(
+        "filter", help="the pair: the positive model writes, the negative one vetoes",
+        description="The GAN at output time.  The positive model (--model) over-samples candidates, the negative\n"
+                    "one judges each of them, and what survives is printed with what was dropped and why.  Two\n"
+                    "signals reject: blame (risk over the threshold) and the likelihood ratio (the candidate reads\n"
+                    "more like known failure than like the training data).  With --text / --data the given texts\n"
+                    "are judged instead of generating any.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--count", type=pos_int, default=3, help="texts wanted out of the filter")
+    a.add_argument("--prefix", default="", metavar="TEXT", help="continue this prefix")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per candidate")
+    a.add_argument("--mode", choices=("sample", "beam", "dijkstra"), default="sample", help="how the positive model writes")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature")
+    a.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="extra cost per edge (longer texts cost more)")
+    a.add_argument("--over-sample", type=pos_int, default=3, help="candidates drawn per wanted text")
+    a.add_argument("--text", action="append", metavar="TEXT", help="judge this text instead of generating (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="judge the texts of FILE (one per line) instead of generating")
+    a.add_argument("--threshold", type=nonneg_float, metavar="RISK", help="reject at this blame per transition (default: the model's)")
+    a.add_argument("--min-coverage", type=nonneg_float, metavar="SHARE", help="known-failing share needed before rejecting")
+    a.add_argument("--ratio", type=float, default=0.0, metavar="NATS",
+                   help="reject when the candidate reads this much more like failure than like the training data")
+    a.add_argument("--no-ratio", action="store_true", help="judge by blame alone (turn the likelihood ratio off)")
+    a.add_argument("--peak", type=nonneg_float, metavar="BLAME",
+                   help="reject a candidate carrying this much blame on a single fragment, whatever the rest of it is "
+                        "(1 = a fragment the tutor corrected once); off by default")
+    a.add_argument("--strict", action="store_true", help="also drop candidates the negative network only finds suspect")
+    a.add_argument("--spans", type=nonneg_int, default=3, help="blamed fragments per verdict")
+    a.add_argument("--learn", action="store_true",
+                   help="blame what the filter rejects (off by default: the tutor supplies the negatives)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_filter)
+
+    a = actions.add_parser(
+        "auto", help="teach it automatically: the model writes, an LLM reviews, the failures are blamed",
+        description="The Negative tab without anyone typing a failure into it.  Each round the model writes\n"
+                    "--count texts of its own, the reviewer (a local Ollama model by default, ChatGPT with\n"
+                    "--provider chatgpt) marks each one out of 10 and says what is wrong with it, and every text\n"
+                    "below the pass mark blames the negative network - the critique picks the reason, the mark\n"
+                    "sets the severity - while the texts it passed take blame off what they share with known\n"
+                    "failures.  Then it goes round again.  --rounds 0 keeps going until Ctrl-C, which finishes\n"
+                    "the round it is in and saves.  The positive model is only read from: nothing here trains,\n"
+                    "rewards or inverts it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--rounds", type=nonneg_int, default=3, help="rounds to run (0: until Ctrl-C)")
+    a.add_argument("--count", type=pos_int, default=8, help="texts the model writes per round")
+    a.add_argument("--prefix", metavar="TEXT", help="continue this prefix instead of writing from scratch")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per text")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the writing")
+    a.add_argument("--threshold", type=nonneg_float, default=6.0, metavar="MARK",
+                   help="pass mark out of 10: below it the text is a failure and is blamed")
+    a.add_argument("--context", metavar="TEXT",
+                   help="what the reviewer is told the texts are meant to be (its yardstick)")
+    a.add_argument("--provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who reviews: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY)")
+    a.add_argument("--reviewer-model", metavar="NAME", help="the reviewer's model (default: the provider's)")
+    a.add_argument("--url", metavar="URL", help="the reviewer's base URL (default: the provider's)")
+    a.add_argument("--timeout", type=nonneg_float, metavar="SECONDS", help="per-request timeout")
+    a.add_argument("--epochs", type=nonneg_int, default=1, help="blame epochs per round")
+    a.add_argument("--no-clear", action="store_true",
+                   help="do not let the texts it passed take blame off what they share")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative network (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_auto)
+
+    a = actions.add_parser(
+        "reasons", help="what the tutor has blamed, and the journal of what it said",
+        description="The reason table (blame, failures and edges per reason) and the newest journal entries.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--limit", type=pos_int, default=20, help="reasons to list")
+    a.add_argument("--log", type=nonneg_int, default=10, help="journal entries to show")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_reasons)
+
+    a = actions.add_parser(
+        "forget", help="drop or fade the blame behind a reason (the tutor can be wrong)",
+        description="Remove the blame one reason contributed (or all of it with no --reason).  --factor keeps a\n"
+                    "share of it instead of dropping it entirely, which is how old failures fade.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--reason", metavar="TAG", help="the reason to forget (default: every reason)")
+    a.add_argument("--factor", type=nonneg_float, default=0.0, help="share of the blame to keep (0 = forget it, 0.5 = halve it)")
+    a.add_argument("--out", metavar="PATH", help="where to save the negative model (default: --negative)")
+    _add_negative_option(a, top_level=False)
+    a.set_defaults(handler=cmd_negative_forget)
 
     # invert / compress ----------------------------------------------------
     p = command("invert", "invert the network and save", "Flip every edge weight and activation amplitude, then save.")
@@ -1847,6 +3621,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-length", type=pos_int, default=EvolveConfig.max_length, help="maximum characters per fake")
     p.add_argument("--temperature", type=nonneg_float, default=EvolveConfig.temperature, help="sampling temperature")
     p.add_argument("--discriminator", metavar="PATH", help="discriminator model file (loaded when it exists, saved at the end)")
+    p.add_argument("--blame", action="store_true",
+                   help="teach the negative network from this loop: every fake the discriminator scores below the "
+                        "real texts is blamed (reason discriminator / blatant), the real texts clear blame")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.add_argument("--disc-neg-epochs", type=nonneg_int, default=EvolveConfig.disc_neg_epochs,
                    help="discriminator negative-phase epochs")
     p.add_argument("--disc-pos-epochs", type=nonneg_int, default=EvolveConfig.disc_pos_epochs,
@@ -1896,12 +3675,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_bench)
 
     # codegen --------------------------------------------------------------
+    from .chatgpt import DEFAULT_MODEL as chatgpt_default_model, DEFAULT_URL as chatgpt_default_url
     from .codegen import DEFAULT_TEACHER_MODEL as codegen_default_model
 
     p = command(
-        "codegen", "generate Python programs, run them in a sandbox, judge them with Ollama, reward / punish with 2NRL",
-        "Semi-supervised code generation over a list of problems.  Phase `teacher`: an Ollama model writes\n"
-        "each solution, the sandbox runs it, the teacher fixes failures and the judge (the LLM plus an\n"
+        "codegen", "generate Python programs, run them in a sandbox, judge them with an LLM, reward / punish with 2NRL",
+        "Semi-supervised code generation over a list of problems.  Phase `teacher`: the tutor (a local\n"
+        "Ollama model, or ChatGPT with --teacher-provider chatgpt and $OPENAI_API_KEY set) writes\n"
+        "each solution, the sandbox runs it, the tutor fixes failures and the judge (the LLM plus an\n"
         "objective PEP 8 / naming check) confirms it; the network learns question + answer with every wrong\n"
         "attempt as 2NRL garbage before the correct one.  Phase `model`: the network writes the solutions\n"
         "itself; errors and rejected programs are punished (negative phase), correct ones rewarded (positive\n"
@@ -1911,13 +3692,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--problems", required=True, metavar="FILE",
                    help="one prompt per line, or .json / .jsonl objects {id, prompt, tests, expected_output}")
     p.add_argument("--phase", choices=("both", "teacher", "model"), default="both",
-                   help="teacher: Ollama writes the solutions; model: the network writes them; both: teacher, then model")
+                   help="teacher: the tutor writes the solutions; model: the network writes them; both: teacher, then model")
     p.add_argument("--rounds", type=pos_int, default=1, help="passes over the problem list (each pass runs the chosen phases)")
+    p.add_argument("--teacher-provider", "--provider", dest="teacher_provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who tutors: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY; prompts and programs go to OpenAI)")
     p.add_argument("--teacher-model", metavar="NAME",
-                   help=f"Ollama model that writes, fixes and judges (default: $RADIXNET_CODEGEN_MODEL or {codegen_default_model})")
-    p.add_argument("--judge-model", metavar="NAME", help="a different Ollama model for judging (default: the teacher model)")
-    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
-    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one Ollama answer (default: 120)")
+                   help=f"model that writes, fixes and judges (default: $RADIXNET_CODEGEN_MODEL or {codegen_default_model} "
+                        f"for ollama, $RADIXNET_OPENAI_MODEL or {chatgpt_default_model} for chatgpt)")
+    p.add_argument("--judge-provider", choices=PROVIDERS, help="judge with the other provider (default: the tutor's)")
+    p.add_argument("--judge-model", metavar="NAME", help="a different model for judging (default: the teacher model)")
+    p.add_argument("--url", metavar="URL",
+                   help="the tutor's base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434 for ollama, "
+                        "$OPENAI_BASE_URL or https://api.openai.com/v1 for chatgpt)")
+    p.add_argument("--judge-url", metavar="URL", help="base URL of the judge's provider (default: the same as --url / its own default)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one LLM answer (default: 120)")
     p.add_argument("--teacher-attempts", type=pos_int, default=3, help="programs the teacher may try per problem (first + fixes)")
     p.add_argument("--model-attempts", type=pos_int, default=4, help="programs the network may try per problem before the teacher steps in")
     p.add_argument("--sample-first", action="store_true",
@@ -1946,7 +3734,210 @@ def build_parser() -> argparse.ArgumentParser:
     _add_checkpoint_options(p, "problem")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.add_argument("--report", metavar="FILE", help="write a JSON report (problems, config, records, solutions)")
+    p.add_argument("--blame", action="store_true",
+                   help="teach the negative network why the rejected programs were rejected (the sandbox, the style "
+                        "checker and the judge are the tutor)")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.set_defaults(handler=cmd_codegen)
+
+    # tutor ------------------------------------------------------------------
+    from .tutor import (
+        DEFAULT_PLAN_LESSONS,
+        DEFAULT_TUTOR_MODEL as tutor_default_model,
+        MODES as TUTOR_MODES,
+        TWONRL_PER as TUTOR_TWONRL_PER,
+    )
+
+    p = command(
+        "tutor", "automated English lessons: the teacher writes the prefix, the network completes it and is marked",
+        "The prediction process run without a human at the keyboard.  Each round the teacher (a local\n"
+        "Ollama model, or ChatGPT with --tutor-provider chatgpt and $OPENAI_API_KEY set) writes\n"
+        "sentence openings about a topic (each drilling one point of grammar, each with its own model\n"
+        "answer), the network completes them with the prediction search, and the same LLM marks every\n"
+        "sentence as an English teacher: grammar, spelling and fluency out of 10, the worst mistake named,\n"
+        "one line of teaching and the sentence written out correctly.  Failed sentences become 2NRL garbage\n"
+        "- weighted by how bad the mark was - and the corrections the fine-tune pass, so the network is\n"
+        "taught the English it got wrong.  With --adapt (the default) the next round drills the mistakes\n"
+        "the last one made.  Ctrl-C stops after the current round and saves.",
+    )
+    p.add_argument("--topic", default="everyday life", metavar="TEXT", help="what the sentences are about")
+    p.add_argument("--rounds", type=pos_int, default=3, help="lesson rounds (each writes, completes and marks a new set of exercises)")
+    p.add_argument("--batches", type=nonneg_int, default=1, metavar="N",
+                   help="auto run: N batches of --rounds rounds, each one planned from the report card of the one "
+                        "before (its brief and its step up in difficulty); 0 keeps going until Ctrl-C")
+    p.add_argument("--exercises", type=pos_int, default=5, help="sentence openings per round")
+    p.add_argument("--attempts", type=pos_int, default=1, help="completions the network writes per exercise (the first in --mode, the rest sampled)")
+    p.add_argument("--focus", metavar="TEXT", help="pin every exercise to one point of grammar, e.g. 'past tense'")
+    p.add_argument("--level", default="beginner", metavar="TEXT", help="how hard the exercises are (beginner, intermediate, ...)")
+    p.add_argument("--words", default="3 to 6", metavar="TEXT", help="how many words a prefix has")
+    p.add_argument("--brief", metavar="TEXT",
+                   help="what this batch of lessons is being taught to: the prompt the last report card led to "
+                        "(the plan's 'brief'), handed to the teacher with every set of exercises")
+    p.add_argument("--tutor-provider", "--provider", dest="tutor_provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who teaches: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY; the lessons go to OpenAI)")
+    p.add_argument("--tutor-model", metavar="NAME",
+                   help=f"model that sets and marks the exercises (default: $RADIXNET_TUTOR_MODEL or {tutor_default_model} "
+                        f"for ollama, $RADIXNET_OPENAI_MODEL or {chatgpt_default_model} for chatgpt)")
+    p.add_argument("--grader-provider", choices=PROVIDERS, help="mark with the other provider (default: the teacher's)")
+    p.add_argument("--grader-model", metavar="NAME", help="a different model for the marking (default: the tutor model)")
+    p.add_argument("--url", metavar="URL",
+                   help="the teacher's base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434 for ollama, "
+                        "$OPENAI_BASE_URL or https://api.openai.com/v1 for chatgpt)")
+    p.add_argument("--grader-url", metavar="URL", help="base URL of the marker's provider (default: the same as --url / its own default)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one LLM answer (default: 120)")
+    group = p.add_argument_group("completion options")
+    group.add_argument("--mode", choices=TUTOR_MODES, default="dijkstra", help="how the network completes a prefix")
+    group.add_argument("--length", type=nonneg_int, default=20, help="characters the completion should reach")
+    group.add_argument("--max-length", type=pos_int, default=80, help="cap on the completion")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature (--mode sample and the extra attempts)")
+    group.add_argument("--no-to-end", action="store_true", help="stop at --length instead of finishing the sentence at END")
+    group.add_argument("--beam", type=pos_int, metavar="N", help="beam width (--mode beam)")
+    group = p.add_argument_group("marking options")
+    group.add_argument("--threshold", type=nonneg_float, default=6.0, help="mark out of 10 a sentence must reach to pass")
+    group.add_argument("--grammar-weight", type=nonneg_float, default=0.6,
+                       help="share of the mark that is grammar; the rest is spelling and fluency")
+    group.add_argument("--batch", type=pos_int, default=10, help="sentences marked in one Ollama call")
+    group.add_argument("--no-adapt", action="store_true", help="do not drill the previous round's weakest points")
+    group.add_argument("--drills", type=nonneg_int, default=0,
+                       help="extra correct example sentences per round, added to the fine-tune pass")
+    group.add_argument("--plan", type=nonneg_int, nargs="?", const=DEFAULT_PLAN_LESSONS, metavar="N",
+                       help="hand the report card at the end back to the teacher and print the next N lessons it "
+                            f"plans - one point of grammar each, worst mistake first (0 = off, default N: "
+                            f"{DEFAULT_PLAN_LESSONS})")
+    group.add_argument("--no-teach-answer", action="store_true",
+                       help="a failed lesson learns only the correction, not the teacher's own model answer")
+    group.add_argument("--dry-run", action="store_true", help="set and mark the exercises but train nothing and save nothing")
+    group = p.add_argument_group("what a correction teaches")
+    group.add_argument("--no-diff-corrections", action="store_true",
+                       help="learn a correction as two whole sentences (the old way) instead of from its diff "
+                            "with what the network wrote")
+    group.add_argument("--keep-weight", type=nonneg_float, default=0.25,
+                       help="what the unchanged part of a correction still earns: 0 teaches the fix alone, "
+                            "1 rewards the whole corrected sentence")
+    group = p.add_argument_group("2NRL options")
+    group.add_argument("--twonrl-per", choices=TUTOR_TWONRL_PER, default="round", help="learn once per round, or after every lesson")
+    group.add_argument("--min-weight", type=nonneg_float, default=0.25,
+                       help="negative-phase weight of a near miss (a hopeless sentence always weighs 1)")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (garbage) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (correction) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase (activation parameters use a tenth)")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
+    group.add_argument("--strength", type=nonneg_float, help="count model: reward / penalty per pass (radix: ignored)")
+    group.add_argument("--no-replay", action="store_true", help="do not keep teaching earlier corrections")
+    group.add_argument("--replay-limit", type=nonneg_int, default=64, help="corrections kept for the replay (0 = no limit)")
+    _add_checkpoint_options(p, "round")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, lessons, report card)")
+    p.add_argument("--blame", action="store_true",
+                   help="teach the negative network why each failed sentence failed: the mistake the teacher named "
+                        "is the reason, its mark the severity, and only the characters it corrected are blamed")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    p.set_defaults(handler=cmd_tutor)
+
+    # chatgpt ---------------------------------------------------------------
+    p = command(
+        "chatgpt", "query ChatGPT (OpenAI): check the key and models, ask one question",
+        "Talk to OpenAI's API, the hosted alternative to a local Ollama tutor.  `models` lists what the\n"
+        "key may use (and is the quickest check that tutoring will work), `ask` sends one prompt.\n"
+        "The key comes from $OPENAI_API_KEY (or $OPENAI_API_KEY_FILE) and is never printed or stored;\n"
+        "$OPENAI_BASE_URL points the client at any OpenAI-compatible server.\n"
+        f"Usage: {PROG} [global options] chatgpt [--url URL] [--chatgpt-model NAME] <action> [options]",
+    )
+    p.add_argument("--url", metavar="URL", help=f"OpenAI base URL (default: $OPENAI_BASE_URL or {chatgpt_default_url})")
+    p.add_argument("--chatgpt-model", metavar="NAME",
+                   help=f"model name (default: $RADIXNET_OPENAI_MODEL or {chatgpt_default_model})")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS",
+                   help="seconds to wait for one ChatGPT answer (default: 120)")
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+
+    a = actions.add_parser("models", help="list the models the API key can use",
+                           description="List the models the OpenAI API key has access to.", formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_chatgpt_models)
+
+    a = actions.add_parser(
+        "ask", help="send one prompt and print the answer",
+        description="Send one prompt to ChatGPT and print the answer: a quick check that the key, the model\n"
+                    "and the network path all work before pointing the code-generation tutor at it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--prompt", required=True, metavar="TEXT", help="the question to ask")
+    a.add_argument("--system", metavar="TEXT", help="system instruction sent before the prompt")
+    a.add_argument("--temperature", type=nonneg_float, default=0.7, help="sampling temperature (dropped when the model refuses it)")
+    a.add_argument("--json", dest="json_answer", action="store_true", help="ask for a JSON answer")
+    a.set_defaults(handler=cmd_chatgpt_ask)
+    # tools / agent / explore ----------------------------------------------
+    p = command(
+        "tools", "list the external tools, or call one directly",
+        "The tools the network can call by writing <tool>name {\"arg\": ...}</tool>: web search, web pages,\n"
+        "the calculator and (with --python-tool / --upload-dir) the sandbox and uploaded files.  `call`\n"
+        "runs one without a model and without Ollama, which is the quickest way to check a tool works.",
+    )
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+    a = actions.add_parser("list", help="list the tools and their arguments", formatter_class=_HelpFormatter)
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+    a = actions.add_parser("describe", help="one tool in detail, with its JSON schema", formatter_class=_HelpFormatter)
+    a.add_argument("--tool", required=True, metavar="NAME", help="the tool to describe")
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+    a = actions.add_parser(
+        "call", help="call one tool and print what it answers",
+        description="Call a tool directly: --tool NAME with repeated --arg name=value, or the whole call as the\n"
+                    "network would write it, e.g. --call 'web_fetch {\"url\": \"https://example.com\"}'.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--tool", metavar="NAME", help="the tool to call")
+    a.add_argument("--arg", action="append", metavar="NAME=VALUE", help="one argument (repeatable)")
+    a.add_argument("--call", metavar="TEXT", help="the call as text: 'name {\"arg\": \"value\"}' or with <tool> tags")
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+
+    p = command(
+        "agent", "solve tasks with tools: Ollama writes the acceptance criteria, judges and teaches",
+        "The network solves each task by writing tool calls as text and reading the results.  Before\n"
+        "anything is attempted the LLM writes the acceptance criteria; while the network works the LLM\n"
+        "mediates - an emission it cannot parse becomes one valid call against the real tool schemas, so\n"
+        "even an untrained network makes progress and learns well-formed calls; afterwards the LLM judges\n"
+        "the answer against the criteria and, when it failed, demonstrates the task with the same real\n"
+        "tools.  Learning focuses on failure: every failed transcript is trained on the harder the worse it\n"
+        "was (--blatant-mode fail_invert), then the network is inverted and fine-tuned on what was right.\n"
+        "Ctrl-C stops after the current task and saves.",
+    )
+    p.add_argument("--tasks", required=True, metavar="FILE",
+                   help="one question per line, or .json / .jsonl objects {id, prompt, criteria, answer, seeds}")
+    p.add_argument("--phase", choices=("model", "teacher", "both"), default="model",
+                   help="model: the network attempts first; teacher: only the LLM demonstrates; both: teacher, then model")
+    p.add_argument("--rounds", type=pos_int, default=1, help="passes over the task list")
+    p.add_argument("--twonrl-per", choices=("task", "round"), default="task",
+                   help="apply 2NRL after every task, or once per round over all attempts")
+    _add_agent_options(p)
+    _add_tool_options(p)
+    _add_checkpoint_options(p, "task")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, criteria, solutions)")
+    p.set_defaults(handler=cmd_agent)
+
+    p = command(
+        "explore", "let the network browse on its own: it picks every task, Ollama judges and teaches",
+        "Self-directed exploration.  The network continues `TASK:` - the way every transcript it has\n"
+        "learned starts - into whatever it is reaching for; the LLM turns that into one concrete question\n"
+        "that browsing can settle, preferring pages the network has come across but not read yet.  Then the\n"
+        "ordinary cycle runs on it: criteria, tool calls, judging, teaching and 2NRL.  Links and search\n"
+        "results found along the way become the frontier, so the exploration compounds.\n"
+        "--steps 0 runs until Ctrl-C, which stops after the current step and saves.",
+    )
+    p.add_argument("--steps", type=nonneg_int, default=10, metavar="N", help="tasks to explore (0 = until Ctrl-C)")
+    p.add_argument("--seed-url", action="append", metavar="URL",
+                   help="put a page on the frontier to start from (repeatable)")
+    _add_agent_options(p)
+    _add_tool_options(p)
+    _add_checkpoint_options(p, "step")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, criteria, solutions)")
+    p.set_defaults(handler=cmd_explore)
 
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
@@ -2007,6 +3998,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--context", metavar="TEXT", help="extra context for the reviewer (e.g. what the model was trained on)")
     a.add_argument("--2nrl", dest="apply_two_nrl", action="store_true",
                    help="afterwards run 2NRL: failed texts as garbage, passed texts (+ --good) as correct data, then save")
+    a.add_argument("--blame", action="store_true",
+                   help="teach the negative network what failed and why: the reviewer's critique becomes the reason, "
+                        "its rating the severity, and the passed texts clear blame")
+    a.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     a.add_argument("--good", metavar="FILE", help="extra correct texts for the 2NRL positive phase (one per line)")
     _add_two_nrl_options(a, neg_epochs=3, pos_epochs=3, batch_size=4)
     a.add_argument("--out", metavar="PATH", help="where to save the model after --2nrl (default: --model)")
@@ -2029,6 +4025,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"Ollama base URL for the /api/ollama endpoints (default: $OLLAMA_HOST or {ollama_default_url})")
     p.add_argument("--ollama-model", metavar="NAME",
                    help=f"default Ollama model for the /api/ollama endpoints (default: $RADIXNET_OLLAMA_MODEL or {ollama_default_model})")
+    p.add_argument("--chatgpt-url", metavar="URL",
+                   help=f"OpenAI base URL for the ChatGPT tutor (default: $OPENAI_BASE_URL or {chatgpt_default_url})")
+    p.add_argument("--chatgpt-model", metavar="NAME",
+                   help=f"default ChatGPT model (default: $RADIXNET_OPENAI_MODEL or {chatgpt_default_model}); "
+                        "the key always comes from the server's $OPENAI_API_KEY")
+    _add_tool_options(p, upload_dir=False)
     p.set_defaults(handler=cmd_serve)
     return parser
 
@@ -2063,8 +4065,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse: --help / --version (0) or a usage error (1)
         return exc.code if isinstance(exc.code, int) else (EXIT_OK if exc.code is None else EXIT_ERROR)
-    if getattr(args, "kind", None) == "count" and args.model == DEFAULT_MODEL:
-        args.model = DEFAULT_COUNT_MODEL  # a count model does not overwrite the radix default file
+    kind_default = DEFAULT_KIND_MODELS.get(getattr(args, "kind", None) or "")
+    if kind_default and args.model == DEFAULT_MODEL:
+        args.model = kind_default  # another kind does not overwrite the radix default file
     console = Console(bool(args.json))
     try:
         doc = args.handler(args, console)

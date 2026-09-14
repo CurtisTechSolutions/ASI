@@ -1,6 +1,7 @@
 package radixnet
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -40,6 +42,34 @@ type edgesDoc struct {
 	// how often each edge's counter wrapped; written only once something has
 	// (see counter.go), so an ordinary file carries no reset arrays at all
 	CountResets []int64 `json:"count_resets,omitempty"`
+
+	// the negative network's evidence (omitted on a count / reward graph)
+	Blame       []float64      `json:"blame,omitempty"`
+	Fails       []int64        `json:"fails,omitempty"`
+	FailsResets []int64        `json:"fails_resets,omitempty"`
+	Clear       []float64      `json:"clear,omitempty"`
+	Reasons     [][][2]float64 `json:"reasons,omitempty"`
+}
+
+// reasonRegistryDoc is the negative graph's reason registry.
+type reasonRegistryDoc struct {
+	Labels []string  `json:"labels"`
+	Blame  []float64 `json:"blame"`
+	Fails  []int64   `json:"fails"`
+	// how often each reason's fail counter wrapped; written only once one has
+	FailsResets []int64 `json:"fails_resets,omitempty"`
+}
+
+// negativeWeightsDoc is the "weights" block of a negative graph, written
+// exactly as the Python implementation writes it.
+type negativeWeightsDoc struct {
+	NegativeWeightConfig
+	Kind             string            `json:"kind"`
+	TotalBlame       float64           `json:"total_blame"`
+	TotalFails       int64             `json:"total_fails"`
+	TotalFailsResets int64             `json:"total_fails_resets"`
+	TotalClear       float64           `json:"total_clear"`
+	Reasons          reasonRegistryDoc `json:"reasons"`
 }
 
 type weightsDoc struct {
@@ -49,7 +79,41 @@ type weightsDoc struct {
 	TotalTraversalsResets int64  `json:"total_traversals_resets"`
 	WindowEvents          []int  `json:"window_events"`
 
+	// the negative form, read from the same block
+	ShareScale       float64            `json:"share_scale"`
+	BlameScale       float64            `json:"blame_scale"`
+	ClearScale       float64            `json:"clear_scale"`
+	TotalBlame       float64            `json:"total_blame"`
+	TotalFails       int64              `json:"total_fails"`
+	TotalFailsResets int64              `json:"total_fails_resets"`
+	TotalClear       float64            `json:"total_clear"`
+	Reasons          *reasonRegistryDoc `json:"reasons"`
+
+	// neg, when set, is what MarshalJSON writes instead of the count form
+	neg *negativeWeightsDoc
+
 	present map[string]bool // which keys the file carried (defaults depend on it, like Python's dict.get)
+}
+
+// negative reports whether this block describes a negative graph.
+func (w *weightsDoc) negative() bool {
+	return w != nil && (w.Kind == "negative" || w.Function == "blame" || w.has("share_scale"))
+}
+
+// MarshalJSON writes the count form, or the negative one when it is set.
+func (w *weightsDoc) MarshalJSON() ([]byte, error) {
+	if w.neg != nil {
+		return json.Marshal(w.neg)
+	}
+	type countForm struct {
+		WeightConfig
+		Kind                  string `json:"kind"`
+		TotalTraversals       int64  `json:"total_traversals"`
+		TotalTraversalsResets int64  `json:"total_traversals_resets"`
+		WindowEvents          []int  `json:"window_events"`
+	}
+	return json.Marshal(countForm{WeightConfig: w.WeightConfig, Kind: w.Kind, TotalTraversals: w.TotalTraversals,
+		TotalTraversalsResets: w.TotalTraversalsResets, WindowEvents: w.WindowEvents})
 }
 
 // UnmarshalJSON also records which keys were present.
@@ -128,10 +192,15 @@ func (g *Graph) ToDoc() *GraphDoc {
 	}
 	edgeIndex := make(map[int]int, g.nAliveEdges)
 	doc.Edges = edgesDoc{Src: []int{}, Dst: []int{}, W: []float64{}, Count: []int64{}, Reward: []float64{}}
+	negative := g.Neg
+	if negative != nil {
+		doc.Edges.Blame, doc.Edges.Fails = []float64{}, []int64{}
+		doc.Edges.Clear, doc.Edges.Reasons = []float64{}, [][][2]float64{}
+	}
 	for _, old := range order {
 		adj := &g.children[old]
-		for _, c := range adj.order {
-			e := adj.edge[c]
+		for i, c := range adj.order {
+			e := adj.edges[i]
 			edgeIndex[e] = len(doc.Edges.Src)
 			doc.Edges.Src = append(doc.Edges.Src, remap[old])
 			doc.Edges.Dst = append(doc.Edges.Dst, remap[c])
@@ -139,9 +208,40 @@ func (g *Graph) ToDoc() *GraphDoc {
 			doc.Edges.Count = append(doc.Edges.Count, g.EdgeCount[e])
 			doc.Edges.CountResets = append(doc.Edges.CountResets, g.EdgeCountResets[e])
 			doc.Edges.Reward = append(doc.Edges.Reward, g.EdgeReward[e])
+			if negative != nil {
+				doc.Edges.Blame = append(doc.Edges.Blame, negative.Blame[e])
+				doc.Edges.Fails = append(doc.Edges.Fails, negative.Fails[e])
+				doc.Edges.FailsResets = append(doc.Edges.FailsResets, negative.FailsResets[e])
+				doc.Edges.Clear = append(doc.Edges.Clear, negative.Clear[e])
+				doc.Edges.Reasons = append(doc.Edges.Reasons, reasonPairs(negative.Reasons[e]))
+			}
 		}
 	}
 	doc.RngState = g.rng.State()
+	if negative != nil {
+		if !anyNonZero(doc.Edges.FailsResets) {
+			doc.Edges.FailsResets = nil
+		}
+		reasonResets := make([]int64, len(negative.ReasonNames))
+		for id := range negative.ReasonNames {
+			reasonResets[id] = negative.ReasonFailsResets[id]
+		}
+		if !anyNonZero(reasonResets) {
+			reasonResets = nil
+		}
+		doc.Weights = &weightsDoc{neg: &negativeWeightsDoc{
+			NegativeWeightConfig: g.NegativeWeightConfig(), Kind: "negative", TotalBlame: negative.TotalBlame,
+			TotalFails: negative.TotalFails.Value, TotalFailsResets: negative.TotalFails.Resets,
+			TotalClear: negative.TotalClear,
+			Reasons: reasonRegistryDoc{
+				Labels:      append([]string{}, negative.ReasonNames...),
+				Blame:       append([]float64{}, negative.ReasonBlame...),
+				Fails:       append([]int64{}, negative.ReasonFails...),
+				FailsResets: reasonResets,
+			},
+		}}
+		return doc
+	}
 	events := make([]int, 0, g.WindowTraversals())
 	for _, e := range g.window[g.windowHead:] {
 		if ni, ok := edgeIndex[e]; ok {
@@ -154,6 +254,16 @@ func (g *Graph) ToDoc() *GraphDoc {
 	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward",
 		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events}
 	return doc
+}
+
+// reasonPairs renders one edge's reasons as Python writes them: [[id, blame], ...] by id.
+func reasonPairs(entries []ReasonBlame) [][2]float64 {
+	out := make([][2]float64, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, [2]float64{float64(entry.ID), entry.Blame})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
 }
 
 // GraphFromDoc rebuilds a graph from its document.
@@ -177,6 +287,9 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	// files written before the dual frequency function carry no global_scale: they get the old
 	// log(1 + count) weight (count_scale 1, no frequency terms); every present key wins over a default
 	w := d.Weights
+	if w.negative() {
+		return negativeGraphFromDoc(d)
+	}
 	legacy := !w.has("global_scale")
 	opts := DefaultGraphOptions()
 	if legacy {
@@ -216,7 +329,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g.CountResets = resetsMap(d.Nodes.CountResets)
 	g.Alive = make([]bool, n)
 	g.children = make([]adjacency, n)
-	g.parents = make([]map[int]int, n)
+	g.parents = make([]adjacency, n)
 	g.index = make(map[string]loc, n*2)
 	for nid := 0; nid < n; nid++ {
 		g.Alive[nid] = true
@@ -268,10 +381,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			return nil, fmt.Errorf("duplicate edge %d -> %d", p, c)
 		}
 		g.children[p].set(c, e)
-		if g.parents[c] == nil {
-			g.parents[c] = make(map[int]int, 2)
-		}
-		g.parents[c][p] = e
+		g.parents[c].set(p, e)
 		g.EdgeAlive[e] = true
 		g.EdgeParent[e] = p
 	}
@@ -310,6 +420,86 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	return g, nil
 }
 
+// negativeGraphFromDoc rebuilds a negative graph: the shared structure first,
+// then the evidence arrays and the reason registry.
+func negativeGraphFromDoc(d *GraphDoc) (*Graph, error) {
+	w := d.Weights
+	opts := DefaultNegativeOptions()
+	if w.has("share_scale") {
+		opts.ShareScale = w.ShareScale
+	}
+	if w.has("blame_scale") {
+		opts.BlameScale = w.BlameScale
+	}
+	if w.has("clear_scale") {
+		opts.ClearScale = w.ClearScale
+	}
+	// the structure, counts and rng come from the shared reader; a copy of the
+	// document without the negative marker keeps it on the count path
+	plain := *d
+	plainWeights := *w
+	plainWeights.Kind, plainWeights.Function = "count-reward", "dual-frequency"
+	delete(plainWeights.present, "share_scale")
+	plain.Weights = &plainWeights
+	g, err := GraphFromDoc(&plain)
+	if err != nil {
+		return nil, err
+	}
+	n := newNegativeData(opts)
+	m := len(g.EdgeW)
+	edges := d.Edges
+	for name, length := range map[string]int{"blame": len(edges.Blame), "clear": len(edges.Clear), "fails": len(edges.Fails)} {
+		if length != 0 && length != m {
+			return nil, fmt.Errorf("edge %s array has an inconsistent length", name)
+		}
+	}
+	if len(edges.Reasons) != 0 && len(edges.Reasons) != m {
+		return nil, fmt.Errorf("edge reason array has an inconsistent length")
+	}
+	n.Blame = make([]float64, m)
+	n.Fails = make([]int64, m)
+	n.Clear = make([]float64, m)
+	n.Reasons = make([][]ReasonBlame, m)
+	copy(n.Blame, edges.Blame)
+	copy(n.Fails, edges.Fails)
+	copy(n.Clear, edges.Clear)
+	if len(edges.FailsResets) != 0 && len(edges.FailsResets) != m {
+		return nil, fmt.Errorf("edge fails_resets array has an inconsistent length")
+	}
+	n.FailsResets = resetsMap(edges.FailsResets)
+	if registry := w.Reasons; registry != nil {
+		for _, label := range registry.Labels {
+			n.ReasonID(label)
+		}
+		for id := range n.ReasonNames {
+			if id < len(registry.Blame) {
+				n.ReasonBlame[id] = registry.Blame[id]
+			}
+			if id < len(registry.Fails) {
+				n.ReasonFails[id] = registry.Fails[id]
+			}
+			if id < len(registry.FailsResets) {
+				setResets(n.ReasonFailsResets, id, registry.FailsResets[id])
+			}
+		}
+	}
+	for e, entries := range edges.Reasons {
+		for _, pair := range entries {
+			id := int(pair[0])
+			if id >= 0 && id < len(n.ReasonNames) {
+				n.Reasons[e] = append(n.Reasons[e], ReasonBlame{ID: id, Blame: pair[1]})
+			}
+		}
+	}
+	n.TotalBlame, n.TotalClear = w.TotalBlame, w.TotalClear
+	n.TotalFails = NewCounter(w.TotalFails, w.TotalFailsResets)
+	g.Neg = n
+	g.TotalTraversals = Counter{}
+	g.dirtyAll = true
+	g.weightsStructure = invalidStamp
+	return g, nil
+}
+
 // ModelDoc is the JSON layout of a model file.
 type ModelDoc struct {
 	Format  string           `json:"format"`
@@ -318,7 +508,18 @@ type ModelDoc struct {
 	Kind    string           `json:"kind"`
 	Meta    map[string]any   `json:"meta"`
 	History []map[string]any `json:"history"`
-	Graph   *GraphDoc        `json:"graph"`
+
+	// the negative network's journal and filter settings (omitted on a count model)
+	Log    []LogEntry `json:"log,omitempty"`
+	Filter *filterDoc `json:"filter,omitempty"`
+
+	Graph *GraphDoc `json:"graph"`
+}
+
+// filterDoc is how strictly a negative network judges.
+type filterDoc struct {
+	Threshold   float64 `json:"threshold"`
+	MinCoverage float64 `json:"min_coverage"`
 }
 
 // utcNow is an ISO-8601 UTC timestamp like Python's datetime.isoformat(timespec="seconds").
@@ -330,17 +531,24 @@ func (m *Model) ToDoc() *ModelDoc {
 	for i, r := range m.History {
 		history[i] = copyMap(r)
 	}
-	return &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: "count",
+	doc := &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: m.Kind(),
 		Meta: copyMap(m.Meta), History: history, Graph: m.G.ToDoc()}
+	if m.IsNegative() {
+		doc.Format = NegativeFormat
+		doc.Log = append([]LogEntry{}, m.Neg.Log...)
+		doc.Filter = &filterDoc{Threshold: m.Neg.Threshold, MinCoverage: m.Neg.MinCoverage}
+	}
+	return doc
 }
 
-// FromDoc rebuilds a model from its document.
+// FromDoc rebuilds a model from its document: the count / reward model, or the
+// negative network (the format decides, as in Python's load_model).
 func FromDoc(d *ModelDoc) (*Model, error) {
-	if d.Format != ModelFormat {
-		return nil, fmt.Errorf("not a %s model document", ModelFormat)
+	if d.Format != ModelFormat && d.Format != NegativeFormat {
+		return nil, fmt.Errorf("not a %s or %s model document", ModelFormat, NegativeFormat)
 	}
 	if d.Version > ModelFormatVersion {
-		return nil, fmt.Errorf("unsupported %s model version %d", ModelFormat, d.Version)
+		return nil, fmt.Errorf("unsupported %s model version %d", d.Format, d.Version)
 	}
 	if d.Graph == nil {
 		return nil, fmt.Errorf("model document has no graph")
@@ -354,34 +562,87 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 	for i, r := range d.History {
 		m.History[i] = copyMap(r)
 	}
+	if g.IsNegative() {
+		m.makeNegative()
+		if len(d.Log) > MaxLogEntries {
+			d.Log = d.Log[len(d.Log)-MaxLogEntries:]
+		}
+		m.Neg.Log = append([]LogEntry{}, d.Log...)
+		if d.Filter != nil {
+			m.Neg.Threshold, m.Neg.MinCoverage = d.Filter.Threshold, d.Filter.MinCoverage
+		}
+	}
 	for k, v := range d.Meta {
 		m.Meta[k] = v
 	}
 	m.carryMeta() // a file may carry a counter that was never wrapped
+	if d.Format == NegativeFormat && !g.IsNegative() {
+		return nil, fmt.Errorf("%s document without a negative graph", NegativeFormat)
+	}
 	return m, nil
 }
 
 // MarshalJSON renders a document compactly without HTML escaping (like json.dumps).
 func marshalCompact(v any) ([]byte, error) {
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err := encodeCompact(&buf, v); err != nil {
 		return nil, err
 	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+	return buf.Bytes(), nil
+}
+
+// encodeCompact streams a document as compact JSON without HTML escaping and
+// without the encoder's trailing newline, so a model of any size is written
+// without ever holding its serialised form in memory.
+func encodeCompact(w io.Writer, v any) error {
+	tw := &trimNewline{w: w}
+	enc := json.NewEncoder(tw)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// trimNewline passes everything through but holds back trailing newlines,
+// writing them only when more data follows (json.Encoder ends with one).
+type trimNewline struct {
+	w    io.Writer
+	held int // newlines seen at the end of the stream so far
+}
+
+func (t *trimNewline) Write(p []byte) (int, error) {
+	cut := len(p)
+	for cut > 0 && p[cut-1] == '\n' {
+		cut--
+	}
+	if cut > 0 {
+		for ; t.held > 0; t.held-- { // they were not trailing after all
+			if _, err := t.w.Write([]byte{'\n'}); err != nil {
+				return 0, err
+			}
+		}
+		if _, err := t.w.Write(p[:cut]); err != nil {
+			return 0, err
+		}
+	}
+	t.held += len(p) - cut
+	return len(p), nil
 }
 
 // Save writes the model as JSON (gzip when path ends with .gz) atomically.
 func (m *Model) Save(path string) error {
-	payload, err := marshalCompact(m.ToDoc())
-	if err != nil {
-		return err
-	}
-	return writeBytesAtomic(path, payload, strings.HasSuffix(path, ".gz"))
+	return writeDocAtomic(path, m.ToDoc(), strings.HasSuffix(path, ".gz"))
+}
+
+// writeDocAtomic streams a document into a temporary file and renames it over
+// path.  Nothing bigger than the write buffer is held in memory.
+func writeDocAtomic(path string, doc any, useGzip bool) error {
+	return writeAtomicWith(path, func(w io.Writer) error { return encodeCompact(w, doc) }, useGzip)
 }
 
 func writeBytesAtomic(path string, data []byte, useGzip bool) error {
+	return writeAtomicWith(path, func(w io.Writer) error { _, err := w.Write(data); return err }, useGzip)
+}
+
+func writeAtomicWith(path string, write func(io.Writer) error, useGzip bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -392,27 +653,31 @@ func writeBytesAtomic(path string, data []byte, useGzip bool) error {
 	}
 	tmpName := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpName) }
-	if useGzip {
-		zw := gzip.NewWriter(tmp)
-		if _, err := zw.Write(data); err != nil {
-			tmp.Close()
-			cleanup()
-			return err
-		}
-		if err := zw.Close(); err != nil {
-			tmp.Close()
-			cleanup()
-			return err
-		}
-	} else if _, err := tmp.Write(data); err != nil {
+	failed := func(err error) error {
 		tmp.Close()
 		cleanup()
 		return err
 	}
+	buf := bufio.NewWriterSize(tmp, 1<<20)
+	var out io.Writer = buf
+	var zw *gzip.Writer
+	if useGzip {
+		zw = gzip.NewWriter(buf)
+		out = zw
+	}
+	if err := write(out); err != nil {
+		return failed(err)
+	}
+	if zw != nil {
+		if err := zw.Close(); err != nil {
+			return failed(err)
+		}
+	}
+	if err := buf.Flush(); err != nil {
+		return failed(err)
+	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		cleanup()
-		return err
+		return failed(err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
@@ -425,23 +690,26 @@ func writeBytesAtomic(path string, data []byte, useGzip bool) error {
 	return nil
 }
 
-// ReadJSONFile loads a JSON document, gunzipping it when it carries the gzip magic.
+// ReadJSONFile decodes a JSON document straight from the file (gunzipping it
+// when it carries the gzip magic), so a huge model is never held twice.
 func ReadJSONFile(path string, v any) error {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	if len(raw) >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
-		zr, err := gzip.NewReader(bytes.NewReader(raw))
-		if err != nil {
-			return err
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 1<<20)
+	magic, err := br.Peek(2)
+	var r io.Reader = br
+	if err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
+		zr, zerr := gzip.NewReader(br)
+		if zerr != nil {
+			return zerr
 		}
-		raw, err = io.ReadAll(zr)
-		if err != nil {
-			return err
-		}
+		defer zr.Close()
+		r = zr
 	}
-	return json.Unmarshal(raw, v)
+	return json.NewDecoder(r).Decode(v)
 }
 
 // Load reads a model written by Save (or by the Python implementation).
