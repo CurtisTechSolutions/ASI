@@ -170,3 +170,85 @@ real games rather than smooth synthetic ones, and whether the interpolation of �
 survives when neighbouring games are genuinely discrete rather than samples from
 a continuum. §4 is the result most likely to weaken on real data and the one most
 worth re-running there first.
+
+---
+
+# Part 2 — how should the range be partitioned?
+
+If games occupy bands, the layout is a design choice: equal `1/N` bands that are
+re-laid-out whenever a game is added, or a **static** sequence (powers of two,
+powers of ten) that reserves slots so existing games never move. `partition.py`.
+
+## 6. Reserved slots are expensive: dust is error amplification
+
+4 games, fixed-width bands, only the width differing. Seeds 0-3, tanh:
+
+| layout | dust | amplification | mean MSE | vs. no dust |
+|---|---|---|---|---|
+| 4 bands of 1/4 | 0% | ×4 | **0.0401** | — |
+| 8 bands of 1/8 | 50% | ×8 | 0.1248 | **3.1× worse** |
+| 16 bands of 1/16 | 75% | ×16 | 0.1814 | **4.5× worse** |
+
+**Dust is not wasted space — it is error amplification.** Reading a band back out
+multiplies output error by the number of slots, so reserving slots for games that
+are not there degrades the games that *are* there, in direct proportion. Fifty
+percent dust costs 3.1×.
+
+This settles the binary-sequence question against it. Padding to the next power
+of two wastes up to 47% just past a boundary — 17 games in 32 slots — which by
+this table is roughly a 3× accuracy penalty for nothing. **Use exactly `N` bands.
+Never reserve.**
+
+## 7. Re-laying-out is cheap — the thing reserving was meant to avoid
+
+The case for a static layout was that `1/N` moves every band when a game is
+added, destroying what was learned. Tested directly: train 4 games, then train
+**only** the 4 new ones, then re-measure the original 4. Seeds 0-3, tanh:
+
+| layout | phase-1 error | damage to the original 4 |
+|---|---|---|
+| `1/N`, re-laid-out | 0.0401 | **1.37×** |
+| reserved slots, nothing moves | 0.0397 | **1.36×** |
+| midpoint insertion (adaptive) | 0.0401 | 2.36× |
+
+**Displacement barely matters.** Re-laying every band out costs 1.37×, and
+freezing them costs 1.36× — indistinguishable. Most of that 1.37× is ordinary
+catastrophic forgetting from training on new games only, which happens whatever
+the layout does.
+
+The reason is §4: the selector is *continuous*. Rescaling `s` is a smooth
+reparameterisation the network already generalises across, not a permutation of
+discrete slots. A network that can interpolate to an unseen game can also absorb
+its coordinate system being stretched.
+
+**So the two costs are 3.1× against 1.37×, and they point the same way:** take
+the relayout, refuse the dust.
+
+Midpoint insertion — placing a new game between its two nearest neighbours so
+existing coordinates never move and bands still tile `[0,1]` — was my own
+proposal for getting static, dust-free and similarity-ordered at once. It is the
+**worst** option tested at 2.36×, because it produces bands of unequal and
+irregular width, and the network must then learn a non-uniform map from selector
+coordinate to output scale on top of everything else. Uniform bands that move
+beat non-uniform bands that stay.
+
+## 8. Predictions this section got wrong
+
+Recorded because the corrections are the content:
+
+* **"Displacement will cause catastrophic forgetting."** It does not — 1.37× against 1.36×. The continuous selector absorbs it (§7).
+* **"Reserved slots cost ~14% at phase 1."** Single-seed noise. Across four seeds it is 0.0397 vs 0.0401 — no difference. The real cost of dust appears only when bands are genuinely held at fixed width (§6), which the first attempt did not do: its Voronoi band construction re-tiled `[0,1]` automatically and so removed the dust it was meant to be measuring.
+* **"Midpoint insertion gets all three properties at once."** It gets them and is still worse, for a reason none of the three properties describes (§7).
+* An earlier incremental test (train 4, then retrain on *all* 8) measured nothing at all: the original games improved from the extra training, which masks displacement entirely. Phase 2 must train only the new games.
+
+## 9. What to build
+
+**Exactly `N` equal bands, ordered by similarity, re-laid-out when a game is
+added.** No padding, no reserved slots, no variable widths.
+
+And the conclusion of Part 1 stands above all of it: the partition is worth
+having only for the **continuous selector coordinate** that comes with it, which
+is what buys interpolation to unseen games (§4). If that coordinate is supplied
+some other way — as `GTMNN`'s game modifier is (`GTMNN/DESIGN.md` §22.5) — then
+the full output range is better than any partition of it, and every number in
+Part 2 becomes moot.
