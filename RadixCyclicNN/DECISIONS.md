@@ -389,7 +389,7 @@ with `to_end`).
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** learning
 
-**Context — 2NRL (*Two-phase Negative Reinforcement Learning*) is the author's
+**Context — 2NRL (*Double-Negative Reinforcement Learning*) is the author's
 own learning process, formalised.** This is not
 an algorithm arrived at from the literature and then justified. The author is
 self-taught, and describes the method that produced that education directly:
@@ -2407,9 +2407,14 @@ positional reading is the intended one: the character shared by two windows *is*
 the pivot. Three is therefore the smallest window that gives a pivot with context
 on either side, and D-006 records it as the reason rather than as a consequence.
 
-**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED.** *Two-phase Negative
-Reinforcement Learning.* Recorded in D-009 and in the paper's title; the
-expansion had appeared nowhere in the repository until now.
+**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED by the author.**
+*Double-Negative Reinforcement Learning.* The `2N` is two negatives: training
+**on** the failures, then negating the representation that produced them —
+phases 1 and 2 of D-009. The third phase is the positive consolidation, so the
+name and the three-phase count do not conflict. Recorded in D-009 and in the
+paper's title and §2.1; the expansion had appeared nowhere in the repository
+before, and an earlier guess of *Two-phase Negative Reinforcement Learning* was
+wrong (it also contradicted the three-phase procedure it labelled).
 
 **Q-13 — ~~Is "pull hard on the thread" a positive-side boost?~~ — ANSWERED, and
 the premise was wrong.** It is not a boost of any kind. The author's process is

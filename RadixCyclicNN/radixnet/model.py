@@ -7,10 +7,12 @@ the self-compressing structure and its parameters, a
 CSR mini-batches and :mod:`radixnet.search` finds the cheapest (Dijkstra) or a
 sampled continuation.
 
-2NRL (:meth:`RadixNet.two_nrl`) is the author's two-phase scheme: train on
-bad / garbage data, :meth:`RadixNet.invert` the network (every edge weight
-and every activation amplitude flips sign, so what was likely becomes
-unlikely) and fine-tune on correct data with a smaller learning rate.
+2NRL (:meth:`RadixNet.two_nrl`) is *Double-Negative Reinforcement Learning*,
+the author's scheme: train on bad / garbage data, :meth:`RadixNet.invert` the
+network (every edge weight and every activation amplitude flips sign, so what
+was likely becomes unlikely) and fine-tune on correct data with a smaller
+learning rate.  The two negatives of the name are the first two steps - trained
+**on** the failures, then negated - and the fine-tune is the positive one.
 """
 
 from __future__ import annotations

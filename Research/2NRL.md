@@ -1,6 +1,6 @@
 # 2NRL: Learning by Inverting Consistent Failure
 
-*Two-phase Negative Reinforcement Learning*
+*Double-Negative Reinforcement Learning*
 
 **A training procedure derived from autodidactic practice**
 
@@ -11,7 +11,7 @@ Working paper · September 2026
 
 ## Abstract
 
-2NRL — *Two-phase Negative Reinforcement Learning* — is a three-phase training
+2NRL — *Double-Negative Reinforcement Learning* — is a three-phase training
 procedure: **train on the failures at full rate,
 invert the network, then fine-tune on the correct data at a reduced rate.** It
 inverts the conventional treatment of wrong examples. Where negative sampling,
@@ -91,6 +91,43 @@ Note what phase 1 is *not*. It is not a penalty, not a negated gradient, not a
 repulsion term. It is **ordinary training on the wrong answer**, at the full
 learning rate, until the model reproduces it. The model is made to fail well
 before it is made to succeed.
+
+### 2.1 The name
+
+**2NRL is Double-Negative Reinforcement Learning.** The `2N` is two negatives,
+and they are phases 1 and 2 of the table above:
+
+1. **A negative input** — the training data is the failures, and the model is
+   trained *on* them rather than away from them.
+2. **A negative operation** — the representation just built is negated.
+
+Two negations compose to an affirmation. That is not wordplay; it is the reason
+the procedure has a *destination* rather than merely a direction, which is the
+whole argument of §3.2. One negative — the conventional push of probability mass
+off a wrong answer — leaves the model anywhere at all. $\neg\neg P$ returns to
+$P$.
+
+The third phase is not a third negative. It is the positive consolidation, which
+is why "double" and "three-phase" are not in tension: two of the three phases are
+negations and the last one is not.
+
+The name also states the procedure's precondition. Double-negative *elimination*
+— $\neg\neg P \Rightarrow P$ — holds only where the negation is well defined,
+and two things have to be true for that. Most of this paper is about them:
+
+- **The negation of a learned structure must itself be a coherent structure**
+  (§3.3). Here it is, and exactly so: flipping the amplitude sign of a sine
+  activation is an exact negation of that unit, to machine precision, so
+  $\neg\neg$ returns precisely where it started rather than approximately. An
+  architecture whose units cannot be negated cleanly has no double negative to
+  eliminate.
+- **The failure being negated must be consistent** (§4). A systematic failure has
+  a coherent opposite. Noise does not — $\neg(\text{noise})$ is not a location,
+  and negating it twice restores nothing.
+
+So the name carries the claim rather than just labelling it. Where either
+condition fails, 2NRL is a double negative in the looser English sense: two
+negations that leave the meaning muddled instead of restored.
 
 ---
 
@@ -582,10 +619,6 @@ not immediately undoing.
 ---
 
 ## 11. Open questions
-
-**Q-A. What does 2NRL stand for?** The expansion is recorded nowhere in the
-implementation; the code calls it only "the author's two-phase scheme". This
-paper uses the acronym as a proper name.
 
 **Q-B. What counts as finding a thread?** See §5.4. The wide-then-narrow
 schedule is well defined once there is a detector; the detector is the open part,
