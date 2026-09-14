@@ -954,8 +954,11 @@ the same way, each with its own correct form.  They are ordinary faults to `blam
 (section 24) - the same reason, the diff against their own correction, `variant_weight` (0.5) of the failure's
 severity because the student never wrote them - and they reach nothing else: the model being taught never sees a
 sentence it did not write.  The question is only asked when a negative network is attached (`--blame`) and
-`variants` > 0, which is also why the parity of the two tutors is unaffected; a teacher that cannot answer costs
-the widening, not the round (a `"note"` record).  Cost: one call per batch of failures.
+`variants` > 0, so a run without one asks nothing extra; a teacher that cannot answer costs the widening, not the
+round (a `"note"` record).  Cost: one call per batch of failures.  The Go tutor does the same, word for word
+(`ExplainMistakes`, `TutorTrainer.Widen`, `FaultsFromLessons`, `-variants` / `-variant-weight`): `tests/test_go_parity.py`
+runs both with `--blame --variants 2` against one fake teacher and asserts the same conversation, the same family
+on every lesson and byte-identical negative networks afterwards.
 
 The report card at the end of a run is handed back to the teacher, which turns it into the syllabus of the
 lessons that follow:
@@ -1101,8 +1104,8 @@ per batch) so the settings show what the server is teaching.
 Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
 it again, answers drill requests and plans the next lessons; the parsers, the marking, the widening -
 `_parse_explanations`, `explain_mistakes`, `TutorTrainer.widen`, a round that widens and one that does not - the
-planner, the loop with a scripted model, the endpoints and the CLI) and `tests/test_blame.py` (a widened lesson
-becomes its whole family of faults), the ChatGPT teacher of
+planner, the loop with a scripted model, the endpoints and the CLI), `tests/test_blame.py` (a widened lesson
+becomes its whole family of faults) and the same in Go (`go/radixnet/tutor_test.go`, `blame_test.go`), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
 model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
 

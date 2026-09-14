@@ -501,7 +501,10 @@ One **round** is:
 
    It is the only LLM call the tutor makes that nothing else uses: without
    `--blame` there is no negative network to teach, so the question is never
-   asked, and `--variants 0` switches it off.
+   asked, and `--variants 0` switches it off. The Go tutor asks it the same way
+   (`radixnet-count tutor -blame -variants 2`), and a parity test runs both
+   against one teacher to check they get the same answer and end with the same
+   negative network.
 
    The same alignment is a command of its own, for a correction typed by hand:
 
