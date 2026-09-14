@@ -247,6 +247,9 @@ func TestTrainJobAndInference(t *testing.T) {
 	if turns[0].(map[string]any)["given"] != true || turns[1].(map[string]any)["speaker"] != "y" {
 		t.Fatalf("turns: %v", turns)
 	}
+	if _, ok := c["repeats"].([]any); !ok { // the duplicates spoken anyway, ready to be punished
+		t.Fatalf("converse: no repeats in %v", c)
+	}
 	status, c = e.post("/api/converse", map[string]any{"turns": 1, "partner": "radix"})
 	if status != 400 {
 		t.Fatalf("partner radix: %d %v", status, c)
@@ -663,7 +666,7 @@ func TestStaticAndErrors(t *testing.T) {
 	if status != 404 || !strings.Contains(doc["error"].(string), "unknown API endpoint") {
 		t.Fatalf("unknown endpoint: %d %v", status, doc)
 	}
-	status, doc = e.get("/api/evolve/history")
+	status, doc = e.post("/api/schedule/preview", map[string]any{"lr_schedule": "lr"}) // still Python-only
 	if status != 404 || !strings.Contains(doc["error"].(string), "not available on the Go server") {
 		t.Fatalf("python-only endpoint: %d %v", status, doc)
 	}

@@ -925,9 +925,10 @@ table.data td.wrap {
   font-size: 13px;
 }
 
-/* Source badges (the model or the Ollama teacher) are outlined to set them apart from the verdict badges. */
+/* Source badges (the model, or the tutor that wrote the program) are outlined to set them apart from the verdict badges. */
 .badge.model,
-.badge.ollama {
+.badge.ollama,
+.badge.chatgpt {
   background: transparent;
   box-shadow: inset 0 0 0 1px currentColor;
 }
@@ -938,6 +939,10 @@ table.data td.wrap {
 
 .badge.ollama {
   color: var(--warn);
+}
+
+.badge.chatgpt {
+  color: var(--ok);
 }
 
 ul.rounds {
@@ -1294,11 +1299,6 @@ ol.dialogue li.turn.b {
   align-items: flex-end;
 }
 
-ol.dialogue li.end {
-  height: 0;
-  margin: 0;
-}
-
 ol.dialogue .speaker {
   display: flex;
   align-items: center;
@@ -1384,6 +1384,125 @@ ol.dialogue li.rated.down .bubble {
   border-radius: 4px;
   padding: 0 3px;
   text-decoration: none;
+}
+
+/* the guard: what the negative network stopped on the way out */
+.guard {
+  border-left: 3px solid var(--border);
+  padding: 2px 0 2px 10px;
+  margin: 10px 0;
+}
+
+.guard.vetoed {
+  border-left-color: var(--warn);
+}
+
+.guard p {
+  margin: 0;
+}
+
+.guard .verdicts {
+  margin-bottom: 6px;
+}
+
+/* the negative network: verdicts, blamed fragments and the journal */
+.verdict {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  background: var(--card);
+}
+
+.verdict p {
+  margin: 4px 0;
+}
+
+.verdict .chips {
+  margin-top: 6px;
+}
+
+p.blamed {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+p.blamed mark {
+  background: rgba(220, 38, 38, 0.18);
+  color: inherit;
+  border-radius: 3px;
+  padding: 1px 0;
+  box-shadow: 0 1px 0 rgba(220, 38, 38, 0.5);
+}
+
+/* Speech tab: the recorder's playback and the decoded waveform */
+.card audio {
+  display: block;
+  width: min(100%, 420px);
+  margin: 0.5rem 0;
+}
+
+/* Tutor tab: the brief the report card wrote for the next batch of lessons */
+blockquote.brief {
+  margin: 6px 0 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--chip);
+  border-radius: 0 6px 6px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+/* Agent tab: the live log of criteria, proposals, tool calls and attempts */
+ul.log {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  max-height: 420px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+ul.log > li {
+  padding: 5px 8px;
+  border-left: 2px solid var(--border);
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+ul.log code {
+  font-size: 12px;
+}
+
+ul.log ol.criteria {
+  margin: 4px 0 0 18px;
+  padding: 0;
+  color: var(--muted);
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--muted);
+}
+
+/* a call the network wrote itself, rather than one the LLM had to repair */
+.tag.own {
+  background: rgba(47, 95, 216, 0.14);
+  color: var(--accent);
+}
+
+.verdict.pass {
+  color: #16a34a;
+}
+
+.verdict.fail {
+  color: #dc2626;
 }
 
 /* judged paths in the status bar: correct against incorrect */

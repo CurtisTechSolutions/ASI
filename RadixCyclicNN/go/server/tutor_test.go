@@ -46,6 +46,8 @@ func newFakeTeacher(t *testing.T) *fakeTeacher {
 			kind = "grades"
 		case strings.Contains(system, "model sentences"):
 			kind = "drills"
+		case strings.Contains(system, "planning the next lessons"):
+			kind = "plan"
 		}
 		fake.prompts[kind] = append(fake.prompts[kind], prompt)
 		json.NewEncoder(w).Encode(map[string]any{"response": fake.answer(kind, prompt)})
@@ -91,6 +93,15 @@ func (f *fakeTeacher) answer(kind, prompt string) string {
 		return string(raw)
 	case "drills":
 		return "1. the cat sat on the mat\n2. the dogs run in the park"
+	case "plan":
+		raw, _ := json.Marshal(map[string]any{
+			"summary": "The student writes verbs badly.", "level": "beginner", "lessons": []map[string]any{
+				{"focus": "subject-verb agreement", "targets": "agreement", "topic": "animals",
+					"why": "Nearly every sentence lost marks here."},
+				{"focus": "plural nouns", "targets": "plural", "topic": "the market", "why": "Plurals were shaky."},
+			},
+		})
+		return string(raw)
 	}
 	return "unexpected request"
 }
@@ -153,6 +164,63 @@ func TestTutorDescribe(t *testing.T) {
 	defaults, _ := body["defaults"].(map[string]any)
 	if defaults["threshold"] != 6.0 || defaults["grammar_weight"] != 0.6 {
 		t.Fatalf("defaults wrong: %v", defaults)
+	}
+}
+
+func TestTutorDescribeListsBothTeachers(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY_FILE", "")
+	e, fake := tutorEnv(t)
+	_, body := e.get("/api/tutor")
+	providers, _ := body["providers"].(map[string]any)
+	local, _ := providers["ollama"].(map[string]any)
+	hosted, _ := providers["chatgpt"].(map[string]any)
+	if local["url"] != fake.server.URL || local["configured"] != true {
+		t.Fatalf("the local teacher should be listed: %v", local)
+	}
+	if hosted["configured"] != false || hosted["model"] == "" {
+		t.Fatalf("ChatGPT should be listed as not configured here: %v", hosted)
+	}
+}
+
+func TestChatGPTModelsEndpointWithoutAKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY_FILE", "")
+	e, _ := tutorEnv(t)
+	status, body := e.get("/api/chatgpt/models")
+	if status != 200 {
+		t.Fatalf("GET /api/chatgpt/models = %d: %v", status, body)
+	}
+	if body["available"] != false || body["configured"] != false {
+		t.Fatalf("without a key it must report itself unusable: %v", body)
+	}
+	message, _ := body["error"].(string)
+	if !strings.Contains(message, "OPENAI_API_KEY") {
+		t.Fatalf("the error should name the key: %v", body["error"])
+	}
+	if models, _ := body["models"].([]any); len(models) != 0 {
+		t.Fatalf("no models without a key: %v", body["models"])
+	}
+}
+
+func TestTutorChatGPTWithoutAKeyIsRefused(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY_FILE", "")
+	e, fake := tutorEnv(t)
+	status, body := e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "tutor_provider": "chatgpt"})
+	if status != 400 {
+		t.Fatalf("POST /api/tutor/lesson = %d, want 400: %v", status, body)
+	}
+	message, _ := body["error"].(string)
+	if !strings.Contains(message, "OPENAI_API_KEY") {
+		t.Fatalf("the error should name the key: %v", body["error"])
+	}
+	if len(fake.prompts) != 0 {
+		t.Fatal("nothing may be asked of the local teacher either")
+	}
+	status, body = e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "tutor_provider": "bard"})
+	if status != 400 {
+		t.Fatalf("an unknown provider must be refused, got %d: %v", status, body)
 	}
 }
 
@@ -271,6 +339,175 @@ func TestTutorStartAndHistory(t *testing.T) {
 	}
 	if changed == 0 {
 		t.Fatal("the corrected lessons should say what changed")
+	}
+}
+
+func TestTutorPlanFromAReportCard(t *testing.T) {
+	e, fake := tutorEnv(t)
+	card := map[string]any{"lessons": 6, "passed": 1, "pass_rate": 1.0 / 6.0, "mean_score": 3.0,
+		"errors": map[string]any{"agreement": 4, "tense": 1}}
+	status, body := e.post("/api/tutor/plan", map[string]any{
+		"report": card, "topic": "animals", "count": 2, "exercises": 3,
+	})
+	if status != 200 {
+		t.Fatalf("POST /api/tutor/plan = %d: %v", status, body)
+	}
+	if body["source"] != "ollama" || body["provider"] != "ollama" || body["model"] != "fake:latest" {
+		t.Fatalf("source / model wrong: %v", body)
+	}
+	plan, _ := body["plan"].(map[string]any)
+	lessons, _ := plan["lessons"].([]any)
+	if len(lessons) != 2 {
+		t.Fatalf("expected 2 planned lessons: %v", plan["lessons"])
+	}
+	first, _ := lessons[0].(map[string]any)
+	if first["targets"] != "agreement" || first["exercises"] != 3.0 {
+		t.Fatalf("first lesson wrong: %v", first)
+	}
+	weak, _ := plan["weak"].([]any)
+	if len(weak) != 2 || weak[0].(map[string]any)["error"] != "agreement" {
+		t.Fatalf("weak points wrong: %v", plan["weak"])
+	}
+	if prompt, _ := plan["prompt"].(string); prompt == "" {
+		t.Fatalf("the plan should carry the brief for the next batch: %v", plan)
+	}
+	upgrade, _ := plan["upgrade"].(map[string]any)
+	if upgrade["step"] != "hold" || upgrade["drills"] != 3.0 {
+		t.Fatalf("a weak card should be held back with examples: %v", upgrade)
+	}
+	if !strings.Contains(fake.prompts["plan"][0], "agreement x4") {
+		t.Fatalf("the teacher did not see the card: %s", fake.prompts["plan"][0])
+	}
+}
+
+func TestTutorPlanFallsBackToTheLastRun(t *testing.T) {
+	e, _ := tutorEnv(t)
+	status, body := e.post("/api/tutor/plan", map[string]any{"topic": "animals"})
+	if status != 400 || !strings.Contains(body["error"].(string), "no report card yet") {
+		t.Fatalf("planning before any lesson = %d: %v", status, body)
+	}
+	e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "threshold": 9.5, "neg_epochs": 1, "pos_epochs": 1,
+	})
+	waitForJob(e, 30*time.Second)
+	status, body = e.post("/api/tutor/plan", map[string]any{"topic": "animals", "count": 1})
+	if status != 200 {
+		t.Fatalf("POST /api/tutor/plan = %d: %v", status, body)
+	}
+	report, _ := body["report"].(map[string]any)
+	if report["kind"] != "report" || report["lessons"] != 2.0 {
+		t.Fatalf("the last run's card should be used: %v", report)
+	}
+	plan, _ := body["plan"].(map[string]any)
+	if lessons, _ := plan["lessons"].([]any); len(lessons) != 1 {
+		t.Fatalf("count ignored: %v", plan["lessons"])
+	}
+}
+
+func TestTutorStartCanPlanItsOwnNextLessons(t *testing.T) {
+	e, _ := tutorEnv(t)
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "threshold": 9.5, "plan": 2,
+		"neg_epochs": 1, "pos_epochs": 1,
+	})
+	if status != 202 {
+		t.Fatalf("POST /api/tutor/start = %d: %v", status, body)
+	}
+	waitForJob(e, 30*time.Second)
+	_, history := e.get("/api/tutor/history")
+	records, _ := history["history"].([]any)
+	last, _ := records[len(records)-1].(map[string]any)
+	if last["kind"] != "plan" {
+		t.Fatalf("the run should end with a plan: %v", last["kind"])
+	}
+	if lessons, _ := last["lessons"].([]any); len(lessons) != 2 {
+		t.Fatalf("planned lessons wrong: %v", last["lessons"])
+	}
+	if targets, _ := last["targets"].([]any); len(targets) == 0 || targets[0] != "agreement" {
+		t.Fatalf("the plan should drill the card's worst mistake: %v", last["targets"])
+	}
+}
+
+func TestTutorStartTeachesToTheBrief(t *testing.T) {
+	e, fake := tutorEnv(t)
+	brief := "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "brief": brief, "learn": false,
+	})
+	if status != 202 {
+		t.Fatalf("POST /api/tutor/start = %d: %v", status, body)
+	}
+	waitForJob(e, 30*time.Second)
+	if len(fake.prompts["exercises"]) == 0 {
+		t.Fatal("the teacher was never asked for exercises")
+	}
+	if !strings.Contains(fake.prompts["exercises"][0], "The plan for this batch of lessons: "+brief) {
+		t.Fatalf("the brief did not reach the exercise writer:\n%s", fake.prompts["exercises"][0])
+	}
+	config, _ := body["config"].(map[string]any)
+	if config["brief"] != brief {
+		t.Fatalf("the job should report the brief it was started with: %v", config["brief"])
+	}
+}
+
+func TestTutorAutoRunJob(t *testing.T) {
+	e, fake := tutorEnv(t)
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "threshold": 9.5, "batches": 3,
+		"neg_epochs": 1, "pos_epochs": 1,
+	})
+	if status != 202 {
+		t.Fatalf("POST /api/tutor/start = %d: %v", status, body)
+	}
+	if config, _ := body["config"].(map[string]any); config["batches"] != 3.0 {
+		t.Fatalf("the job should carry the batches: %v", body["config"])
+	}
+	waitForJob(e, 60*time.Second)
+	_, history := e.get("/api/tutor/history")
+	records, _ := history["history"].([]any)
+	kinds, started := []string{}, []map[string]any{}
+	for _, entry := range records {
+		record, _ := entry.(map[string]any)
+		kind, _ := record["kind"].(string)
+		if kind != "lesson" {
+			kinds = append(kinds, kind)
+		}
+		if kind == "batch" {
+			started = append(started, record)
+		}
+	}
+	want := "round,report,plan,batch,round,report,plan,batch,round,report"
+	if strings.Join(kinds, ",") != want {
+		t.Fatalf("records = %v", kinds)
+	}
+	if len(started) != 2 || started[0]["batch"] != 2.0 {
+		t.Fatalf("batch records wrong: %v", started)
+	}
+	brief, _ := started[1]["brief"].(string)
+	if brief == "" {
+		t.Fatalf("a batch should be announced with the brief it teaches: %v", started[1])
+	}
+	if len(fake.prompts["exercises"]) != 3 ||
+		!strings.Contains(fake.prompts["exercises"][2], "The plan for this batch of lessons: "+brief) {
+		t.Fatalf("the last batch was not taught to the brief:\n%v", fake.prompts["exercises"])
+	}
+}
+
+func TestTutorPlanBadRequests(t *testing.T) {
+	e, _ := tutorEnv(t)
+	cases := []struct {
+		body map[string]any
+		want string
+	}{
+		{map[string]any{"report": "a card"}, "'report' must be an object"},
+		{map[string]any{"report": map[string]any{"lessons": 3}, "count": 0}, "count"},
+		{map[string]any{"report": map[string]any{"lessons": 0}}, "report card of at least one lesson"},
+	}
+	for _, tc := range cases {
+		status, body := e.post("/api/tutor/plan", tc.body)
+		if status != 400 || !strings.Contains(body["error"].(string), tc.want) {
+			t.Fatalf("%v = %d: %v", tc.body, status, body)
+		}
 	}
 }
 

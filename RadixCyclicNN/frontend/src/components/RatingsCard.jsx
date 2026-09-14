@@ -39,6 +39,8 @@ export function clampMark(value) {
  * rating also carries a mark out of 10 (10 by default: a plain thumb) that
  * says *how* good or bad the text is - the network then learns each text in
  * proportion to its mark instead of treating every thumb alike.
+ * ``punish`` marks a whole batch thumbs-down without toggling (the Converse
+ * and Chat tabs punish the duplicates the model could not avoid that way).
  */
 export function useRatings() {
   const [ratings, setRatings] = useState([]);
@@ -55,11 +57,25 @@ export function useRatings() {
       return [...rest, { text, rating, mark: current ? current.mark : DEFAULT_MARK, ...extra }];
     });
   }
+  /**
+   * Thumbs down for every one of ``texts`` at once, without the toggling of
+   * ``rate``: the duplicates a conversation could not avoid, marked for the
+   * 2NRL negative phase. Returns how many distinct texts are now punished.
+   */
+  function punish(texts, extra = {}) {
+    const wanted = [...new Set((Array.isArray(texts) ? texts : []).map((t) => String(t ?? "")).filter((t) => t.trim()))];
+    if (!wanted.length) return 0;
+    setRatings((prev) => [
+      ...prev.filter((r) => !wanted.includes(r.text)),
+      ...wanted.map((text) => ({ text, rating: "down", mark: DEFAULT_MARK, ...extra })),
+    ]);
+    return wanted.length;
+  }
   const setMark = (text, mark) =>
     setRatings((prev) => prev.map((r) => (r.text === text ? { ...r, mark } : r)));
   const remove = (text) => setRatings((prev) => prev.filter((r) => r.text !== text));
   const clear = () => setRatings([]);
-  return { ratings, setRatings, rate, ratingOf, setMark, remove, clear };
+  return { ratings, setRatings, rate, punish, ratingOf, setMark, remove, clear };
 }
 
 /** The thumbs up / thumbs down pair for one text. */

@@ -21,6 +21,7 @@ type fakeTeacher struct {
 	// answers replace the generated ones when set
 	exerciseAnswer string
 	gradeAnswer    string
+	planAnswer     string
 }
 
 var tutorCorpus = []string{"the cat sat on the mat", "the dogs run in the park", "the cat likes the mat"}
@@ -72,6 +73,8 @@ func newFakeTeacher(t *testing.T) *fakeTeacher {
 			kind = "grades"
 		case strings.Contains(system, "model sentences"):
 			kind = "drills"
+		case strings.Contains(system, "planning the next lessons"):
+			kind = "plan"
 		}
 		fake.prompts[kind] = append(fake.prompts[kind], prompt)
 		writeJSONBody(w, map[string]any{"model": body["model"], "response": fake.answer(kind, prompt, system), "done": true})
@@ -123,6 +126,25 @@ func (f *fakeTeacher) answer(kind, prompt, system string) string {
 			lines[i] = fmt.Sprintf("%d. the cat sat on the mat number %d", i+1, i)
 		}
 		return strings.Join(lines, "\n")
+	case "plan":
+		if f.planAnswer != "" {
+			return f.planAnswer
+		}
+		count := numberIn(system, `exactly (\d+) lessons`, 2)
+		pool := []map[string]any{
+			{"focus": "subject-verb agreement", "targets": "agreement", "topic": "animals",
+				"why": "Nearly every sentence lost marks here."},
+			{"focus": "plural nouns", "targets": "plural", "topic": "the market", "why": "Plurals were shaky."},
+			{"focus": "past tense", "targets": "tense", "topic": "yesterday", "why": "Tenses drifted."},
+		}
+		lessons := []map[string]any{}
+		for i := 0; i < count; i++ {
+			lessons = append(lessons, pool[i%len(pool)])
+		}
+		raw, _ := json.Marshal(map[string]any{
+			"summary": "The student writes verbs badly.", "level": "beginner", "lessons": lessons,
+		})
+		return string(raw)
 	}
 	return "unexpected request"
 }
@@ -286,7 +308,7 @@ func TestParseGrades(t *testing.T) {
 		{"index": 9, "grammar": 5},
 		"nonsense"
 	]}`
-	grades := ParseGrades(raw, 2, 0.6, 6.0)
+	grades := ParseGrades(raw, 2, 0.6, 6.0, "")
 	if len(grades) != 2 {
 		t.Fatalf("got %d grades: %+v", len(grades), grades)
 	}
@@ -298,10 +320,10 @@ func TestParseGrades(t *testing.T) {
 	if second.Passed || *second.Score != 3 || second.Error != "plural" || second.Comment != "bad" {
 		t.Fatalf("second grade wrong: %+v", second)
 	}
-	if got := ParseGrades("not json", 2, 0.6, 6); len(got) != 0 {
+	if got := ParseGrades("not json", 2, 0.6, 6, ""); len(got) != 0 {
 		t.Fatalf("junk should grade nothing: %+v", got)
 	}
-	if got := ParseGrades(`{"grades": [{"index": 0}]}`, 1, 0.6, 6); len(got) != 0 {
+	if got := ParseGrades(`{"grades": [{"index": 0}]}`, 1, 0.6, 6, ""); len(got) != 0 {
 		t.Fatalf("an entry without marks should be skipped: %+v", got)
 	}
 }
@@ -352,8 +374,9 @@ func TestWriteExercisesAndDrills(t *testing.T) {
 		t.Fatal("a count of 0 must be refused")
 	}
 	fake.exerciseAnswer = `{"exercises": []}`
-	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); !IsOllamaError(err) {
-		t.Fatalf("no usable exercises must be an OllamaError, got %v", err)
+	// an unusable answer is not the provider's transport failing
+	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); !IsLLMError(err) {
+		t.Fatalf("no usable exercises must be an LLMError, got %v", err)
 	}
 	fake.exerciseAnswer = ""
 	drills, err := DrillSentences(client, "animals", 3, []string{"plural"}, "")

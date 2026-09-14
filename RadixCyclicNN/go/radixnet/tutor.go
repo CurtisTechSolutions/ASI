@@ -1,7 +1,9 @@
 package radixnet
 
-// Automated English lessons: Ollama sets the exercise, the network completes
-// it, Ollama marks it.
+// Automated English lessons: the teacher sets the exercise, the network
+// completes it, the teacher marks it.  The teacher is any provider client - a
+// local Ollama model or ChatGPT (TutorConfig.TutorProvider) - and the marking
+// follows it unless GraderProvider names the other one.
 //
 //	topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
 //
@@ -238,12 +240,13 @@ type ExerciseRequest struct {
 	Level       string   // "beginner", "intermediate", ...
 	Weak        []string // the mistakes the student keeps making
 	Words       string   // how long a prefix is, e.g. "3 to 6"
+	Brief       string   // the plan this batch of lessons is being taught to (LessonPlan.Prompt)
 	Model       string
 	Temperature float64
 }
 
 // WriteExercises asks the teacher for sentence openings about a topic.
-func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, error) {
+func WriteExercises(client LLMClient, req ExerciseRequest) ([]Exercise, error) {
 	if req.Count < 1 {
 		return nil, fmt.Errorf("count must be >= 1")
 	}
@@ -264,6 +267,9 @@ func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, erro
 		temperature = 0.9
 	}
 	lines := []string{"Topic: " + topic, "Level: " + level}
+	if brief := strings.Join(strings.Fields(req.Brief), " "); brief != "" {
+		lines = append(lines, "The plan for this batch of lessons: "+brief)
+	}
 	if strings.TrimSpace(req.Focus) != "" {
 		lines = append(lines, "Every exercise must drill: "+strings.TrimSpace(req.Focus))
 	}
@@ -271,7 +277,7 @@ func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, erro
 		lines = append(lines, "The student keeps making these mistakes, so drill them: "+strings.Join(weak, ", ")+".")
 	}
 	lines = append(lines, fmt.Sprintf("Write the %d exercises now.", req.Count))
-	raw, err := client.Generate(strings.Join(lines, "\n"), OllamaGenerateOptions{
+	raw, err := client.Generate(strings.Join(lines, "\n"), LLMOptions{
 		System: fmt.Sprintf(exerciseSystem, words, req.Count), Model: req.Model, JSON: true, Temperature: temperature,
 	})
 	if err != nil {
@@ -281,9 +287,9 @@ func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, erro
 	if len(exercises) == 0 {
 		name := req.Model
 		if name == "" {
-			name = client.Model
+			name = client.ModelName()
 		}
-		return nil, ollamaErrorf("Ollama model %q returned no usable exercises", name)
+		return nil, llmErrorf("the teacher model %q returned no usable exercises", name)
 	}
 	return exercises, nil
 }
@@ -307,7 +313,7 @@ const drillSystem = "You are an English teacher writing model sentences for a be
 	"student learns English by copying them."
 
 // DrillSentences asks for correct example sentences about the topic, demonstrating the weak points.
-func DrillSentences(client *OllamaClient, topic string, count int, weak []string, model string) ([]string, error) {
+func DrillSentences(client LLMClient, topic string, count int, weak []string, model string) ([]string, error) {
 	if count < 1 {
 		return nil, nil
 	}
@@ -316,7 +322,7 @@ func DrillSentences(client *OllamaClient, topic string, count int, weak []string
 		user += "Each sentence must clearly demonstrate the correct use of: " + strings.Join(useful, ", ") + ".\n"
 	}
 	user += fmt.Sprintf("Write the %d sentences now.", count)
-	raw, err := client.Generate(user, OllamaGenerateOptions{
+	raw, err := client.Generate(user, LLMOptions{
 		System: fmt.Sprintf(drillSystem, count), Model: model, Temperature: 0.8,
 	})
 	if err != nil {
@@ -337,7 +343,7 @@ type Grade struct {
 	Error      string   `json:"error"`      // one of ErrorTypes, or "other"
 	Correction string   `json:"correction"` // the whole sentence in correct English: what the network is taught
 	Comment    string   `json:"comment"`    // one sentence of teaching
-	GradedBy   string   `json:"graded_by"`  // "ollama" | "empty" (nothing to mark) | "unrated" (no usable answer)
+	GradedBy   string   `json:"graded_by"`  // the marking provider ("ollama" | "chatgpt"), "empty" or "unrated"
 }
 
 // Lesson is one exercise, one completion by the network and one grade.
@@ -407,8 +413,13 @@ func numberField(item map[string]any, keys ...string) *float64 {
 	return nil
 }
 
-// ParseGrades reads the marks of an LLM answer, keyed by the index of the completion they belong to.
-func ParseGrades(raw string, count int, grammarWeight, threshold float64) map[int]Grade {
+// ParseGrades reads the marks of an LLM answer, keyed by the index of the
+// completion they belong to; gradedBy (empty: the default provider) is the
+// provider that gave them and ends up in every grade.
+func ParseGrades(raw string, count int, grammarWeight, threshold float64, gradedBy string) map[int]Grade {
+	if gradedBy == "" {
+		gradedBy = DefaultProvider
+	}
 	grades := map[int]Grade{}
 	var items []any
 	switch data := loadsLenient(raw).(type) {
@@ -460,7 +471,7 @@ func ParseGrades(raw string, count int, grammarWeight, threshold float64) map[in
 			Error:      ErrorTypeOf(stringField(item, "error", "error_type", "mistake")),
 			Correction: stringField(item, "correction", "corrected", "fixed"),
 			Comment:    clipText(stringField(item, "comment", "critique", "feedback", "reason"), maxCommentChars),
-			GradedBy:   "ollama",
+			GradedBy:   gradedBy,
 		}
 	}
 	return grades
@@ -491,6 +502,7 @@ type GradeOptions struct {
 	Model         string
 	Batch         int
 	Temperature   float64
+	GradedBy      string // the provider behind the client (empty: the client's own)
 }
 
 // GradeCompletions marks every lesson in place, in batches of Batch.
@@ -499,10 +511,14 @@ type GradeOptions struct {
 // teacher's model answer as the correction; a lesson the LLM said nothing
 // usable about keeps a nil score and GradedBy "unrated" and counts as a
 // failure.
-func GradeCompletions(client *OllamaClient, lessons []*Lesson, o GradeOptions) error {
+func GradeCompletions(client LLMClient, lessons []*Lesson, o GradeOptions) error {
 	batch := o.Batch
 	if batch < 1 {
 		return fmt.Errorf("batch must be >= 1")
+	}
+	gradedBy := o.GradedBy
+	if gradedBy == "" {
+		gradedBy = ProviderOf(client)
 	}
 	temperature := o.Temperature
 	if temperature <= 0 {
@@ -541,13 +557,13 @@ func GradeCompletions(client *OllamaClient, lessons []*Lesson, o GradeOptions) e
 			user = "Topic of the lesson: " + strings.TrimSpace(o.Topic) + "\n\n"
 		}
 		user += fmt.Sprintf("Mark these %d completions:\n%s\n\nReturn the JSON now.", len(asked), strings.Join(body, "\n"))
-		raw, err := client.Generate(user, OllamaGenerateOptions{
+		raw, err := client.Generate(user, LLMOptions{
 			System: system, Model: o.Model, JSON: true, Temperature: temperature,
 		})
 		if err != nil {
 			return err
 		}
-		parsed := ParseGrades(raw, len(chunk), o.GrammarWeight, o.Threshold)
+		parsed := ParseGrades(raw, len(chunk), o.GrammarWeight, o.Threshold, gradedBy)
 		for _, i := range asked {
 			lesson := chunk[i]
 			grade, ok := parsed[i]
@@ -655,15 +671,21 @@ func weakest(errors map[string]int) []string {
 
 // TutorConfig holds the settings of a tutoring run.
 type TutorConfig struct {
-	Topic       string `json:"topic"`
-	Rounds      int    `json:"rounds"`
-	Exercises   int    `json:"exercises"` // sentence openings per round
-	Attempts    int    `json:"attempts"`  // completions the network writes per exercise
-	Focus       string `json:"focus"`     // pin every exercise to one point of grammar
-	Level       string `json:"level"`
-	Words       string `json:"words"`
-	TutorModel  string `json:"tutor_model"`
-	GraderModel string `json:"grader_model"` // a different model for the marking
+	Topic     string `json:"topic"`
+	Rounds    int    `json:"rounds"`
+	Exercises int    `json:"exercises"` // sentence openings per round
+	Attempts  int    `json:"attempts"`  // completions the network writes per exercise
+	Focus     string `json:"focus"`     // pin every exercise to one point of grammar
+	Level     string `json:"level"`
+	Words     string `json:"words"`
+	// Brief is what this batch of lessons is being taught to: the previous batch's plan (LessonPlan.Prompt).
+	Brief string `json:"brief"`
+	// TutorProvider names who teaches: "ollama" (a local model) or "chatgpt" (OpenAI).
+	TutorProvider string `json:"tutor_provider"`
+	TutorModel    string `json:"tutor_model"`
+	// GraderProvider marks with the other provider; empty means the teacher's own.
+	GraderProvider string `json:"grader_provider"`
+	GraderModel    string `json:"grader_model"` // a different model for the marking
 	// the completion
 	Mode        string  `json:"mode"`
 	Length      int     `json:"length"`
@@ -676,10 +698,13 @@ type TutorConfig struct {
 	Threshold     float64 `json:"threshold"`
 	GrammarWeight float64 `json:"grammar_weight"`
 	Batch         int     `json:"batch"`
-	Adapt         bool    `json:"adapt"`        // drill the previous round's weakest points
-	Drills        int     `json:"drills"`       // extra correct example sentences per round
-	TeachAnswer   bool    `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
-	Learn         bool    `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
+	Adapt         bool    `json:"adapt"`  // drill the previous round's weakest points
+	Drills        int     `json:"drills"` // extra correct example sentences per round
+	Plan          int     `json:"plan"`   // lessons to plan from the final report card (0 = no plan)
+	// Batches is the auto run: batches of Rounds rounds, each planned from the one before (0 = until stopped).
+	Batches     int  `json:"batches"`
+	TeachAnswer bool `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
+	Learn       bool `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
 	// 2NRL
 	TwoNRLPer string `json:"twonrl_per"`
 	// DiffCorrections teaches a correction from its diff with the sentence the network wrote
@@ -701,15 +726,54 @@ type TutorConfig struct {
 func DefaultTutorConfig() TutorConfig {
 	return TutorConfig{
 		Topic: "everyday life", Rounds: 3, Exercises: 5, Attempts: 1, Level: "beginner", Words: "3 to 6",
-		TutorModel: DefaultTutorModel(), Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
-		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Adapt: true, TeachAnswer: true, Learn: true,
+		TutorProvider: DefaultProvider, TutorModel: DefaultTutorModel(),
+		Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
+		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Batches: 1, Adapt: true, TeachAnswer: true, Learn: true,
 		TwoNRLPer: "round", DiffCorrections: true, KeepWeight: 0, MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3,
 		Strength: 1.0, Replay: true, ReplayLimit: 64,
 	}
 }
 
+// Resolve normalises the providers and fills in the models they imply, the way
+// the Python TutorConfig.__post_init__ does; Validate calls it first.
+func (c *TutorConfig) Resolve() error {
+	tutor, err := NormaliseProvider(c.TutorProvider)
+	if err != nil {
+		return fmt.Errorf("tutor_provider: %v", err)
+	}
+	c.TutorProvider = tutor
+	if strings.TrimSpace(c.GraderProvider) == "" {
+		c.GraderProvider = tutor
+	} else {
+		grader, err := NormaliseProvider(c.GraderProvider)
+		if err != nil {
+			return fmt.Errorf("grader_provider: %v", err)
+		}
+		c.GraderProvider = grader
+	}
+	if strings.TrimSpace(c.TutorModel) == "" {
+		c.TutorModel = DefaultProviderModel(c.TutorProvider)
+	}
+	return nil
+}
+
+// ResolvedGraderModel is the model the marking runs on: GraderModel, else the
+// teacher's model on the teacher's provider, else that provider's default.
+func (c *TutorConfig) ResolvedGraderModel() string {
+	if strings.TrimSpace(c.GraderModel) != "" {
+		return c.GraderModel
+	}
+	if c.GraderProvider == "" || c.GraderProvider == c.TutorProvider {
+		return c.TutorModel
+	}
+	return DefaultProviderModel(c.GraderProvider)
+}
+
 // Validate checks the settings the way the Python TutorConfig.validate does.
 func (c *TutorConfig) Validate() error {
+	if err := c.Resolve(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Topic) == "" {
 		return fmt.Errorf("topic must not be empty")
 	}
@@ -755,6 +819,12 @@ func (c *TutorConfig) Validate() error {
 	if c.Drills < 0 || c.ReplayLimit < 0 {
 		return fmt.Errorf("drills and replay_limit must be >= 0")
 	}
+	if c.Plan < 0 {
+		return fmt.Errorf("plan must be >= 0")
+	}
+	if c.Batches < 0 {
+		return fmt.Errorf("batches must be >= 0 (0 = until stopped)")
+	}
 	if c.NegEpochs < 0 || c.PosEpochs < 0 {
 		return fmt.Errorf("epochs must be >= 0")
 	}
@@ -776,12 +846,19 @@ func contains(values []string, value string) bool {
 // TutorTrainer runs the lessons: the LLM sets and marks the exercises, the
 // network completes them and learns from the grades.
 type TutorTrainer struct {
-	Model   *Model
-	Client  *OllamaClient
-	Config  TutorConfig
-	History []map[string]any
-	Lessons []*Lesson
-	Weak    []string
+	Model  *Model
+	Client LLMClient
+	// GraderClient marks the completions; nil means the teacher marks its own.
+	GraderClient LLMClient
+	Config       TutorConfig
+	History      []map[string]any
+	Lessons      []*Lesson
+	Weak         []string
+	// Negative is an optional negative network that learns why each failed
+	// sentence failed: the mistake the teacher named is the reason, its mark
+	// the severity, and only the characters its correction changed are blamed
+	// (TeachLessons).
+	Negative *Model
 	// Progress receives every lesson, round and report record as it happens.
 	Progress func(map[string]any)
 	// Stop is polled between steps; a true answer ends the run cleanly.
@@ -792,12 +869,31 @@ type TutorTrainer struct {
 	replay []string
 }
 
-// NewTutorTrainer validates the configuration and returns a trainer.
-func NewTutorTrainer(model *Model, client *OllamaClient, config TutorConfig) (*TutorTrainer, error) {
+// NewTutorTrainer validates the configuration and returns a trainer whose
+// teacher is client; the marking shares it unless GraderClient is set
+// afterwards or the configuration names the other provider, in which case a
+// client for it is built from the environment.
+func NewTutorTrainer(model *Model, client LLMClient, config TutorConfig) (*TutorTrainer, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &TutorTrainer{Model: model, Client: client, Config: config}, nil
+	trainer := &TutorTrainer{Model: model, Client: client, Config: config}
+	if config.GraderProvider != "" && config.GraderProvider != ProviderOf(client) {
+		grader, err := NewLLMClient(config.GraderProvider, "", config.ResolvedGraderModel(), 0)
+		if err != nil {
+			return nil, err
+		}
+		trainer.GraderClient = grader
+	}
+	return trainer, nil
+}
+
+// grader is the client that marks the completions (the teacher by default).
+func (t *TutorTrainer) grader() LLMClient {
+	if t.GraderClient != nil {
+		return t.GraderClient
+	}
+	return t.Client
 }
 
 func (t *TutorTrainer) stopped() bool { return t.Stop != nil && t.Stop() }
@@ -827,7 +923,7 @@ func (t *TutorTrainer) SetExercises(round int) ([]Exercise, error) {
 	err := t.outside(func() error {
 		written, err := WriteExercises(t.Client, ExerciseRequest{
 			Topic: cfg.Topic, Count: cfg.Exercises, Focus: cfg.Focus, Level: cfg.Level, Weak: weak,
-			Words: cfg.Words, Model: cfg.TutorModel,
+			Words: cfg.Words, Brief: cfg.Brief, Model: cfg.TutorModel,
 		})
 		exercises = written
 		return err
@@ -870,16 +966,14 @@ func (t *TutorTrainer) Complete(exercise Exercise, attempt int) (*Lesson, error)
 	}, nil
 }
 
-// GradeLessons is step 3: the teacher marks the completions (one call per Batch).
+// GradeLessons is step 3: the marker marks the completions (one call per Batch).
 func (t *TutorTrainer) GradeLessons(lessons []*Lesson) error {
 	cfg := t.Config
-	model := cfg.GraderModel
-	if strings.TrimSpace(model) == "" {
-		model = cfg.TutorModel
-	}
+	grader := t.grader()
 	return t.outside(func() error {
-		return GradeCompletions(t.Client, lessons, GradeOptions{
-			Topic: cfg.Topic, Threshold: cfg.Threshold, GrammarWeight: cfg.GrammarWeight, Model: model, Batch: cfg.Batch,
+		return GradeCompletions(grader, lessons, GradeOptions{
+			Topic: cfg.Topic, Threshold: cfg.Threshold, GrammarWeight: cfg.GrammarWeight,
+			Model: cfg.ResolvedGraderModel(), Batch: cfg.Batch, GradedBy: ProviderOf(grader),
 		})
 	})
 }
@@ -1172,11 +1266,12 @@ func lastLoss(records []map[string]any) any {
 	return nil
 }
 
-func (t *TutorTrainer) emitLesson(round int, lesson *Lesson) {
+func (t *TutorTrainer) emitLesson(round int, lesson *Lesson, batch int) {
 	grade := lesson.Grade
 	t.emit(map[string]any{
-		"kind": "lesson", "round": round, "exercise": lesson.Exercise.ID, "prefix": lesson.Exercise.Prefix,
-		"focus": lesson.Exercise.Focus, "attempt": lesson.Attempt + 1, "mode": lesson.Mode,
+		"kind": "lesson", "batch": batch, "round": round, "exercise": lesson.Exercise.ID,
+		"prefix": lesson.Exercise.Prefix,
+		"focus":  lesson.Exercise.Focus, "attempt": lesson.Attempt + 1, "mode": lesson.Mode,
 		"continuation": clipText(lesson.Continuation, 400), "sentence": clipText(lesson.Sentence, 400),
 		"score": grade.Score, "grammar": grade.Grammar, "spelling": grade.Spelling, "fluency": grade.Fluency,
 		"passed": grade.Passed, "error": grade.Error, "correction": clipText(grade.Correction, 400),
@@ -1187,6 +1282,11 @@ func (t *TutorTrainer) emitLesson(round int, lesson *Lesson) {
 
 // RunRound runs one round: exercises, completions, grades and the 2NRL they lead to.
 func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
+	return t.runRound(round, 1)
+}
+
+// runRound is RunRound, tagging its records with the batch they belong to.
+func (t *TutorTrainer) runRound(round, batch int) (map[string]any, []*Lesson, error) {
 	cfg := t.Config
 	started := time.Now()
 	exercises, err := t.SetExercises(round)
@@ -1212,7 +1312,7 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 		}
 	}
 	for _, lesson := range lessons {
-		t.emitLesson(round, lesson)
+		t.emitLesson(round, lesson, batch)
 	}
 	t.Lessons = append(t.Lessons, lessons...)
 	card := ReportCard(lessons)
@@ -1234,11 +1334,15 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 			return nil, nil, err
 		}
 	}
+	blamed, err := t.TeachNegative(lessons)
+	if err != nil {
+		return nil, nil, err
+	}
 	if cfg.Adapt {
 		t.Weak = card["weakest"].([]string)
 	}
 	record := map[string]any{
-		"kind": "round", "round": round, "topic": cfg.Topic, "focus": cfg.Focus,
+		"kind": "round", "batch": batch, "round": round, "topic": cfg.Topic, "focus": cfg.Focus,
 		"exercises": len(exercises), "drills": len(drills), "seconds": time.Since(started).Seconds(),
 	}
 	for key, value := range card {
@@ -1247,7 +1351,23 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 	for key, value := range learned {
 		record[key] = value
 	}
+	if blamed != nil {
+		record["negative_blamed"] = blamed.Blamed
+		record["negative_edges"] = blamed.Edges
+		record["negative_reasons"] = blamed.Reasons
+	}
 	return record, lessons, nil
+}
+
+// TeachNegative hands this round's failures to the negative network: the
+// teacher named the mistake, so it is the reason, and where it wrote the
+// sentence out correctly only the characters it changed are blamed.  Returns
+// nil when no negative network is attached.
+func (t *TutorTrainer) TeachNegative(lessons []*Lesson) (*TeachReport, error) {
+	if t.Negative == nil || len(lessons) == 0 {
+		return nil, nil
+	}
+	return TeachLessons(t.Negative, lessons, t.Config.Threshold, true, "tutor", TeachOptions{Stop: t.Stop})
 }
 
 // learnLessons applies the round's grades: once for the whole round, or lesson
@@ -1321,24 +1441,136 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 	return merged, nil
 }
 
-// Run works through every round and finishes with a report card over all of them.
+// Run works through every batch of rounds, each ending in its own report card.
+//
+// One batch is Rounds rounds and the card over them.  With Batches > 1 (or 0,
+// which keeps going until it is stopped) the run drives itself: the card is
+// planned from (PlanNext), the plan is applied (ApplyPlan: its brief becomes
+// the next batch's standing instruction and the step up its difficulty), and
+// the next batch is taught to it.  A batch that cannot be planned ends the run
+// rather than repeating itself.
 func (t *TutorTrainer) Run() ([]map[string]any, error) {
+	cfg := &t.Config
 	records := []map[string]any{}
-	for round := 1; round <= t.Config.Rounds; round++ {
-		if t.stopped() {
+	round, batch := 0, 0
+	for cfg.Batches == 0 || batch < cfg.Batches {
+		if batch > 0 && t.stopped() {
+			break // stopped between batches: no empty card for one that never ran
+		}
+		batch++
+		taught := len(t.Lessons) // this batch's lessons, so its card is its own
+		here := 0
+		for i := 0; i < cfg.Rounds; i++ {
+			if t.stopped() {
+				break
+			}
+			round++
+			here++
+			record, _, err := t.runRound(round, batch)
+			if err != nil {
+				return records, err
+			}
+			t.emit(record)
+			records = append(records, record)
+		}
+		summary := map[string]any{"kind": "report", "batch": batch, "rounds": here, "topic": cfg.Topic}
+		for key, value := range ReportCard(t.Lessons[taught:]) {
+			summary[key] = value
+		}
+		t.emit(summary) // a batch always ends with its card, stopped or not
+		records = append(records, summary)
+		last := cfg.Batches > 0 && batch >= cfg.Batches
+		wanted := cfg.Plan > 0 || !last // a batch that has a successor is always planned
+		if t.stopped() || !wanted || len(t.Lessons) == taught {
 			break
 		}
-		record, _, err := t.RunRound(round)
-		if err != nil {
-			return records, err
+		count := cfg.Plan
+		if count < 1 {
+			count = DefaultPlanLessons
+		}
+		plan, err := t.PlanNext(summary, count)
+		if err != nil { // the lessons stand without a plan for the next ones
+			t.emit(map[string]any{"kind": "note", "batch": batch, "message": "no lesson plan: " + err.Error()})
+			break
+		}
+		record := map[string]any{"kind": "plan", "batch": batch, "rounds": here}
+		for key, value := range plan.Map() {
+			record[key] = value
 		}
 		t.emit(record)
 		records = append(records, record)
+		if last {
+			break
+		}
+		applied := t.ApplyPlan(plan)
+		if t.stopped() {
+			break // stopped while it was planning: do not announce a batch that will not run
+		}
+		started := map[string]any{"kind": "batch", "batch": batch + 1}
+		for key, value := range applied {
+			started[key] = value
+		}
+		t.emit(started)
+		records = append(records, started)
 	}
-	summary := map[string]any{"kind": "report", "rounds": len(records), "topic": t.Config.Topic}
-	for key, value := range ReportCard(t.Lessons) {
-		summary[key] = value
+	return records, nil
+}
+
+// ApplyPlan teaches what comes next to a plan: its brief, and the step up the
+// marks earned.  The brief becomes TutorConfig.Brief - handed to the exercise
+// writer with every round from now on - and the upgrade sets the level, how
+// long the openings are, the pass mark and the drill sentences.  The
+// single-focus pin is released: the brief carries the points of grammar, in
+// order, and a pin from an earlier batch would silently overrule it.
+func (t *TutorTrainer) ApplyPlan(plan LessonPlan) map[string]any {
+	cfg := &t.Config
+	upgrade := plan.Upgrade
+	if upgrade == nil {
+		upgrade = map[string]any{}
 	}
-	t.emit(summary)
-	return append(records, summary), nil
+	if plan.Prompt != "" {
+		cfg.Brief = plan.Prompt
+	}
+	cfg.Focus = ""
+	if level, _ := upgrade["level"].(string); level != "" {
+		cfg.Level = level
+	}
+	if words, _ := upgrade["words"].(string); words != "" {
+		cfg.Words = words
+	}
+	if threshold := markOf(upgrade["threshold"]); threshold != nil {
+		cfg.Threshold = *threshold
+	}
+	if drills, ok := upgrade["drills"].(int); ok {
+		cfg.Drills = drills
+	}
+	step, _ := upgrade["step"].(string)
+	note, _ := upgrade["note"].(string)
+	return map[string]any{
+		"step": step, "brief": cfg.Brief, "topic": cfg.Topic, "level": cfg.Level, "words": cfg.Words,
+		"threshold": cfg.Threshold, "drills": cfg.Drills, "note": note,
+	}
+}
+
+// PlanNext is the next lessons, planned by the teacher from a report card - by
+// default the run's own.  The weaknesses of the card become the syllabus, each
+// lesson carrying the settings to run it with.
+func (t *TutorTrainer) PlanNext(card map[string]any, count int) (LessonPlan, error) {
+	cfg := t.Config
+	if card == nil {
+		card = ReportCard(t.Lessons)
+	}
+	if count < 1 {
+		count = DefaultPlanLessons
+	}
+	var plan LessonPlan
+	err := t.outside(func() error {
+		var err error
+		plan, err = PlanLessons(t.Client, card, PlanRequest{
+			Topic: cfg.Topic, Level: cfg.Level, Words: cfg.Words, Threshold: cfg.Threshold, Count: count,
+			Exercises: cfg.Exercises, Drills: cfg.Drills, Model: cfg.TutorModel,
+		})
+		return err
+	})
+	return plan, err
 }

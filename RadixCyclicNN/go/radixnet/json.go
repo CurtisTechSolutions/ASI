@@ -28,6 +28,9 @@ type nodesDoc struct {
 	H      []float64 `json:"h"`
 	K      []float64 `json:"k"`
 	Count  []int64   `json:"count"`
+	// how often each node's counter wrapped; written only once something has
+	// (see counter.go), so an ordinary file carries no reset arrays at all
+	CountResets []int64 `json:"count_resets,omitempty"`
 }
 
 type edgesDoc struct {
@@ -36,6 +39,37 @@ type edgesDoc struct {
 	W      []float64 `json:"w"`
 	Count  []int64   `json:"count"`
 	Reward []float64 `json:"reward"`
+	// how often each edge's counter wrapped; written only once something has
+	// (see counter.go), so an ordinary file carries no reset arrays at all
+	CountResets []int64 `json:"count_resets,omitempty"`
+
+	// the negative network's evidence (omitted on a count / reward graph)
+	Blame       []float64      `json:"blame,omitempty"`
+	Fails       []int64        `json:"fails,omitempty"`
+	FailsResets []int64        `json:"fails_resets,omitempty"`
+	Clear       []float64      `json:"clear,omitempty"`
+	Reasons     [][][2]float64 `json:"reasons,omitempty"`
+}
+
+// reasonRegistryDoc is the negative graph's reason registry.
+type reasonRegistryDoc struct {
+	Labels []string  `json:"labels"`
+	Blame  []float64 `json:"blame"`
+	Fails  []int64   `json:"fails"`
+	// how often each reason's fail counter wrapped; written only once one has
+	FailsResets []int64 `json:"fails_resets,omitempty"`
+}
+
+// negativeWeightsDoc is the "weights" block of a negative graph, written
+// exactly as the Python implementation writes it.
+type negativeWeightsDoc struct {
+	NegativeWeightConfig
+	Kind             string            `json:"kind"`
+	TotalBlame       float64           `json:"total_blame"`
+	TotalFails       int64             `json:"total_fails"`
+	TotalFailsResets int64             `json:"total_fails_resets"`
+	TotalClear       float64           `json:"total_clear"`
+	Reasons          reasonRegistryDoc `json:"reasons"`
 }
 
 // pathsDoc is the judged paths: one row per (the node that called the step, the edge it took).
@@ -49,11 +83,46 @@ type pathsDoc struct {
 
 type weightsDoc struct {
 	WeightConfig
-	Kind            string `json:"kind"`
-	TotalTraversals int64  `json:"total_traversals"`
-	WindowEvents    []int  `json:"window_events"`
+	Kind                  string `json:"kind"`
+	TotalTraversals       int64  `json:"total_traversals"`
+	TotalTraversalsResets int64  `json:"total_traversals_resets"`
+	WindowEvents          []int  `json:"window_events"`
+
+	// the negative form, read from the same block
+	ShareScale       float64            `json:"share_scale"`
+	BlameScale       float64            `json:"blame_scale"`
+	ClearScale       float64            `json:"clear_scale"`
+	TotalBlame       float64            `json:"total_blame"`
+	TotalFails       int64              `json:"total_fails"`
+	TotalFailsResets int64              `json:"total_fails_resets"`
+	TotalClear       float64            `json:"total_clear"`
+	Reasons          *reasonRegistryDoc `json:"reasons"`
+
+	// neg, when set, is what MarshalJSON writes instead of the count form
+	neg *negativeWeightsDoc
 
 	present map[string]bool // which keys the file carried (defaults depend on it, like Python's dict.get)
+}
+
+// negative reports whether this block describes a negative graph.
+func (w *weightsDoc) negative() bool {
+	return w != nil && (w.Kind == "negative" || w.Function == "blame" || w.has("share_scale"))
+}
+
+// MarshalJSON writes the count form, or the negative one when it is set.
+func (w *weightsDoc) MarshalJSON() ([]byte, error) {
+	if w.neg != nil {
+		return json.Marshal(w.neg)
+	}
+	type countForm struct {
+		WeightConfig
+		Kind                  string `json:"kind"`
+		TotalTraversals       int64  `json:"total_traversals"`
+		TotalTraversalsResets int64  `json:"total_traversals_resets"`
+		WindowEvents          []int  `json:"window_events"`
+	}
+	return json.Marshal(countForm{WeightConfig: w.WeightConfig, Kind: w.Kind, TotalTraversals: w.TotalTraversals,
+		TotalTraversalsResets: w.TotalTraversalsResets, WindowEvents: w.WindowEvents})
 }
 
 // UnmarshalJSON also records which keys were present.
@@ -78,17 +147,21 @@ func (w *weightsDoc) has(key string) bool { return w != nil && w.present[key] }
 
 // GraphDoc is the JSON layout of a graph (the "graph" block of a model file).
 type GraphDoc struct {
-	Format           string      `json:"format"`
-	FormatVersion    int         `json:"format_version"`
-	Seed             int64       `json:"seed"`
-	Inverted         bool        `json:"inverted"`
-	Version          int         `json:"version"`
-	StructureVersion int         `json:"structure_version"`
-	Nodes            nodesDoc    `json:"nodes"`
-	Edges            edgesDoc    `json:"edges"`
-	RngState         []any       `json:"rng_state"`
-	Weights          *weightsDoc `json:"weights,omitempty"`
-	Paths            *pathsDoc   `json:"paths,omitempty"`
+	Format                 string      `json:"format"`
+	FormatVersion          int         `json:"format_version"`
+	Seed                   int64       `json:"seed"`
+	Inverted               bool        `json:"inverted"`
+	Version                int64       `json:"version"`
+	VersionResets          int64       `json:"version_resets"`
+	StructureVersion       int64       `json:"structure_version"`
+	StructureVersionResets int64       `json:"structure_version_resets"`
+	Traversals             int64       `json:"traversals"`
+	TraversalsResets       int64       `json:"traversals_resets"`
+	Nodes                  nodesDoc    `json:"nodes"`
+	Edges                  edgesDoc    `json:"edges"`
+	RngState               []any       `json:"rng_state"`
+	Weights                *weightsDoc `json:"weights,omitempty"`
+	Paths                  *pathsDoc   `json:"paths,omitempty"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -96,6 +169,7 @@ type GraphDoc struct {
 // Python implementation.
 func (g *Graph) ToDoc() *GraphDoc {
 	g.Prepare()
+	g.CarryCounters(false) // a saved file always holds a wrapped reading
 	remap := make(map[int]int, g.nAliveNodes)
 	order := make([]int, 0, g.nAliveNodes)
 	for old, ok := range g.Alive {
@@ -105,19 +179,34 @@ func (g *Graph) ToDoc() *GraphDoc {
 		}
 	}
 	doc := &GraphDoc{Format: graphFormat, FormatVersion: graphFormatVersion, Seed: g.Seed, Inverted: g.Inverted,
-		Version: g.Version, StructureVersion: g.StructureVersion}
+		Version: g.Version.Value, VersionResets: g.Version.Resets,
+		StructureVersion: g.StructureVersion.Value, StructureVersionResets: g.StructureVersion.Resets,
+		Traversals: g.Traversals.Value, TraversalsResets: g.Traversals.Resets}
 	n := len(order)
 	doc.Nodes = nodesDoc{Labels: make([]string, n), Z: make([]float64, n), A: make([]float64, n), B: make([]float64, n),
 		H: make([]float64, n), K: make([]float64, n), Count: make([]int64, n)}
+	nodeResets := make([]int64, n)
+	anyNodeResets := false
 	for i, old := range order {
 		doc.Nodes.Labels[i] = g.Labels[old]
 		doc.Nodes.B[i] = defaultB
 		doc.Nodes.H[i] = defaultH
 		doc.Nodes.K[i] = 1.0
 		doc.Nodes.Count[i] = g.Count[old]
+		if r := g.CountResets[old]; r != 0 {
+			nodeResets[i], anyNodeResets = r, true
+		}
+	}
+	if anyNodeResets { // the reset counts ride along only once something has actually wrapped
+		doc.Nodes.CountResets = nodeResets
 	}
 	edgeIndex := make(map[int]int, g.nAliveEdges)
 	doc.Edges = edgesDoc{Src: []int{}, Dst: []int{}, W: []float64{}, Count: []int64{}, Reward: []float64{}}
+	negative := g.Neg
+	if negative != nil {
+		doc.Edges.Blame, doc.Edges.Fails = []float64{}, []int64{}
+		doc.Edges.Clear, doc.Edges.Reasons = []float64{}, [][][2]float64{}
+	}
 	for _, old := range order {
 		adj := &g.children[old]
 		for i, c := range adj.order {
@@ -127,17 +216,53 @@ func (g *Graph) ToDoc() *GraphDoc {
 			doc.Edges.Dst = append(doc.Edges.Dst, remap[c])
 			doc.Edges.W = append(doc.Edges.W, g.EdgeW[e])
 			doc.Edges.Count = append(doc.Edges.Count, g.EdgeCount[e])
+			doc.Edges.CountResets = append(doc.Edges.CountResets, g.EdgeCountResets[e])
 			doc.Edges.Reward = append(doc.Edges.Reward, g.EdgeReward[e])
+			if negative != nil {
+				doc.Edges.Blame = append(doc.Edges.Blame, negative.Blame[e])
+				doc.Edges.Fails = append(doc.Edges.Fails, negative.Fails[e])
+				doc.Edges.FailsResets = append(doc.Edges.FailsResets, negative.FailsResets[e])
+				doc.Edges.Clear = append(doc.Edges.Clear, negative.Clear[e])
+				doc.Edges.Reasons = append(doc.Edges.Reasons, reasonPairs(negative.Reasons[e]))
+			}
 		}
 	}
 	doc.RngState = g.rng.State()
+	if negative != nil {
+		if !anyNonZero(doc.Edges.FailsResets) {
+			doc.Edges.FailsResets = nil
+		}
+		reasonResets := make([]int64, len(negative.ReasonNames))
+		for id := range negative.ReasonNames {
+			reasonResets[id] = negative.ReasonFailsResets[id]
+		}
+		if !anyNonZero(reasonResets) {
+			reasonResets = nil
+		}
+		doc.Weights = &weightsDoc{neg: &negativeWeightsDoc{
+			NegativeWeightConfig: g.NegativeWeightConfig(), Kind: "negative", TotalBlame: negative.TotalBlame,
+			TotalFails: negative.TotalFails.Value, TotalFailsResets: negative.TotalFails.Resets,
+			TotalClear: negative.TotalClear,
+			Reasons: reasonRegistryDoc{
+				Labels:      append([]string{}, negative.ReasonNames...),
+				Blame:       append([]float64{}, negative.ReasonBlame...),
+				Fails:       append([]int64{}, negative.ReasonFails...),
+				FailsResets: reasonResets,
+			},
+		}}
+		return doc
+	}
 	events := make([]int, 0, g.WindowTraversals())
 	for _, e := range g.window[g.windowHead:] {
 		if ni, ok := edgeIndex[e]; ok {
 			events = append(events, ni)
 		}
 	}
-	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward", TotalTraversals: g.TotalTraversals, WindowEvents: events}
+	if !anyNonZero(doc.Edges.CountResets) {
+		doc.Edges.CountResets = nil
+	}
+	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward",
+		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events}
 	rows := make([][3]int64, 0, len(g.paths))
 	keys := make([][2]int, 0, len(g.paths))
 	for key, row := range g.paths {
@@ -173,6 +298,16 @@ func (g *Graph) ToDoc() *GraphDoc {
 	return doc
 }
 
+// reasonPairs renders one edge's reasons as Python writes them: [[id, blame], ...] by id.
+func reasonPairs(entries []ReasonBlame) [][2]float64 {
+	out := make([][2]float64, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, [2]float64{float64(entry.ID), entry.Blame})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
+}
+
 // GraphFromDoc rebuilds a graph from its document.
 func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	if d.Format != graphFormat {
@@ -194,6 +329,9 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	// files written before the dual frequency function carry no global_scale: they get the old
 	// log(1 + count) weight (count_scale 1, no frequency terms); every present key wins over a default
 	w := d.Weights
+	if w.negative() {
+		return negativeGraphFromDoc(d)
+	}
 	legacy := !w.has("global_scale")
 	opts := DefaultGraphOptions()
 	if legacy {
@@ -230,6 +368,10 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g.labelLen = make([]int, n)
 	g.Count = make([]int64, n)
 	copy(g.Count, d.Nodes.Count)
+	if len(d.Nodes.CountResets) != 0 && len(d.Nodes.CountResets) != n {
+		return nil, fmt.Errorf("node arrays have inconsistent lengths")
+	}
+	g.CountResets = resetsMap(d.Nodes.CountResets)
 	g.Alive = make([]bool, n)
 	g.children = make([]adjacency, n)
 	g.parents = make([]adjacency, n)
@@ -264,6 +406,10 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	copy(g.EdgeW, d.Edges.W)
 	g.EdgeCount = make([]int64, m)
 	copy(g.EdgeCount, d.Edges.Count)
+	if len(d.Edges.CountResets) != 0 && len(d.Edges.CountResets) != m {
+		return nil, fmt.Errorf("edge arrays have inconsistent lengths")
+	}
+	g.EdgeCountResets = resetsMap(d.Edges.CountResets)
 	g.EdgeAlive = make([]bool, m)
 	g.EdgeParent = make([]int, m)
 	g.EdgeReward = make([]float64, m)
@@ -290,8 +436,20 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			return nil, err
 		}
 	}
-	g.Version = d.Version
-	g.StructureVersion = d.StructureVersion
+	g.Version = NewCounter(d.Version, d.VersionResets)
+	g.StructureVersion = NewCounter(d.StructureVersion, d.StructureVersionResets)
+	if d.FormatVersion >= 2 {
+		g.Traversals = NewCounter(d.Traversals, d.TraversalsResets)
+	} else { // a format 1 file counted into plain integers: their sum bounds every one of them
+		var seen int64
+		for _, c := range g.Count {
+			seen += c
+		}
+		for _, c := range g.EdgeCount {
+			seen += c
+		}
+		g.Traversals = NewCounter(seen, 0)
+	}
 	if p := d.Paths; p != nil {
 		for i := range p.Prev {
 			if i >= len(p.Edge) || p.Edge[i] < 0 || p.Edge[i] >= m || p.Prev[i] < 0 || p.Prev[i] >= n {
@@ -304,7 +462,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 		}
 	}
 	if d.Weights != nil {
-		g.TotalTraversals = d.Weights.TotalTraversals
+		g.TotalTraversals = NewCounter(d.Weights.TotalTraversals, d.Weights.TotalTraversalsResets)
 		for _, e := range d.Weights.WindowEvents {
 			if e >= 0 && e < m {
 				g.window = append(g.window, e)
@@ -313,7 +471,88 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 		}
 	}
 	g.dirtyAll = true
-	g.weightsStructure = -1
+	g.weightsStructure = invalidStamp
+	g.CarryCounters(true) // normalise whatever the file carried, however it was written
+	return g, nil
+}
+
+// negativeGraphFromDoc rebuilds a negative graph: the shared structure first,
+// then the evidence arrays and the reason registry.
+func negativeGraphFromDoc(d *GraphDoc) (*Graph, error) {
+	w := d.Weights
+	opts := DefaultNegativeOptions()
+	if w.has("share_scale") {
+		opts.ShareScale = w.ShareScale
+	}
+	if w.has("blame_scale") {
+		opts.BlameScale = w.BlameScale
+	}
+	if w.has("clear_scale") {
+		opts.ClearScale = w.ClearScale
+	}
+	// the structure, counts and rng come from the shared reader; a copy of the
+	// document without the negative marker keeps it on the count path
+	plain := *d
+	plainWeights := *w
+	plainWeights.Kind, plainWeights.Function = "count-reward", "dual-frequency"
+	delete(plainWeights.present, "share_scale")
+	plain.Weights = &plainWeights
+	g, err := GraphFromDoc(&plain)
+	if err != nil {
+		return nil, err
+	}
+	n := newNegativeData(opts)
+	m := len(g.EdgeW)
+	edges := d.Edges
+	for name, length := range map[string]int{"blame": len(edges.Blame), "clear": len(edges.Clear), "fails": len(edges.Fails)} {
+		if length != 0 && length != m {
+			return nil, fmt.Errorf("edge %s array has an inconsistent length", name)
+		}
+	}
+	if len(edges.Reasons) != 0 && len(edges.Reasons) != m {
+		return nil, fmt.Errorf("edge reason array has an inconsistent length")
+	}
+	n.Blame = make([]float64, m)
+	n.Fails = make([]int64, m)
+	n.Clear = make([]float64, m)
+	n.Reasons = make([][]ReasonBlame, m)
+	copy(n.Blame, edges.Blame)
+	copy(n.Fails, edges.Fails)
+	copy(n.Clear, edges.Clear)
+	if len(edges.FailsResets) != 0 && len(edges.FailsResets) != m {
+		return nil, fmt.Errorf("edge fails_resets array has an inconsistent length")
+	}
+	n.FailsResets = resetsMap(edges.FailsResets)
+	if registry := w.Reasons; registry != nil {
+		for _, label := range registry.Labels {
+			n.ReasonID(label)
+		}
+		for id := range n.ReasonNames {
+			if id < len(registry.Blame) {
+				n.ReasonBlame[id] = registry.Blame[id]
+			}
+			if id < len(registry.Fails) {
+				n.ReasonFails[id] = registry.Fails[id]
+			}
+			if id < len(registry.FailsResets) {
+				setResets(n.ReasonFailsResets, id, registry.FailsResets[id])
+			}
+		}
+	}
+	for e, entries := range edges.Reasons {
+		for _, pair := range entries {
+			id := int(pair[0])
+			if id >= 0 && id < len(n.ReasonNames) {
+				n.Reasons[e] = append(n.Reasons[e], ReasonBlame{ID: id, Blame: pair[1]})
+			}
+		}
+	}
+	n.TotalBlame, n.TotalClear = w.TotalBlame, w.TotalClear
+	n.TotalFails = NewCounter(w.TotalFails, w.TotalFailsResets)
+	g.Neg = n
+	g.TotalTraversals = Counter{}
+	g.dirtyAll = true
+	g.weightsStructure = invalidStamp
 	return g, nil
 }
 
@@ -325,7 +564,18 @@ type ModelDoc struct {
 	Kind    string           `json:"kind"`
 	Meta    map[string]any   `json:"meta"`
 	History []map[string]any `json:"history"`
-	Graph   *GraphDoc        `json:"graph"`
+
+	// the negative network's journal and filter settings (omitted on a count model)
+	Log    []LogEntry `json:"log,omitempty"`
+	Filter *filterDoc `json:"filter,omitempty"`
+
+	Graph *GraphDoc `json:"graph"`
+}
+
+// filterDoc is how strictly a negative network judges.
+type filterDoc struct {
+	Threshold   float64 `json:"threshold"`
+	MinCoverage float64 `json:"min_coverage"`
 }
 
 // utcNow is an ISO-8601 UTC timestamp like Python's datetime.isoformat(timespec="seconds").
@@ -337,17 +587,24 @@ func (m *Model) ToDoc() *ModelDoc {
 	for i, r := range m.History {
 		history[i] = copyMap(r)
 	}
-	return &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: "count",
+	doc := &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: m.Kind(),
 		Meta: copyMap(m.Meta), History: history, Graph: m.G.ToDoc()}
+	if m.IsNegative() {
+		doc.Format = NegativeFormat
+		doc.Log = append([]LogEntry{}, m.Neg.Log...)
+		doc.Filter = &filterDoc{Threshold: m.Neg.Threshold, MinCoverage: m.Neg.MinCoverage}
+	}
+	return doc
 }
 
-// FromDoc rebuilds a model from its document.
+// FromDoc rebuilds a model from its document: the count / reward model, or the
+// negative network (the format decides, as in Python's load_model).
 func FromDoc(d *ModelDoc) (*Model, error) {
-	if d.Format != ModelFormat {
-		return nil, fmt.Errorf("not a %s model document", ModelFormat)
+	if d.Format != ModelFormat && d.Format != NegativeFormat {
+		return nil, fmt.Errorf("not a %s or %s model document", ModelFormat, NegativeFormat)
 	}
 	if d.Version > ModelFormatVersion {
-		return nil, fmt.Errorf("unsupported %s model version %d", ModelFormat, d.Version)
+		return nil, fmt.Errorf("unsupported %s model version %d", d.Format, d.Version)
 	}
 	if d.Graph == nil {
 		return nil, fmt.Errorf("model document has no graph")
@@ -361,8 +618,22 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 	for i, r := range d.History {
 		m.History[i] = copyMap(r)
 	}
+	if g.IsNegative() {
+		m.makeNegative()
+		if len(d.Log) > MaxLogEntries {
+			d.Log = d.Log[len(d.Log)-MaxLogEntries:]
+		}
+		m.Neg.Log = append([]LogEntry{}, d.Log...)
+		if d.Filter != nil {
+			m.Neg.Threshold, m.Neg.MinCoverage = d.Filter.Threshold, d.Filter.MinCoverage
+		}
+	}
 	for k, v := range d.Meta {
 		m.Meta[k] = v
+	}
+	m.carryMeta() // a file may carry a counter that was never wrapped
+	if d.Format == NegativeFormat && !g.IsNegative() {
+		return nil, fmt.Errorf("%s document without a negative graph", NegativeFormat)
 	}
 	return m, nil
 }

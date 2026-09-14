@@ -29,6 +29,10 @@ type Model struct {
 	Meta    map[string]any
 	Workers int
 	Exact   bool
+
+	// Neg is the model-level state of the negative network - the journal and
+	// how strictly it judges - and is nil on a count / reward model.
+	Neg *Negative
 }
 
 // NewModel creates an untrained model.
@@ -43,14 +47,21 @@ func NewModel(seed int64, opts GraphOptions) (*Model, error) {
 func newModelWithGraph(g *Graph) *Model {
 	m := &Model{G: g, Workers: Workers}
 	m.Meta = map[string]any{
-		"created": utcNow(), "seed": g.Seed, "epochs_total": 0, "trained_chars": 0, "trained_texts": 0,
-		"twonrl_runs": 0, "rewards_total": 0.0, "penalties_total": 0.0, "feedback_passes": 0,
+		"created": utcNow(), "seed": g.Seed, "rewards_total": 0.0, "penalties_total": 0.0,
+	}
+	for _, key := range []string{"epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes"} {
+		m.Meta[key], m.Meta[key+"_resets"] = 0, 0
 	}
 	return m
 }
 
 // Kind is the model kind shared with the Python implementation.
-func (m *Model) Kind() string { return "count" }
+func (m *Model) Kind() string {
+	if m.G != nil && m.G.IsNegative() {
+		return "negative"
+	}
+	return "count"
+}
 
 // workers is the goroutine cap: Model.Workers, else the package default (0 = unbounded).
 func (m *Model) workers() int {
@@ -84,7 +95,44 @@ func toFloat(v any) float64 {
 
 func (m *Model) metaInt(key string) int64 { return int64(toFloat(m.Meta[key])) }
 
-func (m *Model) metaAddInt(key string, delta int64) { m.Meta[key] = m.metaInt(key) + delta }
+// metaCounter reads one lifetime counter: the reading in key and how often it
+// wrapped in key + "_resets" (see counter.go).
+func (m *Model) metaCounter(key string) Counter {
+	return NewCounter(m.metaInt(key), m.metaInt(key+"_resets"))
+}
+
+// metaAddInt adds to a lifetime counter, wrapping it at CounterLimit into
+// key + "_resets"; returns the new reading.
+func (m *Model) metaAddInt(key string, delta int64) int64 {
+	c := m.metaCounter(key).Bumped(delta)
+	m.Meta[key], m.Meta[key+"_resets"] = c.Value, c.Resets
+	return c.Value
+}
+
+// metaCounters are the lifetime metadata entries that wrap, each keeping its
+// resets in "<name>_resets" (see counter.go).
+var metaCounters = []string{"epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes",
+	"path_inversions"} // path_inversions only appears once the Python sine model writes it
+
+// carryMeta wraps every lifetime counter in place - what a file loaded from
+// disk goes through, in case it carries one that was never wrapped.
+func (m *Model) carryMeta() {
+	for _, key := range metaCounters {
+		_, counted := m.Meta[key]
+		if _, hasResets := m.Meta[key+"_resets"]; counted || hasResets {
+			c := m.metaCounter(key)
+			m.Meta[key], m.Meta[key+"_resets"] = c.Value, c.Resets
+		}
+	}
+}
+
+// metaStats reports the named lifetime counters as the reading plus its resets.
+func (m *Model) metaStats(out map[string]any, keys ...string) {
+	for _, key := range keys {
+		c := m.metaCounter(key)
+		out[key], out[key+"_resets"] = c.Value, c.Resets
+	}
+}
 
 func (m *Model) metaAddFloat(key string, delta float64) { m.Meta[key] = toFloat(m.Meta[key]) + delta }
 
@@ -137,27 +185,58 @@ type TrainOptions struct {
 // DefaultTrainOptions mirror the Python defaults (5 epochs, compression after every epoch).
 func DefaultTrainOptions() TrainOptions { return TrainOptions{Epochs: 5, AutoCompress: true} }
 
-// Train counts one traversal of every text's path per epoch.
+// Train counts one traversal of every text's path per epoch - or, on the
+// negative network, blames every text: training it *is* blaming (see Blame).
 func (m *Model) Train(texts []string, opts TrainOptions) ([]map[string]any, error) {
+	if m.IsNegative() {
+		return m.Blame(texts, blameFromTrain(opts))
+	}
 	return m.passesSource(SliceSource(texts), opts, true, 0.0)
 }
 
 // TrainSource is Train over a streaming source (a massive ZIP archive, a file,
-// several of them): the source is re-read for every pass, chunk by chunk.
+// several of them): the source is re-read for every pass, chunk by chunk.  The
+// negative network blames what the source holds instead, which needs the texts
+// in memory - a corpus of failures is small by construction.
 func (m *Model) TrainSource(src TextSource, opts TrainOptions) ([]map[string]any, error) {
+	if m.IsNegative() {
+		texts, err := CollectTexts(src)
+		if err != nil {
+			return nil, err
+		}
+		return m.Blame(texts, blameFromTrain(opts))
+	}
 	return m.passesSource(src, opts, true, 0.0)
 }
 
-// Reward (thumbs up): epochs passes that traverse and reward (+strength) every path.
+// blameFromTrain carries a training call's settings over to a blame pass.
+func blameFromTrain(opts TrainOptions) BlameOptions {
+	return BlameOptions{Epochs: opts.Epochs, NoCompress: !opts.AutoCompress, Progress: opts.Progress, Stop: opts.Stop}
+}
+
+// Reward (thumbs up): epochs passes that traverse and reward (+strength) every
+// path - or, on the negative network, clearing: it never learns *from* correct
+// text, it only lets go of blame.
 func (m *Model) Reward(texts []string, epochs int, strength float64) ([]map[string]any, error) {
 	opts := DefaultTrainOptions()
 	opts.Epochs = epochs
 	opts.Phase = "positive"
+	if m.IsNegative() {
+		return m.RewardWith(texts, opts, strength)
+	}
 	return m.passes(texts, opts, true, math.Abs(strength))
 }
 
 // RewardWith is Reward with explicit pass options (progress / stop hooks, phase name).
+// On the negative network it clears blame instead (nothing is created).
 func (m *Model) RewardWith(texts []string, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if m.IsNegative() {
+		weight := math.Abs(strength)
+		if weight == 0 {
+			weight = 1
+		}
+		return m.Clear(texts, weight, opts.Epochs)
+	}
 	if opts.Phase == "" {
 		opts.Phase = "positive"
 	}
@@ -169,11 +248,20 @@ func (m *Model) Punish(texts []string, epochs int, strength float64) ([]map[stri
 	opts := DefaultTrainOptions()
 	opts.Epochs = epochs
 	opts.Phase = "negative"
+	if m.IsNegative() {
+		return m.PunishWith(texts, opts, strength)
+	}
 	return m.passes(texts, opts, false, -math.Abs(strength))
 }
 
 // PunishWith is Punish with explicit pass options (progress / stop hooks, phase name).
+// On the negative network it blames the texts (thumbs down: reason "thumbs-down").
 func (m *Model) PunishWith(texts []string, opts TrainOptions, strength float64) ([]map[string]any, error) {
+	if m.IsNegative() {
+		o := blameFromTrain(opts)
+		o.Reason, o.Severity, o.Source = "thumbs-down", math.Abs(strength), "feedback"
+		return m.Blame(texts, o)
+	}
 	if opts.Phase == "" {
 		opts.Phase = "negative"
 	}
@@ -182,6 +270,13 @@ func (m *Model) PunishWith(texts []string, opts TrainOptions, strength float64) 
 
 // MetaInt reads an integer metadata entry (0 when absent).
 func (m *Model) MetaInt(key string) int64 { return m.metaInt(key) }
+
+// MetaCounter reads a lifetime counter: its reading plus how often it wrapped.
+func (m *Model) MetaCounter(key string) Counter { return m.metaCounter(key) }
+
+// MetaAddInt adds to a lifetime counter, wrapping it like every other counter;
+// returns the new reading.
+func (m *Model) MetaAddInt(key string, delta int64) int64 { return m.metaAddInt(key, delta) }
 
 // WeightGroup is a set of texts that share a reward / penalty weight.
 type WeightGroup struct {
@@ -505,6 +600,14 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 				}
 				atomic.AddInt64(&total, int64(len(edges)))
 				if count {
+					// every transition bumped one edge counter, every node of a path one node
+					// counter: the increments bound each counter and so decide when
+					// CarryCounters has work (see counter.go)
+					nodeBumps := 0
+					for _, p := range paths {
+						nodeBumps += len(p)
+					}
+					g.Traversals.Add(int64(len(edges) + nodeBumps))
 					g.RecordTraversals(edges) // the sliding window follows the corpus order
 				}
 				for _, tr := range perText { // and what each text did, in its own context
@@ -535,9 +638,9 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		if opts.AutoCompress {
 			merges += g.Compress()
 		}
-		m.metaAddInt("epochs_total", 1)
+		g.CarryCounters(false) // the epoch is over: wrap whatever reached the limit
 		record := map[string]any{
-			"epoch":             m.metaInt("epochs_total"),
+			"epoch":             m.metaAddInt("epochs_total", 1),
 			"loss":              loss,
 			"perplexity":        math.Exp(math.Min(loss, maxLogPerplexity)),
 			"nodes":             g.NumNodes(),
@@ -751,7 +854,7 @@ func (m *Model) bestTrigram(key string) (int, int, bool) {
 	var bestRank [3]int64
 	for t, l := range g.index {
 		if len(t) >= len(key) && t[:len(key)] == key {
-			rank := [3]int64{-g.Count[l.node], int64(l.node), int64(l.off)}
+			rank := [3]int64{-int64(g.NodeCount(l.node).Float()), int64(l.node), int64(l.off)}
 			if !found || rank[0] < bestRank[0] || (rank[0] == bestRank[0] && (rank[1] < bestRank[1] || (rank[1] == bestRank[1] && rank[2] < bestRank[2]))) {
 				best, bestRank, found = l, rank, true
 			}
@@ -763,10 +866,10 @@ func (m *Model) bestTrigram(key string) (int, int, bool) {
 // bestNodeWithPrefix is the most visited real node whose label starts with prefix.
 func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 	g := m.G
-	best, bestCount := -1, int64(-1)
+	best, bestCount := -1, Counter{Value: -1}
 	for node := 2; node < len(g.Labels); node++ {
 		if g.Alive[node] && len(g.Labels[node]) >= len(prefix) && g.Labels[node][:len(prefix)] == prefix {
-			if c := g.Count[node]; c > bestCount {
+			if c := g.NodeCount(node); bestCount.Less(c) {
 				best, bestCount = node, c
 			}
 		}
@@ -1098,46 +1201,47 @@ func (m *Model) Paths(limit, node int) []PathStats { return m.G.PathContexts(lim
 func (m *Model) Stats() map[string]any {
 	g := m.G
 	pos, neg := g.TotalReward()
-	pathTotals := g.PathTotals()
 	var lastLoss any
 	if len(m.History) > 0 {
 		lastLoss = m.History[len(m.History)-1]["loss"]
 	}
-	return map[string]any{
-		"kind":                 "count",
-		"nodes":                g.NumNodes(),
-		"edges":                g.NumEdges(),
-		"trigrams":             g.NumTrigrams(),
-		"compression_ratio":    g.CompressionRatio(),
-		"inverted":             g.Inverted,
-		"backend":              "go",
-		"device":               m.deviceLabel(),
-		"counting":             m.Counting(),
-		"epochs_total":         m.metaInt("epochs_total"),
-		"trained_chars":        m.metaInt("trained_chars"),
-		"trained_texts":        m.metaInt("trained_texts"),
-		"twonrl_runs":          m.metaInt("twonrl_runs"),
-		"history_len":          len(m.History),
-		"last_loss":            lastLoss,
-		"rewards_total":        toFloat(m.Meta["rewards_total"]),
-		"penalties_total":      toFloat(m.Meta["penalties_total"]),
-		"feedback_passes":      m.metaInt("feedback_passes"),
-		"path_contexts":        pathTotals.Contexts,
-		"path_judged":          pathTotals.Judged,
-		"path_seen":            pathTotals.Seen,
-		"path_correct":         pathTotals.Correct,
-		"path_incorrect":       pathTotals.Incorrect,
-		"edge_reward_positive": pos,
-		"edge_reward_negative": neg,
-		"count_scale":          g.CountScale,
-		"reward_scale":         g.RewardScale,
-		"global_scale":         g.GlobalScale,
-		"window_scale":         g.WindowScale,
-		"path_scale":           g.PathScale,
-		"window":               g.WindowSize,
-		"total_traversals":     g.TotalTraversals,
-		"window_traversals":    g.WindowTraversals(),
+	if m.IsNegative() {
+		return m.negativeStats(lastLoss)
 	}
+	pathTotals := g.PathTotals()
+	stats := map[string]any{
+		"kind":                    "count",
+		"nodes":                   g.NumNodes(),
+		"edges":                   g.NumEdges(),
+		"trigrams":                g.NumTrigrams(),
+		"compression_ratio":       g.CompressionRatio(),
+		"inverted":                g.Inverted,
+		"backend":                 "go",
+		"device":                  m.deviceLabel(),
+		"counting":                m.Counting(),
+		"history_len":             len(m.History),
+		"last_loss":               lastLoss,
+		"rewards_total":           toFloat(m.Meta["rewards_total"]),
+		"penalties_total":         toFloat(m.Meta["penalties_total"]),
+		"path_contexts":           pathTotals.Contexts,
+		"path_judged":             pathTotals.Judged,
+		"path_seen":               pathTotals.Seen,
+		"path_correct":            pathTotals.Correct,
+		"path_incorrect":          pathTotals.Incorrect,
+		"edge_reward_positive":    pos,
+		"edge_reward_negative":    neg,
+		"count_scale":             g.CountScale,
+		"reward_scale":            g.RewardScale,
+		"global_scale":            g.GlobalScale,
+		"window_scale":            g.WindowScale,
+		"path_scale":              g.PathScale,
+		"window":                  g.WindowSize,
+		"total_traversals":        g.TotalTraversals.Value,
+		"total_traversals_resets": g.TotalTraversals.Resets,
+		"window_traversals":       g.WindowTraversals(),
+	}
+	m.metaStats(stats, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes")
+	return stats
 }
 
 // deviceLabel describes the goroutine pool for stats: "cpu" with the cap or "cpu (one goroutine per text)".

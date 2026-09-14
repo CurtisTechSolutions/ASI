@@ -426,6 +426,262 @@ func TestConverse(t *testing.T) {
 	}
 }
 
+// A run of words repeated immediately after itself - and only that.
+func TestStutter(t *testing.T) {
+	for line, want := range map[string]string{
+		"the the west":                                "the",
+		"say morning morning":                         "morning",
+		"the cat the cat sat":                         "the cat",
+		"The  The":                                    "the", // whitespace and case aside
+		"the cat sat on the mat":                      "",
+		"where there is a will there is a way":        "",
+		"a bird in the hand is worth two in the bush": "",
+		"blowers blower":                              "",
+		"park":                                        "",
+		"":                                            "",
+	} {
+		if got := Stutter(line, LongestStutter); got != want {
+			t.Fatalf("Stutter(%q) = %q; want %q", line, got, want)
+		}
+	}
+	long := "the cat sat on the mat the cat sat on the mat"
+	if got := Stutter(long, LongestStutter); got != "" { // six words twice over: past the default
+		t.Fatalf("Stutter(%q) = %q", long, got)
+	}
+	if got := Stutter(long, 6); got != "the cat sat on the mat" {
+		t.Fatalf("Stutter(%q, 6) = %q", long, got)
+	}
+	if got := Stutter("the the west", 0); got != "" {
+		t.Fatalf("Stutter with no run allowed = %q", got)
+	}
+}
+
+// A voice that can only repeat its own words: punished, or allowed to say them on request.
+func TestConverseWordRepeats(t *testing.T) {
+	m, err := NewModel(3, DefaultGraphOptions())
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if _, err := m.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	opts := DefaultConverseOptions()
+	opts.Turns = 4
+	turns, err := m.Converse("", opts)
+	if err != nil || len(turns) == 0 {
+		t.Fatalf("converse: %v %d", err, len(turns))
+	}
+	stutters := 0
+	for _, tr := range turns {
+		if !tr.Repeat { // nothing it could say repeated nothing
+			t.Fatalf("turn %q was not flagged a repeat", tr.Text)
+		}
+		if tr.Stutter != (Stutter(tr.Text, LongestStutter) != "") {
+			t.Fatalf("turn %q: stutter = %v", tr.Text, tr.Stutter)
+		}
+		if tr.Stutter {
+			stutters++
+		}
+	}
+	if stutters == 0 || len(Repeats(turns)) != len(turns) {
+		t.Fatalf("%d stutters, %d punished of %d turns", stutters, len(Repeats(turns)), len(turns))
+	}
+	// allowed instead: spoken freely, flagged for what they are, and punished for nothing
+	opts.AvoidWordRepeats = false
+	loose, err := m.Converse("", opts)
+	if err != nil || len(loose) != opts.Turns {
+		t.Fatalf("converse: %v %d", err, len(loose))
+	}
+	for _, tr := range loose {
+		if !tr.Stutter || tr.Repeat {
+			t.Fatalf("turn %q: stutter = %v, repeat = %v", tr.Text, tr.Stutter, tr.Repeat)
+		}
+	}
+	if got := Repeats(loose); len(got) != 0 {
+		t.Fatalf("nothing should be punished: %q", got)
+	}
+}
+
+// Catching itself repeating, backing up to where the walk went round, and looking for another way on.
+func TestBacktrack(t *testing.T) {
+	// "ha ha ..." loops; the other two lines leave the loop after "ha "
+	ways, err := NewModel(3, DefaultGraphOptions())
+	if err != nil {
+		t.Fatalf("NewModel: %v", err)
+	}
+	if _, err := ways.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
+		TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	stuck, _ := NewModel(3, DefaultGraphOptions())
+	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60,
+		AvoidRepeats: true, AvoidWordRepeats: true}
+
+	found, record, err := ways.Backtrack("ha ha ha", opts)
+	if err != nil || found == nil || !record.Found {
+		t.Fatalf("backtrack: %v %+v", err, record)
+	}
+	if record.Kind != "stutter" || record.Noticed != "ha" || record.Cut != "ha " || record.Steps != 1 ||
+		record.Explored == 0 {
+		t.Fatalf("record = %+v", record)
+	}
+	if !strings.HasPrefix(found.FullText, "ha ") || Stutter(found.FullText, LongestStutter) != "" {
+		t.Fatalf("the way on keeps what was said once and does not go round again: %q", found.FullText)
+	}
+
+	// a voice with nowhere else to go says so - and it did look
+	found, record, _ = stuck.Backtrack("ha ha ha", opts)
+	if found != nil || record.Found || record.Noticed != "ha" || record.Explored == 0 {
+		t.Fatalf("stuck: %v %+v", found, record)
+	}
+
+	// the words it picked up are not its own to rethink
+	keep := opts
+	keep.Keep = "ha ha "
+	found, record, _ = ways.Backtrack("ha ha ha", keep)
+	if found != nil || record.Steps != 0 || record.Explored != 0 {
+		t.Fatalf("keep: %v %+v", found, record)
+	}
+
+	// a whole utterance it has said before is a retread end to end: it keeps all it can and differs at the end
+	said := opts
+	said.Heard = NewHeard([]string{"ha and then the cat sat"})
+	found, record, _ = ways.Backtrack("ha and then the cat sat", said)
+	if record.Kind != "repeat" || record.Noticed != "ha and then the cat sat" || record.Steps == 0 {
+		t.Fatalf("a heard line: %+v", record)
+	}
+	if !strings.HasPrefix("ha and then the cat ", record.Cut) {
+		t.Fatalf("cut %q is not that last word, or further back", record.Cut)
+	}
+	if found != nil && !strings.HasPrefix(found.FullText, record.Cut) {
+		t.Fatalf("a way on keeps what it cut: %q from %q", found.FullText, record.Cut)
+	}
+
+	// one word is nothing to back up from, and nothing is caught with the settings off
+	one := opts
+	one.Heard = NewHeard([]string{"ha"})
+	if found, record, _ = ways.Backtrack("ha", one); found != nil || record.Kind != "repeat" || record.Steps != 0 {
+		t.Fatalf("one word: %v %+v", found, record)
+	}
+	off := said
+	off.AvoidRepeats = false
+	if found, record, _ = ways.Backtrack("ha and then the cat sat", off); found != nil || record.Kind != "" {
+		t.Fatalf("repeats allowed: %v %+v", found, record)
+	}
+	noWords := opts
+	noWords.AvoidWordRepeats = false
+	if found, record, _ = ways.Backtrack("ha ha ha", noWords); found != nil || record.Kind != "" {
+		t.Fatalf("word repeats allowed: %v %+v", found, record)
+	}
+
+	// nothing to rethink, and nothing to explore
+	if found, record, _ = ways.Backtrack("the cat sat on the mat", opts); found != nil || record.Noticed != "" {
+		t.Fatalf("clean: %v %+v", found, record)
+	}
+	noExplore := opts
+	noExplore.Explore = 0
+	if found, record, _ = ways.Backtrack("ha ha ha", noExplore); found != nil || record.Steps != 0 {
+		t.Fatalf("off: %v %+v", found, record)
+	}
+
+	// and a conversation backs out of the loop it walks into
+	cfg := DefaultConverseOptions()
+	cfg.Turns = 4
+	turns, err := ways.Converse("", cfg)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	thought := 0
+	for _, turn := range turns {
+		if turn.Rethink == nil {
+			continue
+		}
+		thought++
+		if turn.Rethink.Noticed == "" || turn.Text != turn.Context+turn.Reply {
+			t.Fatalf("turn %+v", turn)
+		}
+		if turn.Rethink.Found && (!strings.HasPrefix(turn.Text, turn.Rethink.Cut) || turn.Repeat || turn.Stutter) {
+			t.Fatalf("a way out keeps what was said once: %+v", turn)
+		}
+	}
+	if thought == 0 {
+		t.Fatal("nothing was ever noticed")
+	}
+	cfg.Explore = 0
+	plain, _ := ways.Converse("", cfg)
+	for _, turn := range plain {
+		if turn.Rethink != nil {
+			t.Fatalf("nothing is noticed with the exploring off: %+v", turn)
+		}
+	}
+}
+
+// What counts as a duplicate, and what a conversation does with the ones it cannot avoid.
+func TestHeardAndRepeats(t *testing.T) {
+	heard := NewHeard([]string{"the cat sat on the mat"})
+	if !heard.Duplicate("The   Cat Sat On The Mat", "") { // whitespace and case aside
+		t.Fatal("an utterance said before is a duplicate")
+	}
+	if heard.Duplicate("the dog barked", "") {
+		t.Fatal("an unheard utterance is not a duplicate")
+	}
+	if !heard.Duplicate("on the mat", "") || heard.Duplicate("on the mat outside", "") {
+		t.Fatal("an echo adds nothing; a longer utterance says more than was heard")
+	}
+	heard.Remember("the cat sat", " sat")
+	if !heard.Duplicate("the dog sat", " sat") || heard.Duplicate("the dog sat", " sat down") {
+		t.Fatal("the same words added after another context are a duplicate")
+	}
+	if heard.Duplicate("", "") || NewHeard(nil).Duplicate("anything", "") {
+		t.Fatal("nothing is a duplicate of an empty conversation")
+	}
+
+	turns := []*Turn{{Text: "the cat sat"}, {Text: " west", Repeat: true}, {Text: "West", Repeat: true}, {Text: "  ", Repeat: true}}
+	if got := Repeats(turns); !reflect.DeepEqual(got, []string{" west"}) {
+		t.Fatalf("Repeats = %q; the flagged utterances, each once", got)
+	}
+	if got := Repeats(nil); len(got) != 0 {
+		t.Fatalf("Repeats(nil) = %q", got)
+	}
+
+	// a long conversation on a small corpus runs out of new things to say: it speaks a duplicate once,
+	// flags it, and stops rather than saying it again (with the exploring off - a voice that backs out of
+	// its repeats keeps finding new things to say, which is TestBacktrack's business)
+	m := trained(t, 2, 4)
+	opts := DefaultConverseOptions()
+	opts.Turns, opts.Explore = 40, 0
+	long, err := m.Converse("", opts)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	said := map[string]bool{}
+	for _, tr := range long {
+		key := Normalize(tr.Text)
+		if said[key] && !tr.Repeat { // only a flagged duplicate may say something twice
+			t.Fatalf("utterance %q spoken twice", tr.Text)
+		}
+		said[key] = true
+	}
+	punished := Repeats(long)
+	if len(punished) == 0 || len(long) >= opts.Turns {
+		t.Fatalf("%d turns, %d to punish: the conversation should run out of new things to say", len(long), len(punished))
+	}
+	// and no duplicate is ever spoken twice: the conversation ends instead of going round in circles
+	for i, tr := range long {
+		if !tr.Repeat {
+			continue
+		}
+		for _, later := range long[i+1:] {
+			if Normalize(later.Text) == Normalize(tr.Text) {
+				t.Fatalf("duplicate %q spoken again at turn %d", tr.Text, later.Index)
+			}
+		}
+	}
+}
+
 // The default mode: one goroutine per text bumping shared counters with plain increments.  A collision
 // may lose an update, so the counts are compared with a tolerance; the structure, the window and the
 // weights' consistency with the counts are exact.  The race detector would (rightly) flag the plain

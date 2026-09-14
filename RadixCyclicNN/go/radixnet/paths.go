@@ -87,7 +87,7 @@ func (g *Graph) RecordPath(transitions []Transition, outcome PathOutcome, create
 		touched++
 	}
 	if touched > 0 && outcome != PathUnjudged {
-		g.Version++ // the contexts that moved make their node's costs stale
+		g.Version.Add(1) // the contexts that moved make their node's costs stale
 	}
 	return touched
 }
@@ -119,7 +119,7 @@ func (g *Graph) MarkSteps(steps []PathKey, correct bool) int {
 		marked++
 	}
 	if marked > 0 {
-		g.Version++
+		g.Version.Add(1)
 	}
 	return marked
 }
@@ -300,7 +300,7 @@ func (g *Graph) splitPaths(a, b int, moved []int, bridge int) {
 			}
 		}
 	}
-	g.ctxVersion = -1
+	g.ctxVersion = invalidStamp
 }
 
 // mergePaths follows the contexts through a merge: the chain was unary, so
@@ -322,7 +322,7 @@ func (g *Graph) mergePaths(p, child, dying int, moved []int) {
 			g.addPath(p, edge, row)
 		}
 	}
-	g.ctxVersion = -1
+	g.ctxVersion = invalidStamp
 }
 
 func copyKeys(set map[int]bool) map[int]bool {

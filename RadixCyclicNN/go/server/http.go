@@ -118,6 +118,19 @@ func (f fields) number(name string, def float64, minimum *float64) (float64, boo
 	return n, true, nil
 }
 
+// mapping reads an optional JSON object field, such as a report card handed back to the tutor.
+func (f fields) mapping(name string) (map[string]any, error) {
+	v, ok := f.lookup(name)
+	if !ok || v == nil {
+		return nil, nil
+	}
+	object, isObject := v.(map[string]any)
+	if !isObject {
+		return nil, badRequest("'%s' must be an object (got %s %v)", name, jsonType(v), v)
+	}
+	return object, nil
+}
+
 // textsOptional: listName (list of strings) or textName (one text per line); absent -> nil.
 func (f fields) textsOptional(listName, textName string) ([]string, error) {
 	if v, ok := f.lookup(listName); ok {
@@ -223,11 +236,11 @@ func init() {
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, guard (default on: the negative network vetoes the continuations it recognises as failures)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -267,10 +280,12 @@ func init() {
 }
 
 // pythonOnly lists endpoint prefixes the Python server implements and this one does not.
-var pythonOnly = []string{"/api/evolve", "/api/ollama", "/api/images", "/api/codegen", "/api/schedule/preview"}
+var pythonOnly = []string{"/api/schedule/preview"}
 
 // The tutor (/api/tutor, see tutor.go) is served here too: Ollama sets and
-// marks the exercises, this server's count / reward model answers them.
+// marks the exercises, this server's count / reward model answers them.  So are
+// the evolve loop (evolve.go), the Ollama corpus and review, the Negative
+// tab's automatic loop (critic.go) and code generation (codegen.go).
 
 func rIndex(rq *request) (int, any, error) {
 	return 200, map[string]any{"engine": "go", "version": Version, "endpoints": endpointDocs}, nil
@@ -549,7 +564,11 @@ func rPredict(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	p, err := rq.svc.Predict(prefix, o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	p, report, err := rq.svc.Predict(prefix, o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -565,7 +584,7 @@ func rPredict(rq *request) (int, any, error) {
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
-		"top": top, "bottom": bottom,
+		"top": top, "bottom": bottom, "guard": report,
 	}, nil
 }
 
@@ -609,7 +628,11 @@ func rGenerate(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	results, err := rq.svc.Generate(o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	results, report, err := rq.svc.Generate(o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -617,7 +640,7 @@ func rGenerate(rq *request) (int, any, error) {
 	for _, r := range results {
 		samples = append(samples, sampleDict(r))
 	}
-	return 200, map[string]any{"samples": samples}, nil
+	return 200, map[string]any{"samples": samples, "guard": report}, nil
 }
 
 func rConverse(rq *request) (int, any, error) {
@@ -679,14 +702,26 @@ func rConverse(rq *request) (int, any, error) {
 	if o.AvoidRepeats, err = f.flag("avoid_repeats", true); err != nil {
 		return 0, nil, err
 	}
-	turns, err := rq.svc.Converse(opening, o)
+	if o.AvoidWordRepeats, err = f.flag("avoid_word_repeats", true); err != nil {
+		return 0, nil, err
+	}
+	if o.Explore, _, err = f.integer("explore", radixnet.Explore, intp(0)); err != nil {
+		return 0, nil, err
+	}
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	turns, report, err := rq.svc.Converse(opening, o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
 	if turns == nil {
 		turns = []*radixnet.Turn{}
 	}
-	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns, "count": len(turns)}, nil
+	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
+	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}, nil
 }
 
 func rScore(rq *request) (int, any, error) {
