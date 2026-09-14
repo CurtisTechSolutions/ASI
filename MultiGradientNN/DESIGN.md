@@ -27,6 +27,7 @@ has to name something to keep the notation usable, it says so explicitly.
 | Depth perception is the human eye's | The analogy is literal: perception is comparative, never absolute, so the accessed layer is unchanged by a constant shift of the whole column. |
 | Occlusion and parallax, for images | Both cues are monocular, so no second viewpoint is needed. `(i, j)` is a pixel and `k` is the viewing axis: occlusion is the instantaneous read (nearest plane wins), parallax the temporal one (near planes shift more between reads). |
 | A light radial blur on the input, for focus | The blur's centre is the point in focus and sharpness falls off with radius — the retina's foveal profile. Moving the centre changes focus, so preprocessing is dynamic rather than one-time. |
+| Focus is attentional; parallax comes from the descent | Two motions on two axes: the blur centre moves across `(i, j)` and carries attention only, while the descent moves depths along `k` and is the sole source of parallax. |
 
 ---
 
@@ -241,11 +242,53 @@ geometry are the same geometry.
 **Focus makes the preprocessing dynamic.** Because the centre moves, the image
 reaching the stack is not fixed — it changes whenever focus changes. Preprocessing
 here is a step that runs repeatedly with a different centre, not a one-time
-transform applied before training starts. What that motion is *worth* — a depth cue
-or an attentional one — is 6.3.
+transform applied before training starts. What that motion is *worth* is settled in
+5.1: it is attentional, not a depth cue.
 
 "Light" is load-bearing in the instruction: enough blur to establish the gradient
 and the radial structure, not enough to destroy the content being learned.
+
+### 5.1 Focus is attentional
+
+Focus **chooses where to look** and carries no depth information. Parallax takes
+its change between reads from **the descent** instead (consequence 2 of 4.2). This
+closes the first and largest question of 6.3.
+
+The system therefore has two motions, and they run on different axes:
+
+| Motion | What moves | Axis | What it carries |
+|---|---|---|---|
+| Focus | the blur centre | across `(i, j)` | where to look — attention, no depth |
+| Descent | the depths themselves | along `k` | parallax, and so depth |
+
+Three consequences follow.
+
+1. **The two motions cannot be mistaken for one another.** Focus displaces the
+   centre across `(i, j)` and never in a depth-dependent way; the descent changes
+   depths along `k` and never displaces anything laterally. Attention and depth ride
+   on separate axes. This is worth dwelling on, because in biological vision it is a
+   hard problem: an eye must separate retinal motion caused by its own movement from
+   motion caused by the world, and does it with *efference copy* — an internal record
+   of the motor command, subtracted from what is seen. Here the separation is free.
+   Nothing needs subtracting, because the two motions never meet on one axis.
+
+2. **Parallax has a single source, and convergence silences it.** Nothing but the
+   descent changes depths between reads, so the parallax signal is exactly the size
+   of the step just taken. As training converges that step shrinks, the columns stop
+   differing between reads, and the cue goes quiet — at which point occlusion stands
+   alone and, by consequence 1 of 4.2, the stack locks on whatever it last saw.
+
+   Whether that is a failure or the intended end state is a genuine question. A stack
+   that freezes its routing once the depths settle has committed to a layout it can
+   no longer revise; one that keeps routing live needs the descent never to fully
+   quiet. The choice belongs to 6.5 and 6.6, which between them set the step sizes.
+
+3. **It settles what "shift" means for parallax.** 6.2 asked whether parallax
+   measures a lateral sweep across `(i, j)` or a change in depth over time. The
+   descent moves depths, not positions, so it is the second: parallax here reads how
+   far a depth moved between reads. The analogy bends at exactly this point — real
+   parallax is lateral — and this is the one place the design knowingly departs from
+   the eye.
 
 ---
 
@@ -283,41 +326,29 @@ planes of different sizes.
 
 ### 6.2 How occlusion and parallax combine
 
-Section 4.2 settles the cues and settles selection as hard. What remains is how the
-two compose, and one question about what parallax even measures here:
+Section 4.2 settles the cues and settles selection as hard; 5.1 settles that
+parallax reads change in depth over time. What remains is how the two compose:
 
 - **How the cues compose.** Whether parallax only decides what becomes visible next
   — feeding occlusion's hard selection on the following read — or runs as a separate
   graded channel alongside it.
-- **What "shift" means down a column.** Parallax in vision measures displacement
-  *across* the image plane: near things sweep further than far ones. Down a column
-  at fixed `(i, j)` there is no lateral sweep; the quantity that changes between
-  reads is the depth itself. So either shift is read as change in depth over time,
-  or the cue needs a real `(i, j)` displacement to measure against — and those are
-  different mechanisms with different costs.
 - **The parallax baseline.** How many steps apart the two reads are. Consequence 3
   of 4.2 makes this a perceptual parameter rather than a scheduling convenience, and
   it may need to adapt rather than sit fixed.
 
-### 6.3 What the focus centre does, and how it moves
+### 6.3 What moves the focus centre
 
-Section 5 settles that the centre is the focal point and that moving it changes
-focus. Three things remain, and the first matters most:
+Section 5.1 settles that focus is attentional, which makes this an attention
+question rather than a perceptual one: what decides where to look next?
 
-- **Whether focus motion is a depth cue or an attentional one.** Vision is strict
-  here: *translating* a viewpoint produces motion parallax, *rotating* a gaze
-  produces none — under pure rotation every point displaces alike regardless of its
-  depth, which is why a saccade carries no depth information. Sliding a blur centre
-  across the image plane is the second kind of movement, not the first. So either
-  the focus centre feeds 6.2's parallax, and needs some reason its displacement
-  varies with depth, or focus is purely attentional — choosing where to look — and
-  parallax takes its change between reads from the descent instead (consequence 2
-  of 4.2). Both are defensible; they are different jobs, and the design should say
-  which one focus is doing.
-- **What moves the centre.** Chosen by the model from what it has seen, driven by a
-  saliency rule, swept along a fixed path, or learned as an ordinary parameter.
+- **The driver.** A saliency rule read off the image, a policy the model learns, a
+  fixed scan path, or an ordinary learned parameter. Attention in the eye is partly
+  stimulus-driven and partly task-driven, and the two need not be the same mechanism
+  here either.
 - **Strength and falloff.** How fast sharpness decays with radius, and what "light"
-  is numerically.
+  is numerically. This sets how much periphery survives each read, and so how much
+  the model can see outside its current focus to decide where to look next — the
+  driver and the falloff are not independent choices.
 
 ### 6.4 What travels once a layer is accessed
 

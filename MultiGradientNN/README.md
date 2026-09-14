@@ -53,9 +53,13 @@ Images reach the stack through a **light radial blur** standing in for focus:
 the centre is the point in focus, sharpness falls off with radius the way the
 retina's does, and moving the centre re-focuses.
 
-How the two cues compose, what moving the focus centre is worth, what the step
-carries, how the two descents are scheduled and how the vertical weights are
-trained are still open.
+Focus is **attentional** — it chooses where to look and carries no depth. Parallax
+comes from the descent instead: the only thing changing depths between reads is the
+step the model just took, so it perceives depth by moving its own eye.
+
+What decides where to look next, how the two cues compose, what the step carries,
+how the two descents are scheduled and how the vertical weights are trained are
+still open.
 
 `DESIGN.md` is the specification — notation, geometry, the settled invariants,
 and every open decision written out with its trade-offs.
