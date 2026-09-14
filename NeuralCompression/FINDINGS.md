@@ -252,3 +252,138 @@ is what buys interpolation to unseen games (§4). If that coordinate is supplied
 some other way — as `GTMNN`'s game modifier is (`GTMNN/DESIGN.md` §22.5) — then
 the full output range is better than any partition of it, and every number in
 Part 2 becomes moot.
+
+---
+
+# Part 3 — the vanishing gradient, accepted then escaped
+
+Two mechanisms, both built: invert the update when training stalls
+(`vanishing.py`), and train granularly in a specialist network before
+consolidating into a partition of the query network (`consolidate.py`).
+
+## 10. The vanishing gradient here is caused by `b = 1/3`
+
+Deep MLP, `2 -> 8 -> ... -> 1`, measuring the layer-0 gradient directly. The
+sine's derivative near zero is `-cos(b·z)·b ≈ -b`, so each layer multiplies the
+gradient by roughly `b` and `depth` layers multiply it by `b^depth`.
+
+| activation | depth | predicted decay `b^depth` | measured \|g\| at layer 0 | test MSE |
+|---|---|---|---|---|
+| sine `b=1/3` | 1 | 0.333 | 9.7e-03 | 0.0079 |
+| sine `b=1/3` | 2 | 0.111 | 7.6e-03 | 0.0077 |
+| **sine `b=1/3`** | **4** | **0.0123** | **7.6e-05** | **0.0858** |
+| sine `b=1` | 4 | 1.0 | 1.7e-03 | **0.00016** |
+| tanh | 4 | 1.0 | 2.3e-03 | 0.00036 |
+
+At depth 4 the `b=1/3` gradient is **22× smaller** than at `b=1` and the test
+error is **536× worse**. At `b=1` the gradient does not vanish at all, and depth
+4 becomes the *best* result of the whole table — better than depth 1 or 2, which
+is what depth is supposed to buy.
+
+**So in this architecture the vanishing gradient is not a property to accept. It
+is the §5 bug seen from a second direction**, and it has the same one-number fix.
+The general claim that vanishing gradients are worth designing around may hold
+elsewhere; here the gradient vanishes because every neuron was initialised into
+the linear region of its activation, and it stops vanishing when that is
+corrected.
+
+## 11. Inversion: gradient magnitude is the wrong trigger
+
+Depth 4, three seeds, `vanishing.py`:
+
+| activation | trigger | test MSE | fires | vs none |
+|---|---|---|---|---|
+| sine `b=1/3` | none | 0.0785 | 0 | — |
+| sine `b=1/3` | gradient magnitude | 0.0789 | 132 | 0.99× |
+| **sine `b=1/3`** | **plateau, long bursts** | **0.0635** | 15 | **1.24×** |
+| sine `b=1` | none | **0.00017** | 0 | — |
+| sine `b=1` | gradient magnitude | 0.0884 | 13 | **0.002×** |
+| tanh | none | **0.00038** | 0 | — |
+| tanh | gradient magnitude | 0.0925 | 132 | **0.004×** |
+| tanh | plateau | 0.00039 | 6 | 0.98× |
+
+**Triggering on gradient magnitude is catastrophic** — 243× to 520× worse on the
+two healthy configurations. The reason is that a small gradient means *either*
+stuck *or* converged *or* still starting, and the magnitude cannot separate them.
+It fired 132 times, mostly in the early transient where gradients are briefly
+flat and the loss is legitimately high, and each burst of ascent destroyed what
+had been learned. Gating on "loss is still bad" does not fix it, because early
+training satisfies that gate by definition.
+
+**The correct signal is a plateau**: past a warmup, the running loss has not
+improved for a window. That separates *stuck* from *starting* and from
+*converged*, and it is what `Inversion(trigger="plateau")` implements. It is
+harmless where the network is healthy (tanh 0.98×) and helps where the gradient
+genuinely vanished (sine `b=1/3`, **1.24×**).
+
+**But 1.24× is the wrong comparison to be pleased by.** Inversion recovers
+0.0785 → 0.0635 on a problem that setting `b = 1` takes from 0.0785 → 0.00016.
+The escape mechanism buys 1.24× on a condition the initialisation fix removes
+536× of. Build the trigger if the stall is real; do not build it instead of
+fixing the stall.
+
+The author's stated trigger — *all weights below X* — is implemented
+(`trigger="weight"`) and is a **detector of a layer that never moved off its
+initialisation**, which is what vanishing gradients leave behind. It fires rarely
+and late, and on this task it did not distinguish itself from the plateau
+trigger. It is the better of the two magnitude-based conditions because a weight
+that never moved is unambiguous in a way that a small gradient is not.
+
+## 12. Dual network: replay beats grafting, and compute explains most of it
+
+Four games, specialists of 4 hidden units each, query network of 16.
+`consolidate.py`.
+
+| activation | route | query-net updates | MSE |
+|---|---|---|---|
+| tanh | joint | 115,200 | 0.0626 |
+| tanh | joint, **matched budget** | 192,000 | 0.0417 |
+| tanh | **replay** | 192,000 | **0.0398** |
+| tanh | **graft** (fine-tune only) | **38,400** | 0.0542 |
+| sine `b=1` | joint, matched budget | 192,000 | 0.0547 |
+| sine `b=1` | replay | 192,000 | 0.0524 |
+| sine `b=1` | graft (fine-tune only) | 38,400 | 0.0748 |
+| *either* | *specialists alone* | — | *0.0081 / 0.0128* |
+
+**Against naive joint training both routes look strong — replay 1.57×, graft
+1.16×. Most of replay's margin is compute.** Replay trains the query network on
+generated samples before fine-tuning, so it takes 192,000 updates against joint's
+115,200. Give joint the same budget and it reaches 0.0417 against replay's
+0.0398: **1.05×, not 1.57×.** The mechanism is worth about five percent, which is
+real and small.
+
+**Grafting's value turns out to be compute, not accuracy.** It reaches 0.0542
+using **38,400** query-network updates — a third of what joint needs to reach a
+worse 0.0626. The specialists train independently and can run in parallel; the
+shared query network, which is the contended resource, only fine-tunes. For an
+architecture where many games are learned and one network is queried, moving work
+off the shared bottleneck onto parallel independent learners is the win, and it
+is exactly what "slot the weights in, then fine-tune" does.
+
+**Replay is the better transfer where accuracy matters, and the REM framing is
+why.** Grafted weights arrive in a network with an input the specialist never had
+(the selector) and an output scaled to a band — they are in the wrong coordinate
+system, and fine-tuning has to repair them. Replay transfers the *function*
+rather than the *parameters*, so no coordinate system has to match. That is also
+what the neuroscience describes: consolidation during sleep is replay-driven, the
+hippocampus regenerating experience for the neocortex, not synapses being copied
+between structures. **The analogy predicted the better of the two implementations
+before either was run.**
+
+**What neither route fixes:** specialists alone reach 0.0081 where the best
+shared query network reaches 0.0398 — the compression costs about **5×**, and no
+consolidation route recovers it. That is the same cost Part 1 measured from the
+other side, and it is the price of one network holding many games.
+
+## 13. Predictions this part got wrong
+
+* **"Replay gives 1.5×."** It gives 1.05× once joint gets the same budget. The first comparison was against an under-trained baseline.
+* **"A loss gate repairs the gradient trigger."** It does not — early training is flat *and* bad, which is what the gate permits. Only a plateau condition separates the cases.
+* Two implementation bugs were caught before they became results: a backward-pass index error (`as_[l-1]` for `as_[l]`), and a probe-then-step pattern that gave the inversion conditions two updates per sample where the baseline got one.
+
+## 14. What to build
+
+* **Fix `b` first.** Everything in §10 is upstream of both mechanisms.
+* **Build inversion on a plateau trigger, not a magnitude trigger** — and expect ~1.2× where a stall is genuine, nothing where it is not.
+* **Build the dual network, and transfer by replay**, with grafting where query-network compute is the constraint rather than accuracy.
+* **Do not expect consolidation to pay for compression.** The 5× gap between a specialist and a shared band is structural.
