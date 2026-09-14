@@ -26,6 +26,7 @@ and an optional GPU backend (torch) are built in.
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
 | The model converses with itself | `converse` / the Converse tab: two voices take turns, every reply is the prediction search picking up the last words of the previous line and continuing them to the end of a text; beam speaks the most likely reply the conversation has not heard yet, sample draws walks; the second voice can be the model of the other kind. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
+| External tools, browsing, exploring on its own | `agent` / `explore` and the Agent tab: the network calls tools by *writing* them (`<tool>web_fetch {"url": "..."}</tool>`) and reads the answer back as `<result>...</result>`, so a whole attempt is one training text. Ollama writes the acceptance criteria before anything is attempted, repairs the calls the network cannot write yet, judges the answer against those criteria and demonstrates with the same real tools when it failed; then 2NRL trains on the failures — the harder the worse they were — inverts, and fine-tunes on what was right. `explore` lets the network choose every task itself and follow what it finds. |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Go port of the count / reward model | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -87,6 +88,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
 | `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
+| `make tools` / `agent TASKS=data/sample_tasks.txt` / `explore STEPS=10` / `explore-forever` | tool use: list the tools, solve a task list with Ollama writing the criteria, judging and teaching, or let the network choose its own tasks and browse |
 | `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
@@ -163,10 +165,14 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
-| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model` |
+| `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, the tool options below |
 | `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--2nrl --good FILE ...]` |
 | `image info` / `image encode FILE` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--phase both\|teacher\|model`, `--rounds`, `--teacher-model gemma4`, `--judge-model`, `--url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
+| `tools list \| describe \| call` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`; tool options below |
+| `agent --tasks FILE` | `--phase model\|teacher\|both`, `--rounds`, `--twonrl-per task\|round`, `--agent-model`, `--judge-model`, `--url`, `--timeout`, `--criteria 4`, `--lenient`, `--no-judge`, `--mediation repair\|always\|never`, `--no-teach`, `--max-steps 6`, `--model-attempts 2`, `--teacher-attempts 1`, `--sample-first`, `--temperature`, `--max-length 200`, `--observation-chars 600`, `--read-reward`, `--no-replay`, `--blatant-mode fail_invert\|activation\|state\|none`, `--blatant-margin 0.5`, `--blatant-boost 4`, 2NRL options, checkpoint options, tool options, `--out`, `--report FILE` |
+| `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option |
+| tool options (`tools`, `agent`, `explore`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted), `--web-timeout 20`, `--max-bytes 2000000`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -211,6 +217,13 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
 | `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
+| `GET /api/tools` | the external tools the network can call: names, arguments, JSON schemas, the call format |
+| `POST /api/tools/call` | `{"tool", "arguments"}` or `{"call": "web_fetch {\"url\": \"...\"}"}` (+ `offline`, `allow_private`, `search_url`, `web_timeout`, `max_bytes`, `python_tool`) -> the tool result; a failing tool is 200 with `ok: false` |
+| `POST /api/agent/start` | `{"tasks" \| "tasks_text" \| "task_files", "phase", "rounds", "max_steps", "mediation", "criteria", "judge", "teach", "blatant_mode", "blatant_margin", "blatant_boost", 2NRL options}` -> job |
+| `POST /api/agent/explore` | the network chooses every task: `{"steps"` (0 = until stopped)`, "seed_urls", ...}` -> job |
+| `GET /api/agent/history` | criteria / step / attempt / task records of all agent and explore runs |
+| `POST /api/agent/criteria` | `{"tasks"}` -> the acceptance criteria the LLM writes, nothing attempted |
+| `POST /api/agent/solve` | `{"task", "source": "model"\|"teacher"}` -> the transcript, the verdict and how badly it failed; no training |
 | `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
 | `GET /api/history` | training history |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
@@ -241,8 +254,10 @@ the other kind in memory as the second voice; Continue extends the
 conversation, and turns are rated like samples), Score, 2NRL,
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
 adversarial review), Code (code generation with the sandbox and the judge),
-Checkpoints (save / restore / load / reset) and a Graph view of the most
-visited nodes.
+Agent (tool use: solve a list of tasks or let the network explore on its own,
+with a live log of the acceptance criteria, the tasks it chose, every tool call
+tagged by who wrote it, and the verdicts), Checkpoints (save / restore / load /
+reset) and a Graph view of the most visited nodes.
 
 Training files: drop text files onto the Train panel (or press "Upload
 files…"); the browser reads them and sends them to `POST /api/uploads` (a
@@ -358,6 +373,115 @@ API: `POST /api/codegen/start` (job), `GET /api/codegen/history`,
 no training) and `POST /api/codegen/run` (sandbox only). The frontend's Code
 tab drives all of it: problems (typed or uploaded), live attempt / problem /
 round records, a "try a problem" box and a sandbox runner.
+
+## Tool use: the network browses, Ollama sets the bar and teaches
+
+`radixnet agent` and `radixnet explore` give the network **external tools** —
+web search, web pages, a calculator, optionally a Python sandbox and the
+uploaded files — and put a local LLM around it as the thing that keeps it
+honest. The network cannot *decide* to call a function; it can only write
+characters. So a tool call is text it writes, and the observation is text it
+reads back:
+
+```
+TASK: How many legs does a cat have?
+<tool>web_search {"query": "cat anatomy legs"}</tool>
+<result>1. Cat - Wikipedia - https://en.wikipedia.org/wiki/Cat ...</result>
+<tool>web_fetch {"url": "https://en.wikipedia.org/wiki/Cat"}</tool>
+<result>Cat - Wikipedia The cat is a small domesticated carnivorous mammal ... four legs ...</result>
+<answer>A cat has four legs.</answer>
+```
+
+That makes a whole attempt **one ordinary training text**, which is exactly
+what 2NRL can reward or punish as a unit.
+
+```
+task -> acceptance criteria (Ollama, written first) -> the network calls tools -> judged against those criteria
+     -> taught with the same real tools when it failed -> train on the failures, invert, fine-tune (2NRL)
+```
+
+Ollama plays four roles, and solving the task is the last one it is given:
+
+1. **Criteria** — before anything is attempted, the LLM writes the handful of
+   checkable statements a correct answer must satisfy (`--criteria 4`). The bar
+   is therefore set independently of whatever the network happens to produce.
+   A task file may carry its own criteria, and then the LLM is not asked.
+2. **Mediator** — an untrained network writes noise. Whatever it emits that
+   cannot be read as a call is handed to the LLM, which turns it into one valid
+   call against the real tool schemas (Ollama's own tool-calling API where the
+   model supports it, JSON otherwise). The repaired call is executed *and
+   written into the transcript*, so what the network learns is always
+   well-formed — and the share of calls it managed by itself (`own` /
+   `autonomy` in the records) is the number that says whether it is learning.
+   `--mediation always` never asks the network; `--mediation never` runs its
+   broken call and learns from the failure.
+3. **Judge** — the finished transcript is marked against the criteria written
+   up front: every criterion met or not, a score, a critique. `--lenient`
+   accepts an answer the judge calls correct even with a criterion unmet;
+   `--no-judge` marks against a task's known `answer` instead.
+4. **Teacher** — only when the network failed does the LLM solve the task, with
+   the *same real tools*, so the demonstration is a transcript of things that
+   actually happened. That transcript is the positive phase of 2NRL
+   (`--no-teach` turns it off).
+
+### Failure first, then invert
+
+Learning follows section 9.1 of `DESIGN.md`. Every failed attempt gets a **gap**
+in `[0, 1]`: the share of the acceptance criteria it missed, or how far below
+the pass score the judge put it, whichever is worse — an attempt that answered
+nothing has a gap of 1, and every failure keeps a floor of 0.1 so a near miss
+still trains. With `--blatant-mode fail_invert` (the default) the negative phase
+runs one pass per distinct weight, heaviest first, with the learning rates
+multiplied by `min(--blatant-boost, 1 + gap / --blatant-margin)`: the worse the
+attempt, the harder the network is pushed to reproduce it — to fail blatantly on
+purpose — before the inversion turns that into avoidance and the correct
+transcripts are the fine-tune pass. `activation` / `state` instead negate the
+nodes along a failed transcript locally, and blatant failures then leave the
+2NRL garbage set. Nothing failed: the correct run is rewarded and nothing is
+inverted.
+
+### Exploring on its own
+
+`radixnet explore` takes the tasks away and lets the network choose them. Each
+step it continues `TASK:` — the prefix every transcript it has learned starts
+with — into whatever it is reaching for; the LLM turns that emission into one
+concrete question browsing can settle, preferring the pages the network has come
+across but not read yet. Then the ordinary cycle runs on it. Search results and
+page links are filed as the frontier and the pages read as visited, so the
+exploration compounds instead of circling. `--steps 0` runs until Ctrl-C, which
+stops after the current step and saves.
+
+```bash
+ollama pull llama3.2
+python -m radixnet tools list                                  # what the network can call
+python -m radixnet tools call --tool web_fetch --arg url=https://example.com
+python -m radixnet agent --tasks data/sample_tasks.txt         # solve a list of questions
+python -m radixnet agent --tasks data/sample_tasks.jsonl --rounds 3 --report agent.json
+python -m radixnet explore --steps 20 --seed-url https://en.wikipedia.org/wiki/Cat
+python -m radixnet explore --steps 0                           # until Ctrl-C
+```
+
+Task files: one question per line (`.txt`, `#` comments), or `.json` / `.jsonl`
+objects `{"id", "prompt", "criteria", "answer", "seeds"}` (`data/sample_tasks.*`).
+
+**Safety.** The web tools accept `http` and `https` only, refuse URLs with
+credentials, refuse any address that resolves into a private, loopback,
+link-local or reserved range (`--allow-private` is for a local test server),
+re-check every redirect hop, and cap both the response size (`--max-bytes`) and
+the time (`--web-timeout`). Nothing is sent but a GET with a user agent — no
+cookies, no credentials. The `calculator` evaluates an AST that allows numbers,
+operators and the `math` functions and nothing else; `--python-tool` runs code in
+the same sandbox as `codegen` (see its section for what that does and does not
+contain). `--offline` removes the web tools altogether.
+
+API: `GET /api/tools`, `POST /api/tools/call` (one call, no model),
+`POST /api/agent/start` (job), `POST /api/agent/explore` (job),
+`GET /api/agent/history`, `POST /api/agent/criteria` (the criteria for a task,
+nothing attempted) and `POST /api/agent/solve` (one task through the loop with
+no training, reporting the transcript, the verdict and the gap). The frontend's
+**Agent** tab drives all of it: the mode, the tool list, the loop and mediation
+options, the failure settings, a live log of criteria, proposals, tool calls
+(tagged by who wrote each one) and attempts, and a table of finished tasks.
 
 ## Two models: RadixNet and the count / reward model
 
@@ -662,11 +786,12 @@ make go-test     # cd go && go test -race ./...
 ```
 RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
-                      checkpoint, bench, cli, api, ollama, codegen
+                      checkpoint, bench, cli, api, ollama, codegen, tools, agent
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)
-  data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data)
+  data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
+                      sample_problems.* (codegen), sample_tasks.* (agent / explore)
   docker/             container entrypoint (optional checkpoint resume)
   Dockerfile, docker-compose.yml, docker-compose.gpu.yml, .env.example, Makefile
   DESIGN.md           the specification

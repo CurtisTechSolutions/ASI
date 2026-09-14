@@ -132,6 +132,16 @@ export const api = {
     return post(`/api/images/encode${query ? `?${query}` : ""}`, form);
   },
   imageDecode: (text, encoder) => post("/api/images/decode", encoder ? { text, encoder } : { text }),
+  /** Tool use (see AgentPanel): the tools the network can call, and one direct call. */
+  tools: () => get("/api/tools"),
+  toolCall: (body) => post("/api/tools/call", body),
+  /** The agent loop: Ollama writes the acceptance criteria, mediates, judges and teaches; 2NRL learns. */
+  agentStart: (body) => post("/api/agent/start", body),
+  /** Self-directed browsing: the network chooses every task itself. */
+  agentExplore: (body) => post("/api/agent/explore", body),
+  agentHistory: () => get("/api/agent/history"),
+  agentCriteria: (body) => post("/api/agent/criteria", body),
+  agentSolve: (body) => post("/api/agent/solve", body),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama teacher / judge and 2NRL rewards. */
   codegenStart: (body) => post("/api/codegen/start", body),
   codegenHistory: () => get("/api/codegen/history"),

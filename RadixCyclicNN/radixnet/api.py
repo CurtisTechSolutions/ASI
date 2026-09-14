@@ -52,6 +52,17 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import __version__
+from .agent import (
+    BLATANT_MODES as AGENT_BLATANT_MODES,
+    MEDIATION as AGENT_MEDIATION,
+    PHASES as AGENT_PHASES,
+    AgentConfig,
+    AgentTrainer,
+    Task,
+    parse_task_file,
+    parse_tasks,
+    write_criteria,
+)
 from .archive import extract_texts, is_zip
 from .backend import describe_backends
 from .checkpoint import CheckpointManager
@@ -86,6 +97,7 @@ from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
 from .search import PathResult
+from .tools import ToolBox, WebClient, default_toolbox, parse_call
 from .vision import VisionError
 from .vision import decode_text as decode_image_text
 from .vision import describe as describe_vision
@@ -259,6 +271,7 @@ class ModelService:
         ollama_url: str | None = None,
         ollama_model: str | None = None,
         kind: str | None = None,
+        tool_options: dict | None = None,
     ) -> None:
         self.model_path = os.path.abspath(model_path) if model_path else None
         self.checkpoint_dir = os.path.abspath(checkpoint_dir) if checkpoint_dir else None
@@ -267,6 +280,11 @@ class ModelService:
         self._archive_cache: dict[str, tuple[tuple[int, int], dict]] = {}  # path -> ((size, mtime_ns), summary)
         self.ollama_url = normalise_url(ollama_url or OLLAMA_DEFAULT_URL)
         self.ollama_model = (ollama_model or OLLAMA_DEFAULT_MODEL).strip() or OLLAMA_DEFAULT_MODEL
+        self.tool_options: dict[str, Any] = {
+            "offline": False, "allow_private": False, "search_url": None, "web_timeout": 20.0,
+            "max_bytes": 2_000_000, "python_tool": False, "sandbox_timeout": 10.0,
+            **(tool_options or {}),
+        }
         self.backend_name = backend
         self.device = device
         self.seed = int(seed)
@@ -281,6 +299,7 @@ class ModelService:
         self._job_ids = itertools.count(1)
         self._evolve_history: list[dict] = []
         self._codegen_history: list[dict] = []
+        self._agent_history: list[dict] = []
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
@@ -610,6 +629,7 @@ class ModelService:
             checkpoint_dir=self.checkpoint_dir,
             upload_dir=self.upload_dir,
             ollama={"url": self.ollama_url, "model": self.ollama_model},
+            tools={"names": sorted(self.toolbox().names()), **self.tool_options},
         )
         return stats
 
@@ -996,6 +1016,84 @@ class ModelService:
 
     def codegen_history(self) -> dict:
         return {"history": list(self._codegen_history)}
+
+    # -- tool use (browsing + the Ollama-mediated agent loop) ----------------
+
+    def toolbox(
+        self,
+        *,
+        offline: bool | None = None,
+        allow_private: bool | None = None,
+        search_url: str | None = None,
+        web_timeout: float | None = None,
+        max_bytes: int | None = None,
+        python_tool: bool | None = None,
+    ) -> ToolBox:
+        """The tools of one request: the server's defaults with the request's overrides applied."""
+        options = dict(self.tool_options)
+        for key, value in (
+            ("offline", offline), ("allow_private", allow_private), ("search_url", search_url),
+            ("web_timeout", web_timeout), ("max_bytes", max_bytes), ("python_tool", python_tool),
+        ):
+            if value is not None:
+                options[key] = value
+        try:
+            web = None
+            if not options["offline"]:
+                web = WebClient(
+                    timeout=options["web_timeout"], max_bytes=options["max_bytes"],
+                    allow_private=options["allow_private"], search_url=options["search_url"] or None,
+                )
+            sandbox = Sandbox(timeout=options["sandbox_timeout"]) if options["python_tool"] else None
+            return default_toolbox(web, sandbox=sandbox, upload_dir=self.upload_dir, offline=options["offline"])
+        except (ValueError, TypeError) as exc:
+            raise ApiError(400, str(exc)) from exc
+
+    def describe_tools(self) -> dict:
+        box = self.toolbox()
+        return {
+            "tools": box.describe(), "names": box.names(), "count": len(box),
+            "options": dict(self.tool_options), "upload_dir": self.upload_dir,
+            "call_format": '<tool>name {"argument": "value"}</tool>',
+        }
+
+    def call_tool(self, toolbox: ToolBox, name: str, arguments: dict) -> dict:
+        """Run one tool outside any job (the model lock is not taken: no tool touches the model)."""
+        return toolbox.call(name, arguments).to_dict()
+
+    def start_agent(self, tasks: list[Task], config: AgentConfig, client: OllamaClient, toolbox: ToolBox) -> dict:
+        """Start an ``agent`` job: criteria, tool calls, judging, teaching and 2NRL over ``tasks``."""
+        config.validate()
+        manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+
+        def work(job: Job) -> None:
+            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock)
+            trainer.run(
+                tasks, progress=self._progress(job, self._agent_history), stop_event=job.stop_event,
+                checkpoint_manager=manager,
+            )
+
+        return self._start_job("agent", work)
+
+    def start_explore(
+        self, steps: int | None, config: AgentConfig, client: OllamaClient, toolbox: ToolBox, seeds: list[str] | None = None
+    ) -> dict:
+        """Start an ``explore`` job: the network chooses every task itself (``steps`` ``None`` / 0 = until stopped)."""
+        config.validate()
+        manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+
+        def work(job: Job) -> None:
+            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock)
+            trainer.frontier.extend(seeds or ())
+            trainer.explore(
+                steps=steps, progress=self._progress(job, self._agent_history), stop_event=job.stop_event,
+                checkpoint_manager=manager,
+            )
+
+        return self._start_job("explore", work)
+
+    def agent_history(self) -> dict:
+        return {"history": list(self._agent_history)}
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -2034,6 +2132,200 @@ def _r_codegen_run(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, {"run": run.to_dict(), "style": style.to_dict(), "verdict": verdict.to_dict()}
 
 
+def _toolbox_from(svc: ModelService, f: Fields, q: dict | None = None) -> ToolBox:
+    """The request's toolbox: the server's tool defaults with ``offline`` / ``allow_private`` / ... applied."""
+    query = q or {}
+
+    def flag(name: str) -> bool | None:
+        if f.present(name):
+            return bool(f.flag(name, False))
+        raw = (query.get(name) or [None])[0]
+        return None if raw is None else raw.strip().lower() in ("1", "true", "yes", "on")
+
+    return svc.toolbox(
+        offline=flag("offline"), allow_private=flag("allow_private"), python_tool=flag("python_tool"),
+        search_url=f.text("search_url", None), web_timeout=f.number("web_timeout", None, minimum=0.1),
+        max_bytes=f.integer("max_bytes", None, minimum=1024),
+    )
+
+
+def _agent_config(f: Fields) -> AgentConfig:
+    """An :class:`AgentConfig` from the request body (every field optional)."""
+    d = AgentConfig()
+    phase = f.text("phase", "model").strip().lower()
+    if phase not in AGENT_PHASES + ("both",):
+        raise ApiError(400, f"'phase' must be 'model', 'teacher' or 'both' (got {phase!r})")
+    mediation = f.text("mediation", d.mediation).strip().lower()
+    if mediation not in AGENT_MEDIATION:
+        raise ApiError(400, f"'mediation' must be one of {', '.join(AGENT_MEDIATION)} (got {mediation!r})")
+    blatant = f.text("blatant_mode", d.blatant_mode).strip().lower()
+    if blatant not in AGENT_BLATANT_MODES:
+        raise ApiError(400, f"'blatant_mode' must be one of {', '.join(AGENT_BLATANT_MODES)} (got {blatant!r})")
+    twonrl_per = f.text("twonrl_per", d.twonrl_per).strip().lower()
+    if twonrl_per not in ("task", "round"):
+        raise ApiError(400, f"'twonrl_per' must be 'task' or 'round' (got {twonrl_per!r})")
+    config = AgentConfig(
+        agent_model=f.text("agent_model", None) or f.text("model", None) or d.agent_model,
+        judge_model=f.text("judge_model", None),
+        phases=AGENT_PHASES if phase == "both" else (phase,),
+        rounds=f.integer("rounds", d.rounds, minimum=1),
+        max_steps=f.integer("max_steps", d.max_steps, minimum=1),
+        model_attempts=f.integer("model_attempts", d.model_attempts, minimum=1),
+        teacher_attempts=f.integer("teacher_attempts", d.teacher_attempts, minimum=1),
+        first_attempt_dijkstra=f.flag("first_attempt_dijkstra", d.first_attempt_dijkstra),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        max_length=f.integer("max_length", d.max_length, minimum=1),
+        mediation=mediation,
+        criteria_count=f.integer("criteria", d.criteria_count, minimum=1),
+        strict=f.flag("strict", d.strict),
+        use_judge=f.flag("judge", d.use_judge),
+        teach_on_failure=f.flag("teach", d.teach_on_failure),
+        observation_chars=f.integer("observation_chars", d.observation_chars, minimum=0),
+        twonrl_per=twonrl_per,
+        replay=f.flag("replay", d.replay),
+        read_reward=f.flag("read_reward", d.read_reward),
+        blatant_mode=blatant,
+        blatant_margin=f.number("blatant_margin", d.blatant_margin, minimum=0.001),
+        blatant_boost=f.number("blatant_boost", d.blatant_boost, minimum=1.0),
+        neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
+        pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
+        neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
+        pos_lr=f.number("pos_lr", d.pos_lr, minimum=0.0),
+        batch_size=f.integer("batch_size", d.batch_size, minimum=1),
+        checkpoint_every=f.integer("checkpoint_every", 0, minimum=0),
+        seed=f.integer("seed", 0),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _tasks_from(svc: ModelService, f: Fields) -> list[Task]:
+    """``tasks`` (strings / objects), ``tasks_text`` (one per line) and ``task_files`` (uploads)."""
+    items: list[Any] = []
+    raw = f._body.get("tasks")
+    if raw is not None:
+        if not isinstance(raw, list):
+            raise ApiError(400, "'tasks' must be a list of strings or {prompt, criteria, answer, seeds} objects")
+        items.extend(raw)
+    text = f.text("tasks_text", "")
+    if text.strip():
+        items.extend(line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+    tasks: list[Task] = []
+    try:
+        if items:
+            tasks = parse_tasks(items)
+        for name in f.names("task_files"):
+            tasks.extend(parse_task_file(svc.read_upload(name), os.path.splitext(name)[1]))
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    if not tasks:
+        raise ApiError(400, "no tasks: give 'tasks', 'tasks_text' or 'task_files'")
+    for index, task in enumerate(tasks, 1):  # ids must stay unique once the sources are combined
+        task.id = task.id if task.id not in {t.id for t in tasks[: index - 1]} else f"t{index}"
+    return tasks
+
+
+def _agent_client(svc: ModelService, f: Fields, config: AgentConfig) -> OllamaClient:
+    return svc.ollama_client(f.text("url", None), config.agent_model, f.number("timeout", None, minimum=1.0))
+
+
+def _r_tools(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.describe_tools()
+
+
+def _r_tool_call(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    toolbox = _toolbox_from(svc, f, q)
+    raw = f.text("call", "")
+    if raw.strip():
+        call = parse_call(raw if raw.lstrip().startswith("<tool>") else f"<tool>{raw}</tool>", toolbox)
+        if call is None or not call.ok:
+            raise ApiError(400, call.error if call is not None else f"no tool call in {raw[:120]!r}")
+        name, arguments = call.name, call.arguments
+    else:
+        name = f.text("tool").strip()
+        arguments = f._body.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            raise ApiError(400, "'arguments' must be an object")
+    if not toolbox.has(name):
+        raise ApiError(404, f"unknown tool {name!r} (have: {', '.join(toolbox.names())})")
+    return 200, svc.call_tool(toolbox, name, arguments)
+
+
+def _r_agent_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    tasks = _tasks_from(svc, f)
+    config = _agent_config(f)
+    toolbox = _toolbox_from(svc, f)
+    client = _agent_client(svc, f, config)
+    job = svc.start_agent(tasks, config, client, toolbox)
+    return 202, {"job": job, "tasks": [t.to_dict() for t in tasks], "tools": toolbox.names(), "config": config.to_dict()}
+
+
+def _r_agent_explore(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    config = _agent_config(f)
+    toolbox = _toolbox_from(svc, f)
+    client = _agent_client(svc, f, config)
+    steps = f.integer("steps", 10, minimum=0)
+    seeds = [s for s in f.texts_optional("seed_urls", "seed_url") if s.strip()]
+    job = svc.start_explore(steps or None, config, client, toolbox, seeds)
+    return 202, {"job": job, "steps": steps or None, "seeds": seeds, "tools": toolbox.names(), "config": config.to_dict()}
+
+
+def _r_agent_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.agent_history()
+
+
+def _r_agent_criteria(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The acceptance criteria the LLM writes for a task, without attempting anything."""
+    tasks = _tasks_from(svc, f)
+    config = _agent_config(f)
+    client = _agent_client(svc, f, config)
+    out = []
+    try:
+        for task in tasks:
+            out.append({"task": task.id, "prompt": task.prompt,
+                        "criteria": write_criteria(client, task, model=config.agent_model, count=config.criteria_count)})
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    return 200, {"tasks": out, "model": config.agent_model, "url": client.url}
+
+
+def _r_agent_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """One task through the loop with no training: the network's attempt, or the teacher's demonstration."""
+    tasks = _tasks_from(svc, f)
+    if len(tasks) != 1:
+        raise ApiError(400, f"/api/agent/solve takes exactly one task (got {len(tasks)})")
+    task = tasks[0]
+    source = f.text("source", "model").strip().lower()
+    if source not in ("model", "teacher"):
+        raise ApiError(400, f"'source' must be 'model' or 'teacher' (got {source!r})")
+    config = _agent_config(f)
+    config.teach_on_failure = False
+    toolbox = _toolbox_from(svc, f)
+    client = _agent_client(svc, f, config)
+    try:
+        with svc.session() as model:
+            trainer = AgentTrainer(model, client, toolbox, config)
+            criteria = trainer.criteria_for(task)
+            if source == "model":
+                attempt = trainer.solve_with_model(task, 0, None, "model")
+            else:
+                attempt = trainer.solve_with_teacher(task, criteria, 0)
+            attempt.verdict = trainer.judge(task, criteria, attempt)
+            gap = trainer.gap_of(attempt, criteria)
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return 200, {
+        "task": task.to_dict(), "source": source, "criteria": criteria, "attempt": attempt.to_dict(),
+        "transcript": attempt.text, "correct": attempt.verdict.correct, "gap": gap,
+        "frontier": trainer.frontier[:20], "tools": toolbox.names(),
+    }
+
+
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats (with the active kind), current job, backend availability, paths"),
@@ -2103,6 +2395,23 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/codegen/solve", _r_codegen_solve,
      "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
     ("POST", "/api/codegen/run", _r_codegen_run, "run a program in the sandbox: {code, tests, expected_output, sandbox_timeout, memory_mb}"),
+    ("GET", "/api/tools", _r_tools,
+     "the external tools the network can call by writing <tool>name {...}</tool>: names, arguments, JSON schemas"),
+    ("POST", "/api/tools/call", _r_tool_call,
+     "call one tool directly: {tool, arguments} or {call: 'name {\"arg\": \"value\"}'} + tool overrides "
+     "{offline, allow_private, search_url, web_timeout, max_bytes, python_tool} -> the ToolResult"),
+    ("POST", "/api/agent/start", _r_agent_start,
+     "start an agent job over tasks: {tasks | tasks_text | task_files, phase: model|teacher|both, rounds, max_steps, "
+     "mediation: repair|always|never, criteria, judge, teach, blatant_mode, blatant_margin, blatant_boost, 2NRL options}"),
+    ("POST", "/api/agent/explore", _r_agent_explore,
+     "start an explore job - the network chooses every task itself: {steps (0 = until stopped), seed_urls, ...the "
+     "agent options}"),
+    ("GET", "/api/agent/history", _r_agent_history, "criteria / step / attempt / task records of all agent and explore runs"),
+    ("POST", "/api/agent/criteria", _r_agent_criteria,
+     "the acceptance criteria the LLM writes for {tasks}, without attempting anything"),
+    ("POST", "/api/agent/solve", _r_agent_solve,
+     "one task through the loop without training: {task, source: model|teacher, ...} -> the transcript, the verdict "
+     "and how badly it failed"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}
@@ -2463,6 +2772,7 @@ def create_server(
     ollama_url: str | None = None,
     ollama_model: str | None = None,
     kind: str | None = None,
+    tool_options: dict | None = None,
 ) -> tuple[RadixNetHTTPServer, ModelService]:
     """Build (and bind) the server; ``port=0`` picks a free port.
 
@@ -2471,12 +2781,17 @@ def create_server(
     ``upload_dir`` enables the upload endpoints (training files kept on the
     server); ``frontend_dir`` is the built React app; ``ollama_url`` /
     ``ollama_model`` are the defaults of the ``/api/ollama/*`` endpoints
-    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted).  ``quiet``
-    silences the per-request log lines (stderr).
+    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted);
+    ``tool_options`` are the defaults of the ``/api/tools`` and
+    ``/api/agent/*`` endpoints (``offline``, ``allow_private``,
+    ``search_url``, ``web_timeout``, ``max_bytes``, ``python_tool``,
+    ``sandbox_timeout``).  ``quiet`` silences the per-request log lines
+    (stderr).
     """
     service = ModelService(
         model_path=model_path, checkpoint_dir=checkpoint_dir, backend=backend, device=device,
         seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
+        tool_options=tool_options,
     )
     server = RadixNetHTTPServer((host, port), service, frontend_dir=frontend_dir, quiet=quiet)
     return server, service
@@ -2496,12 +2811,13 @@ def run_server(
     ollama_url: str | None = None,
     ollama_model: str | None = None,
     kind: str | None = None,
+    tool_options: dict | None = None,
 ) -> None:
     """Serve until ``KeyboardInterrupt``; a running job is stopped on the way out."""
     server, service = create_server(
         host, port, model_path=model_path, checkpoint_dir=checkpoint_dir, frontend_dir=frontend_dir,
         backend=backend, device=device, seed=seed, quiet=quiet, upload_dir=upload_dir,
-        ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
+        ollama_url=ollama_url, ollama_model=ollama_model, kind=kind, tool_options=tool_options,
     )
     if not quiet:
         sys.stderr.write(f"radixnet API listening on {server.url} (Ctrl-C to stop)\n")

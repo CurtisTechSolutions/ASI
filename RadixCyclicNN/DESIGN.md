@@ -1017,3 +1017,190 @@ without `whole_file`, graph, save / load / reset, checkpoints in the Python layo
 and `tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `tests/test_api.py`, a
 model saved by the server loaded in Python with identical predictions, ZIP uploads, `split: paragraphs`, and the
 Python `CheckpointManager` reading the server's checkpoints).
+
+---
+
+## 24. Tool use (`tools.py`, `agent.py`) — the network browses, Ollama sets the bar and teaches
+
+The network cannot *decide* to call a function; it can only emit characters. So a tool call is text it writes and
+the observation is text it reads, which makes a whole attempt one ordinary training text — and therefore something
+2NRL can reward or punish as a unit:
+
+```
+TASK: How many legs does a cat have?
+<tool>web_search {"query": "cat anatomy legs"}</tool>
+<result>1. Cat - Wikipedia - https://en.wikipedia.org/wiki/Cat ...</result>
+<tool>web_fetch {"url": "https://en.wikipedia.org/wiki/Cat"}</tool>
+<result>Cat - Wikipedia The cat is a small domesticated carnivorous mammal ... four legs ...</result>
+<answer>A cat has four legs.</answer>
+```
+
+Around that the LLM plays four roles, and the role of solving the task is the last one it is given:
+
+```
+task -> acceptance criteria (LLM, written first) -> the network calls tools -> judge against the criteria (LLM)
+     -> teach with the same real tools when it failed (LLM) -> train on the failures, invert, fine-tune (2NRL)
+```
+
+### 24.1 `tools.py` — the call format, the registry, browsing
+
+```python
+CALL_OPEN/CLOSE = "<tool>"/"</tool>" ; RESULT_OPEN/CLOSE ; ANSWER_OPEN/CLOSE ; DEFAULT_OBSERVATION_CHARS = 600
+task_header(prompt) -> "TASK: <one line>\n"      # what every transcript starts with, and what `explore` continues
+call_text(name, arguments) -> '<tool>name {"a": "b"}</tool>\n'        # one line, JSON arguments, sorted keys
+result_text(output, limit=600) ; answer_text(answer) ; format_observation(result, limit)   # a failure -> "ERROR: ..."
+transcript_text(prompt, [(name, arguments, result)], answer=None, limit=600) -> one training text
+parse_arguments(raw, tool=None) -> dict   # JSON (truncated JSON repaired: the first line, then the missing "}),
+                                          # `key=value` pairs, or a bare value for a single-argument tool
+parse_call(text, toolbox=None) -> ToolCall | None   # the FIRST call; never drops what it cannot read: the
+                                          # ToolCall carries `error` so the caller can hand it to the mediator
+find_answer(text) -> str | None           # an unterminated <answer> still counts
+
+class ToolError(Exception)                                   # unknown tool, bad arguments, refused request
+Param(name, type: string|number|integer|boolean, description, required=True, default=None, enum=None)
+    .schema() .coerce(value)
+Tool(name, description, params=(), handler=None, network=False)
+    .signature() -> "name(a: string, [b: integer])"          # the line the prompts and the CLI show
+    .schema()    -> Ollama's / OpenAI's `tools` format       # what OllamaClient.chat(tools=...) sends
+    .coerce(arguments) -> dict                               # types, defaults, case-insensitive names, unknown dropped
+ToolCall(name, arguments, raw, span, error) ; ToolResult(tool, arguments, ok, output, error, seconds, meta)
+class ToolBox(tools=())
+    .register .remove .has .get .names .tools .describe .schemas .catalogue
+    .call(name, arguments) -> ToolResult       # NEVER raises: a failure is a result the model and the LLM can read
+    .run(call: ToolCall) -> ToolResult         # a broken call becomes a failed result
+```
+
+Browsing is `WebClient(timeout=20, max_bytes=2_000_000, max_redirects=4, user_agent=None, allow_private=False,
+search_url=None)`: `http`/`https` only, no credentials in the URL, no address that resolves into a private,
+loopback, link-local, reserved or multicast range (`allow_private` is for a local test server), redirects followed
+by hand so every hop is checked again, a byte cap and a timeout. `.fetch(url)` is the raw response, `.page(url)`
+adds `html_to_text` (title, text, absolute `http(s)` links; `<script>` / `<style>` / `<head>` dropped) and
+`.search(query, limit)` reads a JSON search API (SearxNG, Brave, ...) or an engine's HTML, unwrapping DuckDuckGo's
+redirects and dropping links back into the engine. `$RADIXNET_SEARCH_URL` (`{query}` is substituted) and
+`$RADIXNET_USER_AGENT` are the defaults.
+
+`default_toolbox(web=None, *, sandbox=None, upload_dir=None, offline=False, extra=()) -> ToolBox` installs
+`web_search(query, [limit])`, `web_fetch(url, [max_chars])` (its `meta.links` is what an exploration follows next),
+`web_links(url, [limit])`, `calculator(expression)` (`safe_eval`: an AST walk that allows numbers, operators and the
+`math` functions and nothing else), plus `python(code)` when a :class:`~radixnet.codegen.Sandbox` is given and
+`read_file(name, [max_chars])` when an upload directory is.
+
+### 24.2 `agent.py` — criteria, mediation, judging, teaching
+
+```python
+DEFAULT_AGENT_MODEL = $RADIXNET_AGENT_MODEL or the Ollama default ; PHASES = ("teacher", "model")
+MEDIATION = ("repair", "always", "never") ; MIN_EMISSION = 48 ; MAX_CRITERIA = 8
+Task(id, prompt, criteria=(), answer=None, seeds=()) ; parse_tasks ; parse_task_file(.txt|.json|.jsonl) ; load_tasks
+Step(index, call, result, source: "model"|"mediator"|"teacher", emission) ; Verdict(correct, score, met, critique, issues, judged_by)
+Attempt(index, source, steps, answer, text, verdict, seconds)  # .calls .own_calls .autonomy .feedback()
+Failure(text, gap, task, source)          # a failed transcript and how badly it failed (gap in [0, 1])
+
+write_criteria(client, task, *, model=None, count=4) -> list[str]
+    # JSON-mode, written BEFORE anything is attempted, so the bar does not depend on what the network produced.
+    # A task that carries its own criteria keeps them (the LLM is not asked at all); an unusable answer falls
+    # back to one criterion naming the task.
+mediate_call(client, emission, toolbox, task, transcript="", *, model=None, hint=None) -> ToolCall
+    # Ollama's native tool calling (chat with `tools`) first, then JSON mode for a model without it, then a
+    # fallback to the first network tool with the task as its argument. The arguments are coerced against the
+    # real schema; what still fails is reported on the call and executed as a failure.
+judge_attempt(client, task, criteria, transcript, answer, *, model=None) -> {"met", "score", "correct", "critique"}
+    # marks are read all-or-nothing (`_marks`): a partly readable list would misalign with the criteria
+teach_task(client, task, toolbox, *, model=None, max_steps=6, criteria=None, feedback=None, external, observation_chars)
+    -> (steps, answer)    # the LLM solves it with the REAL tools, so the demonstration is of things that happened
+propose_task(client, emission, *, model=None, frontier=(), visited=(), index=1) -> Task   # exploration (24.4)
+```
+
+`AgentConfig`: `agent_model`, `judge_model`, `phases=("model",)`, `rounds=1`, `max_steps=6` (tool calls per
+attempt), `model_attempts=2`, `teacher_attempts=1`, `first_attempt_dijkstra=True`, `candidates=5`,
+`temperature=1.0`, `max_length=200` (characters per step), `mediation="repair"`, `criteria_count=4`, `strict=True`,
+`use_judge=True`, `teach_on_failure=True`, `observation_chars=600`, `twonrl_per="task"|"round"`, `replay=True`,
+`replay_limit=64`, `read_reward=False`, `blatant_mode="fail_invert"`, `blatant_margin=0.5`, `blatant_boost=4.0`,
+`pass_score=6.0`, `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4`, `checkpoint_every=0`,
+`seed=0`.
+
+`AgentTrainer(model, client, toolbox, config=None, external=None)` (`external` is the context-manager factory the
+API passes as `ModelService.pause_lock`, entered around tool and LLM calls so readers are served while the network
+browses):
+
+* `_emissions(transcript, attempt_index)` — what the network offers to write next, most likely first. The first
+  attempt is the **beam search** (`predict(mode="beam", length=MIN_EMISSION, k=candidates)`), later attempts are
+  samples; candidates that closed their tag come first, because an unterminated call only *started* one. A single
+  cheapest path is no good here: Dijkstra accepts reaching END as a goal, so it answers with a couple of characters
+  that can never be a whole call.
+* `_next_call` — the first candidate that parses into a usable call (or gives an `<answer>`) is the network's own
+  move; only when none of them can be used does the mediator step in, and the repaired call is executed *and
+  written into the transcript*, so what the network learns is always well-formed. `mediation="always"` never asks
+  the network, `"never"` executes its broken call as a failure instead of repairing it.
+* `solve_with_model` / `solve_with_teacher` / `judge` / `criteria_for` — one attempt, one demonstration, one
+  verdict, the criteria (written once per task and remembered).
+* `run(tasks, progress=None, stop_event=None, checkpoint_manager=None)` — every round and phase; records of kind
+  `criteria`, `step`, `attempt`, `task` and `round`. A task record carries `correct`, `solved_by`, `model_solved`,
+  `taught`, `calls`, `own_calls`, **`autonomy`** (the share of calls the network wrote itself — the number that
+  says whether it is learning), `failures`, `blatant`, `boost_mean` / `boost_max`, `action` and `gap_max`.
+
+### 24.3 Failure first: how badly it failed decides how hard it is trained
+
+Section 9.1 applied to tool use. `gap_of(attempt, criteria)` puts every failure on `[0, 1]`: the share of the
+acceptance criteria it missed, or how far below `pass_score` the judge put it, whichever is worse; an attempt that
+answered nothing has a gap of 1, and every failure keeps a floor of 0.1 so that a near miss still trains. Then
+`learn(failures, good)`:
+
+* `blatant_mode="fail_invert"` (the default) — `two_nrl(bad, good, bad_weights=[min(blatant_boost, 1 + gap /
+  blatant_margin)])`: the negative phase runs one pass per distinct weight, heaviest first, so the worse an attempt
+  was the harder the network is pushed to reproduce it — to fail blatantly on purpose — before `invert()` turns
+  that into avoidance and the positive phase fine-tunes on the transcripts that were judged correct.
+* `"activation"` / `"state"` — `invert_paths(failures, mode, amounts=[min(1, gap / (2 * blatant_margin))])`
+  instead: every other node along a failed transcript is moved toward its negation, and blatant failures
+  (`gap > blatant_margin`) leave the 2NRL garbage set.
+* `"none"` — plain unweighted 2NRL.
+
+Nothing failed -> the correct transcripts are rewarded and **nothing is inverted**. Nothing was right -> the
+weighted negative passes run and the network is inverted (`_punish_weighted`). A transcript that is both a failure
+and a success (the same text reached twice) is never trained as garbage. `replay` adds earlier correct transcripts
+to every positive phase; `read_reward` adds the text of the pages that were read.
+
+### 24.4 `explore` — the network chooses its own tasks
+
+`AgentTrainer.explore(steps=10, progress=None, stop_event=None, checkpoint_manager=None)`; `steps` `None` or `0`
+runs until the stop event, like the GAN loop. Each step:
+
+1. `propose()` — the network continues `TASK:` (the prefix every transcript it has learned starts with) into
+   whatever it is reaching for, and `propose_task` turns that emission into one concrete question browsing can
+   settle, preferring the pages it has come across but not read (`frontier`) over the ones it has (`visited`).
+   The record of kind `proposal` keeps the raw emission beside the question, so what the network actually wrote is
+   visible.
+2. The ordinary `run_task` cycle: criteria, attempts, judging, teaching, and 2NRL after every step.
+3. `_note_urls` files the search results and page links of every tool result into `frontier` (capped at 200) and
+   the pages read into `visited`, so the exploration compounds instead of circling.
+
+### 24.5 CLI, API, frontend, tests
+
+CLI: `tools list | describe --tool NAME | call (--tool NAME --arg k=v ... | --call 'name {...}')`,
+`agent --tasks FILE` and `explore [--steps N] [--seed-url URL]`; `_add_tool_options` (`--offline`,
+`--allow-private`, `--search-url`, `--web-timeout`, `--max-bytes`, `--python-tool`, `--sandbox-timeout`,
+`--upload-dir`) and `_add_agent_options` (the LLM roles, the loop, `--blatant-mode|--blatant-margin|--blatant-boost`,
+the 2NRL rates) are shared; `serve` takes the tool options too. `TaskPrinter` prints criteria, proposals, calls and
+attempts as notes and every finished task as a row.
+
+API (`ModelService.toolbox(**overrides)`, `describe_tools`, `start_agent`, `start_explore`, `agent_history`;
+`/api/status` gains `"tools"`):
+
+| method & path | body | response |
+|---|---|---|
+| GET `/api/tools` | | `{"tools", "names", "count", "options", "upload_dir", "call_format"}` |
+| POST `/api/tools/call` | `{tool, arguments}` or `{call}` + tool overrides | the `ToolResult` (a failing tool is 200 with `ok: false`; an unknown tool 404) |
+| POST `/api/agent/start` | `{tasks \| tasks_text \| task_files, phase, rounds, ...}` | 202 `{"job", "tasks", "tools", "config"}` |
+| POST `/api/agent/explore` | `{steps, seed_urls, ...}` | 202 `{"job", "steps", "seeds", "tools", "config"}` |
+| GET `/api/agent/history` | | `{"history": [...]}` |
+| POST `/api/agent/criteria` | `{tasks}` | `{"tasks": [{task, prompt, criteria}], "model", "url"}` |
+| POST `/api/agent/solve` | `{task, source: model\|teacher}` | `{"criteria", "attempt", "transcript", "correct", "gap", "frontier", "tools"}` (no training) |
+
+Frontend: the **Agent** tab (`AgentPanel.jsx`) — the mode (tasks / explore), the tool list, the loop and mediation
+options, the failure fieldset of section 24.3, a live log of criteria, proposals, tool calls (tagged by who wrote
+them) and attempts, and a table of finished tasks with `own` calls, `failures`, `blatant` and `boost`.
+
+Tests: `tests/test_tools.py` (a fake website: pages, a JSON and an HTML search endpoint, redirects — including one
+to a refused scheme — a byte cap; the format, the registry, the guards, `safe_eval`, every built-in tool) and
+`tests/test_agent.py` (a fake Ollama that plays all four roles and switches between native `tool_calls` and JSON,
+the fake website, and a *real* untrained network: criteria, both mediation paths, judging, teaching, the gap and
+the weighting, the whole loop, exploring, the API endpoints and the CLI).

@@ -335,6 +335,76 @@ class ProblemPrinter(_RowPrinter):
             )
 
 
+TASK_COLUMNS: tuple[_Column, ...] = (
+    ("phase", 7, "<"), ("step", 5, ">"), ("task", 12, "<"), ("tries", 5, ">"), ("result", 7, "<"),
+    ("by", 7, "<"), ("calls", 5, ">"), ("own", 5, ">"), ("fails", 5, ">"), ("blatant", 7, ">"),
+    ("boost", 6, ">"), ("action", 6, "<"), ("seconds", 8, ">"),
+)
+
+
+class TaskPrinter(_RowPrinter):
+    """``progress`` callback for :meth:`AgentTrainer.run` / :meth:`AgentTrainer.explore`.
+
+    Criteria, proposals and individual tool calls are printed as notes; every
+    finished task becomes a row.
+    """
+
+    __slots__ = ("attempts", "steps")
+
+    def __init__(self, console: Console) -> None:
+        super().__init__(console, TASK_COLUMNS)
+        self.attempts = 0
+        self.steps = 0
+
+    def __call__(self, record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "criteria":
+            self.console.note(f"  {record.get('task')}: {clip(str(record.get('prompt')), 70)}")
+            for i, criterion in enumerate(record.get("criteria") or (), 1):
+                self.console.note(f"    criterion {i}: {clip(str(criterion), 80)}")
+        elif kind == "proposal":
+            self.console.note(
+                f"  {record.get('task')} chose: {clip(str(record.get('prompt')), 70)} "
+                f"(frontier {record.get('frontier')}, visited {record.get('visited')})"
+            )
+            self.console.note(f"    from its own text: {quote(clip(str(record.get('emission') or ''), 60))}")
+        elif kind == "step":
+            self.steps += 1
+            detail = record.get("error") or clip(str(record.get("output") or ""), 60)
+            self.console.note(
+                f"    {record.get('task')} call {record.get('step')} [{record.get('source')}] "
+                f"{record.get('tool')} {'ok' if record.get('ok') else 'FAILED'}: {detail}"
+            )
+        elif kind == "attempt":
+            self.attempts += 1
+            score = f" score={fmt(record.get('score'))}" if record.get("score") is not None else ""
+            autonomy = record.get("autonomy")
+            own = f" own={fmt(autonomy)}" if autonomy is not None else ""
+            self.console.note(
+                f"    {record.get('task')} attempt {record.get('attempt')} [{record.get('source')}] "
+                f"{'correct' if record.get('correct') else 'failed'}{score}{own}: "
+                f"{quote(clip(str(record.get('answer') or '(no answer)'), 60))}"
+            )
+            if record.get("critique"):
+                self.console.note(f"      judge: {clip(str(record['critique']), 80)}")
+        elif kind in ("task", "explore"):
+            values = [
+                record.get("phase") if kind == "task" else "explore", record.get("step") or record.get("round"),
+                clip(str(record.get("task")), 12), record.get("attempts"),
+                "correct" if record.get("correct") else "failed", record.get("solved_by") or "-",
+                record.get("calls"), record.get("own_calls"), record.get("failures"), record.get("blatant"),
+                record.get("boost_max"), record.get("action") or "-", record.get("seconds"),
+            ]
+            pairs = list(zip([c[0] for c in TASK_COLUMNS], values))
+            self.row(values, _compact(f"task {record.get('task')}", pairs))
+        elif kind == "round":
+            learned = f", 2NRL per round: {record.get('action')}" if record.get("action") else ""
+            self.console.note(
+                f"round {record.get('round')} [{record.get('phase')}]: {record.get('solved')}/{record.get('tasks')} solved, "
+                f"{record.get('model_solved')} by the model{learned}"
+            )
+
+
 # --------------------------------------------------------------------------
 # Ctrl-C handling for long-running work
 # --------------------------------------------------------------------------
@@ -1286,6 +1356,235 @@ def _ollama_client(args: argparse.Namespace) -> Any:
         raise CliError(str(exc)) from exc
 
 
+# --------------------------------------------------------------------------
+# tool use: the network browses, Ollama sets the bar and teaches
+# --------------------------------------------------------------------------
+
+
+def build_toolbox(args: argparse.Namespace) -> Any:
+    """The toolbox a run gets from the command line: browsing, the calculator, the sandbox, uploads."""
+    from .tools import WebClient, default_toolbox
+
+    web = None
+    if not args.offline:
+        try:
+            web = WebClient(
+                timeout=args.web_timeout, max_bytes=args.max_bytes, allow_private=args.allow_private,
+                search_url=args.search_url or None,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    sandbox = None
+    if args.python_tool:
+        from .codegen import Sandbox
+
+        sandbox = Sandbox(timeout=args.sandbox_timeout, isolate_network=not args.no_network_isolation)
+    try:
+        return default_toolbox(web, sandbox=sandbox, upload_dir=args.upload_dir or None, offline=args.offline)
+    except (ValueError, TypeError) as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _agent_config(args: argparse.Namespace, manager: Any) -> Any:
+    from .agent import AgentConfig
+
+    config = AgentConfig(
+        agent_model=args.agent_model or AgentConfig().agent_model, judge_model=args.judge_model,
+        phases=("teacher", "model") if getattr(args, "phase", "model") == "both" else (getattr(args, "phase", "model"),),
+        rounds=getattr(args, "rounds", 1), max_steps=args.max_steps, model_attempts=args.model_attempts,
+        teacher_attempts=args.teacher_attempts, first_attempt_dijkstra=not args.sample_first,
+        temperature=args.temperature, max_length=args.max_length, mediation=args.mediation,
+        criteria_count=args.criteria, strict=not args.lenient, use_judge=not args.no_judge,
+        teach_on_failure=not args.no_teach, observation_chars=args.observation_chars,
+        twonrl_per=getattr(args, "twonrl_per", "task"), replay=not args.no_replay, read_reward=args.read_reward,
+        blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
+        neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
+        batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager), seed=args.seed or 0,
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    return config
+
+
+def _agent_preamble(console: Console, args, model, origin, config, client, toolbox, source: str, out: str) -> None:
+    console.pairs([
+        ("model", origin.describe()),
+        ("backend", backend_label(model)),
+        ("tasks", source),
+        ("tools", f"{len(toolbox)}: {', '.join(toolbox.names())}"),
+        ("ollama", f"{config.agent_model} at {client.url}"),
+        ("judge", (config.judge_model or config.agent_model) if config.use_judge else "off (the known answer only)"),
+        ("mediation", f"{config.mediation} (the LLM repairs the calls the network cannot write yet)"),
+        ("steps", f"{config.max_steps} tool calls per attempt, {config.model_attempts} attempt(s) by the network"
+                  + (f", then the teacher demonstrates" if config.teach_on_failure else ", no teaching")),
+        ("failure", f"{config.blatant_mode}: margin={config.blatant_margin:g} boost={config.blatant_boost:g} "
+                    f"(train on the failures the harder the worse they are, then invert)"),
+        ("2NRL", f"negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
+                 f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}"),
+        ("output", out),
+    ])
+    console.say()
+
+
+def cmd_tools(args: argparse.Namespace, console: Console) -> dict:
+    """List the tools, describe one, or call one directly (no model, no LLM)."""
+    from .tools import ToolError, parse_call
+
+    toolbox = build_toolbox(args)
+    if args.action == "list":
+        console.pairs([("tools", len(toolbox)), ("offline", args.offline)])
+        console.say()
+        console.table(
+            ("name", "network", "arguments", "description"),
+            [[t.name, t.network, ", ".join(p.name if p.required else f"[{p.name}]" for p in t.params), t.description]
+             for t in toolbox.tools()],
+        )
+        return {"tools": toolbox.describe(), "offline": args.offline}
+    if args.action == "describe":
+        try:
+            tool = toolbox.get(args.tool)
+        except ToolError as exc:
+            raise CliError(str(exc)) from exc
+        console.pairs([("tool", tool.signature()), ("network", tool.network), ("description", tool.description)])
+        console.say()
+        console.table(
+            ("argument", "type", "required", "default", "description"),
+            [[p.name, p.type, p.required, p.default, p.description] for p in tool.params],
+        )
+        console.say()
+        console.say(json.dumps(tool.schema(), indent=2))
+        return {"tool": tool.to_dict(), "schema": tool.schema()}
+    # call
+    if args.call:
+        call = parse_call(args.call if args.call.startswith("<tool>") else f"<tool>{args.call}</tool>", toolbox)
+        if call is None or not call.ok:
+            raise CliError(call.error if call is not None else f"no tool call in {args.call!r}")
+        name, arguments = call.name, call.arguments
+    else:
+        if not args.tool:
+            raise CliError("`tools call` needs --tool NAME (with --arg) or --call '<tool>name {...}</tool>'")
+        name = args.tool
+        arguments = {}
+        for pair in args.arg or ():
+            key, sep, value = pair.partition("=")
+            if not sep:
+                raise CliError(f"--arg expects name=value, got {pair!r}")
+            arguments[key.strip()] = value
+    result = toolbox.call(name, arguments)
+    console.pairs([("tool", result.tool), ("arguments", json.dumps(result.arguments, ensure_ascii=False)),
+                   ("ok", result.ok), ("seconds", f"{result.seconds:.3f}")])
+    console.say()
+    console.say(result.output if result.ok else f"ERROR: {result.error}")
+    if not result.ok:
+        raise CliError(f"{result.tool}: {result.error}")
+    return result.to_dict()
+
+
+def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
+    """Solve a list of tasks with tools: criteria, attempts, judging, teaching, 2NRL."""
+    from .agent import AgentTrainer, load_tasks
+    from .ollama import OllamaError
+
+    try:
+        tasks = load_tasks(args.tasks)
+    except (OSError, ValueError) as exc:
+        raise CliError(f"cannot load tasks from {args.tasks}: {exc}") from exc
+    manager = checkpoint_manager(args)
+    config = _agent_config(args, manager)
+    toolbox = build_toolbox(args)
+    client = _ollama_client_for(args, config.agent_model)
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    _agent_preamble(console, args, model, origin, config, client, toolbox,
+                    f"{len(tasks)} from {args.tasks}, {config.rounds} round(s) of {' -> '.join(config.phases)}", out)
+    printer = TaskPrinter(console)
+    stop = threading.Event()
+    trainer = AgentTrainer(model, client, toolbox, config)
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.run(tasks, progress=printer, stop_event=stop, checkpoint_manager=manager),
+            stop, console, "task",
+        )
+    except (OllamaError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    saved = _finish_training(console, model, out, interrupted, printer, "task")
+    return _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+
+
+def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
+    """Browse on the network's own initiative: it picks every task, the LLM judges and teaches it."""
+    from .agent import AgentTrainer
+    from .ollama import OllamaError
+
+    manager = checkpoint_manager(args)
+    config = _agent_config(args, manager)
+    toolbox = build_toolbox(args)
+    client = _ollama_client_for(args, config.agent_model)
+    model, origin = open_model(args, console, required=False)
+    out = args.out or args.model
+    steps = args.steps
+    _agent_preamble(console, args, model, origin, config, client, toolbox,
+                    f"chosen by the network: {steps or 'until Ctrl-C'} step(s)", out)
+    if args.seed_url:
+        trailer = list(args.seed_url)
+        console.note(f"starting frontier: {', '.join(trailer)}")
+    printer = TaskPrinter(console)
+    stop = threading.Event()
+    trainer = AgentTrainer(model, client, toolbox, config)
+    trainer.frontier.extend(args.seed_url or ())
+    try:
+        records, interrupted = run_interruptible(
+            lambda: trainer.explore(steps=steps, progress=printer, stop_event=stop, checkpoint_manager=manager),
+            stop, console, "step",
+        )
+    except (OllamaError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    saved = _finish_training(console, model, out, interrupted, printer, "step")
+    doc = _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+    doc["frontier"] = list(trainer.frontier)
+    doc["visited"] = list(trainer.visited)
+    console.say(f"{len(trainer.visited)} page(s) read, {len(trainer.frontier)} still on the frontier")
+    return doc
+
+
+def _ollama_client_for(args: argparse.Namespace, model: str) -> Any:
+    from .ollama import OllamaClient
+
+    try:
+        return OllamaClient(args.url, model, args.timeout)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model) -> dict:
+    """The shared summary and JSON document of `agent` and `explore`."""
+    done = [r for r in records if r.get("kind") in ("task", "explore")]
+    solved = sum(1 for r in done if r.get("correct"))
+    by_model = sum(1 for r in done if r.get("model_solved"))
+    calls = sum(r.get("calls") or 0 for r in done)
+    own = sum(r.get("own_calls") or 0 for r in done)
+    fails = sum(r.get("failures") or 0 for r in done)
+    console.say(
+        f"{solved}/{len(done)} task(s) solved ({by_model} by the network); {own}/{calls} tool call(s) written by the "
+        f"network itself" + (f" ({own / calls:.0%})" if calls else "") + f"; {fails} failure(s) trained on"
+    )
+    doc = {
+        "model": origin.to_dict(), "out": out, "config": config.to_dict(), "tools": toolbox.names(),
+        "records": records, "attempts": trainer.history, "solved": solved, "model_solved": by_model,
+        "calls": calls, "own_calls": own, "autonomy": (own / calls) if calls else None, "failures": fails,
+        "criteria": trainer.criteria, "solutions": trainer.solved, "interrupted": interrupted, "saved": saved,
+        "stats": model.stats(),
+    }
+    if getattr(args, "report", None):
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump({k: doc[k] for k in ("config", "tools", "records", "criteria", "solutions", "solved", "autonomy")},
+                      fh, indent=2, default=str)
+        console.say(f"wrote report to {args.report}")
+    return doc
+
+
 def cmd_ollama_models(args: argparse.Namespace, console: Console) -> dict:
     from .ollama import OllamaError
 
@@ -1435,6 +1734,11 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     except ImportError as exc:
         raise CliError(f"API module unavailable: {exc}") from exc
     frontend_dir = _resolve_frontend_dir(args.frontend_dir)
+    tool_options = {
+        "offline": args.offline, "allow_private": args.allow_private, "search_url": args.search_url or None,
+        "web_timeout": args.web_timeout, "max_bytes": args.max_bytes, "python_tool": args.python_tool,
+        "sandbox_timeout": args.sandbox_timeout,
+    }
     doc = {
         "host": args.host,
         "port": args.port,
@@ -1451,6 +1755,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         "seed": effective_seed(args),
         "ollama_url": args.ollama_url,
         "ollama_model": args.ollama_model,
+        "tools": tool_options,
         "version": __version__,
     }
     console.pairs([
@@ -1461,6 +1766,9 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         ("frontend", frontend_dir + ("" if doc["frontend_built"] else " (not built: run `npm install && npm run build` in frontend/)")),
         ("backend", args.backend + (f" on {args.device}" if args.device else "")),
         ("ollama", f"{args.ollama_model or '$RADIXNET_OLLAMA_MODEL'} at {args.ollama_url or '$OLLAMA_HOST'}"),
+        ("tools", "offline" if args.offline else "browsing"
+                  + (", sandboxed python" if args.python_tool else "")
+                  + (", private addresses allowed" if args.allow_private else "")),
     ])
     console.say("press Ctrl-C to stop")
     if console.json_mode:
@@ -1469,7 +1777,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
         host=args.host, port=args.port, model_path=args.model, checkpoint_dir=args.checkpoint_dir,
         frontend_dir=frontend_dir, backend=args.backend, device=args.device, seed=effective_seed(args),
         upload_dir=args.upload_dir, ollama_url=args.ollama_url, ollama_model=args.ollama_model,
-        kind=getattr(args, "kind", None),
+        kind=getattr(args, "kind", None), tool_options=tool_options,
     )
     return None
 
@@ -1550,6 +1858,83 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             f"{DEFAULT_COUNT_MODEL}")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
+
+
+def _add_tool_options(parser: argparse.ArgumentParser, upload_dir: bool = True) -> None:
+    """Which tools exist and how the browsing behaves (shared by `tools`, `agent`, `explore` and `serve`)."""
+    group = parser.add_argument_group("tool options")
+    group.add_argument("--offline", action="store_true", help="no web tools at all (the calculator and the local tools only)")
+    group.add_argument("--allow-private", action="store_true",
+                       help="allow private / loopback addresses (refused by default; needed for a local test server)")
+    group.add_argument("--search-url", metavar="URL",
+                       help="search endpoint; {query} is replaced by the query (default: $RADIXNET_SEARCH_URL or DuckDuckGo)")
+    group.add_argument("--web-timeout", type=_float_at_least(0.1), default=20.0, metavar="SECONDS",
+                       help="seconds to wait for one page")
+    group.add_argument("--max-bytes", type=_int_at_least(1024), default=2_000_000, metavar="N",
+                       help="most bytes read from one page")
+    group.add_argument("--python-tool", action="store_true", help="also offer the sandboxed `python` tool")
+    group.add_argument("--sandbox-timeout", type=_float_at_least(0.1), default=10.0, metavar="SECONDS",
+                       help="seconds a sandboxed program may run (--python-tool)")
+    group.add_argument("--no-network-isolation", action="store_true",
+                       help="do not run sandboxed programs in a separate network namespace (--python-tool)")
+    if upload_dir:  # `serve` has its own --upload-dir, which the read_file tool uses as well
+        group.add_argument("--upload-dir", metavar="DIR", help="also offer the `read_file` tool over the files in DIR")
+
+
+def _add_agent_options(parser: argparse.ArgumentParser) -> None:
+    """The LLM's four roles, the loop, the failure weighting and 2NRL (shared by `agent` and `explore`)."""
+    from .agent import BLATANT_MODES, DEFAULT_AGENT_MODEL, MEDIATION
+
+    group = parser.add_argument_group("ollama options")
+    group.add_argument("--agent-model", metavar="NAME",
+                       help=f"model that writes the criteria, mediates, judges and teaches "
+                            f"(default: $RADIXNET_AGENT_MODEL or {DEFAULT_AGENT_MODEL})")
+    group.add_argument("--judge-model", metavar="NAME", help="a different model for judging (default: --agent-model)")
+    group.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+    group.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS",
+                       help="seconds to wait for one Ollama answer (default: 120)")
+    group.add_argument("--criteria", type=pos_int, default=4, metavar="N", help="acceptance criteria to ask for per task")
+    group.add_argument("--lenient", action="store_true",
+                       help="accept an answer the judge calls correct even when it left a criterion unmet")
+    group.add_argument("--no-judge", action="store_true",
+                       help="no LLM judge: an answer is correct only when it contains the task's known answer")
+    group.add_argument("--mediation", choices=MEDIATION, default="repair",
+                       help="repair: the LLM fixes only the calls the network cannot write; always: every call is the "
+                            "LLM's; never: the network's broken calls are executed and learned from as failures")
+    group.add_argument("--no-teach", action="store_true", help="never let the LLM demonstrate a task the network failed")
+
+    group = parser.add_argument_group("loop options")
+    group.add_argument("--max-steps", type=pos_int, default=6, help="tool calls the network may make per attempt")
+    group.add_argument("--model-attempts", type=pos_int, default=2, help="attempts by the network per task")
+    group.add_argument("--teacher-attempts", type=pos_int, default=1, help="demonstrations the LLM may try per task")
+    group.add_argument("--sample-first", action="store_true",
+                       help="sample the first emission too (default: the first one is the cheapest path)")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the network")
+    group.add_argument("--max-length", type=pos_int, default=200, help="characters the network writes per step")
+    group.add_argument("--observation-chars", type=nonneg_int, default=600,
+                       help="characters of a tool's output written into the transcript")
+    group.add_argument("--read-reward", action="store_true",
+                       help="also fine-tune on the text of the pages that were read, not only on the transcripts")
+    group.add_argument("--no-replay", action="store_true", help="do not add earlier correct transcripts to every positive phase")
+
+    group = parser.add_argument_group("failure options (train on failures, then invert)")
+    group.add_argument("--blatant-mode", choices=BLATANT_MODES, default="fail_invert",
+                       help="fail_invert: train on every failure with learning rates scaled by how badly it failed, "
+                            "then invert and fine-tune; activation / state: instead negate the nodes on the failed "
+                            "path itself; none: plain unweighted 2NRL")
+    group.add_argument("--blatant-margin", type=_float_at_least(0.001), default=0.5, metavar="GAP",
+                       help="the gap (0-1: share of the criteria missed, or how far below the pass score) at which a "
+                            "failure counts as blatant")
+    group.add_argument("--blatant-boost", type=_float_at_least(1.0), default=4.0, metavar="X",
+                       help="largest learning-rate multiplier a failure can earn")
+
+    group = parser.add_argument_group("2NRL options")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (failure) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (correct) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1,
+                       help="learning rate of the positive phase (activation parameters use a tenth)")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
 
 
 def _add_checkpoint_options(parser: argparse.ArgumentParser, unit: str) -> None:
@@ -1941,6 +2326,77 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--report", metavar="FILE", help="write a JSON report (problems, config, records, solutions)")
     p.set_defaults(handler=cmd_codegen)
 
+    # tools / agent / explore ----------------------------------------------
+    p = command(
+        "tools", "list the external tools, or call one directly",
+        "The tools the network can call by writing <tool>name {\"arg\": ...}</tool>: web search, web pages,\n"
+        "the calculator and (with --python-tool / --upload-dir) the sandbox and uploaded files.  `call`\n"
+        "runs one without a model and without Ollama, which is the quickest way to check a tool works.",
+    )
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+    a = actions.add_parser("list", help="list the tools and their arguments", formatter_class=_HelpFormatter)
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+    a = actions.add_parser("describe", help="one tool in detail, with its JSON schema", formatter_class=_HelpFormatter)
+    a.add_argument("--tool", required=True, metavar="NAME", help="the tool to describe")
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+    a = actions.add_parser(
+        "call", help="call one tool and print what it answers",
+        description="Call a tool directly: --tool NAME with repeated --arg name=value, or the whole call as the\n"
+                    "network would write it, e.g. --call 'web_fetch {\"url\": \"https://example.com\"}'.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--tool", metavar="NAME", help="the tool to call")
+    a.add_argument("--arg", action="append", metavar="NAME=VALUE", help="one argument (repeatable)")
+    a.add_argument("--call", metavar="TEXT", help="the call as text: 'name {\"arg\": \"value\"}' or with <tool> tags")
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+
+    p = command(
+        "agent", "solve tasks with tools: Ollama writes the acceptance criteria, judges and teaches",
+        "The network solves each task by writing tool calls as text and reading the results.  Before\n"
+        "anything is attempted the LLM writes the acceptance criteria; while the network works the LLM\n"
+        "mediates - an emission it cannot parse becomes one valid call against the real tool schemas, so\n"
+        "even an untrained network makes progress and learns well-formed calls; afterwards the LLM judges\n"
+        "the answer against the criteria and, when it failed, demonstrates the task with the same real\n"
+        "tools.  Learning focuses on failure: every failed transcript is trained on the harder the worse it\n"
+        "was (--blatant-mode fail_invert), then the network is inverted and fine-tuned on what was right.\n"
+        "Ctrl-C stops after the current task and saves.",
+    )
+    p.add_argument("--tasks", required=True, metavar="FILE",
+                   help="one question per line, or .json / .jsonl objects {id, prompt, criteria, answer, seeds}")
+    p.add_argument("--phase", choices=("model", "teacher", "both"), default="model",
+                   help="model: the network attempts first; teacher: only the LLM demonstrates; both: teacher, then model")
+    p.add_argument("--rounds", type=pos_int, default=1, help="passes over the task list")
+    p.add_argument("--twonrl-per", choices=("task", "round"), default="task",
+                   help="apply 2NRL after every task, or once per round over all attempts")
+    _add_agent_options(p)
+    _add_tool_options(p)
+    _add_checkpoint_options(p, "task")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, criteria, solutions)")
+    p.set_defaults(handler=cmd_agent)
+
+    p = command(
+        "explore", "let the network browse on its own: it picks every task, Ollama judges and teaches",
+        "Self-directed exploration.  The network continues `TASK:` - the way every transcript it has\n"
+        "learned starts - into whatever it is reaching for; the LLM turns that into one concrete question\n"
+        "that browsing can settle, preferring pages the network has come across but not read yet.  Then the\n"
+        "ordinary cycle runs on it: criteria, tool calls, judging, teaching and 2NRL.  Links and search\n"
+        "results found along the way become the frontier, so the exploration compounds.\n"
+        "--steps 0 runs until Ctrl-C, which stops after the current step and saves.",
+    )
+    p.add_argument("--steps", type=nonneg_int, default=10, metavar="N", help="tasks to explore (0 = until Ctrl-C)")
+    p.add_argument("--seed-url", action="append", metavar="URL",
+                   help="put a page on the frontier to start from (repeatable)")
+    _add_agent_options(p)
+    _add_tool_options(p)
+    _add_checkpoint_options(p, "step")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, criteria, solutions)")
+    p.set_defaults(handler=cmd_explore)
+
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
 
@@ -2022,6 +2478,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"Ollama base URL for the /api/ollama endpoints (default: $OLLAMA_HOST or {ollama_default_url})")
     p.add_argument("--ollama-model", metavar="NAME",
                    help=f"default Ollama model for the /api/ollama endpoints (default: $RADIXNET_OLLAMA_MODEL or {ollama_default_model})")
+    _add_tool_options(p, upload_dir=False)
     p.set_defaults(handler=cmd_serve)
     return parser
 

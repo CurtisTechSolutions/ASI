@@ -45,6 +45,10 @@ THRESHOLD   ?= 6
 PROBLEMS    ?= data/sample_problems.jsonl
 PHASE       ?= both
 CODEGEN_MODEL ?= gemma4
+TASKS       ?= data/sample_tasks.txt
+STEPS       ?= 10
+AGENT_MODEL ?=
+MAX_STEPS   ?= 6
 COMPOSE     ?= docker compose
 GPU_COMPOSE ?= $(COMPOSE) -f docker-compose.yml -f docker-compose.gpu.yml
 ALL_PROFILES := --profile auto --profile dev --profile evolve --profile tools
@@ -63,7 +67,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve train resume predict generate score 2nrl invert compress \
         evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
-        codegen codegen-teacher codegen-model \
+        codegen codegen-teacher codegen-model tools agent explore explore-forever \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -180,6 +184,20 @@ codegen-model: ## Phase 2 only: the network writes the solutions, punished / rew
 	$(MAKE) codegen PHASE=model
 
 OLLAMA_FLAGS_URL := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),)
+AGENT_FLAGS := $(OLLAMA_FLAGS_URL) $(if $(AGENT_MODEL),--agent-model $(AGENT_MODEL),) --max-steps $(MAX_STEPS)
+
+##@ Tool use (browsing + Ollama criteria, judging and teaching)
+tools: ## List the external tools the network can call
+	$(RADIXNET) $(GLOBAL) tools list
+
+agent: ## Solve TASKS with tools: Ollama writes the acceptance criteria, judges and teaches; 2NRL trains on the failures
+	$(RADIXNET) $(GLOBAL) agent --tasks $(TASKS) $(AGENT_FLAGS) --checkpoint-dir $(CKPT_DIR) --report agent-report.json
+
+explore: ## Let the network choose its own tasks and browse for STEPS steps
+	$(RADIXNET) $(GLOBAL) explore --steps $(STEPS) $(AGENT_FLAGS) --checkpoint-dir $(CKPT_DIR)
+
+explore-forever: ## Explore until Ctrl-C (the model is saved on stop)
+	$(MAKE) explore STEPS=0
 
 ##@ Serve (local)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)

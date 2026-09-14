@@ -1335,3 +1335,53 @@ ol.dialogue li.rated.down .bubble {
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* Agent tab: the live log of criteria, proposals, tool calls and attempts */
+ul.log {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  max-height: 420px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+ul.log > li {
+  padding: 5px 8px;
+  border-left: 2px solid var(--border);
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+ul.log code {
+  font-size: 12px;
+}
+
+ul.log ol.criteria {
+  margin: 4px 0 0 18px;
+  padding: 0;
+  color: var(--muted);
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--muted);
+}
+
+/* a call the network wrote itself, rather than one the LLM had to repair */
+.tag.own {
+  background: rgba(47, 95, 216, 0.14);
+  color: var(--accent);
+}
+
+.verdict.pass {
+  color: #16a34a;
+}
+
+.verdict.fail {
+  color: #dc2626;
+}

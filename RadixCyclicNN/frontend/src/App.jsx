@@ -11,6 +11,7 @@ import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import EvolvePanel from "./components/EvolvePanel.jsx";
 import OllamaPanel from "./components/OllamaPanel.jsx";
 import CodeGenPanel from "./components/CodeGenPanel.jsx";
+import AgentPanel from "./components/AgentPanel.jsx";
 import ImagesPanel from "./components/ImagesPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
@@ -27,6 +28,7 @@ const TABS = [
   { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
   { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
   { id: "code", label: "Code", Component: CodeGenPanel, pythonOnly: true },
+  { id: "agent", label: "Agent", Component: AgentPanel, pythonOnly: true },
   { id: "images", label: "Images", Component: ImagesPanel, pythonOnly: true },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },

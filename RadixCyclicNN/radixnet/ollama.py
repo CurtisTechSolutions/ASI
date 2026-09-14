@@ -155,19 +155,49 @@ class OllamaClient:
         json_mode: bool = False,
         options: dict | None = None,
         timeout: float | None = None,
+        tools: list[dict] | None = None,
     ) -> str:
         """One chat turn (``POST /api/chat``); ``messages`` are ``{"role", "content"}`` dicts."""
+        message = self.chat_message(
+            messages, model=model, json_mode=json_mode, options=options, timeout=timeout, tools=tools
+        )
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise OllamaError("unexpected /api/chat response (no message content)")
+        return content
+
+    def chat_message(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        json_mode: bool = False,
+        options: dict | None = None,
+        timeout: float | None = None,
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """The whole assistant message of one chat turn.
+
+        ``tools`` are JSON-schema function definitions (Ollama's own ``tools``
+        format, see :meth:`radixnet.tools.ToolBox.schemas`); a model that
+        supports tool calling answers with ``{"tool_calls": [...]}`` beside (or
+        instead of) ``content``.  The message is returned as it came, with
+        ``content`` guaranteed to be a string.
+        """
         body: dict[str, Any] = {"model": model or self.model, "messages": list(messages), "stream": False}
         if json_mode:
             body["format"] = "json"
         if options:
             body["options"] = dict(options)
+        if tools:
+            body["tools"] = list(tools)
         data = self._request("POST", "/api/chat", body, timeout)
         message = data.get("message") if isinstance(data, dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str):
-            raise OllamaError("unexpected /api/chat response (no message content)")
-        return content
+        if not isinstance(message, dict):
+            raise OllamaError("unexpected /api/chat response (no message)")
+        if not isinstance(message.get("content"), str):
+            message["content"] = ""
+        return message
 
 
 # ---------------------------------------------------------------------------
