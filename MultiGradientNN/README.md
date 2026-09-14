@@ -41,13 +41,8 @@ connection between them, not a difference of indices.
 ## Status
 
 Concept stage. Settled so far: the stack geometry, and the dense vertical
-connectivity above.
+connectivity above. The cross-layer step, the scheduling of the two descents and
+the training rule for the vertical weights are still open.
 
-Still to be written:
-
-- how the cross-layer step is defined — what it means to move along the vertical
-  axis in one update;
-- how the horizontal descent (within a plane) and the vertical descent (across
-  the stack) are scheduled against each other;
-- whether the vertical weights are trained by the same rule as the horizontal
-  ones, or by their own.
+`DESIGN.md` is the specification — notation, geometry, the settled invariants,
+and every open decision written out with its trade-offs.
