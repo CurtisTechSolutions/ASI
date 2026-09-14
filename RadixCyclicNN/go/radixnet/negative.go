@@ -1247,9 +1247,11 @@ func whyVerdict(verdict string, blamed, total int, risk float64, reasons []Reaso
 	return out
 }
 
-// pythonRepr quotes a string the way Python's repr() does, so the sentence a
+// PythonRepr quotes a string the way Python's repr() does, so the sentence a
 // verdict carries is character for character the one the Python
 // implementation writes (the parity tests compare them).
+func PythonRepr(text string) string { return pythonRepr(text) }
+
 func pythonRepr(text string) string {
 	quote := byte('\'')
 	if strings.ContainsRune(text, '\'') && !strings.ContainsRune(text, '"') {

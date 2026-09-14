@@ -1343,8 +1343,9 @@ What is *not* ported:
   `faster-whisper` / `whisper`) and the **torch backend**: Python ML packages, not code to translate.  The parts of
   those modules that *are* code - the waveform codecs, the text formats, the thumbnail encoder, an
   OpenAI-compatible transcription server - have no such excuse and are simply not done yet.
-* Still Python-only, and listed in `pythonOnly` so the Go server says so rather than 404ing blankly:
-  `tools.py` and `agent.py`.
+* Nothing else is Python-only any more: `tools.go`, `web.go`, `calc.go`, `toolbox.go` and `agent.go` port
+  section 27, so the Go server serves `/api/tools/*` and `/api/agent/*` and the frontend hides no tab.  The
+  `pythonOnly` list the Go server answers 404-with-a-message for is down to `/api/schedule/preview`.
 * `schedule.py` is deliberately not ported, and would be dead code if it were: learning-rate schedules are a
   RadixNet feature, the count / reward model ignores learning rates entirely, and the Train tab already hides the
   schedule fields for it (`!countKind`).  Porting the expression evaluator would add a calculator nothing calls.
@@ -2198,6 +2199,42 @@ to a refused scheme — a byte cap; the format, the registry, the guards, `safe_
 `tests/test_agent.py` (a fake Ollama that plays all four roles and switches between native `tool_calls` and JSON,
 the fake website, and a *real* untrained network: criteria, both mediation paths, judging, teaching, the gap and
 the weighting, the whole loop, exploring, the API endpoints and the CLI).
+
+### 27.6 Tool use in Go (`go/radixnet/tools.go`, `web.go`, `calc.go`, `toolbox.go`, `agent.go`)
+
+The last Python-only module, and the one where the standard library had to be taken at its word: Go has no
+`html.parser`, no `ast.literal_eval` and no `eval`, so three pieces are written out rather than translated.
+
+* `tools.go` is the text format and the registry: `TaskHeader`, `CallText`, `ResultText`, `AnswerText`,
+  `TranscriptText`, `ParseCall`, `ParseArguments` (JSON, `key=value` pairs, a bare value, and the same
+  truncated-JSON repair), `Param` / `Tool` / `ToolCall` / `ToolResult` / `ToolBox`.  One thing had to be written
+  by hand for the format to match character for character: `marshalSorted` renders a value the way
+  `json.dumps(..., ensure_ascii=False, sort_keys=True)` does — sorted keys, a space after every colon and comma,
+  floats as `repr()` writes them — because Go's encoder writes `{"url":"u"}` where Python writes `{"url": "u"}`,
+  and the network learns the characters.
+* `web.go` is the browsing half: a small HTML tokeniser (raw-text elements taken whole, so a `<` inside a script
+  is not a tag), the same block / drop tag sets, the same title-inside-`<head>` special case, and a `WebClient`
+  with the same guards — http / https only, no credentials, no private / loopback / link-local / reserved
+  address unless `AllowPrivate`, a byte cap, and redirects followed by hand so every hop is checked again.
+* `calc.go` is the calculator: a recursive-descent parser over the same grammar, keeping Python's arithmetic
+  where the two differ — `/` is true division, `//` floors, `%` takes the sign of the divisor, `int op int` stays
+  an int, `round` goes to even, and a result is rendered the way `str()` renders it (`29.0`, not `29`).
+  `TestGoToolsParity` runs a list of expressions through both CLIs and compares the answers.
+* `toolbox.go` is the built-in set (`web_search`, `web_fetch`, `web_links`, `calculator`, `python`,
+  `read_file`) with the same names, parameters and descriptions, so a transcript written on one side is a
+  transcript the other can read - and the JSON schemas the LLM is handed are equal, which the parity test
+  asserts.
+* `agent.go` is section 27.2: the four roles with the same prompts, the same lenient readers (`criterionMark`,
+  `marksOf`), `decideAgent`, the mediator's fallbacks, `TeachTask`, `ProposeTask`, and `AgentTrainer` with the
+  same records and the same blatant-failure handling (`TwoNRLWeighted`, `InvertPaths`).  The Go clients gained
+  `Chat` / `ChatMessage` for it, so Ollama's native tool calling is used where the model has it and JSON mode
+  where it does not - duck-typed on the client, exactly as Python's `getattr(client, "chat_message", None)`.
+* `server/agent.go` adds `/api/tools`, `/api/tools/call` and the five `/api/agent/*` endpoints; the Go CLI gains
+  `tools list | describe | call`, `agent` and `explore`, and `serve` takes the tool options.  The count model
+  pushes by a `strength` rather than `neg_lr` / `pos_lr` / `batch_size`, which is the only setting that differs.
+* Go tests: `radixnet/tools_test.go` (a fake website, the format, the registry, the guards, the calculator,
+  every built-in tool), `radixnet/agent_test.go` (a fake Ollama playing all four roles, a real untrained
+  network) and `server/agent_test.go` (the endpoints end to end).
 
 ---
 ## 24. Counter overflow (`counter.py`, `go/radixnet/counter.go`) — cyclic counters with a reset count

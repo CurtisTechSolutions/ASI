@@ -172,6 +172,9 @@ commands:
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
   negative   the failures, and why: blame | clear | why | filter | reasons | forget | auto
   codegen    write Python programs: the teacher tutors, the sandbox runs them, 2NRL follows
+  tools      the external tools the network can call: list | describe | call
+  agent      tool use: the network browses and solves, an LLM sets the bar and teaches
+  explore    the network picks its own tasks and browses on its own initiative
   invert     flip the sign of every reward
   image      images as text: info | encode | tutor | decode
   speech     teaching by talking: info | teach | tutor | decode
@@ -279,6 +282,12 @@ func main() {
 		cmdTutor(rest)
 	case "codegen":
 		cmdCodeGen(rest)
+	case "tools":
+		cmdTools(rest)
+	case "agent":
+		cmdAgent(rest)
+	case "explore":
+		cmdExplore(rest)
 	case "serve":
 		cmdServe(rest)
 	case "version":
@@ -1177,12 +1186,16 @@ func cmdServe(args []string) {
 	chatgptURL := fs.String("chatgpt-url", "", "OpenAI base URL for a ChatGPT teacher (default: $OPENAI_BASE_URL or https://api.openai.com/v1)")
 	chatgptModel := fs.String("chatgpt-model", "", "default ChatGPT model (default: $RADIXNET_OPENAI_MODEL); the key is the server's own $OPENAI_API_KEY")
 	ollamaModel := fs.String("ollama-model", "", "default teacher model for /api/tutor (default: $RADIXNET_TUTOR_MODEL or $RADIXNET_OLLAMA_MODEL)")
+	addToolFlags(fs)
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
 		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
 		ChatGPTURL: *chatgptURL, ChatGPTModel: *chatgptModel,
+		Offline: toolFlags.Offline, AllowPrivate: toolFlags.AllowPrivate, SearchURL: toolFlags.SearchURL,
+		WebTimeout: toolFlags.Timeout, MaxBytes: toolFlags.MaxBytes, PythonTool: toolFlags.PythonTool,
+		SandboxTime: toolFlags.SandboxTimeout, NoIsolation: toolFlags.NoIsolation,
 	})
 	if err != nil {
 		fail("%v", err)

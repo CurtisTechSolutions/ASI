@@ -60,15 +60,17 @@ def go(*args, model, expect=0, env=None):
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300, env=env)
     if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
-    return json.loads(proc.stdout) if proc.stdout.strip() else None
+    if proc.stdout.strip():
+        return json.loads(proc.stdout)
+    return {"error": proc.stderr.strip()} if expect else None
 
 
-def py(*args, model, env=None):
+def py(*args, model, expect=0, env=None):
     cmd = [sys.executable, "-m", "radixnet", "--json", "--model", model, *[str(a) for a in args]]
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600, env=env)
-    if proc.returncode != 0:
+    if proc.returncode != expect:
         raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stderr ---\n{proc.stderr}")
-    return json.loads(proc.stdout)
+    return json.loads(proc.stdout) if proc.stdout.strip() else {"error": proc.stderr.strip()}
 
 
 def load_json(path):
@@ -775,6 +777,52 @@ class TestGoCriticParity(unittest.TestCase):
         self.assertEqual(a["bad"], b["bad"])
 
 
+class TestGoToolsParity(unittest.TestCase):
+    """The tools both sides offer, and the text format the network calls them in."""
+
+    def setUp(self):
+        self.py_model = os.path.join(TMP.name, "tools_py.count.json")
+        self.go_model = os.path.join(TMP.name, "tools_go.count.json")
+
+    def test_the_same_tools_with_the_same_schemas(self):
+        a = py("tools", "list", "--offline", model=self.py_model)
+        b = go("tools", "list", "--offline", model=self.go_model)
+        self.assertEqual(a["tools"], b["tools"])
+        a = py("tools", "list", model=self.py_model)
+        b = go("tools", "list", model=self.go_model)
+        self.assertEqual([t["name"] for t in a["tools"]], [t["name"] for t in b["tools"]])
+        self.assertEqual([t["signature"] for t in a["tools"]], [t["signature"] for t in b["tools"]])
+        self.assertEqual(a["tools"], b["tools"])  # descriptions, parameters, defaults and all
+        a = py("tools", "describe", "--tool", "web_fetch", model=self.py_model)
+        b = go("tools", "describe", "--tool", "web_fetch", model=self.go_model)
+        self.assertEqual(a["schema"], b["schema"])  # what the LLM is handed for tool calling
+
+    def test_the_calculator_answers_the_same(self):
+        for expression in ("2 * (3 + 4)", "sqrt(841)", "7 / 2", "7 // 2", "-7 % 3", "round(2.5)",
+                           "round(3.14159, 2)", "min(3, 1, 2)", "sum([1, 2, 3])", "2 ^ 8", "1 < 2",
+                           "abs(-3)", "int(3.9)", "float(3)", "log(100, 10)", "hypot(3, 4)", "0.1 + 0.2"):
+            a = py("tools", "call", "--tool", "calculator", "--arg", f"expression={expression}", model=self.py_model)
+            b = go("tools", "call", "--tool", "calculator", "--arg", f"expression={expression}", model=self.go_model)
+            self.assertEqual((a["ok"], a["output"]), (b["ok"], b["output"]), expression)
+        # both refuse the same expressions, and say so on stderr with exit 1
+        for bad in ("10 / 0", "open('x')", "nosuchname"):
+            args = ("tools", "call", "--tool", "calculator", "--arg", f"expression={bad}")
+            self.assertIn("calculator", py(*args, model=self.py_model, expect=1)["error"], bad)
+            self.assertIn("calculator", go(*args, model=self.go_model, expect=1)["error"], bad)
+
+    def test_a_call_is_written_and_read_the_same(self):
+        """The text format is the contract: a call one side writes is the call the other reads."""
+        written = 'calculator {"expression": "6*7"}'
+        a = py("tools", "call", "--call", written, model=self.py_model)
+        b = go("tools", "call", "--call", written, model=self.go_model)
+        self.assertEqual((a["tool"], a["arguments"], a["output"]), (b["tool"], b["arguments"], b["output"]))
+        # the lenient reader: a bare value, key=value pairs and a truncated call all arrive the same
+        for raw in ("calculator 5*5", "calculator expression=2+2", 'calculator {"expression": "9"'):
+            a = py("tools", "call", "--call", raw, model=self.py_model)
+            b = go("tools", "call", "--call", raw, model=self.go_model)
+            self.assertEqual((a["arguments"], a["output"]), (b["arguments"], b["output"]), raw)
+
+
 class TestGoCodeGenParity(unittest.TestCase):
     """One fake teacher, both code-generation trainers: the same prompts, the same attempts, the same solutions."""
 
@@ -1075,9 +1123,9 @@ class TestGoServer(unittest.TestCase):
         status, doc, _ = self.client.post("/api/model/select", {"kind": "radix"})
         self.assertEqual(status, 400)
         # what the Go server now serves too: evolve, the Ollama corpus / review, the automatic loop, images,
-        # speech and code generation
+        # speech, code generation and tool use
         for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history",
-                     "/api/images", "/api/speech", "/api/codegen/history"):
+                     "/api/images", "/api/speech", "/api/codegen/history", "/api/tools", "/api/agent/history"):
             status, doc, _ = self.client.get(path)
             self.assertEqual(status, 200, f"{path}: {doc}")
         # what is still Python-only is told so; unknown endpoints and wrong methods behave like the Python server

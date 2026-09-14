@@ -127,6 +127,16 @@ type Options struct {
 	// always comes from the server's $OPENAI_API_KEY.
 	ChatGPTURL   string
 	ChatGPTModel string
+	// Tools are the defaults of the /api/tools and /api/agent endpoints: what
+	// the network may call, and how far it may reach.
+	Offline      bool    // no web tools at all
+	AllowPrivate bool    // let the web tools reach private addresses
+	SearchURL    string  // a different search endpoint
+	WebTimeout   float64 // seconds per web request (0: 20)
+	MaxBytes     int     // cap on a fetched page (0: 2 MB)
+	PythonTool   bool    // also offer the sandboxed `python` tool
+	SandboxTime  float64 // seconds a sandboxed program may run (0: 10)
+	NoIsolation  bool    // do not run sandboxed programs in their own network namespace
 }
 
 // Service holds the model, the current job and the directories.  Readers
@@ -160,7 +170,10 @@ type Service struct {
 	tutorHistory   []map[string]any
 	criticHistory  []map[string]any
 	codegenHistory []map[string]any
-	evolveHistory  []map[string]any
+	agentHistory   []map[string]any
+	// tools are the server's defaults for the external tools the network may call
+	tools         toolDefaults
+	evolveHistory []map[string]any
 	// discriminator is the critic of the evolve loop (nil until first used)
 	discriminator *radixnet.Model
 	// epochDelay slows every epoch (tests: makes a job observable while running)
@@ -195,8 +208,20 @@ func NewService(opts Options) (*Service, error) {
 	m.Workers = workers
 	m.G.Workers = workers
 	m.Exact = opts.Exact
+	tools := defaultToolDefaults()
+	tools.Offline, tools.AllowPrivate, tools.PythonTool = opts.Offline, opts.AllowPrivate, opts.PythonTool
+	tools.SearchURL, tools.NetworkIsolat = opts.SearchURL, !opts.NoIsolation
+	if opts.WebTimeout > 0 {
+		tools.WebTimeout = opts.WebTimeout
+	}
+	if opts.MaxBytes > 0 {
+		tools.MaxBytes = opts.MaxBytes
+	}
+	if opts.SandboxTime > 0 {
+		tools.SandboxTime = opts.SandboxTime
+	}
 	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact,
-		started: time.Now(), logf: opts.Log, guardConfig: radixnet.DefaultFilterConfig()}
+		started: time.Now(), logf: opts.Log, guardConfig: radixnet.DefaultFilterConfig(), tools: tools}
 	s.ollamaURL = radixnet.DefaultOllamaURL()
 	if url, err := radixnet.NormaliseOllamaURL(opts.OllamaURL); err == nil {
 		s.ollamaURL = url

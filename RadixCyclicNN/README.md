@@ -206,9 +206,9 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image tutor FILE...` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `tutor FILE...`: the recall tutor - ask it to draw back what it was shown and mark what comes back, `--size`, `--encoder`, `--lead 16` (payload characters the opening gives away, so it knows which picture), `--length`, `--attempts`, `--mode`, `--threshold 6`, `--train`, `--blame` / `--negative PATH`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
 | `codegen --problems FILE` | `--blame` / `--negative PATH` (the sandbox and the judge teach the negative network), `--phase both\|teacher\|model`, `--rounds`, `--teacher-provider ollama\|chatgpt`, `--teacher-model gemma4`, `--judge-provider`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--teacher-attempts 3`, `--model-attempts 4`, `--sample-first`, `--temperature`, `--max-length 800`, `--strictness strict\|lenient`, `--no-judge`, `--no-fallback-teacher`, `--twonrl-per problem\|round`, `--no-replay`, `--teacher-prompt`, `--model-prompt`, `--sandbox-timeout 10`, `--memory-mb 256`, `--no-network-isolation`, 2NRL options (`--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`), checkpoint options, `--out`, `--report FILE` |
-| `tools list \| describe \| call` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`; tool options below |
+| `tools list \| describe \| call` | the external tools the network can call: `list`, `describe --tool NAME` (with its JSON schema), `call --tool NAME --arg k=v ...` or `call --call 'web_fetch {"url": "..."}'`; tool options below. The Go CLI has the same three actions and the same flags |
 | `agent --tasks FILE` | `--phase model\|teacher\|both`, `--rounds`, `--twonrl-per task\|round`, `--agent-model`, `--judge-model`, `--url`, `--timeout`, `--criteria 4`, `--lenient`, `--no-judge`, `--mediation repair\|always\|never`, `--no-teach`, `--max-steps 6`, `--model-attempts 2`, `--teacher-attempts 1`, `--sample-first`, `--temperature`, `--max-length 200`, `--observation-chars 600`, `--read-reward`, `--no-replay`, `--blatant-mode fail_invert\|activation\|state\|none`, `--blatant-margin 0.5`, `--blatant-boost 4`, 2NRL options, checkpoint options, tool options, `--out`, `--report FILE` |
-| `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option |
+| `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option. `agent` and `explore` are in the Go CLI too (`--strength` in place of the learning rates) |
 | tool options (`tools`, `agent`, `explore`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted), `--web-timeout 20`, `--max-bytes 2000000`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
@@ -1365,6 +1365,9 @@ go/bin/radixnet-count --model model.count.json negative filter --count 3   # the
 go/bin/radixnet-count --model model.count.json generate --count 3          # ... and the same pair on every answer
 go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
 go/bin/radixnet-count --model model.count.json codegen --problems problems.txt --phase teacher   # write programs, run them, learn
+go/bin/radixnet-count tools call --tool calculator --arg 'expression=2*(3+4)'   # the tools the network can call
+go/bin/radixnet-count --model model.count.json agent --tasks tasks.txt          # it browses, an LLM judges, 2NRL follows
+go/bin/radixnet-count --model model.count.json explore --steps 0               # ... and picks its own tasks, until Ctrl-C
 go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
 go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
 go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
@@ -1529,14 +1532,20 @@ Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/images`, `POST /api/images/encode`, `/decode`, `/tutor` | images as text, same bodies and results as the Python server. The **thumbnail encoder only**: the Stable Diffusion one needs torch and diffusers, so `encoder: "sd"` is refused here with a message naming the Python side |
 | `GET /api/speech`, `POST /api/speech/teach`, `/decode`, `/tutor` | the waveform as text and the recall tutor over it, same bodies and results as the Python server. **Transcription is Python-only** (faster-whisper / openai-whisper are Python packages), so send the words with the audio - which is what the browser's dictation does |
 | `POST /api/codegen/start`, `GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run` | code generation, same bodies and results as the Python server: the teacher writes, the sandbox runs, the judge decides and 2NRL follows. The sandbox is the same Python bootstrap both languages run, so a program sees the same interpreter, the same limits and the same isolation whichever server started it. The count model pushes by `strength` rather than `neg_lr` / `pos_lr` / `batch_size` |
-| `/api/schedule/preview` | 404 with a message naming the Python server |
+| `GET /api/tools`, `POST /api/tools/call` | the external tools the network can call by writing `<tool>name {...}</tool>`, and one direct call: the same names, parameters, descriptions and JSON schemas as the Python server, so a transcript written on one side is one the other reads. Browsing is the standard library either way, with the same guards (http / https only, no credentials, no private address unless allowed, a byte cap, redirects followed by hand) |
+| `POST /api/agent/start`, `/api/agent/explore`, `GET /api/agent/history`, `POST /api/agent/criteria`, `/api/agent/solve` | tool use: the LLM writes the acceptance criteria, mediates what the network could not write itself, judges the answer and demonstrates when it failed; 2NRL follows. Same bodies and records as the Python server; the count model pushes by `strength` rather than `neg_lr` / `pos_lr` |
+| `/api/schedule/preview` | 404 with a message naming the Python server - the only endpoint that is still Python-only |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same
 marks and leave the model in the same state, so the two implementations of the
 lessons cannot drift apart.  `TestGoCodeGenParity` does the same for code
 generation: one fake teacher, both trainers, the same conversation prompt for
-prompt, the same solution and the same blame on disk.
+prompt, the same solution and the same blame on disk.  `TestGoToolsParity`
+holds the two tool sets to the same signatures, the same JSON schemas and the
+same answers - including the calculator's, down to `29.0` rather than `29` -
+because the network learns the characters of a call and its result, so a
+transcript written on one side has to be one the other can read.
 
 `tests/test_go_parity.py` also starts the Go server and checks its answers
 against the key sets the Python API tests assert on, loads the model it saves

@@ -19,11 +19,11 @@ import SpeechPanel from "./components/SpeechPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
-// pythonOnly tabs need the Python server (its sine network, the agent's tools); the Go server
-// (`radixnet-count serve`) runs the count / reward model only and hides them. Most tabs are not among them:
-// both servers run the lessons, the evolve loop, the Ollama corpus and review, code generation and the image
-// and speech encoders - the Go side's images use a thumbnail rather than the diffusion VAE, and its speech
-// needs the words to come with the audio, which is what this page dictates anyway.
+// Both servers now run every tab: the lessons, the evolve loop, the Ollama corpus and review, code
+// generation, tool use and the image and speech encoders. The Go side's images use a thumbnail rather than
+// the diffusion VAE, and its speech needs the words to come with the audio, which is what this page dictates
+// anyway; a tab that still needed the Python server would carry `pythonOnly: true` and be hidden when the Go
+// server (`radixnet-count serve`) answers.
 const TABS = [
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "predict", label: "Predict", Component: PredictPanel },
@@ -36,7 +36,7 @@ const TABS = [
   { id: "ollama", label: "Ollama", Component: OllamaPanel },
   { id: "tutor", label: "Tutor", Component: TutorPanel },
   { id: "code", label: "Code", Component: CodeGenPanel },
-  { id: "agent", label: "Agent", Component: AgentPanel, pythonOnly: true },
+  { id: "agent", label: "Agent", Component: AgentPanel },
   { id: "images", label: "Images", Component: ImagesPanel },
   { id: "speech", label: "Speech", Component: SpeechPanel },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
