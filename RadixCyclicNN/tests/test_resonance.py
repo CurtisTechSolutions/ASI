@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.beam import Prediction  # noqa: E402
 from radixnet.encoding import Encoder  # noqa: E402
-from radixnet.graph import BACK, END, FIRST, START  # noqa: E402
+from radixnet.graph import BACK, FIRST, START  # noqa: E402
 from radixnet.metacog import ABORT, ACTIONS, ESCAPE, RIDE, MetaLayer, cycle_signature  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 from radixnet.resonance import (  # noqa: E402
