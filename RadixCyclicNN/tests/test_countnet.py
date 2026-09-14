@@ -516,18 +516,22 @@ class TestApi(unittest.TestCase):
         self.select("radix")
         self.client.post("/api/train", {"texts": TEXTS, "epochs": 2, "lr": 1.0, "batch_size": 1})
         self.wait()
+        # "learn": false keeps the models exactly as trained - this is about who speaks, not about rethinks
         status, data, _ = self.client.post(
-            "/api/converse", {"opening": TEXTS[0], "turns": 4, "partner": "count", "speakers": ["radix", "count"]},
+            "/api/converse",
+            {"opening": TEXTS[0], "turns": 4, "partner": "count", "speakers": ["radix", "count"], "learn": False},
         )
         self.assertEqual(status, 200, data)
         self.assertEqual((data["kind"], data["partner"]), ("radix", "count"))
         self.assertEqual(data["count"], 5)
         self.assertEqual([t["speaker"] for t in data["turns"]], ["radix", "count", "radix", "count", "radix"])
         # the same kind as a partner means talking to itself
-        status, same, _ = self.client.post("/api/converse", {"opening": TEXTS[0], "turns": 2, "partner": "radix"})
+        status, same, _ = self.client.post(
+            "/api/converse", {"opening": TEXTS[0], "turns": 2, "partner": "radix", "learn": False},
+        )
         self.assertEqual((status, same["partner"]), (200, None))
         self.select("count")
-        status, data, _ = self.client.post("/api/converse", {"turns": 3, "partner": "radix"})
+        status, data, _ = self.client.post("/api/converse", {"turns": 3, "partner": "radix", "learn": False})
         self.assertEqual((status, data["kind"], data["partner"], data["count"]), (200, "count", "radix", 3))
 
     def test_radix_beam_prediction_and_load_switches_kind(self):

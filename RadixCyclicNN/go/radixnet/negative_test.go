@@ -66,8 +66,8 @@ func TestEvidenceIsBlameMinusClearing(t *testing.T) {
 
 func TestBlameRecordsTheReasonAndTheJournal(t *testing.T) {
 	m, _ := NewNegativeModel(1, DefaultNegativeOptions())
-	if m.G.NumNodes() != 2 {
-		t.Fatalf("a fresh negative network holds the two sentinels only: %d", m.G.NumNodes())
+	if m.G.NumNodes() != First {
+		t.Fatalf("a fresh negative network holds the sentinels only: %d", m.G.NumNodes())
 	}
 	records, err := m.Blame([]string{"the the the the cat"}, BlameOptions{
 		Reason: "Repetition ", Severity: 2, Source: "review", Note: "  it repeats\n the same word ",

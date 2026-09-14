@@ -116,7 +116,7 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 		candidates := make([]beamState, 0, len(frontier)*2)
 		for _, st := range frontier {
 			expanded++
-			for _, cc := range g.ChildCosts(st.node) {
+			for _, cc := range Onward(g.ChildCosts(st.node)) {
 				nchars := st.chars
 				if cc.Child != End {
 					nchars += g.labelLen[cc.Child] - Overlap

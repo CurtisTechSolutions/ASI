@@ -240,7 +240,7 @@ func init() {
 	route("POST", "/api/generate", rGenerate)
 	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -704,6 +704,9 @@ func rConverse(rq *request) (int, any, error) {
 		return 0, nil, err
 	}
 	if o.Explore, _, err = f.integer("explore", radixnet.Explore, intp(0)); err != nil {
+		return 0, nil, err
+	}
+	if o.Learn, err = f.flag("learn", true); err != nil {
 		return 0, nil, err
 	}
 	guard, err := f.flag("guard", true)

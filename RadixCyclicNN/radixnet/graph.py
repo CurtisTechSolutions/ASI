@@ -35,11 +35,19 @@ from collections.abc import Iterable, Sequence
 from .activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
 from .backend import CSR, NodeParams
 from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
-from .encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
+from .encoding import BACK_LABEL, END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
 
-__all__ = ["START", "END", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
+__all__ = ["START", "END", "BACK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
 
-START, END = 0, 1
+START, END, BACK = 0, 1, 2
+"""The sentinels.  START and END are where a text begins and ends - observed in the corpus, like everything
+else.  BACK is where the graph has learned that a walk *goes round*: nothing in a corpus says so, so its edges
+are taught by the voices that caught themselves repeating (:func:`radixnet.dialogue.backtrack`).  An edge
+``p -> BACK`` competes for probability with ``p``'s real children, so the more often walks through ``p`` had to
+be backed out of, the likelier the search is to hand over there instead of carrying on."""
+
+FIRST = BACK + 1
+"""The first node id that is not a sentinel."""
 
 _W = WINDOW          # trigram length
 _OV = WINDOW - 1     # overlap between consecutive labels
@@ -49,8 +57,48 @@ Z_RANGE = 4.5
 W_LOW, W_HIGH = 0.5, 1.5
 """New edge weights are drawn uniformly from ``[W_LOW, W_HIGH]`` (negated when inverted)."""
 
+BACK_Z = Z_RANGE
+"""BACK's state, fixed at the far edge of the range instead of drawn - the strongest activation a state in
+range can give (``|f|`` within 0.3 % of ``|a|``).
+
+Every other node's ``z`` is random, and BACK is not every other node: it is never trained (no text passes
+through it) and it must not move the random stream, or adding the sentinel would have changed every seeded
+model ever written.  A fixed, firmly non-zero activation is also what lets an edge into it carry a learned
+weight at all: the cost of an edge is a softmax over ``w * f(p) * f(c)``, so a sentinel activating at zero
+could never be learned toward."""
+
 _GRAPH_FORMAT = "radixnet-graph"
-_GRAPH_FORMAT_VERSION = 2   # 2 added the counter reset fields (version 1 files load with no resets)
+_GRAPH_FORMAT_VERSION = 3   # 2 added the counter reset fields; 3 the BACK sentinel (older files gain an
+                            # unvisited one on load, and their node ids shift up by one)
+
+
+def _with_back(d: dict) -> dict:
+    """A graph document with the BACK sentinel in it: format 3 as it is, anything older upgraded.
+
+    Files written before BACK existed have START and END and then their real nodes, so the sentinel is inserted
+    at :data:`BACK` and every node id from there up shifts by one.  It arrives unvisited and with no edges: a
+    model that has never caught itself repeating has nothing to say about where it goes round.
+    """
+    if int(d.get("format_version", 1)) >= 3:
+        return d
+    nodes = dict(d["nodes"])
+    edges = dict(d["edges"])
+    labels = list(nodes["labels"])
+    if len(labels) < BACK or (len(labels) > BACK and labels[BACK] == BACK_LABEL):
+        return d
+    at = BACK
+    nodes["labels"] = labels[:at] + [BACK_LABEL] + labels[at:]
+    # the sentinel takes START's activation parameters, whatever kind of model wrote the file (the count
+    # model's a = 0, k = 1 make every activation 1; the sine model's are the defaults), and its own fixed state
+    for key, blank in (("z", BACK_Z), ("a", None), ("b", None), ("h", None), ("k", None),
+                       ("count", 0), ("count_resets", 0)):
+        if key in nodes and nodes[key]:
+            values = list(nodes[key])
+            nodes[key] = values[:at] + [values[START] if blank is None else blank] + values[at:]
+    shift = lambda i: i + 1 if i >= at else i  # noqa: E731 - one expression, used twice below
+    edges["src"] = [shift(int(i)) for i in edges["src"]]
+    edges["dst"] = [shift(int(i)) for i in edges["dst"]]
+    return {**d, "nodes": nodes, "edges": edges, "format_version": _GRAPH_FORMAT_VERSION}
 
 
 class RadixCyclicGraph:
@@ -89,6 +137,7 @@ class RadixCyclicGraph:
         self._encoder = Encoder(_W)
         self._new_node(START_LABEL)
         self._new_node(END_LABEL)
+        self._new_node(BACK_LABEL, z=BACK_Z)
 
     # -- counters ------------------------------------------------------------
 
@@ -192,7 +241,7 @@ class RadixCyclicGraph:
     # -- sizes ---------------------------------------------------------------
 
     def num_nodes(self) -> int:
-        """Alive nodes including START/END."""
+        """Alive nodes including the sentinels."""
         return self._n_alive_nodes
 
     def num_edges(self) -> int:
@@ -205,10 +254,10 @@ class RadixCyclicGraph:
 
     def compression_ratio(self) -> float:
         """Trigrams per real (non-sentinel) node."""
-        return len(self.trigram_index) / max(1, self._n_alive_nodes - 2)
+        return len(self.trigram_index) / max(1, self._n_alive_nodes - FIRST)
 
     def alive_nodes(self) -> list[int]:
-        """Ids of alive nodes in increasing order (START and END first)."""
+        """Ids of alive nodes in increasing order (the sentinels first)."""
         return [i for i, ok in enumerate(self.alive) if ok]
 
     # -- lookup --------------------------------------------------------------
@@ -249,7 +298,7 @@ class RadixCyclicGraph:
         state, activation parameters and count.  ``A`` gets a single new edge
         ``A -> B`` (``edge_count = count[A]``).  Returns ``(A, B)``.
         """
-        if node_id == START or node_id == END:
+        if node_id < FIRST:
             raise ValueError("cannot split a sentinel node")
         if node_id < 0 or node_id >= len(self.labels) or not self.alive[node_id]:
             raise ValueError(f"node {node_id} is not alive")
@@ -297,13 +346,13 @@ class RadixCyclicGraph:
         probability and cost - is unchanged.  A cycle edge ``c -> p`` (which
         becomes the self-loop ``p -> p``) is covered by the same rescale.
         """
-        if p == START or p == END or p < 0 or p >= len(self.labels) or not self.alive[p]:
+        if p < FIRST or p >= len(self.labels) or not self.alive[p]:
             return False
         ch = self.children[p]
         if len(ch) != 1:
             return False
         c = next(iter(ch))
-        if c == p or c == START or c == END:
+        if c == p or c < FIRST:
             return False
         pc = self.parents[c]
         if len(pc) != 1:
@@ -362,7 +411,7 @@ class RadixCyclicGraph:
         merge = self.merge_child
         while True:
             done = 0
-            for p in range(2, len(self.labels)):
+            for p in range(FIRST, len(self.labels)):
                 if alive[p]:
                     while merge(p):
                         done += 1
@@ -569,7 +618,7 @@ class RadixCyclicGraph:
         changed = 0
         for n, amt in items:
             amt = float(amt)
-            if n <= END or n >= len(target) or not alive[n] or amt <= 0:
+            if n < FIRST or n >= len(target) or not alive[n] or amt <= 0:
                 continue
             target[n] *= 1.0 - 2.0 * amt
             changed += 1
@@ -595,6 +644,74 @@ class RadixCyclicGraph:
         exps = [(c, math.exp(s - m)) for c, s in scores]
         total = sum(v for _, v in exps)
         return [(c, v / total) for c, v in exps]
+
+    def nudge_edge(self, p: int, c: int, amount: float) -> bool:
+        """Move the weight of ``p -> c`` so the transition gets ``amount`` *likelier* (negative: dearer).
+
+        The cost of an edge is a softmax over ``w * f(p) * f(c)``, so which way the weight has to move depends
+        on the sign of the two activations it sits between.  Returns ``False`` when there is no such edge.
+        """
+        e = self.children[p].get(c) if FIRST <= p < len(self.children) else None
+        if e is None or not amount:
+            return False
+        acts = self._activations()
+        pull = acts[p] * acts[c]
+        if pull > 0:
+            self.edge_w[e] += amount
+        elif pull < 0:
+            self.edge_w[e] -= amount
+        else:
+            return False
+        self.version += 1
+        return True
+
+    def observe_back(self, p: int, went: int | None = None, instead: int | None = None,
+                     amount: float = 1.0) -> int:
+        """Teach what a voice learned by backing out of a repeat at ``p``.
+
+        Nothing in a corpus says where a walk loops, so this is the one thing the graph learns from
+        *experience* rather than from observation - a voice that caught itself repeating and had to back up
+        (:func:`radixnet.dialogue.backtrack`).  Three things are taught at once, and all three are ordinary
+        learned quantities:
+
+        * ``p -> BACK`` is created on first use and bumped like any observed transition, its weight moving to
+          make the transition likelier.  It competes with ``p``'s real children for probability, so every
+          hand-over raises the model's own estimate that walks through ``p`` go round - and once that estimate
+          beats the real children, the search hands over there by itself, wherever it is walking.
+        * ``went`` - the child the walk was about to loop through - gets ``amount`` *dearer*.
+        * ``instead`` - the child the voice took after backing up - gets ``amount`` *cheaper*.
+
+        The first is where it goes round; the other two are what to do instead.  Returns the ``BACK`` edge id.
+        """
+        if p < FIRST or p >= len(self.labels) or not self.alive[p]:
+            raise ValueError(f"node {p} is not a real node to go back from")
+        if amount < 0:
+            raise ValueError(f"amount must be >= 0, got {amount}")
+        e = self.children[p].get(BACK)
+        if e is None:
+            e = self._new_edge(p, BACK)
+        self.count[BACK] += 1
+        self.edge_count[e] += 1
+        self.traversals += 1
+        self.version += 1
+        self.nudge_edge(p, BACK, amount)
+        if went is not None and went != BACK:
+            self.nudge_edge(p, went, -amount)
+        if instead is not None and instead != BACK:
+            self.nudge_edge(p, instead, amount)
+        return e
+
+    def back_cost(self, p: int) -> float | None:
+        """What the model thinks a walk arriving at ``p`` costs to go round, or ``None`` when it has no idea.
+
+        ``None`` for a node that was never backed out of; otherwise the cost of its ``BACK`` edge, to compare
+        with the costs of its real children - when it is the cheapest of them the model's most likely next step
+        is to *stop*, which is what the search acts on.
+        """
+        for c, _e, cost in self.child_costs(p):
+            if c == BACK:
+                return cost
+        return None
 
     def child_costs(self, p: int) -> list[tuple[int, int, float]]:
         """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes."""
@@ -720,12 +837,13 @@ class RadixCyclicGraph:
         """Inverse of :meth:`to_dict`."""
         if d.get("format") != _GRAPH_FORMAT:
             raise ValueError(f"not a {_GRAPH_FORMAT} document")
+        d = _with_back(d)
         nodes = d["nodes"]
         edges = d["edges"]
         labels = list(nodes["labels"])
         n = len(labels)
-        if n < 2 or labels[START] != START_LABEL or labels[END] != END_LABEL:
-            raise ValueError("graph document is missing the START/END sentinels")
+        if n < FIRST or labels[START] != START_LABEL or labels[END] != END_LABEL or labels[BACK] != BACK_LABEL:
+            raise ValueError("graph document is missing the START/END/BACK sentinels")
         g = cls(seed=int(d.get("seed", 0)))
         g.inverted = bool(d.get("inverted", False))
         g.labels = labels
@@ -746,7 +864,7 @@ class RadixCyclicGraph:
         g.parents = [{} for _ in range(n)]
         g._n_alive_nodes = n
         index: dict[str, tuple[int, int]] = {}
-        for nid in range(2, n):
+        for nid in range(FIRST, n):
             label = labels[nid]
             if len(label) < _W:
                 raise ValueError(f"node {nid} label {label!r} is shorter than {_W}")
@@ -823,7 +941,7 @@ class RadixCyclicGraph:
             if not alive[p]:
                 assert not children[p] and not parents[p], f"dead node {p} still has edges"
                 continue
-            if p > END:
+            if p >= FIRST:
                 assert len(labels[p]) >= _W, f"node {p} label {labels[p]!r} shorter than {_W}"
             for c, e in children[p].items():
                 assert 0 <= e < len(self.edge_w), f"edge id {e} out of range on {p}->{c}"
@@ -831,9 +949,11 @@ class RadixCyclicGraph:
                 assert e not in seen, f"edge {e} listed twice ({seen.get(e)} and {(p, c)})"
                 seen[e] = (p, c)
                 assert alive[c], f"edge {p}->{c} points at dead node {c}"
-                assert c != START and p != END, f"edge {p}->{c} touches a sentinel illegally"
+                assert c != START and p != END and p != BACK, (
+                    f"edge {p}->{c} touches a sentinel illegally"
+                )
                 assert parents[c].get(p) == e, f"edge {p}->{c} ({e}) missing from parents[{c}]"
-                if p > END and c > END:
+                if p >= FIRST and c >= FIRST:
                     assert labels[p][-_OV:] == labels[c][:_OV], (
                         f"edge {p}->{c} violates window overlap: {labels[p]!r} -> {labels[c]!r}"
                     )
@@ -842,7 +962,7 @@ class RadixCyclicGraph:
         assert len(seen) == sum(self.edge_alive) == self._n_alive_edges, "alive edge bookkeeping is stale"
         index = self.trigram_index
         expected = 0
-        for p in range(2, n):
+        for p in range(FIRST, n):
             if not alive[p]:
                 continue
             label = labels[p]
@@ -855,10 +975,10 @@ class RadixCyclicGraph:
             assert alive[p], f"trigram {t!r} maps to dead node {p}"
             assert labels[p][o : o + _W] == t, f"trigram {t!r} indexed at {p}@{o} but label is {labels[p]!r}"
         if compressed:
-            for p in range(2, n):
+            for p in range(FIRST, n):
                 if alive[p] and len(children[p]) == 1:
                     c = next(iter(children[p]))
-                    assert c == p or c <= END or len(parents[c]) != 1, (
+                    assert c == p or c < FIRST or len(parents[c]) != 1, (
                         f"unary chain {p}->{c} survived compress ({labels[p]!r} -> {labels[c]!r})"
                     )
         if texts is not None:

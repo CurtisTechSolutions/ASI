@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.beam import Prediction  # noqa: E402
 from radixnet.encoding import Encoder  # noqa: E402
-from radixnet.graph import END, START  # noqa: E402
+from radixnet.graph import END, FIRST, START  # noqa: E402
 from radixnet.model import UNKNOWN_PROB, RadixNet, TrainConfig  # noqa: E402
 from radixnet.search import PathResult  # noqa: E402
 
@@ -122,7 +122,7 @@ class TestConstruction(unittest.TestCase):
                 "history_len", "last_loss",
             },
         )
-        self.assertEqual((stats["nodes"], stats["edges"], stats["trigrams"]), (2, 0, 0))
+        self.assertEqual((stats["nodes"], stats["edges"], stats["trigrams"]), (FIRST, 0, 0))  # the sentinels
         self.assertIsNone(stats["last_loss"])
         json.dumps(stats)
         self.assertIn("RadixNet(", repr(model))
@@ -194,7 +194,7 @@ class TestTrain(unittest.TestCase):
         (rec,) = model.train(["hello world"], epochs=1, **FAST)
         # START -> "hello world" -> END: two transitions, all in-node steps are silent
         self.assertEqual(rec["transitions"], 2)
-        self.assertEqual(rec["nodes"], 3)
+        self.assertEqual(rec["nodes"], FIRST + 1)
         self.assertEqual(rec["loss"], 0.0)
 
     def test_reobserves_after_structure_change(self):

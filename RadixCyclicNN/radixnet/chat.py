@@ -97,7 +97,8 @@ class ChatConfig:
     """Blame the failed replies (and clear with the passed ones)."""
     clear_passes: bool = True
     learn: bool = True
-    """Train the positive model on the marked replies (2NRL)."""
+    """Train the positive model on the marked replies (2NRL), and let its rethinks teach the graph where it
+    goes round (:func:`radixnet.dialogue.teach_back`)."""
     teach_partner: bool = True
     """Put the partner's own lines in the positive phase: they are what a good reply looked like."""
     avoid_repeats: bool = True
@@ -256,7 +257,7 @@ class Chat:
                 self.model, line, heard=heard, index=len(transcript), speaker=DEFAULT_SPEAKERS[1], mode=cfg.mode,
                 max_length=cfg.max_length, context=cfg.context, temperature=cfg.temperature, k=cfg.k, rng=rng,
                 avoid_repeats=cfg.avoid_repeats, avoid_word_repeats=cfg.avoid_word_repeats,
-                explore=cfg.explore, veto=veto,
+                explore=cfg.explore, learn=cfg.learn, veto=veto,
             )
             if turn is None:
                 # the guard can silence it outright, and that is worth saying

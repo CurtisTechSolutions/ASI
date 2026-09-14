@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from heapq import heappop, heappush
 
 from .encoding import WINDOW, Decoder
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 
 __all__ = ["PathResult", "dijkstra_predict", "sample_walk"]
 
@@ -59,11 +59,26 @@ class PathResult:
         }
 
 
+def onward(costs: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
+    """The children a walk may actually take, given what the model has learned about going round.
+
+    ``BACK`` is not a continuation - it emits nothing and no text passes through it - so it never appears in a
+    path.  But it *competes* with the real children for probability, and when it is the cheapest of them the
+    model's most likely next step at this node is to stop rather than carry on: the walk hands over, which here
+    means the branch offers nothing and the search goes on with its others (:meth:`RadixCyclicGraph.observe_back`).
+    """
+    onward = [item for item in costs if item[0] != BACK]
+    if len(onward) == len(costs):
+        return costs
+    back = min(cost for c, _e, cost in costs if c == BACK)
+    return [] if all(cost >= back for _c, _e, cost in onward) else onward
+
+
 def _start_emission(graph: RadixCyclicGraph, start_node: int, start_offset: int) -> int:
     """Characters emitted by the start node (its remainder after the matched trigram)."""
     if start_node < 0 or start_node >= len(graph.labels) or not graph.alive[start_node]:
         raise ValueError(f"start node {start_node} is not alive")
-    if start_node == START or start_node == END:
+    if start_node < FIRST:
         return 0
     remainder = len(graph.labels[start_node]) - (start_offset + _W)
     if start_offset < 0 or remainder < 0:
@@ -87,9 +102,9 @@ def _build_result(
     if include_context is None:
         # From START there is no matched context to strip: emit the first node in full.
         include_context = start_node == START
-    offset = 0 if start_node == START or start_node == END else start_offset
+    offset = 0 if start_node < FIRST else start_offset
     # sentinels are stripped by id: a real node may carry the label "<s>" or "</s>"
-    real = [lab for n, lab in zip(node_ids, labels) if n != START and n != END]
+    real = [lab for n, lab in zip(node_ids, labels) if n >= FIRST]
     text = _DECODER.decode_path(real, offset, include_context, skip_sentinels=False)
     if max_chars is not None and max_chars >= 0:
         text = text[:max_chars]
@@ -165,7 +180,7 @@ def dijkstra_predict(
             break
         if max_chars is not None and chars >= max_chars:
             continue
-        for c, _e, ec in child_costs(node):
+        for c, _e, ec in onward(child_costs(node)):
             nchars = chars if c == END else chars + len(labels[c]) - _OV
             step = ec + step_penalty
             ncost = cost + step
@@ -226,7 +241,7 @@ def sample_walk(
     while True:
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
-        costs = child_costs(node)
+        costs = onward(child_costs(node))  # a node the model expects to go round offers nothing
         if not costs:
             break
         if temperature == 0 or len(costs) == 1:

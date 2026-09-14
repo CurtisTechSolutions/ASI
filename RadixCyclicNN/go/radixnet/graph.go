@@ -5,10 +5,19 @@ import (
 	"sync"
 )
 
-// Node ids of the two sentinels.
+// Node ids of the sentinels.  Start and End are where a text begins and ends -
+// observed in the corpus, like everything else.  Back is where the graph has
+// *learned* that a walk goes round: nothing in a corpus says so, so its edges
+// are taught by the voices that caught themselves repeating (Backtrack).  An
+// edge p -> Back competes for probability with p's real children, so the more
+// often walks through p had to be backed out of, the likelier the search is to
+// hand over there instead of carrying on.  First is the first node id that is
+// not a sentinel.
 const (
 	Start = 0
 	End   = 1
+	Back  = 2
+	First = 3
 )
 
 // New edge weights of the sine network are drawn from [WLow, WHigh]; the count
@@ -26,10 +35,16 @@ const (
 	defaultH = 0.0
 )
 
+// BackZ is the Back sentinel's state: fixed at the far edge of the range the
+// sine model draws from instead of drawn, so adding the sentinel moved no
+// random stream and its activation is firmly non-zero (see the Python graph).
+const BackZ = 4.5
+
 const (
 	graphFormat = "radixnet-graph"
-	// 2 added the counter reset fields; version 1 files load with no resets
-	graphFormatVersion = 2
+	// 2 added the counter reset fields (version 1 files load with no resets); 3 the Back sentinel (older
+	// files gain an unvisited one on load, and their node ids shift up by one)
+	graphFormatVersion = 3
 )
 
 type loc struct{ node, off int }
@@ -228,6 +243,7 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 	}
 	g.newNode(StartLabel, 0, 0)
 	g.newNode(EndLabel, 0, 0)
+	g.newNode(BackLabel, 0, 0)
 	return g, nil
 }
 
@@ -334,6 +350,82 @@ func (g *Graph) createTrigramNode(trigram string) int {
 	return nid
 }
 
+// Nothing in a corpus says where a walk loops, so this is the one thing the
+// graph learns from *experience* rather than from observation - a voice that
+// caught itself repeating and had to back up (Backtrack).  Three things are
+// taught at once, and all three are ordinary learned quantities:
+//
+//   - p -> Back is created on first use and bumped like any observed
+//     transition.  It competes with p's real children for probability, so every
+//     hand-over raises the model's own estimate that walks through p go round -
+//     and once that estimate beats the real children, the search hands over
+//     there by itself, wherever it is walking.
+//   - went - the child the walk was about to loop through - gets amount dearer.
+//   - instead - the child the voice took after backing up - gets amount cheaper.
+//
+// The first is where it goes round; the other two are what to do instead.
+// Pass -1 for a child that is not known.  Returns the Back edge id.
+// NudgeEdge moves the weight of p -> c so the transition gets amount likelier
+// (negative: dearer).  The count model derives its weights from counts and
+// rewards, so this is where the sine model's direct nudge would go; here it
+// only reports whether such an edge exists.
+func (g *Graph) NudgeEdge(p, c int, amount float64) bool {
+	if p < First || p >= len(g.children) {
+		return false
+	}
+	_, ok := g.children[p].get(c)
+	return ok && amount != 0
+}
+
+// ObserveBack teaches what a voice learned by backing out of a repeat at p.
+func (g *Graph) ObserveBack(p int, went, instead int, amount float64) (int, error) {
+	if p < First || p >= len(g.Labels) || !g.Alive[p] {
+		return 0, fmt.Errorf("node %d is not a real node to go back from", p)
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("amount must be >= 0, got %v", amount)
+	}
+	e, ok := g.children[p].get(Back)
+	if !ok {
+		e = g.newEdge(p, Back, 0, 0)
+	}
+	g.Count[Back]++
+	g.EdgeCount[e]++
+	g.Traversals.Add(1)
+	g.Version.Add(1)
+	// a weight here is a function of the counts and the rewards, so going round is taught by the Back edge's
+	// count and what to do instead by a penalty on the step it looped through and a reward on the step it took
+	// after backing up - the same rewards 2NRL moves (the sine model nudges the weights themselves instead)
+	g.RecordTraversals([]int{e})
+	g.AddReward([]int{e}, amount) // the hand-over itself, learned the way this model learns everything
+	for _, pair := range [2]struct {
+		child int
+		sign  float64
+	}{{went, -1}, {instead, 1}} {
+		if pair.child < First || pair.child == Back {
+			continue
+		}
+		if edge, ok := g.children[p].get(pair.child); ok {
+			g.AddReward([]int{edge}, pair.sign*amount)
+		}
+	}
+	g.RecomputeWeights()
+	return e, nil
+}
+
+// BackCost is what the model thinks a walk arriving at p costs to go round, or
+// ok = false when it has no idea (a node that was never backed out of).  When it
+// is the cheapest of p's children the model's most likely next step there is to
+// stop, which is what the search acts on.
+func (g *Graph) BackCost(p int) (float64, bool) {
+	for _, it := range g.ChildCosts(p) {
+		if it.Child == Back {
+			return it.Cost, true
+		}
+	}
+	return 0, false
+}
+
 // -- sizes and lookup ------------------------------------------------------------
 
 // NumNodes is the number of alive nodes including the sentinels.
@@ -347,7 +439,7 @@ func (g *Graph) NumTrigrams() int { return len(g.index) }
 
 // CompressionRatio is trigrams per real node.
 func (g *Graph) CompressionRatio() float64 {
-	real := g.nAliveNodes - 2
+	real := g.nAliveNodes - First
 	if real < 1 {
 		real = 1
 	}
@@ -401,7 +493,7 @@ func (g *Graph) Parents(c int) []int {
 // label[:i+2], B is a new node with label[i:] that inherits A's out-edges
 // (edge ids kept) and count; A gets the single new edge A -> B.
 func (g *Graph) Split(node, i int) (int, int, error) {
-	if node == Start || node == End {
+	if node < First {
 		return 0, 0, fmt.Errorf("cannot split a sentinel node")
 	}
 	if node < 0 || node >= len(g.Labels) || !g.Alive[node] {
@@ -439,7 +531,7 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 // MergeChild merges p's single child c into p when the chain is unary
 // (p has exactly one child, c exactly one parent, no sentinels, p != c).
 func (g *Graph) MergeChild(p int) bool {
-	if p == Start || p == End || p < 0 || p >= len(g.Labels) || !g.Alive[p] {
+	if p < First || p >= len(g.Labels) || !g.Alive[p] {
 		return false
 	}
 	ch := &g.children[p]
@@ -447,7 +539,7 @@ func (g *Graph) MergeChild(p int) bool {
 		return false
 	}
 	c := ch.order[0]
-	if c == p || c == Start || c == End {
+	if c == p || c < First {
 		return false
 	}
 	pc := &g.parents[c]
@@ -505,7 +597,7 @@ func (g *Graph) Compress() int {
 	merges := 0
 	for {
 		done := 0
-		for p := 2; p < len(g.Labels); p++ {
+		for p := First; p < len(g.Labels); p++ {
 			if g.Alive[p] {
 				for g.MergeChild(p) {
 					done++
@@ -720,7 +812,8 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 	if !(len(g.EdgeCount) == m && len(g.EdgeAlive) == m && len(g.EdgeReward) == m && len(g.WindowEdgeCount) == m && len(g.EdgeParent) == m) {
 		return fmt.Errorf("edge arrays have inconsistent lengths")
 	}
-	if n < 2 || !g.Alive[Start] || !g.Alive[End] || g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel {
+	if n < First || !g.Alive[Start] || !g.Alive[End] || !g.Alive[Back] ||
+		g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel || g.Labels[Back] != BackLabel {
 		return fmt.Errorf("sentinels missing or changed")
 	}
 	if g.parents[Start].size() != 0 || g.children[End].size() != 0 {
@@ -736,7 +829,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 			continue
 		}
 		aliveNodes++
-		if p > End && g.labelLen[p] < Window {
+		if p >= First && g.labelLen[p] < Window {
 			return fmt.Errorf("node %d label %q shorter than %d", p, g.Labels[p], Window)
 		}
 		if g.labelLen[p] != runeLen(g.Labels[p]) {
@@ -757,7 +850,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 			if g.EdgeParent[e] != p {
 				return fmt.Errorf("edge %d records parent %d, listed under %d", e, g.EdgeParent[e], p)
 			}
-			if p > End && c > End {
+			if p >= First && c >= First {
 				lp := []rune(g.Labels[p])
 				if string(lp[len(lp)-Overlap:]) != runeSlice(g.Labels[c], 0, Overlap) {
 					return fmt.Errorf("edge %d->%d violates the window overlap", p, c)
@@ -784,7 +877,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		return fmt.Errorf("alive edge bookkeeping is stale")
 	}
 	expected := 0
-	for p := 2; p < n; p++ {
+	for p := First; p < n; p++ {
 		if !g.Alive[p] {
 			continue
 		}

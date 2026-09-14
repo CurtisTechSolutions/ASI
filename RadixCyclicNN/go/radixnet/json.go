@@ -267,14 +267,74 @@ func reasonPairs(entries []ReasonBlame) [][2]float64 {
 }
 
 // GraphFromDoc rebuilds a graph from its document.
+// withBack gives a graph document the Back sentinel: format 3 as it is, anything
+// older upgraded.  Files written before Back existed have Start and End and then
+// their real nodes, so the sentinel is inserted at Back and every node id from
+// there up shifts by one.  It arrives unvisited and with no edges: a model that
+// has never caught itself repeating has nothing to say about where it goes round.
+func withBack(d *GraphDoc) {
+	if d.FormatVersion >= 3 {
+		return
+	}
+	labels := d.Nodes.Labels
+	if len(labels) < Back || (len(labels) > Back && labels[Back] == BackLabel) {
+		return
+	}
+	insertStr := func(v []string, at int, x string) []string {
+		return append(v[:at:at], append([]string{x}, v[at:]...)...)
+	}
+	insertF := func(v []float64, at int, x float64) []float64 {
+		if v == nil {
+			return nil
+		}
+		return append(v[:at:at], append([]float64{x}, v[at:]...)...)
+	}
+	insertI := func(v []int64, at int, x int64) []int64 {
+		if v == nil {
+			return nil
+		}
+		return append(v[:at:at], append([]int64{x}, v[at:]...)...)
+	}
+	// the sentinel takes Start's activation parameters, whatever kind of model wrote the file, and its own
+	// fixed state
+	at := func(v []float64, fallback float64) float64 {
+		if len(v) > Start {
+			return v[Start]
+		}
+		return fallback
+	}
+	d.Nodes.Labels = insertStr(labels, Back, BackLabel)
+	d.Nodes.Z = insertF(d.Nodes.Z, Back, BackZ)
+	d.Nodes.A = insertF(d.Nodes.A, Back, at(d.Nodes.A, 0))
+	d.Nodes.B = insertF(d.Nodes.B, Back, at(d.Nodes.B, defaultB))
+	d.Nodes.H = insertF(d.Nodes.H, Back, at(d.Nodes.H, defaultH))
+	d.Nodes.K = insertF(d.Nodes.K, Back, at(d.Nodes.K, 1))
+	d.Nodes.Count = insertI(d.Nodes.Count, Back, 0)
+	d.Nodes.CountResets = insertI(d.Nodes.CountResets, Back, 0)
+	shift := func(i int) int {
+		if i >= Back {
+			return i + 1
+		}
+		return i
+	}
+	for i := range d.Edges.Src {
+		d.Edges.Src[i] = shift(d.Edges.Src[i])
+	}
+	for i := range d.Edges.Dst {
+		d.Edges.Dst[i] = shift(d.Edges.Dst[i])
+	}
+	d.FormatVersion = graphFormatVersion
+}
+
 func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	if d.Format != graphFormat {
 		return nil, fmt.Errorf("not a %s document", graphFormat)
 	}
+	withBack(d)
 	labels := d.Nodes.Labels
 	n := len(labels)
-	if n < 2 || labels[Start] != StartLabel || labels[End] != EndLabel {
-		return nil, fmt.Errorf("graph document is missing the START/END sentinels")
+	if n < First || labels[Start] != StartLabel || labels[End] != EndLabel || labels[Back] != BackLabel {
+		return nil, fmt.Errorf("graph document is missing the START/END/BACK sentinels")
 	}
 	for _, arr := range [][]float64{d.Nodes.Z, d.Nodes.A, d.Nodes.B, d.Nodes.H, d.Nodes.K} {
 		if arr != nil && len(arr) != n {
@@ -334,7 +394,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	for nid := 0; nid < n; nid++ {
 		g.Alive[nid] = true
 		g.labelLen[nid] = runeLen(labels[nid])
-		if nid < 2 {
+		if nid < First {
 			continue
 		}
 		label := []rune(labels[nid])

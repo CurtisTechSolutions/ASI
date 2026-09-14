@@ -153,7 +153,7 @@ func TestWrappedGraphRoundTripsThroughItsDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := m.G.ToDoc()
-	if doc.FormatVersion != 2 {
+	if doc.FormatVersion != 3 {
 		t.Fatalf("graph format version %d, want 2", doc.FormatVersion)
 	}
 	if doc.Nodes.CountResets == nil || doc.Edges.CountResets == nil {

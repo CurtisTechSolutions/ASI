@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K  # noqa: E402
 from radixnet.backend import CSR, NodeParams  # noqa: E402
-from radixnet.encoding import END_LABEL, START_LABEL, Decoder, Encoder  # noqa: E402
-from radixnet.graph import END, START, RadixCyclicGraph  # noqa: E402
+from radixnet.encoding import BACK_LABEL, END_LABEL, START_LABEL, Decoder, Encoder  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START, RadixCyclicGraph  # noqa: E402
 
 ENC = Encoder()
 DEC = Decoder()
@@ -54,12 +54,12 @@ def assert_transitions_consistent(tc: unittest.TestCase, g: RadixCyclicGraph, tr
 class TestBasics(unittest.TestCase):
     def test_fresh_graph(self):
         g = RadixCyclicGraph(seed=3)
-        self.assertEqual(g.labels[:2], [START_LABEL, END_LABEL])
-        self.assertEqual(g.num_nodes(), 2)
+        self.assertEqual(g.labels[:FIRST], [START_LABEL, END_LABEL, BACK_LABEL])
+        self.assertEqual(g.num_nodes(), FIRST)  # the three sentinels and nothing else
         self.assertEqual(g.num_edges(), 0)
         self.assertEqual(g.num_trigrams(), 0)
         self.assertEqual(g.compression_ratio(), 0.0)
-        self.assertEqual(g.alive_nodes(), [START, END])
+        self.assertEqual(g.alive_nodes(), [START, END, BACK])
         self.assertFalse(g.inverted)
         self.assertNotIn(START_LABEL, g.trigram_index)
         g.check_invariants()
@@ -92,7 +92,7 @@ class TestBasics(unittest.TestCase):
         self.assertEqual(g.labels[n], "abc")
         self.assertEqual(g.get_or_create("abc"), (n, 0))
         self.assertEqual(g.lookup("abc"), (n, 0))
-        self.assertEqual(g.num_nodes(), 3)
+        self.assertEqual(g.num_nodes(), FIRST + 1)
         with self.assertRaises(ValueError):
             g.get_or_create("ab")
         g.check_invariants()
@@ -117,13 +117,13 @@ class TestBasics(unittest.TestCase):
         # START -> 5 trigram nodes -> END : 6 transitions
         self.assertEqual(len(trans), 6)
         assert_transitions_consistent(self, g, trans)
-        self.assertEqual(g.num_nodes(), 2 + 5)
+        self.assertEqual(g.num_nodes(), FIRST + 5)
         self.assertEqual(g.num_edges(), 6)
         self.assertEqual(g.num_trigrams(), 5)
         self.assertEqual(g.count[START], 1)
         self.assertEqual(g.count[END], 1)
         for n in g.alive_nodes():
-            self.assertEqual(g.count[n], 1)
+            self.assertEqual(g.count[n], 0 if n == BACK else 1)  # nothing has gone round yet
         for p, e in trans:
             self.assertEqual(g.edge_count[e], 1)
         g.check_invariants(texts=[text])
@@ -172,7 +172,7 @@ class TestCyclesAndRepeats(unittest.TestCase):
         merges = g.compress()
         self.assertGreater(merges, 0)
         g.check_invariants(texts=["abcabc"], compressed=True)
-        labels = sorted(g.labels[i] for i in g.alive_nodes() if i > END)
+        labels = sorted(g.labels[i] for i in g.alive_nodes() if i >= FIRST)
         self.assertEqual(labels, ["abc", "bcab"])
         abc, _ = g.lookup("abc")
         bcab, _ = g.lookup("bca")
@@ -189,7 +189,7 @@ class TestSplit(unittest.TestCase):
         g = RadixCyclicGraph(seed=8)
         g.observe_sequence(ENC.encode("abcdefg"))
         g.compress()
-        (n,) = [i for i in g.alive_nodes() if i > END]
+        (n,) = [i for i in g.alive_nodes() if i >= FIRST]
         self.assertEqual(g.labels[n], "abcdefg")
         return g, n
 
@@ -238,7 +238,7 @@ class TestSplit(unittest.TestCase):
         before = g.to_dict()
         g.split(n, 3)
         g.split(n, 1)
-        self.assertEqual(g.num_nodes(), 5)
+        self.assertEqual(g.num_nodes(), FIRST + 3)
         g.check_invariants(texts=["abcdefg"])
         self.assertEqual(g.compress(), 2)
         g.check_invariants(texts=["abcdefg"], compressed=True)
@@ -309,9 +309,9 @@ class TestMerge(unittest.TestCase):
         g.observe_sequence(ENC.encode(text))
         n_before = g.num_nodes()
         merges = g.compress()
-        self.assertEqual(merges, n_before - 3)
-        self.assertEqual(g.num_nodes(), 3)
-        (n,) = [i for i in g.alive_nodes() if i > END]
+        self.assertEqual(merges, n_before - (FIRST + 1))
+        self.assertEqual(g.num_nodes(), FIRST + 1)  # the sentinels and the one merged node
+        (n,) = [i for i in g.alive_nodes() if i >= FIRST]
         self.assertEqual(g.labels[n], text)
         self.assertEqual(g.compression_ratio(), len(text) - 2)
         self.assertEqual(g.compress(), 0)
@@ -346,7 +346,7 @@ class TestRandomisedInvariants(unittest.TestCase):
                     assert_transitions_consistent(self, g, trans)
                     self.assertEqual(g.node_path(ENC.encode(text)), [START] + [p for p, _ in trans[1:]] + [END])
                 elif op < 0.85:
-                    candidates = [n for n in g.alive_nodes() if n > END and len(g.labels[n]) >= 4]
+                    candidates = [n for n in g.alive_nodes() if n >= FIRST and len(g.labels[n]) >= 4]
                     if candidates:
                         n = rng.choice(candidates)
                         a, b = g.split(n, rng.randint(1, len(g.labels[n]) - 3))
@@ -520,7 +520,7 @@ class TestSerialisation(unittest.TestCase):
         self.assertTrue(all(g2.alive))
         # probabilities are preserved (compare per label)
         for p in g.alive_nodes():
-            p2 = g2.lookup(g.labels[p][:3])[0] if p > END else p
+            p2 = g2.lookup(g.labels[p][:3])[0] if p >= FIRST else p
             probs = {g.labels[c]: pr for c, pr in g.child_probs(p)}
             probs2 = {g2.labels[c]: pr for c, pr in g2.child_probs(p2)}
             self.assertEqual(set(probs), set(probs2))

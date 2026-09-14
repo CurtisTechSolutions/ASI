@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from .encoding import WINDOW
 from .graph import END, RadixCyclicGraph
-from .search import PathResult, _build_result, _start_emission
+from .search import PathResult, _build_result, _start_emission, onward
 
 __all__ = ["Prediction", "beam_predict", "default_beam", "path_probability"]
 
@@ -110,7 +110,7 @@ def _run_beam(
         candidates: list[tuple[float, int, int, int]] = []
         for cost, chars, node, entry in frontier:
             expanded += 1
-            for c, _e, ec in child_costs(node):
+            for c, _e, ec in onward(child_costs(node)):
                 nchars = chars if c == END else chars + len(labels[c]) - _OV
                 step = ec + step_penalty
                 ncost = cost + step

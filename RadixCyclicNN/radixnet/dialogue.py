@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Sequence
 
 from .beam import path_probability
-from .graph import START
+from .graph import FIRST, START
 from .search import PathResult
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -78,10 +78,11 @@ class Rethink:
     steps: int = 0
     explored: int = 0
     found: bool = False
+    taught: int = -1  # the node it taught to hand over here, or -1 when it taught nothing
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "noticed": self.noticed, "cut": self.cut, "steps": self.steps,
-                "explored": self.explored, "found": self.found}
+                "explored": self.explored, "found": self.found, "taught": self.taught}
 
 
 @dataclass
@@ -321,6 +322,42 @@ def _offer(
     return drawn
 
 
+def teach_back(voice: "GraphModel", text: str, at: int, found: PathResult | None, amount: float = 1.0) -> int:
+    """Teach the graph what a rethink just found out, and return the node it was taught at (``-1``: none).
+
+    A voice that has to back up has learned something no corpus could tell it: *this* is where its walks go
+    round.  The node it backed up to gets an edge into ``BACK`` (:meth:`RadixCyclicGraph.observe_back`), the
+    step it was about to loop through gets dearer, and the step it took instead - when it found one - gets
+    cheaper.  Nothing else in the model is touched, and the whole of it is one bump of three ordinary edges.
+
+    From then on the search itself hands over at that node (:func:`radixnet.search.onward`), wherever it is
+    walking: the trait is the model's, not the conversation's.
+    """
+    graph = voice.graph
+    node, _offset, lead = voice._prefix_start(text[:at])
+    if node < FIRST or lead or not graph.alive[node]:
+        return -1  # nothing of its own to mark: the repeat started where the graph could not place it
+    went, _o, went_lead = voice._prefix_start(text[:at + len(text[at:].split(" ")[0])])
+    instead = found.node_ids[1] if found is not None and len(found.node_ids) > 1 else None
+    graph.observe_back(
+        node,
+        went=None if went_lead or went == node or went not in graph.children[node] else went,
+        instead=None if instead is None or instead not in graph.children[node] else instead,
+        amount=amount,
+    )
+    return node
+
+
+@dataclass
+class _Pick:
+    """What one look through the candidates turned up."""
+
+    spoken: PathResult | None = None  # what to say, or the best repeat when everything repeated
+    skipped: int = 0
+    repeat: bool = False  # ``spoken`` repeats something: nothing else was left
+    vetoed: int = 0
+    caught: PathResult | None = None  # the best candidate rejected for repeating: the one worth backing out of
+
 def backtrack(
     voice: "GraphModel",
     text: str,
@@ -338,6 +375,7 @@ def backtrack(
     rng: random.Random | None = None,
     avoid_repeats: bool = True,
     avoid_word_repeats: bool = True,
+    learn: bool = True,
     veto: "Veto | None" = None,
 ) -> tuple[PathResult | None, Rethink]:
     """A voice that caught itself repeating goes back to where it would have started saying it again, and looks
@@ -361,6 +399,11 @@ def backtrack(
     what it said, never what it heard.  ``(candidate, rethink)``: the candidate continues the kept words (its
     ``full_text`` is the whole utterance, its ``cost`` the path it explored from where it backed up), and the
     :class:`Rethink` says what it noticed and did, found or not.
+
+    With ``learn`` the voice does not only get out of this one: :func:`teach_back` writes what it found out
+    into the graph, so the *model* learns where it goes round and the search hands over there by itself from
+    then on, in any walk it makes.  That is the whole point of doing it here - a procedure that has to be
+    re-run every time has learned nothing.
     """
     heard = Heard() if heard is None else heard
     kind, noticed, at = "", "", -1
@@ -390,23 +433,18 @@ def backtrack(
                     (avoid_repeats and heard.duplicate(cand.full_text, cand.text)):
                 continue
             record.found = True
+            if learn:
+                record.taught = teach_back(voice, text, at, cand)
             return cand, record
         shorter = _shorter(cut)
         if len(shorter) < len(keep) or shorter == cut:
             break
         cut = shorter if shorter.endswith(" ") or not shorter else shorter + " "
+    if learn:
+        record.taught = teach_back(voice, text, at, None)  # it goes round here even if it found no way out
     return None, record
 
 
-@dataclass
-class _Pick:
-    """What one look through the candidates turned up."""
-
-    spoken: PathResult | None = None  # what to say, or the best repeat when everything repeated
-    skipped: int = 0
-    repeat: bool = False  # ``spoken`` repeats something: nothing else was left
-    vetoed: int = 0
-    caught: PathResult | None = None  # the best candidate rejected for repeating: the one worth backing out of
 
 
 def _pick(
@@ -478,6 +516,7 @@ def converse(
     avoid_repeats: bool = True,
     avoid_word_repeats: bool = True,
     explore: int = EXPLORE,
+    learn: bool = True,
     veto: Veto | None = None,
 ) -> list[Turn]:
     """``model`` talks to itself (or to ``partner``) for ``turns`` new turns.
@@ -499,6 +538,9 @@ def converse(
     * ``explore`` - times a voice that caught itself repeating - its own words, or the conversation's - may
       back up to where it would have started saying it again and look for another way on before it gives up on
       the line (:func:`backtrack`; 0 turns the exploring off).
+    * ``learn`` - teach the model what each rethink found out (:func:`teach_back`), so the graph itself learns
+      where it goes round.  **A conversation with this on changes the model**: two runs of the same
+      conversation differ because the first one taught it something.
     * ``veto`` - a candidate the voice may not speak (the guard: see :data:`Veto`).  A turn whose every
       candidate is vetoed falls back like any other dead end - a shorter context, then a fresh text - and the
       conversation stops when there is nothing left that may be said.
@@ -544,7 +586,8 @@ def converse(
             voice, said_list[-1] if said_list else "", heard=heard, index=index,
             speaker=speakers[index % len(speakers)], mode=mode, max_length=max_length, context=context,
             temperature=temperature, k=k, beam=beam, step_penalty=step_penalty, rng=rng,
-            avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, explore=explore, veto=veto,
+            avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, explore=explore, learn=learn,
+            veto=veto,
         )
         if turn is None:
             break
@@ -577,6 +620,7 @@ def reply(
     avoid_repeats: bool = True,
     avoid_word_repeats: bool = True,
     explore: int = EXPLORE,
+    learn: bool = True,
     veto: Veto | None = None,
 ) -> Turn | None:
     """What ``voice`` says next after ``previous`` - one turn, or ``None`` when it has nothing to say.
@@ -596,7 +640,9 @@ def reply(
     it backs up to where it would have started saying it again and looks for
     another way on (:func:`backtrack`), and only a voice that cannot think of
     one drops to a lesser answer or changes the subject.  What it noticed and
-    did is the turn's :class:`Rethink`.
+    did is the turn's :class:`Rethink`, and with ``learn`` what it found out is
+    written into the graph (:func:`teach_back`) - so the model, not just this
+    turn, comes out of it knowing where it goes round.
 
     It is public because the other voice need not be a model at all: the chat
     loop (:mod:`radixnet.chat`) has an LLM speak every other line and calls
@@ -623,7 +669,7 @@ def reply(
         found, rethought = backtrack(
             voice, pick.caught.full_text, keep, heard, added=pick.caught.text, explore=explore, mode=mode, k=k,
             beam=beam, max_length=max_length, step_penalty=step_penalty, temperature=temperature, rng=rng,
-            avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, veto=veto,
+            avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, learn=learn, veto=veto,
         )
         offered += rethought.explored
         return (found, False) if found is not None else (pick.spoken, pick.repeat)

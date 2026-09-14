@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -839,6 +840,8 @@ func cmdConverse(args []string) {
 	allowRepeats := fs.Bool("allow-repeats", false, "do not skip continuations already heard")
 	allowWordRepeats := fs.Bool("allow-word-repeats", false, "do not skip a reply that repeats its own words")
 	explore := fs.Int("explore", radixnet.Explore, "times a reply that caught itself repeating may back up and look for another way on")
+	noLearn := fs.Bool("no-learn", false, "do not teach the graph where it goes round (leave the model exactly as it was)")
+	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
@@ -846,7 +849,7 @@ func cmdConverse(args []string) {
 	opts := radixnet.DefaultConverseOptions()
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
-	opts.AvoidWordRepeats, opts.Explore = !*allowWordRepeats, *explore
+	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -888,10 +891,23 @@ func cmdConverse(args []string) {
 		guard = guardDoc(pair, verdicts, map[string]any{"refusals": outcome.Vetoed})
 	}
 	saidTwice := radixnet.Repeats(turnsOut)
+	taught := []int{}
+	seenNode := map[int]bool{}
+	for _, t := range turnsOut {
+		if t.Rethink != nil && t.Rethink.Taught >= 0 && !seenNode[t.Rethink.Taught] {
+			seenNode[t.Rethink.Taught] = true
+			taught = append(taught, t.Rethink.Taught)
+		}
+	}
+	sort.Ints(taught)
+	doc := map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode,
+		"opening": *opening, "kind": "count", "partner_kind": partnerKind, "repeats": saidTwice,
+		"taught": taught, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
+	if len(taught) > 0 && *saveLearned {
+		doc["saved"] = saveModel(m)
+	}
 	if jsonMode {
-		emit(map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode, "opening": *opening,
-			"kind": "count", "partner_kind": partnerKind, "repeats": saidTwice,
-			"transcript": radixnet.Transcript(turnsOut), "guard": guard})
+		emit(doc)
 		return
 	}
 	for _, t := range turnsOut {
@@ -946,6 +962,9 @@ func cmdConverse(args []string) {
 	}
 	if guard != nil {
 		printVetoes(verdicts, "replies")
+	}
+	if len(taught) > 0 && !*saveLearned {
+		fmt.Printf("it learned to hand over at %d node(s); --save writes that into the model\n", len(taught))
 	}
 	if len(saidTwice) > 0 {
 		fmt.Printf("%d utterance(s) the model could only repeat - punish them (2NRL negative phase):\n", len(saidTwice))

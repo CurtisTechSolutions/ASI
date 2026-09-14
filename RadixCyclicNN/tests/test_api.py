@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import __version__, api  # noqa: E402
 from radixnet.dialogue import stutter as dialogue_stutter  # noqa: E402
+from radixnet.graph import FIRST  # noqa: E402
 from radixnet.model import RadixNet, TrainConfig  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -585,7 +586,7 @@ class TestEndpoints(unittest.TestCase):
         for turn in strict["turns"]:
             thought = turn["rethink"]
             if thought is not None:
-                self.assertEqual(set(thought), {"kind", "noticed", "cut", "steps", "explored", "found"})
+                self.assertEqual(set(thought), {"kind", "noticed", "cut", "steps", "explored", "found", "taught"})
                 self.assertIn(thought["kind"], ("stutter", "repeat"))
                 self.assertTrue(thought["noticed"])
                 if thought["found"]:
@@ -923,7 +924,7 @@ class TestPersistence(unittest.TestCase):
         prediction = {k: prediction[k] for k in text_fields}  # node ids are compacted on save
         status, data, _ = self.client.post("/api/reset", {"seed": 3})
         self.assertEqual(status, 200)
-        self.assertEqual((data["nodes"], data["edges"], data["epochs_total"]), (2, 0, 0))
+        self.assertEqual((data["nodes"], data["edges"], data["epochs_total"]), (FIRST, 0, 0))
         self.assertEqual(self.service.model.seed, 3)
         status, data, _ = self.client.post("/api/load", {"path": other})
         self.assertEqual(status, 200)
@@ -987,7 +988,7 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(data["latest"]["tag"], "before-reset")
         stats = self.client.get("/api/status")[1]
         self.client.post("/api/reset", {"seed": 1})
-        self.assertEqual(self.client.get("/api/status")[1]["nodes"], 2)
+        self.assertEqual(self.client.get("/api/status")[1]["nodes"], FIRST)
         status, restored, _ = self.client.post("/api/checkpoints/restore", {"name": record["name"]})
         self.assertEqual(status, 200)
         self.assertEqual((restored["nodes"], restored["edges"], restored["epochs_total"]),

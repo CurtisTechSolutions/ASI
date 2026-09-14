@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
 
 type env struct {
@@ -541,7 +543,7 @@ func TestGraphPersistenceAndCheckpoints(t *testing.T) {
 		t.Fatalf("save to path: %d %v", status, saved)
 	}
 	status, reset := e.post("/api/reset", map[string]any{"seed": 5, "window": 42})
-	if status != 200 || reset["nodes"] != 2.0 || reset["window"] != 42.0 {
+	if status != 200 || reset["nodes"] != float64(radixnet.First) || reset["window"] != 42.0 {
 		t.Fatalf("reset: %d %v", status, reset)
 	}
 	status, reset = e.post("/api/reset", map[string]any{"kind": "radix"})

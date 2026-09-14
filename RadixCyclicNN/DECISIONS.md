@@ -68,7 +68,8 @@ D-055 chat with an LLM
 **Part XI — Tool use and the agent** · D-056 a call is text · D-057 the LLM's four roles ·
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
-**Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood
+**Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
+D-064 the BACK sentinel: where it goes round, learned
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -120,7 +121,9 @@ time, not at *structure* time.
   project's life, **not implemented** — search simply kept paying the cost of
   going round. As of 2026-09-14 it exists: a voice that detects it has walked a
   loop backs up to the point the loop started and re-plans from there, under a
-  *different* procedure than the one that got stuck. See D-061 to D-063.
+  *different* procedure than the one that got stuck — and what it finds out is
+  taught to the graph, so the *search* hands over there from then on. See D-061
+  to D-064.
 
 **Lives in** `Research/CyclesAreAFeature.md`, `radixnet/search.py`,
 `radixnet/beam.py`, `go/radixnet/search.go`, `go/radixnet/beam.go`
@@ -2074,9 +2077,12 @@ to say.
 
 **Decision** A repeat is no longer a dead end. Three steps:
 
-1. **Noticing.** `stutter_at(text)` is where an utterance starts saying itself
-   again. `_pick` hands back `looped` — the best candidate whose only fault was
-   that it said its own words twice.
+1. **Noticing.** `_pick` hands back `caught` — the best candidate rejected for
+   repeating, of either kind. Where it backs up to depends on which: a *stutter*
+   is cut at `stutter_at(text)`, where the walk went round; a *repeat* of
+   something the conversation has already heard (`Heard.match`) is cut at its
+   last word, because the line is a retread from end to end and that is the
+   latest point at which it can still differ.
 2. **Backing up.** `backtrack()` keeps everything said before that point and runs
    the search again from there. **The longer prefix is the whole trick**: it
    forces the walk to leave the loop at exactly the point it went round, where
@@ -2102,6 +2108,67 @@ inside those words is recorded and left alone.
 * It costs nothing when nothing loops. `explore=0` turns it off.
 
 **Lives in** `radixnet/dialogue.py::backtrack`, `go/radixnet/dialogue.go`
+
+---
+
+### D-064 — Where it goes round is **learned into the graph**, like where texts end
+
+**Status** Research claim · 2026-09-14 · **Layer** structure
+
+**Context** D-062 hands over to a second procedure on detecting a loop, and that
+procedure runs again from scratch every time the same loop comes round. A trait
+that has to be re-derived at every turn has not been learned. `START` and `END`
+are not re-derived: the graph *knows* where texts begin and end, because it was
+taught by what it observed.
+
+**Decision** A third sentinel, **`BACK`**, beside `START` and `END`, and an edge
+`p -> BACK` meaning *walks that get to `p` go round*. It is an ordinary edge with
+an ordinary weight and counter, competing for `p`'s probability mass like any
+other child — but it is taught by **experience** rather than by observation,
+because no corpus says where a walk loops. Every rethink teaches three edges at
+once (`observe_back`): the hand-over itself, a *penalty* on the step it was about
+to loop through, and a *reward* on the step it took instead. Where it goes round,
+and what to do instead.
+
+The search then consults it everywhere (`search.onward`): when `BACK` is the
+cheapest child of a node, the model's most likely next step there is to stop, so
+the branch offers nothing and the walk goes on with its others. **That answers
+Q-1**: the hand-over is no longer a property of conversation. `predict`,
+`generate`, the agent's loop and every other walk get it, because it is a
+property of the graph.
+
+**Alternatives rejected**
+* *A learned cost with no sentinel* (a per-node "loops here" number) — same
+  effect, but it would be a second kind of learned quantity bolted beside the
+  edges, learned by its own rule and saved by its own code. An edge is the thing
+  this system already knows how to learn, invert, reward, save and port.
+* *Learning only into the existing weights* — the model would drift away from its
+  loops without ever *knowing* about them, and nothing could be inspected, shown
+  in a transcript or held to parity. Both were taken in the end: the sentinel
+  says where, the weights say what to do instead.
+
+**Consequences**
+* **A conversation changes the model.** Two runs of the same conversation differ,
+  because the first taught it something; determinism now means *a model in the
+  same state says the same thing*. `learn=False` (`--no-learn`) keeps a
+  conversation read-only, and the CLI, which cannot keep the model in memory,
+  says so: *it learned to hand over at N node(s); --save writes that into the
+  model*.
+* The model file is **format 3**. Older files gain an unvisited `BACK` on load
+  and their node ids shift by one; the sentinel takes `START`'s activation
+  parameters so both kinds of model load unchanged.
+* `BACK`'s state is *fixed* rather than drawn, so adding a third sentinel moved
+  no random stream: every seeded model that existed still predicts exactly what
+  it did.
+* A node taught to hand over has two children where it had one, so compression
+  stops merging it. That is correct — a loop point is a junction — but it means
+  learning this trait slightly reduces compression.
+* The rate is a research question, not a settled number: the sine model hands
+  over after ~2 experiences at a node, the count model after ~3. Nothing decays
+  them yet, so a node taught in error stays taught until something retrains it.
+
+**Lives in** `radixnet/graph.py::observe_back`, `radixnet/search.py::onward`,
+`radixnet/dialogue.py::teach_back`, `go/radixnet/graph.go`, `go/radixnet/search.go`
 
 ---
 
@@ -2285,16 +2352,17 @@ Kept because the reversal is information.
 Numbered for reference. These are genuinely open — each would change something
 in the system, and none can be settled from the code as it stands.
 
-**Q-1 — ~~The metacognition half of D-001~~ — ANSWERED (D-061 to D-063).** The
+**Q-1 — ~~The metacognition half of D-001~~ — ANSWERED (D-061 to D-064).** The
 claim was that on hitting a cycle the brain hands over to metacognition rather
 than looping. The hand-over now exists: a voice that detects a stutter backs up
 to where the loop began and re-plans from there under a different procedure,
 widening its search the further back it goes, once per turn, and records what it
-did. **The remaining question is scope**: metacognition is currently a property
-of *conversation* only. The same signature — the search revisiting states —
-appears in plain `generate`, in `predict`, and in the agent's tool loop, none of
-which back up. Should the hand-over be lifted out of `dialogue.py` and made a
-property of the search itself?
+did. The remaining question was **scope** — metacognition was a property of
+*conversation* only — and D-064 answers it: what a rethink finds out is taught to
+the graph as an edge into a third sentinel, and the search consults it in every
+walk, so `predict`, `generate` and the agent's loop hand over too. What is open
+now is the *rate*: how fast a node should learn to hand over, whether it should
+ever unlearn, and what a wrongly taught hand-over costs.
 
 **Q-2 — Evidence for the sine (D-002).** The strongest claim in the project
 rests on one RL task at 250 episodes with no variance reported and a 28–48 range.
