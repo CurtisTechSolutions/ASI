@@ -58,6 +58,22 @@ D-035 no upload limits · D-036 images as text · D-037 SIGINT
 D-040 racy counting · D-041 single-writer structure · D-042 lazy weights · D-043 streaming and chunking ·
 D-044 one JSON contract, two engines
 
+**Part IX — The negative network** · D-045 a model of failure · D-046 blame only what changed ·
+D-047 the guard on every answer · D-048 teaching loops read unfiltered
+
+**Part X — Teaching loops** · D-049 the tutor · D-050 rewards weighted by the mark ·
+D-051 difficulty read off the marks · D-052 the auto run · D-053 the critic only reads · D-054 the recall tutor ·
+D-055 chat with an LLM
+
+**Part XI — Tool use and the agent** · D-056 a call is text · D-057 the LLM's four roles ·
+D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
+
+**Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood
+
+**Part XIII — Counters** · D-064 the odometer
+
+**Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -100,9 +116,11 @@ time, not at *structure* time.
   backstop, and the search must *never raise* — it falls back to the best
   partial path. A pathological graph degrades output quality instead of
   crashing.
-* The "hand over to metacognition" half of the claim is **not implemented**.
-  The system has no second faculty to defer to; search simply keeps paying the
-  cost of going round. See Q-1.
+* The "hand over to metacognition" half of the claim was, for most of the
+  project's life, **not implemented** — search simply kept paying the cost of
+  going round. As of 2026-09-14 it exists: a voice that detects it has walked a
+  loop backs up to the point the loop started and re-plans from there, under a
+  *different* procedure than the one that got stuck. See D-061 to D-063.
 
 **Lives in** `Research/CyclesAreAFeature.md`, `radixnet/search.py`,
 `radixnet/beam.py`, `go/radixnet/search.go`, `go/radixnet/beam.go`
@@ -1484,7 +1502,8 @@ have defeated the whole scheme.
 
 ### D-044 — Two engines, one JSON contract; the frontend detects which it is talking to
 
-**Status** Accepted · 2026-09-12 (`ec78de9`) · **Layer** architecture
+**Status** Accepted; the Python-only split **superseded by D-066** ·
+2026-09-12 (`ec78de9`) · **Layer** architecture
 
 **Context** The Go engine needed a server, and the React frontend (D-018)
 already existed and worked.
@@ -1519,6 +1538,725 @@ live goroutines.
 
 ---
 
+# Part IX — The negative network
+
+The largest development since the count model, and a genuine evolution of D-009:
+2NRL's negative phase, made **permanent**. Rather than training on failure,
+inverting and discarding the representation, the system now keeps a standing
+model of *how text goes wrong* and consults it at output time.
+
+### D-045 — A second network that models failure, not correctness
+
+**Status** Accepted · 2026-09-12 (`1f921e5`) · **Layer** architecture
+
+**Context** Every failure the system found — a tutor's correction, a rejected
+program, a bad review, a thumbs-down — was consumed once by a 2NRL pass and then
+gone. The knowledge *that* a particular fragment tends to be wrong existed only
+as a diffuse change to the positive model's weights.
+
+**Decision** A third model kind: the same self-compressing cyclic graph, the same
+trigram window, the same searches — but **every node and edge in it exists
+because something went wrong there**. Each edge keeps the blame it collected, how
+often it failed, how much *cleared* text crossed it, and the reasons behind that
+blame.
+
+The net evidence against an edge is
+
+$$\text{evidence} = \max(0,\ \text{blame} - \text{clear\_scale} \cdot \text{clear})$$
+
+so a fragment appearing in good and bad output alike stops carrying the verdict.
+Weights are an edge's share of the failure mass leaving its parent, so **a
+softmax over them is the failure distribution**: the network predicts the ways to
+fail from a prefix, exactly as the positive model predicts the ways to succeed.
+
+**Alternatives rejected**
+* Keeping failures as a corpus and re-running 2NRL — no structure, no way to ask
+  "is *this* text likely to be wrong?", and no way for evidence to accumulate or
+  decay.
+* A flag on the positive model's edges — cannot represent a fragment that is
+  good in one context and bad in another, and pollutes the positive weights.
+
+**Consequences**
+* Failure becomes **queryable**. `judge(text)` walks a text through the failure
+  structure and reports risk, peak, coverage, the reasons and the fragments
+  carrying them — a verdict with evidence, not a score.
+* The same graph machinery serves a third purpose, for the same reason D-021
+  worked: the structure is independent of what the weights mean.
+* It is a model kind like the others (`radixnet-negative`), so it saves, loads,
+  checkpoints and crosses to Go by the same route (D-020, D-039).
+* `forget` exists, because evidence that is never released makes the network
+  permanently pessimistic.
+
+**Lives in** `radixnet/negative.py`, `go/radixnet/negative.go`
+
+---
+
+### D-046 — Blame only the characters that actually changed
+
+**Status** Accepted · 2026-09-12 (`27ac0ac`) · **Layer** learning
+
+**Context** A grade reached the graph as two verdicts on two whole sentences: the
+attempt was garbage, the teacher's correction was gospel. But most of a corrected
+sentence is word for word what the network wrote — the teacher changes a tense,
+an article, a plural. The whole-sentence penalty **taxed the trigrams that were
+right**.
+
+**Decision** Align the two sentences character by character (`diff.py`: common
+prefix and suffix trimmed, the middle by a longest-common-subsequence walk,
+changes closer together than a trigram merged so `"mat" → "park"` is one change
+rather than two). Then charge each step of the traced path with the characters it
+writes, and:
+
+* steps of the wrong sentence that wrote a **struck-out** character lose
+  `strength × weight` — and only those;
+* steps of the correction that write the **teacher's version** gain
+  `strength × reward`; the rest keep `keep_weight` times as much
+  (`keep=0` teaches the fix alone, `keep=1` is the old whole-sentence thumbs up);
+* the correction is still traversed once — it is correct English whatever
+  changed — and **an edge both sentences walk is rewarded, never penalised**.
+
+**Consequences**
+* A correction is taught *as a correction*, at the granularity the teacher
+  actually worked at. This is the same principle the agent later applies to tool
+  calls (D-057): blame at the granularity the failure happened at.
+* A blamed transition is **kept out of compression** (D-007), so the fragment
+  stays nameable. Compression and blame are in direct tension, and blame wins.
+* A failure the teacher left uncorrected is still whole-sentence garbage —
+  the fine-grained path needs a correction to diff against.
+
+**Lives in** `radixnet/diff.py`, `radixnet/negative.py::correct`, `go/radixnet/diff.go`
+
+---
+
+### D-047 — The pair guards every answer, and switching it **off** is what takes a flag
+
+**Status** Accepted · 2026-09-14 (`f6585b8`) · **Layer** architecture
+
+**Context** The negative network was something a caller had to ask for. Everything
+else handed out whatever the positive model wrote — including the sentence the
+tutor had corrected an hour earlier.
+
+**Decision** `generate`, `predict` and `converse` run the two networks in tandem
+**by default**. The positive model over-samples; the negative one vetoes by
+blame, by **peak** blame on a single fragment (one corrected word vetoes an
+otherwise clean sentence), or by the **likelihood ratio**
+$\log P_{\text{neg}} - \log P_{\text{pos}}$ — all behind a *coverage gate*, so
+text the tutor has never failed is never vetoed on no evidence.
+
+**The guard stands aside rather than guessing.** It builds the pair only when
+there is something to guard with: not when the negative network is the active
+model (it is generating *from* the failures), not when there is none in memory or
+saved beside the model, and not when the one there has never been taught a
+failure and would veto nothing. **It never creates an empty negative network** —
+an answer is not the place to bring one into being. An unguarded answer is byte
+for byte what it was before, and a null `guard` in the payload says so.
+
+**Consequences**
+* This is the GAN idea (D-011) moved to **output time**: generator and
+  discriminator on one path, rather than a training loop.
+* Each surface re-ranks as little as it can. `generate` sorts on risk alone with
+  a stable sort, keeping the model's own order among equally clean texts.
+  `predict` re-ranks what the search already offered rather than searching again.
+  `converse` treats a vetoed reply exactly like one already spoken — except a
+  vetoed candidate may not even be the fallback.
+* Every answer carries what was stopped and why, so a veto is inspectable.
+
+**Lives in** `radixnet/duo.py`, `radixnet/negative.py`
+
+---
+
+### D-048 — The teaching loops read the model **unfiltered**
+
+**Status** Accepted · 2026-09-14 (`f6585b8`) · **Layer** architecture
+
+**Decision** The loops that *teach* the negative network — the critic, the tutor,
+evolve — keep sampling the positive model directly, bypassing the guard.
+
+**Rationale, stated in the commit that introduced it:** *a reviewer that only ever
+saw what already passed the filter would have nothing left to teach.* Filtering
+the training signal with the filter being trained is a closed loop that converges
+on its own blind spots.
+
+**Consequences** Two sampling paths with different defaults — guarded for
+answers, unguarded for teaching — which is a real asymmetry to keep in mind when
+adding a new loop. The rule is: if the output goes to a person, guard it; if it
+goes to a judge, do not.
+
+**Lives in** `radixnet/critic.py`, `radixnet/tutor.py`, `radixnet/gan.py`
+
+---
+
+# Part X — Teaching loops
+
+Six loops now teach the network, all reducing to the same `(bad, good)` pair
+(D-009) and the same `reward`/`punish` primitives (D-026).
+
+### D-049 — The tutor: an LLM sets the exercise, the network answers, the LLM marks it
+
+**Status** Accepted · 2026-09-12 (`907a7af`) · **Layer** learning
+
+**Decision** One round is
+`topic → prefix (LLM) → completion (prediction search) → grade (LLM) → 2NRL`.
+The teacher writes sentence openings, each drilling one point of grammar and each
+with its own model answer; the network completes them with the ordinary
+prediction search; the same model marks every sentence as an English teacher —
+grammar, spelling and fluency out of 10, the worst mistake named **from a fixed
+list**, one line of teaching, and the sentence written out correctly.
+
+**Consequences**
+* The network is graded on a *completion*, which is what it actually does. The
+  exercise is shaped to the model rather than the model to the exercise.
+* The fixed mistake list is what makes the negative network's reason table
+  possible (D-045) — a free-text critique cannot be tallied.
+* The teacher's own corrected English enters the positive phase at full weight:
+  it is, at that moment, exactly what a good answer would have looked like.
+
+**Lives in** `radixnet/tutor.py`, `go/radixnet/tutor.go`
+
+---
+
+### D-050 — Rewards are weighted by the mark, not by a single thumb
+
+**Status** Accepted · 2026-09-12 (`907a7af`) · **Layer** learning
+
+**Decision** `two_nrl` takes `good_weights`; `reward`/`punish` take `weights`;
+both kinds scale the pass per text. **A 9-out-of-10 sentence is learned nine
+tenths as hard as a perfect one; a 0 is skipped.** `/api/feedback` and
+`/api/2nrl` accept `good_ratings` / `bad_ratings` (marks out of 10) or raw
+weights, and the Ratings card carries a mark per rated text.
+
+**Rationale** A binary thumb throws away most of what a grader knows. It also
+makes the boost mechanism of D-027 available on the *positive* side — see Q-13,
+which this partly answers.
+
+**Consequences** Feedback magnitude becomes continuous everywhere, so every
+judge in the system (LLM grader, sandbox, discriminator, human) can express
+confidence rather than only direction.
+
+**Lives in** `radixnet/model.py`, `radixnet/countnet.py`
+
+---
+
+### D-051 — The difficulty step is read off the marks, never invented by the LLM
+
+**Status** Accepted · 2026-09-13 (`448c7a1`, `6a70746`) · **Layer** learning
+
+**Context** A run ends with a report card — the marks, the pass rate, how often
+each mistake was the worst thing in a sentence — which is handed back to the
+teacher, which answers with a syllabus that repairs it.
+
+**Decision** The LLM writes the *prose*; the **marks** decide the difficulty. It
+is not asked for a level at all.
+
+| Step | Condition | Effect |
+|---|---|---|
+| `advance` | 80 % passed at 8/10 | next level, openings one rung up (3–6 → 5–8 → 7–12 → 10–16), pass mark +1 (max 9) |
+| `stretch` | 50 % passed | same level, openings one rung up |
+| `hold` | anything less | nothing harder: the weak points, and 3 correct sentences to imitate |
+
+**Rationale, in one line:** *a student who is failing must not be given a harder
+exercise.* An LLM asked "what level next?" will happily say "harder" because the
+conversation has a forward momentum of its own.
+
+**The floor.** `plan_from_card` — one lesson per weak point, worst first, no LLM
+involved — is not a last resort but the **floor the teacher has to improve on**.
+A weakness the teacher's plan skips displaces a lesson that drills nothing the
+card marked down; an unreadable answer leaves the card's own plan standing.
+`source` records which of the two wrote it, **so a plan is never a hallucination
+presented as a syllabus.**
+
+**Consequences** This is the general pattern for LLM use in this project: the
+model supplies language, a deterministic rule supplies the decision, and the
+record says which. Compare D-030 (the judge is given the objective style report)
+and D-057 (blame granularity is computed, not asked for).
+
+**Lives in** `radixnet/tutor.py::upgrade_from_card / plan_from_card`, `go/radixnet/plan.go`
+
+---
+
+### D-052 — The auto run: the report card writes the next batch's instructions
+
+**Status** Accepted · 2026-09-13 (`e7921dc`) · **Layer** learning
+
+**Decision** `lessons → report card → plan → apply → lessons → …`, with nobody in
+the loop. The plan's **brief** — two or three sentences naming the points of
+grammar to drill in order — becomes the standing instruction handed to the
+exercise writer for every round of the next batch. One batch's report card is
+literally the next batch's prompt. `--batches 0` runs until stopped.
+
+**Consequences**
+* A batch that cannot be planned **ends the run** rather than repeating itself —
+  an explicit refusal to spin.
+* The single-focus pin is released when a brief is in force, because the brief
+  carries the grammar points in order and a stale pin would silently overrule it.
+* This and the critic loop (D-053) are the two places the system genuinely runs
+  unattended for long periods.
+
+**Lives in** `radixnet/tutor.py::apply_plan`
+
+---
+
+### D-053 — The critic loop only ever *reads* the positive model
+
+**Status** Accepted · 2026-09-14 (`6695e47`) · **Layer** learning
+
+**Context** Every source of negatives arrived as a side effect of something else
+running. The Negative tab was the one surface where a person had to type a
+failure in by hand.
+
+**Decision** A loop: the positive model writes texts; an LLM reviewer marks each
+out of 10 and says what is wrong; everything below the pass mark blames the
+negative network, with the critique picking the reason and the mark setting the
+severity; what it passed **clears** blame off the fragments they share.
+
+**Two invariants make it safe to leave running**, and they are worth stating as
+invariants rather than as properties:
+1. The positive model is **only read from** — nothing here trains, rewards or
+   inverts it.
+2. The slow call is wrapped so the server releases its model lock while the
+   reviewer thinks (D-017).
+
+**Consequences** An unattended loop that cannot damage the thing it is studying.
+`--context` is the reviewer's yardstick and matters, because "is this good?"
+means little without one.
+
+**Lives in** `radixnet/critic.py`, `go/radixnet/critic.go`
+
+---
+
+### D-054 — The recall tutor needs no LLM, because the answer is already on file
+
+**Status** Accepted · 2026-09-13 (`da9126c`) · **Layer** learning
+
+**Context** Speech and images were encode-and-train paths with nothing in them
+that could look at an output and say it went wrong.
+
+**Decision** An utterance and a picture were **encoded into text before being
+trained on** — so asking the network to write that text back is an exercise whose
+correction already exists. The exercise is the opening of a text it was taught
+(the utterance's own token, or an image header plus a few characters, since a
+header alone names no picture); the completion is the ordinary prediction search;
+the marking runs the result through the codec and compares it with the original.
+Agreement over the payload is the mark out of 10, and the single worst fault is
+named: *unreadable, truncated, overrun, garbled, silence/blank, clipping/noise,
+mishearing, distortion/drift*.
+
+**Consequences**
+* No LLM, no Pillow, no torch, no transcriber — the marking is over payload bytes
+  both codecs already produce, so none of its tests skip.
+* Faults are judged **against the reference**: a recording that really was silent
+  is not blamed for coming back silent, and mishearing is only diagnosed where
+  the round-trip transcript is known.
+* The original text is the correction, so D-046's character-level blame applies
+  directly.
+
+**Lives in** `radixnet/recall.py`, `go/radixnet/recall.go`
+
+---
+
+### D-055 — Chat: an LLM holds the other end of the conversation
+
+**Status** Accepted · 2026-09-14 (`3845ae4`) · **Layer** learning
+
+**Context** `converse` has the model talk to itself (D-032) — a good way to see
+what it knows and a useless way to find out whether it *answers* anything, since
+neither voice can tell the other that its reply did not follow on. Every teacher
+until now talked *at* the network.
+
+**Decision** Put a real language model on the other end. The partner is told to
+keep its lines short, plain and easy to carry on from — *because that is the only
+thing a character-level model can reply to; the prompt is doing the model a
+favour, not flattering it.* The model replies the only way it can: the tail of
+that line is located in the graph and continued, so **a reply is a real walk of
+the network and not a prompt trick.** The judge marks every reply out of 10
+against *the line it answered* — not against a style guide — and gives the
+conversation as a whole a verdict, in one call rather than one per line.
+
+**Consequences**
+* `dialogue.reply` was extracted from `converse` so there is one implementation of
+  "what does this model say next" and the other voice need not be a model at all.
+  `converse` is now a loop over `reply`.
+* **The partner's own lines go into the positive phase**, because in that
+  conversation, at that moment, they are exactly what a good reply would have
+  looked like. This is a neat use of the 2NRL good-set: the correct answer is
+  free, and it is contextual.
+* Unlike the critic (D-053) this loop *does* train the positive model.
+
+**Lives in** `radixnet/chat.py`, `go/radixnet/chat.go`
+
+---
+
+# Part XI — Tool use and the agent
+
+### D-056 — A tool call is text the network writes, so an attempt is one training text
+
+**Status** Accepted · 2026-09-14 (`5abb608`) · **Layer** architecture
+
+**Context** The network cannot decide to call a function. It can only emit
+characters.
+
+**Decision** Make that the whole design rather than working around it. A tool call
+**is** text: `<tool>web_fetch {"url": "..."}</tool>`. The observation is text it
+reads back. Therefore **a whole attempt — task, calls, observations, answer — is
+one ordinary training text**, which is exactly what 2NRL can reward or punish as
+a unit.
+
+**Consequences**
+* No new learning machinery at all. Tool use is trained by the same pass as
+  everything else.
+* The call format is characters the model must learn, which is why the Go port
+  had to render JSON **exactly** as `json.dumps(ensure_ascii=False,
+  sort_keys=True)` does — sorted keys, a space after every colon and comma,
+  floats as `repr()` writes them. Go's encoder writes `{"url":"u"}` where Python
+  writes `{"url": "u"}`, and *that one space is the difference between a
+  transcript the other side can read and one it cannot* (D-039's principle,
+  applied to a learned format).
+* Parsing must be lenient — truncated JSON is repaired — because a generator
+  will cut a call off mid-string.
+* The first attempt is the **beam** search rather than Dijkstra's single cheapest
+  path, which ends at END after a couple of characters that can never be a whole
+  call. Candidates that closed their tag are preferred, and the first usable one
+  is the network's own move, tracked as `autonomy`.
+
+**Lives in** `radixnet/tools.py`, `radixnet/agent.py`
+
+---
+
+### D-057 — The LLM gets four roles, and solving the task is the **last** one
+
+**Status** Accepted · 2026-09-14 (`5abb608`) · **Layer** learning
+
+**Decision** The LLM is used in four distinct roles, ordered so that it does as
+little of the work as possible:
+
+1. **Criteria** — it writes the acceptance criteria *before anything is
+   attempted*, so the bar is not set after the fact.
+2. **Mediator** — it turns an emission the network cannot form into one valid
+   call against the real schemas (native tool calling, then JSON, then a
+   fallback), *so even an untrained network makes progress and learns
+   well-formed calls*.
+3. **Judge** — it marks the finished transcript against those criteria.
+4. **Demonstrator** — and **only on failure** does it do the task itself, with
+   the same real tools, as the correction.
+
+**Consequences**
+* The mediator solves the cold-start problem without giving the answer away: the
+  network's malformed attempt is repaired into something that *works*, and the
+  repaired form is what it learns.
+* `explore()` takes the task-setting away too — the network continues `"TASK:"`
+  into whatever it is reaching for, the LLM turns that into one concrete question
+  browsing can settle, and links found along the way become the frontier, so it
+  compounds.
+
+**Lives in** `radixnet/agent.py`
+
+---
+
+### D-058 — Failure is blamed at the granularity it happened at
+
+**Status** Accepted · 2026-09-14 (`6b8c776`) · **Layer** learning
+
+**Decision** Three failures that look alike are blamed differently, *because they
+are different failures*:
+
+| Failure | What is blamed | Why |
+|---|---|---|
+| The answer was wrong | the transcript, diffed against a **correct run of the same task** | only characters differing from a run that worked are blamed; the shared task line and the calls that worked never become evidence |
+| The mediator had to repair the call (`bad-call`) | **the emission the network wrote** | it is not in the transcript, which holds the *repaired* call. Blaming the transcript *would teach the network that a well-formed call is a mistake* |
+| The tool refused the call (`tool-error`) | the call **only if the network wrote it** | one the mediator wrote is not the network's fault |
+
+The reason comes from how far the attempt got (`no-call`, `bad-call`,
+`tool-error`, `no-answer`, then the judge's own words); the severity from its gap.
+
+**Consequences**
+* What it learns comes back the other way: a candidate the negative network
+  recognises as a known failure is passed over for the next one, so the failures
+  stop it repeating them (D-047).
+* This is D-046's principle generalised — blame the thing that was actually
+  wrong — and it is the single most error-prone area in the system, because each
+  of the three cases is plausible-looking and wrong in a different way.
+
+**Lives in** `radixnet/agent.py`, `radixnet/blame.py`
+
+---
+
+### D-059 — Any LLM provider, and the key is never stored
+
+**Status** Accepted · 2026-09-12 (`870d4bf`, `0dd6b57`) · **Layer** platform
+
+**Decision** `LLMClient` is the shape both clients share; `make_client(provider)`
+builds one from `"ollama"` or `"chatgpt"`. Teacher and judge choose independently,
+so a ChatGPT teacher can be marked by a local model or the other way round, and
+every grade records **which provider marked it**.
+
+**Key handling is deliberate and strict.** The key comes from `$OPENAI_API_KEY`
+(or `$OPENAI_API_KEY_FILE`, for a Docker secret), is read **per request**, and
+never lands in a config, a job record, a report or a `repr`. **The HTTP API has
+no field for it at all**, so the server always uses its own. A key is refused over
+plain HTTP to a remote host. A model that rejects an optional field (reasoning
+models refuse `temperature`, older ones `response_format`) is retried without it
+rather than failing.
+
+**Consequences** Still no dependency: both clients are `urllib` (D-012). An
+answer that cannot be read is an `LLMError` rather than a provider-specific one,
+*because it says nothing about the transport*.
+
+**Lives in** `radixnet/llm.py`, `radixnet/chatgpt.py`, `go/radixnet/llm.go`
+
+---
+
+### D-060 — Browser and MCP, both on the standard library
+
+**Status** Accepted · 2026-09-14 (`6b8c776`) · **Layer** platform
+
+**Decision** `browser.py` drives Chrome over the **W3C WebDriver protocol** —
+which is HTTP with JSON bodies, so `chromedriver` is started and spoken to with
+the standard library and **no driver package is needed**. A page that draws itself
+with JavaScript then reads as a person sees it rather than as "loading…".
+`mcp.py` serves the tools and the network over the **Model Context Protocol** on
+stdio (JSON-RPC 2.0, standard library only): predict, generate, score, stats,
+judge against the negative network, and solve a task through the whole agent loop.
+
+**Consequences**
+* `chromedriver` refuses to drive another major version of Chrome — far and away
+  the most common failure — so both versions are read and compared **up front**
+  instead of surfacing a raw WebDriver error.
+* `$RADIXNET_WEBDRIVER` attaches to a Selenium Grid or a standalone-chrome
+  container instead of starting anything.
+* A failing MCP tool is a **result with `isError`**, not a protocol error — the
+  distinction matters to a client.
+* The address guards (no credentials, no private / loopback / link-local, every
+  redirect hop re-checked, byte and time caps) run first, on every path.
+
+**Lives in** `radixnet/browser.py`, `radixnet/mcp.py`, `radixnet/tools.py`
+
+---
+
+# Part XII — Metacognition
+
+This part **answers the question D-001 left open**. The claim was that on hitting
+a cycle the brain hands over to metacognition rather than looping. As of
+2026-09-14 that hand-over exists.
+
+### D-061 — A stutter is the shape a cyclic graph falls into when it walks a loop
+
+**Status** Accepted · 2026-09-14 (`ba055f6`) · **Layer** inference
+
+**Decision** `stutter(text)` finds a run of one to four words repeated
+**immediately** after itself — "the *the* west", "say morning *morning*", "*the
+cat* the cat sat". Only immediate repetition counts, so English that repeats a
+word and means it — "where there is a will there is a way", "a bird in the hand
+is worth two in the bush" — is left alone.
+
+**Why this is the right detector** It is the *signature of the failure mode*, not
+a generic quality heuristic. A cyclic graph that walks a loop instead of going
+somewhere emits exactly this shape. The detector is derived from D-001.
+
+**Consequences**
+* Such a candidate is skipped like one already heard; when every candidate
+  repeats, the one spoken anyway is flagged, **punished through the 2NRL negative
+  phase**, and ends a conversation that would only go round in circles.
+* The flag is recorded whether or not the setting is on, *so a transcript says
+  what happened either way* — switched off, the repetition is neither skipped nor
+  punished, but the information survives.
+
+**Lives in** `radixnet/dialogue.py::stutter`, `go/radixnet/dialogue.go`
+
+---
+
+### D-062 — A voice that catches itself repeating **backs up and explores**, rather than discarding the turn
+
+**Status** Accepted · 2026-09-14 (`414bd1d`) · **Layer** inference
+
+**Context** Skipping a looping candidate throws away everything it got right. The
+words *before* the walk went round were said once and were the most likely thing
+to say.
+
+**Decision** A repeat is no longer a dead end. Three steps:
+
+1. **Noticing.** `stutter_at(text)` is where an utterance starts saying itself
+   again. `_pick` hands back `looped` — the best candidate whose only fault was
+   that it said its own words twice.
+2. **Backing up.** `backtrack()` keeps everything said before that point and runs
+   the search again from there. **The longer prefix is the whole trick**: it
+   forces the walk to leave the loop at exactly the point it went round, where
+   asking the same question again from the original context would only rank the
+   same answers.
+3. **Exploring.** Candidates that stutter, that the conversation has heard, or
+   that the guard vetoes are passed over; the first that says something new is
+   spoken as an ordinary turn **with nothing to punish**. Nothing new? It backs up
+   one word further and looks wider — `k × (step + 2)` candidates, *so the further
+   back it goes the more it weighs* — `explore` times over, then falls through to
+   what it would have done anyway.
+
+**A constraint worth naming: the voice may rethink what it said, never what it
+heard.** What it picked up from the other voice it may not rewrite, and a repeat
+inside those words is recorded and left alone.
+
+**Consequences**
+* This is the metacognitive hand-over of D-001, made concrete: on detecting that
+  the search has gone round, control passes to a *different* procedure — one that
+  re-plans from an earlier point and widens its search as it goes — rather than
+  the same search being asked the same question again.
+* **One rethink per turn**, so a conversation cannot spend itself thinking.
+* It costs nothing when nothing loops. `explore=0` turns it off.
+
+**Lives in** `radixnet/dialogue.py::backtrack`, `go/radixnet/dialogue.go`
+
+---
+
+### D-063 — The metacognition is a record, not a mood
+
+**Status** Accepted · 2026-09-14 (`414bd1d`) · **Layer** observability
+
+**Decision** Every turn that thought twice carries a `Rethink`: what it caught
+itself saying, what it kept, how many times it backed up, how many paths it
+weighed, and whether it found a way on. Both CLIs and both tabs render it in a
+line — *caught itself saying "ha" twice; kept "ha " and found another way on in 3
+path(s)*.
+
+**Rationale** A system that claims to reflect on itself has to be able to show
+the reflection. If the only evidence of metacognition is better output, the claim
+is unfalsifiable.
+
+**Consequences** The parity tests hold both implementations to the same
+transcript **and the same records**, exploring and not — so the reflection is part
+of the cross-language contract, not a presentation detail.
+
+**Lives in** `radixnet/dialogue.py::Rethink`
+
+---
+
+# Part XIII — Counters
+
+### D-064 — Every counter is a two-digit odometer that wraps at 10^15
+
+**Status** Accepted · 2026-09-14 (`2751287`) · **Layer** platform
+
+**Context** Traversals, visit counts, epochs, trained characters, 2NRL runs,
+feedback passes and the internal version stamps only ever count up. Each would
+eventually leave the integer holding it — `int64` in Go, and *long before that*
+the 53-bit mantissa of the JSON number carrying it through a model file, the HTTP
+API and a JavaScript `Number`.
+
+**Decision** No unbounded integers. Each counter is
+
+$$\text{total} = \text{resets} \times \text{LIMIT} + \text{value}, \qquad 0 \le \text{value} < \text{LIMIT}$$
+
+The count rises as before; on reaching the limit it is set back to 0 and `resets`
+goes up by one. Nothing is lost — the exact number of events is still there, split
+over two numbers that each stay small.
+
+**Why 10^15** Exactly representable as a `float64` (< 2^53), so a counter
+survives a model file, a JSON response and a JavaScript `Number` unchanged; and
+four orders of magnitude under the `int64` maximum, so a whole epoch of counting
+can land on a counter before the next wrap. The resets wrap at the same limit, so
+the odometer comes full circle after 10^30 events.
+
+**The design note the commit makes, and it is the right one:** *cycles are a
+feature here too.* The same principle as D-001, applied to arithmetic.
+
+**Consequences**
+* **Wrapping never happens in a counting loop.** The loops add to a plain integer
+  (in Go from one goroutine per text, plain or atomic — D-040); a *carry sweep* at
+  the end of every epoch and before every save moves whatever crossed the limit
+  into the resets. `graph.traversals` counts every increment made and so bounds
+  each counter, which lets the sweep return after one comparison until a counter
+  can actually have wrapped.
+* The weight function, the shares, the loss and every ranking are computed from
+  the **exact totals**, so a wrapped model behaves exactly as one that counted
+  forever. Split carries a node's resets; merge keeps the larger exact count.
+* Model files are `format_version 2`; format 1 files load unchanged with their
+  counts carried on the way in, and `_resets` fields are written only once
+  something has actually wrapped.
+* A cached version stamp is still compared with `==` and stays exact across a
+  reset, which is why the counter is a value type rather than a plain integer.
+
+**Lives in** `radixnet/counter.py`, `go/radixnet/counter.go`
+
+---
+
+# Part XIV — Memory and the closing of the Go gap
+
+### D-065 — Bounded memory: a sequencer, inflight slots, and a soft heap limit
+
+**Status** Accepted · 2026-09-12 (`5a25799`) · **Layer** performance
+
+**Context** D-043's streaming kept the *corpus* out of memory, but the Go server
+was still being OOM-killed on large archives, for two independent reasons.
+
+**Decision**
+
+* **The reader outran the counting.** A chunk now holds one of `--inflight` slots
+  (two per CPU by default) *from the moment it is read until the sequencer has
+  applied it* — a finished chunk waiting its turn costs the same memory as one
+  being counted. A **sequencer** restores corpus order by `(part, chunk)`, so the
+  reader never waits for a chunk it spawned, and every part of an archive can be
+  read at once with `--parallel-parts`. Parallel parts cannot share one pool (the
+  slots would all be held by parts the sequencer cannot reach yet), so each open
+  part gets its own budget, only a window of parts is open, and permits are taken
+  in part order so the oldest part can always make progress.
+* **The collector grows the heap to twice the live graph before it runs**, which
+  on a container with a hard limit is a kill. Every process now sets a soft memory
+  limit at 80 % of its cgroup limit or of available memory (`--memlimit`,
+  `GOMEMLIMIT` wins).
+
+**Measured** 39 MB corpus: **393 MB, down from 1.7 GB** (414 MB with parallel
+parts, down from 3.2 GB). A 113 MB corpus inside a 1 GiB cgroup was **killed after
+26.9 s; it now finishes in 32.5 s at 908 MiB.**
+
+**Also from the profile:** adjacency is two parallel slices with a map index only
+past degree 16 (*a Go map per node cost more than the rest of the graph*); models
+are encoded straight into their file and decoded straight out of it rather than
+buffered whole; the sliding window compacts in place; read buffers are pooled.
+
+**Consequences** `/api/status` reports `heap_bytes`, `heap_sys_bytes` and
+`memory_limit_bytes`, and the status bar shows heap against the limit — the
+constraint is visible rather than discovered by a kill.
+
+**Lives in** `go/radixnet/source.go`, `go/radixnet/model.go`, `go/server/service.go`
+
+---
+
+### D-066 — Close the Go gap almost completely, and say plainly what is left
+
+**Status** Accepted · 2026-09-14 (`a34b822`, `737cd06`) · **Layer** platform ·
+**Supersedes** the Python-only split in D-044
+
+**Decision** Port everything, and record what is *not* ported together with
+whether that is deliberate or merely undone. What remains Python-only:
+
+| Not ported | Why |
+|---|---|
+| `schedule.py` (learning-rate preview) | **Deliberate.** Schedules are a RadixNet feature; the count model ignores learning rates (D-021), so a port would be a calculator nothing calls. |
+| Whisper transcription | **Deliberate.** `faster-whisper` / `openai-whisper` are packages, not code to translate. |
+| Image encoding **parity** | **Deliberate and documented.** Python's thumbnail resamples with Pillow's Lanczos, Go's with a box filter, *because reproducing Pillow's coefficients without Pillow to check against would be a guess rather than a port.* The **format** is shared — each side reads, trains on and decodes the other's — and `DescribeVision` says so in its own output. |
+
+**Three things had to be written out rather than translated**, because the
+standard libraries differ where it matters: sorted JSON rendering matching
+`json.dumps` byte for byte (D-056); an HTML tokeniser (Go has no `html.parser`),
+with raw-text elements taken whole so a `<` inside a script is not a tag; and a
+recursive-descent arithmetic parser (Go has no `eval`) **keeping Python's
+semantics where they differ** — `/` is true division, `//` floors, `%` takes the
+sign of the divisor, `int op int` stays an `int`, `round` goes to even, and a
+result prints as `str()` prints it: `29.0`, not `29`.
+
+Speech **is** at exact parity, and had to be: the utterance token is a digest of
+the waveform text and *the token is in the text the model trains on*, so two
+encoders that disagree would teach two different things from one recording. That
+required carrying `float32` through the sample pipeline (Python's `array("f")`
+rounds every stored value) and writing out BLAKE2b, which Go's standard library
+lacks.
+
+**Consequences** The frontend hides no tab from the Go engine any more, and
+D-044's "Python-only endpoints answer 404" now covers a single endpoint. The
+honest accounting of *deliberate* versus *undone* is itself the decision: a gap
+recorded with its reason is a design statement, an unrecorded one is debt.
+
+**Lives in** `go/`, `DESIGN.md`
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.
@@ -1533,6 +2271,12 @@ Kept because the reversal is information.
 | Generation sampled; prediction searched | Generation **is** the prediction search run to the end (D-025) | 2026-09-12 (`40faaea`) | Two code paths drifted, and the tabs disagreed about what the model would say. |
 | The evolve loop punished the worst **half** of fakes | Failure-proportional boosting, and blatant failures handled locally (D-027, D-028) | 2026-09-11 (`dc4eb78`) | A fixed split ignores *how* bad a failure was, which is exactly the signal available. |
 | Docker's default SIGTERM | `STOPSIGNAL SIGINT` (D-037) | 2026-09-10 (`b2adb78`) | `docker stop` discarded an entire evolve run without saving. |
+| A grade penalised the **whole** wrong sentence | Blame only the characters the teacher changed (D-046) | 2026-09-12 (`27ac0ac`) | Most of a corrected sentence is word for word what the network wrote; the whole-sentence penalty taxed the trigrams that were right. |
+| The negative network was opt-in | The pair guards every answer; switching it **off** takes a flag (D-047) | 2026-09-14 (`f6585b8`) | Every surface handed out whatever the positive model wrote, including sentences the tutor had corrected an hour earlier. |
+| A looping candidate was skipped | The voice backs up to where the loop started and re-plans (D-062) | 2026-09-14 (`414bd1d`) | Skipping threw away everything the candidate got right — the words before it went round were said once and were the most likely thing to say. |
+| Go hid five tabs; Python-only endpoints 404'd (D-044) | Go serves everything but the schedule preview (D-066) | 2026-09-14 (`a34b822`) | The gap closed. What remains is recorded as deliberate rather than undone. |
+| Counters were unbounded integers | Two-digit odometers wrapping at 10^15 (D-064) | 2026-09-14 (`2751287`) | Every counter would eventually leave the 53-bit mantissa carrying it through a model file, the API and a JavaScript Number. |
+| A single thumb up or down | Rewards weighted by a mark out of 10 (D-050) | 2026-09-12 (`907a7af`) | A binary thumb throws away most of what a grader knows. |
 
 ---
 
@@ -1541,12 +2285,16 @@ Kept because the reversal is information.
 Numbered for reference. These are genuinely open — each would change something
 in the system, and none can be settled from the code as it stands.
 
-**Q-1 — The metacognition half of D-001.** The claim is that on hitting a cycle
-the brain *hands over* to metacognition or another region. The implementation
-only makes cycles finite in state space and pays their cost. Is the hand-over a
-component that should exist (a second faculty that takes over when the search
-starts revisiting states), or was it always a description of *why* cycles are
-tolerable rather than a mechanism to build?
+**Q-1 — ~~The metacognition half of D-001~~ — ANSWERED (D-061 to D-063).** The
+claim was that on hitting a cycle the brain hands over to metacognition rather
+than looping. The hand-over now exists: a voice that detects a stutter backs up
+to where the loop began and re-plans from there under a different procedure,
+widening its search the further back it goes, once per turn, and records what it
+did. **The remaining question is scope**: metacognition is currently a property
+of *conversation* only. The same signature — the search revisiting states —
+appears in plain `generate`, in `predict`, and in the agent's tool loop, none of
+which back up. Should the hand-over be lifted out of `dialogue.py` and made a
+property of the search itself?
 
 **Q-2 — Evidence for the sine (D-002).** The strongest claim in the project
 rests on one RL task at 250 episodes with no variance reported and a 28–48 range.
@@ -1619,3 +2367,29 @@ result training harder, not just a bad one?
 invert" describes a loop. In a life it ends when the thing is learned. The
 evolve loop never ends (D-011) and has no convergence criterion (Q-4). What
 ended an iteration for the author?
+
+**Q-15 — Does the negative network supersede inversion (D-045 vs D-009)?** The
+negative network is 2NRL's negative phase made permanent: a standing model of
+how text goes wrong, consulted at output time rather than trained-on and
+discarded. If a failure can be kept, named and vetoed against, what is the
+transient negative-phase-and-invert still buying? Are they two mechanisms for
+one job, or does each do something the other cannot?
+
+**Q-16 — Who arbitrates when blame and compression disagree (D-046 vs D-007)?**
+A blamed transition is kept out of compression so the fragment stays nameable.
+On a long-running system that accumulates blame, how much compression is being
+given up — and should blame expire (`forget`) on a schedule rather than only on
+request?
+
+**Q-17 — How many teaching loops is the right number?** There are now six
+(tutor, critic, recall, chat, codegen, agent), each with its own config surface,
+its own report shape and its own parity test. They all reduce to `(bad, good)`
+and `reward`/`punish`. Is there a loop *abstraction* worth extracting — or is
+the variety the point, each being genuinely shaped to its subject?
+
+**Q-18 — Is the guard's default right (D-047)?** Guarding every answer by
+default, with the teaching loops exempt (D-048), means the output a person sees
+and the output a judge sees are systematically different. That is deliberate and
+well argued. But it also means the quality a user experiences is partly the
+filter's, and no measurement currently separates "the model got better" from
+"the filter got better at hiding it". Should there be one?

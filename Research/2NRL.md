@@ -251,13 +251,116 @@ reading of "pull hard" might require a *positive*-side boost: a correct example
 that arrived against expectation, or a fine-tune pass weighted by how much the
 result improved, training harder than a routine success does.
 
-Whether this asymmetry is an oversight or an intended simplification is open
-(Q-13 in `RadixCyclicNN/DECISIONS.md`). It is the most concrete unexplored
-extension the analogy suggests.
+Part of this has since been answered. Feedback is no longer a binary thumb:
+rewards are weighted by a mark out of 10, so a 9-out-of-10 result is learned nine
+tenths as hard as a perfect one and a 0 is skipped. Every judge in the system —
+LLM grader, sandbox, discriminator, human — can now express *confidence* rather
+than only direction, and the positive side is graded, not merely gated.
+
+What is still missing is the **surprise** term. A weight proportional to a mark
+is not the same as a weight proportional to how *unexpected* the success was, and
+the author's description — a thread that appears and is then pulled — is about
+recognising something unlooked-for. A positive boost driven by the gap between
+what was expected and what arrived would be the faithful implementation, and does
+not exist (Q-13 in `RadixCyclicNN/DECISIONS.md`).
 
 ---
 
-## 6. Relation to existing work
+## 6. The negative phase made permanent
+
+2NRL as stated in §2 is *transient*. Phase 1 builds a representation of the
+failure, phase 2 negates it, and the representation itself is gone — what remains
+is its effect on the weights. The knowledge that a particular fragment tends to be
+wrong survives only as a diffuse change, unnameable and unqueryable.
+
+The implementation has since taken the obvious next step: **keep it.**
+
+### 6.1 A standing model of failure
+
+A second network is maintained alongside the first. It has the same structure —
+the same self-compressing cyclic graph, the same trigram windows, the same
+searches — but every node and edge in it exists *because something went wrong
+there*. Each edge accumulates the blame charged against it, how often it failed,
+and how much **cleared** text has crossed it. The net evidence is
+
+$$\text{evidence} = \max(0,\ \text{blame} - \lambda \cdot \text{clear})$$
+
+so a fragment appearing in good and bad output alike stops carrying the verdict.
+Weights are an edge's share of the failure mass leaving its parent, so a softmax
+over them is the **failure distribution**: this network predicts the ways to fail
+from a prefix, exactly as the positive model predicts the ways to succeed.
+
+### 6.2 What this changes about the argument
+
+Three things, and each is a strengthening rather than a replacement.
+
+**Failure becomes queryable.** §3.2 argued that inversion's value is turning an
+under-determined "away" into a determined "toward". A persistent failure model
+goes further: one can ask of an arbitrary candidate *how* likely it is to be
+wrong, and *which fragment* carries the risk. That is not available from a
+transient phase at all.
+
+**The entropy condition becomes measurable rather than assumed.** §4 claims the
+recoverable information is bounded by the failure distribution's negative
+entropy, and §4.3 could only observe that the implementation happens to generate
+structured garbage. With an explicit model of $q$, its concentration is a
+property one can compute. Q-E in §11 — estimate $H(q)$ online and skip the
+inversion when the garbage is too diffuse to be worth inverting — becomes
+straightforwardly implementable.
+
+**Correction can be placed precisely.** A grade originally reached the graph as
+two verdicts on two whole sentences: the attempt was garbage, the correction was
+gospel. But most of a corrected sentence is word for word what the model wrote,
+so the whole-sentence penalty *taxed the parts that were right*. Blame is now
+placed by alignment — only the characters the teacher actually changed are
+charged, the rest are cleared, and a fragment both sentences walk is rewarded
+rather than penalised.
+
+This last point deserves emphasis, because it qualifies §2. 2NRL's negative phase
+trains on the failure *as a unit*. That is correct when the failure is a unit — a
+rejected program, a hallucinated line, a fabricated fact. It is wrong when the
+failure is local to a larger, mostly correct output. The persistent model
+supports the granularity the transient phase cannot.
+
+### 6.3 The pair at output time
+
+Both networks now run on every answer by default: the positive model
+over-samples, the negative one vetoes by accumulated blame, by peak blame on a
+single fragment, or by the likelihood ratio
+$\log P_{\text{neg}} - \log P_{\text{pos}}$, behind a coverage gate so text the
+system has never failed is never vetoed on no evidence.
+
+This is the adversarial idea relocated from *training time* to *inference time*.
+The discriminator no longer only shapes the generator's weights; it sits on the
+output path and refuses. Notably, the loops that *teach* the failure model
+deliberately read the positive model **unfiltered** — a reviewer that only ever
+saw what already passed the filter would have nothing left to teach.
+
+### 6.4 The open question this raises
+
+If a failure can be kept, named, and vetoed against, what is the transient
+negative-phase-and-invert still buying?
+
+Two defensible answers, and the paper does not settle between them:
+
+* **They do different jobs.** Inversion changes what the model *tends to
+  produce*; the failure model changes what is *allowed out*. A generation
+  process that never proposes the failure is cheaper than one that proposes and
+  filters it, and only inversion does the former.
+* **The failure model subsumes it.** Inversion is a global, blunt operation
+  (§10, item 2) that reverses the correct parts of the model along with the
+  incorrect ones and relies on the positive phase to repair the damage. A precise,
+  persistent, local account of failure may simply be the better instrument, with
+  inversion a historical step toward it.
+
+Settling this needs the same thing §9 needs: a measurement. The experiment in
+§9.1 extends naturally — add an arm in which the negative set trains a
+persistent failure model and guards the output, with no inversion anywhere, and
+compare.
+
+---
+
+## 7. Relation to existing work
 
 The project's stated method is to set current research aside and rebuild from
 first principles. A paper should still say where its neighbours are, if only to
@@ -283,14 +386,14 @@ appear to be standard.
 
 ---
 
-## 7. Implementation
+## 8. Implementation
 
 2NRL is implemented in `RadixCyclicNN` and is the learning primitive the rest of
 the system is shaped around. Every feedback source in the project — human thumbs
 up/down, LLM judgements, sandbox results, discriminator scores — is funnelled
 into the same $(B, G)$ pair, because that is the interface learning takes.
 
-It runs in four places:
+It now runs in eight places:
 
 1. **Directly** — CLI `2nrl`, `POST /api/2nrl`, the 2NRL panel.
 2. **Feedback** — rated texts dispatch to `two_nrl` (both sets rated),
@@ -300,6 +403,22 @@ It runs in four places:
    the worst become $B$, real corpus lines $G$; perpetually.
 4. **Code generation** — wrong programs are $B$, the working program is $G$,
    with the sandbox providing a ground-truth verdict rather than an opinion.
+5. **The tutor** — an LLM writes a sentence opening, the model completes it, the
+   LLM marks the completion out of 10 and supplies the correction. Failed
+   sentences are $B$ weighted by the mark; the corrections and drills are $G$.
+6. **The critic** — the model writes freely, a reviewer marks it, and everything
+   below the pass mark charges the failure model. This loop *only reads* the
+   positive model; it trains nothing.
+7. **Conversation with a language model** — the partner's own lines become $G$,
+   because in that exchange, at that moment, they are exactly what a good reply
+   would have looked like. A reply the model could only repeat is punished.
+8. **The agent** — a whole tool-use attempt is one training text, so a failed
+   attempt is $B$ and a successful one $G$ with no new machinery at all.
+
+The eighth is worth noting for what it says about the interface. Because a tool
+call is *text the model writes*, an entire episode of planning, calling and
+answering reduces to a single string — and therefore to a single $(B, G)$
+element. Nothing about 2NRL had to change to accommodate agency.
 
 A second model kind in the same system (a count/reward network) implements the
 2NRL *interface* with a different *mechanism*: penalise the bad paths, reward
@@ -311,7 +430,7 @@ can.
 
 ---
 
-## 8. Empirical status — and what would settle it
+## 9. Empirical status — and what would settle it
 
 **Stated plainly: 2NRL has not been measured against a baseline.**
 
@@ -370,7 +489,7 @@ not immediately undoing.
 
 ---
 
-## 9. Limitations
+## 10. Limitations
 
 1. **The architectural precondition is strong.** 2NRL needs an exact,
    cheap, involutive, order-reversing inversion operator. Most architectures do
@@ -393,11 +512,11 @@ not immediately undoing.
    demonstrably produced a working education at least once — and it is not a
    controlled result about human learning generally. It is offered here as the
    *source* of the algorithm, not as evidence for it. The algorithm has to stand
-   on §8.
+   on §9.
 
 ---
 
-## 10. Open questions
+## 11. Open questions
 
 **Q-A. What does 2NRL stand for?** The expansion is recorded nowhere in the
 implementation; the code calls it only "the author's two-phase scheme". This
@@ -415,7 +534,7 @@ should proceed until the failure mode is *well* represented, since a partially
 learned failure inverts into a partially useful signal. Is there an optimal
 depth, and does it depend on $H(q)$?
 
-**Q-E. Can $H(q)$ be estimated online?** If the advantage is governed by the
+**Q-E. Can $H(q)$ be estimated online?** (See §6.2 — now tractable.) If the advantage is governed by the
 negative set's entropy, the system could *measure* it and skip phases 1–2 when
 the garbage is too diffuse to be worth inverting — making the precondition
 self-enforcing rather than a caveat in a paper.
