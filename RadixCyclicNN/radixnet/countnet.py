@@ -23,7 +23,10 @@ and a parent's children are drawn by a softmax over those weights: every
 node's activation is the constant 1 (``a = 0, k = 1`` in the sine
 parameters), so the graph's edge score ``w * f_parent * f_child`` is the
 weight itself and ``P(child | parent) ∝ R_all ** global_scale * R_recent **
-window_scale * exp(reward_scale * reward)``.  There is no gradient and no
+window_scale * exp(reward_scale * reward)``.  Every count here is a *cyclic
+counter* (:mod:`radixnet.counter`): it wraps back to 0 at ``COUNTER_LIMIT`` and
+counts the wrap in ``<name>_resets``, so no total ever outgrows the integer or
+the JSON number that carries it.  There is no gradient and no
 learning rate: training counts traversals (and slides the window), feedback
 moves rewards, ``invert`` flips the sign of every reward, and prediction is a
 beam search that returns the K most likely *and* the K least likely
@@ -41,8 +44,10 @@ from collections.abc import Iterable, Sequence
 from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
 from .beam import Prediction
+from . import diff
+from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
-from .graph import RadixCyclicGraph
+from .graph import END, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
     GraphModel,
@@ -51,6 +56,9 @@ from .model import (
     _resolve_config,
     _utc_now,
     _weight_groups,
+    carry_meta,
+    meta_add,
+    meta_stats,
 )
 
 __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
@@ -58,6 +66,14 @@ __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
 COUNT_MODEL_FORMAT = "radixnet-count"
 _W = WINDOW
 _MAX_LOG_PPL = 700.0
+
+
+def _by_amount(rewards: dict[int, float]) -> dict[float, list[int]]:
+    """Group edges by the reward they are owed (first-seen order, so the graph moves once per amount)."""
+    groups: dict[float, list[int]] = {}
+    for edge, amount in rewards.items():
+        groups.setdefault(amount, []).append(edge)
+    return groups
 
 
 class CountRewardGraph(RadixCyclicGraph):
@@ -108,7 +124,7 @@ class CountRewardGraph(RadixCyclicGraph):
         self.edge_reward: list[float] = []
         self.window_edge_count: list[int] = []
         self._window: deque[int] = deque()
-        self.total_traversals = 0
+        self.total_traversals = CyclicCounter()
         super().__init__(seed)
 
     # -- the tracked numbers -------------------------------------------------
@@ -200,26 +216,33 @@ class CountRewardGraph(RadixCyclicGraph):
     def shares(self, p: int) -> list[tuple[int, int, float, float]]:
         """``[(child, edge, share_all, share_recent)]`` of ``p``'s edges: each edge's ratio of the node's traversals."""
         edges = list(self.children[p].items())
-        total = sum(self.edge_count[e] for _c, e in edges)
         recent = sum(self.window_edge_count[e] for _c, e in edges)
+        traversals = {e: self._edge_traversals_f(e) for _c, e in edges}
+        total = 0.0
+        for _c, e in edges:  # an explicit left-to-right sum: the Go port adds them in the same order
+            total += traversals[e]
         return [
-            (c, e, self.edge_count[e] / total if total else 0.0, self.window_edge_count[e] / recent if recent else 0.0)
+            (c, e, traversals[e] / total if total else 0.0, self.window_edge_count[e] / recent if recent else 0.0)
             for c, e in edges
         ]
 
     def recompute_weights(self) -> None:
         """Write the dual frequency weight to every alive edge (after counts, rewards or scales changed)."""
-        ew, ec, er, wc = self.edge_w, self.edge_count, self.edge_reward, self.window_edge_count
+        ew, er, wc = self.edge_w, self.edge_reward, self.window_edge_count
         weight = self.edge_weight
+        traversals = self._edge_traversals_f
         for p, ch in enumerate(self.children):
             if not ch or not self.alive[p]:
                 continue
             edges = list(ch.values())
             degree = len(edges)
-            total = sum(ec[e] for e in edges)
+            counts = [traversals(e) for e in edges]
+            total = 0.0
+            for count in counts:  # an explicit left-to-right sum, as in the Go port
+                total += count
             recent = sum(wc[e] for e in edges)
-            for e in edges:
-                ew[e] = weight(ec[e], er[e], total, degree, wc[e], recent)
+            for e, count in zip(edges, counts):
+                ew[e] = weight(count, er[e], total, degree, wc[e], recent)
         self.version += 1
 
     def add_reward(self, edge_ids: Iterable[int], amount: float) -> int:
@@ -249,12 +272,14 @@ class CountRewardGraph(RadixCyclicGraph):
 
     # -- construction overrides ----------------------------------------------
 
-    def _new_node(self, label, z=None, a=None, b=DEFAULT_B, h=DEFAULT_H, k=0.0, count=0) -> int:
+    def _new_node(self, label, z=None, a=None, b=DEFAULT_B, h=DEFAULT_H, k=0.0, count=0, count_resets=0) -> int:
         # a = 0 and k = 1 make f(z) = 1 whatever z is: scores reduce to the edge weight
-        return super()._new_node(label, z=0.0 if z is None else z, a=0.0, b=b, h=h, k=1.0, count=count)
+        return super()._new_node(
+            label, z=0.0 if z is None else z, a=0.0, b=b, h=h, k=1.0, count=count, count_resets=count_resets
+        )
 
-    def _new_edge(self, p: int, c: int, count: int = 0) -> int:
-        e = super()._new_edge(p, c, count)
+    def _new_edge(self, p: int, c: int, count: int = 0, count_resets: int = 0) -> int:
+        e = super()._new_edge(p, c, count, count_resets)
         self.edge_reward.append(0.0)
         self.window_edge_count.append(0)
         self.edge_w[e] = 0.0  # recompute_weights() gives it its real value once the pass is over
@@ -284,7 +309,8 @@ class CountRewardGraph(RadixCyclicGraph):
         d["weights"] = {
             **self.weight_config(),
             "kind": "count-reward",
-            "total_traversals": self.total_traversals,
+            "total_traversals": self.total_traversals.value,
+            "total_traversals_resets": self.total_traversals.resets,
             "window_events": [new_index[e] for e in self._window if e in new_index],
         }
         return d
@@ -299,7 +325,9 @@ class CountRewardGraph(RadixCyclicGraph):
         g.global_scale = float(weights.get("global_scale", 0.0 if legacy else 0.5))
         g.window_scale = float(weights.get("window_scale", 0.0 if legacy else 0.5))
         g.window = max(1, int(weights.get("window", 10_000)))
-        g.total_traversals = int(weights.get("total_traversals", 0))
+        g.total_traversals = CyclicCounter.from_pair(
+            weights.get("total_traversals", 0), weights.get("total_traversals_resets", 0)
+        )
         rewards = d.get("edges", {}).get("reward")
         n = len(g.edge_w)
         if rewards is None:
@@ -367,7 +395,7 @@ class CountRewardNet(GraphModel):
     @staticmethod
     def _new_meta(seed: int) -> dict:
         meta = GraphModel._new_meta(seed)
-        meta.update(rewards_total=0.0, penalties_total=0.0, feedback_passes=0)
+        meta.update(rewards_total=0.0, penalties_total=0.0, feedback_passes=0, feedback_passes_resets=0)
         return meta
 
     # -- passes over data ----------------------------------------------------
@@ -405,8 +433,8 @@ class CountRewardNet(GraphModel):
         records: list[dict] = []
         grams = [self.encoder.encode(t) for t in texts]
         if count:
-            meta["trained_texts"] += len(texts)
-            meta["trained_chars"] += sum(len(t) for t in texts)
+            meta_add(meta, "trained_texts", len(texts))
+            meta_add(meta, "trained_chars", sum(len(t) for t in texts))
         # build the structure first (no counting) and compress it, so every pass - the first included - walks
         # the same transitions: steps inside a compressed node are deterministic and never counted
         self._observe_grams(grams, False)
@@ -417,7 +445,7 @@ class CountRewardNet(GraphModel):
             edges = [e for _, e in transitions]
             if reward:
                 graph.add_reward(edges, reward)
-                meta["feedback_passes"] += 1
+                meta_add(meta, "feedback_passes", 1)
                 if reward > 0:
                     meta["rewards_total"] += reward * len(edges)
                 else:
@@ -427,8 +455,8 @@ class CountRewardNet(GraphModel):
             loss = self._mean_cost(transitions)
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
-            meta["epochs_total"] += 1
-            epoch = meta["epochs_total"]
+            graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
+            epoch = meta_add(meta, "epochs_total", 1)
             record = {
                 "epoch": epoch,
                 "loss": loss,
@@ -484,16 +512,29 @@ class CountRewardNet(GraphModel):
         *,
         epochs: int = 1,
         strength: float | None = 1.0,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         lr: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs up: ``epochs`` passes that traverse *and* reward (``+strength``) every path of ``texts``."""
-        cfg = _resolve_config(None, {"epochs": epochs, **overrides})
-        return self._passes(
-            texts, cfg, count=True, reward=abs(1.0 if strength is None else float(strength)), phase="positive",
-            progress=progress, stop_event=stop_event,
+        """Thumbs up: ``epochs`` passes that traverse *and* reward (``+strength``) every path of ``texts``.
+
+        ``weights`` (one per text, ``>= 0``) turns the thumbs up into a
+        rating: each path is rewarded by ``weight * strength``, so a text
+        rated 9 out of 10 adds nine tenths of what a perfect one adds.  Texts
+        of equal weight share a pass (heaviest first) and their records carry
+        ``"weight"``; a weight of 0 is skipped.
+        """
+        base = abs(1.0 if strength is None else float(strength))
+        if weights is None:
+            cfg = _resolve_config(None, {"epochs": epochs, **overrides})
+            return self._passes(
+                texts, cfg, count=True, reward=base, phase="positive", progress=progress, stop_event=stop_event,
+            )
+        return self._weighted_passes(
+            texts, weights, epochs=epochs, count=True, reward=base, phase="positive",
+            progress=progress, stop_event=stop_event, **overrides,
         )
 
     def punish(
@@ -502,17 +543,56 @@ class CountRewardNet(GraphModel):
         *,
         epochs: int = 1,
         strength: float | None = 1.0,
+        weights: Sequence[float] | None = None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         lr: float | None = None,
         **overrides,
     ) -> list[dict]:
-        """Thumbs down: ``epochs`` passes that penalise (``-strength``) every path of ``texts``; no traversal is counted."""
-        cfg = _resolve_config(None, {"epochs": epochs, **overrides})
-        return self._passes(
-            texts, cfg, count=False, reward=-abs(1.0 if strength is None else float(strength)), phase="negative",
-            progress=progress, stop_event=stop_event,
+        """Thumbs down: ``epochs`` passes that penalise (``-strength``) every path of ``texts``; no traversal is counted.
+
+        ``weights`` rates the failures the way :meth:`reward` rates the
+        successes: each path is penalised by ``weight * strength``.
+        """
+        base = abs(1.0 if strength is None else float(strength))
+        if weights is None:
+            cfg = _resolve_config(None, {"epochs": epochs, **overrides})
+            return self._passes(
+                texts, cfg, count=False, reward=-base, phase="negative", progress=progress, stop_event=stop_event,
+            )
+        return self._weighted_passes(
+            texts, weights, epochs=epochs, count=False, reward=-base, phase="negative",
+            progress=progress, stop_event=stop_event, **overrides,
         )
+
+    def _weighted_passes(
+        self,
+        texts: Iterable[str] | str,
+        weights: Sequence[float],
+        *,
+        epochs: int,
+        count: bool,
+        reward: float,
+        phase: str,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """One pass per group of equally weighted texts, the reward / penalty scaled by the weight."""
+        cfg = _resolve_config(None, {"epochs": epochs, **overrides})
+        records: list[dict] = []
+        for weight, group in _weight_groups(texts, weights, "weights"):
+            if stop_event is not None and stop_event.is_set():
+                break
+            group_records = self._passes(
+                group, cfg, count=count, reward=reward * weight, phase=phase, stop_event=stop_event,
+            )
+            for record in group_records:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(group_records)
+        return records
 
     def two_nrl(
         self,
@@ -527,6 +607,7 @@ class CountRewardNet(GraphModel):
         stop_event: threading.Event | None = None,
         strength: float | None = 1.0,
         bad_weights: Sequence[float] | None = None,
+        good_weights: Sequence[float] | None = None,
         **overrides,
     ) -> dict:
         """2NRL for the count model: penalise ``bad`` (``neg_epochs`` passes), then count + reward ``good``.
@@ -534,7 +615,9 @@ class CountRewardNet(GraphModel):
         Nothing is inverted: a penalty already makes a path unlikely.
         ``neg_lr`` / ``pos_lr`` are accepted for interface parity and ignored;
         the magnitude per pass is ``strength``, scaled per text by
-        ``bad_weights`` when given (the worse a failure, the larger its penalty).
+        ``bad_weights`` when given (the worse a failure, the larger its
+        penalty) and by ``good_weights`` (the better a text, the larger its
+        reward - a rating, not a thumbs up).
         """
         reserved = sorted({"epochs", "lr", "act_lr"} & set(overrides))
         if reserved:
@@ -544,7 +627,7 @@ class CountRewardNet(GraphModel):
             negative = self.punish(bad, epochs=neg_epochs, strength=base, progress=progress, stop_event=stop_event, **overrides)
         else:
             negative = []
-            for weight, group in _weight_groups(bad, bad_weights):
+            for weight, group in _weight_groups(bad, bad_weights, "bad_weights"):
                 if stop_event is not None and stop_event.is_set():
                     break
                 records = self.punish(group, epochs=neg_epochs, strength=base * weight, stop_event=stop_event, **overrides)
@@ -555,11 +638,14 @@ class CountRewardNet(GraphModel):
                 negative.extend(records)
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
-            positive = self.reward(good, epochs=pos_epochs, strength=strength, progress=progress, stop_event=stop_event, **overrides)
-        self.meta["twonrl_runs"] += 1
+            positive = self.reward(
+                good, epochs=pos_epochs, strength=strength, weights=good_weights, progress=progress,
+                stop_event=stop_event, **overrides,
+            )
+        runs = meta_add(self.meta, "twonrl_runs", 1)
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)
-            checkpoint_manager.save(self, self.meta["twonrl_runs"], "2nrl", last)
+            checkpoint_manager.save(self, runs, "2nrl", last)
         return {"negative": negative, "positive": positive, "inverted": self.graph.inverted}
 
     def invert(self) -> None:
@@ -597,12 +683,102 @@ class CountRewardNet(GraphModel):
         for e, penalty in penalties.items():
             touched += graph.add_reward([e], -penalty)
             self.meta["penalties_total"] += penalty
-        self.meta["feedback_passes"] += 1 if touched else 0
+        if touched:
+            meta_add(self.meta, "feedback_passes", 1)
         applied = [v for v in values if v > 0]
         return {
             "texts": len(texts), "flipped": touched, "unit": "edges", "mode": "penalty",
             "amount_mean": sum(applied) / len(applied) if applied else 0.0,
         }
+
+    # -- learning from a correction ------------------------------------------
+
+    def correct(
+        self,
+        wrong: str,
+        right: str,
+        *,
+        strength: float | None = 1.0,
+        weight: float = 1.0,
+        reward: float = 1.0,
+        keep: float = 0.25,
+        count: bool = True,
+    ) -> dict:
+        """Teach one correction: move only the trigram nodes the two sentences disagree on.
+
+        ``wrong`` is what the network wrote, ``right`` what the teacher wrote
+        instead.  The two are aligned character by character
+        (:mod:`radixnet.diff`) and every step of either path is charged with
+        the characters it adds, so:
+
+        * the steps of ``wrong`` that added a character the teacher struck out
+          or replaced lose ``strength * weight`` of reward - and *only* those:
+          the words both sentences agree on keep what they earned;
+        * the steps of ``right`` that wrote what the teacher put there instead
+          gain ``strength * reward``, the rest of the correction ``keep`` times
+          as much (``keep=0`` teaches the fix alone, ``keep=1`` is the old
+          whole-sentence thumbs up);
+        * ``count`` traverses the correction once, as a training pass does,
+          because a corrected sentence is correct English whatever changed.
+
+        An edge both sentences walk over a changed span - the network wrote the
+        right characters by another route - is rewarded, never penalised.
+        Returns what moved: ``{"edits", "changes", "penalised", "rewarded",
+        "kept", "penalty", "reward", "loss", "wrong_chars", "right_chars"}``.
+        """
+        base = abs(1.0 if strength is None else float(strength))
+        wrong, right = str(wrong or ""), str(right or "")
+        changes = diff.summary(wrong, right, limit=0)
+        wrong_spans, right_spans = diff.changed_spans(wrong, right)
+        result = {
+            "edits": len(changes), "changes": changes[:8],
+            "penalised": 0, "rewarded": 0, "kept": 0, "penalty": 0.0, "reward": 0.0, "loss": None,
+            "wrong_chars": sum(hi - lo for lo, hi in wrong_spans),
+            "right_chars": sum(hi - lo for lo, hi in right_spans),
+        }
+        graph = self.graph
+        wrong_grams = self.encoder.encode(wrong) if len(wrong) >= _W else []
+        right_grams = self.encoder.encode(right) if len(right) >= _W else []
+        if not wrong_grams and not right_grams:
+            return result
+        # both sentences join the structure before either is measured: observing one can split a node the
+        # other's path runs through, and the split moves the very edge a penalty was meant for
+        self._observe_grams([g for g in (wrong_grams, right_grams) if g], False)
+        penalties: dict[int, float] = {}
+        rewards: dict[int, float] = {}
+        fixed: set[int] = set()
+        if wrong_grams and wrong_spans and base * weight > 0:
+            for edge in self._steps_over(wrong_grams, len(wrong), wrong_spans):
+                penalties[edge] = -base * float(weight)
+        if right_grams:
+            transitions = graph.observe_sequence(right_grams, count)
+            if count:
+                self.meta["trained_texts"] += 1
+                self.meta["trained_chars"] += len(right)
+            if right_spans:
+                fixed = set(self._steps_over(right_grams, len(right), right_spans))
+            for _p, e in transitions:
+                amount = base * float(reward) * (1.0 if e in fixed else float(keep))
+                if amount > 0:
+                    rewards[e] = amount
+            result["loss"] = self._mean_cost(transitions)
+        # one call per distinct amount: add_reward recomputes the weights, and a correction moves
+        # at most three of them (the penalty, the fix, and what the rest of the correction keeps)
+        blamed = [e for e in penalties if e not in rewards]  # the teacher wrote it too: it is not the mistake
+        if blamed:
+            penalty = -base * float(weight)
+            result["penalised"] = graph.add_reward(blamed, penalty)
+            result["penalty"] = -penalty * result["penalised"]
+        for amount, edges in _by_amount(rewards).items():
+            touched = graph.add_reward(edges, amount)
+            result["rewarded" if all(e in fixed for e in edges) else "kept"] += touched
+            result["reward"] += amount * touched
+        if result["penalised"] or result["rewarded"] or result["kept"]:
+            self.meta["feedback_passes"] += 1
+            self.meta["rewards_total"] += result["reward"]
+            self.meta["penalties_total"] += result["penalty"]
+            graph.recompute_weights()
+        return result
 
     # -- prediction ----------------------------------------------------------
 
@@ -650,15 +826,11 @@ class CountRewardNet(GraphModel):
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,
-            "epochs_total": meta["epochs_total"],
-            "trained_chars": meta["trained_chars"],
-            "trained_texts": meta["trained_texts"],
-            "twonrl_runs": meta["twonrl_runs"],
+            **meta_stats(meta, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes"),
             "history_len": len(self.history),
             "last_loss": self.history[-1]["loss"] if self.history else None,
             "rewards_total": meta["rewards_total"],
             "penalties_total": meta["penalties_total"],
-            "feedback_passes": meta["feedback_passes"],
             "edge_reward_positive": pos,
             "edge_reward_negative": neg,
             "count_scale": g.count_scale,
@@ -666,7 +838,8 @@ class CountRewardNet(GraphModel):
             "global_scale": g.global_scale,
             "window_scale": g.window_scale,
             "window": g.window,
-            "total_traversals": g.total_traversals,
+            "total_traversals": g.total_traversals.value,
+            "total_traversals_resets": g.total_traversals.resets,
             "window_traversals": g.window_traversals,
         }
 
@@ -696,7 +869,7 @@ class CountRewardNet(GraphModel):
         model.history = [dict(r) for r in d.get("history", [])]
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
-        model.meta = meta
+        model.meta = carry_meta(meta)
         return model
 
     def __repr__(self) -> str:

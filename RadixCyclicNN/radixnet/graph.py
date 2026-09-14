@@ -17,6 +17,13 @@ feature, not an error.  Node ids ``0`` (START) and ``1`` (END) are sentinels.
 Storage is flat parallel lists indexed by node id / edge id; per-node dicts
 hold the edges for O(1) lookup.  Removed nodes and edges are tombstoned (ids
 are never reused) and compacted only by :meth:`to_dict`.
+
+Every counter here - node and edge visit counts, the traversal total, the
+version stamps - is a *cyclic counter* (:mod:`radixnet.counter`): it wraps back
+to 0 at :data:`~radixnet.counter.COUNTER_LIMIT` and counts the wrap as a reset,
+so nothing grows out of an ``int64`` or out of a JSON number.  The wrapping
+itself happens in :meth:`RadixCyclicGraph.carry_counters`, never in the
+counting loops.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
 from .backend import CSR, NodeParams
+from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
 from .encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
 
 __all__ = ["START", "END", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
@@ -42,7 +50,7 @@ W_LOW, W_HIGH = 0.5, 1.5
 """New edge weights are drawn uniformly from ``[W_LOW, W_HIGH]`` (negated when inverted)."""
 
 _GRAPH_FORMAT = "radixnet-graph"
-_GRAPH_FORMAT_VERSION = 1
+_GRAPH_FORMAT_VERSION = 2   # 2 added the counter reset fields (version 1 files load with no resets)
 
 
 class RadixCyclicGraph:
@@ -58,16 +66,19 @@ class RadixCyclicGraph:
         self.h: list[float] = []
         self.k: list[float] = []
         self.count: list[int] = []
+        self.count_resets: dict[int, int] = {}
         self.alive: list[bool] = []
         self.children: list[dict[int, int]] = []
         self.parents: list[dict[int, int]] = []
         self.edge_w: list[float] = []
         self.edge_count: list[int] = []
+        self.edge_count_resets: dict[int, int] = {}
         self.edge_alive: list[bool] = []
         self.trigram_index: dict[str, tuple[int, int]] = {}
         self.inverted = False
-        self.version = 0
-        self.structure_version = 0
+        self.traversals = CyclicCounter()
+        self.version = CyclicCounter()
+        self.structure_version = CyclicCounter()
         self._n_alive_nodes = 0
         self._n_alive_edges = 0
         self._cost_cache: dict[int, list[tuple[int, int, float]]] = {}
@@ -78,6 +89,43 @@ class RadixCyclicGraph:
         self._encoder = Encoder(_W)
         self._new_node(START_LABEL)
         self._new_node(END_LABEL)
+
+    # -- counters ------------------------------------------------------------
+
+    @staticmethod
+    def _set_resets(resets: dict[int, int], key: int, value: int) -> None:
+        """Store one reset count, keeping the map sparse (missing means 'never wrapped')."""
+        if value:
+            resets[key] = value
+        else:
+            resets.pop(key, None)
+
+    def node_count(self, i: int) -> int:
+        """How often node ``i`` was visited, exactly, across every reset of its counter."""
+        return total(self.count[i], self.count_resets.get(i, 0))
+
+    def edge_traversals(self, e: int) -> int:
+        """How often edge ``e`` was traversed, exactly, across every reset of its counter."""
+        return total(self.edge_count[e], self.edge_count_resets.get(e, 0))
+
+    def _edge_traversals_f(self, e: int) -> float:
+        """:meth:`edge_traversals` as a float - what the weight function (and the Go port) sums."""
+        return as_float(self.edge_count[e], self.edge_count_resets.get(e, 0))
+
+    def carry_counters(self, force: bool = False) -> int:
+        """Set every counter that reached ``COUNTER_LIMIT`` back to 0, counting the reset; returns how many wrapped.
+
+        This is the *only* place the visit counters wrap, so the counting loops
+        stay plain increments and the Go port can count into a raw ``int64``
+        from several goroutines.  Call it at a safe point - the end of an
+        epoch, before a save.  While the graph has not seen
+        ``COUNTER_LIMIT`` increments no counter can have reached the limit
+        (:attr:`traversals` counts them all and so bounds every single one), so
+        the sweep is skipped after one comparison; ``force`` runs it anyway.
+        """
+        if not force and not self.traversals.resets:
+            return 0
+        return carry_series(self.count, self.count_resets) + carry_series(self.edge_count, self.edge_count_resets)
 
     # -- construction helpers ------------------------------------------------
 
@@ -90,6 +138,7 @@ class RadixCyclicGraph:
         h: float = DEFAULT_H,
         k: float = DEFAULT_K,
         count: int = 0,
+        count_resets: int = 0,
     ) -> int:
         """Allocate a node (not indexed); ``z`` random and ``a`` default unless given."""
         if z is None:
@@ -104,6 +153,8 @@ class RadixCyclicGraph:
         self.h.append(h)
         self.k.append(k)
         self.count.append(count)
+        if count_resets:
+            self.count_resets[nid] = count_resets
         self.alive.append(True)
         self.children.append({})
         self.parents.append({})
@@ -112,7 +163,7 @@ class RadixCyclicGraph:
         self.structure_version += 1
         return nid
 
-    def _new_edge(self, p: int, c: int, count: int = 0) -> int:
+    def _new_edge(self, p: int, c: int, count: int = 0, count_resets: int = 0) -> int:
         """Allocate edge ``p -> c`` with a fresh random weight; ``p -> c`` must not exist."""
         w = self.rng.uniform(W_LOW, W_HIGH)
         if self.inverted:
@@ -120,6 +171,8 @@ class RadixCyclicGraph:
         e = len(self.edge_w)
         self.edge_w.append(w)
         self.edge_count.append(count)
+        if count_resets:
+            self.edge_count_resets[e] = count_resets
         self.edge_alive.append(True)
         self.children[p][c] = e
         self.parents[c][p] = e
@@ -205,10 +258,11 @@ class RadixCyclicGraph:
         if i < 1 or i > length - _W:
             raise ValueError(f"split index {i} out of range 1..{length - _W} for label {label!r}")
         a_id = node_id
+        a_resets = self.count_resets.get(a_id, 0)
         b_id = self._new_node(
             label[i:],
             z=self.z[a_id], a=self.a[a_id], b=self.b[a_id], h=self.h[a_id], k=self.k[a_id],
-            count=self.count[a_id],
+            count=self.count[a_id], count_resets=a_resets,
         )
         ch_a = self.children[a_id]
         ch_b = self.children[b_id]
@@ -219,7 +273,7 @@ class RadixCyclicGraph:
             del pc[a_id]
             pc[b_id] = e
         ch_a.clear()
-        self._new_edge(a_id, b_id, count=self.count[a_id])
+        self._new_edge(a_id, b_id, count=self.count[a_id], count_resets=a_resets)
         index = self.trigram_index
         for j in range(i, length - _OV):
             index[label[j : j + _W]] = (b_id, j - i)
@@ -292,7 +346,9 @@ class RadixCyclicGraph:
             index[lc[j : j + _W]] = (p, shift + j)
         self.labels[p] = lp + lc[_OV:]
         self.labels[c] = ""
-        self.count[p] = max(self.count[p], self.count[c])
+        if self.node_count(c) > self.node_count(p):
+            self.count[p] = self.count[c]
+            self._set_resets(self.count_resets, p, self.count_resets.get(c, 0))
         self.alive[c] = False
         self._n_alive_nodes -= 1
         self.version += 1
@@ -400,6 +456,11 @@ class RadixCyclicGraph:
             counts[END] += 1
             ecounts[e] += 1
 
+        if count:
+            # every transition bumped one node counter and one edge counter, plus START's:
+            # the total bounds each of them and so decides when carry_counters() has work
+            self.traversals += 2 * len(transitions) + 1
+
         if did_split:
             # a later split may have moved an out-edge recorded earlier in this
             # sequence to the new B node; re-derive the transitions structurally
@@ -454,6 +515,15 @@ class RadixCyclicGraph:
         transitions.append((px, e))
         path.append(END)
         return transitions, path
+
+    def trace(self, trigrams: Sequence[str]) -> tuple[list[tuple[int, int]], list[int]] | None:
+        """``(transitions, node_path)`` of a sequence through the current structure, or ``None``.
+
+        Like :meth:`observe_sequence` without the observing: nothing is
+        created, split or counted, so ``None`` means the structure cannot
+        represent the sequence as it stands (see :meth:`node_path`).
+        """
+        return self._trace(trigrams)
 
     def node_path(self, trigrams: Sequence[str]) -> list[int] | None:
         """Node ids ``[START, n0, ..., END]`` visited by a sequence, or ``None``.
@@ -599,6 +669,7 @@ class RadixCyclicGraph:
         the trigram index is rebuilt from the labels on load.  The RNG state is
         included so training continues reproducibly after a reload.
         """
+        self.carry_counters()  # a saved file always holds a wrapped reading
         remap: dict[int, int] = {}
         for old, ok in enumerate(self.alive):
             if ok:
@@ -607,21 +678,28 @@ class RadixCyclicGraph:
         dst: list[int] = []
         ew: list[float] = []
         ec: list[int] = []
+        er: list[int] = []
         for old, new in remap.items():
             for c, e in self.children[old].items():
                 src.append(new)
                 dst.append(remap[c])
                 ew.append(self.edge_w[e])
                 ec.append(self.edge_count[e])
+                er.append(self.edge_count_resets.get(e, 0))
         order = list(remap)
+        nr = [self.count_resets.get(i, 0) for i in order]
         state = self.rng.getstate()
         return {
             "format": _GRAPH_FORMAT,
             "format_version": _GRAPH_FORMAT_VERSION,
             "seed": self.seed,
             "inverted": self.inverted,
-            "version": self.version,
-            "structure_version": self.structure_version,
+            "version": self.version.value,
+            "version_resets": self.version.resets,
+            "structure_version": self.structure_version.value,
+            "structure_version_resets": self.structure_version.resets,
+            "traversals": self.traversals.value,
+            "traversals_resets": self.traversals.resets,
             "nodes": {
                 "labels": [self.labels[i] for i in order],
                 "z": [self.z[i] for i in order],
@@ -630,8 +708,10 @@ class RadixCyclicGraph:
                 "h": [self.h[i] for i in order],
                 "k": [self.k[i] for i in order],
                 "count": [self.count[i] for i in order],
+                # the reset counts ride along only once something has actually wrapped
+                **({"count_resets": nr} if any(nr) else {}),
             },
-            "edges": {"src": src, "dst": dst, "w": ew, "count": ec},
+            "edges": {"src": src, "dst": dst, "w": ew, "count": ec, **({"count_resets": er} if any(er) else {})},
             "rng_state": [state[0], list(state[1]), state[2]],
         }
 
@@ -655,7 +735,11 @@ class RadixCyclicGraph:
         g.h = [float(v) for v in nodes["h"]]
         g.k = [float(v) for v in nodes["k"]]
         g.count = [int(v) for v in nodes["count"]]
+        node_resets = nodes.get("count_resets") or []
+        g.count_resets = {i: int(v) for i, v in enumerate(node_resets) if int(v)}
         if not (len(g.z) == len(g.a) == len(g.b) == len(g.h) == len(g.k) == len(g.count) == n):
+            raise ValueError("node arrays have inconsistent lengths")
+        if node_resets and len(node_resets) != n:
             raise ValueError("node arrays have inconsistent lengths")
         g.alive = [True] * n
         g.children = [{} for _ in range(n)]
@@ -678,6 +762,10 @@ class RadixCyclicGraph:
             raise ValueError("edge arrays have inconsistent lengths")
         g.edge_w = [float(v) for v in ew]
         g.edge_count = [int(v) for v in ec]
+        edge_resets = edges.get("count_resets") or []
+        if edge_resets and len(edge_resets) != len(src):
+            raise ValueError("edge arrays have inconsistent lengths")
+        g.edge_count_resets = {i: int(v) for i, v in enumerate(edge_resets) if int(v)}
         g.edge_alive = [True] * len(src)
         for e, (p, c) in enumerate(zip(src, dst)):
             if not (0 <= p < n and 0 <= c < n) or c in g.children[p]:
@@ -688,8 +776,15 @@ class RadixCyclicGraph:
         state = d.get("rng_state")
         if state is not None:
             g.rng.setstate((state[0], tuple(state[1]), state[2]))
-        g.version = int(d.get("version", 0))
-        g.structure_version = int(d.get("structure_version", 0))
+        g.version = CyclicCounter.from_pair(d.get("version", 0), d.get("version_resets", 0))
+        g.structure_version = CyclicCounter.from_pair(
+            d.get("structure_version", 0), d.get("structure_version_resets", 0)
+        )
+        if "traversals" in d:
+            g.traversals = CyclicCounter.from_pair(d["traversals"], d.get("traversals_resets", 0))
+        else:  # a format 1 file counted into unbounded integers: their sum bounds every one of them
+            g.traversals = CyclicCounter(sum(g.count) + sum(g.edge_count))
+        g.carry_counters(force=True)  # normalise whatever the file carried, however it was written
         return g
 
     # -- debugging -----------------------------------------------------------
@@ -711,6 +806,13 @@ class RadixCyclicGraph:
         assert len(self.edge_w) == len(self.edge_count) == len(self.edge_alive), (
             "edge arrays have inconsistent lengths"
         )
+        for name, values, resets in (
+            ("node", self.count, self.count_resets), ("edge", self.edge_count, self.edge_count_resets)
+        ):
+            assert all(v >= 0 for v in values), f"a {name} counter went negative"
+            assert all(0 < r < COUNTER_LIMIT and 0 <= i < len(values) for i, r in resets.items()), (
+                f"a {name} counter reset count is out of range or belongs to no counter"
+            )
         assert n >= 2 and alive[START] and alive[END], "sentinels must exist and be alive"
         assert labels[START] == START_LABEL and labels[END] == END_LABEL, "sentinel labels changed"
         assert not parents[START], "START must not have parents"
