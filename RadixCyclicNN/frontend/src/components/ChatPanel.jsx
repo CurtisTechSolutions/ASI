@@ -301,9 +301,10 @@ function rethinkSays(exchange) {
   const caught =
     r.kind === "stutter" ? `caught itself saying “${r.noticed}” twice` : `caught itself repeating “${r.noticed}”`;
   if (!r.steps) return `${caught}: the words it picked up, not its own`;
-  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)`;
+  const learned = r.taught >= 0 ? " (and learned to hand over there)" : "";
+  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)${learned}`;
   const ending = exchange.repeat ? "said it anyway" : "took a lesser answer";
-  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}`;
+  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}${learned}`;
 }
 
 /** The judge's mark for one exchange, once its conversation has been marked. */

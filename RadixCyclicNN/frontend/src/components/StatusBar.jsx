@@ -135,6 +135,25 @@ export default function StatusBar({ onStatus }) {
           window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
         </span>
       ) : null}
+      {s.kind === "count" && s.path_contexts !== undefined ? (
+        <span
+          className="stat"
+          title="Judged paths: a step counted in the company it kept, so the same edge can be right after one word and wrong after another"
+        >
+          paths <b>{fmtInt(s.path_contexts)}</b> · <b className="ok">{fmtInt(s.path_correct)}</b> correct /{" "}
+          <b className="bad">{fmtInt(s.path_incorrect)}</b> wrong of <b>{fmtInt(s.path_seen)}</b> seen
+        </span>
+      ) : null}
+      {s.kind === "resonant" ? (
+        <span className="stat" title="How tightly the edges are locked to a phase, over how many positions on the ring">
+          coherence <b>{fmtNum(s.coherence_mean, 3)}</b> · <b>{fmtInt(s.buckets)}</b> phases
+        </span>
+      ) : null}
+      {s.kind === "resonant" ? (
+        <span className="stat" title="Phase-locked cycles met in training, and the signatures the metacognitive layer learned">
+          cycles <b>{fmtInt(s.cycles_seen)}</b> · signatures <b>{fmtInt(s.meta && s.meta.signatures)}</b>
+        </span>
+      ) : null}
       <span className={`stat job ${jobState}`}>
         job{" "}
         <b>

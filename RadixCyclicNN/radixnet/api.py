@@ -492,7 +492,7 @@ class ModelService:
 
     @property
     def kind(self) -> str:
-        """The active model's kind (``"radix"`` or ``"count"``)."""
+        """The active model's kind (``"radix"``, ``"count"`` or ``"resonant"``)."""
         return self.model.kind
 
     def model_path_for(self, kind: str) -> str | None:
@@ -887,6 +887,53 @@ class ModelService:
         with self.session() as model:
             return _graph_view(model.graph, limit)
 
+    def paths(self, limit: int = 50) -> dict:
+        """The judged paths: what each step did in the context it was taken from."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "paths"):
+                raise ApiError(400, f"the {model.kind} model does not count paths")
+            graph = model.graph
+            rows = []
+            for row in model.paths(limit=limit):
+                prev = graph.labels[row["prev"]] if row["prev"] < len(graph.labels) else ""
+                parent = graph.edge_parent[row["edge"]] if row["edge"] < len(graph.edge_parent) else -1
+                child = next((c for c, e in graph.children[parent].items() if e == row["edge"]), -1) if parent >= 0 else -1
+                rows.append({
+                    **row,
+                    "after": prev,
+                    "parent": parent,
+                    "parent_label": graph.labels[parent] if 0 <= parent < len(graph.labels) else "",
+                    "child": child,
+                    "child_label": graph.labels[child] if 0 <= child < len(graph.labels) else "",
+                })
+            return {
+                "totals": graph.path_totals(), "paths": rows, "limit": limit,
+                "path_scale": graph.weight_config()["path_scale"],
+            }
+
+    def node_ratios(self, limit: int = 20, node: str | None = None) -> dict:
+        """Each node against the nodes around it: its traffic and its reward, shared out both ways."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "node_ratios"):
+                raise ApiError(400, f"the {model.kind} model does not count node ratios")
+            graph = model.graph
+            wanted = None
+            if node:
+                wanted = next((i for i, label in enumerate(graph.labels) if label == node and graph.alive[i]), None)
+                if wanted is None:
+                    found = graph.lookup(node) if len(node) == 3 else None
+                    if found is None:
+                        raise ApiError(404, f"no node labelled {node!r}: give a node label, or one of its trigrams")
+                    wanted = found[0]
+            return {
+                "nodes": model.node_ratios(limit=limit, node=wanted), "limit": limit,
+                "node": node, "total_nodes": graph.num_nodes(), "totals": graph.path_totals(),
+            }
+
     # -- the negative network ------------------------------------------------
 
     def negative_model(self) -> NegativeNet:
@@ -1159,14 +1206,17 @@ class ModelService:
     def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
         """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
 
-        ``options`` (count model only): ``count_scale``, ``global_scale``,
-        ``window_scale``, ``reward_scale``, ``window``.
+        ``options`` are the score-function settings of the kind that has them:
+        ``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``
+        and ``window`` for the count model; ``buckets``, ``period``,
+        ``kick_scale``, ``resonance_scale``, ``amp_scale``, ``reward_scale``
+        and ``concentration`` for the resonant one.
         """
         self._ensure_idle()
         cls = model_class(kind or self.kind)
         extra = {k: v for k, v in options.items() if v is not None}
-        if extra and cls.kind != "count":
-            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) apply to the count model only")
+        if extra and not hasattr(cls, "weight_config"):
+            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) do not apply to the {cls.kind} model")
         try:
             model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
         except (TypeError, ValueError) as exc:
@@ -1174,10 +1224,14 @@ class ModelService:
         return self._replace_model(model)
 
     def configure_weights(self, **options: Any) -> dict:
-        """Change the count model's dual frequency function (400 for RadixNet); returns the config and stats."""
+        """Change the active model's score function (400 for RadixNet); returns the config and stats.
+
+        The count model takes the dual frequency function's scales, the
+        resonant one its phase and resonance settings.
+        """
         with self.mutating() as model:
-            if model.kind != "count":
-                raise ApiError(400, "the weight function can be configured on the count model only (select it first)")
+            if not hasattr(model, "configure_weights"):
+                raise ApiError(400, f"the {model.kind} model has no configurable weight function (select another kind first)")
             try:
                 config = model.configure_weights(**{k: v for k, v in options.items() if v is not None})
             except ValueError as exc:
@@ -1768,9 +1822,11 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     edge_count = graph.edge_count
     edge_reward = getattr(graph, "edge_reward", None)
     shares_of = getattr(graph, "shares", None)
+    window_counts = getattr(graph, "window_edge_count", None)   # the count model only
+    advance = getattr(graph, "advance", None)                   # the resonant model only
     edges = []
     for p in ids:
-        shares = {e: (all_, recent) for _c, e, all_, recent in shares_of(p)} if shares_of is not None else {}
+        shares = {e: (first, second) for _c, e, first, second in shares_of(p)} if shares_of is not None else {}
         for c, e, cost in graph.child_costs(p):
             if c in chosen:
                 edge = {
@@ -1780,8 +1836,11 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
                 }
                 if edge_reward is not None:
                     edge["reward"] = edge_reward[e]
+                if window_counts is not None:
                     edge["share"], edge["recent_share"] = shares.get(e, (0.0, 0.0))
-                    edge["recent_count"] = graph.window_edge_count[e]
+                    edge["recent_count"] = window_counts[e]
+                elif advance is not None:
+                    edge["coherence"], edge["mu"] = shares.get(e, (0.0, 0.0))
                 edges.append(edge)
     edges.sort(key=lambda d: (d["source"], d["target"]))
     view = {
@@ -1791,8 +1850,13 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     if edge_reward is not None:
         view["total_traversals"] = graph.total_traversals.value
         view["total_traversals_resets"] = graph.total_traversals.resets
+    if window_counts is not None:
         view["window_traversals"] = graph.window_traversals
         view["window"] = graph.window
+    if advance is not None:
+        view["buckets"] = graph.buckets
+        for node in nodes:
+            node["advance"] = advance[node["id"]]
     return view
 
 
@@ -2315,6 +2379,7 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         avoid_repeats=f.flag("avoid_repeats", True),
         avoid_word_repeats=f.flag("avoid_word_repeats", True),
         explore=f.integer("explore", EXPLORE, minimum=0),
+        learn=f.flag("learn", True),
     )
 
 
@@ -2393,12 +2458,23 @@ def _r_load(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _weight_options(f: Fields) -> dict:
+    """Score-function settings of every kind that has one; the model rejects the ones it does not know."""
     return {
+        # count model
         "count_scale": f.number("count_scale", None),
         "global_scale": f.number("global_scale", None),
         "window_scale": f.number("window_scale", None),
-        "reward_scale": f.number("reward_scale", None),
+        "path_scale": f.number("path_scale", None),
         "window": f.integer("window", None, minimum=1),
+        # resonant model
+        "buckets": f.integer("buckets", None, minimum=1),
+        "period": f.number("period", None),
+        "kick_scale": f.number("kick_scale", None),
+        "resonance_scale": f.number("resonance_scale", None),
+        "amp_scale": f.number("amp_scale", None),
+        "concentration": f.number("concentration", None),
+        # both
+        "reward_scale": f.number("reward_scale", None),
     }
 
 
@@ -2641,6 +2717,25 @@ def _r_graph(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     except ValueError:
         raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
     return 200, svc.graph(limit)
+
+
+def _r_paths(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["50"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    return 200, svc.paths(limit)
+
+
+def _r_nodes(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["20"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    node = q.get("node", [None])[-1]
+    return 200, svc.node_ratios(limit, node)
 
 
 def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3481,6 +3576,8 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         batch=f.integer("batch", d.batch, minimum=1),
         adapt=f.flag("adapt", d.adapt),
         drills=f.integer("drills", d.drills, minimum=0),
+        variants=f.integer("variants", d.variants, minimum=0),
+        variant_weight=f.number("variant_weight", d.variant_weight, minimum=0.0),
         plan=f.integer("plan", d.plan, minimum=0),
         batches=f.integer("batches", d.batches, minimum=0),
         teach_answer=f.flag("teach_answer", d.teach_answer),
@@ -3620,7 +3717,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
      "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats "
      "(what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a "
-     "reply that caught itself repeating may back up and look for another way on; 0 = not at all), "
+     "reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn "
+     "(default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes "
+     "round - a conversation with this on changes the model), "
      "guard (default on: a reply the negative network vetoes is left unsaid)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
@@ -3642,9 +3741,13 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
     ("POST", "/api/reset", _r_reset,
-     "replace the model with a fresh one: {seed, kind, count model: count_scale, global_scale, window_scale, reward_scale, window}"),
+     "replace the model with a fresh one: {seed, kind, and the kind's score-function settings - count: "
+     "count_scale, global_scale, window_scale, reward_scale, window; resonant: buckets, period, kick_scale, "
+     "resonance_scale, amp_scale, reward_scale, concentration}"),
     ("POST", "/api/model/weights", _r_model_weights,
-     "count model: change the dual frequency function {count_scale, global_scale, window_scale, reward_scale, window} -> {weights, stats}"),
+     "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
+     "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "
+     "concentration} -> {weights, stats}"),
     ("GET", "/api/negative", _r_negative,
      "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
      "filter settings"),
@@ -3686,6 +3789,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
     ("GET", "/api/graph", _r_graph, "top nodes by visit count and the edges among them (?limit=150)"),
+    ("GET", "/api/paths", _r_paths,
+     "count model: the judged paths (?limit=50) - what each step did in the context it was taken from: "
+     "{totals, path_scale, paths: [{after, parent_label, child_label, seen, correct, incorrect, correct_ratio, "
+     "seen_ratio, term}]}"),
+    ("GET", "/api/nodes", _r_nodes,
+     "count model: each node against the nodes around it (?limit=20, ?node=LABEL) - {nodes: [{node, label, visits, "
+     "from: [{label, seen, seen_ratio, reward, reward_ratio, path_seen, path_ratio, correct, incorrect, "
+     "correct_ratio}], to: [...], in_totals, out_totals}]}"),
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload,
@@ -3761,7 +3872,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "neg_epochs, pos_epochs, neg_lr, pos_lr, brief, plan, batches (auto run: each batch planned from the last, "
      "0 = until stopped), tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
      "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
-     "failed), ...}"),
+     "failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same "
+     "mistake, blamed at 'variant_weight' of its severity), ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "

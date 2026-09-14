@@ -228,7 +228,7 @@ func init() {
 	route("POST", "/api/model/select", rModelSelect)
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
-	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, window}")
+	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
 	route("POST", "/api/train", rTrain)
 	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
@@ -240,7 +240,7 @@ func init() {
 	route("POST", "/api/generate", rGenerate)
 	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -265,6 +265,10 @@ func init() {
 	doc("POST", "/api/checkpoints/restore", "{name}: load a checkpoint")
 	route("GET", "/api/graph", rGraph)
 	doc("GET", "/api/graph", "?limit=150: the most visited nodes and the edges among them, with counts, shares and rewards")
+	route("GET", "/api/paths", rPaths)
+	doc("GET", "/api/paths", "?limit=50: the judged paths - what each step did in the context it was taken from: {totals, path_scale, paths}")
+	route("GET", "/api/nodes", rNodes)
+	doc("GET", "/api/nodes", "?limit=20&node=LABEL: each node against the nodes around it - its traffic and its reward, shared out over the previous and the next nodes: {nodes, totals}")
 	route("GET", "/api/history", rHistory)
 	doc("GET", "/api/history", "training history")
 	route("GET", "/api/uploads", rUploads)
@@ -317,7 +321,7 @@ func rModelSelect(rq *request) (int, any, error) {
 
 func weightOptions(f fields) (map[string]float64, error) {
 	opts := map[string]float64{}
-	for _, name := range []string{"count_scale", "global_scale", "window_scale", "reward_scale"} {
+	for _, name := range []string{"count_scale", "global_scale", "window_scale", "reward_scale", "path_scale"} {
 		v, present, err := f.number(name, 0, nil)
 		if err != nil {
 			return nil, err
@@ -706,6 +710,9 @@ func rConverse(rq *request) (int, any, error) {
 	if o.Explore, _, err = f.integer("explore", radixnet.Explore, intp(0)); err != nil {
 		return 0, nil, err
 	}
+	if o.Learn, err = f.flag("learn", true); err != nil {
+		return 0, nil, err
+	}
 	guard, err := f.flag("guard", true)
 	if err != nil {
 		return 0, nil, err
@@ -918,6 +925,33 @@ func rCheckpointRestore(rq *request) (int, any, error) {
 		return 0, nil, badRequest("'name' must not be empty")
 	}
 	out, err := rq.svc.RestoreCheckpoint(name)
+	return 200, out, err
+}
+
+func rPaths(rq *request) (int, any, error) {
+	limit := 50
+	if raw, ok := rq.queryValue("limit"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, nil, badRequest("query parameter 'limit' must be an integer (got %q)", raw)
+		}
+		limit = n
+	}
+	out, err := rq.svc.Paths(limit)
+	return 200, out, err
+}
+
+func rNodes(rq *request) (int, any, error) {
+	limit := 20
+	if raw, ok := rq.queryValue("limit"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, nil, badRequest("query parameter 'limit' must be an integer (got %q)", raw)
+		}
+		limit = n
+	}
+	node, _ := rq.queryValue("node")
+	out, err := rq.svc.NodeRatios(limit, node)
 	return 200, out, err
 }
 

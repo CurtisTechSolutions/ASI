@@ -22,6 +22,8 @@ from collections.abc import Iterable
 WINDOW = 3
 START_LABEL = "<s>"
 END_LABEL = "</s>"
+BACK_LABEL = "<back>"
+"""The third sentinel: where the graph has learned that a walk goes round (``graph.BACK``)."""
 
 
 class Encoder:
@@ -95,7 +97,7 @@ class Decoder:
         parts: list[str] = []
         first = True
         for label in labels:
-            if skip_sentinels and (label == START_LABEL or label == END_LABEL):
+            if skip_sentinels and label in (START_LABEL, END_LABEL, BACK_LABEL):
                 continue
             if first:
                 first = False

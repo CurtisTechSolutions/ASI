@@ -16,7 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radixnet.graph import END, START  # noqa: E402
+from radixnet.graph import END, FIRST, START  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 from radixnet.negative import (  # noqa: E402
     MAX_EDGE_REASONS,
@@ -90,7 +90,7 @@ class TestWeightFunction(unittest.TestCase):
 class TestBlameAndClear(unittest.TestCase):
     def test_blame_builds_structure_and_records_the_reason(self):
         model = NegativeNet(seed=1)
-        self.assertEqual(model.graph.num_nodes(), 2)  # the two sentinels only
+        self.assertEqual(model.graph.num_nodes(), FIRST)  # the sentinels only
         records = model.blame(["the the the the cat"], reason="Repetition ", severity=2.0, source="review",
                               note="  it repeats\n the same word ")
         self.assertEqual(len(records), 1)

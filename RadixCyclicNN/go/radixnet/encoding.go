@@ -34,6 +34,8 @@ const Overlap = Window - 1
 const (
 	StartLabel = "<s>"
 	EndLabel   = "</s>"
+	// BackLabel is the third sentinel: where the graph has learned a walk goes round (Back).
+	BackLabel = "<back>"
 )
 
 // runeLen is the character (code point) length of a string, the unit the

@@ -135,6 +135,12 @@ export const api = {
   checkpointSave: (body) => post("/api/checkpoints/save", body),
   checkpointRestore: (body) => post("/api/checkpoints/restore", body),
   graph: (limit) => get(`/api/graph?limit=${encodeURIComponent(limit)}`),
+  /** Count model: the judged paths - what each step did in the context it was taken from. */
+  paths: (limit = 50) => get(`/api/paths?limit=${encodeURIComponent(limit)}`),
+
+  /** Count model: one node (or the most visited ones) against the nodes around it. */
+  nodeRatios: (node = null, limit = 20) =>
+    get(`/api/nodes?limit=${encodeURIComponent(limit)}${node === null ? "" : `&node=${encodeURIComponent(node)}`}`),
   history: () => get("/api/history"),
   uploads: () => get("/api/uploads"),
   /** Upload one text file (read in the browser); the server keeps it under its upload directory. */

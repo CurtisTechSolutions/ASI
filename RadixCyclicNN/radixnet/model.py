@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .search import PathResult, dijkstra_predict, sample_walk
 from .schedule import preview_points
@@ -372,8 +372,8 @@ class GraphModel:
                 raise ValueError(f"amounts must lie in [0, 1], got {v}")
         return values
 
-    def _steps_over(self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]) -> list[int]:
-        """The edges of a traced text whose step wrote a character inside one of ``spans``.
+    def _steps_over(self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+        """The steps of a traced text that wrote a character inside one of ``spans``, as ``(prev node, edge)``.
 
         Every step is charged with the characters it adds to the text: the
         first with the whole of its node's label, a later one with everything
@@ -388,19 +388,20 @@ class GraphModel:
             return []
         labels = graph.labels
         children = graph.children
-        out: list[int] = []
+        out: list[tuple[int, int]] = []
         position = 0  # trigram index of the node being entered
         for index in range(1, len(path)):
             node = path[index]
+            prev = path[index - 2] if index >= 2 else START  # who called the step: START begins every walk
             edge = children[path[index - 1]].get(node)
             if node == END:
                 if edge is not None and _touches(length, length + 1, spans):
-                    out.append(edge)
+                    out.append((prev, edge))
                 break
             size = len(labels[node])
             lo = 0 if index == 1 else position + _OV
             if edge is not None and _touches(lo, position + size, spans):
-                out.append(edge)
+                out.append((prev, edge))
             position += size - _OV
         return out
 
@@ -493,7 +494,7 @@ class GraphModel:
         g = self.graph
         best: int | None = None
         best_count = -1
-        for node in range(2, len(g.labels)):
+        for node in range(FIRST, len(g.labels)):
             if g.alive[node] and g.labels[node].startswith(prefix):
                 c = g.node_count(node)
                 if c > best_count:
@@ -1006,7 +1007,7 @@ class RadixNet(GraphModel):
         values = self._amounts(texts, amounts)
         chosen: dict[int, float] = {}
         for path, amount in zip(self._paths_of(texts), values):
-            real = [n for n in path if n > END]
+            real = [n for n in path if n >= FIRST]
             if not real or amount <= 0:
                 continue
             best: tuple[int, set[int]] | None = None
@@ -1279,11 +1280,17 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"``, ``"count"`` and ``"negative"``)."""
-    from .countnet import CountRewardNet  # local imports: both build on this module
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"negative"`` and ``"resonant"``)."""
+    from .countnet import CountRewardNet  # local imports: they all build on this module
     from .negative import NegativeNet
+    from .resonance import ResonantNet
 
-    return {RadixNet.kind: RadixNet, CountRewardNet.kind: CountRewardNet, NegativeNet.kind: NegativeNet}
+    return {
+        RadixNet.kind: RadixNet,
+        CountRewardNet.kind: CountRewardNet,
+        NegativeNet.kind: NegativeNet,
+        ResonantNet.kind: ResonantNet,
+    }
 
 
 def model_kinds() -> list[dict]:

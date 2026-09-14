@@ -6,14 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
 
 type env struct {
@@ -541,7 +545,7 @@ func TestGraphPersistenceAndCheckpoints(t *testing.T) {
 		t.Fatalf("save to path: %d %v", status, saved)
 	}
 	status, reset := e.post("/api/reset", map[string]any{"seed": 5, "window": 42})
-	if status != 200 || reset["nodes"] != 2.0 || reset["window"] != 42.0 {
+	if status != 200 || reset["nodes"] != float64(radixnet.First) || reset["window"] != 42.0 {
 		t.Fatalf("reset: %d %v", status, reset)
 	}
 	status, reset = e.post("/api/reset", map[string]any{"kind": "radix"})
@@ -596,6 +600,84 @@ func TestGraphPersistenceAndCheckpoints(t *testing.T) {
 	status, ck = f.post("/api/checkpoints/save", map[string]any{})
 	if status != 400 {
 		t.Fatalf("save without a directory: %d %v", status, ck)
+	}
+
+	// the judged paths: nothing until a text is judged, then one row per step in its context
+	status, p := e.get("/api/paths?limit=5")
+	if status != 200 {
+		t.Fatalf("paths: %d %v", status, p)
+	}
+	if totals := p["totals"].(map[string]any); totals["contexts"].(float64) != 0 {
+		t.Fatalf("training alone judges nothing: %v", totals)
+	}
+	status, _ = e.post("/api/feedback", map[string]any{"good": []string{corpus[0]}, "bad": []string{"zzz qqq"}, "strength": 1})
+	if status != 202 {
+		t.Fatalf("feedback: %d", status)
+	}
+	e.waitJob()
+	status, p = e.get("/api/paths?limit=5")
+	totals := p["totals"].(map[string]any)
+	if status != 200 || totals["contexts"].(float64) == 0 || totals["correct"].(float64) == 0 || totals["incorrect"].(float64) == 0 {
+		t.Fatalf("a judged path should be counted: %d %v", status, p)
+	}
+	rows := p["paths"].([]any)
+	if len(rows) == 0 || len(rows) > 5 {
+		t.Fatalf("paths rows: %d", len(rows))
+	}
+	hasKeys(t, rows[0].(map[string]any), "prev", "edge", "after", "parent_label", "child_label", "seen", "correct",
+		"incorrect", "correct_ratio", "seen_ratio", "term")
+	_, st := e.get("/api/status")
+	if st["path_contexts"] != totals["contexts"] || st["path_correct"] != totals["correct"] {
+		t.Fatalf("the status should agree with /api/paths: %v vs %v", st["path_contexts"], totals["contexts"])
+	}
+	status, _ = e.get("/api/paths?limit=x")
+	if status != 400 {
+		t.Fatalf("bad paths limit: %d", status)
+	}
+	status, w := e.post("/api/model/weights", map[string]any{"path_scale": 0.5})
+	if status != 200 || w["weights"].(map[string]any)["path_scale"] != 0.5 {
+		t.Fatalf("path_scale: %d %v", status, w)
+	}
+
+	// the same judgements from the node's point of view: its traffic and its reward, shared out both ways
+	status, n := e.get("/api/nodes?limit=4")
+	if status != 200 {
+		t.Fatalf("nodes: %d %v", status, n)
+	}
+	nodeRows := n["nodes"].([]any)
+	if len(nodeRows) == 0 || len(nodeRows) > 4 {
+		t.Fatalf("nodes rows: %d", len(nodeRows))
+	}
+	hasKeys(t, nodeRows[0].(map[string]any), "node", "label", "visits", "from", "to", "in_totals", "out_totals")
+	var picked map[string]any
+	for _, row := range nodeRows {
+		if out := row.(map[string]any)["to"].([]any); len(out) > 1 {
+			picked = row.(map[string]any)
+			break
+		}
+	}
+	if picked == nil {
+		t.Fatal("no node in the top 4 branches")
+	}
+	shares := 0.0
+	for _, r := range picked["to"].([]any) {
+		row := r.(map[string]any)
+		hasKeys(t, row, "node", "label", "edge", "seen", "seen_ratio", "reward", "reward_ratio",
+			"path_seen", "path_ratio", "correct", "incorrect", "correct_ratio")
+		shares += row["seen_ratio"].(float64)
+	}
+	if math.Abs(shares-1) > 1e-9 {
+		t.Fatalf("the out-side shares add up to %g, want 1", shares)
+	}
+	status, one := e.get("/api/nodes?node=" + url.QueryEscape(picked["label"].(string)))
+	if status != 200 || len(one["nodes"].([]any)) != 1 {
+		t.Fatalf("one node by label: %d %v", status, one)
+	}
+	if status, _ = e.get("/api/nodes?node=no+such+label"); status != 404 {
+		t.Fatalf("an unknown label should be 404, got %d", status)
+	}
+	if status, _ = e.get("/api/nodes?limit=x"); status != 400 {
+		t.Fatalf("bad nodes limit: %d", status)
 	}
 }
 

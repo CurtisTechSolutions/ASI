@@ -23,7 +23,7 @@ design's development.
 **Status legend**
 
 * **Accepted** — in force.
-* **Research claim** — accepted and implemented, but resting on the author's own
+* **Research claim** — accepted and implemented, but resting on my own
   hypothesis rather than on external results. Flagged separately because these
   are the load-bearing ones: if a research claim is wrong, the engineering
   around it is wasted.
@@ -69,7 +69,8 @@ D-055 chat with an LLM
 **Part XI — Tool use and the agent** · D-056 a call is text · D-057 the LLM's four roles ·
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
-**Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood
+**Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
+D-064 the BACK sentinel: where it goes round, learned
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -82,9 +83,9 @@ D-058 blame at the right granularity · D-059 any provider, no stored key · D-0
 # Part I — Foundations: the research claims
 
 These nine decisions are the system. Everything in Parts II–VI exists to serve
-them. They come out of the author's reverse-engineering of the brain rather than
-from the literature, and the project's stated method is to *refuse current
-research and reinvent the wheel* — so they are recorded as claims, with their
+them. They come out of my own reverse-engineering of the brain rather than from
+the literature, and my stated method is to *refuse current research and reinvent
+the wheel* — so they are recorded as claims, with their
 evidence and their exposure stated plainly.
 
 ### D-001 — The graph is directed and **cyclic**; cycles are a feature
@@ -92,7 +93,7 @@ evidence and their exposure stated plainly.
 **Status** Research claim · 2026-08-15 (`2c79fdb`), realised 2026-09-09 (`d180176`) · **Layer** theory
 
 **Context** The first formulation of the brain model was a directed *acyclic*
-graph. Working through it, the author concluded that the brain is a directed
+graph. Working through it, I concluded that the brain is a directed
 *cyclic* graph, and that a cycle is not a failure of the representation: when
 the brain hits a cycle it hands over to metacognition or to another region
 rather than looping.
@@ -121,7 +122,9 @@ time, not at *structure* time.
   project's life, **not implemented** — search simply kept paying the cost of
   going round. As of 2026-09-14 it exists: a voice that detects it has walked a
   loop backs up to the point the loop started and re-plans from there, under a
-  *different* procedure than the one that got stuck. See D-061 to D-063.
+  *different* procedure than the one that got stuck — and what it finds out is
+  taught to the graph, so the *search* hands over there from then on. See D-061
+  to D-064.
 
 **Lives in** `Research/CyclesAreAFeature.md`, `radixnet/search.py`,
 `radixnet/beam.py`, `go/radixnet/search.go`, `go/radixnet/beam.go`
@@ -134,13 +137,13 @@ time, not at *structure* time.
 
 **Context** The brain is taken to be an analog computer, so sine waves are
 assumed to be the native encoding of information in it. Looking at a sigmoid
-next to a sine, the author read the sigmoid as a sine "rotated 45 degrees" —
+next to a sine, I read the sigmoid as a sine "rotated 45 degrees" —
 a truncated special case of the more general periodic function.
 
 **Decision** Use `f(x) = a·sin(b·(x − h)) + k`, defaulting to
 `a = −1, b = 1/3, h = 0, k = 0` — that is, exactly `−sin(x/3)`.
 
-**Evidence** The author's own comparison (`ActivationFunctionTest/`) on a
+**Evidence** My own comparison (`ActivationFunctionTest/`) on a
 reinforcement-learning control task at 250 episodes: sigmoid 9, ReLU 10,
 sine 28–48 reward — a 2.8×–4.8× improvement over the better baseline.
 
@@ -157,7 +160,7 @@ sine 28–48 reward — a 2.8×–4.8× improvement over the better baseline.
   load-bearing claim in the project on the thinnest measurement. That is now
   addressed where it belongs: `Research/SineWaveActivationFunction.md` §9 sets
   out what the CartPole result does and does not establish, gives a replication
-  protocol, and §12 states what would change the author's mind. See Q-2.
+  protocol, and §12 states what would change my mind. See Q-2.
 
 **Lives in** `Research/SineWaveActivationFunction.md`, `ActivationFunctionTest/`,
 `radixnet/activation.py`
@@ -199,8 +202,8 @@ call so the hot loop computes `sin` and `cos` once.
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** theory
 
-**Context** The author's framing: rather than fight the vanishing gradient with
-deeper machinery, accept it, and move the learning into the activation.
+**Context** My framing: rather than fight the vanishing gradient with deeper
+machinery, accept it, and move the learning into the activation.
 
 **Decision** There is **no back-propagation through depth**. Each observed
 transition `p → c` applies a one-hop gradient to exactly: the edge weight
@@ -234,8 +237,8 @@ and of each of `p`'s children. Nothing propagates further.
 
 **Status** Accepted · 2026-09-09 (`d180176`) · **Layer** theory
 
-**Context** The author's specification: `N*N`, and "activation of the child ×
-activation of the parent".
+**Context** My specification: `N*N`, and "activation of the child × activation
+of the parent".
 
 **Decision** `score(p → c) = W[p,c] · f_p(z_p) · f_c(z_c)`. `N*N` is read as the
 node-to-node weight matrix — N nodes, N² possible edges — stored sparsely as
@@ -266,10 +269,9 @@ parent's scores is the next-node distribution; `−log` of it is the search cost
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** representation
 
-**Context — the author's stated reason** Three was not chosen as "the smallest
-window that leaves an overlap"; that is a consequence, not the motive. The
-trigram was chosen because **it reminded the author of transformer architecture,
-in how the transformer pivots**. The structural echo is direct: with stride 1
+**Context — my reason** Three was not chosen as "the smallest window that leaves
+an overlap"; that is a consequence, not the motive. I chose the trigram because
+**it reminded me of transformer architecture, in how the transformer pivots**. The structural echo is direct: with stride 1
 every character is shared by the window that ends on it and the window that
 begins on it, so each character is a *pivot* joining two contexts — and the
 two-character overlap that results is what every edge in the graph is keyed on.
@@ -355,7 +357,7 @@ again. Compression runs after every epoch.
 
 **Status** Accepted · 2026-09-09 (`d180176`) · **Layer** inference
 
-**Context** The author's specification named a cost function and Dijkstra.
+**Context** My specification named a cost function and Dijkstra.
 
 **Decision** Edge cost is `−log P(c | p) + step_penalty ≥ 0`; prediction is
 Dijkstra from the context node over the depth-unrolled graph, returning the
@@ -389,12 +391,12 @@ with `to_end`).
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** learning
 
-**Context — 2NRL (*Double-Negative Reinforcement Learning*) is the author's
-own learning process, formalised.** This is not
-an algorithm arrived at from the literature and then justified. The author is
-self-taught, and describes the method that produced that education directly:
-**fail consistently, then do the inverse of what failed; and once a thread worth
-pulling appears, pull hard.** 2NRL is that procedure written as an update rule —
+**Context — 2NRL (*Double-Negative Reinforcement Learning*) is my own learning
+process, formalised.** This is not an algorithm I arrived at from the literature
+and then justified. I am self-taught, and this is the method that produced that
+education: **fail consistently, then do the inverse of what failed; and once a
+thread worth pulling appears, pull hard.** 2NRL is that procedure written as an
+update rule —
 which is why the negative phase trains *on* the garbage at full rate rather than
 away from it. You cannot invert a failure you have not first represented. The
 full argument, the correspondence term by term, and where the analogy is
@@ -423,10 +425,9 @@ data at a smaller rate (`pos_lr` default `0.01` against `neg_lr` `0.05`, with
 * The count model implements the *interface* but not the *mechanism* — see
   D-023.
 * **"Pull hard on the thread" is not implemented, and is not a learning-rate
-  decision.** It was tempting to read it as D-027's failure-proportional
-  boosting; the author's own account is different and more specific:
-  *explore rapidly and widely until a thread appears, then tighten the
-  exploration and iterate.* That is a schedule over **search breadth** —
+  decision.** The obvious reading is D-027's failure-proportional boosting.
+  That is not what I meant: *explore rapidly and widely until a thread appears,
+  then tighten the exploration and iterate.* That is a schedule over **search breadth** —
   temperature, beam width, sample count — not over learning rates, and nothing
   in the system currently anneals those. See D-067.
 
@@ -434,7 +435,7 @@ data at a smaller rate (`pos_lr` default `0.01` against `neg_lr` `0.05`, with
 
 ---
 
-### D-067 — Search breadth is fixed per call; the author's process anneals it
+### D-067 — Search breadth is fixed per call; my own process anneals it
 
 **Status** Provisional — a recognised gap · **Layer** inference
 
@@ -445,9 +446,17 @@ turned up.
 
 **Current behaviour** Every parameter that governs breadth — `temperature`, `k`,
 `beam`, the sample `count`, `step_penalty` — is **fixed for the duration of a
-call** and chosen by the caller. Nothing narrows as a run proceeds, and nothing
-detects that a thread has appeared. A long evolve or tutor run explores exactly
-as widely in its last generation as in its first.
+call** and chosen by the caller. Nothing narrows as a run proceeds. A long evolve
+or tutor run explores exactly as widely in its last generation as in its first.
+
+**The trigger is settled; the schedule is not.** `Research/2NRL.md` §6.4 replaces
+"what counts as finding a thread" with **what counts as finding a reward**, and
+answers it with two events the system already emits: a judge paid out (the LLM
+grader, the sandbox, a human mark, the discriminator), or the walk reached a
+known area of completion (`reached_end`, a region an earlier run finished in).
+Neither is an estimator inferred from the statistics of a search, so neither
+needs a bar somebody sets in advance and neither can be tuned wrong. Nothing
+currently listens to them for this purpose.
 
 **What exists that is nearly right**
 * D-033 already provides the machinery: rates as sandboxed expressions of the
@@ -460,25 +469,45 @@ as widely in its last generation as in its first.
   local recovery, not the global schedule — the two are compatible.
 
 **Why this is recorded rather than built** It is a genuine feature, not a
-documentation fix, and this pass is a decision record. Noted so the gap is
-visible rather than lost.
+documentation fix. Recorded so the gap stays visible rather than being lost.
 
 **Would live in** `radixnet/schedule.py`, `radixnet/gan.py`, `radixnet/tutor.py`
 
 ---
 
-### D-010 — Inversion is negating every weight and every amplitude
+### D-010 — Inversion negates every weight and every **whole** activation
 
-**Status** Accepted · 2026-09-09 (`d180176`) · **Layer** learning
+**Status** Accepted · 2026-09-09 (`d180176`); corrected 2026-09-14 · **Layer** learning
 
-**Decision** `invert()` sets `w → −w` on every alive edge and `a → −a` on every
-node, and flips the `inverted` flag.
+**Decision** `invert()` sets `w → −w` on every alive edge, and `a → −a`
+**together with `k → −k`** on every node, then flips the `inverted` flag.
 
 **Why it works** The edge signal is `w · f_p · f_c` (D-005). Negating `w`
-negates the product once; negating both `a`s negates it twice more — net, every
-edge signal changes sign, the softmax ordering reverses, and the most likely
-continuation becomes the least likely. Two inversions are the identity, which
-the test suite asserts.
+negates the product once; negating each endpoint's activation negates it twice
+more — net, every edge signal changes sign, the softmax ordering reverses, and
+the most likely continuation becomes the least likely. Two inversions are the
+identity.
+
+**Why `k` as well, which I had wrong** A unit is `f(x) = a·sin(b(x − h)) + k`.
+Negating the amplitude alone gives `−a·sin(u) + k`, which is `−f(x) + 2k` — the
+negation of the unit **only while `k` is 0**. And `k` is learned: `df/dk` is 1,
+so every training step moves it. By the time 2NRL inverts anything, `k` is not 0.
+
+The original rule negated `a` only. The consequence was not subtle once measured:
+on randomised four-child nodes the ranking failed to reverse **87 %** of the
+time, and after eight epochs of real training the edge signals came back as
+−0.453 → +0.459 instead of +0.453. The most likely continuation was not becoming
+the least likely, which is the one thing inversion exists to do — so the negative
+phase's work was not being turned into avoidance, and 2NRL was quietly not doing
+what it says.
+
+**Why the tests did not catch it** They asserted the two properties that stay
+true under the broken rule: `invert()` twice is the identity (negating `a` twice
+restores it either way), and the sign flips of `w` and `a` themselves. Neither
+looks at what inversion is *for*. And the graph-level test never trained, so
+every `k` was still 0 and the bug could not appear. The regression tests now
+assert the property that matters — every edge signal exactly negated, every child
+ranking exactly reversed — with offsets deliberately moved off 0 first.
 
 **Consequences**
 * Nodes and edges created *while inverted* must be created with inverted
@@ -1217,7 +1246,7 @@ all to say **ends the conversation**.
 
 **Status** Accepted · 2026-09-10 (`0e4c9a7`) · **Layer** control
 
-**Context** The author's framing was rates as *graph functions of the epoch* —
+**Context** My framing was rates as *graph functions of the epoch* —
 not a menu of named schedules, but the curve itself as an input. And rates that
 *grow*, which most frameworks do not offer.
 
@@ -1727,8 +1756,8 @@ for byte what it was before, and a null `guard` in the payload says so.
 **Decision** The loops that *teach* the negative network — the critic, the tutor,
 evolve — keep sampling the positive model directly, bypassing the guard.
 
-**Rationale, stated in the commit that introduced it:** *a reviewer that only ever
-saw what already passed the filter would have nothing left to teach.* Filtering
+**Rationale** *A reviewer that only ever saw what already passed the filter would
+have nothing left to teach.* Filtering
 the training signal with the filter being trained is a closed loop that converges
 on its own blind spots.
 
@@ -2129,9 +2158,12 @@ to say.
 
 **Decision** A repeat is no longer a dead end. Three steps:
 
-1. **Noticing.** `stutter_at(text)` is where an utterance starts saying itself
-   again. `_pick` hands back `looped` — the best candidate whose only fault was
-   that it said its own words twice.
+1. **Noticing.** `_pick` hands back `caught` — the best candidate rejected for
+   repeating, of either kind. Where it backs up to depends on which: a *stutter*
+   is cut at `stutter_at(text)`, where the walk went round; a *repeat* of
+   something the conversation has already heard (`Heard.match`) is cut at its
+   last word, because the line is a retread from end to end and that is the
+   latest point at which it can still differ.
 2. **Backing up.** `backtrack()` keeps everything said before that point and runs
    the search again from there. **The longer prefix is the whole trick**: it
    forces the walk to leave the loop at exactly the point it went round, where
@@ -2157,6 +2189,67 @@ inside those words is recorded and left alone.
 * It costs nothing when nothing loops. `explore=0` turns it off.
 
 **Lives in** `radixnet/dialogue.py::backtrack`, `go/radixnet/dialogue.go`
+
+---
+
+### D-064 — Where it goes round is **learned into the graph**, like where texts end
+
+**Status** Research claim · 2026-09-14 · **Layer** structure
+
+**Context** D-062 hands over to a second procedure on detecting a loop, and that
+procedure runs again from scratch every time the same loop comes round. A trait
+that has to be re-derived at every turn has not been learned. `START` and `END`
+are not re-derived: the graph *knows* where texts begin and end, because it was
+taught by what it observed.
+
+**Decision** A third sentinel, **`BACK`**, beside `START` and `END`, and an edge
+`p -> BACK` meaning *walks that get to `p` go round*. It is an ordinary edge with
+an ordinary weight and counter, competing for `p`'s probability mass like any
+other child — but it is taught by **experience** rather than by observation,
+because no corpus says where a walk loops. Every rethink teaches three edges at
+once (`observe_back`): the hand-over itself, a *penalty* on the step it was about
+to loop through, and a *reward* on the step it took instead. Where it goes round,
+and what to do instead.
+
+The search then consults it everywhere (`search.onward`): when `BACK` is the
+cheapest child of a node, the model's most likely next step there is to stop, so
+the branch offers nothing and the walk goes on with its others. **That answers
+Q-1**: the hand-over is no longer a property of conversation. `predict`,
+`generate`, the agent's loop and every other walk get it, because it is a
+property of the graph.
+
+**Alternatives rejected**
+* *A learned cost with no sentinel* (a per-node "loops here" number) — same
+  effect, but it would be a second kind of learned quantity bolted beside the
+  edges, learned by its own rule and saved by its own code. An edge is the thing
+  this system already knows how to learn, invert, reward, save and port.
+* *Learning only into the existing weights* — the model would drift away from its
+  loops without ever *knowing* about them, and nothing could be inspected, shown
+  in a transcript or held to parity. Both were taken in the end: the sentinel
+  says where, the weights say what to do instead.
+
+**Consequences**
+* **A conversation changes the model.** Two runs of the same conversation differ,
+  because the first taught it something; determinism now means *a model in the
+  same state says the same thing*. `learn=False` (`--no-learn`) keeps a
+  conversation read-only, and the CLI, which cannot keep the model in memory,
+  says so: *it learned to hand over at N node(s); --save writes that into the
+  model*.
+* The model file is **format 3**. Older files gain an unvisited `BACK` on load
+  and their node ids shift by one; the sentinel takes `START`'s activation
+  parameters so both kinds of model load unchanged.
+* `BACK`'s state is *fixed* rather than drawn, so adding a third sentinel moved
+  no random stream: every seeded model that existed still predicts exactly what
+  it did.
+* A node taught to hand over has two children where it had one, so compression
+  stops merging it. That is correct — a loop point is a junction — but it means
+  learning this trait slightly reduces compression.
+* The rate is a research question, not a settled number: the sine model hands
+  over after ~2 experiences at a node, the count model after ~3. Nothing decays
+  them yet, so a node taught in error stays taught until something retrains it.
+
+**Lives in** `radixnet/graph.py::observe_back`, `radixnet/search.py::onward`,
+`radixnet/dialogue.py::teach_back`, `go/radixnet/graph.go`, `go/radixnet/search.go`
 
 ---
 
@@ -2340,16 +2433,17 @@ Kept because the reversal is information.
 Numbered for reference. These are genuinely open — each would change something
 in the system, and none can be settled from the code as it stands.
 
-**Q-1 — ~~The metacognition half of D-001~~ — ANSWERED (D-061 to D-063).** The
+**Q-1 — ~~The metacognition half of D-001~~ — RESOLVED (D-061 to D-064).** The
 claim was that on hitting a cycle the brain hands over to metacognition rather
 than looping. The hand-over now exists: a voice that detects a stutter backs up
 to where the loop began and re-plans from there under a different procedure,
 widening its search the further back it goes, once per turn, and records what it
-did. **The remaining question is scope**: metacognition is currently a property
-of *conversation* only. The same signature — the search revisiting states —
-appears in plain `generate`, in `predict`, and in the agent's tool loop, none of
-which back up. Should the hand-over be lifted out of `dialogue.py` and made a
-property of the search itself?
+did. The remaining question was **scope** — metacognition was a property of
+*conversation* only — and D-064 answers it: what a rethink finds out is taught to
+the graph as an edge into a third sentinel, and the search consults it in every
+walk, so `predict`, `generate` and the agent's loop hand over too. What is open
+now is the *rate*: how fast a node should learn to hand over, whether it should
+ever unlearn, and what a wrongly taught hand-over costs.
 
 **Q-2 — Evidence for the sine (D-002).** Now stated fully in
 `Research/SineWaveActivationFunction.md` §9 and §12, with a replication protocol.
@@ -2402,12 +2496,12 @@ described as further solutions to the same problem. Should this become a
 repository-wide decision log — with a section on what each variation tries and
 why it diverges — or stay scoped to this one?
 
-**Q-11 — ~~What does "how the transformer pivots" mean?~~ — ANSWERED.** The
+**Q-11 — ~~What does "how the transformer pivots" mean?~~ — RESOLVED.** The
 positional reading is the intended one: the character shared by two windows *is*
 the pivot. Three is therefore the smallest window that gives a pivot with context
 on either side, and D-006 records it as the reason rather than as a consequence.
 
-**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED by the author.**
+**Q-12 — ~~What does 2NRL stand for?~~ — RESOLVED.**
 *Double-Negative Reinforcement Learning.* The `2N` is two negatives: training
 **on** the failures, then negating the representation that produced them —
 phases 1 and 2 of D-009. The third phase is the positive consolidation, so the
@@ -2416,15 +2510,18 @@ paper's title and §2.1; the expansion had appeared nowhere in the repository
 before, and an earlier guess of *Two-phase Negative Reinforcement Learning* was
 wrong (it also contradicted the three-phase procedure it labelled).
 
-**Q-13 — ~~Is "pull hard on the thread" a positive-side boost?~~ — ANSWERED, and
-the premise was wrong.** It is not a boost of any kind. The author's process is
-*explore rapidly and widely until you find a thread, then tighten the exploration
-and iterate* — a schedule over **search breadth**, not over learning rates.
+**Q-13 — ~~Is "pull hard on the thread" a positive-side boost?~~ — RESOLVED, and
+the premise was wrong.** It is not a boost of any kind. My process is *explore
+rapidly and widely until you find a thread, then tighten the exploration and
+iterate* — a schedule over **search breadth**, not over learning rates.
 Nothing in the system anneals temperature, beam width or sample count; D-033's
 expression evaluator is the obvious mechanism and is pointed at the wrong
-quantity. Recorded as D-067. **What remains open is the trigger**: what counts as
-"finding a thread" — a score threshold, a plateau, a run of passes? Without a
-detector, the schedule has nothing to key on.
+quantity. Recorded as D-067. The trigger, which looked like the hard part, is
+settled too (`Research/2NRL.md` §6.4): the question was wrong. Not "what counts
+as finding a *thread*", which is a judgement, but **what counts as finding a
+reward** — the network is rewarded, or it reaches a known area of completion.
+Both are events the system already emits, so neither needs a bar set in advance.
+What is left is the schedule that listens to them.
 
 **Q-14 — Does the process have a stopping rule?** "Fail consistently, then
 invert" describes a loop. In a life it ends when the thing is learned; the answer

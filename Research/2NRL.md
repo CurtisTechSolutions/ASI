@@ -127,10 +127,12 @@ only holds where the negation is well defined, and two things have to be true fo
 that. Most of this paper is about them:
 
 - **The negation of a learned structure has to be a coherent structure** (§4.3).
-  Mine is, and exactly: flipping the amplitude sign of a sine activation negates
-  that unit to machine precision, so `¬¬` comes back to precisely where it
-  started rather than approximately. An architecture whose units cannot be
-  negated cleanly has no double negative to eliminate.
+  Mine is, and exactly: flipping the sign of a sine unit's amplitude *and* its
+  offset negates that unit to machine precision, so `¬¬` comes back to precisely
+  where it started rather than approximately. An architecture whose units cannot
+  be negated cleanly has no double negative to eliminate — and neither has one
+  whose units are negated *almost* cleanly, which is a trap I walked into: see
+  §4.3.
 - **The failure has to be consistent** (§5). A systematic failure has a coherent
   opposite. Noise does not — `¬(noise)` is not a place, and negating it twice
   restores nothing.
@@ -191,11 +193,11 @@ activation is a parametric sine, `f(x) = a·sin(b(x − h)) + k`
 Inversion is then two sign flips:
 
 ```
-W → −W          for every edge
-a → −a          for every node
+W → −W              for every edge
+a → −a , k → −k     for every node
 ```
 
-Negating `W` flips the product once. Negating both endpoint amplitudes flips it
+Negating `W` flips the product once. Negating each endpoint's activation flips it
 twice more. Net effect: **every edge signal changes sign.** The softmax over a
 node's children reverses its order, and the most likely continuation becomes the
 least likely. The operation is exact, costs `O(N + E)`, and is its own inverse —
@@ -815,9 +817,11 @@ got fairly criticised for.
 - Moving *away* from a wrong answer is under-determined: it names a direction to
   leave and no place to arrive. Going all the way into the failure and negating it
   turns that into a destination.
-- Inversion is two sign flips — `W → −W`, `a → −a` — because the edge signal is
-  the product of the weight and both endpoints' activations. It is exact, cheap
-  and its own inverse. The sine's sign parameter is what makes it possible at all.
+- Inversion negates the weight and both endpoints' activations — `W → −W`, and
+  `a → −a` with `k → −k` — because the edge signal is their product. It is exact,
+  cheap and its own inverse. The sine's sign parameter is what makes it possible
+  at all, and the offset has to travel with it: negating `a` alone is `−f + 2k`,
+  which reverses nothing reliably once `k` has been learned.
 - The condition is **consistency**, and it was in my own sentence before I
   understood why. What inverting a failure can recover is bounded by that
   failure's negative entropy. Systematic failure inverts into signal; random

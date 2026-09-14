@@ -78,7 +78,8 @@ type ChatConfig struct {
 	// Blame blames the failed replies (and clears with the passed ones).
 	Blame       bool `json:"blame"`
 	ClearPasses bool `json:"clear_passes"`
-	// Learn trains the positive model on the marked replies (2NRL).
+	// Learn trains the positive model on the marked replies (2NRL), and lets its rethinks teach the graph
+	// where it goes round (TeachBack).
 	Learn bool `json:"learn"`
 	// TeachPartner puts the partner's own lines in the positive phase: they are what a good reply looked like.
 	TeachPartner bool `json:"teach_partner"`
@@ -339,7 +340,7 @@ func (c *Chat) Converse(progress func(map[string]any)) (*ChatHeld, error) {
 			Heard: heard, Index: len(held.Transcript), Speaker: ChatSpeakers[1], Mode: cfg.Mode,
 			MaxLength: cfg.MaxLength, Context: cfg.Context, Temperature: cfg.Temperature, K: cfg.K,
 			RNG: rng, AvoidRepeats: cfg.AvoidRepeats, AvoidWordRepeats: cfg.AvoidWordRepeats,
-			Explore: cfg.Explore, Veto: vetoFn,
+			Explore: cfg.Explore, Learn: cfg.Learn, Veto: vetoFn,
 		})
 		if err != nil {
 			return nil, err

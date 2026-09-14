@@ -159,6 +159,31 @@ func FaultsFromLessons(lessons []*Lesson, threshold float64, source string) ([]F
 				fault.Correction = correction
 			}
 			faults = append(faults, fault)
+			why := strings.Join(strings.Fields(lesson.Why), " ")
+			for _, variant := range lesson.Variants {
+				wrong := strings.Join(strings.Fields(variant.Wrong), " ")
+				right := strings.Join(strings.Fields(variant.Right), " ")
+				if wrong == "" || wrong == sentence {
+					continue
+				}
+				weight := variant.Weight
+				if weight < 0 {
+					weight = 0
+				}
+				note := why
+				if note == "" {
+					note = lesson.Grade.Comment
+				}
+				similar := Fault{
+					Text: wrong, Reason: reason, Severity: fault.Severity * weight, Note: note,
+					Source: source + ":similar",
+				}
+				if right != "" && right != wrong {
+					similar.Correction = right
+					add(right)
+				}
+				faults = append(faults, similar)
+			}
 		}
 		add(correction)
 		add(answer)

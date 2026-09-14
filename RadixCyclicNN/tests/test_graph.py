@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K  # noqa: E402
 from radixnet.backend import CSR, NodeParams  # noqa: E402
-from radixnet.encoding import END_LABEL, START_LABEL, Decoder, Encoder  # noqa: E402
-from radixnet.graph import END, START, RadixCyclicGraph  # noqa: E402
+from radixnet.encoding import BACK_LABEL, END_LABEL, START_LABEL, Decoder, Encoder  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START, RadixCyclicGraph  # noqa: E402
 
 ENC = Encoder()
 DEC = Decoder()
@@ -54,12 +54,12 @@ def assert_transitions_consistent(tc: unittest.TestCase, g: RadixCyclicGraph, tr
 class TestBasics(unittest.TestCase):
     def test_fresh_graph(self):
         g = RadixCyclicGraph(seed=3)
-        self.assertEqual(g.labels[:2], [START_LABEL, END_LABEL])
-        self.assertEqual(g.num_nodes(), 2)
+        self.assertEqual(g.labels[:FIRST], [START_LABEL, END_LABEL, BACK_LABEL])
+        self.assertEqual(g.num_nodes(), FIRST)  # the three sentinels and nothing else
         self.assertEqual(g.num_edges(), 0)
         self.assertEqual(g.num_trigrams(), 0)
         self.assertEqual(g.compression_ratio(), 0.0)
-        self.assertEqual(g.alive_nodes(), [START, END])
+        self.assertEqual(g.alive_nodes(), [START, END, BACK])
         self.assertFalse(g.inverted)
         self.assertNotIn(START_LABEL, g.trigram_index)
         g.check_invariants()
@@ -92,7 +92,7 @@ class TestBasics(unittest.TestCase):
         self.assertEqual(g.labels[n], "abc")
         self.assertEqual(g.get_or_create("abc"), (n, 0))
         self.assertEqual(g.lookup("abc"), (n, 0))
-        self.assertEqual(g.num_nodes(), 3)
+        self.assertEqual(g.num_nodes(), FIRST + 1)
         with self.assertRaises(ValueError):
             g.get_or_create("ab")
         g.check_invariants()
@@ -117,13 +117,13 @@ class TestBasics(unittest.TestCase):
         # START -> 5 trigram nodes -> END : 6 transitions
         self.assertEqual(len(trans), 6)
         assert_transitions_consistent(self, g, trans)
-        self.assertEqual(g.num_nodes(), 2 + 5)
+        self.assertEqual(g.num_nodes(), FIRST + 5)
         self.assertEqual(g.num_edges(), 6)
         self.assertEqual(g.num_trigrams(), 5)
         self.assertEqual(g.count[START], 1)
         self.assertEqual(g.count[END], 1)
         for n in g.alive_nodes():
-            self.assertEqual(g.count[n], 1)
+            self.assertEqual(g.count[n], 0 if n == BACK else 1)  # nothing has gone round yet
         for p, e in trans:
             self.assertEqual(g.edge_count[e], 1)
         g.check_invariants(texts=[text])
@@ -172,7 +172,7 @@ class TestCyclesAndRepeats(unittest.TestCase):
         merges = g.compress()
         self.assertGreater(merges, 0)
         g.check_invariants(texts=["abcabc"], compressed=True)
-        labels = sorted(g.labels[i] for i in g.alive_nodes() if i > END)
+        labels = sorted(g.labels[i] for i in g.alive_nodes() if i >= FIRST)
         self.assertEqual(labels, ["abc", "bcab"])
         abc, _ = g.lookup("abc")
         bcab, _ = g.lookup("bca")
@@ -189,7 +189,7 @@ class TestSplit(unittest.TestCase):
         g = RadixCyclicGraph(seed=8)
         g.observe_sequence(ENC.encode("abcdefg"))
         g.compress()
-        (n,) = [i for i in g.alive_nodes() if i > END]
+        (n,) = [i for i in g.alive_nodes() if i >= FIRST]
         self.assertEqual(g.labels[n], "abcdefg")
         return g, n
 
@@ -238,7 +238,7 @@ class TestSplit(unittest.TestCase):
         before = g.to_dict()
         g.split(n, 3)
         g.split(n, 1)
-        self.assertEqual(g.num_nodes(), 5)
+        self.assertEqual(g.num_nodes(), FIRST + 3)
         g.check_invariants(texts=["abcdefg"])
         self.assertEqual(g.compress(), 2)
         g.check_invariants(texts=["abcdefg"], compressed=True)
@@ -309,9 +309,9 @@ class TestMerge(unittest.TestCase):
         g.observe_sequence(ENC.encode(text))
         n_before = g.num_nodes()
         merges = g.compress()
-        self.assertEqual(merges, n_before - 3)
-        self.assertEqual(g.num_nodes(), 3)
-        (n,) = [i for i in g.alive_nodes() if i > END]
+        self.assertEqual(merges, n_before - (FIRST + 1))
+        self.assertEqual(g.num_nodes(), FIRST + 1)  # the sentinels and the one merged node
+        (n,) = [i for i in g.alive_nodes() if i >= FIRST]
         self.assertEqual(g.labels[n], text)
         self.assertEqual(g.compression_ratio(), len(text) - 2)
         self.assertEqual(g.compress(), 0)
@@ -346,7 +346,7 @@ class TestRandomisedInvariants(unittest.TestCase):
                     assert_transitions_consistent(self, g, trans)
                     self.assertEqual(g.node_path(ENC.encode(text)), [START] + [p for p, _ in trans[1:]] + [END])
                 elif op < 0.85:
-                    candidates = [n for n in g.alive_nodes() if n > END and len(g.labels[n]) >= 4]
+                    candidates = [n for n in g.alive_nodes() if n >= FIRST and len(g.labels[n]) >= 4]
                     if candidates:
                         n = rng.choice(candidates)
                         a, b = g.split(n, rng.randint(1, len(g.labels[n]) - 3))
@@ -520,7 +520,7 @@ class TestSerialisation(unittest.TestCase):
         self.assertTrue(all(g2.alive))
         # probabilities are preserved (compare per label)
         for p in g.alive_nodes():
-            p2 = g2.lookup(g.labels[p][:3])[0] if p > END else p
+            p2 = g2.lookup(g.labels[p][:3])[0] if p >= FIRST else p
             probs = {g.labels[c]: pr for c, pr in g.child_probs(p)}
             probs2 = {g2.labels[c]: pr for c, pr in g2.child_probs(p2)}
             self.assertEqual(set(probs), set(probs2))
@@ -548,6 +548,53 @@ class TestSerialisation(unittest.TestCase):
 
 
 class TestInvert(unittest.TestCase):
+    def test_invert_negates_every_edge_signal_with_learned_offsets(self):
+        """The property 2NRL rests on: inversion negates every score, so every ranking reverses.
+
+        A node's activation is ``a * sin(b(x - h)) + k``.  Negating ``a`` alone leaves
+        ``-f(x) + 2k``, so with a learned ``k`` the edge signal ``w * f_p * f_c`` does not
+        change sign cleanly and the most likely continuation does not become the least
+        likely.  ``k`` is learned, so this is the case that matters; a graph that has only
+        been observed still has ``k = 0`` everywhere and cannot see the difference.
+        """
+        g = RadixCyclicGraph(seed=17)
+        for t in ["the cat sat on the mat", "the cat ran on the rug", "the dog sat"]:
+            g.observe_sequence(ENC.encode(t))
+        rng = random.Random(5)
+        for n in g.alive_nodes():  # stand in for training, which moves k off 0
+            g.k[n] = rng.uniform(-0.5, 0.5)
+            g.a[n] = rng.uniform(-1.5, 1.5)
+        g.version += 1
+
+        before = {p: g.child_scores(p) for p in g.alive_nodes() if g.children[p]}
+        self.assertTrue(before, "need at least one node with children")
+        g.invert()
+        for p, scores in before.items():
+            after = dict(g.child_scores(p))
+            for c, s in scores:
+                self.assertAlmostEqual(after[c], -s, places=12, msg=f"edge {p}->{c} not negated")
+            ranked = [c for c, _ in sorted(scores, key=lambda t: -t[1])]
+            now = [c for c, _ in sorted(g.child_scores(p), key=lambda t: -t[1])]
+            self.assertEqual(now, ranked[::-1], f"ranking of {p} did not reverse")
+        g.invert()  # and it is still its own inverse
+        for p, scores in before.items():
+            self.assertEqual(g.child_scores(p), scores)
+
+    def test_flip_nodes_half_makes_a_node_neutral(self):
+        """``amount`` 0.5 zeroes the unit's output, which needs the offset scaled too."""
+        g = RadixCyclicGraph(seed=4)
+        g.observe_sequence(ENC.encode("the cat sat"))
+        n = next(i for i in g.alive_nodes() if i >= FIRST)
+        g.k[n], g.a[n] = 0.3, -1.2
+        g.version += 1
+        full = g.activation_of(n)
+        self.assertEqual(g.flip_nodes({n: 0.5}, "activation"), 1)
+        self.assertAlmostEqual(g.activation_of(n), 0.0, places=15)
+        g.k[n], g.a[n] = 0.3, -1.2
+        g.version += 1
+        g.flip_nodes({n: 1.0}, "activation")  # a full flip is an exact negation
+        self.assertAlmostEqual(g.activation_of(n), -full, places=15)
+
     def test_invert_flips_signs(self):
         g = RadixCyclicGraph(seed=17)
         for t in ["the cat sat", "the dog"]:

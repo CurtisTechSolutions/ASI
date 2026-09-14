@@ -180,7 +180,7 @@ func TestSplitAndMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.Compress()
-	if g.NumNodes() != 3 { // START, END and one compressed node
+	if g.NumNodes() != First+1 { // the sentinels and one compressed node
 		t.Fatalf("expected one compressed node, got %d nodes", g.NumNodes())
 	}
 	if _, err := g.ObserveSequence(Encode("hello there"), true); err != nil {
@@ -381,7 +381,7 @@ func TestGenerateAndScore(t *testing.T) {
 func TestConverse(t *testing.T) {
 	m := trained(t, 2, 4)
 	opts := DefaultConverseOptions()
-	opts.Turns = 6
+	opts.Turns, opts.Learn = 6, false
 	turns, err := m.Converse("the cat sat on the mat", opts)
 	if err != nil || len(turns) != 7 {
 		t.Fatalf("converse: %v %d", err, len(turns))
@@ -413,8 +413,12 @@ func TestConverse(t *testing.T) {
 			}
 		}
 	}
-	again, _ := m.Converse("the cat sat on the mat", opts)
-	if Transcript(again) != Transcript(turns) {
+	// deterministic on a model in the same state - with Learn on, the first conversation taught it something
+	plain := opts
+	plain.Learn = false
+	first, _ := m.Converse("the cat sat on the mat", plain)
+	again, _ := m.Converse("the cat sat on the mat", plain)
+	if Transcript(again) != Transcript(first) {
 		t.Fatal("beam conversations must be deterministic")
 	}
 	if got := TailContext("the cat sat on the mat", 12); got != "on the mat" {
@@ -616,6 +620,74 @@ func TestBacktrack(t *testing.T) {
 		if turn.Rethink != nil {
 			t.Fatalf("nothing is noticed with the exploring off: %+v", turn)
 		}
+	}
+}
+
+// The rethink is not only a way out of this turn: what it finds out is taught to the graph.
+func TestLearnsWhereItGoesRound(t *testing.T) {
+	build := func() *Model {
+		m, _ := NewModel(3, DefaultGraphOptions())
+		if _, err := m.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
+			TrainOptions{Epochs: 3}); err != nil {
+			t.Fatalf("Train: %v", err)
+		}
+		return m
+	}
+	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60,
+		AvoidRepeats: true, AvoidWordRepeats: true, Learn: true}
+
+	m := build()
+	if len(m.G.parents[Back].order) != 0 {
+		t.Fatal("a fresh model has no idea where it goes round")
+	}
+	_, record, err := m.Backtrack("ha ha ha", opts)
+	if err != nil || record.Taught < First {
+		t.Fatalf("backing out teaches the node: %v %+v", err, record)
+	}
+	if _, ok := m.G.children[record.Taught].get(Back); !ok {
+		t.Fatalf("node %d was not taught to hand over", record.Taught)
+	}
+	if _, ok := m.G.BackCost(record.Taught); !ok {
+		t.Fatalf("node %d has no back cost", record.Taught)
+	}
+
+	// enough hand-overs and the search refuses by itself
+	node := record.Taught
+	for i := 0; i < 6; i++ {
+		if _, err := m.G.ObserveBack(node, -1, -1, 1); err != nil {
+			t.Fatalf("ObserveBack: %v", err)
+		}
+	}
+	if len(Onward(m.G.ChildCosts(node))) != 0 {
+		t.Fatalf("the model's most likely next step at %d should be to stop", node)
+	}
+
+	// a conversation leaves the model knowing more than it did, and with the learning off it does not
+	m = build()
+	cfg := DefaultConverseOptions()
+	cfg.Turns = 6
+	if _, err := m.Converse("", cfg); err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	if len(m.G.parents[Back].order) == 0 {
+		t.Fatal("a conversation taught it nothing")
+	}
+	quiet := build()
+	cfg.Learn = false
+	turns, _ := quiet.Converse("", cfg)
+	if len(quiet.G.parents[Back].order) != 0 {
+		t.Fatal("nothing is taught with the learning off")
+	}
+	for _, turn := range turns {
+		if turn.Rethink != nil && turn.Rethink.Taught != -1 {
+			t.Fatalf("turn taught %d with the learning off", turn.Rethink.Taught)
+		}
+	}
+
+	// a repeat the graph cannot place teaches nothing
+	blank := build()
+	if got := blank.TeachBack("zzz zzz", 4, nil, 1); got != -1 {
+		t.Fatalf("TeachBack on an unknown prefix = %d", got)
 	}
 }
 

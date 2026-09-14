@@ -87,3 +87,18 @@ export function asArray(value) {
 export function jobIsRunning(status) {
   return Boolean(status && status.job && status.job.state === "running");
 }
+
+/** The active model kind reported by the status payload (`""` when offline). */
+export function modelKind(status) {
+  return status && typeof status.kind === "string" ? status.kind : "";
+}
+
+/**
+ * True for a model that learns by counting rather than by a gradient: the
+ * count / reward model and the resonant one. Those have no learning rates or
+ * batches to set, and take a `strength` instead.
+ */
+export function countingKind(status) {
+  const kind = modelKind(status);
+  return kind !== "" && kind !== "radix";
+}

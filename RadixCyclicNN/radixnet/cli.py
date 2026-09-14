@@ -33,6 +33,7 @@ from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
+from .encoding import WINDOW
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -50,10 +51,16 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "beam", "sample")
-KINDS = ("radix", "count", "negative")
+KINDS = ("radix", "count", "negative", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
 DEFAULT_NEGATIVE_MODEL = "model.negative.json"
-DEFAULT_KIND_MODELS = {"count": DEFAULT_COUNT_MODEL, "negative": DEFAULT_NEGATIVE_MODEL}
+DEFAULT_RESONANT_MODEL = "model.resonant.json"
+DEFAULT_KIND_MODELS = {
+    "count": DEFAULT_COUNT_MODEL,
+    "negative": DEFAULT_NEGATIVE_MODEL,
+    "resonant": DEFAULT_RESONANT_MODEL,
+}
+"""Default ``--model`` per kind, so one kind never overwrites another's default file."""
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -384,6 +391,13 @@ class LessonPrinter(_RowPrinter):
                     self.console.note(f"    correct: {quote(clip(str(correction), 80))}")
                 if comment:
                     self.console.note(f"    teacher: {clip(str(comment), 100)}")
+                why = record.get("why")
+                if why:
+                    self.console.note(f"    why:     {clip(str(why), 100)}")
+                for variant in record.get("variants") or []:
+                    wrong = quote(clip(str(variant.get("wrong", "")), 60))
+                    right = str(variant.get("right") or "")
+                    self.console.note(f"    same:    {wrong}" + (f" -> {quote(clip(right, 50))}" if right else ""))
         elif kind == "round":
             weakest = ", ".join(record.get("weakest") or []) or "nothing"
             learned = record.get("action") or "nothing to learn"
@@ -392,6 +406,12 @@ class LessonPrinter(_RowPrinter):
                 f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
                 f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
             )
+            if record.get("similar"):
+                self.console.note(
+                    f"    negative network: {record.get('explained')} mistake(s) explained, "
+                    f"{record.get('similar')} more sentence(s) wrong the same way, "
+                    f"{record.get('negative_blamed')} blamed on {record.get('negative_edges')} edge(s)"
+                )
         elif kind == "report":
             self.console.note(
                 f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
@@ -867,7 +887,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
-        explore=args.explore,
+        explore=args.explore, learn=not args.no_learn,
     )
     guard: dict | None = None
     if pair is None:
@@ -909,6 +929,12 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
     if said_twice:
         console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
         console.say("    radixnet feedback " + " ".join(f"--bad-text {quote(t)}" for t in said_twice))
+    taught = sorted({t.rethink.taught for t in turns if t.rethink is not None and t.rethink.taught >= 0})
+    saved = None
+    if taught and args.save:
+        saved = save_model(model, args.out or args.model)
+    elif taught:
+        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
     return {
         "guard": guard,
         "turns": [t.to_dict() for t in turns],
@@ -919,6 +945,8 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         "kind": model.kind,
         "partner_kind": partner.kind if partner is not None else None,
         "repeats": said_twice,
+        "taught": taught,
+        **({"saved": saved} if saved is not None else {}),
         "transcript": transcript(turns),
     }
 
@@ -946,6 +974,12 @@ def _phase_pairs(model: GraphModel, args: argparse.Namespace) -> list[tuple[str,
         return [
             ("negative", f"{args.neg_epochs} pass(es): reward -= {args.strength} on every edge of the bad paths"),
             ("positive", f"{args.pos_epochs} pass(es): traversal counted and reward += {args.strength} on the good paths"),
+        ]
+    if model.kind == "resonant":
+        return [
+            ("negative", f"{args.neg_epochs} pass(es): lock the phases onto the bad paths"),
+            ("invert", "rotate every edge's mean phase by pi - what resonated now cancels"),
+            ("positive", f"{args.pos_epochs} pass(es): relock the phases on the good paths, reward += {args.strength}"),
         ]
     return [
         ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
@@ -1233,6 +1267,18 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+_WEIGHT_OPTIONS = {
+    "count": ("count_scale", "global_scale", "window_scale", "reward_scale", "path_scale", "window"),
+    "resonant": ("buckets", "period", "kick_scale", "resonance_scale", "amp_scale", "reward_scale", "concentration"),
+}
+"""Which ``weights`` options each kind understands."""
+
+_ALL_WEIGHT_OPTIONS = {name for names in _WEIGHT_OPTIONS.values() for name in names}
+
+
+def _flag(name: str) -> str:
+    return "--" + name.replace("_", "-")
+
 def cmd_speech_info(args: argparse.Namespace, console: Console) -> dict:
     from .speech import describe
 
@@ -1396,12 +1442,19 @@ def cmd_speech_decode(args: argparse.Namespace, console: Console) -> dict:
 
 def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
     model, origin = open_model(args, console, required=True)
-    if model.kind != "count":
-        raise CliError(f"{args.model} holds a {model.kind} model; the weight function belongs to the count model (--kind count)")
-    options = {
-        "count_scale": args.count_scale, "global_scale": args.global_scale, "window_scale": args.window_scale,
-        "reward_scale": args.reward_scale, "window": args.window,
-    }
+    if model.kind not in _WEIGHT_OPTIONS:
+        raise CliError(
+            f"{args.model} holds a {model.kind} model; the weight function belongs to the count and resonant "
+            f"models (--kind count / --kind resonant)"
+        )
+    mine = _WEIGHT_OPTIONS[model.kind]
+    stray = sorted(n for n in _ALL_WEIGHT_OPTIONS - set(mine) if getattr(args, n, None) is not None)
+    if stray:
+        raise CliError(
+            f"{', '.join(_flag(n) for n in stray)} do(es) not apply to the {model.kind} model; it takes "
+            f"{', '.join(_flag(n) for n in mine)}"
+        )
+    options = {name: getattr(args, name, None) for name in mine}
     changes = {k: v for k, v in options.items() if v is not None}
     saved = None
     if changes:
@@ -1412,14 +1465,32 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
         saved = save_model(model, args.out or args.model)
     config = model.weight_config()
     stats = model.stats()
+    if model.kind == "resonant":
+        rows = [
+            ("function", "amp_scale * log(share of the parent) + reward_scale * reward "
+                         "+ resonance_scale * coherence * cos(phase - mu)"),
+            ("buckets", f"{config['buckets']} phases on the ring"),
+            ("period", f"{fmt(config['period'])} characters per turn of the clock"),
+            ("kick_scale", f"{fmt(config['kick_scale'])} (0 = the phase is the position; > 0 = it carries the path)"),
+            ("resonance_scale", config["resonance_scale"]),
+            ("amp_scale", config["amp_scale"]),
+            ("reward_scale", config["reward_scale"]),
+            ("concentration", f"{fmt(config['concentration'])} (shrinks a thinly observed edge's coherence)"),
+            ("coherence", f"mean {fmt(stats['coherence_mean'])}, max {fmt(stats['coherence_max'])}"),
+        ]
+    else:
+        rows = [
+            ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
+            ("count_scale", config["count_scale"]),
+            ("global_scale", config["global_scale"]),
+            ("window_scale", config["window_scale"]),
+            ("reward_scale", config["reward_scale"]),
+            ("path_scale", f"{config['path_scale']} over {stats['path_contexts']} judged path(s)"),
+            ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        ]
     console.pairs([
         ("model", origin.describe()),
-        ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
-        ("count_scale", config["count_scale"]),
-        ("global_scale", config["global_scale"]),
-        ("window_scale", config["window_scale"]),
-        ("reward_scale", config["reward_scale"]),
-        ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        *rows,
         ("total traversals", stats["total_traversals"]),
         ("changed", ", ".join(f"{k}={v}" for k, v in changes.items()) if changes else "nothing"),
         ("saved", saved["path"] if saved else "-"),
@@ -1511,6 +1582,106 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
         "negative": result["negative"], "positive": result["positive"], "inverted": result["inverted"],
         "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
+
+
+def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
+    """What the judged walks did, step by step: correct / incorrect per path, not per edge."""
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "paths"):
+        raise CliError(f"{args.model} holds a {model.kind} model; path counters belong to the count model")
+    graph = model.graph
+    totals = graph.path_totals()
+    node = _resolve_node(graph, args.node) if getattr(args, "node", None) else None
+    rows = model.paths(limit=args.limit, node=node)
+    console.pairs([
+        ("model", origin.describe()),
+        ("contexts", f"{totals['contexts']} ({totals['judged']} judged)"),
+        ("counted", f"{totals['correct']} correct / {totals['incorrect']} incorrect of {totals['seen']} seen"),
+        ("path_scale", graph.weight_config()["path_scale"]),
+    ])
+    console.say()
+    if not rows:
+        console.say("nothing has been judged yet: reward or punish a text, or let the tutor correct one")
+        return {"totals": totals, "paths": [], "stats": model.stats()}
+    console.table(
+        ["after", "step", "correct", "incorrect", "seen", "correct %", "seen %", "term"],
+        [[
+            quote(graph.labels[row["prev"]]) if row["prev"] < len(graph.labels) else row["prev"],
+            _step_label(graph, row["edge"]),
+            row["correct"], row["incorrect"], row["seen"],
+            "-" if row["correct_ratio"] is None else f"{row['correct_ratio'] * 100:.0f}%",
+            "-" if row["seen_ratio"] is None else f"{row['seen_ratio'] * 100:.0f}%",
+            f"{row['term']:+.3f}",
+        ] for row in rows],
+    )
+    return {"totals": totals, "paths": rows, "stats": model.stats()}
+
+
+def _resolve_node(graph, text: str) -> int:
+    """A node id from a label the user typed: the whole label first, then the trigram it holds."""
+    wanted = str(text)
+    for node, label in enumerate(graph.labels):
+        if label == wanted and graph.alive[node]:
+            return node
+    found = graph.lookup(wanted) if len(wanted) == WINDOW else None
+    if found is None:
+        raise CliError(f"no node labelled {wanted!r}: give a node label, or one of its trigrams")
+    return found[0]
+
+
+def _ratio_cell(value: float | None) -> str:
+    """A ratio as a percentage, or ``-`` when there was nothing to divide by."""
+    return "-" if value is None else f"{value * 100:.0f}%"
+
+
+def cmd_nodes(args: argparse.Namespace, console: Console) -> dict:
+    """Each node against the nodes around it: what share of its traffic and of its reward goes each way."""
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "node_ratios"):
+        raise CliError(f"{args.model} holds a {model.kind} model; node ratios belong to the count model")
+    graph = model.graph
+    node = _resolve_node(graph, args.node) if args.node else None
+    rows = model.node_ratios(limit=args.limit, node=node)
+    totals = graph.path_totals()
+    console.pairs([
+        ("model", origin.describe()),
+        ("nodes", f"{graph.num_nodes()} alive, {len(rows)} shown"),
+        ("counted", f"{totals['correct']} correct / {totals['incorrect']} incorrect "
+                    f"over {totals['judged']} judged context(s) of {totals['contexts']}"),
+    ])
+    if not rows:
+        console.say()
+        console.say("no such node" if args.node else "the graph is empty: train something first")
+        return {"nodes": [], "stats": model.stats()}
+    for row in rows:
+        console.say()
+        console.say(f"{quote(row['label'])}  visited {row['visits']}x  "
+                    f"({row['in_totals']['edges']} in, {row['out_totals']['edges']} out)")
+        table = []
+        for side, label in (("from", "from"), ("to", "to")):
+            for r in row[side]:
+                table.append([
+                    label, quote(r["label"]), r["seen"], _ratio_cell(r["seen_ratio"]),
+                    f"{r['reward']:+.2f}", _ratio_cell(r["reward_ratio"]),
+                    r["path_seen"], _ratio_cell(r["path_ratio"]),
+                    r["correct"], r["incorrect"], _ratio_cell(r["correct_ratio"]),
+                ])
+        console.table(
+            ["", "node", "seen", "seen %", "reward", "reward %", "judged", "of edge", "correct", "wrong", "correct %"],
+            table,
+        )
+    return {"nodes": rows, "stats": model.stats()}
+
+
+def _step_label(graph, edge: int) -> str:
+    """``parent -> child`` as the two labels, for a path row."""
+    parent = graph.edge_parent[edge] if edge < len(graph.edge_parent) else -1
+    if parent < 0 or parent >= len(graph.labels):
+        return f"edge {edge}"
+    for child, e in graph.children[parent].items():
+        if e == edge:
+            return f"{graph.labels[parent]} -> {graph.labels[child]}"
+    return f"edge {edge}"
 
 
 def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
@@ -2236,8 +2407,20 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
            ("traversals", f"{counter_text(stats, 'total_traversals')} total, {stats['window_traversals']} inside "
                           f"the sliding window of {stats['window']}"),
            ("weights", f"global_scale={fmt(stats['global_scale'])} window_scale={fmt(stats['window_scale'])} "
-                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])}")]
+                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])} "
+                       f"path_scale={fmt(stats['path_scale'])}"),
+           ("paths", f"{stats['path_contexts']} context(s), {stats['path_correct']} correct / "
+                     f"{stats['path_incorrect']} incorrect of {stats['path_seen']} seen")]
           if model.kind == "count" else []),
+        *([("traversals", f"{stats['total_traversals']} total"),
+           ("phase", f"{stats['buckets']} buckets, period {fmt(stats['weights']['period'])} chars, "
+                     f"kick_scale {fmt(stats['weights']['kick_scale'])}"),
+           ("coherence", f"mean {fmt(stats['coherence_mean'])}, max {fmt(stats['coherence_max'])}"),
+           ("metacognition", f"{stats['meta']['signatures']} cycle signature(s) from {stats['cycles_seen']} cycle(s); "
+                             f"{', '.join(f'{a}={fmt(v)}' for a, v in stats['meta']['totals'].items())}"),
+           ("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
+                       f"{stats['feedback_passes']} feedback pass(es)")]
+          if model.kind == "resonant" else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -2416,7 +2599,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
-        plan=args.plan or 0, batches=args.batches,
+        variants=args.variants, variant_weight=args.variant_weight, plan=args.plan or 0, batches=args.batches,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
@@ -2471,7 +2654,12 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     negative = neg_origin = None
     if args.blame:
         negative, neg_origin = open_negative(args, console, required=False)
-        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        console.pairs([
+            ("negative model", f"{neg_origin.describe()} -> {negative_path(args)}"),
+            ("widening", f"the teacher explains why and writes {config.variants} more sentence(s) with the same "
+                         f"mistake, blamed at {fmt(config.variant_weight)} of its severity"
+                         if config.variants else "off (--variants 0): the failed sentences alone"),
+        ])
         console.say()
     trainer = TutorTrainer(model, client, config, negative=negative)
     try:
@@ -3203,10 +3391,12 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="RNG seed for a newly created model (default 0) and for `generate` sampling")
     group.add_argument("--kind", choices=KINDS, default=default(None),
                        help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
-                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction), "
-                            "negative = the negative network (failures only, blamed with the tutor's reasons); a "
-                            "loaded file's own kind always wins.  With --kind count / negative the default --model is "
-                            f"{DEFAULT_COUNT_MODEL} / {DEFAULT_NEGATIVE_MODEL}")
+                            "reward model (edge weight = the edge's share of its node's traversals plus rewards, "
+                            "top-K / bottom-K prediction), negative = the negative network (failures only, blamed "
+                            "with the tutor's reasons), resonant = the phase model (edges learn the phase at which "
+                            "they fire; a phase-locked cycle goes to the metacognitive layer); a loaded file's own "
+                            "kind always wins.  The default --model follows the kind "
+                            f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 
@@ -3522,6 +3712,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
                    help="times a reply that caught itself repeating may back up and look for another way on "
                         "(0 = not at all)")
+    p.add_argument("--no-learn", action="store_true",
+                   help="do not teach the graph where it goes round (leave the model exactly as it was)")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 
@@ -3765,11 +3959,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # weights --------------------------------------------------------------
     p = command(
-        "weights", "count model: show or change the dual frequency weight function",
+        "weights", "count / resonant model: show or change the score function",
         "The count / reward model weighs an edge by its share of its node's traversals - all time and inside a\n"
         "sliding window of the last --window traversals - plus its rewards:\n"
         "  weight = global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward\n"
         "         (+ count_scale * log(1 + count), off by default).\n"
+        "The resonant model adds the phase to that share:\n"
+        "  score  = amp_scale * log(share) + reward_scale * reward + resonance_scale * coherence * cos(phase - mu)\n"
+        "with the phase one of --buckets positions on a ring, advanced by --period characters per turn plus\n"
+        "--kick-scale times each trigram's own phase (0 = a pure position clock, > 0 = a rolling signature of\n"
+        "the path) and --concentration shrinking a thinly observed edge's coherence towards 0.\n"
         "Without options the current function and the tracked totals are shown; with options the model is\n"
         "changed, every weight recomputed and the model saved.",
     )
@@ -3777,7 +3976,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--global-scale", type=float, metavar="X", help="weight of the all-time share log(R_all)")
     p.add_argument("--window-scale", type=float, metavar="X", help="weight of the sliding-window share log(R_recent)")
     p.add_argument("--reward-scale", type=float, metavar="X", help="weight of the rewards")
-    p.add_argument("--window", type=pos_int, metavar="N", help="traversals the sliding window remembers")
+    p.add_argument("--path-scale", type=float, metavar="X",
+                   help="count model: weight of the judged paths: log((correct + s) / (incorrect + s)) of the step "
+                        "in the context it was taken from (0 turns the path counters off)")
+    p.add_argument("--window", type=pos_int, metavar="N", help="count model: traversals the sliding window remembers")
+    p.add_argument("--buckets", type=pos_int, metavar="N", help="resonant model: phases on the ring")
+    p.add_argument("--period", type=nonneg_float, metavar="X", help="resonant model: characters per turn of the clock")
+    p.add_argument("--kick-scale", type=float, metavar="X",
+                   help="resonant model: how much each trigram's own phase kicks the clock (0 = position only)")
+    p.add_argument("--resonance-scale", type=float, metavar="X", help="resonant model: weight of the resonance term")
+    p.add_argument("--amp-scale", type=float, metavar="X", help="resonant model: weight of the log share")
+    p.add_argument("--concentration", type=nonneg_float, metavar="X",
+                   help="resonant model: shrinkage of a thinly observed edge's coherence")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_weights)
 
@@ -3812,6 +4022,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_feedback)
 
+    # paths ----------------------------------------------------------------
+    p = command(
+        "paths", "what the judged walks did, step by step",
+        "A reward or a penalty lands on a *path*, not on an edge: the counters are kept per step in the company\n"
+        "it kept - the node that called it - so the same edge can be the right move after one word and the wrong\n"
+        "one after another.  This lists those contexts with their correct / incorrect counts, how much of the\n"
+        "edge's traffic came through them (seen %) and the term they add to the weight.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=20, help="rows to show, most judged first (0 = all)")
+    p.add_argument("--node", metavar="LABEL", help="only the steps leaving this node (a node label, or a trigram it holds)")
+    p.set_defaults(handler=cmd_paths)
+
+    # nodes ----------------------------------------------------------------
+    p = command(
+        "nodes", "each node against the nodes around it",
+        "What a node's traffic and its reward look like from where it stands: a row per previous node and a row\n"
+        "per next node, each with its share of that side (seen %, reward %) and what the judged paths made of\n"
+        "it.  The shares are of the side, not of the node - a node is entered without an in-edge whenever a\n"
+        "text starts on it - and the reward share is signed, so a penalty reads as a negative share of the\n"
+        "pressure on the node.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=10, help="nodes to show, most visited first (0 = all)")
+    p.add_argument("--node", metavar="LABEL", help="only this node (a node label, or a trigram it holds)")
+    p.set_defaults(handler=cmd_nodes)
+
     # correct --------------------------------------------------------------
     p = command(
         "correct", "teach one correction: only what changed moves",
@@ -3827,7 +4062,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strength", type=nonneg_float, default=1.0, help="magnitude of one unit of feedback")
     p.add_argument("--weight", type=nonneg_float, default=1.0, help="how bad the attempt was: the penalty is strength x weight")
     p.add_argument("--reward", type=nonneg_float, default=1.0, help="what the correction is worth")
-    p.add_argument("--keep", type=nonneg_float, default=0.25, help="what the unchanged part of the correction still earns")
+    p.add_argument("--keep", type=nonneg_float, default=0.0, help="what the unchanged part of the correction still earns (0: only the fix; a whole path is rewarded when the output was right)")
     p.add_argument("--no-count", action="store_true", help="do not traverse the correction (it is counted by default)")
     p.add_argument("--dry-run", action="store_true", help="show the alignment without touching the model")
     p.add_argument("--blame", action="store_true",
@@ -4139,6 +4374,8 @@ def build_parser() -> argparse.ArgumentParser:
     from .tutor import (
         DEFAULT_PLAN_LESSONS,
         DEFAULT_TUTOR_MODEL as tutor_default_model,
+        DEFAULT_VARIANTS as TUTOR_DEFAULT_VARIANTS,
+        MAX_VARIANTS as TUTOR_MAX_VARIANTS,
         MODES as TUTOR_MODES,
         TWONRL_PER as TUTOR_TWONRL_PER,
     )
@@ -4206,9 +4443,10 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-diff-corrections", action="store_true",
                        help="learn a correction as two whole sentences (the old way) instead of from its diff "
                             "with what the network wrote")
-    group.add_argument("--keep-weight", type=nonneg_float, default=0.25,
-                       help="what the unchanged part of a correction still earns: 0 teaches the fix alone, "
-                            "1 rewards the whole corrected sentence")
+    group.add_argument("--keep-weight", type=nonneg_float, default=0.0,
+                       help="what the unchanged part of a correction still earns: 0 (the default) teaches the fix "
+                            "alone - a whole path is rewarded when the output was correct - and 1 rewards the "
+                            "whole corrected sentence")
     group = p.add_argument_group("2NRL options")
     group.add_argument("--twonrl-per", choices=TUTOR_TWONRL_PER, default="round", help="learn once per round, or after every lesson")
     group.add_argument("--min-weight", type=nonneg_float, default=0.25,
@@ -4229,6 +4467,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "is the reason, its mark the severity, and only the characters it corrected are blamed")
     p.add_argument("--negative", metavar="PATH",
                    help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    group = p.add_argument_group("why it is wrong, and the same mistake again (--blame only)")
+    group.add_argument("--variants", type=nonneg_int, default=TUTOR_DEFAULT_VARIANTS, metavar="N",
+                       help="ask the teacher why each failed sentence is wrong and for N more sentences that make "
+                            "the same mistake, each with its correct form; they are blamed under the same reason, so "
+                            f"the negative network learns the mistake and not one sentence (0 = do not ask, max {TUTOR_MAX_VARIANTS})")
+    group.add_argument("--variant-weight", type=nonneg_float, default=0.5, metavar="X",
+                       help="their share of the failure's severity (the student never wrote them)")
     p.set_defaults(handler=cmd_tutor)
 
     # chatgpt ---------------------------------------------------------------

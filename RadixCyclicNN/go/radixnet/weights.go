@@ -81,7 +81,7 @@ func (g *Graph) Configure(opts map[string]float64) error {
 					g.WindowEdgeCount[old]--
 				}
 			}
-		case "count_scale", "global_scale", "window_scale", "reward_scale":
+		case "count_scale", "global_scale", "window_scale", "reward_scale", "path_scale":
 			if math.IsNaN(value) || math.IsInf(value, 0) {
 				return fmt.Errorf("%s must be a finite number, got %v", name, value)
 			}
@@ -94,6 +94,9 @@ func (g *Graph) Configure(opts map[string]float64) error {
 				g.WindowScale = value
 			case "reward_scale":
 				g.RewardScale = value
+			case "path_scale":
+				g.PathScale = value
+				g.ctxVersion = invalidStamp // every context is priced again
 			}
 		default:
 			return fmt.Errorf("unknown weight option %q", name)
@@ -111,6 +114,7 @@ type WeightConfig struct {
 	GlobalScale float64 `json:"global_scale"`
 	WindowScale float64 `json:"window_scale"`
 	RewardScale float64 `json:"reward_scale"`
+	PathScale   float64 `json:"path_scale"`
 	Window      int     `json:"window"`
 	Smoothing   float64 `json:"smoothing"`
 }
@@ -119,7 +123,8 @@ type WeightConfig struct {
 func (g *Graph) WeightConfig() WeightConfig {
 	return WeightConfig{
 		Function: "dual-frequency", CountScale: g.CountScale, GlobalScale: g.GlobalScale,
-		WindowScale: g.WindowScale, RewardScale: g.RewardScale, Window: g.WindowSize, Smoothing: Smoothing,
+		WindowScale: g.WindowScale, RewardScale: g.RewardScale, PathScale: g.PathScale,
+		Window: g.WindowSize, Smoothing: Smoothing,
 	}
 }
 
@@ -341,6 +346,76 @@ func (g *Graph) ensureCosts() {
 func (g *Graph) Prepare() {
 	g.flushWeights()
 	g.ensureCosts()
+	g.ensureContextCosts()
+}
+
+// ChildCostsFrom lists p's out-edges as a walk that arrived from prev sees
+// them.  Without a judged context the costs are the edge costs; where a path
+// *has* been judged, its context adds PathScale * log((correct + s) /
+// (incorrect + s)) to that edge's weight before the softmax - so the same edge
+// is cheap for the walk that was right here and dear for the one that was
+// wrong, which is the whole point of counting paths instead of edges.
+func (g *Graph) ChildCostsFrom(p, prev int) []ChildCost {
+	if prev < 0 || g.PathScale == 0 || len(g.paths) == 0 {
+		return g.ChildCosts(p)
+	}
+	if g.costsVersion != g.Version || g.WeightsStale() {
+		g.Prepare()
+	}
+	if costs, ok := g.ctxCache[PathKey{prev, p}]; ok {
+		return costs
+	}
+	return g.ChildCosts(p)
+}
+
+// ensureContextCosts prices every judged context, once, while the graph is
+// still single-threaded: the searches then only read the table (the two beams
+// run side by side).
+func (g *Graph) ensureContextCosts() {
+	if g.ctxVersion == g.Version {
+		return
+	}
+	g.ctxVersion = g.Version
+	g.ctxCache = nil
+	if len(g.paths) == 0 || g.PathScale == 0 {
+		return
+	}
+	pairs := map[PathKey]bool{} // (the node that called, the node whose children it prices)
+	for key := range g.paths {
+		if key.Edge >= 0 && key.Edge < len(g.EdgeParent) {
+			pairs[PathKey{key.Prev, g.EdgeParent[key.Edge]}] = true
+		}
+	}
+	cache := make(map[PathKey][]ChildCost, len(pairs))
+	for pair := range pairs {
+		p := pair.Edge // the parent node, as stored above
+		if p < 0 || p >= len(g.children) || !g.Alive[p] {
+			continue
+		}
+		adj := &g.children[p]
+		if adj.size() == 0 {
+			continue
+		}
+		weights := make([]float64, len(adj.order))
+		m := math.Inf(-1)
+		for i := range adj.order {
+			weights[i] = g.EdgeW[adj.edges[i]] + g.PathScale*g.PathTerm(pair.Prev, adj.edges[i])
+			if weights[i] > m {
+				m = weights[i]
+			}
+		}
+		terms := make([]float64, len(weights))
+		for i, w := range weights {
+			terms[i] = math.Exp(w - m)
+		}
+		lse := m + math.Log(fsum(terms))
+		costs := make([]ChildCost, len(adj.order))
+		for i, c := range adj.order {
+			costs[i] = ChildCost{c, adj.edges[i], lse - weights[i]}
+		}
+		cache[pair] = costs
+	}
+	g.ctxCache = cache
 }
 
 // ChildCosts lists p's out-edges with their costs (-log softmax + nothing

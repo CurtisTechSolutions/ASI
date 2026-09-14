@@ -3,9 +3,10 @@
 A fake Ollama server (standard library) stands in for the real one and plays
 the English teacher: it answers exercise requests with JSON openings and model
 answers, marks completions by a simple rule (a sentence ending in "the mat" is
-correct English, anything else is an agreement mistake), and returns plain
-lines for drill sentences.  Every request is recorded, and the answers can be
-replaced or made to fail.
+correct English, anything else is an agreement mistake), explains why a
+sentence is wrong and writes more sentences with the same mistake, and returns
+plain lines for drill sentences.  Every request is recorded, and the answers
+can be replaced or made to fail.
 """
 
 import json
@@ -26,20 +27,25 @@ from radixnet.llm import LLMError  # noqa: E402
 from radixnet.ollama import OllamaClient, OllamaError  # noqa: E402
 from radixnet.search import PathResult  # noqa: E402
 from radixnet.tutor import (  # noqa: E402
+    DEFAULT_VARIANTS,
     ERROR_TYPES,
     HOLD_DRILLS,
     LEVELS,
+    MAX_VARIANTS,
     WORDS_LADDER,
+    Correction,
     Exercise,
     Grade,
     Lesson,
     TutorConfig,
     TutorTrainer,
     _error_type,
+    _parse_explanations,
     _parse_grades,
     card_lines,
     cue,
     drill_sentences,
+    explain_mistakes,
     focus_for,
     grade_completions,
     next_level,
@@ -156,6 +162,25 @@ class _FakeHandler(BaseHTTPRequestHandler):
                 "prompt": "Drill subject-verb agreement first, then plurals. Keep it at beginner.",
                 "lessons": [pool[i % len(pool)] for i in range(count)],
             })
+        if "explaining a beginner's mistake" in system:  # why, and the same mistake again
+            if self.server.why_response is not None:
+                return self.server.why_response
+            match = re.search(r"is (\d+) MORE examples", system)
+            count = int(match.group(1)) if match else 3
+            mistakes = []
+            for line in prompt.splitlines():
+                match = re.match(r"\[(\d+)\] mistake: (.*)", line)
+                if match:
+                    index, error = int(match.group(1)), match.group(2).strip()
+                    mistakes.append({
+                        "index": index,
+                        "why": f"A plural subject takes a plural verb; the student breaks that rule ({error}).",
+                        "again": [
+                            {"wrong": f"the dogs sits on the mat {i}", "right": f"the dogs sit on the mat {i}"}
+                            for i in range(count)
+                        ],
+                    })
+            return json.dumps({"mistakes": mistakes})
         if "model sentences" in system:  # drills
             match = re.search(r"exactly (\d+) lines", system)
             count = int(match.group(1)) if match else 3
@@ -173,6 +198,7 @@ class FakeTeacher(ThreadingHTTPServer):
         self.exercise_response = None
         self.grade_response = None
         self.plan_response = None
+        self.why_response = None
 
     @property
     def url(self):
@@ -183,6 +209,7 @@ class FakeTeacher(ThreadingHTTPServer):
         marker = {
             "exercises": "writing exercises", "grades": "marking sentence completions",
             "drills": "model sentences", "plan": "planning the next lessons",
+            "why": "explaining a beginner's mistake",
         }[kind]
         return [body["prompt"] for _method, _path, body in self.requests if body and marker in body.get("system", "")]
 
@@ -428,6 +455,169 @@ class TeacherTests(unittest.TestCase):
         grade = lessons[0].grade
         self.assertEqual((grade.score, grade.passed, grade.graded_by), (None, False, "unrated"))
         self.assertEqual(grade.correction, "the cat sat on the mat")
+
+
+# ---------------------------------------------------------------------------
+# why it is wrong, and the same mistake again
+# ---------------------------------------------------------------------------
+
+
+class ParseExplanationTests(unittest.TestCase):
+    def test_reads_the_documented_shape(self):
+        raw = json.dumps({"mistakes": [
+            {"index": 1, "why": "A plural subject takes a plural verb.",
+             "again": [{"wrong": "the dogs sits", "right": "the dogs sit"}, {"wrong": "the cats runs", "right": "the cats run"}]},
+            {"index": 0, "reason": "The past tense of go is went.", "again": ["she go yesterday"]},
+        ]})
+        parsed = _parse_explanations(raw, 2, 4)
+        self.assertEqual(set(parsed), {0, 1})
+        self.assertEqual(parsed[1]["again"], [("the dogs sits", "the dogs sit"), ("the cats runs", "the cats run")])
+        self.assertIn("past tense", parsed[0]["why"])
+        self.assertEqual(parsed[0]["again"], [("she go yesterday", "")])  # a bare line has no correct form
+
+    def test_tolerates_the_shapes_an_llm_drifts_into(self):
+        fenced = "```json\n{\"mistakes\": [{\"index\": 0, \"why\": \"w\", \"examples\": [{\"sentence\": \"a b c\", \"correction\": \"a b\"}]}]}\n```"
+        self.assertEqual(_parse_explanations(fenced, 1, 4)[0]["again"], [("a b c", "a b")])
+        single = json.dumps({"why": "w", "again": [{"wrong": "a b c"}]})
+        self.assertEqual(_parse_explanations(single, 1, 4)[0]["why"], "w")
+        self.assertEqual(_parse_explanations("the teacher wandered off", 2, 4), {})
+        self.assertEqual(_parse_explanations(json.dumps({"mistakes": [{"index": 9, "why": "w"}]}), 2, 4), {})
+
+    def test_limit_and_repeats(self):
+        raw = json.dumps({"mistakes": [{"index": 0, "why": "w", "again": [
+            {"wrong": "a b c"}, {"wrong": "A B C"}, {"wrong": "d e f"}, {"wrong": "g h i"},
+        ]}]})
+        again = _parse_explanations(raw, 1, 2)[0]["again"]
+        self.assertEqual([wrong for wrong, _right in again], ["a b c", "d e f"])  # the repeat drops, the limit holds
+        same = json.dumps({"mistakes": [{"index": 0, "why": "w", "again": [{"wrong": "a b c", "right": "a b c"}]}]})
+        self.assertEqual(_parse_explanations(same, 1, 4)[0]["again"], [("a b c", "")])  # a correction that corrects nothing
+
+
+class ExplainMistakeTests(unittest.TestCase):
+    def setUp(self):
+        self.fake = start_fake(self.addCleanup)
+        self.client = OllamaClient(self.fake.url, "fake:latest")
+
+    def _failed(self, *sentences):
+        out = []
+        for i, sentence in enumerate(sentences):
+            lesson = Lesson(Exercise(f"e{i}", "the dogs", "agreement", "the dogs run in the park"), 0, "dijkstra",
+                            " runs in the park", sentence)
+            lesson.grade = Grade(score=2.0, passed=False, error="agreement", correction="the dogs run in the park",
+                                 comment="A plural subject takes a plural verb.")
+            out.append(lesson)
+        return out
+
+    def test_the_teacher_explains_and_writes_the_mistake_again(self):
+        lessons = self._failed("the dogs runs in the park")
+        asked = explain_mistakes(self.client, lessons, topic="animals", count=2, weight=0.5)
+        self.assertEqual(asked, lessons)
+        lesson = lessons[0]
+        self.assertIn("plural verb", lesson.why)
+        self.assertEqual(len(lesson.variants), 2)
+        self.assertTrue(all(isinstance(v, Correction) for v in lesson.variants))
+        self.assertEqual(lesson.variants[0].weight, 0.5)
+        self.assertNotEqual(lesson.variants[0].wrong, lesson.variants[0].right)
+        prompt = self.fake.prompts("why")[0]
+        self.assertIn("Topic of the lesson: animals", prompt)
+        self.assertIn("[0] mistake: agreement", prompt)
+        self.assertIn("the student wrote: \"the dogs runs in the park\"", prompt)
+        self.assertIn("correct English:   \"the dogs run in the park\"", prompt)
+        self.assertIn("you told the student: A plural subject", prompt)
+        self.assertEqual(lesson.to_dict()["variants"][0]["weight"], 0.5)
+
+    def test_batches_and_skips_what_was_never_written(self):
+        lessons = self._failed(*["the dogs runs in the park"] * 5)
+        explain_mistakes(self.client, lessons, count=1, batch=2)
+        self.assertEqual(len(self.fake.prompts("why")), 3)
+        blank = Lesson(Exercise("e9", "the dogs", "", ""), 0, "dijkstra", "  ", "the dogs ")
+        blank.grade = Grade(score=0.0, passed=False, error="nonsense")
+        self.assertEqual(explain_mistakes(self.client, [blank], count=1), [])
+        self.assertEqual(len(self.fake.prompts("why")), 3)  # nothing written: no call
+        with self.assertRaises(ValueError):
+            explain_mistakes(self.client, lessons, batch=0)
+        with self.assertRaises(ValueError):
+            explain_mistakes(self.client, lessons, weight=-1)
+
+    def test_an_unreadable_answer_leaves_the_lesson_as_it_was(self):
+        self.fake.why_response = "the teacher wandered off"
+        lessons = self._failed("the dogs runs in the park")
+        explain_mistakes(self.client, lessons, count=2)
+        self.assertEqual((lessons[0].why, lessons[0].variants), ("", []))
+
+    def test_a_repeat_of_the_students_own_sentence_is_dropped(self):
+        self.fake.why_response = json.dumps({"mistakes": [{"index": 0, "why": "w", "again": [
+            {"wrong": "the dogs runs in the park", "right": "the dogs run in the park"},
+            {"wrong": "the cats sits down", "right": "the cats sit down"},
+        ]}]})
+        lessons = self._failed("the dogs runs in the park")
+        explain_mistakes(self.client, lessons, count=4)
+        self.assertEqual([v.wrong for v in lessons[0].variants], ["the cats sits down"])
+
+    def test_the_provider_failing_propagates(self):
+        self.fake.fail_with = 500
+        with self.assertRaises(OllamaError):
+            explain_mistakes(self.client, self._failed("the dogs runs in the park"), count=2)
+
+
+class WidenTests(unittest.TestCase):
+    """The trainer only asks when a negative network is there to learn from the answer."""
+
+    def setUp(self):
+        self.fake = start_fake(self.addCleanup)
+        self.client = OllamaClient(self.fake.url, "fake:latest")
+
+    def _lesson(self, passed=False):
+        lesson = Lesson(Exercise("e1", "the dogs", "agreement", "the dogs run in the park"), 0, "dijkstra",
+                        " runs in the park", "the dogs runs in the park")
+        lesson.grade = Grade(score=9.0 if passed else 2.0, passed=passed, error="none" if passed else "agreement",
+                             correction="the dogs run in the park", comment="A plural subject takes a plural verb.")
+        return lesson
+
+    def trainer(self, negative=None, **options):
+        return TutorTrainer(None, self.client, TutorConfig(**options), negative=negative)
+
+    def test_no_negative_network_no_call(self):
+        lessons = [self._lesson()]
+        out = self.trainer().widen(lessons)
+        self.assertEqual(out, {"explained": 0, "similar": 0})
+        self.assertEqual(self.fake.prompts("why"), [])
+        self.assertEqual(lessons[0].variants, [])
+
+    def test_with_a_negative_network_the_failures_are_widened(self):
+        from radixnet.negative import NegativeNet
+
+        lessons = [self._lesson(), self._lesson(passed=True)]
+        out = self.trainer(negative=NegativeNet(seed=1), variants=2).widen(lessons)
+        self.assertEqual(out, {"explained": 1, "similar": 2})
+        self.assertEqual(len(lessons[0].variants), 2)
+        self.assertEqual(lessons[1].variants, [])  # a sentence that passed has no mistake to widen
+        self.assertEqual(len(self.fake.prompts("why")), 1)
+
+    def test_variants_zero_switches_it_off(self):
+        from radixnet.negative import NegativeNet
+
+        out = self.trainer(negative=NegativeNet(seed=1), variants=0).widen([self._lesson()])
+        self.assertEqual(out, {"explained": 0, "similar": 0})
+        self.assertEqual(self.fake.prompts("why"), [])
+
+    def test_a_teacher_that_cannot_answer_costs_the_widening_not_the_round(self):
+        from radixnet.negative import NegativeNet
+
+        self.fake.fail_with = 500
+        records = []
+        out = self.trainer(negative=NegativeNet(seed=1), variants=2).widen([self._lesson()], 1, records.append)
+        self.assertEqual(out, {"explained": 0, "similar": 0})
+        self.assertEqual(records[0]["kind"], "note")
+        self.assertIn("no similar mistakes", records[0]["message"])
+
+    def test_the_config_bounds_the_variants(self):
+        TutorConfig(variants=0).validate()
+        TutorConfig(variants=MAX_VARIANTS).validate()
+        self.assertEqual(TutorConfig().variants, DEFAULT_VARIANTS)
+        for bad in ({"variants": -1}, {"variants": MAX_VARIANTS + 1}, {"variant_weight": -0.5}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                TutorConfig(**bad).validate()
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +974,34 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(records[-1]["lessons"], 4)
         after = model.stats()
         self.assertGreater(after["epochs_total"], before["epochs_total"])
+
+    def test_a_round_with_a_negative_network_widens_every_mistake(self):
+        from radixnet.negative import NegativeNet
+
+        negative = NegativeNet(seed=3)
+        trainer = TutorTrainer(
+            trained_model(), self.client, self.config(threshold=9.5, variants=2), negative=negative,
+        )
+        records = trainer.run()
+        round_record = records[0]
+        self.assertEqual(round_record["explained"], round_record["lessons"])  # nothing passes at 9.5
+        self.assertEqual(round_record["similar"], 2 * round_record["lessons"])
+        self.assertGreater(round_record["negative_blamed"], round_record["lessons"])  # the family, not one sentence
+        self.assertEqual(len(self.fake.prompts("why")), 1)  # one call for the whole round
+        lessons = [r for r in trainer.history if r["kind"] == "lesson"]
+        self.assertTrue(all(r["why"] for r in lessons))
+        self.assertEqual([len(r["variants"]) for r in lessons], [2, 2])
+        # the negative network knows the mistake by its reason, and what the teacher wrote instead is clean
+        self.assertIn("agreement", [r["reason"] for r in negative.reasons()])
+        self.assertEqual(negative.stats()["sources"], {"tutor": 2, "tutor:similar": 4})
+        self.assertEqual(negative.judge("the dogs sit on the mat 0")["verdict"], "pass")
+
+    def test_without_a_negative_network_nothing_is_widened(self):
+        trainer = TutorTrainer(trained_model(), self.client, self.config(threshold=9.5, variants=2))
+        records = trainer.run()
+        self.assertNotIn("similar", records[0])
+        self.assertEqual(self.fake.prompts("why"), [])
+        self.assertTrue(all(not r["variants"] for r in trainer.history if r["kind"] == "lesson"))
 
     def test_a_run_is_taught_to_the_brief_it_was_started_with(self):
         brief = "Drill plural nouns first. Stay at beginner. Keep the sentences about animals."
@@ -1176,6 +1394,26 @@ class ApiTests(unittest.TestCase):
         self.assertGreaterEqual(report["errors"].get("agreement", 0), 1)
         self.assertEqual(report["weakest"][0], "agreement")
         self.assertGreater(self.service.model.stats()["twonrl_runs"], 0)
+
+    def test_blame_widens_every_mistake_for_the_negative_network(self):
+        status, body, _ = self.client.post(
+            "/api/tutor/start",
+            {"topic": "animals", "rounds": 1, "exercises": 2, "threshold": 9.5, "blame": True, "variants": 2,
+             "variant_weight": 0.25, **FAST},
+        )
+        self.assertEqual(status, 202, body)
+        self.assertEqual((body["config"]["variants"], body["config"]["variant_weight"]), (2, 0.25))
+        job = wait_for_job(self.client)
+        self.assertEqual((job["state"], job["error"]), ("done", None))
+        status, history, _ = self.client.get("/api/tutor/history")
+        rounds = [r for r in history["history"] if r["kind"] == "round"]
+        self.assertEqual(rounds[0]["explained"], rounds[0]["lessons"])
+        self.assertEqual(rounds[0]["similar"], 2 * rounds[0]["lessons"])
+        lessons = [r for r in history["history"] if r["kind"] == "lesson"]
+        self.assertTrue(all(r["why"] and len(r["variants"]) == 2 for r in lessons))
+        negative = self.service.negative_model()
+        self.assertEqual(negative.stats()["sources"]["tutor:similar"], 2 * len(lessons))
+        self.assertIn("agreement", [r["reason"] for r in negative.reasons()])
 
     def test_plan_from_a_report_card(self):
         card = {"lessons": 6, "passed": 1, "pass_rate": 1 / 6, "mean_score": 3.0,

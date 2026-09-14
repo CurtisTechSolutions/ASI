@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
-import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
+import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -108,7 +108,9 @@ export default function PredictPanel({ status }) {
   const [lastLiked, setLastLiked] = useState(null);
   const { job, running, busy, error: jobError, start, clearError } = useJob("feedback");
 
-  const countKind = Boolean(status && status.kind === "count");
+  const countKind = countingKind(status);  // takes a strength; predicts with the beam by default
+  // only the count model aliases "dijkstra" to the beam - on the resonant model it is a real, exact mode
+  const beamOnly = Boolean(status && status.kind === "count");
   const likeDisabled = busy || running || jobIsRunning(status);
 
   async function like(text) {
@@ -127,7 +129,7 @@ export default function PredictPanel({ status }) {
     setLoading(true);
     setError(null);
     try {
-      const effectiveMode = countKind && mode === "dijkstra" ? "beam" : mode;
+      const effectiveMode = beamOnly && mode === "dijkstra" ? "beam" : mode;
       const body = {
         prefix,
         length: parseInteger(length, 20),
@@ -195,7 +197,7 @@ export default function PredictPanel({ status }) {
             }
           />
         </div>
-        {mode === "beam" || (countKind && mode === "dijkstra") ? (
+        {mode === "beam" || (beamOnly && mode === "dijkstra") ? (
           <div className="row">
             <NumberField
               label="K"
@@ -241,7 +243,7 @@ export default function PredictPanel({ status }) {
             {loading ? "Predicting…" : "Predict"}
           </button>
         </div>
-        {mode === "beam" || (countKind && mode === "dijkstra") ? (
+        {mode === "beam" || (beamOnly && mode === "dijkstra") ? (
           <p className="muted">
             The beam search returns the K most likely continuations and the K least likely ones of the same length
             in one prediction; the same search generates whole texts on the Generate tab.
