@@ -135,6 +135,15 @@ export default function StatusBar({ onStatus }) {
           window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
         </span>
       ) : null}
+      {s.kind === "count" && s.path_contexts !== undefined ? (
+        <span
+          className="stat"
+          title="Judged paths: a step counted in the company it kept, so the same edge can be right after one word and wrong after another"
+        >
+          paths <b>{fmtInt(s.path_contexts)}</b> · <b className="ok">{fmtInt(s.path_correct)}</b> correct /{" "}
+          <b className="bad">{fmtInt(s.path_incorrect)}</b> wrong of <b>{fmtInt(s.path_seen)}</b> seen
+        </span>
+      ) : null}
       <span className={`stat job ${jobState}`}>
         job{" "}
         <b>

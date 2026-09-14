@@ -710,7 +710,8 @@ type TutorConfig struct {
 	// DiffCorrections teaches a correction from its diff with the sentence the network wrote
 	// instead of as two whole sentences: only the trigram nodes they disagree on move.
 	DiffCorrections bool `json:"diff_corrections"`
-	// KeepWeight is what the unchanged part of a correction still earns (1 = the whole sentence, as before).
+	// KeepWeight is what the unchanged part of a correction still earns.  It is 0 by default:
+	// a whole path is rewarded when the output was correct, not when it had to be corrected.
 	KeepWeight float64 `json:"keep_weight"`
 	MinWeight  float64 `json:"min_weight"` // negative-phase weight of a near miss (a hopeless answer weighs 1)
 	NegEpochs  int     `json:"neg_epochs"`
@@ -728,7 +729,7 @@ func DefaultTutorConfig() TutorConfig {
 		TutorProvider: DefaultProvider, TutorModel: DefaultTutorModel(),
 		Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
 		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Batches: 1, Adapt: true, TeachAnswer: true, Learn: true,
-		TwoNRLPer: "round", DiffCorrections: true, KeepWeight: 0.25, MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3,
+		TwoNRLPer: "round", DiffCorrections: true, KeepWeight: 0, MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3,
 		Strength: 1.0, Replay: true, ReplayLimit: 64,
 	}
 }
@@ -1150,7 +1151,7 @@ func (t *TutorTrainer) Learn(graded Graded) (map[string]any, error) {
 	result := map[string]any{
 		"bad": len(graded.Bad), "good": len(good), "action": nil, "neg_loss": nil, "pos_loss": nil,
 		"mean_weight": mean(graded.BadWeights), "mean_reward": mean(goodWeights),
-		"corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
+		"corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
 	}
 	opts := TrainOptions{Epochs: cfg.NegEpochs, AutoCompress: true, Stop: t.Stop}
 	strength := cfg.Strength
@@ -1172,6 +1173,8 @@ func (t *TutorTrainer) Learn(graded Graded) (map[string]any, error) {
 		result["edits"] = result["edits"].(int) + moved.Edits
 		result["penalised"] = result["penalised"].(int) + moved.Penalised
 		result["rewarded"] = result["rewarded"].(int) + moved.Rewarded
+		result["marked_correct"] = result["marked_correct"].(int) + moved.MarkedCorrect
+		result["marked_incorrect"] = result["marked_incorrect"].(int) + moved.MarkedIncorrect
 		result["pos_loss"] = moved.Loss
 		if !containsString(t.replay, correction.Right) {
 			t.replay = append(t.replay, correction.Right)
@@ -1392,6 +1395,7 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 			"bad": len(graded.Bad), "good": len(graded.Good), "action": nil, "neg_loss": nil, "pos_loss": nil,
 			"mean_weight": mean(graded.BadWeights), "mean_reward": mean(graded.GoodWeights),
 			"corrections": len(graded.Corrections), "edits": edits, "penalised": 0, "rewarded": 0,
+			"marked_correct": 0, "marked_incorrect": 0,
 		}, nil
 	}
 	if cfg.TwoNRLPer != "lesson" {
@@ -1399,7 +1403,7 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 	}
 	merged := map[string]any{
 		"bad": 0, "good": 0, "action": nil, "neg_loss": nil, "pos_loss": nil, "mean_weight": nil, "mean_reward": nil,
-		"corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
+		"corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
 	}
 	actions := []string{}
 	badSeen, goodSeen := []float64{}, []float64{}
@@ -1420,7 +1424,7 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 		}
 		merged["bad"] = merged["bad"].(int) + outcome["bad"].(int)
 		merged["good"] = merged["good"].(int) + outcome["good"].(int)
-		for _, key := range []string{"corrections", "edits", "penalised", "rewarded"} {
+		for _, key := range []string{"corrections", "edits", "penalised", "rewarded", "marked_correct", "marked_incorrect"} {
 			if value, ok := outcome[key].(int); ok {
 				merged[key] = merged[key].(int) + value
 			}

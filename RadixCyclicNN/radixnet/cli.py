@@ -1408,7 +1408,7 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
         raise CliError(f"{args.model} holds a {model.kind} model; the weight function belongs to the count model (--kind count)")
     options = {
         "count_scale": args.count_scale, "global_scale": args.global_scale, "window_scale": args.window_scale,
-        "reward_scale": args.reward_scale, "window": args.window,
+        "reward_scale": args.reward_scale, "path_scale": args.path_scale, "window": args.window,
     }
     changes = {k: v for k, v in options.items() if v is not None}
     saved = None
@@ -1427,6 +1427,7 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
         ("global_scale", config["global_scale"]),
         ("window_scale", config["window_scale"]),
         ("reward_scale", config["reward_scale"]),
+        ("path_scale", f"{config['path_scale']} over {stats['path_contexts']} judged path(s)"),
         ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
         ("total traversals", stats["total_traversals"]),
         ("changed", ", ".join(f"{k}={v}" for k, v in changes.items()) if changes else "nothing"),
@@ -1519,6 +1520,49 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
         "negative": result["negative"], "positive": result["positive"], "inverted": result["inverted"],
         "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
+
+
+def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
+    """What the judged walks did, step by step: correct / incorrect per path, not per edge."""
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "paths"):
+        raise CliError(f"{args.model} holds a {model.kind} model; path counters belong to the count model")
+    graph = model.graph
+    totals = graph.path_totals()
+    rows = model.paths(limit=args.limit)
+    console.pairs([
+        ("model", origin.describe()),
+        ("contexts", f"{totals['contexts']} ({totals['judged']} judged)"),
+        ("counted", f"{totals['correct']} correct / {totals['incorrect']} incorrect of {totals['seen']} seen"),
+        ("path_scale", graph.weight_config()["path_scale"]),
+    ])
+    console.say()
+    if not rows:
+        console.say("nothing has been judged yet: reward or punish a text, or let the tutor correct one")
+        return {"totals": totals, "paths": [], "stats": model.stats()}
+    console.table(
+        ["after", "step", "correct", "incorrect", "seen", "correct %", "seen %", "term"],
+        [[
+            quote(graph.labels[row["prev"]]) if row["prev"] < len(graph.labels) else row["prev"],
+            _step_label(graph, row["edge"]),
+            row["correct"], row["incorrect"], row["seen"],
+            "-" if row["correct_ratio"] is None else f"{row['correct_ratio'] * 100:.0f}%",
+            "-" if row["seen_ratio"] is None else f"{row['seen_ratio'] * 100:.0f}%",
+            f"{row['term']:+.3f}",
+        ] for row in rows],
+    )
+    return {"totals": totals, "paths": rows, "stats": model.stats()}
+
+
+def _step_label(graph, edge: int) -> str:
+    """``parent -> child`` as the two labels, for a path row."""
+    parent = graph.edge_parent[edge] if edge < len(graph.edge_parent) else -1
+    if parent < 0 or parent >= len(graph.labels):
+        return f"edge {edge}"
+    for child, e in graph.children[parent].items():
+        if e == edge:
+            return f"{graph.labels[parent]} -> {graph.labels[child]}"
+    return f"edge {edge}"
 
 
 def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
@@ -2244,7 +2288,10 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
            ("traversals", f"{counter_text(stats, 'total_traversals')} total, {stats['window_traversals']} inside "
                           f"the sliding window of {stats['window']}"),
            ("weights", f"global_scale={fmt(stats['global_scale'])} window_scale={fmt(stats['window_scale'])} "
-                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])}")]
+                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])} "
+                       f"path_scale={fmt(stats['path_scale'])}"),
+           ("paths", f"{stats['path_contexts']} context(s), {stats['path_correct']} correct / "
+                     f"{stats['path_incorrect']} incorrect of {stats['path_seen']} seen")]
           if model.kind == "count" else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
@@ -3789,6 +3836,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--global-scale", type=float, metavar="X", help="weight of the all-time share log(R_all)")
     p.add_argument("--window-scale", type=float, metavar="X", help="weight of the sliding-window share log(R_recent)")
     p.add_argument("--reward-scale", type=float, metavar="X", help="weight of the rewards")
+    p.add_argument("--path-scale", type=float, metavar="X",
+                   help="weight of the judged paths: log((correct + s) / (incorrect + s)) of the step in the "
+                        "context it was taken from (0 turns the path counters off)")
     p.add_argument("--window", type=pos_int, metavar="N", help="traversals the sliding window remembers")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_weights)
@@ -3824,6 +3874,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_feedback)
 
+    # paths ----------------------------------------------------------------
+    p = command(
+        "paths", "what the judged walks did, step by step",
+        "A reward or a penalty lands on a *path*, not on an edge: the counters are kept per step in the company\n"
+        "it kept - the node that called it - so the same edge can be the right move after one word and the wrong\n"
+        "one after another.  This lists those contexts with their correct / incorrect counts, how much of the\n"
+        "edge's traffic came through them (seen %) and the term they add to the weight.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=20, help="rows to show, most judged first (0 = all)")
+    p.set_defaults(handler=cmd_paths)
+
     # correct --------------------------------------------------------------
     p = command(
         "correct", "teach one correction: only what changed moves",
@@ -3839,7 +3900,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strength", type=nonneg_float, default=1.0, help="magnitude of one unit of feedback")
     p.add_argument("--weight", type=nonneg_float, default=1.0, help="how bad the attempt was: the penalty is strength x weight")
     p.add_argument("--reward", type=nonneg_float, default=1.0, help="what the correction is worth")
-    p.add_argument("--keep", type=nonneg_float, default=0.25, help="what the unchanged part of the correction still earns")
+    p.add_argument("--keep", type=nonneg_float, default=0.0, help="what the unchanged part of the correction still earns (0: only the fix; a whole path is rewarded when the output was right)")
     p.add_argument("--no-count", action="store_true", help="do not traverse the correction (it is counted by default)")
     p.add_argument("--dry-run", action="store_true", help="show the alignment without touching the model")
     p.add_argument("--blame", action="store_true",
@@ -4218,9 +4279,10 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-diff-corrections", action="store_true",
                        help="learn a correction as two whole sentences (the old way) instead of from its diff "
                             "with what the network wrote")
-    group.add_argument("--keep-weight", type=nonneg_float, default=0.25,
-                       help="what the unchanged part of a correction still earns: 0 teaches the fix alone, "
-                            "1 rewards the whole corrected sentence")
+    group.add_argument("--keep-weight", type=nonneg_float, default=0.0,
+                       help="what the unchanged part of a correction still earns: 0 (the default) teaches the fix "
+                            "alone - a whole path is rewarded when the output was correct - and 1 rewards the "
+                            "whole corrected sentence")
     group = p.add_argument_group("2NRL options")
     group.add_argument("--twonrl-per", choices=TUTOR_TWONRL_PER, default="round", help="learn once per round, or after every lesson")
     group.add_argument("--min-weight", type=nonneg_float, default=0.25,

@@ -228,7 +228,7 @@ func init() {
 	route("POST", "/api/model/select", rModelSelect)
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
-	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, window}")
+	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
 	route("POST", "/api/train", rTrain)
 	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
@@ -265,6 +265,8 @@ func init() {
 	doc("POST", "/api/checkpoints/restore", "{name}: load a checkpoint")
 	route("GET", "/api/graph", rGraph)
 	doc("GET", "/api/graph", "?limit=150: the most visited nodes and the edges among them, with counts, shares and rewards")
+	route("GET", "/api/paths", rPaths)
+	doc("GET", "/api/paths", "?limit=50: the judged paths - what each step did in the context it was taken from: {totals, path_scale, paths}")
 	route("GET", "/api/history", rHistory)
 	doc("GET", "/api/history", "training history")
 	route("GET", "/api/uploads", rUploads)
@@ -317,7 +319,7 @@ func rModelSelect(rq *request) (int, any, error) {
 
 func weightOptions(f fields) (map[string]float64, error) {
 	opts := map[string]float64{}
-	for _, name := range []string{"count_scale", "global_scale", "window_scale", "reward_scale"} {
+	for _, name := range []string{"count_scale", "global_scale", "window_scale", "reward_scale", "path_scale"} {
 		v, present, err := f.number(name, 0, nil)
 		if err != nil {
 			return nil, err
@@ -921,6 +923,19 @@ func rCheckpointRestore(rq *request) (int, any, error) {
 		return 0, nil, badRequest("'name' must not be empty")
 	}
 	out, err := rq.svc.RestoreCheckpoint(name)
+	return 200, out, err
+}
+
+func rPaths(rq *request) (int, any, error) {
+	limit := 50
+	if raw, ok := rq.queryValue("limit"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, nil, badRequest("query parameter 'limit' must be an integer (got %q)", raw)
+		}
+		limit = n
+	}
+	out, err := rq.svc.Paths(limit)
 	return 200, out, err
 }
 

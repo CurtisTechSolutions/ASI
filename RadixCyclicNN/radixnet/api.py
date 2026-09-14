@@ -887,6 +887,32 @@ class ModelService:
         with self.session() as model:
             return _graph_view(model.graph, limit)
 
+    def paths(self, limit: int = 50) -> dict:
+        """The judged paths: what each step did in the context it was taken from."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "paths"):
+                raise ApiError(400, f"the {model.kind} model does not count paths")
+            graph = model.graph
+            rows = []
+            for row in model.paths(limit=limit):
+                prev = graph.labels[row["prev"]] if row["prev"] < len(graph.labels) else ""
+                parent = graph.edge_parent[row["edge"]] if row["edge"] < len(graph.edge_parent) else -1
+                child = next((c for c, e in graph.children[parent].items() if e == row["edge"]), -1) if parent >= 0 else -1
+                rows.append({
+                    **row,
+                    "after": prev,
+                    "parent": parent,
+                    "parent_label": graph.labels[parent] if 0 <= parent < len(graph.labels) else "",
+                    "child": child,
+                    "child_label": graph.labels[child] if 0 <= child < len(graph.labels) else "",
+                })
+            return {
+                "totals": graph.path_totals(), "paths": rows, "limit": limit,
+                "path_scale": graph.weight_config()["path_scale"],
+            }
+
     # -- the negative network ------------------------------------------------
 
     def negative_model(self) -> NegativeNet:
@@ -2399,6 +2425,7 @@ def _weight_options(f: Fields) -> dict:
         "global_scale": f.number("global_scale", None),
         "window_scale": f.number("window_scale", None),
         "reward_scale": f.number("reward_scale", None),
+        "path_scale": f.number("path_scale", None),
         "window": f.integer("window", None, minimum=1),
     }
 
@@ -2642,6 +2669,15 @@ def _r_graph(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     except ValueError:
         raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
     return 200, svc.graph(limit)
+
+
+def _r_paths(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["50"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    return 200, svc.paths(limit)
 
 
 def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3689,6 +3725,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
     ("GET", "/api/graph", _r_graph, "top nodes by visit count and the edges among them (?limit=150)"),
+    ("GET", "/api/paths", _r_paths,
+     "count model: the judged paths (?limit=50) - what each step did in the context it was taken from: "
+     "{totals, path_scale, paths: [{after, parent_label, child_label, seen, correct, incorrect, correct_ratio, "
+     "seen_ratio, term}]}"),
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload,

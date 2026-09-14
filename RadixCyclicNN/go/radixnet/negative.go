@@ -939,9 +939,9 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 		}
 	}
 	blamed := []int{}
-	for _, e := range m.stepsOver(grams, runeLen(wrong), wrongSpans) {
-		if !cleared[e] {
-			blamed = append(blamed, e)
+	for _, step := range m.stepsOver(grams, runeLen(wrong), wrongSpans) {
+		if !cleared[step.Edge] {
+			blamed = append(blamed, step.Edge)
 		}
 	}
 	if len(blamed) > 0 && amount > 0 {

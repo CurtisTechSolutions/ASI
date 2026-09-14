@@ -171,6 +171,7 @@ commands:
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
+  paths      what the judged walks did, step by step: correct / incorrect per path, not per edge
   negative   the failures, and why: blame | clear | why | filter | reasons | forget | auto
   codegen    write Python programs: the teacher tutors, the sandbox runs them, 2NRL follows
   tools      the external tools the network can call: list | describe | call
@@ -254,6 +255,8 @@ func main() {
 		cmdTwoNRL(rest)
 	case "negative":
 		cmdNegative(rest)
+	case "paths":
+		cmdPaths(rest)
 	case "correct":
 		cmdCorrect(rest)
 	case "image":
@@ -647,6 +650,62 @@ func cmdTwoNRL(args []string) {
 	}
 }
 
+func cmdPaths(args []string) {
+	fs := subFlagSet("paths")
+	limit := fs.Int("limit", 20, "rows to show, most judged first (0 = all)")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	g := m.G
+	totals := g.PathTotals()
+	rows := m.Paths(*limit, -1)
+	say("contexts   %d (%d judged)", totals.Contexts, totals.Judged)
+	say("counted    %d correct / %d incorrect of %d seen", totals.Correct, totals.Incorrect, totals.Seen)
+	say("path_scale %g", g.WeightConfig().PathScale)
+	if len(rows) == 0 {
+		say("nothing has been judged yet: reward or punish a text, or let the tutor correct one")
+	} else {
+		say("")
+		say("%-14s %-24s %7s %9s %5s %9s %6s %7s", "after", "step", "correct", "incorrect", "seen", "correct %", "seen %", "term")
+		for _, row := range rows {
+			say("%-14s %-24s %7d %9d %5d %9s %6s %+7.3f",
+				quoteLabel(g, row.Prev), stepLabel(g, row.Edge), row.Correct, row.Incorrect, row.Seen,
+				percentOf(row.CorrectRatio), percentOf(row.SeenRatio), row.Term)
+		}
+	}
+	if jsonMode {
+		emit(map[string]any{"totals": totals, "paths": rows, "stats": m.Stats()})
+	}
+}
+
+// quoteLabel is a node's label in quotes (whitespace is part of it).
+func quoteLabel(g *radixnet.Graph, node int) string {
+	if node < 0 || node >= g.NumNodeIDs() {
+		return fmt.Sprintf("node %d", node)
+	}
+	return strconv.Quote(g.Label(node))
+}
+
+// stepLabel is "parent -> child" as the two labels, for a path row.
+func stepLabel(g *radixnet.Graph, edge int) string {
+	parent := g.ParentOfEdge(edge)
+	if parent < 0 {
+		return fmt.Sprintf("edge %d", edge)
+	}
+	for _, t := range g.Children(parent) {
+		if t.E == edge {
+			return fmt.Sprintf("%s -> %s", g.Label(parent), g.Label(t.P))
+		}
+	}
+	return fmt.Sprintf("edge %d", edge)
+}
+
+func percentOf(ratio *float64) string {
+	if ratio == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", *ratio*100)
+}
+
 func cmdCorrect(args []string) {
 	fs := subFlagSet("correct")
 	wrong := fs.String("wrong", "", "what the network wrote")
@@ -654,7 +713,7 @@ func cmdCorrect(args []string) {
 	strength := fs.Float64("strength", 1.0, "magnitude of one unit of feedback")
 	weight := fs.Float64("weight", 1.0, "how bad the attempt was: the penalty is strength x weight")
 	reward := fs.Float64("reward", 1.0, "what the correction is worth")
-	keep := fs.Float64("keep", 0.25, "what the unchanged part of the correction still earns")
+	keep := fs.Float64("keep", 0, "what the unchanged part of the correction still earns (0: only the fix; a whole path is rewarded when the output was right)")
 	noCount := fs.Bool("no-count", false, "do not traverse the correction (it is counted by default)")
 	dryRun := fs.Bool("dry-run", false, "show the alignment without touching the model")
 	blame := fs.Bool("blame", false, "also teach the negative network: the same diff, blaming only the characters you changed")
@@ -752,6 +811,7 @@ func cmdWeights(args []string) {
 	windowScale := fs.Float64("window-scale", -1, "weight of log(recent share)")
 	rewardScale := fs.Float64("reward-scale", -1, "weight of the reward")
 	countScale := fs.Float64("count-scale", -1, "weight of log(1 + traversals)")
+	pathScale := fs.Float64("path-scale", -1, "weight of the judged paths (0 turns the path counters off)")
 	window := fs.Int("window", 0, "sliding window size")
 	_ = fs.Parse(args)
 	m := openModel(true)
@@ -767,6 +827,9 @@ func cmdWeights(args []string) {
 	}
 	if *countScale >= 0 {
 		changes["count_scale"] = *countScale
+	}
+	if *pathScale >= 0 {
+		changes["path_scale"] = *pathScale
 	}
 	if *window > 0 {
 		changes["window"] = float64(*window)

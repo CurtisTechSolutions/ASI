@@ -2,7 +2,7 @@
 
 **Replacing the sigmoid with `f(x) = a·sin(b(x − h)) + k`, default `−sin(x/3)`**
 
-R. Curtis — Curtis Tech Solutions
+Mason Curtis — Curtis Tech Solutions
 Working paper · September 2026
 
 ---

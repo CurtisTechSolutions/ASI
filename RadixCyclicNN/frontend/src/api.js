@@ -135,6 +135,8 @@ export const api = {
   checkpointSave: (body) => post("/api/checkpoints/save", body),
   checkpointRestore: (body) => post("/api/checkpoints/restore", body),
   graph: (limit) => get(`/api/graph?limit=${encodeURIComponent(limit)}`),
+  /** Count model: the judged paths - what each step did in the context it was taken from. */
+  paths: (limit = 50) => get(`/api/paths?limit=${encodeURIComponent(limit)}`),
   history: () => get("/api/history"),
   uploads: () => get("/api/uploads"),
   /** Upload one text file (read in the browser); the server keeps it under its upload directory. */

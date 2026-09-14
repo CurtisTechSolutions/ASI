@@ -25,9 +25,14 @@ prediction process run end to end without a human:
    character is penalised, the step that writes the right one is rewarded,
    and the words both sentences share keep what they earned
    (:meth:`radixnet.countnet.CountRewardNet.correct`,
-   ``diff_corrections``).  Everything else is 2NRL as before: sentences with
-   no correction to diff are garbage weighted by how bad the mark was, the
-   passed sentences and the teacher's own English are the fine-tune pass.
+   ``diff_corrections``).  A whole path is rewarded only when the sentence
+   *passed*: an answer that had to be corrected earns its fix, not its
+   sentence (``keep_weight``).  Every judged step is also counted as a path -
+   correct or incorrect in the context it was taken from - so the same edge
+   can be the right move after one word and the wrong one after another.
+   Everything else is 2NRL as before: sentences with no correction to diff
+   are garbage weighted by how bad the mark was, the passed sentences and the
+   teacher's own English are the fine-tune pass.
 
 Grammar is what is being taught, so grammar is what the overall score mostly
 is: ``score = grammar_weight * grammar + (1 - grammar_weight) * mean(spelling,
@@ -1176,7 +1181,7 @@ class TutorConfig:
     learn: bool = True  # False: a dry run - the grades are reported, the network is left alone
     twonrl_per: str = "round"
     diff_corrections: bool = True  # teach a correction from its diff with the sentence, not as two whole sentences
-    keep_weight: float = 0.25  # what the unchanged part of a correction still earns (1 = the whole sentence)
+    keep_weight: float = 0.0  # what the unchanged part of a correction still earns (1 = the whole sentence)
     min_weight: float = 0.25  # negative-phase weight of a near miss (a hopeless answer weighs 1)
     neg_epochs: int = 2
     pos_epochs: int = 3
@@ -1472,7 +1477,7 @@ class TutorTrainer:
             "bad": len(bad), "good": len(good_all), "action": None, "neg_loss": None, "pos_loss": None,
             "mean_weight": statistics.fmean(bad_weights) if bad_weights else None,
             "mean_reward": statistics.fmean(good_all_weights) if good_all_weights else None,
-            "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
+            "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
         }
         actions: list[str] = []
         for correction in corrections:
@@ -1486,6 +1491,8 @@ class TutorTrainer:
             result["edits"] += int(moved.get("edits") or 0)
             result["penalised"] += int(moved.get("penalised") or 0)
             result["rewarded"] += int(moved.get("rewarded") or 0)
+            result["marked_correct"] += int(moved.get("marked_correct") or 0)
+            result["marked_incorrect"] += int(moved.get("marked_incorrect") or 0)
             if moved.get("loss") is not None:
                 result["pos_loss"] = moved["loss"]
             if correction.right not in self.replay_buffer:
@@ -1620,7 +1627,7 @@ class TutorTrainer:
                 "mean_reward": statistics.fmean(good_weights) if good_weights else None,
                 "corrections": len(corrections),
                 "edits": sum(len(diff.summary(c.wrong, c.right, limit=0)) for c in corrections),
-                "penalised": 0, "rewarded": 0,
+                "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
             }
         if self.config.twonrl_per != "lesson":
             bad, bad_weights, good, good_weights = self.texts_of(lessons)
@@ -1631,6 +1638,7 @@ class TutorTrainer:
         merged: dict[str, Any] = {
             "bad": 0, "good": 0, "action": None, "neg_loss": None, "pos_loss": None,
             "mean_weight": None, "mean_reward": None, "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
+            "marked_correct": 0, "marked_incorrect": 0,
         }
         actions: list[str] = []
         bad_seen: list[float] = []
@@ -1650,7 +1658,7 @@ class TutorTrainer:
                 actions.extend(outcome["action"].split("+"))
             merged["bad"] += outcome["bad"]
             merged["good"] += outcome["good"]
-            for key in ("corrections", "edits", "penalised", "rewarded"):
+            for key in ("corrections", "edits", "penalised", "rewarded", "marked_correct", "marked_incorrect"):
                 merged[key] += outcome.get(key, 0)
             for key in ("neg_loss", "pos_loss"):
                 if outcome[key] is not None:

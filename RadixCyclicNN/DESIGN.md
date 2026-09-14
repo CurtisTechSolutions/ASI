@@ -26,7 +26,7 @@ imported lazily and never required.
 | The negatives come from the tutor | `blame.py` (section 24.2): the English tutor's marked mistake and correction, the Ollama reviewer's critique and rating, the code sandbox / style checker / judge, the evolve discriminator and a person's thumbs down become faults `(text, reason, severity, note, correction)`. The negative network never invents a failure. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)` (section 24.2): the same character alignment the count model's `correct` teaches from (`diff.py`) decides which steps are blamed - the words the teacher kept carry no verdict, and a blamed transition is never compressed away. |
 | The pair as a GAN at output time | `NegativeFilter` (section 24.3): the positive model over-samples candidates, the negative one vetoes them by blame or by the likelihood ratio `log P_negative - log P_positive`; what survives is returned ranked, what does not comes back with its reason. |
-| 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) `invert()` the network, (3) fine-tune on correct data with a smaller learning rate. |
+| 2NRL (*Double-Negative Reinforcement Learning*) | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) `invert()` the network, (3) fine-tune on correct data with a smaller learning rate. The two negatives of the name are (1) and (2); (3) is the positive one. |
 | CLI / API / React frontend | `radixnet.cli` (argparse), `radixnet.api` (stdlib `http.server`, JSON), `frontend/` (Vite + React). |
 | Checkpointing / save / load | JSON (optionally gzip) model files, `CheckpointManager` with rotation + `latest` pointer + resume. |
 | GPU acceleration / performance | `Backend` abstraction: `PythonBackend` (always available, optimised pure Python over flat CSR arrays) and `TorchBackend` (optional; picks `cuda` > `mps` > `cpu`). The graph exports CSR arrays once per epoch; the backend runs vectorised mini-batch steps. |
@@ -1075,7 +1075,7 @@ the CLI), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
 model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
 
-### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves
+### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves, counted per path
 
 A grade used to reach the graph as two verdicts on two whole sentences: the attempt was garbage, the correction was
 gospel. Most of a corrected sentence is however word for word what the network wrote - the teacher changes a tense,
@@ -1106,6 +1106,43 @@ CLI `radixnet correct --wrong ... --right ...` (and `radixnet-count correct`) te
 `go/radixnet/correct_test.go` (the alignment rebuilds both sentences, only the differing steps move, `keep` spreads
 the rest, an early end blames the step into END, a run of corrections keeps the graph sound), plus the cross-language
 parity case.
+
+### 16.5 Judged paths (`CountRewardGraph.paths`) — the node that called the step
+
+An edge is the right move in one sentence and the wrong one in another, so a reward counted per edge blurs the two
+together. Every judgement is counted **per path** instead: the key is `(the node before the edge's parent, the
+edge)` - the step in the company it kept - and the row is `[seen, correct, incorrect]`.
+
+* **Who writes it.** `record_path(transitions, outcome, create)` walks one text's `(parent, edge)` steps and takes
+  the context of step *k* from the parent of step *k-1* (START for the first, which has none). `reward` marks the
+  whole walk correct, `punish` marks it incorrect, a plain training pass marks nothing; `mark_steps` judges single
+  steps, which is what `correct` uses - the blamed steps incorrect, the fix correct, so **the counters follow the
+  reward**. A whole path is rewarded only when the output was correct: `keep` (and the tutor's `keep_weight`)
+  defaults to 0.
+* **What it costs.** A context is *born* when a path is judged and is kept up to date by every later traversal;
+  an unjudged pass never creates one (`create=False`), so training a corpus cannot fill the table with the
+  second-order counts of a whole language. Two indexes (by edge, by caller) make the structural fix-ups cheap, and
+  `nodes_with_paths()` is rebuilt lazily so a whole epoch of splits costs one rebuild.
+* **What it changes.** `path_term = log((correct + s) / (incorrect + s))` (zero until judged, symmetric) is added
+  to the edge's weight, times `path_scale` (1 by default, in the weight config and the file), before the softmax
+  over the node's children: `child_costs(p, prev)`. The searches carry the node they came from - the beam reads it
+  off its entry table, the sampler remembers its last step, and the Python Dijkstra puts it in the state key *only*
+  for the nodes where it makes a difference, so the search does not grow anywhere else. Go prices every judged
+  context once in `Prepare` (`ensureContextCosts`), because the two beams run side by side and must only read.
+* **Through splits and merges.** A split re-keys a moved edge's contexts to the new node and hands the bridge edge
+  the caller's counts (`q -> P -> c` becomes `q -> A -> B -> c`); a merge drops the contexts of the dying edge and
+  of the steps that were never a choice (a unary chain has one way through) and re-keys the ones that arrived
+  through the absorbed node. `edge_parent` is maintained alongside, as Go has always had `EdgeParent`.
+* **What it reports.** `path_stats` adds `correct_ratio` (of the judged traffic) and `seen_ratio` (of the edge's
+  traversals), `path_totals` the four counters that reach `stats()` as `path_contexts`, `path_judged`, `path_seen`,
+  `path_correct`, `path_incorrect`; `radixnet paths` / `radixnet-count paths` and `GET /api/paths` list the
+  contexts with their labels, and the status bar shows the totals. The file carries a `paths` block (prev, edge,
+  seen, correct, incorrect; ids remapped and sorted, so both implementations write the same bytes).
+
+Tests: `tests/test_countnet.py::TestPathCounters` and `go/radixnet/paths_test.go` (training judges nothing, a
+judgement starts the table and a later pass only updates it, the same edge is right after one word and wrong after
+another and its cost follows, the round trip, compression, the scale off), and
+`tests/test_go_parity.py::test_judged_paths_price_the_same_step_differently` for the two implementations.
 
 ---
 

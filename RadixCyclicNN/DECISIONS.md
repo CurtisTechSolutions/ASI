@@ -11,8 +11,9 @@ documents and deliberately overlaps neither:
 | `DECISIONS.md` (this) | *Why is it like that, and what did it cost?* | someone questioning a choice, or reconstructing the reasoning later |
 
 Where a decision carries an argument too long to fit an entry, it is written up
-separately and linked: `../Research/2NRL.md` for D-009, and the notes in
-`../Research/` for D-001 and D-002.
+as a paper in `../Research/` (indexed in `../Research/README.md`):
+`CyclesAreAFeature.md` for D-001 and D-028, `SineWaveActivationFunction.md` for
+D-002 and D-003, and `2NRL.md` for D-009, D-010 and D-045.
 
 A decision belongs here when reversing it would change the character of the
 system, not just an implementation detail. Each entry is dated to the commit
@@ -37,7 +38,7 @@ design's development.
 **Part I — Foundations: the research claims** · D-001 cyclic not acyclic · D-002 sine activation ·
 D-003 per-node learnable activation · D-004 accept the vanishing gradient · D-005 the edge signal ·
 D-006 character trigrams · D-007 radix self-compression · D-008 shortest path · D-009 2NRL ·
-D-010 inversion · D-011 perpetual self-upgrade
+D-010 inversion · D-011 perpetual self-upgrade · D-067 breadth is not annealed
 
 **Part II — Implementation platform** · D-012 stdlib only · D-013 flat arrays and CSR ·
 D-014 the backend protocol · D-015 JSON model files · D-016 stdlib HTTP server · D-017 one job at a time ·
@@ -155,9 +156,11 @@ sine 28–48 reward — a 2.8×–4.8× improvement over the better baseline.
 * `b` is clamped to `≥ 1e-3` after every update: at `b = 0` the function is
   constant and the node stops carrying information irrecoverably.
 * The evidence is one task, one episode count, no variance and no seeds
-  reported. The range 28–48 is itself wide. This is the single most
-  load-bearing claim in the project and the thinnest measurement supporting
-  it. See Q-2.
+  reported, and the range 28–48 is itself wide — this being the most
+  load-bearing claim in the project on the thinnest measurement. That is now
+  addressed where it belongs: `Research/SineWaveActivationFunction.md` §9 sets
+  out what the CartPole result does and does not establish, gives a replication
+  protocol, and §12 states what would change the author's mind. See Q-2.
 
 **Lives in** `Research/SineWaveActivationFunction.md`, `ActivationFunctionTest/`,
 `radixnet/activation.py`
@@ -274,8 +277,9 @@ every character is shared by the window that ends on it and the window that
 begins on it, so each character is a *pivot* joining two contexts — and the
 two-character overlap that results is what every edge in the graph is keyed on.
 The relation a transformer computes with attention, this representation carries
-in the shape of the window itself. (The precise sense of "pivots" intended here
-is recorded as Q-11.)
+in the shape of the window itself. (The author has confirmed this positional
+reading: the shared character *is* the pivot. Three is therefore the smallest
+window that gives a pivot plus context on either side of it.)
 
 **Decision** `Encoder.encode("hello") → ["hel", "ell", "llo"]`. Characters, not
 bytes and not tokens. Overlap of two characters between consecutive windows.
@@ -388,7 +392,8 @@ with `to_end`).
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** learning
 
-**Context — 2NRL is the author's own learning process, formalised.** This is not
+**Context — 2NRL (*Double-Negative Reinforcement Learning*) is the author's
+own learning process, formalised.** This is not
 an algorithm arrived at from the literature and then justified. The author is
 self-taught, and describes the method that produced that education directly:
 **fail consistently, then do the inverse of what failed; and once a thread worth
@@ -420,14 +425,48 @@ data at a smaller rate (`pos_lr` default `0.01` against `neg_lr` `0.05`, with
   pair, because that is the interface learning takes.
 * The count model implements the *interface* but not the *mechanism* — see
   D-023.
-* "Pull hard on the thread" is implemented as D-027's failure-proportional
-  boosting, and arguably only half of it: the boost scales with how badly
-  something *failed*, where the author's description is of pursuing a
-  *promising* direction. See Q-13.
-* The acronym's expansion is recorded nowhere in the repository; the code calls
-  it only "the author's two-phase scheme". See Q-12.
+* **"Pull hard on the thread" is not implemented, and is not a learning-rate
+  decision.** It was tempting to read it as D-027's failure-proportional
+  boosting; the author's own account is different and more specific:
+  *explore rapidly and widely until a thread appears, then tighten the
+  exploration and iterate.* That is a schedule over **search breadth** —
+  temperature, beam width, sample count — not over learning rates, and nothing
+  in the system currently anneals those. See D-067.
 
 **Lives in** `radixnet/model.py::RadixNet.two_nrl`
+
+---
+
+### D-067 — Search breadth is fixed per call; the author's process anneals it
+
+**Status** Provisional — a recognised gap · **Layer** inference
+
+**Context** The third commitment in the process 2NRL comes from (D-009) is
+*explore rapidly and widely until you find a thread, then tighten the exploration
+and iterate.* Wide-then-narrow: breadth first, then depth on whatever the breadth
+turned up.
+
+**Current behaviour** Every parameter that governs breadth — `temperature`, `k`,
+`beam`, the sample `count`, `step_penalty` — is **fixed for the duration of a
+call** and chosen by the caller. Nothing narrows as a run proceeds, and nothing
+detects that a thread has appeared. A long evolve or tutor run explores exactly
+as widely in its last generation as in its first.
+
+**What exists that is nearly right**
+* D-033 already provides the machinery: rates as sandboxed expressions of the
+  epoch, with `linear` / `geometric` / `cosine` / `step` / `warmup` helpers, a
+  live preview and a reverse switch. It is pointed at the **learning rate**. The
+  same evaluator applied to `temperature`, `k` and `beam` would be an annealing
+  schedule over search breadth, which is what the process describes.
+* D-062's exploration goes the *other* way on purpose, and correctly so: backing
+  out of a loop, it widens (`k × (step + 2)`) the further back it goes. That is
+  local recovery, not the global schedule — the two are compatible.
+
+**Why this is recorded rather than built** It is a genuine feature, not a
+documentation fix, and this pass is a decision record. Noted so the gap is
+visible rather than lost.
+
+**Would live in** `radixnet/schedule.py`, `radixnet/gan.py`, `radixnet/tutor.py`
 
 ---
 
@@ -989,8 +1028,24 @@ flips *alternating* nodes — `flip_nodes({node: amount}, mode)` applies
 **Why alternating** An edge's score is `w · f_p · f_c` (D-005). Flipping the
 sign of **both** endpoints leaves the product unchanged; flipping exactly one
 negates it. So to make every edge of a path unlikely, you must flip every
-*other* node. The implementation picks the parity that covers the most edges of
-the path, and where a node is shared it takes the largest amount.
+*other* node — a two-colouring of the path.
+
+**Why it is best-effort, and this is exact rather than sloppy** A path is always
+two-colourable. A *graph with cycles* need not be: a graph is two-colourable if
+and only if it contains no odd cycle, and a walk through a cyclic graph (D-001)
+can close one. On a 3-cycle, no assignment of flips covers all three edges — the
+best any of the eight patterns achieves is two. The obstruction is a theorem, not
+an approximation. The extreme case is the self-loop: `score(p → p) = w · f_p²`,
+and `f_p²` is non-negative whatever `f_p` is, so **flipping the node changes a
+self-loop's score by exactly nothing** — a self-loop is sign-locked against node
+inversion and can only be changed through its weight.
+
+This is why the implementation says *the parity that covers the most edges, a
+shared node takes the largest amount* rather than *the parity that covers every
+edge*. It is the strongest statement available in a graph that has cycles in it —
+and a clean instance of the general trade this project makes: allowing cycles
+turned an operation that is exact on a DAG into one that is best-effort.
+(`Research/CyclesAreAFeature.md` proves it.)
 
 **Consequences**
 * `amount` is continuous and gradual: 1 is a full sign flip, 0.5 zeroes the
@@ -2364,10 +2419,11 @@ walk, so `predict`, `generate` and the agent's loop hand over too. What is open
 now is the *rate*: how fast a node should learn to hand over, whether it should
 ever unlearn, and what a wrongly taught hand-over costs.
 
-**Q-2 — Evidence for the sine (D-002).** The strongest claim in the project
-rests on one RL task at 250 episodes with no variance reported and a 28–48 range.
-Is a firmer comparison worth running — multiple seeds, a second task, the range
-explained — or is the result already settled enough for its purpose here?
+**Q-2 — Evidence for the sine (D-002).** Now stated fully in
+`Research/SineWaveActivationFunction.md` §9 and §12, with a replication protocol.
+The decision left here is whether to *run* it — multiple seeds, a second task,
+the 28–48 range explained — or to let the result stand as sufficient for its
+purpose.
 
 **Q-3 — Is the sine a fixed family?** Only `a, b, h, k` are learned; the
 functional form is always a sine. Was a learnable *family* (sums of sines,
@@ -2414,27 +2470,36 @@ described as further solutions to the same problem. Should this become a
 repository-wide decision log — with a section on what each variation tries and
 why it diverges — or stay scoped to this one?
 
-**Q-11 — What does "how the transformer pivots" mean precisely (D-006)?** The
-reading recorded above is the *positional* one: with stride 1 each character is
-shared by two windows and so joins two contexts, the way attention relates a
-position to its neighbours. Other readings are available — the query/key/value
-pivot around a single token, or the way attention re-centres the sequence on
-whichever position it weights. Which one was the analogy? It decides whether
-three is the right number or simply the first number that worked.
+**Q-11 — ~~What does "how the transformer pivots" mean?~~ — ANSWERED.** The
+positional reading is the intended one: the character shared by two windows *is*
+the pivot. Three is therefore the smallest window that gives a pivot with context
+on either side, and D-006 records it as the reason rather than as a consequence.
 
-**Q-12 — What does 2NRL stand for?** The expansion appears nowhere in the
-repository. `Research/2NRL.md` currently uses the acronym as a proper name.
+**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED by the author.**
+*Double-Negative Reinforcement Learning.* The `2N` is two negatives: training
+**on** the failures, then negating the representation that produced them —
+phases 1 and 2 of D-009. The third phase is the positive consolidation, so the
+name and the three-phase count do not conflict. Recorded in D-009 and in the
+paper's title and §2.1; the expansion had appeared nowhere in the repository
+before, and an earlier guess of *Two-phase Negative Reinforcement Learning* was
+wrong (it also contradicted the three-phase procedure it labelled).
 
-**Q-13 — Is "pull hard on the thread" fully implemented (D-009, D-027)?** The
-boost scales the negative phase by how badly a sample *failed*. The described
-process is about recognising a *promising* direction and pursuing it hard. Those
-are different signals. Should there be a positive-side boost — a promising
-result training harder, not just a bad one?
+**Q-13 — ~~Is "pull hard on the thread" a positive-side boost?~~ — ANSWERED, and
+the premise was wrong.** It is not a boost of any kind. The author's process is
+*explore rapidly and widely until you find a thread, then tighten the exploration
+and iterate* — a schedule over **search breadth**, not over learning rates.
+Nothing in the system anneals temperature, beam width or sample count; D-033's
+expression evaluator is the obvious mechanism and is pointed at the wrong
+quantity. Recorded as D-067. **What remains open is the trigger**: what counts as
+"finding a thread" — a score threshold, a plateau, a run of passes? Without a
+detector, the schedule has nothing to key on.
 
 **Q-14 — Does the process have a stopping rule?** "Fail consistently, then
-invert" describes a loop. In a life it ends when the thing is learned. The
-evolve loop never ends (D-011) and has no convergence criterion (Q-4). What
-ended an iteration for the author?
+invert" describes a loop. In a life it ends when the thing is learned; the answer
+given in `Research/2NRL.md` §12 is *"when the thing worked"*. The evolve loop
+never ends (D-011) and has no convergence criterion (Q-4). What remains open is
+making that judgement computable — which is Q-13's problem in another form, since
+both come down to recognising that something has started working.
 
 **Q-15 — Does the negative network supersede inversion (D-045 vs D-009)?** The
 negative network is 2NRL's negative phase made permanent: a standing model of

@@ -154,20 +154,24 @@ def dijkstra_predict(
     pop = heappop
     inf = math.inf
     start_chars = _start_emission(graph, start_node, start_offset)
-    start_key = (start_node, start_chars)
-    best: dict[tuple[int, int], float] = {start_key: 0.0}
+    # a model that counts paths prices a step by the node the walk came from, so the state has to carry it -
+    # but only where it makes a difference, which keeps the search as small as it was everywhere else
+    context = graph.nodes_with_paths()
+    start_from = START if start_node == START else -1
+    start_key = (start_from if start_node in context else -1, start_node, start_chars)
+    best: dict[tuple[int, int, int], float] = {start_key: 0.0}
     best_get = best.get
-    prev: dict[tuple[int, int], tuple[tuple[int, int], float]] = {}
-    heap = [(0.0, 0, start_node, start_chars)]
+    prev: dict[tuple[int, int, int], tuple[tuple[int, int, int], float]] = {}
+    heap = [(0.0, 0, start_from, start_node, start_chars)]
     tie = 0
     expanded = 0
-    goal: tuple[int, int] | None = None
+    goal: tuple[int, int, int] | None = None
     fallback = start_key
     fb_chars = start_chars
     fb_cost = 0.0
     while heap:
-        cost, _, node, chars = pop(heap)
-        key = (node, chars)
+        cost, _, came_from, node, chars = pop(heap)
+        key = (came_from if node in context else -1, node, chars)
         if cost > best[key]:
             continue  # stale entry
         expanded += 1
@@ -180,22 +184,22 @@ def dijkstra_predict(
             break
         if max_chars is not None and chars >= max_chars:
             continue
-        for c, _e, ec in onward(child_costs(node)):
+        for c, _e, ec in onward(child_costs(node, came_from if came_from >= 0 else None)):
             nchars = chars if c == END else chars + len(labels[c]) - _OV
             step = ec + step_penalty
             ncost = cost + step
-            nkey = (c, nchars)
+            nkey = (node if c in context else -1, c, nchars)
             if ncost < best_get(nkey, inf):
                 best[nkey] = ncost
                 prev[nkey] = (key, step)
                 tie += 1
-                push(heap, (ncost, tie, c, nchars))
+                push(heap, (ncost, tie, node, c, nchars))
     end_key = goal if goal is not None else fallback
     node_ids: list[int] = []
     step_costs: list[float] = []
     key = end_key
     while True:
-        node_ids.append(key[0])
+        node_ids.append(key[1])
         link = prev.get(key)
         if link is None:
             break
@@ -238,10 +242,11 @@ def sample_walk(
     node_ids = [node]
     step_costs: list[float] = []
     steps = 0
+    came_from = START if start_node == START else None
     while True:
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
-        costs = onward(child_costs(node))  # a node the model expects to go round offers nothing
+        costs = onward(child_costs(node, came_from))  # a node the model expects to go round offers nothing
         if not costs:
             break
         if temperature == 0 or len(costs) == 1:
@@ -263,6 +268,7 @@ def sample_walk(
         node_ids.append(c)
         if c != END:
             chars += len(labels[c]) - _OV
+        came_from = node
         node = c
         steps += 1
     return _build_result(graph, node_ids, step_costs, start_offset, max_chars, steps, include_context)

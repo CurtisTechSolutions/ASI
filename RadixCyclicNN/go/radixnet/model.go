@@ -447,6 +447,13 @@ func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward flo
 // plus at most Inflight chunks: the reader waits when that many are in
 // flight, which is what keeps a corpus of any size from piling up.
 func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, reward float64) ([]map[string]any, error) {
+	// a rewarded path was judged correct, a penalised one wrong, a plain training pass neither
+	outcome := PathUnjudged
+	if reward > 0 {
+		outcome = PathCorrect
+	} else if reward < 0 {
+		outcome = PathIncorrect
+	}
 	if opts.Epochs < 0 {
 		return nil, fmt.Errorf("epochs must be >= 0, got %d", opts.Epochs)
 	}
@@ -602,6 +609,9 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 					}
 					g.Traversals.Add(int64(len(edges) + nodeBumps))
 					g.RecordTraversals(edges) // the sliding window follows the corpus order
+				}
+				for _, tr := range perText { // and what each text did, in its own context
+					g.RecordPath(tr, outcome, outcome != PathUnjudged)
 				}
 				if reward != 0 {
 					g.AddReward(edges, reward)
@@ -1185,6 +1195,9 @@ func (m *Model) ScoreAll(texts []string) []Score {
 // -- statistics ----------------------------------------------------------------------------------------
 
 // Stats mirrors the Python model's stats() dictionary.
+// Paths are the judged paths, most judged first (limit 0 = all, node -1 = every node).
+func (m *Model) Paths(limit, node int) []PathStats { return m.G.PathContexts(limit, node) }
+
 func (m *Model) Stats() map[string]any {
 	g := m.G
 	pos, neg := g.TotalReward()
@@ -1195,6 +1208,7 @@ func (m *Model) Stats() map[string]any {
 	if m.IsNegative() {
 		return m.negativeStats(lastLoss)
 	}
+	pathTotals := g.PathTotals()
 	stats := map[string]any{
 		"kind":                    "count",
 		"nodes":                   g.NumNodes(),
@@ -1209,12 +1223,18 @@ func (m *Model) Stats() map[string]any {
 		"last_loss":               lastLoss,
 		"rewards_total":           toFloat(m.Meta["rewards_total"]),
 		"penalties_total":         toFloat(m.Meta["penalties_total"]),
+		"path_contexts":           pathTotals.Contexts,
+		"path_judged":             pathTotals.Judged,
+		"path_seen":               pathTotals.Seen,
+		"path_correct":            pathTotals.Correct,
+		"path_incorrect":          pathTotals.Incorrect,
 		"edge_reward_positive":    pos,
 		"edge_reward_negative":    neg,
 		"count_scale":             g.CountScale,
 		"reward_scale":            g.RewardScale,
 		"global_scale":            g.GlobalScale,
 		"window_scale":            g.WindowScale,
+		"path_scale":              g.PathScale,
 		"window":                  g.WindowSize,
 		"total_traversals":        g.TotalTraversals.Value,
 		"total_traversals_resets": g.TotalTraversals.Resets,

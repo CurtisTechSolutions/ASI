@@ -243,6 +243,36 @@ class TestGoParity(unittest.TestCase):
                 self.assertEqual(x["continuation"], y["continuation"])
                 self.assertLessEqual(abs(x["cost"] - y["cost"]), 1e-9)
 
+    def test_judged_paths_price_the_same_step_differently(self):
+        """Both sides count correct / incorrect per path, and both let the context move the search."""
+        py_path = os.path.join(TMP.name, "paths_py.count.json")
+        go_path = os.path.join(TMP.name, "paths_go.count.json")
+        corpus = os.path.join(TMP.name, "paths_corpus.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write("a cat sat\nthe cat sat\na cat ran\n")
+        for path, run in ((py_path, py), (go_path, go)):
+            run("--seed", 1, *(("--kind", "count") if run is py else ()), "train", "--data", corpus, "--epochs", 3, model=path)
+            run("feedback", "--good-text", "a cat sat", "--strength", 1, model=path)
+            run("feedback", "--bad-text", "the cat sat", "--strength", 1, model=path)
+        a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        for column in ("prev", "edge", "seen", "correct", "incorrect"):
+            self.assertEqual(a_doc["paths"][column], b_doc["paths"][column], column)
+        self.assertGreater(len(a_doc["paths"]["prev"]), 0)
+        self.assertEqual(a_doc["weights"]["path_scale"], b_doc["weights"]["path_scale"])
+        # a judged path changes what the search does, identically on both sides
+        for prefix in ("a cat", "the cat", "a "):
+            with self.subTest(prefix=prefix):
+                a = py("predict", "--prefix", prefix, "--length", 6, "--k", 3, model=py_path)
+                b = go("predict", "--prefix", prefix, "--length", 6, "--k", 3, model=go_path)
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+                self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+        a_stats, b_stats = py("info", model=py_path)["stats"], go("info", model=go_path)["stats"]
+        for key in ("path_contexts", "path_judged", "path_seen", "path_correct", "path_incorrect"):
+            self.assertEqual(a_stats[key], b_stats[key], key)
+        self.assertGreater(a_stats["path_correct"], 0)
+        self.assertGreater(a_stats["path_incorrect"], 0)
+
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")
         go_path = os.path.join(TMP.name, "fb_go.count.json")
@@ -306,9 +336,15 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(a_doc["edges"]["count"], b_doc["edges"]["count"])
         self.assertEqual(a_doc["weights"]["window_events"], b_doc["weights"]["window_events"])
         assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
+        # the judged paths: both sides counted the same steps in the same contexts
+        a_paths, b_paths = load_json(py_path)["graph"]["paths"], load_json(go_path)["graph"]["paths"]
+        for column in ("prev", "edge", "seen", "correct", "incorrect"):
+            self.assertEqual(a_paths[column], b_paths[column], column)
+        self.assertGreater(len(a_paths["prev"]), 0)
         a_stats = py("info", model=py_path)["stats"]
         b_stats = go("info", model=go_path)["stats"]
-        for key in ("feedback_passes", "total_traversals", "window_traversals", "trained_texts"):
+        for key in ("feedback_passes", "total_traversals", "window_traversals", "trained_texts",
+                    "path_contexts", "path_judged", "path_seen", "path_correct", "path_incorrect"):
             self.assertEqual(a_stats[key], b_stats[key], key)
         for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
             self.assertLessEqual(abs(a_stats[key] - b_stats[key]), 1e-9, key)

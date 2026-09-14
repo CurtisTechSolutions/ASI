@@ -49,6 +49,8 @@ be backed out of, the likelier the search is to hand over there instead of carry
 FIRST = BACK + 1
 """The first node id that is not a sentinel."""
 
+_NO_NODES: frozenset[int] = frozenset()
+
 _W = WINDOW          # trigram length
 _OV = WINDOW - 1     # overlap between consecutive labels
 
@@ -713,8 +715,17 @@ class RadixCyclicGraph:
                 return cost
         return None
 
-    def child_costs(self, p: int) -> list[tuple[int, int, float]]:
-        """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes."""
+    def nodes_with_paths(self) -> set[int]:
+        """Nodes whose costs depend on where the walk came from; empty unless the model counts paths."""
+        return _NO_NODES
+
+    def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
+        """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes.
+
+        ``prev`` is the node the walk arrived from, which a model that counts
+        paths (:class:`~radixnet.countnet.CountRewardGraph`) uses to price the
+        same edge differently in different contexts; here it is ignored.
+        """
         if self._cost_cache_version != self.version:
             self._cost_cache.clear()
             self._cost_cache_version = self.version

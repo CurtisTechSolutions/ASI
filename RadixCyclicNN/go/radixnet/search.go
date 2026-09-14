@@ -134,11 +134,16 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 	nodeIDs := []int{node}
 	stepCosts := []float64{}
 	steps := 0
+	cameFrom := -1
+	if startNode == Start {
+		cameFrom = Start // every walk from the sentinel starts in the same context
+	}
 	for {
 		if node == End || (maxChars >= 0 && chars >= maxChars) {
 			break
 		}
-		costs := Onward(g.ChildCosts(node)) // a node the model expects to go round offers nothing
+		// a node the model expects to go round offers nothing
+		costs := Onward(g.ChildCostsFrom(node, cameFrom))
 		if len(costs) == 0 {
 			break
 		}
@@ -178,6 +183,7 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 		if pick.Child != End {
 			chars += g.labelLen[pick.Child] - Overlap
 		}
+		cameFrom = node
 		node = pick.Child
 		steps++
 	}

@@ -8,7 +8,7 @@ examples, and an honest account of what the evidence does and does not show.
 |---|---|
 | [Cycles Are a Feature](CyclesAreAFeature.md) | The brain is a directed *cyclic* graph. A cycle is repetition stored once, and the loops are what make a metacognitive level both necessary and useful. |
 | [A Sine Wave Activation Function](SineWaveActivationFunction.md) | A sigmoid is one step of a sine wave rotated 45 degrees. I stopped deleting the rest of the wave. |
-| [2NRL: Learning by Inverting Consistent Failure](2NRL.md) | Train on the failures at full rate, invert the network, then fine-tune on the correct data. Fail consistently, then do the inverse of what failed. |
+| [2NRL: Learning by Inverting Consistent Failure](2NRL.md) | *Double-Negative Reinforcement Learning.* Train **on** the failures at full rate, negate the network, then fine-tune on the correct data. Two negatives — fail consistently, then do the inverse of what failed. |
 
 The three depend on each other, and it is worth knowing in which direction:
 

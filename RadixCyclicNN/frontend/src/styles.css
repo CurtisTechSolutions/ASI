@@ -1504,3 +1504,12 @@ ul.log ol.criteria {
 .verdict.fail {
   color: #dc2626;
 }
+
+/* judged paths in the status bar: correct against incorrect */
+.statusbar b.ok {
+  color: var(--ok);
+}
+
+.statusbar b.bad {
+  color: var(--danger);
+}

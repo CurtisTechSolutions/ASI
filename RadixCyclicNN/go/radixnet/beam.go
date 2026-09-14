@@ -116,7 +116,14 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 		candidates := make([]beamState, 0, len(frontier)*2)
 		for _, st := range frontier {
 			expanded++
-			for _, cc := range Onward(g.ChildCosts(st.node)) {
+			// where the walk came from: a judged path prices the next step by it
+			prev := -1
+			if parent := entries[st.entry].parent; parent >= 0 {
+				prev = entries[parent].node
+			} else if st.node == Start {
+				prev = Start
+			}
+			for _, cc := range Onward(g.ChildCostsFrom(st.node, prev)) {
 				nchars := st.chars
 				if cc.Child != End {
 					nchars += g.labelLen[cc.Child] - Overlap

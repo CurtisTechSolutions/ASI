@@ -2,7 +2,7 @@
 
 **The brain is a directed cyclic graph, and the loops are the point**
 
-R. Curtis — Curtis Tech Solutions
+Mason Curtis — Curtis Tech Solutions
 Working paper · September 2026
 
 ---
