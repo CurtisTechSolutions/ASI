@@ -7,8 +7,8 @@ gradient and stacking those gradients into a connected volume.
 Directory: `MultiGradientNN/` (this directory).
 
 This document is the contract the implementation will be written against.
-It is **concept stage**: sections 1–3 are settled, section 4 lists the decisions
-that are still open. Nothing in section 4 has been chosen — where this document
+It is **concept stage**: sections 1–4 are settled, section 5 lists the decisions
+that are still open. Nothing in section 5 has been chosen — where this document
 has to name something to keep the notation usable, it says so explicitly.
 
 ---
@@ -22,6 +22,8 @@ has to name something to keep the notation usable, it says so explicitly.
 | Multiple gradients (multiple layers) | `L` gradients, so `L` planes, one per layer — rather than every layer sharing one surface. |
 | This adds another dimension | The planes stack: `G` is an `L × m × n` volume. The stack index `k` is a third axis, and descent moves *through* it as well as across each plane. |
 | Each layer directly connected to each other vertically | All-to-all along `k`: every layer is one hop from every other, `L(L-1)/2` vertical connection sets, each with its own weights. |
+| The cross-layer step moves through the stack via the vertical weights | `V[k, k']` is the medium the step travels through, not a static coupling sitting between the planes. |
+| Layers are accessed based on depth perception | At `(i, j)`, the column down the `k` axis holds one depth per plane; reading those depths is what selects the layer to access. |
 
 ---
 
@@ -49,7 +51,7 @@ through the stack).
 toward lower depth, by the usual step.
 
 **Vertical descent** is the new part. It moves along `k` — between planes — rather
-than across any single plane. Section 4.2 is where that step gets defined.
+than across any single plane. Section 4 defines that step.
 
 The two are not the same operation. A single gradient answers *which way is
 downhill from here*; the stack must also answer *which layer is the right one to
@@ -88,60 +90,117 @@ choices still to be made:
 
 ---
 
-## 4. Open decisions
+## 4. The cross-layer step (settled)
+
+The operation that moves along the vertical axis. Two statements fix it.
+
+**It travels via the vertical weights.** `V[k, k']` is not a static coupling
+sitting between the planes; it is the medium the step moves through. Because
+every layer is one hop from every other (section 3), the step reaches any plane
+from any other directly, and `V[k, k']` is what it travels along to get there.
+
+**Layers are accessed by depth perception.** Which layer the step reaches is
+decided by perceiving depth through the stack. At a position `(i, j)`, the column
+running down the `k` axis holds one depth per plane; reading those depths is what
+selects the layer to access.
+
+The two halves compose: **depth perception chooses the layer, the vertical weights
+carry the step there.** Selection and transport are separate mechanisms doing
+separate jobs, and neither substitutes for the other.
+
+Four consequences follow.
+
+1. **The access rule presupposes columns.** Perceiving depth "through the stack"
+   is only defined if there is a column to look down — a fixed `(i, j)` with one
+   depth per plane. This is independent evidence for the column-wise reading in
+   5.1, which until now rested only on the word "vertical".
+
+2. **`V[k, k']` carries two jobs at once.** Section 3 made it the learned
+   separation between two layers; this section makes it the medium the step
+   travels through. They are the same object, so a layer that has learned to be
+   close is by that fact easier to reach. The metric and the transport are one.
+
+3. **The descent shapes its own path.** The step travels via `V`, and `V` is
+   itself learned (5.5). The route is therefore modified by the traffic on it.
+   This is the design's most powerful property and its least stable one: the
+   network can learn its own optimisation path, and it can also reinforce a path
+   until nothing else is reachable. Whatever rule 5.5 settles on has to be read
+   with this in mind.
+
+4. **Depth is doing double duty.** `G_k[i, j]` is the weight being learned
+   (section 2) and also the quantity perception reads to choose a layer. Changing
+   a weight therefore changes which layers are reachable from it.
+
+---
+
+## 5. Open decisions
 
 None of these are settled. They are written as decisions with their trade-offs
 rather than left as questions, so each can be closed by picking a branch.
 
-### 4.1 What `V[k, k']` connects
+### 5.1 What `V[k, k']` connects
 
 "Vertically" is read geometrically here — along `k`, perpendicular to the planes.
-Two readings remain:
+Two readings remain, though consequence 1 of section 4 now favours the first:
 
 - **Column-wise.** `G_k[i, j]` connects to `G_k'[i, j]`: the same `(i, j)`
   position through the stack, so each position owns a column of `L` cells,
   densely connected within the column. `V[k, k']` is then one weight per
   position, `m x n` per connection set. This is the literal reading of
-  "vertical".
+  "vertical", and the one depth perception needs.
 - **Plane-wise.** Every cell of plane `k` connects to every cell of plane `k'`.
   `V[k, k']` is then `(m x n) x (m x n)`, which at any realistic width is far
   larger than the network it is attached to.
 
-Column-wise is the assumed reading below. It carries a constraint worth naming
-before it bites: **columns only line up if the planes share a shape.** A
-conventional network is ragged (`784 -> 128 -> 10`), so either the planes are
-held to a common `m x n`, or a rule is needed for connecting positions that
-exist on one plane and not another.
+Column-wise is the assumed reading. It carries a constraint worth naming before
+it bites: **columns only line up if the planes share a shape.** A conventional
+network is ragged (`784 -> 128 -> 10`), so either the planes are held to a common
+`m x n`, or a rule is needed for connecting positions that exist on one plane and
+not another.
 
-### 4.2 The cross-layer step
+### 5.2 What depth perception computes
 
-What it means to move along the vertical axis in one update. The horizontal step
-is the conventional one; this is the operation that has no standard counterpart,
-and it is the centre of the design.
+Section 4 settles that layers are accessed by perceiving depth down the column.
+What that perception *is* remains open, along two axes:
 
-### 4.3 Scheduling the two descents
+- **Absolute or relative.** Depth perception in vision is comparative — it judges
+  distance from the disparity between views, never from one absolute reading. If
+  the analogy is meant to hold, the rule compares depths across the column rather
+  than reading any single plane's depth on its own. The two give different
+  answers as soon as a whole column shifts by a constant.
+- **Hard or soft.** Whether perception selects exactly one layer to access, or
+  ranks all of them and accesses them in proportion. Hard selection makes the
+  step discrete and cheap; soft access keeps it differentiable.
+
+### 5.3 What travels once a layer is accessed
+
+Perception picks the layer and `V[k, k']` carries the step, but what is carried
+is not yet fixed — the depth itself, its local slope, or something derived from
+the accessed plane.
+
+### 5.4 Scheduling the two descents
 
 Whether the horizontal and vertical steps alternate, run simultaneously, or run
 at different rates — and whether the vertical step is taken every batch, every
 epoch, or on a schedule of its own.
 
-### 4.4 Training the vertical weights
+### 5.5 Training the vertical weights
 
 `V[k, k']` is not part of any single plane's surface, so the horizontal rule does
 not obviously apply to it. Either the same rule is extended to cover it, or the
-vertical weights get a rule of their own.
+vertical weights get a rule of their own. Consequence 3 of section 4 makes this
+the decision the stability of the whole scheme rests on.
 
-### 4.5 What each layer's gradient is *of*
+### 5.6 What each layer's gradient is *of*
 
 Conventionally every layer descends one shared scalar loss, and the gradient is a
 separate object derived from it. Here the gradient *is* the plane and the depth on
 it is the weight, so the array descended and the array learned are the same one.
 
 What stays open is what drives that descent: per-layer losses, or one loss read
-differently per layer. Which it is determines whether the vertical connections
-carry gradient, activation, or both.
+differently per layer.
 
-### 4.6 Tooling
+### 5.7 Tooling
 
 `RadixCyclicNN` is deliberately standard-library only. Traditional backpropagation
 over an `L x m x n` volume is the case where `numpy` earns its place. Whether this
@@ -150,9 +209,9 @@ the repository's conventions, not just this directory.
 
 ---
 
-## 5. Package layout (provisional)
+## 6. Package layout (provisional)
 
-Depends on 4.6; the shape below assumes a Python package in the style of
+Depends on 5.7; the shape below assumes a Python package in the style of
 `radixnet`, with the package name still to be confirmed.
 
 ```
@@ -164,11 +223,13 @@ MultiGradientNN/
     __init__.py             exports MultiGradientNet, TrainConfig, __version__
     volume.py               the L x m x n volume: the planes, their columns, indexing
     vertical.py             V[k, k'] - the dense vertical connections (section 3)
-    descent.py              the horizontal step, the vertical step (4.2), the schedule (4.3)
+    perception.py           depth perception down a column: which layer is accessed (section 4)
+    descent.py              the horizontal step, the cross-layer step (section 4), the schedule (5.4)
     model.py                MultiGradientNet - forward, backward, train, predict
     cli.py                  argparse CLI
   tests/
     test_volume.py          geometry and indexing invariants
     test_vertical.py        all-to-all connectivity, L(L-1)/2 sets, one-hop reachability
+    test_perception.py      depth perception selects a layer from a column
     test_descent.py         the two steps and their scheduling
 ```
