@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .backend import Backend, get_backend
+from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
@@ -206,6 +207,51 @@ def _resolve_config(config: TrainConfig | None, overrides: dict) -> TrainConfig:
     return cfg
 
 
+
+META_COUNTERS = ("epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes", "path_inversions")
+"""Lifetime counters of :attr:`GraphModel.meta` that wrap: each keeps its resets in ``<name>_resets``."""
+
+
+def meta_add(meta: dict, key: str, delta: int) -> int:
+    """Add ``delta`` to a lifetime counter, wrapping it like every other counter; returns the new reading.
+
+    The counter is stored as the two JSON numbers a cyclic counter needs:
+    ``meta[key]`` - back to 0 whenever it reaches
+    :data:`~radixnet.counter.COUNTER_LIMIT` - and ``meta[key + "_resets"]``,
+    how often that happened (see :mod:`radixnet.counter`).
+    """
+    counter = CyclicCounter.from_pair(meta.get(key, 0), meta.get(f"{key}_resets", 0)).bumped(delta)
+    meta[key], meta[f"{key}_resets"] = counter.to_pair()
+    return counter.value
+
+
+def meta_counter(meta: dict, key: str) -> CyclicCounter:
+    """One lifetime counter as a :class:`~radixnet.counter.CyclicCounter` reading."""
+    return CyclicCounter.from_pair(meta.get(key, 0), meta.get(f"{key}_resets", 0))
+
+
+def carry_meta(meta: dict) -> dict:
+    """Wrap every lifetime counter of ``meta`` in place - what a file loaded from disk goes through.
+
+    A file written before the counters were cyclic (or by hand) can carry a
+    plain integer over the limit; after this every counter reads as an
+    odometer, exactly as it would have if it had been counted here.
+    """
+    for key in META_COUNTERS:
+        if key in meta or f"{key}_resets" in meta:
+            meta[key], meta[f"{key}_resets"] = meta_counter(meta, key).to_pair()
+    return meta
+
+
+def meta_stats(meta: dict, *keys: str) -> dict:
+    """``{key: value, key + "_resets": resets}`` for the named lifetime counters - what :meth:`GraphModel.stats` reports."""
+    out: dict = {}
+    for key in keys:
+        counter = meta_counter(meta, key)
+        out[key], out[f"{key}_resets"] = counter.to_pair()
+    return out
+
+
 class GraphModel:
     """What every model kind shares: the graph, text encoding, prefix location, sampling, scoring, persistence.
 
@@ -230,14 +276,10 @@ class GraphModel:
 
     @staticmethod
     def _new_meta(seed: int) -> dict:
-        return {
-            "created": _utc_now(),
-            "seed": seed,
-            "epochs_total": 0,
-            "trained_chars": 0,
-            "trained_texts": 0,
-            "twonrl_runs": 0,
-        }
+        meta = {"created": _utc_now(), "seed": seed}
+        for key in ("epochs_total", "trained_chars", "trained_texts", "twonrl_runs"):
+            meta[key], meta[f"{key}_resets"] = 0, 0
+        return meta
 
     # -- the algorithm-specific part (implemented by every kind) -------------
 
@@ -356,12 +398,12 @@ class GraphModel:
 
     def _best_trigram(self, key: str) -> tuple[int, int] | None:
         """Most-visited ``(node, offset)`` holding a trigram that starts with ``key``."""
-        count = self.graph.count
+        count = self.graph.node_count
         best: tuple[int, int] | None = None
         best_rank: tuple[int, int, int] | None = None
         for t, (node, off) in self.graph.trigram_index.items():
             if t.startswith(key):
-                rank = (-count[node], node, off)
+                rank = (-count(node), node, off)
                 if best_rank is None or rank < best_rank:
                     best, best_rank = (node, off), rank
         return best
@@ -373,7 +415,7 @@ class GraphModel:
         best_count = -1
         for node in range(2, len(g.labels)):
             if g.alive[node] and g.labels[node].startswith(prefix):
-                c = g.count[node]
+                c = g.node_count(node)
                 if c > best_count:
                     best, best_count = node, c
         return best
@@ -717,8 +759,8 @@ class RadixNet(GraphModel):
         records: list[dict] = []
 
         transitions, observed_version = self._observe(texts, count=True)
-        meta["trained_texts"] += len(texts)
-        meta["trained_chars"] += sum(len(t) for t in texts)
+        meta_add(meta, "trained_texts", len(texts))
+        meta_add(meta, "trained_chars", sum(len(t) for t in texts))
         pending_merges = graph.compress() if cfg.auto_compress else 0
 
         parents_all: list[int] = []
@@ -758,8 +800,8 @@ class RadixNet(GraphModel):
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
             loss = loss_sum / n if n else 0.0
-            meta["epochs_total"] += 1
-            epoch = meta["epochs_total"]
+            graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
+            epoch = meta_add(meta, "epochs_total", 1)
             record = {
                 "epoch": epoch,
                 "loss": loss,
@@ -897,7 +939,7 @@ class RadixNet(GraphModel):
             for n in best[1]:
                 chosen[n] = max(chosen.get(n, 0.0), amount)
         flipped = self.graph.flip_nodes(chosen, mode)
-        self.meta["path_inversions"] = self.meta.get("path_inversions", 0) + flipped
+        meta_add(self.meta, "path_inversions", flipped)
         applied = [v for v in values if v > 0]
         return {
             "texts": len(texts), "flipped": flipped, "unit": "nodes", "mode": mode,
@@ -975,10 +1017,10 @@ class RadixNet(GraphModel):
                 good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, progress=progress,
                 checkpoint_manager=checkpoint_manager, stop_event=stop_event, phase="positive", **overrides,
             )
-        self.meta["twonrl_runs"] += 1
+        runs = meta_add(self.meta, "twonrl_runs", 1)
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)
-            checkpoint_manager.save(self, self.meta["twonrl_runs"], "2nrl", last)
+            checkpoint_manager.save(self, runs, "2nrl", last)
         return {"negative": negative, "positive": positive, "inverted": self.graph.inverted}
 
     def reward(
@@ -1030,10 +1072,7 @@ class RadixNet(GraphModel):
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,
-            "epochs_total": meta["epochs_total"],
-            "trained_chars": meta["trained_chars"],
-            "trained_texts": meta["trained_texts"],
-            "twonrl_runs": meta["twonrl_runs"],
+            **meta_stats(meta, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs"),
             "history_len": len(self.history),
             "last_loss": self.history[-1]["loss"] if self.history else None,
         }
@@ -1066,7 +1105,7 @@ class RadixNet(GraphModel):
         model.history = [dict(r) for r in d.get("history", [])]
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
-        model.meta = meta
+        model.meta = carry_meta(meta)
         return model
 
 

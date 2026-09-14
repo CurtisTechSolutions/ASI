@@ -319,7 +319,7 @@ func (s *Service) twoNRL(bad, good []string, negEpochs, posEpochs int, strength 
 	if err := s.phase(good, posEpochs, true, math.Abs(strength), "positive", progress, stop); err != nil {
 		return err
 	}
-	s.model.Meta["twonrl_runs"] = float64(s.model.MetaInt("twonrl_runs") + 1)
+	s.model.MetaAddInt("twonrl_runs", 1)
 	return nil
 }
 
@@ -681,8 +681,9 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	if limit < len(real) {
 		sorted := append([]int(nil), real...)
 		sort.Slice(sorted, func(a, b int) bool {
-			if g.Count[sorted[a]] != g.Count[sorted[b]] {
-				return g.Count[sorted[a]] > g.Count[sorted[b]]
+			ca, cb := g.NodeCount(sorted[a]), g.NodeCount(sorted[b])
+			if ca != cb {
+				return cb.Less(ca)
 			}
 			return sorted[a] < sorted[b]
 		})
@@ -696,7 +697,8 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	}
 	nodes := make([]map[string]any, 0, len(ids))
 	for _, i := range ids {
-		nodes = append(nodes, map[string]any{"id": i, "label": g.Labels[i], "count": g.Count[i], "activation": 1.0, "z": 0.0, "a": 0.0, "b": 1.0 / 3.0, "h": 0.0, "k": 1.0})
+		nodes = append(nodes, map[string]any{"id": i, "label": g.Labels[i], "count": g.Count[i],
+			"count_resets": g.CountResets[i], "activation": 1.0, "z": 0.0, "a": 0.0, "b": 1.0 / 3.0, "h": 0.0, "k": 1.0})
 	}
 	edges := []map[string]any{}
 	for _, p := range ids {
@@ -711,7 +713,8 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 			sh := shares[cc.Edge]
 			edges = append(edges, map[string]any{
 				"source": p, "target": cc.Child, "weight": g.EdgeW[cc.Edge], "count": g.EdgeCount[cc.Edge],
-				"prob": math.Exp(-cc.Cost), "cost": cc.Cost, "reward": g.EdgeReward[cc.Edge],
+				"count_resets": g.EdgeCountResets[cc.Edge],
+				"prob":         math.Exp(-cc.Cost), "cost": cc.Cost, "reward": g.EdgeReward[cc.Edge],
 				"share": sh.All, "recent_share": sh.Recent, "recent_count": g.WindowEdgeCount[cc.Edge],
 			})
 		}
@@ -724,7 +727,8 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	})
 	return map[string]any{
 		"nodes": nodes, "edges": edges, "limit": limit, "total_nodes": g.NumNodes(), "total_edges": g.NumEdges(),
-		"total_traversals": g.TotalTraversals, "window_traversals": g.WindowTraversals(), "window": g.WindowSize,
+		"total_traversals": g.TotalTraversals.Value, "total_traversals_resets": g.TotalTraversals.Resets,
+		"window_traversals": g.WindowTraversals(), "window": g.WindowSize,
 	}
 }
 

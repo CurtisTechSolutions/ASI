@@ -42,6 +42,7 @@ RadixCyclicNN/
     __main__.py             `python -m radixnet` -> cli.main()
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder
+    counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 24)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
@@ -137,19 +138,27 @@ class RadixCyclicGraph:
     labels: list[str]            # labels[i] = label of node i; labels[0] = "<s>", labels[1] = "</s>"
     z: list[float]               # node state / pre-activation, learnable
     a, b, h, k: list[float]      # per-node activation params (defaults -1, 1/3, 0, 0)
-    count: list[int]             # number of times the node was visited in training
+    count: list[int]             # times the node was visited in training - a cyclic counter (section 24)
+    count_resets: dict[int, int] # node id -> how often its counter wrapped (absent = never; usually empty)
     alive: list[bool]            # False for nodes removed by merge (ids are never reused until compaction on save)
     children: list[dict[int, int]]  # children[p][c] = edge id e
     parents:  list[dict[int, int]]  # parents[c][p]  = edge id e
     edge_w: list[float]          # edge weights (index = edge id)
-    edge_count: list[int]
+    edge_count: list[int]        # cyclic counters, like count
+    edge_count_resets: dict[int, int]
     edge_alive: list[bool]       # tombstones for removed edges
     trigram_index: dict[str, tuple[int, int]]   # trigram -> (node_id, offset); offset = index of the trigram inside the label
     rng: random.Random           # seeded
     inverted: bool = False
-    version: int                 # bumped on ANY structural or parameter change (cost caches key on it)
-    structure_version: int       # bumped only on node/edge creation, removal, split, merge
+    traversals: CyclicCounter    # every increment made to the counters above; bounds each of them (section 24)
+    version: CyclicCounter       # bumped on ANY structural or parameter change (cost caches key on it)
+    structure_version: CyclicCounter  # bumped only on node/edge creation, removal, split, merge
 ```
+
+Every integer above that only ever grows is a **cyclic counter**: it goes back
+to 0 at `COUNTER_LIMIT` and the wrap is counted in the matching `_resets`
+(section 24). `node_count(i)` / `edge_traversals(e)` give the exact totals and
+`carry_counters()` does the wrapping.
 
 Node id 0 is START, 1 is END; both always exist, are never merged or split, and
 their labels are not in `trigram_index`. `f_START` and `f_END` are ordinary
@@ -194,12 +203,13 @@ def split(self, node_id: int, i: int) -> tuple[int, int]
     # Split node between trigram i-1 and trigram i  (1 <= i <= len(label) - 3).
     # A keeps id `node_id` with label[:i+2]; B is a new node with label[i:].
     # A's out-edges move to B (edge ids preserved, parents[c] re-pointed); A gets ONE new edge A->B
-    # (initialised like a new edge, edge_count = count[node_id]). B copies A's z/a/b/h/k and count.
+    # (initialised like a new edge, edge_count = count[node_id]). B copies A's z/a/b/h/k, count and its resets.
     # trigram_index updated. Returns (A, B). Bad preconditions -> ValueError.
 
 def merge_child(self, p: int) -> bool
     # Merge p's single child c into p when: p, c not in (START, END); p != c; len(children[p]) == 1;
-    # len(parents[c]) == 1. New label = labels[p] + labels[c][2:]. count[p] = max(count[p], count[c]).
+    # len(parents[c]) == 1. New label = labels[p] + labels[c][2:]. count[p] = max(count[p], count[c]),
+    # compared as the EXACT counts (node_count) and taking the resets along.
     # c's out-edges move to p (edge ids preserved). If c had a self-loop c->c it becomes p->p.
     # Edge p->c is tombstoned; c is tombstoned (alive False, dicts emptied); trigram_index entries
     # of c re-pointed to p with offset shifted by len(labels[p]) - 2 (computed BEFORE relabel).
@@ -220,9 +230,20 @@ def apply_csr_weights(self, csr: CSR, weights: list[float]) -> None   # write ba
 def node_params(self) -> NodeParams  # copies of z, a, b, h, k in node-id order
 def apply_node_params(self, params: NodeParams) -> None             # version += 1
 
+def carry_counters(self, force: bool = False) -> int
+    # The ONLY place the visit counters wrap: every counter that reached COUNTER_LIMIT goes back to 0 and
+    # its reset is counted. Called at the end of every epoch and before a save; skipped after one comparison
+    # while `traversals` (which bounds every counter) has not wrapped. Returns how many wrapped. Section 24.
+
+def node_count(self, i: int) -> int ; def edge_traversals(self, e: int) -> int
+    # The exact counts across every reset: resets * COUNTER_LIMIT + the reading.
+
 def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> RadixCyclicGraph
-    # JSON-serialisable. Dead nodes/edges are compacted on save (ids remapped), START=0/END=1 preserved.
-    # Includes rng state (random.Random.getstate() converted to lists) so training is reproducible after load.
+    # JSON-serialisable, format_version 2. Dead nodes/edges are compacted on save (ids remapped),
+    # START=0/END=1 preserved. Includes rng state (random.Random.getstate() converted to lists) so training
+    # is reproducible after load, `version` / `structure_version` / `traversals` with their `*_resets`, and
+    # `nodes.count_resets` / `edges.count_resets` - dense arrays written only once something has wrapped.
+    # A format 1 file loads with all resets 0 and its counts carried on the way in.
 ```
 
 ### 5.3 Invariants (tests assert these after random sequences of observe/split/compress)
@@ -234,6 +255,7 @@ def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> RadixCyclicGraph
 5. `children`/`parents` are mirror images; every alive edge appears in both; dead nodes have empty dicts.
 6. After `compress()`, no unary chain remains (no non-sentinel p with exactly one child c != p, c non-sentinel, where c has exactly one parent).
 7. After `observe_sequence(encode(t))`, walking `t`'s trigrams through the index and decoding gives `t` (structure round trip), before and after `compress()`.
+8. Every counter is non-negative, every stored reset count is in `1..COUNTER_LIMIT - 1` and belongs to a real id; after `carry_counters()` every reading is below `COUNTER_LIMIT`.
 
 ---
 
@@ -397,10 +419,11 @@ class RadixNet:
         # phase 2: invert()
         # phase 3: train(good, epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10) -> "positive" records (phase="positive")
         # records passed to progress carry "phase". returns {"negative": [...], "positive": [...], "inverted": graph.inverted}
-        # meta["twonrl_runs"] += 1
+        # meta_add(meta, "twonrl_runs", 1)
 
     def stats(self) -> dict   # {"nodes","edges","trigrams","compression_ratio","inverted","backend","device",
                               #  "epochs_total","trained_chars","trained_texts","twonrl_runs","history_len","last_loss"}
+                              # every lifetime counter is reported with its "<name>_resets" as well (section 24)
 
     def save(self, path: str) -> None
         # JSON; gzip if path endswith ".gz"; {"format": "radixnet", "version": 1, "saved_at", "meta", "history",
@@ -585,7 +608,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
-* `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count, hover label).
+* `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any).
 * `ScorePanel.jsx` — score a text.
 
 Plain readable CSS, responsive (single column under 800px). No TypeScript.
@@ -604,6 +627,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
+* `test_counter.py` — the cyclic counters of section 24: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
 * `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 
 ---
@@ -779,7 +803,8 @@ call instead of spelling the rule out themselves.
 
 `CountRewardGraph(RadixCyclicGraph)` keeps more per-edge lists next to `edge_w` / `edge_count`: `edge_reward` and
 `window_edge_count` (traversals inside a sliding window, a deque `_window` of the last `window` edge ids traversed
-anywhere in the graph, default 10 000), plus the global `total_traversals`. `observe_sequence(count=True)` is
+anywhere in the graph, default 10 000), plus the global `total_traversals` - a cyclic counter like every other
+(section 24); the window counts are bounded by `window` and so need no wrapping. `observe_sequence(count=True)` is
 overridden to `record_traversals` (all time, window, total) and recompute the weights. The weight is the *dual
 frequency function* (`edge_weight`): with `C_p` / `W_p` the all-time / windowed traversals leaving the parent over
 its `deg` children and `s = 0.5`, `R_all = (count + s) / (C_p + s * deg)`, `R_recent = (window_count + s) /
@@ -940,7 +965,8 @@ Python dict order decides the softmax summation order -, trigram index, `Split` 
 `ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`),
-`json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`).
+`json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`), `counter.go` (the
+cyclic counters of section 24, identical to `radixnet/counter.py`).
 
 Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
 
@@ -1017,3 +1043,96 @@ without `whole_file`, graph, save / load / reset, checkpoints in the Python layo
 and `tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `tests/test_api.py`, a
 model saved by the server loaded in Python with identical predictions, ZIP uploads, `split: paragraphs`, and the
 Python `CheckpointManager` reading the server's checkpoints).
+
+---
+
+## 24. Counter overflow (`counter.py`, `go/radixnet/counter.go`) — cyclic counters with a reset count
+
+Every number in the model that only ever counts up - traversals, node and edge
+visit counts, epochs, trained characters and texts, 2NRL runs, feedback passes,
+the version stamps - would eventually leave the range of whatever holds it:
+`int64` in the Go port, and long before that the 53-bit mantissa of the JSON
+number that carries it through a model file, the HTTP API and the frontend. So
+**no counter in the model is an unbounded integer.** Each one is a two-digit
+odometer in base `COUNTER_LIMIT`:
+
+```
+total = resets * COUNTER_LIMIT + value          with 0 <= value < COUNTER_LIMIT
+```
+
+The value counts up as before; the moment it reaches the limit it is **set back
+to 0** and `resets` - how often that happened - goes up by one. Nothing is lost:
+`total` is the exact number of events, `value` is what the odometer reads now,
+`resets` is how often it went round. Cycles are a feature here too.
+
+`COUNTER_LIMIT = 10 ** 15` because it is exactly representable as a `float64`
+(`< 2 ** 53`), so every counter survives a model file, a JSON response and a
+JavaScript `Number` unchanged; because it leaves four orders of magnitude of
+head room under `int64`, so a whole epoch of increments can land on a counter
+before the next carry without overflowing the Go port; and because it is a
+round decimal - one quadrillion events per turn. `resets` wraps at the same
+limit, so the pair itself cycles after `10 ** 30` events.
+
+```python
+COUNTER_LIMIT = 1_000_000_000_000_000
+
+def carry(value: int, resets: int = 0) -> tuple[int, int]   # whole turns move from value into resets
+def total(value: int, resets: int = 0) -> int               # the exact number of events
+def as_float(value: int, resets: int = 0) -> float          # float(resets) * COUNTER_LIMIT + float(value)
+def carry_series(values: list[int], resets: dict[int, int]) -> int   # wrap a parallel counter list in place
+
+class CyclicCounter:                 # one scalar odometer; immutable, so `counter += 1` rebinds
+    value: int ; resets: int         # compares and hashes as `total`, so version stamps stay exact
+    @property total ; def as_float() ; def bumped(n=1) ; def to_pair() ; @classmethod from_pair(value, resets=0)
+```
+
+Go mirrors it exactly (`CounterLimit`, `Carry`, `Counter{Value, Resets}` - a
+comparable struct, so a cached version stamp is still checked with `==` -,
+`CarrySeries`, `counterTotal`). Both compute the float total as
+`float(resets) * LIMIT + float(value)`, in that order, so the weights stay
+identical to the bit across the two implementations.
+
+**Wrapping never happens in a counting loop.** Hot loops add to a plain integer
+(the Go port from many goroutines, with plain or atomic increments); a *carry
+sweep* at a safe point moves whatever crossed the limit into the resets:
+
+* `RadixCyclicGraph.carry_counters(force=False)` / `(*Graph).CarryCounters(force)` —
+  the only place the visit counters wrap. Called at the end of every epoch and
+  before every save. `graph.traversals` counts every increment made and so
+  bounds each individual counter: while it has not wrapped, the sweep returns
+  after one comparison. `force` sweeps anyway (used when loading a file).
+* `meta_add(meta, key, delta)` (`(*Model).metaAddInt`) — the lifetime counters
+  of `model.meta`, each wrapping into `<key>_resets`.
+* `CyclicCounter` / `Counter` scalars (`total_traversals`, `traversals`,
+  `version`, `structure_version`) wrap as they are bumped; they are cheap.
+
+Per node / edge the reset counts live in a **sparse** map (`count_resets`,
+`edge_count_resets`), so the usual case - nothing ever came near the limit -
+costs one comparison per entry and stores nothing. `split` copies a node's
+resets to the new node and the new internal edge; `merge_child` keeps the
+larger of the two *exact* counts; every ranking by visits (`_best_trigram`,
+`_best_node_with_prefix`, the graph view) compares exact counts, never the bare
+readings.
+
+What crosses a boundary:
+
+| Where | Fields |
+|---|---|
+| model file (`format_version` 2) | `version` / `structure_version` / `traversals` and their `_resets`; `nodes.count_resets` and `edges.count_resets` (dense arrays, written only once something has wrapped); `weights.total_traversals_resets`; `meta.<counter>_resets` |
+| `GET /api/status`, `/api/model` | `epochs_total_resets`, `trained_chars_resets`, `trained_texts_resets`, `twonrl_runs_resets`, `feedback_passes_resets`, `total_traversals_resets` |
+| `GET /api/graph` | `count_resets` per node and per edge, `total_traversals_resets` |
+| frontend | `fmtCounter(value, resets)` renders `1,234 (+2 resets)`; `counterTotal(value, resets)` is what node radius / edge opacity scale on |
+
+A format 1 file (written before any of this) loads unchanged: its counts are
+plain integers, are carried on the way in, and `traversals` is seeded with their
+sum so the guard above stays correct. The float accumulators `rewards_total` /
+`penalties_total` are sums of real numbers, not counters, and are left alone.
+
+Tests: `tests/test_counter.py` (the odometer itself; counters wrapping mid-training
+without losing history; weights, shares and rankings identical to what unbounded
+integers would give; the save / load round trip; a format 1 file; the guard;
+the lifetime counters), `go/radixnet/counter_test.go` (the same in Go) and
+`tests/test_go_parity.py::test_a_wrapped_model_file_crosses_over_unchanged`
+(a wrapped file trained on by both sides, with identical counters, weights and
+predictions).
+

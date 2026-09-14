@@ -110,12 +110,16 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(model.history, [])
         for key in ("created", "seed", "epochs_total", "trained_chars", "trained_texts", "twonrl_runs"):
             self.assertIn(key, model.meta)
+        for key in ("epochs_total", "trained_chars", "trained_texts", "twonrl_runs"):
+            self.assertIn(f"{key}_resets", model.meta)  # every lifetime counter carries its reset count
         stats = model.stats()
         self.assertEqual(
             set(stats),
             {
                 "kind", "nodes", "edges", "trigrams", "compression_ratio", "inverted", "backend", "device",
-                "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "history_len", "last_loss",
+                "epochs_total", "epochs_total_resets", "trained_chars", "trained_chars_resets",
+                "trained_texts", "trained_texts_resets", "twonrl_runs", "twonrl_runs_resets",
+                "history_len", "last_loss",
             },
         )
         self.assertEqual((stats["nodes"], stats["edges"], stats["trigrams"]), (2, 0, 0))

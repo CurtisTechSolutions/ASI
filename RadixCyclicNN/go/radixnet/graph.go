@@ -27,8 +27,9 @@ const (
 )
 
 const (
-	graphFormat        = "radixnet-graph"
-	graphFormatVersion = 1
+	graphFormat = "radixnet-graph"
+	// 2 added the counter reset fields; version 1 files load with no resets
+	graphFormatVersion = 2
 )
 
 type loc struct{ node, off int }
@@ -90,13 +91,23 @@ type Graph struct {
 	EdgeAlive  []bool
 	EdgeParent []int
 
+	// Every visit count is a cyclic counter (counter.go): the slices above hold
+	// the odometer readings, these maps the reset counts of the ids that ever
+	// wrapped (absent = 0), and CarryCounters does the wrapping - never the
+	// counting loops, which stay plain or atomic increments.
+	CountResets     map[int]int64
+	EdgeCountResets map[int]int64
+	// Traversals counts every increment made to those counters and so bounds
+	// each of them: while it has not wrapped, none of them can have.
+	Traversals Counter
+
 	// the count / reward numbers
 	EdgeReward      []float64
 	WindowEdgeCount []int64
 	window          []int
 	windowHead      int
 	WindowSize      int
-	TotalTraversals int64
+	TotalTraversals Counter
 	CountScale      float64
 	RewardScale     float64
 	GlobalScale     float64
@@ -105,17 +116,17 @@ type Graph struct {
 	index    map[string]loc
 	Inverted bool
 
-	Version          int
-	StructureVersion int
+	Version          Counter
+	StructureVersion Counter
 	nAliveNodes      int
 	nAliveEdges      int
 
 	// lazy weights and costs
 	dirty            map[int]struct{}
 	dirtyAll         bool
-	weightsStructure int
+	weightsStructure Counter
 	edgeCost         []float64
-	costsVersion     int
+	costsVersion     Counter
 
 	// mu guards structural changes: splits / merges / new nodes and edges take
 	// the write lock, concurrent traces the read lock.
@@ -147,8 +158,10 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 		rng:              NewMT19937(seed),
 		index:            make(map[string]loc),
 		dirty:            make(map[int]struct{}),
-		weightsStructure: -1,
-		costsVersion:     -1,
+		CountResets:      map[int]int64{},
+		EdgeCountResets:  map[int]int64{},
+		weightsStructure: invalidStamp,
+		costsVersion:     invalidStamp,
 		WindowSize:       opts.Window,
 		CountScale:       opts.CountScale,
 		RewardScale:      opts.RewardScale,
@@ -156,34 +169,84 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 		WindowScale:      opts.WindowScale,
 		Workers:          Workers,
 	}
-	g.newNode(StartLabel, 0)
-	g.newNode(EndLabel, 0)
+	g.newNode(StartLabel, 0, 0)
+	g.newNode(EndLabel, 0, 0)
 	return g, nil
+}
+
+// -- counters ------------------------------------------------------------------
+
+// invalidStamp is a version stamp no real reading can equal, so a cache marked
+// with it is always stale.
+var invalidStamp = Counter{Value: -1}
+
+// setResets stores one reset count, keeping the map sparse (absent = never wrapped).
+func setResets(resets map[int]int64, key int, value int64) {
+	if value != 0 {
+		resets[key] = value
+	} else {
+		delete(resets, key)
+	}
+}
+
+// NodeCount is how often node i was visited, as an odometer reading.
+func (g *Graph) NodeCount(i int) Counter { return Counter{g.Count[i], g.CountResets[i]} }
+
+// EdgeTraversals is how often edge e was traversed, as an odometer reading.
+func (g *Graph) EdgeTraversals(e int) Counter { return Counter{g.EdgeCount[e], g.EdgeCountResets[e]} }
+
+// edgeTraversalsF is the exact traversal count of an edge, as the float the
+// weight function sums (the Python implementation computes it the same way).
+func (g *Graph) edgeTraversalsF(e int) float64 {
+	return counterTotal(g.EdgeCount[e], g.EdgeCountResets, e)
+}
+
+// CarryCounters sets every counter that reached CounterLimit back to 0,
+// counting the reset; returns how many wrapped.
+//
+// This is the only place the visit counters wrap, so the counting loops stay
+// plain (or atomic) increments and several goroutines can count into a raw
+// int64 at once.  Call it at a safe point - the end of an epoch, before a save
+// - while nothing else is touching the graph.  While the graph has not seen
+// CounterLimit increments no counter can have reached the limit (Traversals
+// counts them all and so bounds every single one), so the sweep is skipped
+// after one comparison; force runs it anyway.
+func (g *Graph) CarryCounters(force bool) int {
+	if !force && g.Traversals.Resets == 0 {
+		return 0
+	}
+	return CarrySeries(g.Count, g.CountResets) + CarrySeries(g.EdgeCount, g.EdgeCountResets)
 }
 
 // -- construction --------------------------------------------------------------
 
-func (g *Graph) newNode(label string, count int64) int {
+func (g *Graph) newNode(label string, count, countResets int64) int {
 	nid := len(g.Labels)
 	g.Labels = append(g.Labels, label)
 	g.labelLen = append(g.labelLen, runeLen(label))
 	g.Count = append(g.Count, count)
+	if countResets != 0 {
+		g.CountResets[nid] = countResets
+	}
 	g.Alive = append(g.Alive, true)
 	g.children = append(g.children, adjacency{})
 	g.parents = append(g.parents, nil)
 	g.nAliveNodes++
-	g.Version++
-	g.StructureVersion++
+	g.Version.Add(1)
+	g.StructureVersion.Add(1)
 	return nid
 }
 
-func (g *Graph) newEdge(p, c int, count int64) int {
+func (g *Graph) newEdge(p, c int, count, countResets int64) int {
 	// the sine network draws a weight here; the count model recomputes the
 	// weight but consumes the same random number
 	g.rng.Uniform(WLow, WHigh)
 	e := len(g.EdgeW)
 	g.EdgeW = append(g.EdgeW, 0.0)
 	g.EdgeCount = append(g.EdgeCount, count)
+	if countResets != 0 {
+		g.EdgeCountResets[e] = countResets
+	}
 	g.EdgeAlive = append(g.EdgeAlive, true)
 	g.EdgeParent = append(g.EdgeParent, p)
 	g.EdgeReward = append(g.EdgeReward, 0.0)
@@ -194,8 +257,8 @@ func (g *Graph) newEdge(p, c int, count int64) int {
 	}
 	g.parents[c][p] = e
 	g.nAliveEdges++
-	g.Version++
-	g.StructureVersion++
+	g.Version.Add(1)
+	g.StructureVersion.Add(1)
 	g.dirty[p] = struct{}{}
 	return e
 }
@@ -204,7 +267,7 @@ func (g *Graph) createTrigramNode(trigram string) int {
 	if runeLen(trigram) != Window {
 		panic(fmt.Sprintf("expected a %d-character trigram, got %q", Window, trigram))
 	}
-	nid := g.newNode(trigram, 0)
+	nid := g.newNode(trigram, 0, 0)
 	g.index[trigram] = loc{nid, 0}
 	return nid
 }
@@ -292,7 +355,8 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 		return 0, 0, fmt.Errorf("split index %d out of range 1..%d for label %q", i, length-Window, string(label))
 	}
 	a := node
-	b := g.newNode(string(label[i:]), g.Count[a])
+	aResets := g.CountResets[a]
+	b := g.newNode(string(label[i:]), g.Count[a], aResets)
 	chA := &g.children[a]
 	chB := &g.children[b]
 	for _, c := range chA.order {
@@ -304,7 +368,7 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 		g.EdgeParent[e] = b
 	}
 	chA.clear()
-	g.newEdge(a, b, g.Count[a])
+	g.newEdge(a, b, g.Count[a], aResets)
 	for j := i; j < length-Overlap; j++ {
 		g.index[string(label[j:j+Window])] = loc{b, j - i}
 	}
@@ -367,13 +431,14 @@ func (g *Graph) MergeChild(p int) bool {
 	g.labelLen[p] = len(lp) + len(lc) - Overlap
 	g.Labels[c] = ""
 	g.labelLen[c] = 0
-	if g.Count[c] > g.Count[p] {
+	if g.NodeCount(p).Less(g.NodeCount(c)) {
 		g.Count[p] = g.Count[c]
+		setResets(g.CountResets, p, g.CountResets[c])
 	}
 	g.Alive[c] = false
 	g.nAliveNodes--
-	g.Version++
-	g.StructureVersion++
+	g.Version.Add(1)
+	g.StructureVersion.Add(1)
 	g.dirtyAll = true
 	return true
 }
@@ -435,7 +500,7 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 	}
 	e, ok := g.children[Start].get(px)
 	if !ok {
-		e = g.newEdge(Start, px, 0)
+		e = g.newEdge(Start, px, 0, 0)
 	}
 	transitions = append(transitions, Transition{Start, e})
 	if count {
@@ -480,7 +545,7 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 		}
 		e, ok := g.children[px].get(py)
 		if !ok {
-			e = g.newEdge(px, py, 0)
+			e = g.newEdge(px, py, 0, 0)
 		}
 		transitions = append(transitions, Transition{px, e})
 		if count {
@@ -497,12 +562,15 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 	}
 	e, ok = g.children[px].get(End)
 	if !ok {
-		e = g.newEdge(px, End, 0)
+		e = g.newEdge(px, End, 0, 0)
 	}
 	transitions = append(transitions, Transition{px, e})
 	if count {
 		g.Count[End]++
 		g.EdgeCount[e]++
+		// every transition bumped one node counter and one edge counter, plus Start's:
+		// the total bounds each of them and so decides when CarryCounters has work
+		g.Traversals.Add(int64(2*len(transitions) + 1))
 	}
 	if didSplit {
 		traced, _, ok := g.trace(trigrams)

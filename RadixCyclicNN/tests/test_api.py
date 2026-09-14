@@ -44,8 +44,8 @@ PREDICT_KEYS = {
     "prefix", "kind", "continuation", "full_text", "cost", "probability", "step_costs", "path", "node_ids", "expanded",
     "reached_end",
 }
-NODE_KEYS = {"id", "label", "count", "activation", "z", "a", "b", "h", "k"}
-EDGE_KEYS = {"source", "target", "weight", "count", "prob", "cost"}
+NODE_KEYS = {"id", "label", "count", "count_resets", "activation", "z", "a", "b", "h", "k"}
+EDGE_KEYS = {"source", "target", "weight", "count", "count_resets", "prob", "cost"}
 
 
 class Client:

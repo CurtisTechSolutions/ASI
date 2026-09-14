@@ -53,7 +53,7 @@ func (g *Graph) RecordTraversals(edges []int) int {
 		g.window = append(g.window[:0:0], g.window[g.windowHead:]...)
 		g.windowHead = 0
 	}
-	g.TotalTraversals += int64(len(edges))
+	g.TotalTraversals.Add(int64(len(edges)))
 	return len(edges)
 }
 
@@ -125,18 +125,21 @@ type Share struct {
 // Shares lists the shares of p's edges.
 func (g *Graph) Shares(p int) []Share {
 	adj := &g.children[p]
-	var total, recent int64
-	for _, c := range adj.order {
+	counts := make([]float64, len(adj.order))
+	var total float64
+	var recent int64
+	for i, c := range adj.order {
 		e := adj.edge[c]
-		total += atomic.LoadInt64(&g.EdgeCount[e])
+		counts[i] = counterTotal(atomic.LoadInt64(&g.EdgeCount[e]), g.EdgeCountResets, e)
+		total += counts[i]
 		recent += g.WindowEdgeCount[e]
 	}
 	out := make([]Share, 0, len(adj.order))
-	for _, c := range adj.order {
+	for i, c := range adj.order {
 		e := adj.edge[c]
 		s := Share{Child: c, Edge: e}
 		if total > 0 {
-			s.All = float64(atomic.LoadInt64(&g.EdgeCount[e])) / float64(total)
+			s.All = counts[i] / total
 		}
 		if recent > 0 {
 			s.Recent = float64(g.WindowEdgeCount[e]) / float64(recent)
@@ -152,16 +155,19 @@ func (g *Graph) recomputeRow(p int) {
 	if adj.size() == 0 || !g.Alive[p] {
 		return
 	}
-	var total, recent int64
-	for _, c := range adj.order {
+	counts := make([]float64, len(adj.order))
+	var total float64
+	var recent int64
+	for i, c := range adj.order {
 		e := adj.edge[c]
-		total += g.EdgeCount[e]
+		counts[i] = g.edgeTraversalsF(e)
+		total += counts[i] // an explicit left-to-right sum, as in the Python implementation
 		recent += g.WindowEdgeCount[e]
 	}
 	degree := adj.size()
-	for _, c := range adj.order {
+	for i, c := range adj.order {
 		e := adj.edge[c]
-		g.EdgeW[e] = g.EdgeWeight(float64(g.EdgeCount[e]), g.EdgeReward[e], float64(total), degree, float64(g.WindowEdgeCount[e]), float64(recent))
+		g.EdgeW[e] = g.EdgeWeight(counts[i], g.EdgeReward[e], total, degree, float64(g.WindowEdgeCount[e]), float64(recent))
 	}
 }
 
@@ -186,7 +192,7 @@ func (g *Graph) RecomputeWeights() {
 	}
 	g.dirtyAll = false
 	g.weightsStructure = g.StructureVersion
-	g.Version++
+	g.Version.Add(1)
 }
 
 // flushWeights brings the weights up to date: every row after a structural
@@ -209,7 +215,7 @@ func (g *Graph) flushWeights() {
 		}
 		delete(g.dirty, p)
 	}
-	g.Version++
+	g.Version.Add(1)
 }
 
 // WeightsStale reports whether Prepare would change anything.

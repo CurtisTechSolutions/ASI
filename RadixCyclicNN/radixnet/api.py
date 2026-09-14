@@ -1049,15 +1049,16 @@ def _path_dict(result: PathResult) -> dict:
 def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     """Top-``limit`` alive nodes by visit count (ties: lowest id) plus START/END, and the edges among them."""
     alive = graph.alive
-    count = graph.count
+    count = graph.node_count
     real = [i for i in range(2, len(graph.labels)) if alive[i]]
-    top = heapq.nsmallest(limit, real, key=lambda i: (-count[i], i)) if limit < len(real) else real
+    top = heapq.nsmallest(limit, real, key=lambda i: (-count(i), i)) if limit < len(real) else real
     ids = [START, END, *sorted(top)]
     chosen = set(ids)
     labels, z, a, b, h, k = graph.labels, graph.z, graph.a, graph.b, graph.h, graph.k
     nodes = [
         {
-            "id": i, "label": labels[i], "count": count[i], "activation": graph.activation_of(i),
+            "id": i, "label": labels[i], "count": graph.count[i], "count_resets": graph.count_resets.get(i, 0),
+            "activation": graph.activation_of(i),
             "z": z[i], "a": a[i], "b": b[i], "h": h[i], "k": k[i],
         }
         for i in ids
@@ -1073,6 +1074,7 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
             if c in chosen:
                 edge = {
                     "source": p, "target": c, "weight": edge_w[e], "count": edge_count[e],
+                    "count_resets": graph.edge_count_resets.get(e, 0),
                     "prob": math.exp(-cost), "cost": cost,
                 }
                 if edge_reward is not None:
@@ -1086,7 +1088,8 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
         "total_nodes": graph.num_nodes(), "total_edges": graph.num_edges(),
     }
     if edge_reward is not None:
-        view["total_traversals"] = graph.total_traversals
+        view["total_traversals"] = graph.total_traversals.value
+        view["total_traversals_resets"] = graph.total_traversals.resets
         view["window_traversals"] = graph.window_traversals
         view["window"] = graph.window
     return view

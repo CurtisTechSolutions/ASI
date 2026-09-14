@@ -17,6 +17,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from radixnet.counter import COUNTER_LIMIT  # noqa: E402
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.model import load_model  # noqa: E402
 
@@ -171,6 +172,44 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(a["weights"]["window_events"], b["weights"]["window_events"])
         self.assertEqual(a["weights"]["total_traversals"], b["weights"]["total_traversals"])
         assert_close(self, a["edges"]["w"], b["edges"]["w"], 1e-12)
+
+    def test_a_wrapped_model_file_crosses_over_unchanged(self):
+        """Counters wrap at COUNTER_LIMIT; both sides must read the other's reset counts and agree."""
+        py_path = os.path.join(TMP.name, "wrap_py.count.json")
+        go_path = os.path.join(TMP.name, "wrap_go.count.json")
+        py("--kind", "count", "--seed", 4, "train", "--data", CORPUS, "--epochs", 1, model=py_path)
+
+        model = load_model(py_path)  # wind every counter to one event short of its reset
+        graph = model.graph
+        step = COUNTER_LIMIT - 1
+        graph.count = [c + step for c in graph.count]
+        graph.edge_count = [c + step for c in graph.edge_count]
+        graph.traversals += step
+        graph.total_traversals += step
+        with open(py_path, "w", encoding="utf-8") as fh:
+            json.dump(model.to_dict(), fh)
+        shutil.copy(py_path, go_path)
+
+        py("train", "--data", CORPUS, "--epochs", 1, model=py_path)   # the epoch takes every counter round
+        go("train", "--data", CORPUS, "--epochs", 1, model=go_path)
+        a, b = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertTrue(a["nodes"]["count_resets"], "Python recorded no reset")
+        self.assertTrue(b["nodes"]["count_resets"], "Go recorded no reset")
+        for block, key in (("nodes", "count"), ("nodes", "count_resets"), ("edges", "count"), ("edges", "count_resets")):
+            self.assertEqual(a[block][key], b[block][key], f"{block}.{key}")
+        for key in ("traversals", "traversals_resets"):
+            self.assertEqual(a[key], b[key], key)
+        for key in ("total_traversals", "total_traversals_resets", "window_events"):
+            self.assertEqual(a["weights"][key], b["weights"][key], key)
+        self.assertEqual(a["weights"]["total_traversals_resets"], 1)
+        assert_close(self, a["edges"]["w"], b["edges"]["w"], 1e-12)
+        # and the wrapped counts still predict the same continuations on both sides
+        for prefix in ("the cat", "the dog"):
+            with self.subTest(prefix=prefix):
+                x = py("predict", "--prefix", prefix, "--length", 8, "--k", 3, model=py_path)
+                y = go("predict", "--prefix", prefix, "--length", 8, "--k", 3, model=go_path)
+                self.assertEqual(x["continuation"], y["continuation"])
+                self.assertLessEqual(abs(x["cost"] - y["cost"]), 1e-9)
 
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")

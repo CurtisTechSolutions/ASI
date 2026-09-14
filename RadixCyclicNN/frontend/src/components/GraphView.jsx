@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
-import { asArray, fmtInt, fmtNum, parseInteger, showWhitespace } from "../util.js";
+import { asArray, counterTotal, fmtCounter, fmtInt, fmtNum, parseInteger, showWhitespace } from "../util.js";
 import Alert from "./Alert.jsx";
 import { NumberField } from "./Fields.jsx";
 
@@ -19,12 +19,12 @@ const EMPTY_SET = new Set();
 function layoutNodes(nodes) {
   const sorted = nodes.filter((n) => n && n.id !== null && n.id !== undefined).sort((a, b) => a.id - b.id);
   let maxCount = 1;
-  for (const n of sorted) maxCount = Math.max(maxCount, Number(n.count) || 0);
+  for (const n of sorted) maxCount = Math.max(maxCount, counterTotal(n.count, n.count_resets));
   const centre = SIZE / 2;
   const placed = new Map();
   sorted.forEach((node, i) => {
     const angle = -Math.PI / 2 + (2 * Math.PI * i) / Math.max(1, sorted.length);
-    const visits = Math.max(0, Number(node.count) || 0);
+    const visits = Math.max(0, counterTotal(node.count, node.count_resets));
     placed.set(node.id, {
       node,
       angle,
@@ -94,7 +94,7 @@ export default function GraphView() {
 
   const edges = useMemo(() => {
     let maxEdgeCount = 1;
-    for (const e of graph.edges) if (e) maxEdgeCount = Math.max(maxEdgeCount, Number(e.count) || 0);
+    for (const e of graph.edges) if (e) maxEdgeCount = Math.max(maxEdgeCount, counterTotal(e.count, e.count_resets));
     const out = [];
     graph.edges.forEach((e, i) => {
       if (!e) return;
@@ -102,7 +102,7 @@ export default function GraphView() {
       const t = placed.get(e.target);
       if (!s || !t) return;
       const prob = Number.isFinite(e.prob) ? Math.min(1, Math.max(0, e.prob)) : 0.5;
-      const uses = Math.max(0, Number(e.count) || 0);
+      const uses = Math.max(0, counterTotal(e.count, e.count_resets));
       out.push({
         key: i,
         edge: e,
@@ -202,7 +202,7 @@ export default function GraphView() {
               const className = `graph-edge${g.negative ? " neg" : ""}${connected ? " hl" : ""}`;
               const reward = typeof g.edge.reward === "number" ? ` · reward=${fmtNum(g.edge.reward, 2)}` : "";
               const shares = typeof g.edge.share === "number" ? ` · share=${fmtNum(g.edge.share, 2)} recent=${fmtNum(g.edge.recent_share, 2)} (${fmtInt(g.edge.recent_count)} in window)` : "";
-              const title = `${labelOf(g.edge.source)} → ${labelOf(g.edge.target)} · p=${fmtNum(g.edge.prob, 3)} · cost=${fmtNum(g.edge.cost, 3)} · w=${fmtNum(g.edge.weight, 3)} · n=${fmtInt(g.edge.count)}${reward}${shares}`;
+              const title = `${labelOf(g.edge.source)} → ${labelOf(g.edge.target)} · p=${fmtNum(g.edge.prob, 3)} · cost=${fmtNum(g.edge.cost, 3)} · w=${fmtNum(g.edge.weight, 3)} · n=${fmtCounter(g.edge.count, g.edge.count_resets)}${reward}${shares}`;
               return g.loop ? (
                 <circle
                   key={g.key}
@@ -274,7 +274,7 @@ export default function GraphView() {
               <dt>id</dt>
               <dd>{String(hoverNode.node.id)}</dd>
               <dt>count</dt>
-              <dd>{fmtInt(hoverNode.node.count)}</dd>
+              <dd>{fmtCounter(hoverNode.node.count, hoverNode.node.count_resets)}</dd>
               <dt>activation</dt>
               <dd>{fmtNum(hoverNode.node.activation, 4)}</dd>
               <dt>z</dt>

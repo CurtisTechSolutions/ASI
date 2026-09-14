@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,15 @@ func subFlagSet(name string) *flag.FlagSet {
 func fail(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "radixnet-count: error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// counterText prints an odometer: the reading, and how often it went round
+// once it has (see radixnet/counter.go).
+func counterText(c radixnet.Counter) string {
+	if c.Resets == 0 {
+		return strconv.FormatInt(c.Value, 10)
+	}
+	return fmt.Sprintf("%d (+%d resets)", c.Value, c.Resets)
 }
 
 func emit(doc any) {
@@ -569,8 +579,9 @@ func cmdWeights(args []string) {
 		emit(map[string]any{"weights": cfg, "changed": len(changes) > 0, "saved": saved, "stats": m.Stats()})
 		return
 	}
-	fmt.Printf("function      %s\ncount_scale   %g\nglobal_scale  %g\nwindow_scale  %g\nreward_scale  %g\nwindow        %d\nsmoothing     %g\ntraversals    %d (window %d)\n",
-		cfg.Function, cfg.CountScale, cfg.GlobalScale, cfg.WindowScale, cfg.RewardScale, cfg.Window, cfg.Smoothing, m.G.TotalTraversals, m.G.WindowTraversals())
+	fmt.Printf("function      %s\ncount_scale   %g\nglobal_scale  %g\nwindow_scale  %g\nreward_scale  %g\nwindow        %d\nsmoothing     %g\ntraversals    %s (window %d)\n",
+		cfg.Function, cfg.CountScale, cfg.GlobalScale, cfg.WindowScale, cfg.RewardScale, cfg.Window, cfg.Smoothing,
+		counterText(m.G.TotalTraversals), m.G.WindowTraversals())
 	if saved != "" {
 		fmt.Printf("saved %s\n", saved)
 	}

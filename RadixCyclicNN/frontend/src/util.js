@@ -33,6 +33,24 @@ export function fmtInt(value) {
   return String(value);
 }
 
+/**
+ * Every counter in the model is a two-digit odometer (see radixnet/counter.py):
+ * it counts up to COUNTER_LIMIT, is set back to 0 and counts the wrap as a
+ * reset, so nothing ever outgrows a JavaScript number.
+ */
+export const COUNTER_LIMIT = 1e15;
+
+/** One odometer reading: the count, plus how often it went round once it has. */
+export function fmtCounter(value, resets) {
+  const turns = Number(resets) || 0;
+  return turns ? `${fmtInt(value)} (+${fmtInt(turns)} resets)` : fmtInt(value);
+}
+
+/** The events an odometer reading stands for - for sizing and ratios, not for display. */
+export function counterTotal(value, resets) {
+  return (Number(resets) || 0) * COUNTER_LIMIT + (Number(value) || 0);
+}
+
 export function fmtBytes(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "–";
   if (value < 1024) return `${value} B`;

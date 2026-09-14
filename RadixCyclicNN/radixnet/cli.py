@@ -87,6 +87,12 @@ def fmt(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def counter_text(stats: dict, key: str) -> str:
+    """One odometer reading from a stats dict: the count, and how often it went round once it has."""
+    resets = stats.get(f"{key}_resets") or 0
+    return f"{stats[key]} (+{resets} resets)" if resets else fmt(stats[key])
+
+
 def quote(text: str) -> str:
     """Text in double quotes with whitespace escaped (JSON string syntax)."""
     return json.dumps(text, ensure_ascii=False)
@@ -1123,15 +1129,16 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
         ("trigrams", stats["trigrams"]),
         ("compression ratio", stats["compression_ratio"]),
         ("inverted", stats["inverted"]),
-        ("epochs total", stats["epochs_total"]),
-        ("trained", f"{stats['trained_texts']} texts, {stats['trained_chars']} chars"),
-        ("2NRL runs", stats["twonrl_runs"]),
+        ("epochs total", counter_text(stats, "epochs_total")),
+        ("trained", f"{counter_text(stats, 'trained_texts')} texts, {counter_text(stats, 'trained_chars')} chars"),
+        ("2NRL runs", counter_text(stats, "twonrl_runs")),
         ("last loss", stats["last_loss"]),
         *([("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
-                       f"{stats['feedback_passes']} feedback pass(es); edge rewards +{fmt(stats['edge_reward_positive'])} "
+                       f"{counter_text(stats, 'feedback_passes')} feedback pass(es); "
+                       f"edge rewards +{fmt(stats['edge_reward_positive'])} "
                        f"/ {fmt(stats['edge_reward_negative'])}"),
-           ("traversals", f"{stats['total_traversals']} total, {stats['window_traversals']} inside the sliding window "
-                          f"of {stats['window']}"),
+           ("traversals", f"{counter_text(stats, 'total_traversals')} total, {stats['window_traversals']} inside "
+                          f"the sliding window of {stats['window']}"),
            ("weights", f"global_scale={fmt(stats['global_scale'])} window_scale={fmt(stats['window_scale'])} "
                        f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])}")]
           if model.kind == "count" else []),

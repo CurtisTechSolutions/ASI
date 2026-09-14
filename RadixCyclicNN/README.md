@@ -34,6 +34,7 @@ and an optional GPU backend (torch) are built in.
 | CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `frontend/` (Vite + React, prebuilt `dist` is served by the API). |
 | Checkpointing, saving, loading | JSON model files (gzip with `.gz`), `CheckpointManager` with rotation, `latest` pointer, restore and resume. |
 | GPU acceleration, performance | `--backend auto` uses torch on CUDA / Apple MPS when installed, else the optimised pure-Python backend (flat CSR arrays, cached costs, ~150k transitions/s on a 4-core CPU). Both backends compute identical numbers. |
+| Counters that never overflow | Every growing integer (traversals, visit counts, epochs, trained characters, version stamps) is a **cyclic counter**: at `10^15` it goes back to 0 and the reset is counted, so the exact total is `resets × 10^15 + value` and nothing ever outgrows a 64-bit integer or a JSON number. The weights are computed from the exact totals, so a wrapped model behaves exactly as one that counted forever. |
 
 `DESIGN.md` is the full specification (math, invariants, module interfaces).
 
@@ -211,7 +212,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/save` / `POST /api/load` / `POST /api/reset` | `{"path"}` (default: the active kind's file) / `{"path"}` (any kind; switches to it) / `{"seed", "kind"}` (+ `count_scale`, `global_scale`, `window_scale`, `reward_scale`, `window` for a fresh count model) |
 | `POST /api/model/weights` | count model: `{"count_scale", "global_scale", "window_scale", "reward_scale", "window"}` -> `{"weights", "stats"}`; every edge weight is recomputed |
 | `GET /api/checkpoints` / `POST /api/checkpoints/save` / `POST /api/checkpoints/restore` | list / `{"tag"}` / `{"name"}` |
-| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`) |
+| `GET /api/graph?limit=150` | top nodes by visit count with their activation parameters, and the edges between them with weight, count, probability, cost (count model: also `reward`, `share`, `recent_share`, `recent_count`, plus `total_traversals`, `window_traversals`, `window`). Every count comes with its `count_resets` / `total_traversals_resets`: counters are cyclic, so the exact number of events is `resets × 10^15 + count` |
 | `GET /api/history` | training history |
 | `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
 
@@ -402,7 +403,9 @@ so a text seen a thousand times last year and one seen ten times today can
 both win, and raising one scale trusts history or recency more.  The Train tab (count model) shows the scales and the window with an
 "Apply" button, `radixnet weights` does the same from the shell, and the
 status bar shows the traversal totals; the Graph tab's edge tooltips show
-each edge's all-time and recent share.
+each edge's all-time and recent share.  Every one of those counts is a cyclic
+counter (below): it is set back to 0 at `10^15` and the reset is counted, and
+the ratios above are formed from the exact totals.
 
 The server keeps the model of each kind in memory: switching kinds parks the
 active model (unsaved work included) and brings the other one back, loading
@@ -493,6 +496,50 @@ records and the Evolve tab's table show `failures`, `blatant`, the mean
 boost / amount and whether a 2NRL pass ran.  Outside the loop the same
 primitives are available directly: `RadixNet.two_nrl(bad, good,
 bad_weights=[...])` and `model.invert_paths(texts, mode, amounts)`.
+
+## Counters that never overflow
+
+Every number the model only ever counts up - traversals, node and edge visit
+counts, epochs, trained characters and texts, 2NRL runs, feedback passes, the
+internal version stamps - would eventually run out of the integer holding it:
+64 bits in the Go port, and long before that the 53 bits of mantissa in the
+JSON number that carries it through a model file, the API and the browser. So
+none of them is an unbounded integer. Each is a two-digit **odometer**:
+
+```
+total = resets × 1_000_000_000_000_000 + value        (0 ≤ value < 1_000_000_000_000_000)
+```
+
+The count goes up as before; the moment it reaches the limit it is **set back
+to 0** and `resets` - how often that has happened - goes up by one. Nothing is
+lost: the exact number of events is still there, split over two numbers that
+each stay small. Cycles are a feature here too.
+
+The limit is `10^15` because it is exactly representable as a double (so a
+counter survives a model file, an API response and a JavaScript number
+unchanged), and because it leaves four orders of magnitude of head room under a
+64-bit integer - enough that a whole epoch of counting can land on a counter
+before the next wrap. `resets` wraps at the same limit, so the odometer itself
+comes full circle after `10^30` events.
+
+What this changes in practice:
+
+* **Nothing in the numbers.** Weights, shares, probabilities, losses,
+  predictions and rankings are computed from the exact totals, so a model that
+  has wrapped behaves exactly as if its counters had grown forever.
+* **Counting stays as fast as it was.** Wrapping never happens in a counting
+  loop: the loops (in Go, from one goroutine per text) add to a plain integer,
+  and a sweep at the end of each epoch - skipped after a single comparison
+  until a counter can actually have reached the limit - moves whatever crossed
+  it into the resets.
+* **Model files carry both numbers** (`format_version` 2). Files written by
+  earlier versions load unchanged, with their counts wrapped on the way in.
+  Python and Go read and write the same fields, so a wrapped model still moves
+  between the two implementations unchanged.
+* **The UI shows both**: the status bar reads `traversals 12,345 (+2 resets)`
+  once a counter has gone round, and the Graph tab's node and edge tooltips do
+  the same. `total_traversals_resets`, `epochs_total_resets`, `count_resets`
+  and friends are in `/api/status` and `/api/graph` next to the values.
 
 ## Checkpoints, saving, loading
 
@@ -661,8 +708,8 @@ make go-test     # cd go && go test -race ./...
 
 ```
 RadixCyclicNN/
-  radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
-                      checkpoint, bench, cli, api, ollama, codegen
+  radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, model, countnet,
+                      schedule, gan, checkpoint, bench, cli, api, ollama, codegen
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)
@@ -680,6 +727,7 @@ RadixCyclicNN/
 * **"invert the network"** (2NRL) flips the sign of every edge weight and every activation amplitude `a`, which negates every edge signal: the most likely continuation becomes the least likely. Two inversions are the identity.
 * **Prediction prefers short, confident completions** because the cost is summed per edge; `--step-penalty` and `--length` / `--to-end` steer that, and `--mode sample` gives diverse output for the GAN loop.
 * **Self-compression is lossy on purpose**: merging a unary chain keeps the parent's parameters; the chain was deterministic (probability 1, cost 0), so predictions are unchanged.
+* **Counters cycle rather than grow**: an integer that only counts up is a fault waiting to happen, so every one of them goes back to 0 at `10^15` and counts the reset. The pair is exact, both halves stay inside a double, and the wrapping is done by a sweep between epochs instead of a check on every increment - so the counting loops (and the Go port's goroutines) are untouched.
 
 ## License
 
