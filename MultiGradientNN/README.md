@@ -22,8 +22,32 @@ That added axis is the whole point. A single gradient can only answer "which
 way is downhill from here". A stack can also answer "which layer is the right
 one to be descending in", and the two questions are optimised together.
 
+## Vertical connections
+
+The layers are not independent surfaces that descent merely hops between. Every
+layer connects **directly to every other layer** along the vertical axis — not
+just to the one above and below it, but to all of them, in a single hop.
+
+The stack is therefore densely connected: with `L` layers there are `L(L-1)/2`
+vertical connection sets, each carrying its own weights. Gradient information
+reaches any layer from any other without propagating through the layers in
+between.
+
+This also settles what the new axis measures. The stack index is not a distance
+— layer 1 is no further from layer 5 than it is from layer 2, since both are one
+direct connection away. How far apart two layers are is a *learned weight* on the
+connection between them, not a difference of indices.
+
 ## Status
 
-Concept stage. The directory is scaffolded; the design — how the layers are
-coupled, how the cross-layer step is defined, and how the two descents are
-scheduled against each other — is still to be written.
+Concept stage. Settled so far: the stack geometry, and the dense vertical
+connectivity above.
+
+Still to be written:
+
+- how the cross-layer step is defined — what it means to move along the vertical
+  axis in one update;
+- how the horizontal descent (within a plane) and the vertical descent (across
+  the stack) are scheduled against each other;
+- whether the vertical weights are trained by the same rule as the horizontal
+  ones, or by their own.
