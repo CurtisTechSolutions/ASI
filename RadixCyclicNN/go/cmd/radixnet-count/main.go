@@ -1147,6 +1147,10 @@ func cmdTutor(args []string) {
 	noReplay := fs.Bool("no-replay", false, "do not keep teaching earlier corrections")
 	blame := fs.Bool("blame", false, "teach the negative network why each failed sentence failed: the mistake the "+
 		"teacher named is the reason, its mark the severity, and only the characters it corrected are blamed")
+	variants := fs.Int("variants", cfg.Variants, "with -blame: ask the teacher why each failed sentence is wrong and "+
+		"for N more sentences that make the same mistake, blamed under the same reason (0 = do not ask)")
+	variantWeight := fs.Float64("variant-weight", cfg.VariantWeight,
+		"their share of the failure's severity (the student never wrote them)")
 	addNegativeFlag(fs)
 	_ = fs.Parse(args)
 
@@ -1163,6 +1167,7 @@ func cmdTutor(args []string) {
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
 	cfg.DiffCorrections, cfg.KeepWeight = !*noDiff, *keepWeight
 	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
+	cfg.Variants, cfg.VariantWeight = *variants, *variantWeight
 	if err := cfg.Validate(); err != nil { // also resolves the providers and the models they imply
 		fail("%v", err)
 	}
@@ -1193,6 +1198,10 @@ func cmdTutor(args []string) {
 		negative = openNegative(false)
 		trainer.Negative = negative
 		say("negative network: %s (every failed sentence is blamed for what the teacher marked it down for)", negativeFile())
+		if cfg.Variants > 0 {
+			say("widening: the teacher explains why and writes %d more sentence(s) with the same mistake, "+
+				"blamed at %g of its severity", cfg.Variants, cfg.VariantWeight)
+		}
 	}
 	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s: %s at %s, marked by %s: %s, pass at %g/10 (grammar %g)",
 		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorProvider, cfg.TutorModel, client.BaseURL(),

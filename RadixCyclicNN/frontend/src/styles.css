@@ -1386,6 +1386,43 @@ ol.dialogue li.rated.down .bubble {
   text-decoration: none;
 }
 
+/* why a sentence is wrong, and the teacher's sentences that are wrong the same way */
+.same-mistake p {
+  margin: 0 0 4px;
+  color: var(--muted);
+}
+
+.same-mistake ul.plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.same-mistake li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.same-mistake del {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.same-mistake ins {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+  text-decoration: none;
+}
+
 /* the guard: what the negative network stopped on the way out */
 .guard {
   border-left: 3px solid var(--border);
