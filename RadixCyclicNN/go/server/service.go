@@ -149,11 +149,12 @@ type Service struct {
 	// negative is the negative network this server filters with (nil until first used)
 	negative *radixnet.Model
 	// the teacher defaults of the tutor endpoints and the records of every tutor run
-	ollamaURL    string
-	ollamaModel  string
-	chatgptURL   string
-	chatgptModel string
-	tutorHistory []map[string]any
+	ollamaURL     string
+	ollamaModel   string
+	chatgptURL    string
+	chatgptModel  string
+	tutorHistory  []map[string]any
+	criticHistory []map[string]any
 	// epochDelay slows every epoch (tests: makes a job observable while running)
 	epochDelay time.Duration
 }

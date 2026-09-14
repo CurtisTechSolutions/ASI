@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
@@ -162,12 +164,14 @@ commands:
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
-  negative   the negative network: blame | clear | why | filter | reasons | forget
+X
   invert     flip the sign of every reward
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
+  ollama     a corpus written to order, and the adversarial review (models | corpus | review)
+  chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   version    print the version
 
@@ -242,6 +246,10 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "ollama":
+		cmdOllama(rest)
+	case "chatgpt":
+		cmdChatGPT(rest)
 	case "tutor":
 		cmdTutor(rest)
 	case "serve":
@@ -1136,5 +1144,29 @@ func writeHeapProfile() {
 	runtime.GC()
 	if err := pprof.WriteHeapProfile(f); err != nil {
 		fmt.Fprintf(os.Stderr, "memprofile: %v\n", err)
+	}
+}
+
+// interruptible returns a stop function that turns true on the first Ctrl-C, so
+// a loop running "until interrupted" finishes the round it is in and saves
+// rather than dying half-taught.  A second Ctrl-C kills the process outright.
+func interruptible() func() bool {
+	stopped := make(chan struct{})
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-signals
+		close(stopped)
+		fmt.Fprintln(os.Stderr, "interrupted: finishing the current round, then saving (Ctrl-C again aborts)")
+		<-signals
+		os.Exit(130)
+	}()
+	return func() bool {
+		select {
+		case <-stopped:
+			return true
+		default:
+			return false
+		}
 	}
 }

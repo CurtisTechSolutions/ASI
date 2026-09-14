@@ -287,3 +287,52 @@ func TeachLessons(negative *Model, lessons []*Lesson, threshold float64, clearPa
 	report.Source, report.Threshold = source, threshold
 	return report, nil
 }
+
+// FaultsFromReviews turns an adversarial review into faults and the texts that
+// clear blame.
+//
+// Everything the reviewer did not pass becomes a fault whose reason comes from
+// its critique and whose severity comes from its rating; the texts it passed
+// come back separately so they can take blame off what they share.
+func FaultsFromReviews(reviews []Review, threshold float64, source string) ([]Fault, []string) {
+	faults := []Fault{}
+	passed := []string{}
+	for _, review := range reviews {
+		if review.Text == "" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(review.Verdict)) == "pass" {
+			passed = append(passed, review.Text)
+			continue
+		}
+		faults = append(faults, Fault{
+			Text:     review.Text,
+			Reason:   Classify(review.Critique, ClassifyOptions{Verdict: review.Verdict, Rating: review.Rating}),
+			Severity: SeverityFromRating(review.Rating, threshold),
+			Note:     review.Critique,
+			Source:   source,
+		})
+	}
+	return faults, passed
+}
+
+// TeachReviews feeds an adversarial review straight into the negative network.
+func TeachReviews(negative *Model, reviews []Review, threshold float64, clearPasses bool, source string,
+	o TeachOptions) (*TeachReport, error) {
+	if source == "" {
+		source = "review"
+	}
+	if threshold <= 0 {
+		threshold = 6
+	}
+	faults, passed := FaultsFromReviews(reviews, threshold, source)
+	if !clearPasses {
+		passed = nil
+	}
+	report, err := Teach(negative, faults, passed, o)
+	if err != nil {
+		return nil, err
+	}
+	report.Source, report.Threshold = source, threshold
+	return report, nil
+}

@@ -645,6 +645,93 @@ class TestGoServerNegative(unittest.TestCase):
         self.assertEqual(load_model(data["path"]).kind, "negative")
 
 
+class TestGoCriticParity(unittest.TestCase):
+    """One fake reviewer, both loops: the same prompts, the same marks, the same blame."""
+
+    def setUp(self):
+        try:  # the fake Ollama of the ollama tests plays the reviewer for both sides
+            from test_ollama import start_fake
+        except ImportError:
+            from tests.test_ollama import start_fake
+        self.fake = start_fake(self.addCleanup)
+        self.env = {**os.environ, "OLLAMA_HOST": self.fake.url, "RADIXNET_OLLAMA_MODEL": "fake:latest",
+                    "PYTHONWARNINGS": "ignore"}
+        self.py_path = os.path.join(TMP.name, "critic_py.count.json")
+        self.go_path = os.path.join(TMP.name, "critic_go.count.json")
+        for path in (self.py_path, self.go_path):
+            for name in (path, path.replace(".count.json", ".count.negative.json")):
+                if os.path.exists(name):
+                    os.remove(name)
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.py_path)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=self.go_path)
+
+    def prompts(self):
+        """The prompt of every call so far, so both sides' conversations can be compared."""
+        return [body.get("prompt", "") for _method, _path, body in self.fake.requests if body]
+
+    def test_both_loops_ask_the_same_and_blame_the_same(self):
+        options = ("negative", "auto", "--rounds", 2, "--count", 4, "--max-length", 40, "--threshold", 6)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_prompts = self.prompts()
+
+        # the same texts written, so the same conversation with the reviewer
+        self.assertEqual(len(py_prompts), len(go_prompts))
+        for i, (first, second) in enumerate(zip(py_prompts, go_prompts)):
+            self.assertEqual(first, second, f"call {i} differs between the two loops")
+        self.assertGreaterEqual(len(py_prompts), 2)
+
+        # the same rounds, marked the same and blamed the same
+        py_rounds = [r for r in a["records"] if r["kind"] == "round"]
+        go_rounds = [r for r in b["records"] if r["kind"] == "round"]
+        self.assertEqual(len(py_rounds), 2)
+        self.assertEqual(len(py_rounds), len(go_rounds))
+        for first, second in zip(py_rounds, go_rounds):
+            for key in ("round", "texts", "passed", "failed", "blamed", "cleared", "edges", "reasons"):
+                self.assertEqual(first[key], second[key], f"round {first['round']}: {key}")
+            self.assertAlmostEqual(first["mean_rating"], second["mean_rating"], places=9)
+            self.assertAlmostEqual(first["severity_mean"], second["severity_mean"], places=9)
+
+        # the same report card
+        for key in ("rounds", "reviewed", "blamed", "cleared", "edges", "reasons"):
+            self.assertEqual(a["report"][key], b["report"][key], key)
+        self.assertAlmostEqual(a["report"]["mean_rating"], b["report"]["mean_rating"], places=9)
+
+        # and the same negative network on disk
+        py_doc = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_doc = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual(py_doc["format"], go_doc["format"])
+        self.assertEqual(py_doc["graph"]["nodes"]["labels"], go_doc["graph"]["nodes"]["labels"])
+        self.assertEqual(py_doc["graph"]["edges"]["blame"], go_doc["graph"]["edges"]["blame"])
+        self.assertEqual(py_doc["graph"]["edges"]["fails"], go_doc["graph"]["edges"]["fails"])
+        self.assertEqual(sorted(r["reason"] for r in py_doc["log"]),
+                         sorted(r["reason"] for r in go_doc["log"]))
+        self.assertEqual({r["source"] for r in py_doc["log"]}, {"critic"})
+        self.assertEqual({r["source"] for r in go_doc["log"]}, {"critic"})
+
+    def test_the_positive_model_comes_out_untouched_on_both_sides(self):
+        before = (load_json(self.py_path), load_json(self.go_path))
+        options = ("negative", "auto", "--rounds", 1, "--count", 3, "--max-length", 40)
+        py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(before[0], load_json(self.py_path))
+        self.assertEqual(before[1], load_json(self.go_path))
+
+    def test_both_reviews_mark_the_same_given_texts(self):
+        texts = ["the cat sat on the mat", "xxxx xxxx xxxx"]
+        options = ("ollama", "review", "--threshold", 6, *sum((("--text", t) for t in texts), ()))
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual([r["verdict"] for r in a["reviews"]], [r["verdict"] for r in b["reviews"]])
+        self.assertEqual([r["rating"] for r in a["reviews"]], [r["rating"] for r in b["reviews"]])
+        self.assertEqual(a["good"], b["good"])
+        self.assertEqual(a["bad"], b["bad"])
+
+
 class TestGoServer(unittest.TestCase):
     """`radixnet-count serve` speaks the Python server's JSON contract for the count model: the frontend's
     requests and the shapes the Python API tests assert on must be served the same way."""
