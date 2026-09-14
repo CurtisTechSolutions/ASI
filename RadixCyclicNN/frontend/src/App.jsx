@@ -8,16 +8,20 @@ import GeneratePanel from "./components/GeneratePanel.jsx";
 import ConversePanel from "./components/ConversePanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
+import NegativePanel from "./components/NegativePanel.jsx";
 import EvolvePanel from "./components/EvolvePanel.jsx";
 import OllamaPanel from "./components/OllamaPanel.jsx";
+import TutorPanel from "./components/TutorPanel.jsx";
 import CodeGenPanel from "./components/CodeGenPanel.jsx";
 import AgentPanel from "./components/AgentPanel.jsx";
 import ImagesPanel from "./components/ImagesPanel.jsx";
+import SpeechPanel from "./components/SpeechPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
-// pythonOnly tabs need the Python server (its sine network, Ollama, the sandbox, the image encoder);
-// the Go server (`radixnet-count serve`) runs the count / reward model only and hides them.
+// pythonOnly tabs need the Python server (its sine network, the corpus / review calls to Ollama, the
+// sandbox, the image and speech encoders); the Go server (`radixnet-count serve`) runs the count / reward
+// model only and hides them. The Tutor tab is not one of them: both servers run the lessons.
 const TABS = [
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "predict", label: "Predict", Component: PredictPanel },
@@ -25,11 +29,14 @@ const TABS = [
   { id: "converse", label: "Converse", Component: ConversePanel },
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
+  { id: "negative", label: "Negative", Component: NegativePanel },
   { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
   { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
+  { id: "tutor", label: "Tutor", Component: TutorPanel },
   { id: "code", label: "Code", Component: CodeGenPanel, pythonOnly: true },
   { id: "agent", label: "Agent", Component: AgentPanel, pythonOnly: true },
   { id: "images", label: "Images", Component: ImagesPanel, pythonOnly: true },
+  { id: "speech", label: "Speech", Component: SpeechPanel, pythonOnly: true },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];
@@ -110,7 +117,7 @@ export default function App() {
         </div>
         <p className="tagline">
           self-compressing cyclic graph · sine activation or count / reward edges · Dijkstra and top-K / bottom-K
-          prediction · 2NRL · GAN-style evolution
+          prediction · 2NRL · GAN-style evolution · a negative network that filters the output
         </p>
       </header>
 

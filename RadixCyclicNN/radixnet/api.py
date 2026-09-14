@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import dataclasses
 import heapq
 import html
 import itertools
@@ -66,6 +67,13 @@ from .agent import (
 from .archive import extract_texts, is_zip
 from .backend import describe_backends
 from .checkpoint import CheckpointManager
+from .chatgpt import (
+    DEFAULT_MODEL as CHATGPT_DEFAULT_MODEL,
+    DEFAULT_URL as CHATGPT_DEFAULT_URL,
+    ChatGPTClient,
+    api_key_configured as chatgpt_key_configured,
+)
+from .chatgpt import normalise_url as normalise_chatgpt_url
 from .codegen import (
     PHASES as CODEGEN_PHASES,
     CodeGenConfig,
@@ -74,14 +82,18 @@ from .codegen import (
     Sandbox,
     check_style,
     decide,
+    default_teacher_model,
     parse_problem_file,
     parse_problems,
 )
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
+from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS
+from .duo import FilterConfig, NegativeFilter
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
+from .negative import NegativeNet
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
     DEFAULT_URL as OLLAMA_DEFAULT_URL,
@@ -93,11 +105,34 @@ from .ollama import (
     normalise_url,
     sample_texts,
 )
+from .blame import teach_reviews
 from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
 from .search import PathResult
+from .speech import DEFAULT_RATE as SPEECH_DEFAULT_RATE
+from .speech import SpeechError
+from .speech import decode_text as decode_speech_text
+from .speech import describe as describe_speech
+from .speech import teach as teach_speech
+from .speech import transcribe as transcribe_speech
 from .tools import ToolBox, WebClient, default_toolbox, parse_call
+from .tutor import (
+    DEFAULT_PLAN_LESSONS,
+    DEFAULT_TUTOR_MODEL,
+    ERROR_TYPES as TUTOR_ERROR_TYPES,
+    LEVELS as TUTOR_LEVELS,
+    MODES as TUTOR_MODES,
+    TWONRL_PER as TUTOR_TWONRL_PER,
+    UPGRADE_STEPS as TUTOR_UPGRADE_STEPS,
+    WORDS_LADDER as TUTOR_WORDS_LADDER,
+    Exercise,
+    TutorConfig,
+    TutorTrainer,
+    default_tutor_model,
+    plan_lessons,
+    report_card,
+)
 from .vision import VisionError
 from .vision import decode_text as decode_image_text
 from .vision import describe as describe_vision
@@ -120,8 +155,16 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 """Largest accepted JSON request body (a training corpus can be big)."""
 MAX_UPLOAD_BYTES: int | None = None
 """Largest accepted ``POST /api/uploads`` body: ``None`` = no limit (a ZIP of a whole source tree is fine)."""
+_FILTER_FIELDS = frozenset(f.name for f in dataclasses.fields(FilterConfig))
+"""Request fields that configure the filter rather than the generation behind it."""
+
 _UPLOAD_PATH = "/api/uploads"
-_BINARY_ROUTES = {"/api/uploads": None, "/api/images/encode": "image"}
+_BINARY_ROUTES = {
+    "/api/uploads": None,
+    "/api/images/encode": "image",
+    "/api/speech/transcribe": "speech",
+    "/api/speech/teach": "speech",
+}
 """POST routes whose bodies may be raw bytes or multipart (value: the default name of a raw body, None = required)."""
 
 DEFAULT_GRAPH_LIMIT = 150
@@ -270,6 +313,8 @@ class ModelService:
         upload_dir: str | None = None,
         ollama_url: str | None = None,
         ollama_model: str | None = None,
+        chatgpt_url: str | None = None,
+        chatgpt_model: str | None = None,
         kind: str | None = None,
         tool_options: dict | None = None,
     ) -> None:
@@ -280,6 +325,8 @@ class ModelService:
         self._archive_cache: dict[str, tuple[tuple[int, int], dict]] = {}  # path -> ((size, mtime_ns), summary)
         self.ollama_url = normalise_url(ollama_url or OLLAMA_DEFAULT_URL)
         self.ollama_model = (ollama_model or OLLAMA_DEFAULT_MODEL).strip() or OLLAMA_DEFAULT_MODEL
+        self.chatgpt_url = normalise_chatgpt_url(chatgpt_url or CHATGPT_DEFAULT_URL)
+        self.chatgpt_model = (chatgpt_model or CHATGPT_DEFAULT_MODEL).strip() or CHATGPT_DEFAULT_MODEL
         self.tool_options: dict[str, Any] = {
             "offline": False, "allow_private": False, "search_url": None, "web_timeout": 20.0,
             "max_bytes": 2_000_000, "python_tool": False, "sandbox_timeout": 10.0,
@@ -300,6 +347,8 @@ class ModelService:
         self._evolve_history: list[dict] = []
         self._codegen_history: list[dict] = []
         self._agent_history: list[dict] = []
+        self._tutor_history: list[dict] = []
+        self._critic_history: list[dict] = []
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
@@ -464,7 +513,7 @@ class ModelService:
             "model_path": self.model_path_for(self.kind),
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
             "in_memory": sorted({self.kind, *self._parked}),
-            "weights": self.model.weight_config() if self.kind == "count" else None,
+            "weights": self.model.weight_config() if hasattr(self.model, "weight_config") else None,
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -528,16 +577,23 @@ class ModelService:
         neg_lr: float = 0.05,
         pos_lr: float = 0.01,
         strength: float | None = None,
+        bad_weights: list[float] | None = None,
+        good_weights: list[float] | None = None,
         **overrides: Any,
     ) -> dict:
-        """Start a ``2nrl`` job (``overrides``: batch_size, auto_compress, clip, shuffle; ``strength``: count model)."""
+        """Start a ``2nrl`` job (``overrides``: batch_size, auto_compress, clip, shuffle; ``strength``: count model).
+
+        ``bad_weights`` / ``good_weights`` scale the two phases per text: how
+        bad a failure is and how good a text is, rather than one rate for all.
+        """
         TrainConfig(epochs=neg_epochs, lr=neg_lr, **overrides).validate()
         TrainConfig(epochs=pos_epochs, lr=pos_lr, act_lr=pos_lr / 10, **overrides).validate()
 
         def work(job: Job) -> None:
             self.model.two_nrl(
                 bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
-                progress=self._progress(job), stop_event=job.stop_event, strength=strength, **overrides,
+                progress=self._progress(job), stop_event=job.stop_event, strength=strength,
+                bad_weights=bad_weights, good_weights=good_weights, **overrides,
             )
 
         return self._start_job("2nrl", work)
@@ -551,6 +607,8 @@ class ModelService:
         neg_lr: float = 0.5,
         pos_lr: float = 0.1,
         strength: float | None = None,
+        good_weights: list[float] | None = None,
+        bad_weights: list[float] | None = None,
         **overrides: Any,
     ) -> dict:
         """Start a ``feedback`` job from rated texts (thumbs up = ``good``, thumbs down = ``bad``).
@@ -559,7 +617,9 @@ class ModelService:
         ``punish``.  For RadixNet that is 2NRL (bad, invert, good), a
         positive-phase pass, or a negative-phase pass followed by an
         inversion; the count / reward model penalises and rewards the paths
-        by ``strength`` instead.
+        by ``strength`` instead.  ``good_weights`` / ``bad_weights`` (one per
+        text) turn the thumbs into ratings: each text is learned in
+        proportion to how good or bad it was rated.
         """
         action = feedback_action(good, bad)
         if action is None:
@@ -572,26 +632,30 @@ class ModelService:
             if action == "2nrl":
                 self.model.two_nrl(
                     bad, good, neg_epochs=neg_epochs, pos_epochs=pos_epochs, neg_lr=neg_lr, pos_lr=pos_lr,
-                    progress=progress, stop_event=job.stop_event, strength=strength, **overrides,
+                    progress=progress, stop_event=job.stop_event, strength=strength,
+                    bad_weights=bad_weights, good_weights=good_weights, **overrides,
                 )
             elif action == "reward":
                 self.model.reward(
-                    good, epochs=pos_epochs, lr=pos_lr, strength=strength, progress=progress, stop_event=job.stop_event,
-                    **overrides,
+                    good, epochs=pos_epochs, lr=pos_lr, strength=strength, weights=good_weights, progress=progress,
+                    stop_event=job.stop_event, **overrides,
                 )
             else:
                 self.model.punish(
-                    bad, epochs=neg_epochs, lr=neg_lr, strength=strength, progress=progress, stop_event=job.stop_event,
-                    **overrides,
+                    bad, epochs=neg_epochs, lr=neg_lr, strength=strength, weights=bad_weights, progress=progress,
+                    stop_event=job.stop_event, **overrides,
                 )
 
         return self._start_job("feedback", work)
 
-    def start_evolve(self, corpus: list[str], generations: int | None, config: EvolveConfig) -> dict:
+    def start_evolve(self, corpus: list[str], generations: int | None, config: EvolveConfig, blame: bool = False) -> dict:
         """Start an ``evolve`` job (``generations`` ``None`` / ``0`` = until stopped).
 
         The discriminator survives across runs of the same model with the same
         ``config.seed``; its records are appended to :meth:`evolve_history`.
+        With ``blame`` the discriminator also teaches the negative network:
+        every fake it scores below the real texts is blamed, the real texts
+        clear blame.
         """
         if not generations:
             generations = None
@@ -600,7 +664,10 @@ class ModelService:
         with self.session() as model:
             self._ensure_idle()
             disc = self._discriminator if self._discriminator_seed == config.seed else None
-            evolver = Evolver(model, corpus, discriminator=disc, config=config)
+            evolver = Evolver(
+                model, corpus, discriminator=disc, config=config,
+                negative=self.negative_model() if blame else None,
+            )
             self._discriminator = evolver.discriminator
             self._discriminator_seed = config.seed
             sink = self._evolve_history
@@ -629,6 +696,7 @@ class ModelService:
             checkpoint_dir=self.checkpoint_dir,
             upload_dir=self.upload_dir,
             ollama={"url": self.ollama_url, "model": self.ollama_model},
+            chatgpt={"url": self.chatgpt_url, "model": self.chatgpt_model, "configured": chatgpt_key_configured()},
             tools={"names": sorted(self.toolbox().names()), **self.tool_options},
         )
         return stats
@@ -718,6 +786,247 @@ class ModelService:
         with self.session() as model:
             return _graph_view(model.graph, limit)
 
+    # -- the negative network ------------------------------------------------
+
+    def negative_model(self) -> NegativeNet:
+        """The one negative network of this service (the active model when that kind is selected, else the parked one).
+
+        On first use it is loaded from its file (``model.negative.json``
+        beside the model path) or created empty; it lives in the same
+        ``_parked`` store as the other kinds, so selecting ``negative`` as the
+        active model hands back this very object.
+        """
+        if isinstance(self.model, NegativeNet):
+            return self.model
+        model = self._parked.get(NegativeNet.kind)
+        if model is None:
+            path = self.model_path_for(NegativeNet.kind)
+            if path and os.path.isfile(path):
+                model = load_model(path, backend=self.backend_name, device=self.device)
+                if not isinstance(model, NegativeNet):
+                    raise ApiError(400, f"{path} holds a {model.kind} model, not a negative one")
+                self._log(f"negative model loaded from {path}")
+            else:
+                model = NegativeNet(seed=self.seed, backend=self.backend_name, device=self.device)
+            self._parked[NegativeNet.kind] = model
+        return model
+
+    def recall_quiz(
+        self, texts: list[str], labels: list[str], modality: str, *, said: list[str] | None = None,
+        blame: bool = False, threshold: float = 6.0, source: str = "", **options: Any
+    ) -> dict:
+        """Ask the model to write out texts it was taught, mark what comes back, and optionally blame the failures.
+
+        The recall tutor needs no LLM: the right answer is the encoded
+        utterance / image itself, so the mark is the agreement over the payload
+        and the original is the correction (:mod:`radixnet.recall`).
+        """
+        from . import blame as blame_module
+        from . import recall as recall_module
+
+        if not texts:
+            raise ApiError(400, f"nothing to ask about: send a {modality} or 'texts' (already-encoded)")
+        with self.mutating() if blame else self.session():
+            model = self.positive_model()
+            try:
+                lessons = recall_module.quiz(
+                    model, texts, labels=labels, said=said or [], threshold=threshold, **options
+                )
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            doc = {
+                "modality": modality,
+                "lessons": [lesson.to_dict() for lesson in lessons],
+                "report": recall_module.report_card(lessons),
+                "negative": None,
+            }
+            if blame:
+                negative = self.negative_model()
+                report = blame_module.teach_recall(
+                    negative, lessons, threshold=threshold, source=source or modality,
+                )
+                doc["negative"] = {
+                    "taught": {k: report[k] for k in ("blamed", "cleared", "edges", "reasons", "severity_mean")},
+                    "reasons": negative.reasons(),
+                    "stats": negative.stats(),
+                }
+            return doc
+
+    def positive_model(self) -> GraphModel:
+        """The model the negative network filters: the active one, or a parked / saved positive model."""
+        if not isinstance(self.model, NegativeNet):
+            return self.model
+        for kind in (self._path_kind, RadixNet.kind, "count"):
+            parked = self._parked.get(kind)
+            if parked is not None and not isinstance(parked, NegativeNet):
+                return parked
+            path = self.model_path_for(kind)
+            if path and os.path.isfile(path):
+                model = load_model(path, backend=self.backend_name, device=self.device)
+                if not isinstance(model, NegativeNet):
+                    self._parked[model.kind] = model
+                    return model
+        raise ApiError(
+            409, "the negative network is the active model and no positive model is in memory; "
+                 "select the radix or count kind first (POST /api/model/select)"
+        )
+
+    def negative_status(self) -> dict:
+        """Stats, the reason table and the journal of the negative network."""
+        with self.session():
+            model = self.negative_model()
+            return {
+                "path": self.model_path_for(NegativeNet.kind),
+                "active": isinstance(self.model, NegativeNet),
+                "stats": model.stats(),
+                "reasons": model.reasons(),
+                "journal": model.recent(20),
+                "weights": model.weight_config(),
+                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+            }
+
+    def _negative_result(self, model: NegativeNet, records: list[dict], **extra: Any) -> dict:
+        return {"records": records, "reasons": model.reasons(), "stats": model.stats(), **extra}
+
+    def negative_blame(
+        self, texts: list[str], reason: str, severity: float = 1.0, source: str = "api", note: str = "",
+        epochs: int = 1,
+    ) -> dict:
+        """Teach the negative network a failure (synchronous: rated sets are small)."""
+        if not texts:
+            raise ApiError(400, "give the failed texts as 'texts' (a list) or 'text' (one per line)")
+        with self.mutating():
+            model = self.negative_model()
+            try:
+                records = model.blame(texts, reason=reason, severity=severity, source=source, note=note, epochs=epochs)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            return self._negative_result(model, records, texts=len(texts), reason=reason, severity=severity)
+
+    def negative_clear(self, texts: list[str], weight: float = 1.0, epochs: int = 1) -> dict:
+        """The tutor passed these texts: take blame off the fragments they share with known failures."""
+        if not texts:
+            raise ApiError(400, "give the passed texts as 'texts' (a list) or 'text' (one per line)")
+        with self.mutating():
+            model = self.negative_model()
+            try:
+                records = model.clear(texts, weight=weight, epochs=epochs)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            last = records[-1] if records else {}
+            return self._negative_result(
+                model, records, texts=len(texts), matched=last.get("matched", 0), unmatched=last.get("unmatched", 0)
+            )
+
+    def negative_judge(
+        self, texts: list[str], threshold: float | None = None, min_coverage: float | None = None, spans: int = 5,
+    ) -> dict:
+        """Why these texts look like failures."""
+        if not texts:
+            raise ApiError(400, "give the texts to judge as 'texts' (a list) or 'text' (one per line)")
+        with self.session():
+            model = self.negative_model()
+            try:
+                verdicts = [model.judge(t, threshold=threshold, min_coverage=min_coverage, spans=spans) for t in texts]
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"verdicts": verdicts, "stats": model.stats()}
+
+    def negative_filter(
+        self, texts: list[str] | None = None, count: int = 3, no_ratio: bool = False, **options: Any
+    ) -> dict:
+        """The pair at work: the positive model writes, the negative one vetoes (or the given texts are judged)."""
+        fields = {k: v for k, v in options.items() if k in _FILTER_FIELDS and v is not None}
+        if no_ratio:
+            fields["ratio"] = None  # a None in ``options`` means "unset"; only this turns the ratio rule off
+        config = FilterConfig(**fields)
+        try:
+            config.validate()
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        generate = {k: v for k, v in options.items() if k not in _FILTER_FIELDS}
+        with (self.mutating() if config.learn else self.session()):
+            negative = self.negative_model()
+            pair = NegativeFilter(self.positive_model(), negative, config)
+            try:
+                if texts:
+                    outcome = pair.filter(texts)
+                    result = {
+                        "texts": outcome["kept"], "kept": outcome["kept"], "verdicts": outcome["verdicts"],
+                        "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
+                        "candidates": len(texts), "asked": len(texts), "rate": outcome["rate"],
+                    }
+                else:
+                    result = pair.generate(count=count, **generate)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            result["pair"] = pair.describe()
+            return result
+
+    def negative_forget(self, reason: str | None = None, factor: float = 0.0) -> dict:
+        """Drop (or fade) the blame behind one reason - the tutor can be wrong too."""
+        with self.mutating():
+            model = self.negative_model()
+            try:
+                result = model.forget(reason, factor=factor)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return self._negative_result(model, [], **result)
+
+    def negative_settings(self, **options: Any) -> dict:
+        """Change how strictly the negative network judges (``threshold``, ``min_coverage``) and its weight scales."""
+        with self.mutating():
+            model = self.negative_model()
+            for name in ("threshold", "min_coverage"):
+                value = options.get(name)
+                if value is not None:
+                    setattr(model, name, float(value))
+            scales = {k: options.get(k) for k in ("share_scale", "blame_scale", "clear_scale")}
+            if any(v is not None for v in scales.values()):
+                try:
+                    model.configure_weights(**{k: v for k, v in scales.items() if v is not None})
+                except ValueError as exc:
+                    raise ApiError(400, str(exc)) from exc
+            return {
+                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+                "weights": model.weight_config(),
+                "stats": model.stats(),
+            }
+
+    def negative_reset(self, seed: int | None = None) -> dict:
+        """Forget every failure: a fresh, empty negative network."""
+        with self.mutating():
+            model = NegativeNet(
+                seed=self.seed if seed is None else int(seed), backend=self.backend_name, device=self.device
+            )
+            if isinstance(self.model, NegativeNet):
+                self.model = model
+            else:
+                self._parked[NegativeNet.kind] = model
+            return {"stats": model.stats(), "reasons": [], "journal": []}
+
+    def negative_save(self, path: str | None = None) -> dict:
+        """Write the negative network (default: its file beside the model path)."""
+        target = path or self.model_path_for(NegativeNet.kind)
+        if not target:
+            raise ApiError(400, "no 'path' given and the server was started without a model path")
+        target = os.path.abspath(target)
+        with self.session():
+            self.negative_model().save(target)
+        return {"path": target, "bytes": os.path.getsize(target)}
+
+    def negative_teach(self, reviews: list[dict], threshold: float = 6.0, source: str = "review") -> dict:
+        """Hand a tutor's review (ratings, verdicts, critiques) to the negative network."""
+        with self.mutating():
+            model = self.negative_model()
+            report = teach_reviews(model, reviews, threshold=threshold, source=source)
+            return {
+                "blamed": report["blamed"], "cleared": report["cleared"], "unmatched": report["unmatched"],
+                "edges": report["edges"], "reasons": report["reasons"], "lessons": report["lessons"],
+                "severity_mean": report["severity_mean"], "stats": model.stats(),
+                "reason_table": model.reasons(),
+            }
+
     # -- persistence ---------------------------------------------------------
 
     def save(self, path: str | None = None) -> dict:
@@ -727,9 +1036,17 @@ class ModelService:
         if not target:
             raise ApiError(400, "no 'path' given and the server was started without a model path")
         target = os.path.abspath(target)
+        negative: dict | None = None
         with self.session() as model:
             model.save(target)
-        return {"path": target, "bytes": os.path.getsize(target)}
+            companion = self._parked.get(NegativeNet.kind)
+            if path is None and companion is not None and companion.graph.total_blame:
+                # the negative network is a second file beside the model; saving the work means saving both
+                side = self.model_path_for(NegativeNet.kind)
+                if side:
+                    companion.save(side)
+                    negative = {"path": side, "bytes": os.path.getsize(side)}
+        return {"path": target, "bytes": os.path.getsize(target), "negative": negative}
 
     def load(self, path: str) -> dict:
         """Replace the model with the one at ``path`` (parsed outside the lock)."""
@@ -964,7 +1281,7 @@ class ModelService:
                     texts.extend(line for line in blob.splitlines() if line.strip())
         return texts
 
-    # -- Ollama (local LLM) --------------------------------------------------
+    # -- LLM providers (local Ollama, hosted ChatGPT) -------------------------
 
     def ollama_client(self, url: str | None = None, model: str | None = None, timeout: float | None = None) -> OllamaClient:
         """A client for the request's Ollama overrides, falling back to the server defaults."""
@@ -972,6 +1289,31 @@ class ModelService:
             return OllamaClient(url or self.ollama_url, model or self.ollama_model, timeout)
         except ValueError as exc:
             raise ApiError(400, str(exc)) from exc
+
+    def chatgpt_client(self, url: str | None = None, model: str | None = None, timeout: float | None = None) -> ChatGPTClient:
+        """A client for the request's ChatGPT overrides; the API key is the server's own (never a request field)."""
+        try:
+            return ChatGPTClient(url or self.chatgpt_url, model or self.chatgpt_model, timeout)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+
+    def llm_client(
+        self, provider: str | None = None, url: str | None = None, model: str | None = None, timeout: float | None = None
+    ) -> LLMClient:
+        """A client for ``provider`` (``"ollama"`` | ``"chatgpt"``); 400 when ChatGPT has no key on this server."""
+        try:
+            provider = normalise_provider(provider)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        if provider == "ollama":
+            return self.ollama_client(url, model, timeout)
+        if not chatgpt_key_configured():
+            raise ApiError(
+                400,
+                "ChatGPT is not configured on this server: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) in its "
+                "environment and restart it, or use the 'ollama' provider",
+            )
+        return self.chatgpt_client(url, model, timeout)
 
     def sample_texts(
         self, count: int, prefix: str = "", max_length: int = 60, temperature: float = 1.0, seed: int | None = None
@@ -1000,13 +1342,29 @@ class ModelService:
         finally:
             self._lock.acquire()
 
-    def start_codegen(self, problems: list[Problem], config: CodeGenConfig, client: OllamaClient, sandbox: Sandbox) -> dict:
-        """Start a ``codegen`` job: teacher / model phases over ``problems`` with 2NRL rewards."""
+    def start_codegen(
+        self,
+        problems: list[Problem],
+        config: CodeGenConfig,
+        client: LLMClient,
+        sandbox: Sandbox,
+        judge_client: LLMClient | None = None,
+        blame: bool = False,
+    ) -> dict:
+        """Start a ``codegen`` job: teacher / model phases over ``problems`` with 2NRL rewards.
+
+        With ``blame`` the sandbox, the style checker and the judge also teach
+        the negative network why each rejected program was rejected.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
-            trainer = CodeGenTrainer(self.model, client, sandbox, config, external=self.pause_lock)
+            trainer = CodeGenTrainer(
+                self.model, client, sandbox, config, external=self.pause_lock, judge_client=judge_client,
+                negative=negative,
+            )
             trainer.run(
                 problems, progress=self._progress(job, self._codegen_history), stop_event=job.stop_event,
                 checkpoint_manager=manager,
@@ -1094,6 +1452,75 @@ class ModelService:
 
     def agent_history(self) -> dict:
         return {"history": list(self._agent_history)}
+
+    # -- English lessons (Ollama sets and marks the exercises) ---------------
+
+    def start_tutor(
+        self, config: TutorConfig, client: LLMClient, grader_client: LLMClient | None = None, blame: bool = False,
+    ) -> dict:
+        """Start a ``tutor`` job: rounds of prefix -> completion -> grade -> 2NRL.
+
+        With ``blame`` every failed sentence also teaches the negative network
+        why it failed: the mistake the teacher named is the reason, its mark
+        the severity, and only the characters the correction changed are
+        blamed.
+        """
+        config.validate()
+        manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
+
+        def work(job: Job) -> None:
+            trainer = TutorTrainer(
+                self.model, client, config, external=self.pause_lock, grader_client=grader_client,
+                negative=negative,
+            )
+            trainer.run(
+                progress=self._progress(job, self._tutor_history), stop_event=job.stop_event,
+                checkpoint_manager=manager,
+            )
+
+        return self._start_job("tutor", work)
+
+    def start_critic(self, config: Any, client: LLMClient) -> dict:
+        """Start a ``critic`` job: rounds of write -> review -> blame, teaching the negative network on its own.
+
+        The positive model writes the texts, the LLM marks them and the
+        failures blame the negative network with the critique as the reason and
+        the mark as the severity (:mod:`radixnet.critic`).  The positive model
+        is only read from - nothing here trains, rewards or inverts it - so the
+        loop can be left running beside whatever else is teaching it.
+        """
+        from .critic import Critic
+
+        config.validate()
+        model = self.positive_model()
+        negative = self.negative_model()
+
+        def work(job: Job) -> None:
+            critic = Critic(model, negative, client, config, external=self.pause_lock)
+            critic.run(progress=self._progress(job, self._critic_history), stop_event=job.stop_event)
+
+        return self._start_job("critic", work)
+
+    def critic_history(self) -> dict:
+        return {"history": list(self._critic_history)}
+
+    def critic_card(self) -> dict | None:
+        """The report at the end of the last automatic run, or ``None`` when it has never run."""
+        for record in reversed(self._critic_history):
+            if record.get("kind") == "report":
+                return dict(record)
+        return None
+
+    def tutor_history(self) -> dict:
+        return {"history": list(self._tutor_history)}
+
+    def tutor_card(self) -> dict | None:
+        """The report card at the end of the last tutor run, or ``None`` when nothing has been marked yet."""
+        for record in reversed(self._tutor_history):
+            if record.get("kind") == "report":
+                return dict(record)
+        return None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1299,6 +1726,15 @@ class Fields:
             raise ApiError(400, f"'{name}' must be >= {minimum} (got {value})")
         return float(value)
 
+    def mapping(self, name: str, default: Any = _MISSING) -> Any:
+        """A JSON object field, such as a report card handed back to the tutor."""
+        value = self._lookup(name)
+        if value is _MISSING:
+            return self._default(name, default, "object")
+        if not isinstance(value, dict):
+            raise self._bad(name, "an object", value)
+        return value
+
     def texts(self, list_name: str, text_name: str) -> list[str]:
         """``list_name`` (list of strings) or ``text_name`` (one text per line, blank lines dropped)."""
         value = self._lookup(list_name)
@@ -1329,6 +1765,21 @@ class Fields:
             if exc.message.endswith("contains no texts"):
                 return []
             raise
+
+    def weights(self, name: str, count: int, scale: float = 1.0) -> list[float] | None:
+        """An optional list of ``count`` non-negative numbers (per-text ratings), divided by ``scale``."""
+        value = self._lookup(name)
+        if value is _MISSING or value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+            raise ApiError(400, f"'{name}' must be a list of numbers")
+        if len(value) != count:
+            raise ApiError(400, f"'{name}' has {len(value)} entries for {count} text(s)")
+        numbers = [float(v) / scale for v in value]
+        for number in numbers:
+            if not (number >= 0.0) or number != number:  # NaN and negatives
+                raise ApiError(400, f"'{name}' must hold numbers >= 0 (got {number * scale})")
+        return numbers
 
     def names(self, name: str) -> list[str]:
         """An optional list of non-empty strings (upload names); absent -> ``[]``."""
@@ -1524,6 +1975,20 @@ def _r_status(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.status()
 
 
+def _ratings(f: Fields, side: str, texts: list[str]) -> list[float] | None:
+    """Per-text weights of one side: ``<side>_weights`` (0..1 shares) or ``<side>_ratings`` (marks out of 10).
+
+    A rating says *how* good or bad each text is, so the network learns a
+    9-out-of-10 text nine tenths as hard as a perfect one instead of treating
+    every thumbs up alike.
+    """
+    weights = f.weights(f"{side}_weights", len(texts))
+    ratings = f.weights(f"{side}_ratings", len(texts), scale=10.0)
+    if weights is not None and ratings is not None:
+        raise ApiError(400, f"give '{side}_weights' or '{side}_ratings', not both")
+    return weights if weights is not None else ratings
+
+
 def feedback_action(good: list[str], bad: list[str]) -> str | None:
     """What rated texts lead to: ``"2nrl"`` (both), ``"reward"`` (good only), ``"punish"`` (bad only), ``None``."""
     if good and bad:
@@ -1550,6 +2015,8 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         )
     overrides = _train_overrides(f)
     overrides.setdefault("batch_size", 4)  # rated sets are small
+    good_weights = _ratings(f, "good", good)
+    bad_weights = _ratings(f, "bad", bad)
     job = svc.start_feedback(
         good, bad,
         neg_epochs=f.integer("neg_epochs", 2, minimum=0),
@@ -1557,9 +2024,14 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         neg_lr=f.number("neg_lr", 0.5, minimum=0.0),
         pos_lr=f.number("pos_lr", 0.1, minimum=0.0),
         strength=f.number("strength", None, minimum=0.0),
+        good_weights=good_weights,
+        bad_weights=bad_weights,
         **overrides,
     )
-    return 202, {"job": job, "action": action, "good": len(good), "bad": len(bad)}
+    return 202, {
+        "job": job, "action": action, "good": len(good), "bad": len(bad),
+        "good_weights": good_weights, "bad_weights": bad_weights,
+    }
 
 
 def _train_config(f: Fields) -> TrainConfig:
@@ -1677,6 +2149,8 @@ def _r_two_nrl(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         neg_lr=f.number("neg_lr", 0.05, minimum=0.0),
         pos_lr=f.number("pos_lr", 0.01, minimum=0.0),
         strength=f.number("strength", None, minimum=0.0),
+        bad_weights=_ratings(f, "bad", bad),
+        good_weights=_ratings(f, "good", good),
         **_train_overrides(f),
     )
     return 202, {"job": job}
@@ -1712,7 +2186,7 @@ def _r_evolve_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         blatant_margin=f.number("blatant_margin", d.blatant_margin, minimum=0.0),
         blatant_boost=f.number("blatant_boost", d.blatant_boost, minimum=1.0),
     )
-    return 202, {"job": svc.start_evolve(corpus, generations, config)}
+    return 202, {"job": svc.start_evolve(corpus, generations, config, blame=f.flag("blame", False))}
 
 
 def _r_evolve_stop(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -1766,6 +2240,130 @@ def _r_model_select(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         raise ApiError(400, str(exc)) from exc
 
 
+def _r_negative(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_status()
+
+
+def _negative_texts(f: Fields, what: str) -> list[str]:
+    texts = f.texts_optional("texts", "text")
+    if not texts:
+        raise ApiError(400, f"give the {what} as 'texts' (a list) or 'text' (one per line)")
+    return texts
+
+
+def _r_negative_blame(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_blame(
+        _negative_texts(f, "failed texts"),
+        reason=f.text("reason", "unspecified"),
+        severity=f.number("severity", 1.0, minimum=0.0),
+        source=f.text("source", "api"),
+        note=f.text("note", ""),
+        epochs=f.integer("epochs", 1, minimum=1),
+    )
+
+
+def _r_negative_clear(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_clear(
+        _negative_texts(f, "passed texts"),
+        weight=f.number("weight", 1.0, minimum=0.0),
+        epochs=f.integer("epochs", 1, minimum=1),
+    )
+
+
+def _r_negative_judge(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_judge(
+        _negative_texts(f, "texts to judge"),
+        threshold=f.number("threshold", None, minimum=0.0),
+        min_coverage=f.number("min_coverage", None, minimum=0.0),
+        spans=f.integer("spans", 5, minimum=0),
+    )
+
+
+def _r_negative_filter(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_filter(
+        texts=f.texts_optional("texts", "text"),
+        count=f.integer("count", 3, minimum=0),
+        threshold=f.number("threshold", None, minimum=0.0),
+        min_coverage=f.number("min_coverage", None, minimum=0.0),
+        ratio=f.number("ratio", 0.0),
+        no_ratio=f.flag("no_ratio", False),
+        peak=f.number("peak", None, minimum=0.0),
+        over_sample=f.integer("over_sample", 3, minimum=1),
+        strict=f.flag("strict", False),
+        spans=f.integer("spans", 3, minimum=0),
+        learn=f.flag("learn", False),
+        reason=f.text("reason", "filtered"),
+        mode=f.text("mode", "sample"),
+        max_length=f.integer("max_length", 60, minimum=0),
+        temperature=f.number("temperature", 1.0, minimum=0.0),
+        prefix=f.text("prefix", ""),
+        seed=f.integer("seed", None),
+        step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
+        beam=f.integer("beam", None, minimum=1),
+    )
+
+
+def _r_negative_forget(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_forget(f.text("reason", None), factor=f.number("factor", 0.0, minimum=0.0))
+
+
+def _r_negative_settings(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_settings(
+        threshold=f.number("threshold", None, minimum=0.0),
+        min_coverage=f.number("min_coverage", None, minimum=0.0),
+        share_scale=f.number("share_scale", None),
+        blame_scale=f.number("blame_scale", None),
+        clear_scale=f.number("clear_scale", None),
+    )
+
+
+def _r_negative_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_reset(f.integer("seed", None))
+
+
+def _critic_config(f: Fields) -> Any:
+    """The automatic-teaching settings of a request body (:class:`~radixnet.critic.CriticConfig` defaults)."""
+    from .critic import CriticConfig
+
+    d = CriticConfig()
+    config = CriticConfig(
+        rounds=f.integer("rounds", d.rounds, minimum=0),
+        count=f.integer("count", d.count, minimum=1),
+        prefix=f.text("prefix", d.prefix),
+        max_length=f.integer("max_length", d.max_length, minimum=0),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        threshold=f.number("threshold", d.threshold, minimum=0.0),
+        context=f.text("context", d.context),
+        provider=_provider_field(f, "provider", "reviewer_provider", d.provider),
+        reviewer_model=f.text("reviewer_model", None) or f.text("model", None) or d.reviewer_model,
+        clear_passes=f.flag("clear_passes", d.clear_passes),
+        epochs=f.integer("epochs", d.epochs, minimum=0),
+        seed=f.integer("seed", d.seed),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _r_negative_auto(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Start the automatic loop: the model writes, the LLM reviews, the failures blame the negative network."""
+    config = _critic_config(f)
+    client = svc.llm_client(config.provider, f.text("url", None), config.reviewer_model or None,
+                            f.number("timeout", None, minimum=1.0))
+    job = svc.start_critic(config, client)
+    return 202, {"job": job, "config": config.to_dict(), "url": client.url, "reviewer": client.model}
+
+
+def _r_negative_auto_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.critic_history()
+
+
+def _r_negative_save(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.negative_save(f.text("path", None))
+
+
 def _r_checkpoints(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.checkpoints()
 
@@ -1806,6 +2404,23 @@ def _option(f: Fields, q: dict, name: str, default: Any) -> Any:
     return values[0] if values else default
 
 
+def _flag_option(f: Fields, q: dict, name: str, default: bool = False) -> bool:
+    """A boolean option from the JSON body or the query string (``?train=true``)."""
+    raw = _option(f, q, name, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _audio_bytes(f: Fields, what: str) -> tuple[str, bytes]:
+    """The one audio file of a request: multipart, a raw body or JSON ``content_base64``."""
+    files = f.upload_files()
+    name, payload = files[0]
+    if not isinstance(payload, bytes):
+        raise ApiError(400, f"send the {what} as bytes: multipart/form-data, a raw body, or JSON {{name, content_base64}}")
+    return name, payload
+
+
 def _r_images(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, describe_vision()
 
@@ -1821,8 +2436,7 @@ def _r_image_encode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     except (TypeError, ValueError) as exc:
         raise ApiError(400, "'size' must be an integer") from exc
     encoder = str(_option(f, q, "encoder", "auto") or "auto")
-    raw_train = _option(f, q, "train", False)
-    train = raw_train if isinstance(raw_train, bool) else str(raw_train).strip().lower() in ("1", "true", "yes", "on")
+    train = _flag_option(f, q, "train")
     save_as = _option(f, q, "save_as", None)
     if train:
         svc._ensure_idle()
@@ -1852,6 +2466,169 @@ def _r_image_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         raise ApiError(400, str(exc)) from exc
     png = result.pop("png")
     result["png_base64"] = base64.b64encode(png).decode("ascii")
+    return 200, result
+
+
+def _r_speech(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, describe_speech()
+
+
+def _r_speech_transcribe(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Speech to text: audio bytes -> the words, with the backend that did it."""
+    name, payload = _audio_bytes(f, "audio")
+    try:
+        result = transcribe_speech(
+            payload,
+            backend=str(_option(f, q, "backend", "auto") or "auto"),
+            text=str(_option(f, q, "transcript", "") or ""),
+            language=_option(f, q, "language", None) or None,
+            model=_option(f, q, "asr_model", None) or None,
+            url=_option(f, q, "asr_url", None) or None,
+        )
+    except SpeechError as exc:
+        raise ApiError(400, str(exc)) from exc
+    result["name"] = name
+    return 200, result
+
+
+def _r_speech_teach(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """One utterance -> the transcript and the waveform behind one unique token; optionally trained on."""
+    name, payload = _audio_bytes(f, "recording")
+    train = _flag_option(f, q, "train")
+    save_as = _option(f, q, "save_as", None)
+    try:
+        rate = int(_option(f, q, "rate", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "'rate' must be an integer") from exc
+    if train:
+        svc._ensure_idle()
+    try:
+        result = teach_speech(
+            payload,
+            transcript=str(_option(f, q, "transcript", "") or ""),
+            backend=str(_option(f, q, "backend", "auto") or "auto"),
+            language=_option(f, q, "language", None) or None,
+            asr_model=_option(f, q, "asr_model", None) or None,
+            asr_url=_option(f, q, "asr_url", None) or None,
+            rate=rate or SPEECH_DEFAULT_RATE,
+            codec=str(_option(f, q, "codec", "auto") or "auto"),
+            normalise=_flag_option(f, q, "normalise"),
+            waveform=_flag_option(f, q, "waveform", True),
+            pair=_flag_option(f, q, "pair"),
+            token=_option(f, q, "token", None) or None,
+            unique=_flag_option(f, q, "unique", True),
+        )
+    except SpeechError as exc:
+        raise ApiError(400, str(exc)) from exc
+    if train and not result["texts"]:
+        raise ApiError(400, "nothing to train on: the audio produced neither a transcript nor a waveform")
+    result.update(name=name, upload=None, job=None)
+    if save_as:
+        result["upload"] = svc.upload(str(save_as), "\n".join(result["texts"]) + "\n")
+    if train:
+        config = TrainConfig(
+            epochs=int(_option(f, q, "epochs", 3)), lr=float(_option(f, q, "lr", 0.5)),
+            act_lr=float(_option(f, q, "act_lr", TrainConfig.act_lr)), batch_size=int(_option(f, q, "batch_size", 8)),
+        )
+        result["job"] = svc.start_train(result["texts"], config)
+        return 202, result
+    return 200, result
+
+
+def _recall_options(f: Fields, q: dict, modality: str) -> dict:
+    """The recall-tutor options a request may carry (see :mod:`radixnet.recall`)."""
+    lead = _option(f, q, "lead", None)
+    try:
+        return {
+            "lead": None if lead in (None, "") else int(lead),
+            "length": int(_option(f, q, "length", 0) or 0),
+            "attempts": max(1, int(_option(f, q, "attempts", 1) or 1)),
+            "mode": str(_option(f, q, "mode", "beam") or "beam"),
+            "temperature": float(_option(f, q, "temperature", 1.0) or 1.0),
+            "listen_back": modality == "speech" and _flag_option(f, q, "listen_back"),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, f"bad recall option: {exc}") from exc
+
+
+def _recall_threshold(f: Fields, q: dict) -> float:
+    try:
+        return float(_option(f, q, "threshold", 6.0) or 6.0)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "'threshold' must be a number out of 10") from exc
+
+
+def _r_image_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Ask the network to draw back a picture it was shown, and blame what it got wrong."""
+    texts = [t for t in f.texts_optional("texts", "text") if t.strip()]
+    labels = [f"text {i + 1}" for i in range(len(texts))]
+    if not texts:
+        files = f.upload_files()
+        name, payload = files[0]
+        if not isinstance(payload, bytes):
+            raise ApiError(400, "send the image as bytes: multipart/form-data, a raw body, or JSON {name, content_base64}")
+        try:
+            size = int(_option(f, q, "size", 0) or 0) or 128
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, "'size' must be an integer") from exc
+        try:
+            texts = [encode_image(payload, size=size, encoder=str(_option(f, q, "encoder", "auto") or "auto"))["text"]]
+        except VisionError as exc:
+            raise ApiError(400, str(exc)) from exc
+        labels = [name]
+    return 200, svc.recall_quiz(
+        texts, labels, "image", blame=_flag_option(f, q, "blame"), threshold=_recall_threshold(f, q),
+        **_recall_options(f, q, "image"),
+    )
+
+
+def _r_speech_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Ask the network to say back an utterance it was taught, and blame what it got wrong."""
+    texts = [t for t in f.texts_optional("texts", "text") if t.strip()]
+    labels = [f"text {i + 1}" for i in range(len(texts))]
+    said = [""] * len(texts)
+    if not texts:
+        name, payload = _audio_bytes(f, "recording")
+        try:
+            rate = int(_option(f, q, "rate", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, "'rate' must be an integer") from exc
+        try:
+            taught = teach_speech(
+                payload,
+                transcript=str(_option(f, q, "transcript", "") or ""),
+                backend=str(_option(f, q, "backend", "auto") or "auto"),
+                language=_option(f, q, "language", None) or None,
+                asr_model=_option(f, q, "asr_model", None) or None,
+                asr_url=_option(f, q, "asr_url", None) or None,
+                rate=rate or SPEECH_DEFAULT_RATE,
+                codec=str(_option(f, q, "codec", "auto") or "auto"),
+                normalise=_flag_option(f, q, "normalise"),
+                token=_option(f, q, "token", None) or None,
+                unique=_flag_option(f, q, "unique", True),
+            )
+        except SpeechError as exc:
+            raise ApiError(400, str(exc)) from exc
+        waveform = next((t for t in taught["texts"] if "aud:" in t), "")
+        if not waveform:
+            raise ApiError(400, "nothing to remember: the recording produced no waveform")
+        texts, labels, said = [waveform], [f"{name} {taught['token']}"], [taught["transcript"]]
+    return 200, svc.recall_quiz(
+        texts, labels, "speech", said=said, blame=_flag_option(f, q, "blame"),
+        threshold=_recall_threshold(f, q), **_recall_options(f, q, "speech"),
+    )
+
+
+def _r_speech_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """An encoded - or predicted - waveform text back to a WAV file that can be played."""
+    text = f.text("text")
+    codec = f.text("codec", None) or None
+    try:
+        result = decode_speech_text(text, codec=codec)
+    except SpeechError as exc:
+        raise ApiError(400, str(exc)) from exc
+    wav = result.pop("wav")
+    result["wav_base64"] = base64.b64encode(wav).decode("ascii")
     return 200, result
 
 
@@ -1897,6 +2674,28 @@ def _r_ollama_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
             {"name": m.get("name"), "size": m.get("size"), "modified_at": m.get("modified_at"), "details": m.get("details")}
             for m in models
         ],
+        "error": error,
+    }
+
+
+def _r_chatgpt_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Is ChatGPT usable as a tutor on this server, and which models does its key have?"""
+    url = (q.get("url") or [None])[0]
+    client = svc.chatgpt_client(url or None)
+    configured = chatgpt_key_configured()
+    error = None if configured else "no API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) for the server process"
+    models: list[dict] = []
+    if configured:
+        try:
+            models = client.models()
+        except LLMError as exc:
+            error = str(exc)
+    return 200, {
+        "available": error is None,
+        "configured": configured,
+        "url": client.url,
+        "model": client.model,
+        "models": [{"name": m.get("name"), "owned_by": m.get("owned_by"), "created": m.get("created")} for m in models],
         "error": error,
     }
 
@@ -1957,6 +2756,9 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     result["source"] = source
     result["url"] = client.url
     result["job"] = None
+    result["negative"] = None
+    if f.flag("blame", False):
+        result["negative"] = svc.negative_teach(result["reviews"], threshold=threshold, source="review")
     if apply != "2nrl":
         return 200, result
     bad = list(result["bad"])
@@ -2007,7 +2809,27 @@ def _problems_from(svc: ModelService, f: Fields) -> list[Problem]:
         raise ApiError(400, str(exc)) from exc
 
 
-def _codegen_config(f: Fields) -> CodeGenConfig:
+def _default_llm_model(svc: ModelService, provider: str) -> str:
+    """The model this server tutors / judges with when a request names none.
+
+    ChatGPT follows the server's own default (``--chatgpt-model`` /
+    ``$RADIXNET_OPENAI_MODEL``); Ollama keeps codegen's default
+    (``$RADIXNET_CODEGEN_MODEL``), which is deliberately not the model of the
+    ``/api/ollama/*`` endpoints.
+    """
+    return svc.chatgpt_model if provider == "chatgpt" else default_teacher_model("ollama")
+
+
+def _provider_field(f: Fields, name: str, alias: str | None, default: str) -> str:
+    """``"ollama"`` | ``"chatgpt"`` from a request field (``"openai"`` and ``"gpt"`` are accepted too)."""
+    raw = f.text(name, None) or (f.text(alias, None) if alias else None)
+    try:
+        return normalise_provider(raw) if raw else default
+    except ValueError as exc:
+        raise ApiError(400, f"'{name}' must be one of {', '.join(PROVIDERS)} (got {raw!r})") from exc
+
+
+def _codegen_config(svc: ModelService, f: Fields) -> CodeGenConfig:
     d = CodeGenConfig()
     raw_phases = f._body.get("phases", f._body.get("phase"))
     if raw_phases is None:
@@ -2018,10 +2840,17 @@ def _codegen_config(f: Fields) -> CodeGenConfig:
         phases = tuple(p.strip().lower() for p in raw_phases)
     else:
         raise ApiError(400, "'phases' must be 'both', 'teacher', 'model' or a list of those")
-    teacher_model = f.text("teacher_model", None) or f.text("model", None) or d.teacher_model
+    teacher_provider = _provider_field(f, "teacher_provider", "provider", d.teacher_provider)
+    judge_provider = _provider_field(f, "judge_provider", None, teacher_provider)
+    teacher_model = f.text("teacher_model", None) or f.text("model", None) or _default_llm_model(svc, teacher_provider)
+    judge_model = f.text("judge_model", None)
+    if judge_model is None and judge_provider != teacher_provider:
+        judge_model = _default_llm_model(svc, judge_provider)
     config = CodeGenConfig(
+        teacher_provider=teacher_provider,
         teacher_model=teacher_model,
-        judge_model=f.text("judge_model", None),
+        judge_provider=judge_provider,
+        judge_model=judge_model,
         phases=phases,
         rounds=f.integer("rounds", d.rounds, minimum=1),
         teacher_attempts=f.integer("teacher_attempts", d.teacher_attempts, minimum=1),
@@ -2051,6 +2880,16 @@ def _codegen_config(f: Fields) -> CodeGenConfig:
     return config
 
 
+def _codegen_clients(svc: ModelService, f: Fields, config: CodeGenConfig) -> tuple[LLMClient, LLMClient]:
+    """The tutor and judge clients of a codegen request (``url`` / ``judge_url`` override the server defaults)."""
+    timeout = f.number("timeout", None, minimum=1.0)
+    client = svc.llm_client(config.teacher_provider, f.text("url", None), config.teacher_model, timeout)
+    if config.judge_provider == config.teacher_provider and not f.text("judge_url", None):
+        return client, client
+    judge = svc.llm_client(config.judge_provider, f.text("judge_url", None), config.resolved_judge_model, timeout)
+    return client, judge
+
+
 def _sandbox_from(f: Fields) -> Sandbox:
     return Sandbox(
         timeout=f.number("sandbox_timeout", 10.0, minimum=0.1),
@@ -2061,10 +2900,10 @@ def _sandbox_from(f: Fields) -> Sandbox:
 
 def _r_codegen_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     problems = _problems_from(svc, f)
-    config = _codegen_config(f)
-    client = svc.ollama_client(f.text("url", None), config.teacher_model, f.number("timeout", None, minimum=1.0))
+    config = _codegen_config(svc, f)
+    client, judge = _codegen_clients(svc, f, config)
     sandbox = _sandbox_from(f)
-    job = svc.start_codegen(problems, config, client, sandbox)
+    job = svc.start_codegen(problems, config, client, sandbox, judge_client=judge, blame=f.flag("blame", False))
     return 202, {
         "job": job, "problems": [p.id for p in problems], "config": config.to_dict(),
         "sandbox": {"timeout": sandbox.timeout, "memory_mb": sandbox.memory_mb, "network_isolated": sandbox.network_isolated},
@@ -2087,16 +2926,16 @@ def _r_codegen_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     if source not in ("model", "teacher"):
         raise ApiError(400, f"'source' must be 'model' or 'teacher' (got {source!r})")
     count = f.integer("attempts", 1, minimum=1)
-    config = _codegen_config(f)
+    config = _codegen_config(svc, f)
     config.teacher_attempts = count
     config.model_attempts = count
     config.fallback_teacher = False
-    client = svc.ollama_client(f.text("url", None), config.teacher_model, f.number("timeout", None, minimum=1.0))
+    client, judge = _codegen_clients(svc, f, config)
     sandbox = _sandbox_from(f)
     try:
         if source == "model":
             with svc.session() as model:
-                trainer = CodeGenTrainer(model, client, sandbox, config)
+                trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge)
                 codes = [trainer.generate_with_model(problem, i) for i in range(count)]
             attempts = []
             for i, code in enumerate(codes):  # sandbox and judge run without the model lock
@@ -2105,9 +2944,9 @@ def _r_codegen_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
                 if attempt.verdict.correct:
                     break
         else:
-            trainer = CodeGenTrainer(None, client, sandbox, config)
+            trainer = CodeGenTrainer(None, client, sandbox, config, judge_client=judge)
             attempts = trainer.solve_with_teacher(problem, None, "teacher", 0)
-    except OllamaError as exc:
+    except LLMError as exc:
         raise ApiError(502, str(exc)) from exc
     return 200, {
         "problem": problem.to_dict(), "source": source, "attempts": [a.to_dict() for a in attempts],
@@ -2326,6 +3165,171 @@ def _r_agent_solve(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     }
 
 
+def _default_tutor_model(svc: ModelService, provider: str = "ollama") -> str:
+    """The model this server teaches with when a request names none.
+
+    Ollama: ``RADIXNET_TUTOR_MODEL`` when it is set, else the model the server
+    was started with.  ChatGPT: the server's own default
+    (``--chatgpt-model`` / ``$RADIXNET_OPENAI_MODEL``).
+    """
+    if provider == "chatgpt":
+        return svc.chatgpt_model
+    return os.environ.get("RADIXNET_TUTOR_MODEL", "").strip() or svc.ollama_model
+
+
+def _tutor_clients(svc: ModelService, f: Fields, config: TutorConfig) -> tuple[LLMClient, LLMClient]:
+    """The teacher and marker clients of a tutor request (``url`` / ``grader_url`` override the server defaults)."""
+    timeout = f.number("timeout", None, minimum=1.0)
+    client = svc.llm_client(config.tutor_provider, f.text("url", None), config.tutor_model, timeout)
+    if config.grader_provider == config.tutor_provider and not f.text("grader_url", None):
+        return client, client
+    grader = svc.llm_client(config.grader_provider, f.text("grader_url", None), config.resolved_grader_model, timeout)
+    return client, grader
+
+
+def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
+    """The tutoring settings of a request body, defaults from :class:`~radixnet.tutor.TutorConfig`."""
+    d = TutorConfig()
+    tutor_provider = _provider_field(f, "tutor_provider", "provider", d.tutor_provider)
+    grader_provider = _provider_field(f, "grader_provider", None, tutor_provider)
+    grader_model = f.text("grader_model", None) or None
+    if grader_model is None and grader_provider != tutor_provider:
+        grader_model = _default_tutor_model(svc, grader_provider)
+    config = TutorConfig(
+        topic=f.text("topic", d.topic),
+        rounds=f.integer("rounds", d.rounds, minimum=1),
+        exercises=f.integer("exercises", d.exercises, minimum=1),
+        attempts=f.integer("attempts", d.attempts, minimum=1),
+        focus=f.text("focus", None) or None,
+        level=f.text("level", d.level),
+        words=f.text("words", d.words),
+        brief=f.text("brief", d.brief),
+        tutor_provider=tutor_provider,
+        tutor_model=f.text("tutor_model", None) or f.text("model", None) or _default_tutor_model(svc, tutor_provider),
+        grader_provider=grader_provider,
+        grader_model=grader_model,
+        mode=f.text("mode", d.mode).strip().lower(),
+        length=f.integer("length", d.length, minimum=0),
+        max_length=f.integer("max_length", d.max_length, minimum=1),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        to_end=f.flag("to_end", d.to_end),
+        beam=f.integer("beam", None, minimum=1),
+        threshold=f.number("threshold", d.threshold, minimum=0.0),
+        grammar_weight=f.number("grammar_weight", d.grammar_weight, minimum=0.0),
+        batch=f.integer("batch", d.batch, minimum=1),
+        adapt=f.flag("adapt", d.adapt),
+        drills=f.integer("drills", d.drills, minimum=0),
+        plan=f.integer("plan", d.plan, minimum=0),
+        batches=f.integer("batches", d.batches, minimum=0),
+        teach_answer=f.flag("teach_answer", d.teach_answer),
+        learn=f.flag("learn", d.learn),
+        twonrl_per=f.text("twonrl_per", d.twonrl_per).strip().lower(),
+        diff_corrections=f.flag("diff_corrections", d.diff_corrections),
+        keep_weight=f.number("keep_weight", d.keep_weight, minimum=0.0),
+        min_weight=f.number("min_weight", d.min_weight, minimum=0.0),
+        neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
+        pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
+        neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
+        pos_lr=f.number("pos_lr", d.pos_lr, minimum=0.0),
+        batch_size=f.integer("batch_size", d.batch_size, minimum=1),
+        strength=f.number("strength", None, minimum=0.0),
+        replay=f.flag("replay", d.replay),
+        replay_limit=f.integer("replay_limit", d.replay_limit, minimum=0),
+        checkpoint_every=f.integer("checkpoint_every", d.checkpoint_every, minimum=0),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _r_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """What the tutor can be asked for: the teachers on offer, the marking vocabulary and every default."""
+    return 200, {
+        "url": svc.ollama_url,
+        "model": _default_tutor_model(svc),
+        "env_model": DEFAULT_TUTOR_MODEL,
+        "providers": {
+            "ollama": {"url": svc.ollama_url, "model": _default_tutor_model(svc, "ollama"), "configured": True},
+            "chatgpt": {
+                "url": svc.chatgpt_url,
+                "model": _default_tutor_model(svc, "chatgpt"),
+                "configured": chatgpt_key_configured(),
+            },
+        },
+        "error_types": list(TUTOR_ERROR_TYPES),
+        "modes": list(TUTOR_MODES),
+        "twonrl_per": list(TUTOR_TWONRL_PER),
+        "levels": list(TUTOR_LEVELS),
+        "words_ladder": list(TUTOR_WORDS_LADDER),
+        "upgrade_steps": list(TUTOR_UPGRADE_STEPS),
+        "plan_lessons": DEFAULT_PLAN_LESSONS,
+        "defaults": TutorConfig().to_dict(),
+    }
+
+
+def _r_tutor_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    config = _tutor_config(f, svc)
+    client, grader = _tutor_clients(svc, f, config)
+    job = svc.start_tutor(config, client, grader_client=grader, blame=f.flag("blame", False))
+    return 202, {"job": job, "config": config.to_dict(), "url": client.url}
+
+
+def _r_tutor_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.tutor_history()
+
+
+def _r_tutor_lesson(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """One round of lessons without training: exercises, completions, grades and the report card."""
+    config = _tutor_config(f, svc)
+    client, grader = _tutor_clients(svc, f, config)
+    given = f.texts_optional("prefixes", "prefix")
+    trainer = TutorTrainer(None, client, config, grader_client=grader)
+    try:
+        if given:
+            exercises = [
+                Exercise(id=f"e{i + 1}", prefix=prefix, focus=config.focus or "")
+                for i, prefix in enumerate(given[: config.exercises])
+            ]
+        else:
+            exercises = trainer.set_exercises(1)
+        with svc.session() as model:  # the search runs under the lock, the LLM calls do not
+            trainer.model = model
+            lessons = [trainer.complete(ex, attempt) for ex in exercises for attempt in range(config.attempts)]
+        trainer.grade(lessons)
+    except LLMError as exc:
+        raise ApiError(502, str(exc)) from exc
+    return 200, {
+        "source": "given" if given else config.tutor_provider, "model": client.model, "url": client.url,
+        "config": config.to_dict(), "exercises": [e.to_dict() for e in exercises],
+        "lessons": [lesson.to_dict() for lesson in lessons], "report": report_card(lessons),
+    }
+
+
+def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The lessons to run next: the teacher turns a report card into a syllabus of its weakest points."""
+    config = _tutor_config(f, svc)
+    client, _grader = _tutor_clients(svc, f, config)
+    card = f.mapping("report", None) or svc.tutor_card()
+    if card is None:
+        raise ApiError(400, "no report card yet: run some lessons first, or send one as 'report'")
+    count = f.integer("count", config.plan or DEFAULT_PLAN_LESSONS, minimum=1)
+    try:
+        plan = plan_lessons(
+            client, card, topic=config.topic, level=config.level, words=config.words, threshold=config.threshold,
+            count=count, exercises=config.exercises, drills=config.drills, model=config.tutor_model,
+        )
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except LLMError as exc:
+        raise ApiError(502, str(exc)) from exc
+    return 200, {
+        "plan": plan.to_dict(), "source": plan.source, "provider": config.tutor_provider,
+        "model": client.model, "url": client.url, "report": card,
+    }
+
+
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
     ("GET", "/api/status", _r_status, "model stats (with the active kind), current job, backend availability, paths"),
@@ -2352,14 +3356,19 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
      "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
-    ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
+    ("POST", "/api/2nrl", _r_two_nrl,
+     "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "
+     "bad_weights | bad_ratings, good_weights | good_ratings (per text: how bad / how good)}"),
     ("POST", "/api/feedback", _r_feedback,
-     "learn from rated texts: {good (thumbs up), bad (thumbs down), ...} -> 2NRL when both, reward on good alone, punish (negative phase + invert) on bad alone"),
+     "learn from rated texts: {good (thumbs up), bad (thumbs down), good_ratings / bad_ratings (marks out of 10, "
+     "or good_weights / bad_weights as 0..1 shares), ...} -> 2NRL when both, reward on good alone, punish "
+     "(negative phase + invert) on bad alone; every text is learned in proportion to its rating"),
     ("POST", "/api/invert", _r_invert, "invert the network"),
     ("POST", "/api/compress", _r_compress, "merge unary chains"),
     ("POST", "/api/evolve/start", _r_evolve_start,
      "start the GAN-style loop: {corpus | corpus_text | corpus_files, generations, samples, ..., blatant_mode: none | "
-     "fail_invert | activation | state, blatant_margin, blatant_boost}"),
+     "fail_invert | activation | state, blatant_margin, blatant_boost, blame (the discriminator also teaches the "
+     "negative network)}"),
     ("POST", "/api/evolve/stop", _r_evolve_stop, "stop the evolve job"),
     ("GET", "/api/evolve/history", _r_evolve_history, "generation records of all evolve runs"),
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
@@ -2368,6 +3377,33 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "replace the model with a fresh one: {seed, kind, count model: count_scale, global_scale, window_scale, reward_scale, window}"),
     ("POST", "/api/model/weights", _r_model_weights,
      "count model: change the dual frequency function {count_scale, global_scale, window_scale, reward_scale, window} -> {weights, stats}"),
+    ("GET", "/api/negative", _r_negative,
+     "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
+     "filter settings"),
+    ("POST", "/api/negative/blame", _r_negative_blame,
+     "teach it a failure: {texts | text, reason, severity, source, note, epochs} - the only thing that adds "
+     "structure to the negative network"),
+    ("POST", "/api/negative/clear", _r_negative_clear,
+     "the tutor passed these texts: {texts | text, weight, epochs} takes blame off the fragments they share with "
+     "known failures (nothing is created)"),
+    ("POST", "/api/negative/judge", _r_negative_judge,
+     "why texts look like failures: {texts | text, threshold, min_coverage, spans} -> verdicts with risk, coverage, "
+     "the reasons and the fragments to blame"),
+    ("POST", "/api/negative/filter", _r_negative_filter,
+     "the pair: the positive model writes, the negative one vetoes - {count, prefix, mode, max_length, temperature, "
+     "over_sample, threshold, min_coverage, ratio, no_ratio, peak (blame on a single fragment), strict, learn} or "
+     "{texts} to judge given texts"),
+    ("POST", "/api/negative/forget", _r_negative_forget, "drop or fade the blame behind a reason: {reason, factor}"),
+    ("POST", "/api/negative/settings", _r_negative_settings,
+     "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
+    ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
+    ("POST", "/api/negative/auto", _r_negative_auto,
+     "the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every "
+     "failure blame the negative network - {rounds (0 = until stopped), count, prefix, max_length, temperature, "
+     "threshold, context (what the texts are meant to be), provider: ollama|chatgpt, reviewer_model, url, timeout, "
+     "clear_passes, epochs, seed}; the positive model is only read from"),
+    ("GET", "/api/negative/auto/history", _r_negative_auto_history, "round / report records of all automatic runs"),
+    ("POST", "/api/negative/save", _r_negative_save, "save the negative network: {path} (default: beside the model path)"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
@@ -2384,17 +3420,44 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "{name, content_base64} + ?size=128&encoder=auto|sd|tiny&train=true&save_as=NAME -> {text, encoder, latent_shape, ...}"),
     ("POST", "/api/images/decode", _r_image_decode,
      "decode an encoded or predicted text back to an image: {text, encoder} -> {png_base64, width, height, repaired}"),
+    ("GET", "/api/speech", _r_speech,
+     "the speech backends: faster-whisper / whisper / a transcription server, ffmpeg, the microphone recorders, "
+     "the waveform codecs and the unique token"),
+    ("POST", "/api/speech/transcribe", _r_speech_transcribe,
+     "speech to text: audio as multipart / a raw body / JSON {name, content_base64} (+ backend, language, "
+     "asr_model, asr_url, transcript) -> {transcript, backend, model, language, seconds}"),
+    ("POST", "/api/speech/teach", _r_speech_teach,
+     "teach the model an utterance: the same audio forms plus transcript, rate, codec, normalise, waveform, pair, "
+     "token, unique, train, save_as, epochs, lr, batch_size -> {token, transcript, asr, audio, texts, job, upload}"),
+    ("POST", "/api/images/tutor", _r_image_tutor,
+     "the recall tutor: ask the network to draw back an image it was shown and mark what comes back "
+     "{image bytes | texts, size, encoder, lead, length, attempts, mode, temperature, threshold, blame} -> "
+     "lessons with a mark out of 10 and the reason each failure failed"),
+    ("POST", "/api/speech/tutor", _r_speech_tutor,
+     "the recall tutor: ask the network to say back an utterance it was taught and mark what comes back "
+     "{recording bytes | texts, transcript, rate, codec, lead, length, attempts, mode, temperature, "
+     "threshold, listen_back, blame} -> lessons with a mark out of 10 and the reason each failure failed"),
+    ("POST", "/api/speech/decode", _r_speech_decode,
+     "decode an encoded or predicted waveform text back to audio: {text, codec} -> {wav_base64, rate, seconds, repaired}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
     ("POST", "/api/ollama/review", _r_ollama_review,
-     "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, good, good_files}"),
+     "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, "
+     "good, good_files, blame (teach the negative network what failed and why)}"),
+    ("GET", "/api/chatgpt/models", _r_chatgpt_models,
+     "is ChatGPT usable as a tutor here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails"),
     ("POST", "/api/codegen/start", _r_codegen_start,
-     "start a codegen job: {problems | problems_text | problem_files, phases: both|teacher|model, rounds, teacher_model, ...}"),
+     "start a codegen job: {problems | problems_text | problem_files, phases: both|teacher|model, rounds, "
+     "teacher_provider: ollama|chatgpt, teacher_model, judge_provider, judge_model, blame (the sandbox and the judge "
+     "also teach the negative network), ...}"),
     ("GET", "/api/codegen/history", _r_codegen_history, "attempt / problem / round records of all codegen runs"),
     ("POST", "/api/codegen/solve", _r_codegen_solve,
      "solve one problem without training: {problem, source: model|teacher, attempts, judge, ...} -> attempts with sandbox runs and verdicts"),
     ("POST", "/api/codegen/run", _r_codegen_run, "run a program in the sandbox: {code, tests, expected_output, sandbox_timeout, memory_mb}"),
+    ("GET", "/api/tutor", _r_tutor,
+     "the English tutor: the teachers on offer (ollama, chatgpt: url, model, configured), the error types a "
+     "completion is marked with, the completion modes and every default setting"),
     ("GET", "/api/tools", _r_tools,
      "the external tools the network can call by writing <tool>name {...}</tool>: names, arguments, JSON schemas"),
     ("POST", "/api/tools/call", _r_tool_call,
@@ -2412,6 +3475,24 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/agent/solve", _r_agent_solve,
      "one task through the loop without training: {task, source: model|teacher, ...} -> the transcript, the verdict "
      "and how badly it failed"),
+    ("POST", "/api/tutor/start", _r_tutor_start,
+     "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the "
+     "grammar and the 2NRL follows: {topic, rounds, exercises, attempts, focus, level, mode, threshold, "
+     "grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, "
+     "neg_epochs, pos_epochs, neg_lr, pos_lr, brief, plan, batches (auto run: each batch planned from the last, "
+     "0 = until stopped), tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
+     "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
+     "failed), ...}"),
+    ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
+    ("POST", "/api/tutor/lesson", _r_tutor_lesson,
+     "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "
+     "threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card"),
+    ("POST", "/api/tutor/plan", _r_tutor_plan,
+     "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, "
+     "level, words, threshold, exercises, drills, tutor_provider, tutor_model, url} -> {plan: {summary, prompt "
+     "(the brief for the next batch: start a run with it as 'brief'), upgrade: {step, level, words, threshold, "
+     "drills, note}, level, weak, targets, lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, "
+     "source}"),
 )
 
 _ROUTES: dict[str, dict[str, RouteFn]] = {}
@@ -2771,6 +3852,8 @@ def create_server(
     upload_dir: str | None = None,
     ollama_url: str | None = None,
     ollama_model: str | None = None,
+    chatgpt_url: str | None = None,
+    chatgpt_model: str | None = None,
     kind: str | None = None,
     tool_options: dict | None = None,
 ) -> tuple[RadixNetHTTPServer, ModelService]:
@@ -2781,17 +3864,19 @@ def create_server(
     ``upload_dir`` enables the upload endpoints (training files kept on the
     server); ``frontend_dir`` is the built React app; ``ollama_url`` /
     ``ollama_model`` are the defaults of the ``/api/ollama/*`` endpoints
-    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted);
-    ``tool_options`` are the defaults of the ``/api/tools`` and
-    ``/api/agent/*`` endpoints (``offline``, ``allow_private``,
-    ``search_url``, ``web_timeout``, ``max_bytes``, ``python_tool``,
-    ``sandbox_timeout``).  ``quiet`` silences the per-request log lines
-    (stderr).
+    (``$OLLAMA_HOST`` / ``$RADIXNET_OLLAMA_MODEL`` when omitted) and
+    ``chatgpt_url`` / ``chatgpt_model`` those of the ChatGPT provider
+    (``$OPENAI_BASE_URL`` / ``$RADIXNET_OPENAI_MODEL``; the key always comes
+    from the server's ``$OPENAI_API_KEY``); ``tool_options`` are the defaults
+    of the ``/api/tools`` and ``/api/agent/*`` endpoints (``offline``,
+    ``allow_private``, ``search_url``, ``web_timeout``, ``max_bytes``,
+    ``python_tool``, ``sandbox_timeout``).  ``quiet`` silences the per-request
+    log lines (stderr).
     """
     service = ModelService(
         model_path=model_path, checkpoint_dir=checkpoint_dir, backend=backend, device=device,
-        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model, kind=kind,
-        tool_options=tool_options,
+        seed=seed, quiet=quiet, upload_dir=upload_dir, ollama_url=ollama_url, ollama_model=ollama_model,
+        chatgpt_url=chatgpt_url, chatgpt_model=chatgpt_model, kind=kind, tool_options=tool_options,
     )
     server = RadixNetHTTPServer((host, port), service, frontend_dir=frontend_dir, quiet=quiet)
     return server, service
@@ -2810,6 +3895,8 @@ def run_server(
     upload_dir: str | None = None,
     ollama_url: str | None = None,
     ollama_model: str | None = None,
+    chatgpt_url: str | None = None,
+    chatgpt_model: str | None = None,
     kind: str | None = None,
     tool_options: dict | None = None,
 ) -> None:
@@ -2817,7 +3904,8 @@ def run_server(
     server, service = create_server(
         host, port, model_path=model_path, checkpoint_dir=checkpoint_dir, frontend_dir=frontend_dir,
         backend=backend, device=device, seed=seed, quiet=quiet, upload_dir=upload_dir,
-        ollama_url=ollama_url, ollama_model=ollama_model, kind=kind, tool_options=tool_options,
+        ollama_url=ollama_url, ollama_model=ollama_model, chatgpt_url=chatgpt_url, chatgpt_model=chatgpt_model,
+        kind=kind, tool_options=tool_options,
     )
     if not quiet:
         sys.stderr.write(f"radixnet API listening on {server.url} (Ctrl-C to stop)\n")

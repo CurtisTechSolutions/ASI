@@ -44,7 +44,8 @@ from contextlib import nullcontext
 from typing import Any
 
 from .gan import BLATANT_MODES
-from .ollama import DEFAULT_MODEL, OllamaClient, OllamaError, _loads_lenient, parse_lines
+from .llm import LLMClient, LLMError, loads_lenient
+from .ollama import DEFAULT_MODEL, parse_lines
 from .tools import (
     ANSWER_CLOSE,
     ANSWER_OPEN,
@@ -85,7 +86,12 @@ __all__ = [
 ]
 
 DEFAULT_AGENT_MODEL = os.environ.get("RADIXNET_AGENT_MODEL", "").strip() or DEFAULT_MODEL
-"""Ollama model that writes the criteria, mediates, judges and teaches (``RADIXNET_AGENT_MODEL`` overrides)."""
+"""Model that writes the criteria, mediates, judges and teaches (``RADIXNET_AGENT_MODEL`` overrides).
+
+Any :class:`~radixnet.llm.LLMClient` does: Ollama's tool-calling API is used
+where the provider has it, and a provider without it answers the same questions
+in JSON mode instead.
+"""
 
 PHASES = ("teacher", "model")
 MEDIATION = ("repair", "always", "never")
@@ -309,7 +315,7 @@ _CRITERIA_SYSTEM = (
 )
 
 
-def write_criteria(client: OllamaClient, task: Task, *, model: str | None = None, count: int = 4) -> list[str]:
+def write_criteria(client: LLMClient, task: Task, *, model: str | None = None, count: int = 4) -> list[str]:
     """The statements a correct answer must satisfy, written before anything is attempted.
 
     A task that already carries criteria keeps them; an LLM that answers with
@@ -323,7 +329,7 @@ def write_criteria(client: OllamaClient, task: Task, *, model: str | None = None
         f"Task: {task.prompt}\n\nWrite the criteria now.",
         system=_CRITERIA_SYSTEM.format(count=count), model=model, json_mode=True, options={"temperature": 0.2},
     )
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     items: Any = data.get("criteria") if isinstance(data, dict) else data
     if isinstance(items, dict):
         items = list(items.values())
@@ -356,6 +362,23 @@ def _tools_block(toolbox: ToolBox) -> str:
     return "The tools are:\n" + toolbox.catalogue()
 
 
+def _chat_message(client: LLMClient, messages: list[dict], *, tools: list[dict] | None = None, **options: Any) -> dict:
+    """One assistant message, with ``tools`` when the provider supports tool calling.
+
+    Ollama answers with ``{"tool_calls": [...]}``; a provider whose client has
+    no ``chat_message`` (or refuses the tools) answers in JSON instead, which
+    :func:`_call_from_message` reads just the same.
+    """
+    chat_message = getattr(client, "chat_message", None)
+    if chat_message is not None:
+        try:
+            return chat_message(messages, tools=tools, **options)
+        except LLMError:
+            if not tools:
+                raise
+    return {"role": "assistant", "content": client.chat(messages, json_mode=True, **options)}
+
+
 def _call_from_message(message: dict, toolbox: ToolBox) -> ToolCall | None:
     """One call out of Ollama's native ``tool_calls``, or out of a JSON answer in the content."""
     calls = message.get("tool_calls")
@@ -367,22 +390,22 @@ def _call_from_message(message: dict, toolbox: ToolBox) -> ToolCall | None:
             name = str(function.get("name") or "").strip()
             arguments = function.get("arguments")
             if isinstance(arguments, str):
-                arguments = _loads_lenient(arguments)
+                arguments = loads_lenient(arguments)
             if name and toolbox.has(name):
                 return ToolCall(name, arguments if isinstance(arguments, dict) else {})
-    data = _loads_lenient(message.get("content") or "")
+    data = loads_lenient(message.get("content") or "")
     if isinstance(data, dict):
         name = str(data.get("tool") or data.get("name") or data.get("function") or "").strip()
         arguments = data.get("arguments", data.get("args", data.get("parameters")))
         if isinstance(arguments, str):
-            arguments = _loads_lenient(arguments)
+            arguments = loads_lenient(arguments)
         if name and toolbox.has(name):
             return ToolCall(name, arguments if isinstance(arguments, dict) else {})
     return None
 
 
 def mediate_call(
-    client: OllamaClient,
+    client: LLMClient,
     emission: str,
     toolbox: ToolBox,
     task: Task,
@@ -393,7 +416,7 @@ def mediate_call(
 ) -> ToolCall:
     """Turn the network's unusable emission into one valid call — Ollama's tool-calling API, then JSON, then a guess.
 
-    Raises :class:`~radixnet.ollama.OllamaError` only when the LLM cannot be
+    Raises :class:`~radixnet.llm.LLMError` only when the LLM cannot be
     reached; an answer that names no known tool falls back to the first network
     tool with the task as its argument, so the loop always makes a move.
     """
@@ -408,7 +431,7 @@ def mediate_call(
     message: dict = {}
     try:
         message = client.chat_message(messages, model=model, tools=toolbox.schemas(), options={"temperature": 0.2})
-    except OllamaError:
+    except LLMError:
         message = {}
     call = _call_from_message(message, toolbox) if message else None
     if call is None:  # a model without tool calling: ask for the JSON directly
@@ -476,7 +499,7 @@ def _marks(value: Any) -> list[bool]:
 
 
 def judge_attempt(
-    client: OllamaClient,
+    client: LLMClient,
     task: Task,
     criteria: list[str],
     transcript: str,
@@ -493,7 +516,7 @@ def judge_attempt(
         + f"Return the JSON with exactly {len(criteria) or 1} entries in \"met\"."
     )
     raw = client.generate(user, system=_JUDGE_SYSTEM, model=model, json_mode=True, options={"temperature": 0.1})
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     if not isinstance(data, dict):
         return {"met": [], "score": None, "correct": None, "critique": "the judge returned nothing usable"}
     met = _marks(data.get("met", data.get("criteria_met", data.get("results"))))
@@ -539,7 +562,7 @@ _TEACHER_SYSTEM = (
 
 
 def teach_task(
-    client: OllamaClient,
+    client: LLMClient,
     task: Task,
     toolbox: ToolBox,
     *,
@@ -572,7 +595,7 @@ def teach_task(
             if native:
                 try:
                     message = client.chat_message(messages, model=model, tools=schemas, options={"temperature": 0.3})
-                except OllamaError:
+                except LLMError:
                     native, message = False, {}
             if not native:
                 message = {"role": "assistant", "content": client.chat(messages, model=model, options={"temperature": 0.3})}
@@ -612,7 +635,7 @@ _PROPOSE_SYSTEM = (
 
 
 def propose_task(
-    client: OllamaClient,
+    client: LLMClient,
     emission: str,
     *,
     model: str | None = None,
@@ -634,7 +657,7 @@ def propose_task(
         + "Give the question now."
     )
     raw = client.generate(user, system=_PROPOSE_SYSTEM, model=model, json_mode=True, options={"temperature": 0.8})
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     question = seed = ""
     if isinstance(data, dict):
         question = " ".join(str(data.get("question") or data.get("task") or data.get("prompt") or "").split())
@@ -750,7 +773,7 @@ class AgentTrainer:
     def __init__(
         self,
         model: Any,
-        client: OllamaClient,
+        client: LLMClient,
         toolbox: ToolBox,
         config: AgentConfig | None = None,
         external: Callable[[], Any] | None = None,

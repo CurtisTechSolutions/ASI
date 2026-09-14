@@ -15,6 +15,10 @@ dependencies = []
 gpu = ["torch"]
 images = ["pillow"]
 diffusion = ["pillow", "torch", "diffusers"]
+# Speech to text; the waveform encoder itself needs nothing, and the browser's
+# Web Speech API (or --text) supplies the words without any of these.
+speech = ["faster-whisper"]
+whisper = ["openai-whisper"]
 
 [project.scripts]
 radixnet = "radixnet.cli:main"

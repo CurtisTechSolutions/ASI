@@ -31,6 +31,9 @@ MAX_LENGTH  ?= 60
 TEXT        ?= the cat sat on the mat
 GENERATIONS ?= 3
 SAMPLES     ?= 8
+NEGATIVE    ?= $(basename $(MODEL)).negative$(suffix $(MODEL))
+REASON      ?= gibberish
+SEVERITY    ?= 1
 DISC        ?= $(dir $(MODEL))discriminator.json
 NAME        ?= latest
 HOST        ?= 127.0.0.1
@@ -42,8 +45,29 @@ PROMPT      ?= short true sentences about animals and the weather
 LINES       ?= 20
 STYLE       ?= good
 THRESHOLD   ?= 6
+TOPIC       ?= everyday life
+FOCUS       ?= subject-verb agreement
+ROUNDS      ?= 3
+EXERCISES   ?= 5
+DRILLS      ?= 0
+PLAN        ?= 3
+BATCHES     ?= 3
+BRIEF       ?=
 PROBLEMS    ?= data/sample_problems.jsonl
+AUDIO       ?= utterance.wav
+TRANSCRIPT  ?=
+SECONDS     ?= 5
+SPEECH_RATE ?= 8000
 PHASE       ?= both
+# Who teaches: the English lessons and the code-generation tutor both follow it
+TUTOR       ?= ollama
+TUTOR_MODEL ?=
+TUTOR_URL   ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_URL),$(OLLAMA_URL))
+CHATGPT_MODEL ?=
+CHATGPT_URL ?=
+# blank for the chatgpt tutor: it then uses CHATGPT_MODEL, $$RADIXNET_OPENAI_MODEL or gpt-4o-mini
+CODEGEN_MODEL ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_MODEL),gemma4)
+CODEGEN_URL ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_URL),$(OLLAMA_URL))
 CODEGEN_MODEL ?= gemma4
 TASKS       ?= data/sample_tasks.txt
 STEPS       ?= 10
@@ -64,10 +88,13 @@ export EPOCHS LR BATCH RADIXNET_PORT RADIXNET_BACKEND RADIXNET_CORPUS WITH_TORCH
 DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
-.PHONY: help install install-gpu check test go-build go-test go-parity go-serve train resume predict generate score 2nrl invert compress \
-        evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
-        frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
-        codegen codegen-teacher codegen-model tools agent explore explore-forever \
+.PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative train resume predict generate score 2nrl invert compress \
+        negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
+        evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
+        frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
+        chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
+        speech-info speech-teach speech-listen speech-tutor speech-decode \
+        tools agent explore explore-forever \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -98,6 +125,10 @@ go-build: ## Build the Go count / reward model CLI into go/bin/radixnet-count
 
 go-test: ## Run the Go tests with the race detector
 	cd go && $(GO) vet ./... && $(GO) test -race ./...
+
+go-negative: go-build ## The Go negative network: blame GARBAGE, then judge TEXT through it
+	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
+	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative why --text "$(TEXT)"
 
 go-parity: ## Cross-language parity of the Go port against the Python model
 	$(PY) -m unittest tests.test_go_parity -v
@@ -131,11 +162,38 @@ invert: ## Invert the network (flip every edge weight and activation amplitude)
 compress: ## Merge unary chains (radix-tree path compression) and save
 	$(RADIXNET) $(GLOBAL) compress
 
+##@ The negative network (failures only; it filters the positive model)
+negative-blame: ## Blame every line of GARBAGE for REASON with SEVERITY (the negative model is NEGATIVE)
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
+
+negative-clear: ## The tutor passed DATA: take blame off the fragments it shares with known failures
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) clear --data $(DATA)
+
+negative-why: ## Why TEXT looks like a failure: the reasons and the fragments carrying them
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) why --text "$(TEXT)"
+
+negative-filter: ## Generate COUNT texts through the pair: the positive model writes, the negative one vetoes
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) filter --count $(COUNT) --max-length $(MAX_LENGTH)
+
+REVIEWER_FLAGS := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),) $(if $(OLLAMA_MODEL),--reviewer-model $(OLLAMA_MODEL),)
+negative-auto: ## Teach it automatically for ROUNDS rounds: the model writes, Ollama reviews, the failures are blamed
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) auto --rounds $(ROUNDS) --count $(COUNT) --threshold $(THRESHOLD) $(REVIEWER_FLAGS)
+
+negative-reasons: ## What the tutor has blamed, and the journal of what it said
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) reasons
+
+negative-forget: ## Forget the blame behind REASON (the tutor can be wrong too)
+	$(RADIXNET) $(GLOBAL) negative --negative $(NEGATIVE) forget --reason $(REASON)
+
+##@ Evolve (GAN-style self-upgrading)
 evolve: ## GAN-style self-upgrade for GENERATIONS generations (checkpoints in CKPT_DIR, discriminator in DISC)
 	$(RADIXNET) $(GLOBAL) evolve --data $(DATA) --generations $(GENERATIONS) --samples $(SAMPLES) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR) --discriminator $(DISC)
 
 evolve-forever: ## Self-upgrade until Ctrl-C (the model is saved on stop)
 	$(MAKE) evolve GENERATIONS=0
+
+evolve-blame: ## Self-upgrade and let the discriminator teach the negative network as it goes
+	$(RADIXNET) $(GLOBAL) evolve --data $(DATA) --generations $(GENERATIONS) --samples $(SAMPLES) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR) --discriminator $(DISC) --blame --negative $(NEGATIVE)
 
 info: ## Model statistics and training history
 	$(RADIXNET) $(GLOBAL) info
@@ -170,19 +228,74 @@ ollama-garbage: ## Ask Ollama for LINES deliberately wrong lines about PROMPT an
 ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pass at THRESHOLD)
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD)
 
+ollama-blame: ## Review COUNT samples and teach the negative network why the failures failed (critique -> reason)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --blame --negative $(NEGATIVE)
+
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
 
-##@ Code generation (sandbox + Ollama judge + 2NRL rewards)
-codegen: ## Solve PROBLEMS with the teacher (CODEGEN_MODEL) and then the model (PHASE=both|teacher|model), 2NRL after every problem
-	$(RADIXNET) $(GLOBAL) codegen --problems $(PROBLEMS) --phase $(PHASE) --teacher-model $(CODEGEN_MODEL) $(OLLAMA_FLAGS_URL) --checkpoint-dir $(CKPT_DIR) --report codegen-report.json
+##@ Tutor (the teacher sets the exercise, the model answers, the teacher marks it)
+TUTOR_FLAGS := --tutor-provider $(TUTOR) $(if $(TUTOR_URL),--url $(TUTOR_URL),) \
+               $(if $(TUTOR_MODEL),--tutor-model $(TUTOR_MODEL),)
 
-codegen-teacher: ## Phase 1 only: Ollama writes and fixes the solutions, the network learns them (wrong attempts as garbage)
+tutor: ## English lessons about TOPIC (TUTOR=ollama|chatgpt teaches): ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --drills $(DRILLS) --threshold $(THRESHOLD) --report tutor-report.json
+
+tutor-blame: ## English lessons that also teach the negative network why each sentence failed
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --blame --negative $(NEGATIVE)
+
+tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trained on
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds 1 --exercises $(EXERCISES) --threshold $(THRESHOLD) --dry-run
+
+tutor-focus: ## Lessons drilling one point of grammar: FOCUS="past tense"
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --focus "$(FOCUS)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD)
+
+tutor-plan: ## Lessons about TOPIC that end with the next PLAN lessons and the brief that teaches them; BRIEF="..." runs a batch to one
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD) $(if $(BRIEF),--brief "$(BRIEF)",) --plan $(PLAN) --report tutor-report.json
+
+tutor-auto: ## Auto run: BATCHES batches of ROUNDS rounds about TOPIC, each planned from the report card of the one before (BATCHES=0 runs until Ctrl-C)
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --threshold $(THRESHOLD) --batches $(BATCHES) --report tutor-report.json
+
+##@ ChatGPT (OpenAI as the code-generation tutor; needs $$OPENAI_API_KEY)
+CHATGPT_FLAGS := $(if $(CHATGPT_URL),--url $(CHATGPT_URL),) $(if $(CHATGPT_MODEL),--chatgpt-model $(CHATGPT_MODEL),)
+
+chatgpt-models: ## List the models $$OPENAI_API_KEY may use (the quickest check that ChatGPT can tutor)
+	$(RADIXNET) $(GLOBAL) chatgpt $(CHATGPT_FLAGS) models
+
+chatgpt-ask: ## Send PROMPT to ChatGPT and print the answer
+	$(RADIXNET) $(GLOBAL) chatgpt $(CHATGPT_FLAGS) ask --prompt "$(PROMPT)"
+
+##@ Code generation (sandbox + LLM tutor / judge + 2NRL rewards)
+CODEGEN_FLAGS := --teacher-provider $(TUTOR) $(if $(CODEGEN_MODEL),--teacher-model $(CODEGEN_MODEL),) \
+                 $(if $(CODEGEN_URL),--url $(CODEGEN_URL),)
+
+codegen: ## Solve PROBLEMS with the tutor (TUTOR=ollama|chatgpt, CODEGEN_MODEL) and then the model (PHASE=both|teacher|model), 2NRL after every problem
+	$(RADIXNET) $(GLOBAL) codegen --problems $(PROBLEMS) --phase $(PHASE) $(CODEGEN_FLAGS) --checkpoint-dir $(CKPT_DIR) --report codegen-report.json
+
+codegen-teacher: ## Phase 1 only: the tutor writes and fixes the solutions, the network learns them (wrong attempts as garbage)
 	$(MAKE) codegen PHASE=teacher
 
 codegen-model: ## Phase 2 only: the network writes the solutions, punished / rewarded by the sandbox and the judge
 	$(MAKE) codegen PHASE=model
 
+
+##@ Speech (teach the model by talking to it)
+SPEECH_TEXT := $(if $(TRANSCRIPT),--text "$(TRANSCRIPT)",)
+
+speech-info: ## Which transcription backends, microphone recorders and codecs are available
+	$(RADIXNET) $(GLOBAL) speech info
+
+speech-teach: ## Teach AUDIO: its transcript and its waveform, behind one unique token (TRANSCRIPT=... skips the ASR)
+	$(RADIXNET) $(GLOBAL) speech teach $(AUDIO) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH)
+
+speech-listen: ## Record SECONDS from the microphone and teach the model what was said and how it sounded
+	$(RADIXNET) $(GLOBAL) speech listen --seconds $(SECONDS) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH)
+
+speech-tutor: ## Ask the model to say AUDIO back, mark what comes back and blame what it misremembered
+	$(RADIXNET) $(GLOBAL) speech tutor $(AUDIO) $(SPEECH_TEXT) --rate $(SPEECH_RATE) --train --length 400 --blame
+
+speech-decode: ## Turn an encoded or predicted waveform text (TEXT=...) back into AUDIO
+	$(RADIXNET) $(GLOBAL) speech decode --text "$(TEXT)" --out $(AUDIO)
 OLLAMA_FLAGS_URL := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),)
 AGENT_FLAGS := $(OLLAMA_FLAGS_URL) $(if $(AGENT_MODEL),--agent-model $(AGENT_MODEL),) --max-steps $(MAX_STEPS)
 

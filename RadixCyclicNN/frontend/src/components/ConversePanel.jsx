@@ -32,7 +32,7 @@ export default function ConversePanel({ status }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const feedback = useJob("feedback");
-  const { ratings, rate, ratingOf, remove, clear } = useRatings();
+  const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
   const kind = status ? status.kind : null;
   const endRef = useRef(null);
 
@@ -232,6 +232,7 @@ export default function ConversePanel({ status }) {
         ratings={ratings}
         onClear={clear}
         onRemove={remove}
+        onMark={setMark}
         feedback={feedback}
         status={status}
         emptyText="rate some turns first"
