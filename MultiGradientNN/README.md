@@ -49,8 +49,13 @@ absolute. The cues are **occlusion** and **motion parallax**, chosen for images:
 `(i, j)` is a pixel, `k` is the viewing axis, the nearest plane hides those behind
 it, and the descent's own motion is what brings the hidden ones back into view.
 
-How the two cues compose, what the step carries, how the two descents are
-scheduled and how the vertical weights are trained are still open.
+Images reach the stack through a **light radial blur** standing in for focus:
+the centre is the point in focus, sharpness falls off with radius the way the
+retina's does, and moving the centre re-focuses.
+
+How the two cues compose, what moving the focus centre is worth, what the step
+carries, how the two descents are scheduled and how the vertical weights are
+trained are still open.
 
 `DESIGN.md` is the specification — notation, geometry, the settled invariants,
 and every open decision written out with its trade-offs.
