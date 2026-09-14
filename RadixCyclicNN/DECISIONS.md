@@ -389,7 +389,7 @@ with `to_end`).
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** learning
 
-**Context — 2NRL (*Two-phase Negative Reinforcement Learning*) is the author's
+**Context — 2NRL (*Double-Negative Reinforcement Learning*) is the author's
 own learning process, formalised.** This is not
 an algorithm arrived at from the literature and then justified. The author is
 self-taught, and describes the method that produced that education directly:
@@ -2407,9 +2407,14 @@ positional reading is the intended one: the character shared by two windows *is*
 the pivot. Three is therefore the smallest window that gives a pivot with context
 on either side, and D-006 records it as the reason rather than as a consequence.
 
-**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED.** *Two-phase Negative
-Reinforcement Learning.* Recorded in D-009 and in the paper's title; the
-expansion had appeared nowhere in the repository until now.
+**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED by the author.**
+*Double-Negative Reinforcement Learning.* The `2N` is two negatives: training
+**on** the failures, then negating the representation that produced them —
+phases 1 and 2 of D-009. The third phase is the positive consolidation, so the
+name and the three-phase count do not conflict. Recorded in D-009 and in the
+paper's title and §2.1; the expansion had appeared nowhere in the repository
+before, and an earlier guess of *Two-phase Negative Reinforcement Learning* was
+wrong (it also contradicted the three-phase procedure it labelled).
 
 **Q-13 — ~~Is "pull hard on the thread" a positive-side boost?~~ — ANSWERED, and
 the premise was wrong.** It is not a boost of any kind. The author's process is
@@ -2422,9 +2427,11 @@ quantity. Recorded as D-067. **What remains open is the trigger**: what counts a
 detector, the schedule has nothing to key on.
 
 **Q-14 — Does the process have a stopping rule?** "Fail consistently, then
-invert" describes a loop. In a life it ends when the thing is learned. The
-evolve loop never ends (D-011) and has no convergence criterion (Q-4). What
-ended an iteration for the author?
+invert" describes a loop. In a life it ends when the thing is learned; the answer
+given in `Research/2NRL.md` §12 is *"when the thing worked"*. The evolve loop
+never ends (D-011) and has no convergence criterion (Q-4). What remains open is
+making that judgement computable — which is Q-13's problem in another form, since
+both come down to recognising that something has started working.
 
 **Q-15 — Does the negative network supersede inversion (D-045 vs D-009)?** The
 negative network is 2NRL's negative phase made permanent: a standing model of
