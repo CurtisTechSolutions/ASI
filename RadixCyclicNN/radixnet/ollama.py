@@ -28,6 +28,7 @@ import re
 import statistics
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from typing import Any
 
 from .llm import LLMError, loads_lenient as _loads_lenient
@@ -39,9 +40,11 @@ __all__ = [
     "OllamaClient",
     "OllamaError",
     "adversarial_review",
+    "chat_line",
     "corpus_from_prompt",
     "normalise_url",
     "parse_lines",
+    "review_conversation",
     "review_texts",
     "sample_texts",
     "summarise_reviews",
@@ -426,3 +429,146 @@ def summarise_reviews(source: str, model: str, threshold: float, texts: list[str
         "good": passed,
         "bad": failed,
     }
+
+# ---------------------------------------------------------------------------
+# conversing with the network, and marking the conversation
+# ---------------------------------------------------------------------------
+
+_CHAT_SYSTEM = (
+    "You are having a short, ordinary conversation with a very small character-level neural network that is "
+    "learning to talk. It answers by continuing the last few words you wrote, so every line you write must be "
+    "short, plain and concrete, and must end on words that are easy to carry on from. Never mention that it is a "
+    "model, never explain yourself, never ask more than one thing at a time, and never write more than one "
+    "sentence. Reply with the next thing you would say and nothing else."
+)
+
+_CONVERSATION_SYSTEM = (
+    "You are marking a conversation between a person and a very small character-level neural network that is "
+    "learning to talk. Mark each of the network's lines out of 10 for one thing only: is it a real reply to the "
+    "line before it - does it follow on, is it about the same thing, is it a sentence at all. Ignore style, "
+    "length and ambition: a short plain line that follows on is a 10. A line that merely repeats what was just "
+    "said, that is gibberish, or that answers something nobody asked is 0 to 3. {threshold:g} out of 10 is a "
+    "pass. Reply with JSON only, of the form {{\"reviews\": [{{\"index\": <n>, \"rating\": <0-10>, "
+    "\"critique\": \"<one sentence>\"}}, ...], \"overall\": {{\"rating\": <0-10>, \"critique\": "
+    "\"<one sentence about the conversation as a whole>\"}}}}."
+)
+
+
+def chat_line(
+    client: OllamaClient,
+    transcript: Sequence[tuple[str, str]] = (),
+    *,
+    topic: str = "",
+    persona: str = "",
+    speakers: Sequence[str] = ("Partner", "Model"),
+    model: str | None = None,
+    temperature: float = 0.8,
+) -> str:
+    """The next line of the LLM's side of a conversation with the network.
+
+    ``transcript`` is what has been said so far as ``(speaker, text)`` pairs;
+    empty opens the conversation.  The system prompt asks for short, plain
+    lines ending on words that are easy to carry on from, because that is what
+    a character-level model can actually reply to.
+    """
+    system = _CHAT_SYSTEM
+    if topic.strip():
+        system += f" The conversation is about {topic.strip()}."
+    if persona.strip():
+        system += f" You are {persona.strip()}."
+    said = "\n".join(f"{speaker}: {text}" for speaker, text in transcript if str(text).strip())
+    if said:
+        user = f"The conversation so far:\n{said}\n\nWrite your next line."
+    else:
+        opener = f" about {topic.strip()}" if topic.strip() else ""
+        user = f"Open the conversation{opener} with one short, plain line."
+    raw = client.generate(user, system=system, model=model, options={"temperature": temperature})
+    return _first_line(raw)
+
+
+def _first_line(raw: str) -> str:
+    """One line out of an LLM answer that may have written several (or quoted itself)."""
+    for line in str(raw or "").splitlines():
+        text = " ".join(line.split()).strip()
+        if not text:
+            continue
+        for speaker in ("Partner:", "Model:", "You:", "Me:"):
+            if text.lower().startswith(speaker.lower()):
+                text = text[len(speaker):].strip()
+        text = text.strip('"\u201c\u201d')
+        if text:
+            return text
+    return ""
+
+
+def review_conversation(
+    client: OllamaClient,
+    exchanges: Sequence[tuple[str, str]],
+    *,
+    topic: str = "",
+    model: str | None = None,
+    threshold: float = 6.0,
+    speakers: Sequence[str] = ("Partner", "Model"),
+) -> dict:
+    """Mark every reply the network gave in a conversation, and the conversation as a whole.
+
+    ``exchanges`` are ``(what was said to it, what it replied)`` pairs in
+    order.  The result is the :func:`summarise_reviews` shape - so
+    :func:`radixnet.blame.teach_reviews` takes it as it is - plus ``overall``,
+    the judge's verdict on the conversation itself (``None`` when it did not
+    give one).
+    """
+    pairs = [(str(said), str(reply)) for said, reply in exchanges]
+    replies = [reply for _said, reply in pairs]
+    asked = [(i, said, reply) for i, (said, reply) in enumerate(pairs) if reply.strip()]
+    parsed: dict[int, dict] = {}
+    overall: dict | None = None
+    if asked:
+        numbered = "\n\n".join(
+            f"[{i}] {speakers[0]}: {said}\n    {speakers[1]}: {reply}" for i, said, reply in asked
+        )
+        user = (
+            (f"Topic: {topic.strip()}\n\n" if topic.strip() else "")
+            + f"The conversation:\n{numbered}\n\nReturn the JSON now."
+        )
+        raw = client.generate(
+            user, system=_CONVERSATION_SYSTEM.format(threshold=threshold), model=model, json_mode=True,
+            options={"temperature": 0.2},
+        )
+        parsed = _parse_reviews(raw, len(pairs))
+        overall = _parse_overall(raw)
+    reviews: list[dict] = []
+    for i, (said, reply) in enumerate(pairs):
+        entry: dict[str, Any] = {"index": i, "text": reply, "said": said}
+        if not reply.strip():
+            entry.update(rating=0.0, verdict="fail", critique="it said nothing")
+        elif i in parsed:
+            rating = parsed[i]["rating"]
+            entry.update(
+                rating=rating, verdict="pass" if rating >= threshold else "fail", critique=parsed[i]["critique"],
+            )
+        else:
+            entry.update(rating=None, verdict="unrated", critique="no review returned")
+        reviews.append(entry)
+    summary = summarise_reviews("chat", model or client.model, threshold, replies, reviews)
+    summary["overall"] = overall
+    return summary
+
+
+def _parse_overall(raw: str) -> dict | None:
+    """The judge's verdict on the conversation as a whole, when it gave one."""
+    data = _loads_lenient(raw)
+    if not isinstance(data, dict):
+        return None
+    item = data.get("overall") or data.get("conversation") or data.get("summary")
+    if not isinstance(item, dict):
+        return None
+    rating = item.get("rating", item.get("score"))
+    try:
+        rating = max(0.0, min(10.0, float(rating)))
+    except (TypeError, ValueError):
+        rating = None
+    critique = str(item.get("critique") or item.get("reason") or item.get("comment") or "").strip()
+    if rating is None and not critique:
+        return None
+    return {"rating": rating, "critique": critique or "no critique given"}

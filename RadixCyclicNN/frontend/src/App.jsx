@@ -6,6 +6,7 @@ import TrainPanel from "./components/TrainPanel.jsx";
 import PredictPanel from "./components/PredictPanel.jsx";
 import GeneratePanel from "./components/GeneratePanel.jsx";
 import ConversePanel from "./components/ConversePanel.jsx";
+import ChatPanel from "./components/ChatPanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import NegativePanel from "./components/NegativePanel.jsx";
@@ -29,6 +30,7 @@ const TABS = [
   { id: "predict", label: "Predict", Component: PredictPanel },
   { id: "generate", label: "Generate", Component: GeneratePanel },
   { id: "converse", label: "Converse", Component: ConversePanel },
+  { id: "chat", label: "Chat", Component: ChatPanel },
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
   { id: "negative", label: "Negative", Component: NegativePanel },

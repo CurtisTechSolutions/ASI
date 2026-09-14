@@ -58,7 +58,8 @@ RadixCyclicNN/
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3),
                             and the guard: the same pair on every output path (section 24.7)
-    dialogue.py             Turn, converse - the model conversing with itself (section 22)
+    dialogue.py             Turn, reply, converse - the model conversing with itself (section 22)
+    chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
     critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
@@ -690,6 +691,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
 * `test_codegen.py` — code generation (section 17): the problem formats, the sandbox, the style check, the verdict, the trainer's phases, the API routes and the CLI.
 * `test_duo.py` — the pair (section 24.3): the blame, peak and ratio rules with the coverage gate, strict, learn, `filter` / `generate` / `predict`, the count model as the positive half.
+* `test_chat.py` — the chat loop (section 28): the conversation, the marking against the line answered, the blame, the 2NRL, the guard's veto, stalling, the report card, the endpoint and the CLI.
 * `test_guard.py` — the guard (section 24.7): `ready` / `rank` / `converse`, the three service methods, the three routes and the three CLI commands, on by default and off on request.
 * `test_speech.py` — the text format (packing, the header found behind a token and before a transcript, repair of a
   cut-off prediction), unique tokens, `speech_texts`, both codecs (mu-law beats linear 8-bit on quiet audio, byte
@@ -1321,7 +1323,9 @@ A `Turn` records `index`, `speaker`, `text`, the `context` it picked up, the `re
 `skipped` (rejected before the spoken one), plus the path (`labels`, `node_ids`, `step_costs`); `transcript(turns)`
 renders `speaker: text` lines. Beam conversations are deterministic and never repeat themselves; the CLI `converse`
 command, `POST /api/converse` (`ModelService.converse`, `partner` = another kind in memory) and the Converse tab
-expose it, and turns are rated with the same thumbs as generated samples (`RatingsCard.jsx`).
+expose it, and turns are rated with the same thumbs as generated samples (`RatingsCard.jsx`).  `reply(voice,
+previous, ...)` is one turn of that loop on its own, and is what section 28 calls when the other voice is an LLM
+rather than a model.
 
 ## 23. The count / reward model in Go (`go/`) — goroutines over lines, paragraphs and pages
 
@@ -2237,6 +2241,58 @@ The last Python-only module, and the one where the standard library had to be ta
 * Go tests: `radixnet/tools_test.go` (a fake website, the format, the registry, the guards, the calculator,
   every built-in tool), `radixnet/agent_test.go` (a fake Ollama playing all four roles, a real untrained
   network) and `server/agent_test.go` (the endpoints end to end).
+
+---
+## 28. Talking to something that answers back (`chat.py`) — the LLM converses, and marks the conversation
+
+Section 22 has the model talk to *itself*.  That is a good way to see what it knows and a useless way to find out
+whether it answers anything: neither voice can tell the other that its reply did not follow on.  Every teacher in
+this project so far talks *at* the network — the English tutor writes a prefix and marks the completion (§21), the
+critic reviews texts written alone (§24.6), the agent judges a transcript of tool calls (§27) — and none of them
+holds up the other end of a conversation.
+
+`Chat(model, client, config, negative=..., external=..., judge_client=...)` is that missing party.  One
+conversation is:
+
+1. the **partner** (`ollama.chat_line`) says a line.  Its system prompt asks for short, plain lines that end on
+   words which are easy to carry on from, because that is the only thing a character-level model can reply to —
+   the prompt is doing the model a favour, not flattering it.  `topic`, `persona` and a given `opening` steer it;
+2. the **model replies** through `dialogue.reply` — extracted from `converse`'s loop for exactly this, so there is
+   one implementation of "what does this model say next" and the other voice need not be a model at all.  The tail
+   of the partner's line is located in the graph and continued, the context loses a word at a time while nothing
+   follows it, and a voice with nothing left to add changes the subject from START.  With a negative network in
+   hand `config.guard` puts the pair (§24.3) in the way as a `veto`, so a reply the network would be blamed for is
+   never spoken;
+3. they alternate for `turns` exchanges, the model always having the last word (there is no point asking the
+   partner for a line nothing will answer);
+4. the **judge** (`ollama.review_conversation`) marks every reply out of 10 **against the line it answered** and
+   gives the conversation as a whole a verdict of its own.  One call per conversation, not one per line: the
+   exchanges are numbered `[i] Partner: … / Model: …` and parsed by the same lenient `_parse_reviews` the critic
+   uses, so the result is the `summarise_reviews` shape and `blame.teach_reviews` takes it unchanged.
+
+Then both networks learn.  The failures blame the negative network and the passes clear it (§24.2, source
+`chat`); and — unlike the critic, which only ever reads the positive model — this loop **trains it**:
+`Chat._learn` runs 2NRL with the failed replies as garbage and the passed ones as correct, and with
+`teach_partner` the partner's own lines join the positive phase, because in that conversation, at that moment,
+they are exactly what a good reply would have looked like.  It takes the model lock like any other training job.
+
+Lock discipline is §24.6's, applied twice per exchange: **the model replies under the lock, every LLM call happens
+outside it**.  `_external` wraps the opening, each partner line and the judgement; `dialogue.reply` is a walk of
+the graph and is made with the lock held.
+
+Records are `exchange` (streamed as each reply is spoken: the line, the reply, the context it picked up, whether
+the guard vetoed anything), `conversation` (the transcript, every review, the marks, the overall verdict, what was
+blamed and what was learned — always carrying the learning keys so the shape is stable whether or not it learned)
+and one `report` per run.  A conversation that ends early says which way it ended: the model had nothing left to
+say, the guard vetoed everything it could say, or the partner went quiet.
+
+CLI: `chat` (`--conversations 0` runs until Ctrl-C, which finishes the conversation in progress and saves).
+API: `POST /api/chat/start` starts a `chat` job over `ModelService.start_chat`, `GET /api/chat/history` is its
+record.  Frontend: the **Chat** tab — the settings, a live transcript that streams as the two of them talk (each
+reply badged with its mark once the conversation has been judged), the table of conversations and the report card.
+Tests: `tests/test_chat.py` — a fake partner and judge, a real trained model: the conversation, a given opening,
+the reply really continuing the line, the marking, what reaches the negative network and the positive one, the
+guard silencing a reply, stalling, the report card, stopping, the endpoint and the CLI.
 
 ---
 ## 24. Counter overflow (`counter.py`, `go/radixnet/counter.go`) — cyclic counters with a reset count

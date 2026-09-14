@@ -349,6 +349,7 @@ class ModelService:
         self._agent_history: list[dict] = []
         self._tutor_history: list[dict] = []
         self._critic_history: list[dict] = []
+        self._chat_history: list[dict] = []
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
@@ -1602,6 +1603,40 @@ class ModelService:
     def critic_history(self) -> dict:
         return {"history": list(self._critic_history)}
 
+    def start_chat(self, config: Any, client: LLMClient, judge_client: LLMClient | None = None) -> dict:
+        """Start a ``chat`` job: the LLM converses with the model, marks every reply, and both networks learn.
+
+        The partner keeps its lines short and easy to carry on from, the model
+        replies by continuing them (:func:`radixnet.dialogue.reply`), and the
+        judge marks each reply against the line it answered
+        (:mod:`radixnet.chat`).  Unlike the critic this loop *does* train the
+        positive model - the replies that passed are rewarded and the ones that
+        failed punished - so it takes the model lock like any other training
+        job; the negative network learns from the same verdicts when one is in
+        memory.
+        """
+        from .chat import Chat
+
+        config.validate()
+        negative = self.negative_model() if config.blame or config.guard else None
+
+        def work(job: Job) -> None:
+            loop = Chat(self.model, client, config, negative=negative, external=self.pause_lock,
+                        judge_client=judge_client)
+            loop.run(progress=self._progress(job, self._chat_history), stop_event=job.stop_event)
+
+        return self._start_job("chat", work)
+
+    def chat_history(self) -> dict:
+        return {"history": list(self._chat_history)}
+
+    def chat_card(self) -> dict | None:
+        """The report at the end of the last conversation run, or ``None`` when it has never run."""
+        for record in reversed(self._chat_history):
+            if record.get("kind") == "report":
+                return dict(record)
+        return None
+
     def critic_card(self) -> dict | None:
         """The report at the end of the last automatic run, or ``None`` when it has never run."""
         for record in reversed(self._critic_history):
@@ -2461,6 +2496,75 @@ def _r_negative_auto(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 def _r_negative_auto_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.critic_history()
+
+
+def _chat_config(f: Fields) -> Any:
+    """The conversation settings of a request body (:class:`~radixnet.chat.ChatConfig` defaults)."""
+    from .chat import ChatConfig
+
+    d = ChatConfig()
+    config = ChatConfig(
+        conversations=f.integer("conversations", d.conversations, minimum=0),
+        turns=f.integer("turns", d.turns, minimum=1),
+        topic=f.text("topic", d.topic),
+        opening=f.text("opening", d.opening),
+        persona=f.text("persona", d.persona),
+        context=f.integer("context", d.context, minimum=0),
+        max_length=f.integer("max_length", d.max_length, minimum=1),
+        mode=f.text("mode", d.mode).strip().lower(),
+        k=f.integer("k", d.k, minimum=1),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        partner_temperature=f.number("partner_temperature", d.partner_temperature, minimum=0.0),
+        threshold=f.number("threshold", d.threshold, minimum=0.0),
+        provider=_provider_field(f, "provider", "partner_provider", d.provider),
+        partner_model=f.text("partner_model", None) or f.text("model", None) or d.partner_model,
+        judge_model=f.text("judge_model", None) or d.judge_model,
+        guard=f.flag("guard", d.guard),
+        blame=f.flag("blame", d.blame),
+        clear_passes=f.flag("clear_passes", d.clear_passes),
+        learn=f.flag("learn", d.learn),
+        teach_partner=f.flag("teach_partner", d.teach_partner),
+        avoid_repeats=f.flag("avoid_repeats", d.avoid_repeats),
+        neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
+        pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
+        neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
+        pos_lr=f.number("pos_lr", d.pos_lr, minimum=0.0),
+        batch_size=f.integer("batch_size", d.batch_size, minimum=1),
+        strength=f.number("strength", d.strength, minimum=0.0),
+        epochs=f.integer("epochs", d.epochs, minimum=0),
+        seed=f.integer("seed", d.seed),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _r_chat_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Start a conversation job: the LLM talks to the model, marks every reply, and both networks learn."""
+    config = _chat_config(f)
+    timeout = f.number("timeout", None, minimum=1.0)
+    client = svc.llm_client(config.provider, f.text("url", None), config.partner_model or None, timeout)
+    judge = client
+    judge_url = f.text("judge_url", None)
+    if config.judge_model or judge_url:
+        judge = svc.llm_client(config.provider, judge_url, config.judge_model or None, timeout)
+    job = svc.start_chat(config, client, judge_client=judge)
+    return 202, {
+        "job": job, "config": config.to_dict(), "url": client.url, "partner": client.model, "judge": judge.model,
+        "speakers": list(_chat_speakers()),
+    }
+
+
+def _chat_speakers() -> tuple[str, str]:
+    from .chat import DEFAULT_SPEAKERS
+
+    return DEFAULT_SPEAKERS
+
+
+def _r_chat_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.chat_history()
 
 
 def _r_negative_save(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3503,6 +3607,15 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/negative/settings", _r_negative_settings,
      "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
     ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
+    ("POST", "/api/chat/start", _r_chat_start,
+     "start a chat job - an LLM converses with the model and marks every reply: {conversations (0 = until "
+     "stopped), turns, topic, opening, persona, context, max_length, mode: beam|sample, k, temperature, "
+     "partner_temperature, threshold, provider: ollama|chatgpt, partner_model, judge_model, url, judge_url, "
+     "timeout, guard (the negative network vetoes a reply before it is spoken), blame, clear_passes, learn "
+     "(2NRL on the marked replies), teach_partner (the partner's own lines join the positive phase), "
+     "avoid_repeats, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size, strength, epochs, seed}"),
+    ("GET", "/api/chat/history", _r_chat_history,
+     "exchange / conversation / report records of all chat runs"),
     ("POST", "/api/negative/auto", _r_negative_auto,
      "the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every "
      "failure blame the negative network - {rounds (0 = until stopped), count, prefix, max_length, temperature, "

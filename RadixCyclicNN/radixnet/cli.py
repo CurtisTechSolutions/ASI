@@ -1927,6 +1927,119 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_chat(args: argparse.Namespace, console: Console) -> dict:
+    """An LLM converses with the model and marks every reply; the failures blame, the passes teach."""
+    from .chat import DEFAULT_SPEAKERS as DEFAULT_CHAT_SPEAKERS
+    from .chat import Chat, ChatConfig
+    from .chatgpt import api_key_configured
+    from .llm import LLMError, make_client
+
+    if args.provider == "chatgpt" and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT converse, "
+            "or use --provider ollama"
+        )
+    config = ChatConfig(
+        conversations=args.conversations, turns=args.turns, topic=args.topic or "", opening=args.opening or "",
+        persona=args.persona or "", context=args.context, max_length=args.max_length, mode=args.mode, k=args.k,
+        temperature=args.temperature, partner_temperature=args.partner_temperature, threshold=args.threshold,
+        provider=args.provider, partner_model=args.partner_model or args.ollama_model or "",
+        judge_model=args.judge_model or "", guard=not args.no_guard, blame=not args.no_blame,
+        clear_passes=not args.no_clear, learn=not args.no_learn, teach_partner=not args.no_teach_partner,
+        avoid_repeats=not args.allow_repeats, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs,
+        neg_lr=args.neg_lr, pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
+        epochs=args.epochs, seed=effective_seed(args),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        client = make_client(config.provider, args.url, config.partner_model or None, args.timeout)
+        judge = client
+        if config.judge_model or args.judge_url:
+            judge = make_client(config.provider, args.judge_url or args.url, config.judge_model or None, args.timeout)
+    except (LLMError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    model, origin = open_model(args, console, required=True)
+    negative = neg_origin = None
+    if config.blame or config.guard:
+        negative, neg_origin = open_negative(args, console, required=False)
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("partner", f"{config.provider}: {client.model} at {client.url}"),
+        ("judge", f"{judge.model} at {judge.url}"),
+        ("conversations", "until stopped (Ctrl-C)" if not config.conversations else config.conversations),
+        ("per conversation", f"{config.turns} repl(ies), {config.max_length} chars, picking up {config.context}"),
+        ("topic", config.topic or "the partner chooses"),
+        ("pass mark", f"{config.threshold:g}/10"),
+        ("guard", "on" if config.guard and negative is not None else "off"),
+        ("learns", "2NRL on the marked replies" + (" + the partner's lines" if config.teach_partner else "")
+                   if config.learn else "nothing (--no-learn)"),
+        *([("negative network", neg_origin.describe())] if neg_origin is not None else []),
+        ("output", out),
+    ])
+    console.say()
+    rows: list[list[Any]] = []
+    stop = threading.Event()
+
+    def show(record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "exchange":
+            console.say(f"{DEFAULT_CHAT_SPEAKERS[0]}: {record['said']}")
+            console.say(f"{DEFAULT_CHAT_SPEAKERS[1]}: {record['reply']}")
+            detail = f"    picked up {quote(record['context'])}" if record["context"] else "    (a fresh line)"
+            if record["vetoed"]:
+                detail += f"  [{record['vetoed']} vetoed]"
+            console.say(detail)
+            return
+        if kind != "conversation":
+            return
+        rows.append([
+            record["conversation"], record["exchanges"], record["passed"], record["failed"],
+            fmt(record["mean_rating"]), fmt(record["overall_rating"]), record["vetoed"], record["blamed"],
+            record["action"] or "-", record["stalled"] or "-",
+        ])
+        console.note(
+            f"conversation {record['conversation']}: {record['failed']}/{record['exchanges']} replies failed, "
+            f"mean mark {fmt(record['mean_rating'])}/10" + (f" ({record['stalled']})" if record["stalled"] else "")
+        )
+        console.say()
+
+    loop = Chat(model, client, config, negative=negative, judge_client=judge)
+    records, interrupted = run_interruptible(
+        lambda: loop.run(progress=show, stop_event=stop), stop, console, "conversation",
+    )
+    console.table(
+        ("#", "replies", "passed", "failed", "mean mark", "overall", "vetoed", "blamed", "learned", "ended"), rows,
+    )
+    card = records[-1] if records and records[-1].get("kind") == "report" else {}
+    console.say()
+    console.say(
+        f"{card.get('conversations', 0)} conversation(s), {card.get('exchanges', 0)} repl(ies): "
+        f"{card.get('passed', 0)} passed, {card.get('failed', 0)} failed; mean mark "
+        f"{fmt(card.get('mean_rating'))}/10"
+        + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
+    )
+    saved = None
+    if config.learn:
+        if interrupted:
+            console.note(f"stopped after {card.get('conversations', 0)} conversation(s); saving")
+        saved = save_model(model, out)["path"]
+        console.say(f"saved {saved}")
+    else:
+        console.note("nothing was learned (--no-learn): the model is untouched")
+    doc = {
+        "config": config.to_dict(), "url": client.url, "partner": client.model, "judge": judge.model,
+        "records": records, "report": card, "interrupted": interrupted, "saved": saved,
+        "speakers": list(DEFAULT_CHAT_SPEAKERS),
+    }
+    if negative is not None:
+        doc["negative"] = _save_negative(console, negative, negative_path(args))
+    return doc
+
+
 def cmd_negative_reasons(args: argparse.Namespace, console: Console) -> dict:
     """Everything the tutor has blamed, and the journal of what it said."""
     model, origin = open_negative(args, console, required=True)
@@ -3306,6 +3419,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-repeats", action="store_true", help="do not skip continuations the conversation already heard")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
+
+    # chat -------------------------------------------------------------------
+    p = command(
+        "chat", "an LLM converses with the model and marks every reply",
+        "The other side of the line is a real language model.  It says a short line, the network replies\n"
+        "by continuing it (the same search `converse` uses), they take turns, and then the LLM marks every\n"
+        "reply out of 10 against the line it answered - and the conversation as a whole.  What failed blames\n"
+        "the negative network, what passed clears it, and 2NRL trains the model on both, with the partner's\n"
+        "own lines joining the positive phase: they are what a good reply here would have looked like.\n"
+        "Ctrl-C stops after the conversation in progress and saves.",
+    )
+    p.add_argument("--conversations", type=nonneg_int, default=1, help="conversations to hold (0: until Ctrl-C)")
+    p.add_argument("--turns", type=pos_int, default=4, help="replies the model gives per conversation")
+    p.add_argument("--topic", metavar="TEXT", help="what to talk about (default: the partner chooses)")
+    p.add_argument("--opening", metavar="TEXT", help="the first line, spoken as given (default: the partner opens)")
+    p.add_argument("--persona", metavar="TEXT", help="who the partner is being (\"a curious child\", \"a vet\")")
+    p.add_argument("--context", type=nonneg_int, default=12, help="characters of the previous line a reply picks up")
+    p.add_argument("--max-length", type=pos_int, default=60, help="characters a reply may add to its context")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="how a reply is found")
+    p.add_argument("--k", type=pos_int, default=5, help="candidates considered per reply")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the replies")
+    p.add_argument("--partner-temperature", type=nonneg_float, default=0.8,
+                   help="sampling temperature of the partner's lines")
+    p.add_argument("--threshold", type=nonneg_float, default=6.0, metavar="MARK",
+                   help="pass mark out of 10: below it a reply is a failure")
+    p.add_argument("--provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who converses and marks: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY)")
+    p.add_argument("--partner-model", metavar="NAME", help="the partner's model (default: the provider's)")
+    p.add_argument("--judge-model", metavar="NAME", help="a different model for marking (default: the partner's)")
+    p.add_argument("--url", metavar="URL", help="the partner's base URL (default: the provider's)")
+    p.add_argument("--judge-url", metavar="URL", help="base URL of the judge (default: --url)")
+    p.add_argument("--timeout", type=nonneg_float, metavar="SECONDS", help="per-request timeout")
+    p.add_argument("--allow-repeats", action="store_true", help="let the model say something already heard")
+    p.add_argument("--no-guard", action="store_true",
+                   help="do not let the negative network veto a reply before it is spoken")
+    p.add_argument("--no-blame", action="store_true", help="do not blame the failed replies")
+    p.add_argument("--no-clear", action="store_true", help="do not let the passed replies clear blame")
+    p.add_argument("--no-learn", action="store_true", help="mark the conversation but do not train on it")
+    p.add_argument("--no-teach-partner", action="store_true",
+                   help="keep the partner's own lines out of the positive phase")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"the negative network to teach and guard with (default: {DEFAULT_NEGATIVE_MODEL})")
+    p.add_argument("--epochs", type=nonneg_int, default=1, help="blame epochs per conversation")
+    group = p.add_argument_group("2NRL options")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (punish) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (reward) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
+    group.add_argument("--strength", type=nonneg_float, metavar="S",
+                       help="count / reward model: the magnitude of a penalty or reward")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_chat)
 
     # score ----------------------------------------------------------------
     p = command(

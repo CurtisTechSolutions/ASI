@@ -164,6 +164,9 @@ export const api = {
    * every failure blame the negative network. Body: rounds (0 = until stopped), count, prefix, max_length,
    * temperature, threshold, context, provider, reviewer_model, url, timeout, clear_passes, epochs, seed.
    */
+  /** The chat loop: an LLM converses with the model and marks every reply. */
+  chatStart: (body) => post("/api/chat/start", body),
+  chatHistory: () => get("/api/chat/history"),
   negativeAuto: (body) => post("/api/negative/auto", body),
   /** Round / report records of all automatic runs (the job's own history while one is running). */
   negativeAutoHistory: () => get("/api/negative/auto/history"),

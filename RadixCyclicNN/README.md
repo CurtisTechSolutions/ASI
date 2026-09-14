@@ -42,6 +42,7 @@ and an optional GPU backend (torch) are built in.
 | The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
 | The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the **speech and image tutors** compare what the network remembers of a recording or a picture with the original (`speech tutor --blame`, `image tutor --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
 | A tutor that needs no teacher | `recall.py`: an utterance and a picture were *encoded* into text before being trained on, so the right answer is on file and marking needs no LLM. The network is given the opening of a text it was taught - the utterance's own token, or an image header and a few characters - and asked to write the rest; what comes back is run back through the codec and compared with the original. The agreement over the payload is the mark out of 10, the single worst thing wrong with it is named (`silence`, `clipping`, `mishearing`, `blank`, `noise`, `truncated`, ...), and the original is the correction the negative network blames from. |
+| An LLM on the other side of the line | `chat` (the **Chat** tab): a local **Ollama** model - or ChatGPT - holds an actual conversation with the network. It says a short line, the network replies by continuing it (the same search `converse` uses, so a reply is a real walk of the graph), they take turns, and then the LLM marks every reply out of 10 *against the line it answered* and the conversation as a whole. The failures blame the negative network, the passes clear it, and 2NRL trains the model on both - with the partner's own lines joining the positive phase, because they are what a good reply there would have looked like. It is the one thing a language model is for, and the first teacher here that answers back. |
 | The negative network feeds itself | `negative auto` (the Negative tab's *Automatic* card): the model writes texts of its own, a local **Ollama** model (or ChatGPT) marks each one out of 10 and says what is wrong with it, and everything below the pass mark blames the negative network - round after round, with nobody typing a failure in by hand. The positive model is only read from, so the loop can run beside whatever else is teaching it. |
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)`: the sentence the network wrote and the sentence the teacher wrote instead are aligned character by character (`diff.py`, the same alignment the count model's `correct` teaches from) and only the steps that wrote a character the teacher struck out are blamed - with the tutor's error type as the reason. The correction clears blame everywhere else, and a blamed transition is never compressed away, so the fragment that went wrong stays nameable. |
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
@@ -188,6 +189,7 @@ model file is `model.count.json`), `--backend auto|python|torch`,
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; the guard flags below |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`; prints the transcript with cost, probability and the words each reply picked up; the guard flags below |
+| `chat` | an LLM converses with the model and marks every reply: `--conversations 1` (0 = until Ctrl-C), `--turns 4` (replies per conversation), `--topic TEXT`, `--opening TEXT`, `--persona TEXT`, `--context 12`, `--max-length 60`, `--mode beam\|sample`, `--k 5`, `--temperature`, `--partner-temperature`, `--threshold 6` (pass mark), `--provider ollama\|chatgpt`, `--partner-model`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--no-guard` (do not veto a reply before it is spoken), `--no-blame`, `--no-clear`, `--no-learn` (mark it but do not train), `--no-teach-partner`, `--allow-repeats`, `--negative PATH`, `--epochs`, 2NRL options, `--out` |
 | the guard (on `predict`, `generate`, `converse`) | the negative network filters what the model writes, by default: `--no-guard` (print it unfiltered), `--negative PATH` (default `model.negative.json` beside `--model`), `--threshold RISK`, `--min-coverage SHARE`, `--over-sample N`. It stands aside when there is no negative model file, or when the one there has never been taught a failure |
 | `weights` | count model: show the dual frequency function and the tracked totals, or change it: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--window N` (then every weight is recomputed and the model saved) |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count model), `--out` |
@@ -268,6 +270,8 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/negative/judge` | `{"texts"\|"text","threshold","min_coverage","spans": 5}` -> `{"verdicts": [{"verdict": "reject"\|"suspect"\|"pass","risk","coverage","blame","reasons","spans": [{"start","end","fragment","blame","fails","reason"}],"why"}]}` |
 | `POST /api/negative/filter` | the pair: `{"count": 3,"prefix","mode","max_length","temperature","over_sample": 3,"threshold","min_coverage","ratio": 0,"no_ratio","peak","strict","learn"}` (or `{"texts"}` to judge given texts) -> `{"texts" (the cleanest survivors),"kept","rejected": [verdicts],"verdicts","candidates","asked","rate","pair"}` |
 | `POST /api/negative/forget` / `POST /api/negative/settings` / `POST /api/negative/reset` / `POST /api/negative/save` | drop or fade a reason `{"reason","factor"}` / `{"threshold","min_coverage","share_scale","blame_scale","clear_scale"}` / a fresh negative network `{"seed"}` / write it `{"path"}` |
+| `POST /api/chat/start` | start a chat job - an LLM converses with the model and marks every reply: `{"conversations": 1 (0 = until stopped),"turns": 4,"topic","opening","persona","context": 12,"max_length": 60,"mode": "beam"\|"sample","k": 5,"temperature","partner_temperature","threshold": 6,"provider": "ollama"\|"chatgpt","partner_model","judge_model","url","judge_url","timeout","guard": true,"blame": true,"clear_passes": true,"learn": true,"teach_partner": true,"avoid_repeats": true,"neg_epochs","pos_epochs","neg_lr","pos_lr","batch_size","strength","epochs","seed"}` -> 202 `{"job","config","url","partner","judge","speakers"}` |
+| `GET /api/chat/history` | the `exchange` records as they are spoken, then one `conversation` record each (its transcript, every review with the line it answered, the marks, what was blamed and what was learned) and a `report` at the end of a run |
 | `POST /api/negative/auto` / `GET /api/negative/auto/history` | the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every failure blame the negative network - `{rounds (0 = until stopped), count, prefix, max_length, temperature, threshold, context, provider: ollama\|chatgpt, reviewer_model, url, timeout, clear_passes, epochs, seed}` -> 202 `{"job","config","url","reviewer"}`; the history is its round / report records. The positive model is only read from |
 | `POST /api/invert` / `POST /api/compress` | statistics / `{"merges", ...}` |
 | `POST /api/evolve/start` / `POST /api/evolve/stop` / `GET /api/evolve/history` | `{"corpus": [...]` or `"corpus_text"` or `"corpus_files"`, `"generations"` (null = forever), `samples`, `max_length`, `temperature`, `checkpoint_every`, `blatant_mode`, `blatant_margin`, `blatant_boost`, `blame`, ...}` -> job; generation records carry `failures`, `blatant`, `boost_mean`, `boost_max`, `flipped`, `twonrl`, `mode` (and `negative_blamed` / `negative_reasons` with `blame`) |
@@ -1019,6 +1023,59 @@ records and the Evolve tab's table show `failures`, `blatant`, the mean
 boost / amount and whether a 2NRL pass ran.  Outside the loop the same
 primitives are available directly: `RadixNet.two_nrl(bad, good,
 bad_weights=[...])` and `model.invert_paths(texts, mode, amounts)`.
+
+## Talking to something that answers back
+
+`converse` has the model talk to itself, which is a good way to see what it
+knows and a useless way to find out whether it *answers* anything: neither
+voice can tell the other that its reply did not follow on.  `chat`
+(`radixnet/chat.py`, the **Chat** tab) puts a real language model on the other
+side of the line.
+
+```bash
+python -m radixnet --kind count chat --conversations 2 --turns 3 --topic animals
+```
+
+```
+Partner: tell me about the cat
+Model: the cat on the mat
+    picked up "the cat"
+Partner: and what about the dog
+Model: the dog sat on the mat
+    picked up "the dog"
+conversation 1: 1/2 replies failed, mean mark 5.5000/10
+
+#  replies  passed  failed  mean mark  overall  vetoed  blamed  learned  ended
+-  -------  ------  ------  ---------  -------  ------  ------  -------  -----
+1        2       1       1  5.5000     7.0000        0       1  2nrl     -
+```
+
+One conversation is four things:
+
+1. the **partner** says a line.  It is told to keep it short, plain and easy to
+   carry on from, because that is what a character-level model can reply to at
+   all - the prompt is doing the model a favour, not flattering it;
+2. the **model replies the only way it can**: the tail of that line is located
+   in the graph and continued (`dialogue.reply`, the same search `converse`
+   uses).  A reply is a real walk of the network, not a prompt trick, and when
+   nothing follows the line the context loses a word at a time before the voice
+   changes the subject.  With a negative network in hand the pair vetoes a reply
+   *before it is spoken* (`--no-guard` turns that off);
+3. they take turns for `--turns` exchanges;
+4. the **judge** marks every reply out of 10 **against the line it answered** -
+   not against a style guide - and gives the conversation as a whole a verdict
+   of its own.
+
+What the marks buy is the point.  The failures blame the negative network and
+the passes clear it, as every other tutor here does; and then 2NRL trains the
+positive model on both - *and on the partner's own lines*, because in that
+conversation, at that moment, they are exactly what a good reply would have
+looked like.  `--no-learn` marks without training, `--no-teach-partner` keeps
+the partner's lines out of the positive phase.
+
+A conversation can also end early, and the report says which way: the model had
+nothing left to say, the guard vetoed everything it could say, or the partner
+went quiet.
 
 ## The negative network: what went wrong, and why
 
