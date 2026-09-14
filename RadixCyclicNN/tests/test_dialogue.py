@@ -6,7 +6,16 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radixnet.dialogue import DEFAULT_SPEAKERS, Turn, converse, normalize, tail_context, transcript  # noqa: E402
+from radixnet.dialogue import (  # noqa: E402
+    DEFAULT_SPEAKERS,
+    Heard,
+    Turn,
+    converse,
+    normalize,
+    repeats,
+    tail_context,
+    transcript,
+)
 from radixnet.model import new_model  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,6 +63,52 @@ class TestHelpers(unittest.TestCase):
             "index", "speaker", "text", "context", "reply", "cost", "probability", "reached_end", "fresh", "given",
             "repeat", "candidates", "skipped", "labels", "node_ids", "step_costs",
         })
+
+
+class TestHeard(unittest.TestCase):
+    """What counts as a duplicate: an utterance said before, a reply adding what an earlier reply added,
+    an echo of a line already spoken."""
+
+    def test_an_utterance_said_before_is_a_duplicate(self):
+        heard = Heard(["the cat sat on the mat"])
+        self.assertTrue(heard.duplicate("The   Cat Sat On The Mat"))  # whitespace and case aside
+        self.assertFalse(heard.duplicate("the dog barked"))
+        heard.remember("the dog barked")
+        self.assertTrue(heard.duplicate("the dog barked"))
+
+    def test_the_same_words_added_after_another_context_are_a_duplicate(self):
+        heard = Heard()
+        heard.remember("the cat sat", reply=" sat")
+        self.assertTrue(heard.duplicate("the dog sat", " sat"))  # " sat" was added once already
+        self.assertFalse(heard.duplicate("the dog sat", " sat down"))
+        self.assertFalse(heard.duplicate("the dog sat"))  # nothing was added: only the utterance counts
+
+    def test_an_echo_of_a_line_already_spoken_is_a_duplicate(self):
+        heard = Heard(["on the west"])
+        self.assertTrue(heard.duplicate("the west"))  # adds nothing that was not heard
+        self.assertFalse(heard.duplicate("the west wind"))  # says more than was heard
+        self.assertFalse(heard.duplicate(""))
+        self.assertFalse(Heard().duplicate("anything"))
+
+    def test_empty_utterances_are_never_remembered(self):
+        heard = Heard(["", "   "])
+        self.assertEqual((heard.keys, heard.said, heard.added), ([], set(), set()))
+        heard.remember("a line", reply="   ")
+        self.assertEqual((heard.keys, heard.added), (["a line"], set()))
+
+
+class TestRepeats(unittest.TestCase):
+    def test_repeats_collects_the_flagged_utterances_once_each(self):
+        turns = [
+            Turn(0, "A", "the cat sat"),
+            Turn(1, "B", " west", repeat=True),
+            Turn(2, "A", "the dog barked"),
+            Turn(3, "B", "West", repeat=True),  # the same utterance again: punished once
+            Turn(4, "A", "  ", repeat=True),
+            Turn(5, "B", "the owl hunts", repeat=True),
+        ]
+        self.assertEqual(repeats(turns), [" west", "the owl hunts"])
+        self.assertEqual(repeats([]), [])
 
 
 class TestConverse(unittest.TestCase):
@@ -175,6 +230,31 @@ class TestConverse(unittest.TestCase):
         short = converse(self.model, "the cat sat on the mat", turns=3, max_length=5)
         for turn in short[1:]:
             self.assertLessEqual(len(turn.reply), 5)
+
+    def test_a_long_conversation_avoids_every_kind_of_duplicate(self):
+        turns = converse(self.model, "the cat sat on the mat", turns=30)
+        punished = {normalize(t) for t in repeats(turns)}
+        said, added = [], []
+        for turn in turns:
+            key = normalize(turn.text)
+            if turn.repeat:  # spoken anyway because every candidate was a duplicate - and punishable
+                self.assertIn(key, punished, turn.text)
+                continue
+            self.assertNotIn(key, said, turn.text)
+            self.assertFalse([line for line in said if key in line], turn.text)  # no echo of an earlier line
+            reply = normalize(turn.reply) if turn.context else ""
+            if reply:
+                self.assertNotIn(reply, added, turn.text)
+                added.append(reply)
+            said.append(key)
+        # a small corpus runs out of new things to say; those duplicates are what the Converse tab punishes
+        self.assertTrue(punished)
+        self.assertLess(len(turns), 31)  # the conversation ends rather than going round in circles
+        self.assertEqual(len(repeats(turns)), len(punished))  # each punished utterance appears once
+        # and no duplicate is ever spoken twice
+        for i, turn in enumerate(turns):
+            if turn.repeat:
+                self.assertNotIn(normalize(turn.text), [normalize(t.text) for t in turns[i + 1:]], turn.text)
 
     def test_repeats_are_allowed_on_request(self):
         strict = converse(self.model, "the cat", turns=8)

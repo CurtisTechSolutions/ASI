@@ -69,7 +69,7 @@ from .codegen import (
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, path_probability
-from .dialogue import DEFAULT_SPEAKERS
+from .dialogue import DEFAULT_SPEAKERS, repeats as dialogue_repeats
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
@@ -668,6 +668,8 @@ class ModelService:
             "speakers": speakers,
             "turns": [t.to_dict() for t in spoken],
             "count": len(spoken),
+            # the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
+            "repeats": dialogue_repeats(spoken),
         }
 
     def score(self, text: str) -> dict:
@@ -2058,7 +2060,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
-     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats}"),
+     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats} "
+     "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl, "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr}"),
     ("POST", "/api/feedback", _r_feedback,

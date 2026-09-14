@@ -27,6 +27,8 @@ export function clipText(text, width = 70) {
  * Thumbs up / thumbs down ratings, one per distinct text, shared by the
  * Generate and Converse tabs. Pressing the active thumb again removes the
  * rating; ratings accumulate until they are trained on or cleared.
+ * ``punish`` marks a whole batch thumbs-down without toggling (the Converse
+ * tab punishes the duplicates the model could not avoid that way).
  */
 export function useRatings() {
   const [ratings, setRatings] = useState([]);
@@ -43,9 +45,23 @@ export function useRatings() {
       return [...rest, { text, rating, ...extra }];
     });
   }
+  /**
+   * Thumbs down for every one of ``texts`` at once, without the toggling of
+   * ``rate``: the duplicates a conversation could not avoid, marked for the
+   * 2NRL negative phase. Returns how many distinct texts are now punished.
+   */
+  function punish(texts, extra = {}) {
+    const wanted = [...new Set((Array.isArray(texts) ? texts : []).map((t) => String(t ?? "")).filter((t) => t.trim()))];
+    if (!wanted.length) return 0;
+    setRatings((prev) => [
+      ...prev.filter((r) => !wanted.includes(r.text)),
+      ...wanted.map((text) => ({ text, rating: "down", ...extra })),
+    ]);
+    return wanted.length;
+  }
   const remove = (text) => setRatings((prev) => prev.filter((r) => r.text !== text));
   const clear = () => setRatings([]);
-  return { ratings, setRatings, rate, ratingOf, remove, clear };
+  return { ratings, setRatings, rate, punish, ratingOf, remove, clear };
 }
 
 /** The thumbs up / thumbs down pair for one text. */

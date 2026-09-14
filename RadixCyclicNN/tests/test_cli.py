@@ -279,6 +279,12 @@ class TestInference(unittest.TestCase):
                 self.assertTrue(any(words[j:j + len(wanted)] == wanted for j in range(len(words))), (words, wanted))
                 self.assertEqual(turn["text"], turn["context"] + turn["reply"])
         self.assertEqual(doc["transcript"], "\n".join(f"{t['speaker']}: {t['text']}" for t in turns))
+        self.assertEqual(doc["repeats"], [t["text"] for t in turns if t["repeat"]])
+        # a long conversation runs out of new things to say; the repeats come with the command that punishes them
+        long = run_cli("converse", "--turns", 40, model=MODEL, json_mode=False).stdout
+        self.assertIn("could only repeat - punish them (2NRL negative phase):", long)
+        self.assertIn("radixnet feedback --bad-text ", long)
+        self.assertIn("repeat]", long)
         human = run_cli("converse", "--opening", "the cat sat on the mat", "--turns", 2, model=MODEL, json_mode=False).stdout
         self.assertIn("A: the cat sat on the mat", human)
         self.assertIn("[given]", human)

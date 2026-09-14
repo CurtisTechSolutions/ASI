@@ -656,9 +656,10 @@ func cmdConverse(args []string) {
 	if err != nil {
 		fail("%v", err)
 	}
+	saidTwice := radixnet.Repeats(turnsOut)
 	if jsonMode {
 		emit(map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode, "opening": *opening,
-			"kind": "count", "partner_kind": partnerKind, "transcript": radixnet.Transcript(turnsOut)})
+			"kind": "count", "partner_kind": partnerKind, "repeats": saidTwice, "transcript": radixnet.Transcript(turnsOut)})
 		return
 	}
 	for _, t := range turnsOut {
@@ -684,6 +685,14 @@ func cmdConverse(args []string) {
 	}
 	if len(turnsOut) == 0 {
 		fmt.Println("(nothing to say: train the model first)")
+	}
+	if len(saidTwice) > 0 {
+		fmt.Printf("%d utterance(s) the model could only repeat - punish them (2NRL negative phase):\n", len(saidTwice))
+		parts := make([]string, len(saidTwice))
+		for i, t := range saidTwice {
+			parts[i] = "--bad-text " + quote(t)
+		}
+		fmt.Println("    radixnet-count feedback " + strings.Join(parts, " "))
 	}
 }
 

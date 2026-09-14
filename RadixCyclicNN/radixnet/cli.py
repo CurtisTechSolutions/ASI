@@ -32,7 +32,7 @@ from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
-from .dialogue import DEFAULT_SPEAKERS, transcript
+from .dialogue import DEFAULT_SPEAKERS, repeats as dialogue_repeats, transcript
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 
 __all__ = ["main", "build_parser", "CliError", "EXIT_OK", "EXIT_ERROR", "EXIT_ABORTED"]
@@ -710,6 +710,10 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         console.say(detail)
     if not turns:
         console.say("(nothing to say: train the model first)")
+    said_twice = dialogue_repeats(turns)
+    if said_twice:
+        console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
+        console.say("    radixnet feedback " + " ".join(f"--bad-text {quote(t)}" for t in said_twice))
     return {
         "turns": [t.to_dict() for t in turns],
         "count": len(turns),
@@ -718,6 +722,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         "opening": args.opening,
         "kind": model.kind,
         "partner_kind": partner.kind if partner is not None else None,
+        "repeats": said_twice,
         "transcript": transcript(turns),
     }
 

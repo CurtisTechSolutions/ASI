@@ -564,6 +564,14 @@ class TestEndpoints(unittest.TestCase):
                 self.assertEqual(turn["text"], turn["context"] + turn["reply"])
         texts = [t["text"] for t in turns]
         self.assertEqual(len(set(texts)), len(texts))
+        # the duplicates the search could not avoid come back ready to be punished (POST /api/feedback "bad")
+        self.assertEqual(data["repeats"], [t["text"] for t in turns if t["repeat"]])
+        status, long, _ = self.client.post("/api/converse", {"opening": CORPUS[0], "turns": 40})
+        self.assertEqual(status, 200, long)
+        said_twice = [t["text"] for t in long["turns"] if t["repeat"]]
+        self.assertTrue(said_twice, "a long conversation on a small corpus runs out of new things to say")
+        self.assertEqual(set(long["repeats"]), set(said_twice))
+        self.assertEqual(len(long["repeats"]), len({t.strip().casefold() for t in long["repeats"]}))
         # continue: the history is picked up, indices and speakers carry on
         status, more, _ = self.client.post("/api/converse", {"turns": 2, "history": texts, "speakers": ["me", "you"]})
         self.assertEqual(status, 200, more)

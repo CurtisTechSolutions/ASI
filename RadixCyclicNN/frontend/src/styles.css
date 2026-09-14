@@ -1276,11 +1276,6 @@ ol.dialogue li.turn.b {
   align-items: flex-end;
 }
 
-ol.dialogue li.end {
-  height: 0;
-  margin: 0;
-}
-
 ol.dialogue .speaker {
   display: flex;
   align-items: center;

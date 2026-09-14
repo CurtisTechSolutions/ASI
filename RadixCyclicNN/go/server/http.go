@@ -227,7 +227,7 @@ func init() {
 	route("POST", "/api/generate", rGenerate)
 	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -673,7 +673,9 @@ func rConverse(rq *request) (int, any, error) {
 	if turns == nil {
 		turns = []*radixnet.Turn{}
 	}
-	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns, "count": len(turns)}, nil
+	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
+	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+		"count": len(turns), "repeats": radixnet.Repeats(turns)}, nil
 }
 
 func rScore(rq *request) (int, any, error) {

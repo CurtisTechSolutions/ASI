@@ -424,6 +424,68 @@ func TestConverse(t *testing.T) {
 	}
 }
 
+// What counts as a duplicate, and what a conversation does with the ones it cannot avoid.
+func TestHeardAndRepeats(t *testing.T) {
+	heard := NewHeard([]string{"the cat sat on the mat"})
+	if !heard.Duplicate("The   Cat Sat On The Mat", "") { // whitespace and case aside
+		t.Fatal("an utterance said before is a duplicate")
+	}
+	if heard.Duplicate("the dog barked", "") {
+		t.Fatal("an unheard utterance is not a duplicate")
+	}
+	if !heard.Duplicate("on the mat", "") || heard.Duplicate("on the mat outside", "") {
+		t.Fatal("an echo adds nothing; a longer utterance says more than was heard")
+	}
+	heard.Remember("the cat sat", " sat")
+	if !heard.Duplicate("the dog sat", " sat") || heard.Duplicate("the dog sat", " sat down") {
+		t.Fatal("the same words added after another context are a duplicate")
+	}
+	if heard.Duplicate("", "") || NewHeard(nil).Duplicate("anything", "") {
+		t.Fatal("nothing is a duplicate of an empty conversation")
+	}
+
+	turns := []*Turn{{Text: "the cat sat"}, {Text: " west", Repeat: true}, {Text: "West", Repeat: true}, {Text: "  ", Repeat: true}}
+	if got := Repeats(turns); !reflect.DeepEqual(got, []string{" west"}) {
+		t.Fatalf("Repeats = %q; the flagged utterances, each once", got)
+	}
+	if got := Repeats(nil); len(got) != 0 {
+		t.Fatalf("Repeats(nil) = %q", got)
+	}
+
+	// a long conversation on a small corpus runs out of new things to say: it speaks a duplicate once,
+	// flags it, and stops rather than saying it again
+	m := trained(t, 2, 4)
+	opts := DefaultConverseOptions()
+	opts.Turns = 40
+	long, err := m.Converse("", opts)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	said := map[string]bool{}
+	for _, tr := range long {
+		key := Normalize(tr.Text)
+		if said[key] && !tr.Repeat { // only a flagged duplicate may say something twice
+			t.Fatalf("utterance %q spoken twice", tr.Text)
+		}
+		said[key] = true
+	}
+	punished := Repeats(long)
+	if len(punished) == 0 || len(long) >= opts.Turns {
+		t.Fatalf("%d turns, %d to punish: the conversation should run out of new things to say", len(long), len(punished))
+	}
+	// and no duplicate is ever spoken twice: the conversation ends instead of going round in circles
+	for i, tr := range long {
+		if !tr.Repeat {
+			continue
+		}
+		for _, later := range long[i+1:] {
+			if Normalize(later.Text) == Normalize(tr.Text) {
+				t.Fatalf("duplicate %q spoken again at turn %d", tr.Text, later.Index)
+			}
+		}
+	}
+}
+
 // The default mode: one goroutine per text bumping shared counters with plain increments.  A collision
 // may lose an update, so the counts are compared with a tolerance; the structure, the window and the
 // weights' consistency with the counts are exact.  The race detector would (rightly) flag the plain

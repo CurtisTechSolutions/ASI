@@ -48,7 +48,7 @@ RadixCyclicNN/
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
-    dialogue.py             Turn, converse - the model conversing with itself (section 22)
+    dialogue.py             Turn, Heard, converse, repeats - the model conversing with itself (section 22)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -504,7 +504,7 @@ output only, one JSON document on stdout).
 | `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
 | `score` | `--text` or `--data FILE` | log-prob per text |
-| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat); JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `transcript` |
+| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
 | `compress` | `--out` | compresses and saves, prints merges |
@@ -538,7 +538,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/job/stop` | | sets the stop event; returns job status |
 | POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
-| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()]}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned (section 22) |
+| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
 | POST `/api/score` | `{"text"}` | score dict |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
@@ -580,8 +580,8 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
 * `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
 * `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`).
-* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`); Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat), and every turn has the thumbs.
-* `RatingsCard.jsx` — shared by Generate and Converse: `useRatings()` (one rating per distinct text, toggling), `RateButtons` (the thumbs pair) and the "Ratings → 2NRL" card (rated texts, the action that will run, epochs / learning rates / strength, Train on ratings → `POST /api/feedback` through the panel's `useJob("feedback")`, the job's phase table).
+* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked.
+* `RatingsCard.jsx` — shared by Generate and Converse: `useRatings()` (one rating per distinct text, toggling; `punish(texts)` marks a whole batch thumbs-down without toggling and returns how many), `RateButtons` (the thumbs pair) and the "Ratings → 2NRL" card (rated texts, the action that will run, epochs / learning rates / strength, Train on ratings → `POST /api/feedback` through the panel's `useJob("feedback")`, the job's phase table).
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
@@ -604,7 +604,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
-* `test_dialogue.py` — `tail_context`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 
 ---
 
@@ -911,13 +911,32 @@ Every reply is the prediction search run from the end of what was just said:
    guessed partial-trigram lead). Then `predict(context, length=0, mode="beam", k, beam, to_end=True, max_length,
    step_penalty)` offers the `k` most likely complete continuations (`"sample"`: one stochastic walk per draw, up to
    `k` draws; `seed` gives the dialogue a private RNG). The first candidate that adds something (a non-empty
-   continuation) and, with `avoid_repeats`, is neither an utterance the conversation already heard nor an *echo*
-   (a piece of the previous line) is spoken: `text = context + continuation`.
+   continuation) and, with `avoid_repeats`, does not duplicate the conversation is spoken:
+   `text = context + continuation`.
 3. Nothing (new) follows, or the context is not usable → the context loses its last word (`_shorter`) and the
    search runs again — what else could follow "on the"? — until it is empty.
 4. Still nothing → the voice changes the subject: the same search from START (`fresh=True`); when even that only
-   offers repeats the best repeat is spoken and flagged `repeat=True`. A voice with nothing at all to say (an
+   offers duplicates the best one is spoken and flagged `repeat=True`. A voice with nothing at all to say (an
    untrained model) ends the conversation early.
+
+### Duplicates: avoided, and punished when they cannot be
+
+`Heard` is what the conversation has already heard and decides what counts as a duplicate. An utterance duplicates
+it when it was **said** before (`normalize`: whitespace collapsed, case folded), when its reply **adds** what some
+earlier reply added — the same continuation reached from another context, "blowers" answered with "blower" twice —
+or when it **echoes** a line already spoken (the whole utterance sits inside one of them: "the west" after "on the
+west" adds nothing). A *longer* utterance that happens to contain an earlier one is not a duplicate: it says more
+than was heard. `Heard.remember(text, reply)` takes a spoken turn in; `_pick` skips every duplicate candidate and
+counts it in `skipped`.
+
+When they are all duplicates the best one is spoken anyway — the cheapest candidate that was never said word for
+word, else the cheapest of all — and the turn is flagged `repeat=True`. Saying that same duplicate a second time
+would only go round in circles, so `converse` ends the conversation there instead (before this, a model that ran
+out of things to say repeated one line for every remaining turn). `repeats(turns)` collects the flagged utterances,
+each once: the texts to **punish**. They ride back on `POST /api/converse` and the CLI's JSON as `repeats`; the CLI
+prints the `radixnet feedback --bad-text …` command that punishes them, and the Converse tab's "Punish duplicates"
+marks them 👎 so "Train on ratings" runs the 2NRL negative phase (`two_nrl`, section 8) on them — the model is taught out of
+the duplicates the search cannot avoid by itself, instead of offering them again next time.
 
 A `Turn` records `index`, `speaker`, `text`, the `context` it picked up, the `reply` it added, `cost`,
 `probability` (`exp(-cost)`), `reached_end`, `fresh`, `given`, `repeat`, `candidates` (continuations offered) and
@@ -939,7 +958,8 @@ exact summation, so path costs match `math.fsum` to the bit), `graph.go` (nodes,
 Python dict order decides the softmax summation order -, trigram index, `Split` / `MergeChild` / `Compress`,
 `ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
-`model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`),
+`model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`, `Heard`,
+`Repeats` - the same duplicate rules as Python, checked by `test_go_parity.py`),
 `json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`).
 
 Concurrency (`--workers N` caps the goroutines; the default 0 is no cap):
