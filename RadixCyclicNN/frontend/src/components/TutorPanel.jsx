@@ -72,6 +72,8 @@ function lessonRecord(lesson, index) {
     changes: asArray(lesson && lesson.changes),
     comment: grade.comment || "",
     graded_by: grade.graded_by || "ollama",
+    why: lesson.why || "",
+    variants: asArray(lesson && lesson.variants),
   };
 }
 
@@ -256,6 +258,27 @@ function LessonPlanCard({ plan, onUse, onTeach, onClear, disabled, cardRef }) {
   );
 }
 
+/** Why a sentence is wrong, and the sentences the teacher wrote that are wrong in the same way. */
+function SameMistake({ why, variants }) {
+  const items = asArray(variants).filter((v) => v && typeof v === "object" && v.wrong);
+  if (!why && items.length === 0) return <span className="muted">–</span>;
+  return (
+    <div className="same-mistake">
+      {why ? <p>{String(why)}</p> : null}
+      {items.length > 0 ? (
+        <ul className="plain">
+          {items.map((variant, i) => (
+            <li key={i}>
+              <del>{String(variant.wrong)}</del>
+              {variant.right ? <ins>{String(variant.right)}</ins> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 /** Every graded completion: the marks, the mistake, what the network wrote and what it should have written. */
 function LessonTable({ rows, total, running }) {
   if (rows.length === 0) {
@@ -284,6 +307,7 @@ function LessonTable({ rows, total, running }) {
               <th>correct English</th>
               <th>what changed</th>
               <th>the teacher says</th>
+              <th>why, and the same mistake again</th>
             </tr>
           </thead>
           <tbody>
@@ -318,6 +342,9 @@ function LessonTable({ rows, total, running }) {
                     <Changes changes={r.changes} />
                   </td>
                   <td className="wrap">{String(r.comment ?? "")}</td>
+                  <td className="wrap">
+                    <SameMistake why={r.why} variants={r.variants} />
+                  </td>
                 </tr>
               );
             })}
@@ -428,6 +455,8 @@ export default function TutorPanel({ status }) {
   const [twonrlPer, setTwonrlPer] = useState("round");
   const [diffCorrections, setDiffCorrections] = useState(true);
   const [blame, setBlame] = useState(false);
+  const [variants, setVariants] = useState("3");
+  const [variantWeight, setVariantWeight] = useState("0.5");
   const [keepWeight, setKeepWeight] = useState("0.25");
   const [minWeight, setMinWeight] = useState("0.25");
   const [negEpochs, setNegEpochs] = useState("2");
@@ -514,6 +543,8 @@ export default function TutorPanel({ status }) {
         twonrl_per: twonrlPer,
         diff_corrections: diffCorrections,
         blame,
+        variants: Math.max(0, parseInteger(variants, 3)),
+        variant_weight: parseNumber(variantWeight, 0.5),
         keep_weight: parseNumber(keepWeight, 0.25),
         min_weight: parseNumber(minWeight, 0.25),
         neg_epochs: parseInteger(negEpochs, 2),
@@ -898,6 +929,25 @@ export default function TutorPanel({ status }) {
               disabled={running}
             />
           </div>
+          <NumberField
+            label="Same mistake again"
+            hint="sentences per failure, for the negative network"
+            value={variants}
+            onChange={setVariants}
+            min={0}
+            max={10}
+            step={1}
+            disabled={running || !blame}
+          />
+          <NumberField
+            label="Their blame"
+            hint="× the failure's severity"
+            value={variantWeight}
+            onChange={setVariantWeight}
+            min={0}
+            step={0.05}
+            disabled={running || !blame || parseInteger(variants, 3) === 0}
+          />
           <NumberField
             label="Unchanged words keep"
             hint="0 = the fix alone, 1 = the whole sentence"

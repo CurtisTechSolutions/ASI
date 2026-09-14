@@ -45,6 +45,7 @@ PROMPT      ?= short true sentences about animals and the weather
 LINES       ?= 20
 STYLE       ?= good
 THRESHOLD   ?= 6
+VARIANTS    ?= 3
 TOPIC       ?= everyday life
 FOCUS       ?= subject-verb agreement
 ROUNDS      ?= 3
@@ -243,8 +244,8 @@ TUTOR_FLAGS := --tutor-provider $(TUTOR) $(if $(TUTOR_URL),--url $(TUTOR_URL),) 
 tutor: ## English lessons about TOPIC (TUTOR=ollama|chatgpt teaches): ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --drills $(DRILLS) --threshold $(THRESHOLD) --report tutor-report.json
 
-tutor-blame: ## English lessons that also teach the negative network why each sentence failed
-	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --blame --negative $(NEGATIVE)
+tutor-blame: ## English lessons that also teach the negative network why each sentence failed, and VARIANTS more sentences with the same mistake
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --blame --negative $(NEGATIVE) --variants $(VARIANTS)
 
 tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trained on
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds 1 --exercises $(EXERCISES) --threshold $(THRESHOLD) --dry-run

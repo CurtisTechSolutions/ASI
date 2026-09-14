@@ -920,7 +920,9 @@ def overall_score(grammar, spelling, fluency, grammar_weight=0.6) -> float | Non
 @dataclass Exercise:  id, prefix, focus, answer        # .cue == cue(prefix)
 @dataclass Grade:     score, grammar, spelling, fluency, passed, error, correction, comment, graded_by
                       # graded_by: the marking provider ("ollama" | "chatgpt"), "empty" or "unrated"
-@dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade
+@dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade,
+                      why, variants                     # the widening (below): filled only for a blamed failure
+@dataclass Correction: wrong, right, weight             # what was written, what should have been, how much it counts
 
 def write_exercises(client, topic, count=5, *, focus=None, level="beginner", weak=(), words="3 to 6", model=None)
     # JSON mode: {"exercises": [{"prefix", "focus", "answer"}]}; parse_exercises tolerates bare lists, plain lines,
@@ -933,7 +935,27 @@ def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0
     # unreadable answer -> score None, graded_by="unrated", counted as a failure
 def report_card(lessons) -> dict          # {"lessons","graded","passed","failed","pass_rate","mean_score",
                                           #  "mean_grammar","mean_spelling","mean_fluency","errors","weakest"}
+
+DEFAULT_VARIANTS = 3;  MAX_VARIANTS = 10;  MAX_WHY_CHARS = 400
+def explain_mistakes(client, lessons, *, topic="", count=3, weight=0.5, model=None, batch=10, temperature=0.9,
+                     external=None) -> list[Lesson]
+    # one JSON call per batch of failures: {"mistakes": [{"index", "why", "again": [{"wrong", "right"}]}]}
+    # fills lesson.why (the rule that was broken, clipped) and lesson.variants (Correction(wrong, right, weight));
+    # blank completions are skipped (nothing was written to be wrong about), repeats of the student's own sentence
+    # and of each other are dropped, a "right" equal to its "wrong" is treated as absent, and an unreadable answer
+    # leaves the lesson exactly as it was
 ```
+
+**Why it is wrong, and the same mistake again.**  A mark says *that* a sentence is wrong; the negative network
+(section 24) wants to know *why*, and wants the mistake more than once.  So step 4 of a round is
+`TutorTrainer.widen()`: every failed sentence goes back to the teacher with the mistake it was marked for and the
+correction, and comes back with the **rule** it broke and `variants` more short sentences that break the same rule
+the same way, each with its own correct form.  They are ordinary faults to `blame.faults_from_lessons`
+(section 24) - the same reason, the diff against their own correction, `variant_weight` (0.5) of the failure's
+severity because the student never wrote them - and they reach nothing else: the model being taught never sees a
+sentence it did not write.  The question is only asked when a negative network is attached (`--blame`) and
+`variants` > 0, which is also why the parity of the two tutors is unaffected; a teacher that cannot answer costs
+the widening, not the round (a `"note"` record).  Cost: one call per batch of failures.
 
 The report card at the end of a run is handed back to the teacher, which turns it into the syllabus of the
 lessons that follow:
@@ -1016,7 +1038,7 @@ the next batch, taught to it.  A batch that cannot be planned ends the run rathe
 between batches never starts one, and the batch it stops in still reports.
 
 Records: `{"kind": "lesson", batch, round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
-spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds}` (`changes` is what
+spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds, why, variants}` (`changes` is what
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
 `pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
@@ -1030,7 +1052,10 @@ each new batch with `{"kind": "batch", batch, step, brief, topic, level, words, 
 With `--blame` (`TutorTrainer(negative=...)`, `POST /api/tutor/start {"blame": true}`) every failed sentence of a
 round also teaches the **negative network** (section 24) why it failed: the mistake the teacher named is the reason,
 its mark the severity, its sentence of teaching the note, and the correction is diffed so only the characters it
-changed are blamed. The round records then carry `negative_blamed`, `negative_edges` and `negative_reasons`.
+changed are blamed. The round records then carry `negative_blamed`, `negative_edges` and `negative_reasons`, plus
+`explained` and `similar` — how many mistakes the teacher explained and how many more sentences it wrote that are
+wrong in the same way (`--variants N`, `--variant-weight X`, `{"variants": N, "variant_weight": X}`; the lesson
+records carry them as `why` and `variants`).
 
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
@@ -1059,7 +1084,9 @@ Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpo
 key), the settings ("Teach corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
 per round, the report card with the mistake histogram, a table of rounds (with what the corrections moved) and one
 of every lesson (marks, mistake, what the network wrote, the correction, the changed words struck out against what
-replaced them, the teacher's line).  **Plan** (`POST /api/tutor/plan`) sits under each report card - the dry run's
+replaced them, the teacher's line, and - when the negative network is being taught - why it is wrong with the
+sentences the teacher wrote that are wrong the same way, each struck out against its correct form; "Same mistake
+again" and "Their blame" sit beside the blame checkbox).  **Plan** (`POST /api/tutor/plan`) sits under each report card - the dry run's
 and the run's - and a **Lesson plan** card closes the tab: the summary, the step up (`hold` / `stretch` /
 `advance` with its note), the brief for the next batch with **Teach the next batch** (which loads the brief and
 the upgraded level, openings, pass mark and drills into the settings above), the weak points as pills, and a row
@@ -1071,9 +1098,11 @@ button becomes *Start auto run*, the Rounds table gains a `batch` column, the re
 every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
 per batch) so the settings show what the server is teaching.
 
-Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, answers drill requests and
-plans the next lessons; the parsers, the marking, the planner, the loop with a scripted model, the endpoints and
-the CLI), the ChatGPT teacher of
+Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
+it again, answers drill requests and plans the next lessons; the parsers, the marking, the widening -
+`_parse_explanations`, `explain_mistakes`, `TutorTrainer.widen`, a round that widens and one that does not - the
+planner, the loop with a scripted model, the endpoints and the CLI) and `tests/test_blame.py` (a widened lesson
+becomes its whole family of faults), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
 model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
 
@@ -1842,7 +1871,13 @@ characters, and so does the Go port.
 `faults_from_lessons(lessons, threshold)` reads a round of the English tutor (section 16.1): the mistake it named
 (`grade.error`, one of `tutor.ERROR_TYPES`) is the reason, its mark is the severity, its sentence of teaching is the
 note and its correction rides along so `teach` routes the fault through `NegativeNet.correct`; the sentences that
-passed, the corrections themselves and the teacher's model answers all clear blame.
+passed, the corrections themselves and the teacher's model answers all clear blame.  A lesson the teacher was asked
+*why* about (`tutor.explain_mistakes`, section 16.3) also carries its `variants` - more sentences that make the same
+mistake, each with its correct form - and every one becomes a fault of its own: the same reason, the teacher's
+explanation as the note, `<source>:similar` as the source, the variant's own `weight` (0.5) times the failure's
+severity, and its correct form both the diff to blame against and one more sentence that clears blame.  One mistake
+therefore teaches the *shape* of the mistake: a sentence the network never wrote is already suspect (`judge`), while
+nothing synthetic reaches the model being taught.
 `classify(critique, verdict=, rating=)`
 picks a reason out of `REASONS` (`empty`, `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`,
 `contradiction`, `false`, `incoherent`, `off-topic`, `other`, plus `unrated`) by matching the tutor's own words;

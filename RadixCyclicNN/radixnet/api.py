@@ -3549,6 +3549,8 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         batch=f.integer("batch", d.batch, minimum=1),
         adapt=f.flag("adapt", d.adapt),
         drills=f.integer("drills", d.drills, minimum=0),
+        variants=f.integer("variants", d.variants, minimum=0),
+        variant_weight=f.number("variant_weight", d.variant_weight, minimum=0.0),
         plan=f.integer("plan", d.plan, minimum=0),
         batches=f.integer("batches", d.batches, minimum=0),
         teach_answer=f.flag("teach_answer", d.teach_answer),
@@ -3839,7 +3841,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "neg_epochs, pos_epochs, neg_lr, pos_lr, brief, plan, batches (auto run: each batch planned from the last, "
      "0 = until stopped), tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
      "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
-     "failed), ...}"),
+     "failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same "
+     "mistake, blamed at 'variant_weight' of its severity), ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "

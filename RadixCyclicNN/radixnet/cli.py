@@ -385,6 +385,13 @@ class LessonPrinter(_RowPrinter):
                     self.console.note(f"    correct: {quote(clip(str(correction), 80))}")
                 if comment:
                     self.console.note(f"    teacher: {clip(str(comment), 100)}")
+                why = record.get("why")
+                if why:
+                    self.console.note(f"    why:     {clip(str(why), 100)}")
+                for variant in record.get("variants") or []:
+                    wrong = quote(clip(str(variant.get("wrong", "")), 60))
+                    right = str(variant.get("right") or "")
+                    self.console.note(f"    same:    {wrong}" + (f" -> {quote(clip(right, 50))}" if right else ""))
         elif kind == "round":
             weakest = ", ".join(record.get("weakest") or []) or "nothing"
             learned = record.get("action") or "nothing to learn"
@@ -393,6 +400,12 @@ class LessonPrinter(_RowPrinter):
                 f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
                 f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
             )
+            if record.get("similar"):
+                self.console.note(
+                    f"    negative network: {record.get('explained')} mistake(s) explained, "
+                    f"{record.get('similar')} more sentence(s) wrong the same way, "
+                    f"{record.get('negative_blamed')} blamed on {record.get('negative_edges')} edge(s)"
+                )
         elif kind == "report":
             self.console.note(
                 f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
@@ -2529,7 +2542,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
-        plan=args.plan or 0, batches=args.batches,
+        variants=args.variants, variant_weight=args.variant_weight, plan=args.plan or 0, batches=args.batches,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
@@ -2584,7 +2597,12 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     negative = neg_origin = None
     if args.blame:
         negative, neg_origin = open_negative(args, console, required=False)
-        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        console.pairs([
+            ("negative model", f"{neg_origin.describe()} -> {negative_path(args)}"),
+            ("widening", f"the teacher explains why and writes {config.variants} more sentence(s) with the same "
+                         f"mistake, blamed at {fmt(config.variant_weight)} of its severity"
+                         if config.variants else "off (--variants 0): the failed sentences alone"),
+        ])
         console.say()
     trainer = TutorTrainer(model, client, config, negative=negative)
     try:
@@ -4284,6 +4302,8 @@ def build_parser() -> argparse.ArgumentParser:
     from .tutor import (
         DEFAULT_PLAN_LESSONS,
         DEFAULT_TUTOR_MODEL as tutor_default_model,
+        DEFAULT_VARIANTS as TUTOR_DEFAULT_VARIANTS,
+        MAX_VARIANTS as TUTOR_MAX_VARIANTS,
         MODES as TUTOR_MODES,
         TWONRL_PER as TUTOR_TWONRL_PER,
     )
@@ -4375,6 +4395,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "is the reason, its mark the severity, and only the characters it corrected are blamed")
     p.add_argument("--negative", metavar="PATH",
                    help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    group = p.add_argument_group("why it is wrong, and the same mistake again (--blame only)")
+    group.add_argument("--variants", type=nonneg_int, default=TUTOR_DEFAULT_VARIANTS, metavar="N",
+                       help="ask the teacher why each failed sentence is wrong and for N more sentences that make "
+                            "the same mistake, each with its correct form; they are blamed under the same reason, so "
+                            f"the negative network learns the mistake and not one sentence (0 = do not ask, max {TUTOR_MAX_VARIANTS})")
+    group.add_argument("--variant-weight", type=nonneg_float, default=0.5, metavar="X",
+                       help="their share of the failure's severity (the student never wrote them)")
     p.set_defaults(handler=cmd_tutor)
 
     # chatgpt ---------------------------------------------------------------

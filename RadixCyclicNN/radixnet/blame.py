@@ -11,7 +11,12 @@ output and said it was wrong, and why:
   teaching and the *correction*, the same sentence written out in correct
   English.  The mistake is the reason, the mark is the severity, and the diff
   against the correction says which characters were wrong
-  (:func:`faults_from_lessons`, :meth:`radixnet.negative.NegativeNet.correct`);
+  (:func:`faults_from_lessons`, :meth:`radixnet.negative.NegativeNet.correct`).
+  A failure the teacher was also asked *why* about
+  (:func:`radixnet.tutor.explain_mistakes`) arrives with the rule it broke and
+  with more sentences that break it the same way, each with its own correct
+  form: they are blamed under the same reason at ``weight`` of the severity,
+  so one mistake teaches the shape of the mistake instead of one sentence;
 * the **adversarial reviewer** (:mod:`radixnet.ollama`): an Ollama model rates
   the network's own texts 0-10, passes or fails each one and writes a
   one-sentence critique;
@@ -450,6 +455,16 @@ def faults_from_lessons(lessons: Iterable[Any], threshold: float = 6.0, source: 
     (:meth:`radixnet.negative.NegativeNet.correct`).  The sentences that
     passed, the corrections themselves and the teacher's own model answers all
     come back as cleared text.
+
+    A lesson that was widened (:func:`radixnet.tutor.explain_mistakes`) also
+    carries the teacher's explanation of *why* it is wrong and its
+    ``variants`` - more sentences that make the same mistake, each with its
+    correct form.  Every variant becomes a fault of its own under the same
+    reason, at its own ``weight`` of the failure's severity, noted with the
+    explanation and sourced as ``<source>:similar``; its correct form clears
+    blame like any other sentence the teacher wrote.  Nothing else in the
+    system reads them: a sentence the student never wrote is the negative
+    network's lesson alone.
     """
     faults: list[dict] = []
     passed: list[str] = []
@@ -477,6 +492,25 @@ def faults_from_lessons(lessons: Iterable[Any], threshold: float = 6.0, source: 
             if correction and correction != sentence:
                 fault["correction"] = correction
             faults.append(fault)
+            why = " ".join(str(data.get("why") or "").split())
+            for variant in data.get("variants") or []:
+                item = variant.to_dict() if hasattr(variant, "to_dict") else dict(variant or {})
+                wrong = " ".join(str(item.get("wrong") or "").split())
+                right = " ".join(str(item.get("right") or "").split())
+                if not wrong or wrong == sentence:
+                    continue
+                similar = _fault(
+                    wrong,
+                    reason,
+                    fault["severity"] * max(0.0, float(item.get("weight", 0.5))),
+                    why or comment,
+                    f"{source}:similar",
+                )
+                if right and right != wrong:
+                    similar["correction"] = right
+                    if right not in passed:
+                        passed.append(right)
+                faults.append(similar)
         for text in (correction, answer):
             if text and text not in passed:
                 passed.append(text)

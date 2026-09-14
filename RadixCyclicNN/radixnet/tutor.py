@@ -43,7 +43,21 @@ next one, and ``drills`` asks it for extra correct example sentences about
 them - a teacher noticing that the class keeps failing plurals and setting
 plural exercises.
 
-5. **The next lesson plan** - the report card at the end of a run is handed
+5. **Why, and the same mistake again** - a mark says *that* a sentence is
+   wrong; the negative network (:mod:`radixnet.negative`) wants to know *why*
+   and to have seen the mistake more than once.  So when one is attached,
+   every failed sentence is handed back to the teacher
+   (:func:`explain_mistakes`): it explains **why** the sentence is wrong - the
+   rule that was broken and the pattern behind it, not just this instance -
+   and writes ``variants`` more short sentences that make the *same* mistake,
+   each with its own correct form.  Those pairs are blamed exactly like the
+   student's own mistake (diffed against their corrections,
+   :mod:`radixnet.blame`) at ``variant_weight`` of its severity, so the
+   negative network learns the *error*, not the one sentence it happened to
+   appear in.  Nothing synthetic reaches the network being taught: the
+   variants are the negative network's lesson alone.
+
+6. **The next lesson plan** - the report card at the end of a run is handed
    back to the teacher (:func:`plan_lessons`, ``plan`` / ``--plan N`` /
    ``POST /api/tutor/plan``), which writes the syllabus of the lessons that
    follow: one point of grammar per lesson, the mistake of the card it
@@ -63,12 +77,14 @@ exercises and everything the network writes to OpenAI, and costs money per
 call.
 
 Cost, per round: one call for the exercises, one per grading batch, one more
-when ``drills`` is on.
+when ``drills`` is on, and one per batch of failed sentences when the mistakes
+are being widened for a negative network.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import statistics
 import threading
@@ -95,6 +111,8 @@ from .ollama import DEFAULT_MODEL, parse_lines
 __all__ = [
     "DEFAULT_PLAN_LESSONS",
     "DEFAULT_TUTOR_MODEL",
+    "DEFAULT_VARIANTS",
+    "MAX_VARIANTS",
     "ERROR_FOCUS",
     "ERROR_TYPES",
     "LEVELS",
@@ -116,6 +134,7 @@ __all__ = [
     "cue",
     "default_tutor_model",
     "drill_sentences",
+    "explain_mistakes",
     "focus_for",
     "grade_completions",
     "next_level",
@@ -441,6 +460,10 @@ class Lesson:
     reached_end: bool = False
     seconds: float = 0.0
     grade: Grade = dataclasses.field(default_factory=Grade)
+    why: str = ""
+    """Why the sentence is wrong: the rule behind the mistake (:func:`explain_mistakes`)."""
+    variants: list["Correction"] = dataclasses.field(default_factory=list)
+    """More sentences that make the same mistake, each with its correct form - the negative network's lesson."""
 
     @property
     def empty(self) -> bool:
@@ -458,7 +481,8 @@ class Lesson:
             "exercise": self.exercise.to_dict(), "attempt": self.attempt, "mode": self.mode,
             "continuation": self.continuation, "sentence": self.sentence, "cost": self.cost,
             "probability": self.probability, "reached_end": self.reached_end, "seconds": self.seconds,
-            "grade": self.grade.to_dict(), "changes": self.changes,
+            "grade": self.grade.to_dict(), "changes": self.changes, "why": self.why,
+            "variants": [v.to_dict() for v in self.variants],
         }
 
 
@@ -602,6 +626,148 @@ def grade_completions(
                 grade.correction = lesson.exercise.answer if not grade.passed else lesson.sentence
             lesson.grade = grade
     return list(lessons)
+
+
+# ---------------------------------------------------------------------------
+# why it is wrong, and the same mistake again
+# ---------------------------------------------------------------------------
+
+DEFAULT_VARIANTS = 3
+"""Sentences with the same mistake the teacher writes per failure, for the negative network."""
+MAX_VARIANTS = 10
+"""Most that can be asked for at once (a longer list starts repeating itself)."""
+MAX_WHY_CHARS = 400
+
+_WHY_SCHEMA = (
+    '{"mistakes": [{"index": <int>, "why": "<why the sentence is wrong>", "again": '
+    '[{"wrong": "<another sentence with the same mistake>", "right": "<that sentence in correct English>"}, ...]}, ...]}'
+)
+
+_WHY_SYSTEM = (
+    "You are an English teacher explaining a beginner's mistake and then showing it again. For every sentence you "
+    "are given the student's wrong sentence, the mistake you named and the correct sentence. Answer two things. "
+    "'why' explains in one or two sentences why the sentence is wrong: name the rule that was broken and what the "
+    "student is doing instead - the pattern, not just this one sentence. 'again' is {n} MORE examples of the SAME "
+    "mistake: each 'wrong' is a different short sentence that breaks that same rule in that same way - a different "
+    "subject, verb or noun, never a repeat of the student's sentence or of another example - and its 'right' is "
+    "that same sentence in correct English, changed only where the mistake is, so the two differ in the mistake "
+    "and nothing else. Keep every sentence short, simple and about everyday life. Reply with JSON only, no prose, "
+    "exactly of the form {schema} with one entry per sentence, in the given order and with the given index."
+)
+
+
+def _pairs_of(value: Any, limit: int, skip: set[str]) -> list[tuple[str, str]]:
+    """``[(wrong, right)]`` of an ``again`` list: dicts or bare strings, blanks and repeats dropped."""
+    out: list[tuple[str, str]] = []
+    if not isinstance(value, list):
+        return out
+    for entry in value:
+        if isinstance(entry, str):
+            wrong, right = " ".join(entry.split()), ""
+        elif isinstance(entry, dict):
+            wrong = " ".join(str(entry.get("wrong") or entry.get("sentence") or entry.get("example") or "").split())
+            right = " ".join(str(entry.get("right") or entry.get("correction") or entry.get("correct") or "").split())
+        else:
+            continue
+        key = wrong.lower()
+        if not wrong or key in skip:
+            continue
+        skip.add(key)
+        out.append((wrong, right if right.lower() != key else ""))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_explanations(raw: str, count: int, limit: int) -> dict[int, dict]:
+    """``{index: {"why", "again": [(wrong, right)]}}`` for the entries of an LLM answer that could be understood."""
+    data = loads_lenient(raw)
+    items: Any = None
+    if isinstance(data, dict):
+        for key in ("mistakes", "explanations", "results", "items", "grades"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+        if items is None and any(k in data for k in ("why", "again", "reason")):
+            items = [data]
+    elif isinstance(data, list):
+        items = data
+    out: dict[int, dict] = {}
+    if not isinstance(items, list):
+        return out
+    for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        if not (0 <= index < count) or index in out:
+            continue
+        why = " ".join(str(item.get("why") or item.get("reason") or item.get("explanation") or "").split())
+        again = item.get("again", item.get("examples", item.get("variants", item.get("sentences"))))
+        out[index] = {"why": _clip(why, MAX_WHY_CHARS), "again": _pairs_of(again, limit, set())}
+    return out
+
+
+def explain_mistakes(
+    client: LLMClient,
+    lessons: Sequence[Lesson],
+    *,
+    topic: str = "",
+    count: int = DEFAULT_VARIANTS,
+    weight: float = 0.5,
+    model: str | None = None,
+    batch: int = 10,
+    temperature: float = 0.9,
+    external: Callable[[], Any] | None = None,
+) -> list[Lesson]:
+    """Ask the teacher *why* each of these sentences is wrong, and for ``count`` more with the same mistake.
+
+    ``lessons`` are the failures of a round (blank completions are skipped:
+    nothing was written to be wrong about).  Each one is filled in place -
+    :attr:`Lesson.why` with the teacher's explanation and
+    :attr:`Lesson.variants` with :class:`Correction` pairs at ``weight``, the
+    share of the failure's severity the negative network should give a
+    sentence the student never actually wrote.  Returns the lessons asked
+    about; an entry the teacher said nothing usable about simply keeps its
+    empty ``why`` and no variants.
+    """
+    if batch < 1:
+        raise ValueError("batch must be >= 1")
+    count = max(1, min(int(count), MAX_VARIANTS))
+    if weight < 0:
+        raise ValueError(f"weight must be >= 0, got {weight}")
+    asked = [l for l in lessons if l.sentence.strip() and not l.empty]
+    hold = external or nullcontext
+    system = _WHY_SYSTEM.format(n=count, schema=_WHY_SCHEMA)
+    for start in range(0, len(asked), batch):
+        chunk = asked[start : start + batch]
+        body = "\n".join(
+            f"[{i}] mistake: {lesson.grade.error or 'other'}\n"
+            f"    the student wrote: {json.dumps(lesson.sentence.strip(), ensure_ascii=False)}\n"
+            f"    correct English:   {json.dumps(lesson.grade.correction.strip() or lesson.exercise.answer.strip(), ensure_ascii=False)}"
+            + (f"\n    you told the student: {lesson.grade.comment.strip()}" if lesson.grade.comment.strip() else "")
+            for i, lesson in enumerate(chunk)
+        )
+        user = (
+            (f"Topic of the lesson: {topic.strip()}\n\n" if topic and topic.strip() else "")
+            + f"Explain these {len(chunk)} mistakes and show each one again:\n{body}\n\nReturn the JSON now."
+        )
+        with hold():
+            raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": temperature})
+        parsed = _parse_explanations(raw, len(chunk), count)
+        for i, lesson in enumerate(chunk):
+            entry = parsed.get(i)
+            if entry is None:
+                continue
+            lesson.why = entry["why"]
+            lesson.variants = [
+                Correction(wrong=wrong, right=right, weight=float(weight))
+                for wrong, right in entry["again"]
+                if wrong.lower() != lesson.sentence.strip().lower()
+            ]
+    return asked
 
 
 def report_card(lessons: Iterable[Lesson]) -> dict:
@@ -1174,6 +1340,9 @@ class TutorConfig:
     batch: int = 10
     adapt: bool = True  # drill the previous round's weakest points
     drills: int = 0  # extra correct example sentences per round
+    # why it is wrong, and the same mistake again (the negative network's lesson; see explain_mistakes)
+    variants: int = DEFAULT_VARIANTS  # sentences with the same mistake per failure (0 = do not ask)
+    variant_weight: float = 0.5  # their share of the failure's severity (they are the teacher's, not the student's)
     plan: int = 0  # lessons to plan from the final report card at the end of the run (0 = no plan)
     batches: int = 1  # auto run: batches of ``rounds`` rounds, each planned from the last (0 = until stopped)
     teach_answer: bool = True  # a failed lesson also learns the teacher's model answer
@@ -1244,6 +1413,10 @@ class TutorConfig:
             raise ValueError("batch must be >= 1")
         if self.drills < 0 or self.replay_limit < 0 or self.checkpoint_every < 0:
             raise ValueError("drills, replay_limit and checkpoint_every must be >= 0")
+        if self.variants < 0 or self.variants > MAX_VARIANTS:
+            raise ValueError(f"variants must lie in [0, {MAX_VARIANTS}]")
+        if self.variant_weight < 0:
+            raise ValueError("variant_weight must be >= 0")
         if self.plan < 0:
             raise ValueError("plan must be >= 0")
         if self.batches < 0:
@@ -1353,6 +1526,33 @@ class TutorTrainer:
             model=cfg.resolved_grader_model, batch=cfg.batch, external=self._external,
             graded_by=self.grader_provider,
         )
+
+    def widen(self, lessons: Sequence[Lesson], round_no: int = 1, progress: ProgressFn | None = None) -> dict:
+        """Step 4: why are the failures wrong, and what else is wrong in the same way?
+
+        Only asked when a negative network is attached and
+        ``config.variants`` is more than 0 - it is the only thing that learns
+        from the answer, and it costs one LLM call per batch of failures.  A
+        teacher that cannot answer costs the widening, not the round.
+        """
+        cfg = self.config
+        out = {"explained": 0, "similar": 0}
+        if self.negative is None or cfg.variants < 1 or self._stopped():
+            return out
+        failed = [l for l in lessons if not l.grade.passed and l.sentence.strip() and not l.empty]
+        if not failed:
+            return out
+        try:
+            explain_mistakes(
+                self.client, failed, topic=cfg.topic, count=cfg.variants, weight=cfg.variant_weight,
+                model=cfg.tutor_model, batch=cfg.batch, external=self._external,
+            )
+        except LLMError as exc:  # the round stands without the widening
+            self._emit(progress, {"kind": "note", "round": round_no, "message": f"no similar mistakes: {exc}"})
+            return out
+        out["explained"] = sum(1 for lesson in failed if lesson.why)
+        out["similar"] = sum(len(lesson.variants) for lesson in failed)
+        return out
 
     # -- what a grade is worth -----------------------------------------------
 
@@ -1555,7 +1755,8 @@ class TutorTrainer:
             "score": grade.score, "grammar": grade.grammar, "spelling": grade.spelling, "fluency": grade.fluency,
             "passed": grade.passed, "error": grade.error, "correction": _clip(grade.correction, 400),
             "comment": grade.comment, "graded_by": grade.graded_by, "probability": lesson.probability,
-            "seconds": lesson.seconds, "changes": self.changes_of(lesson),
+            "seconds": lesson.seconds, "changes": self.changes_of(lesson), "why": lesson.why,
+            "variants": [v.to_dict() for v in lesson.variants],
         })
 
     def changes_of(self, lesson: Lesson) -> list[dict]:
@@ -1577,6 +1778,7 @@ class TutorTrainer:
                 lessons.append(self.complete(exercise, attempt))
         if lessons and not self._stopped():
             self.grade(lessons)
+        widened = self.widen(lessons, round_no, progress)
         for lesson in lessons:
             self._emit_lesson(progress, round_no, lesson, batch)
         self.lessons.extend(lessons)
@@ -1603,6 +1805,8 @@ class TutorTrainer:
             record["negative_blamed"] = blamed["blamed"]
             record["negative_edges"] = blamed["edges"]
             record["negative_reasons"] = blamed["reasons"]
+            record["explained"] = widened["explained"]
+            record["similar"] = widened["similar"]
         return record, lessons
 
     def _teach_negative(self, lessons: list[Lesson]) -> dict | None:
