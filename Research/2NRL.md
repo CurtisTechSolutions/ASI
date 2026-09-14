@@ -1,5 +1,7 @@
 # 2NRL: Learning by Inverting Consistent Failure
 
+*Two-phase Negative Reinforcement Learning*
+
 **A training procedure derived from autodidactic practice**
 
 R. Curtis — Curtis Tech Solutions
@@ -9,7 +11,8 @@ Working paper · September 2026
 
 ## Abstract
 
-2NRL is a three-phase training procedure: **train on the failures at full rate,
+2NRL — *Two-phase Negative Reinforcement Learning* — is a three-phase training
+procedure: **train on the failures at full rate,
 invert the network, then fine-tune on the correct data at a reduced rate.** It
 inverts the conventional treatment of wrong examples. Where negative sampling,
 unlikelihood training and contrastive objectives all move a model *away* from
@@ -18,7 +21,9 @@ completely — and then negates the representation it built.
 
 The procedure is not derived from the literature. It is a formalisation of how
 its author learned, being self-taught: *fail consistently, then do the inverse of
-what failed; once a thread worth pulling appears, pull hard.*
+what failed; explore widely until a thread appears, then tighten and iterate.*
+The first half is implemented and is what this paper is mostly about; the second
+is a schedule over search breadth that the system does not yet have (§5).
 
 This paper states the procedure precisely, gives the mechanism that makes
 inversion a coherent operation rather than a destructive one, and identifies its
@@ -53,10 +58,13 @@ Three commitments are contained in that sentence, and 2NRL implements each:
    into it.
 2. **The correction is inversion**, not gradual adjustment. Having understood
    what does not work, you do the opposite of it.
-3. **Effort is proportional to signal.** A promising direction is not pursued
-   evenly with everything else; it is pursued *hard*.
+3. **Exploration narrows once it finds something.** In the author's fuller
+   account: *explore rapidly and widely until you find a thread, then tighten the
+   exploration and iterate.* Breadth first, then depth on whatever the breadth
+   turned up.
 
-The claim of this paper is that these three are implementable as an update rule,
+The first two are implemented; the third, as §5 sets out, is not. The claim of
+this paper is that these are implementable as an update rule,
 that the rule is well-defined given an architecture in which inversion is
 meaningful, and that its efficacy is governed by a single measurable property of
 the failure distribution.
@@ -218,51 +226,99 @@ it, and worth recording as such.
 
 ---
 
-## 5. Pulling the thread: proportional effort
+## 5. Finding the thread: exploration, not effort
 
-The third commitment — *once I found a thread to pull on, I would pull hard* —
-is implemented as failure-proportional boosting in the self-improvement loop.
+The third commitment is the one the implementation has **not** captured, and the
+gap is worth stating precisely because the obvious reading of it is wrong.
 
-Each generated sample is scored against the real distribution, giving a gap
-$g = \bar{s}_{\text{real}} - s(x)$. Samples with $g > 0$ are failures; those
-exceeding a margin are **blatant**. The negative phase then runs one pass per
-distinct weight
+### 5.1 What it is not
+
+"Once I found a thread to pull on, I would pull hard" invites reading as a
+weighting: pursue the promising example harder than the routine one. The system
+does contain such a mechanism, and it is genuinely useful, so it is worth
+describing before setting it aside.
+
+In the self-improvement loop each generated sample is scored against the real
+distribution, giving a gap $g = \bar{s}_{\text{real}} - s(x)$. Samples with
+$g > 0$ are failures; those past a margin are **blatant**. The negative phase then
+runs one pass per distinct weight
 
 $$w = \min\left(\text{boost},\ 1 + g/\text{margin}\right), \qquad
 \eta^- \leftarrow w \cdot \eta^-$$
 
-heaviest first, with the activation-parameter rate scaled identically. **The
-worse the failure, the harder the model is driven to reproduce it** — including
-its activation parameters — before the inversion turns all of it around. The
-system fails blatantly, on purpose, in proportion to how blatant the failure
-was.
+heaviest first, with the activation-parameter rate scaled identically. The worse
+the failure, the harder the model is driven to reproduce it — including its
+activation parameters — before the inversion turns all of it around. The system
+fails blatantly, on purpose, in proportion to how blatant the failure was. A
+generation with no failures does not invert at all.
 
-A generation with no failures does not invert at all. Nothing was wrong, so
-nothing is turned around.
+A positive-side analogue exists too: feedback is no longer a binary thumb but a
+mark out of 10, so a 9-out-of-10 result is learned nine tenths as hard as a
+perfect one and a 0 is skipped. Every judge in the system — LLM grader, sandbox,
+discriminator, human — expresses confidence rather than only direction.
 
-### 5.1 An asymmetry worth naming
+Both are sound mechanisms, and both belong to §2's two training phases: they say
+*how hard* to represent an example. **Neither is the third commitment.**
 
-The implemented boost is driven by **failure** magnitude. The author's
-description is of pursuing a **promising** direction — a thread is something
-that looks like it is going somewhere, not something that went badly.
+### 5.2 What it actually is
 
-These are different signals, and only one of them is currently wired. A faithful
-reading of "pull hard" might require a *positive*-side boost: a correct example
-that arrived against expectation, or a fine-tune pass weighted by how much the
-result improved, training harder than a routine success does.
+The author's fuller account is a statement about **search**, not about rates:
 
-Part of this has since been answered. Feedback is no longer a binary thumb:
-rewards are weighted by a mark out of 10, so a 9-out-of-10 result is learned nine
-tenths as hard as a perfect one and a 0 is skipped. Every judge in the system —
-LLM grader, sandbox, discriminator, human — can now express *confidence* rather
-than only direction, and the positive side is graded, not merely gated.
+> Explore rapidly and widely until you find a thread, then tighten up the
+> exploration and iterate/fine-tune.
 
-What is still missing is the **surprise** term. A weight proportional to a mark
-is not the same as a weight proportional to how *unexpected* the success was, and
-the author's description — a thread that appears and is then pulled — is about
-recognising something unlooked-for. A positive boost driven by the gap between
-what was expected and what arrived would be the faithful implementation, and does
-not exist (Q-13 in `RadixCyclicNN/DECISIONS.md`).
+That is an *annealing schedule over exploration breadth*. Early on, sample
+widely and cheaply — many candidates, high temperature, little commitment. When
+something promising appears, **narrow**: fewer candidates, lower temperature,
+concentrated on the region that produced it, and iterate there.
+
+The distinction matters because the two are independent. Learning-rate weighting
+decides how much a given example moves the model. Exploration breadth decides
+*which examples are ever seen*. One can be maximal while the other is minimal.
+Wide-then-narrow is a policy about where to look; boosting is a policy about what
+to do once you have looked.
+
+### 5.3 The gap
+
+Every parameter governing breadth in this system — `temperature`, `k`, `beam`,
+the sample `count`, `step_penalty` — is **fixed for the duration of a call** and
+chosen by the caller. Nothing narrows as a run proceeds, and nothing detects that
+a thread has appeared. A long self-improvement or tutoring run explores exactly
+as widely in its final generation as in its first.
+
+Two pieces of the machinery already exist, pointed elsewhere:
+
+* **The schedule evaluator.** Learning rates are already expressible as sandboxed
+  functions of the epoch, with linear, geometric, cosine, step and warm-up
+  helpers, a live preview and a reverse switch. The same evaluator applied to
+  `temperature`, `k` and `beam` would *be* the annealing schedule. It governs the
+  wrong quantity.
+* **Local re-exploration.** A conversational voice that catches itself looping
+  backs up and widens its search — $k \times (\text{step} + 2)$ candidates, more
+  the further back it goes. That is deliberately the opposite direction, and
+  correctly so: it is local recovery from a dead end, not the global schedule.
+  The two are compatible and would compose.
+
+### 5.4 The harder half: what counts as finding a thread?
+
+A schedule needs a trigger, and this is the genuinely open part. "A thread
+appeared" is doing real work in the description and has no obvious formalisation.
+Candidates, none yet tested:
+
+* **A score threshold** — the first sample to clear some bar. Simple, and
+  sensitive to a bar that has to be set in advance.
+* **A plateau break** — narrow when the best-so-far improves after a stretch of
+  not improving. Detects surprise rather than quality, which is closer to what a
+  thread *is*.
+* **A run of passes** — narrow after $n$ consecutive successes in one region.
+  Robust, but slow to notice a single strong signal.
+* **Discriminator disagreement** — narrow where the positive and negative models
+  disagree most sharply, that being where the information is.
+
+Without a detector the schedule has nothing to key on, so this is the part to
+settle first. It is also the part where the human account is least directly
+transferable: the author's recognition of a thread was a judgement, and the whole
+exercise of this project is to ask what such a judgement is made of.
 
 ---
 
@@ -522,8 +578,9 @@ not immediately undoing.
 implementation; the code calls it only "the author's two-phase scheme". This
 paper uses the acronym as a proper name.
 
-**Q-B. Should the positive side boost too?** See §5.1. The implemented boost
-responds to failure magnitude; the described process responds to *promise*.
+**Q-B. What counts as finding a thread?** See §5.4. The wide-then-narrow
+schedule is well defined once there is a detector; the detector is the open part,
+and it is where the human account transfers least directly.
 
 **Q-C. Is there a principled stopping rule?** What ended an iteration for the
 author — and can that be made a computable criterion?

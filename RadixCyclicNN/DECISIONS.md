@@ -37,7 +37,7 @@ design's development.
 **Part I — Foundations: the research claims** · D-001 cyclic not acyclic · D-002 sine activation ·
 D-003 per-node learnable activation · D-004 accept the vanishing gradient · D-005 the edge signal ·
 D-006 character trigrams · D-007 radix self-compression · D-008 shortest path · D-009 2NRL ·
-D-010 inversion · D-011 perpetual self-upgrade
+D-010 inversion · D-011 perpetual self-upgrade · D-067 breadth is not annealed
 
 **Part II — Implementation platform** · D-012 stdlib only · D-013 flat arrays and CSR ·
 D-014 the backend protocol · D-015 JSON model files · D-016 stdlib HTTP server · D-017 one job at a time ·
@@ -271,8 +271,9 @@ every character is shared by the window that ends on it and the window that
 begins on it, so each character is a *pivot* joining two contexts — and the
 two-character overlap that results is what every edge in the graph is keyed on.
 The relation a transformer computes with attention, this representation carries
-in the shape of the window itself. (The precise sense of "pivots" intended here
-is recorded as Q-11.)
+in the shape of the window itself. (The author has confirmed this positional
+reading: the shared character *is* the pivot. Three is therefore the smallest
+window that gives a pivot plus context on either side of it.)
 
 **Decision** `Encoder.encode("hello") → ["hel", "ell", "llo"]`. Characters, not
 bytes and not tokens. Overlap of two characters between consecutive windows.
@@ -385,7 +386,8 @@ with `to_end`).
 
 **Status** Research claim · 2026-09-09 (`d180176`) · **Layer** learning
 
-**Context — 2NRL is the author's own learning process, formalised.** This is not
+**Context — 2NRL (*Two-phase Negative Reinforcement Learning*) is the author's
+own learning process, formalised.** This is not
 an algorithm arrived at from the literature and then justified. The author is
 self-taught, and describes the method that produced that education directly:
 **fail consistently, then do the inverse of what failed; and once a thread worth
@@ -417,14 +419,48 @@ data at a smaller rate (`pos_lr` default `0.01` against `neg_lr` `0.05`, with
   pair, because that is the interface learning takes.
 * The count model implements the *interface* but not the *mechanism* — see
   D-023.
-* "Pull hard on the thread" is implemented as D-027's failure-proportional
-  boosting, and arguably only half of it: the boost scales with how badly
-  something *failed*, where the author's description is of pursuing a
-  *promising* direction. See Q-13.
-* The acronym's expansion is recorded nowhere in the repository; the code calls
-  it only "the author's two-phase scheme". See Q-12.
+* **"Pull hard on the thread" is not implemented, and is not a learning-rate
+  decision.** It was tempting to read it as D-027's failure-proportional
+  boosting; the author's own account is different and more specific:
+  *explore rapidly and widely until a thread appears, then tighten the
+  exploration and iterate.* That is a schedule over **search breadth** —
+  temperature, beam width, sample count — not over learning rates, and nothing
+  in the system currently anneals those. See D-067.
 
 **Lives in** `radixnet/model.py::RadixNet.two_nrl`
+
+---
+
+### D-067 — Search breadth is fixed per call; the author's process anneals it
+
+**Status** Provisional — a recognised gap · **Layer** inference
+
+**Context** The third commitment in the process 2NRL comes from (D-009) is
+*explore rapidly and widely until you find a thread, then tighten the exploration
+and iterate.* Wide-then-narrow: breadth first, then depth on whatever the breadth
+turned up.
+
+**Current behaviour** Every parameter that governs breadth — `temperature`, `k`,
+`beam`, the sample `count`, `step_penalty` — is **fixed for the duration of a
+call** and chosen by the caller. Nothing narrows as a run proceeds, and nothing
+detects that a thread has appeared. A long evolve or tutor run explores exactly
+as widely in its last generation as in its first.
+
+**What exists that is nearly right**
+* D-033 already provides the machinery: rates as sandboxed expressions of the
+  epoch, with `linear` / `geometric` / `cosine` / `step` / `warmup` helpers, a
+  live preview and a reverse switch. It is pointed at the **learning rate**. The
+  same evaluator applied to `temperature`, `k` and `beam` would be an annealing
+  schedule over search breadth, which is what the process describes.
+* D-062's exploration goes the *other* way on purpose, and correctly so: backing
+  out of a loop, it widens (`k × (step + 2)`) the further back it goes. That is
+  local recovery, not the global schedule — the two are compatible.
+
+**Why this is recorded rather than built** It is a genuine feature, not a
+documentation fix, and this pass is a decision record. Noted so the gap is
+visible rather than lost.
+
+**Would live in** `radixnet/schedule.py`, `radixnet/gan.py`, `radixnet/tutor.py`
 
 ---
 
@@ -2346,22 +2382,24 @@ described as further solutions to the same problem. Should this become a
 repository-wide decision log — with a section on what each variation tries and
 why it diverges — or stay scoped to this one?
 
-**Q-11 — What does "how the transformer pivots" mean precisely (D-006)?** The
-reading recorded above is the *positional* one: with stride 1 each character is
-shared by two windows and so joins two contexts, the way attention relates a
-position to its neighbours. Other readings are available — the query/key/value
-pivot around a single token, or the way attention re-centres the sequence on
-whichever position it weights. Which one was the analogy? It decides whether
-three is the right number or simply the first number that worked.
+**Q-11 — ~~What does "how the transformer pivots" mean?~~ — ANSWERED.** The
+positional reading is the intended one: the character shared by two windows *is*
+the pivot. Three is therefore the smallest window that gives a pivot with context
+on either side, and D-006 records it as the reason rather than as a consequence.
 
-**Q-12 — What does 2NRL stand for?** The expansion appears nowhere in the
-repository. `Research/2NRL.md` currently uses the acronym as a proper name.
+**Q-12 — ~~What does 2NRL stand for?~~ — ANSWERED.** *Two-phase Negative
+Reinforcement Learning.* Recorded in D-009 and in the paper's title; the
+expansion had appeared nowhere in the repository until now.
 
-**Q-13 — Is "pull hard on the thread" fully implemented (D-009, D-027)?** The
-boost scales the negative phase by how badly a sample *failed*. The described
-process is about recognising a *promising* direction and pursuing it hard. Those
-are different signals. Should there be a positive-side boost — a promising
-result training harder, not just a bad one?
+**Q-13 — ~~Is "pull hard on the thread" a positive-side boost?~~ — ANSWERED, and
+the premise was wrong.** It is not a boost of any kind. The author's process is
+*explore rapidly and widely until you find a thread, then tighten the exploration
+and iterate* — a schedule over **search breadth**, not over learning rates.
+Nothing in the system anneals temperature, beam width or sample count; D-033's
+expression evaluator is the obvious mechanism and is pointed at the wrong
+quantity. Recorded as D-067. **What remains open is the trigger**: what counts as
+"finding a thread" — a score threshold, a plateau, a run of passes? Without a
+detector, the schedule has nothing to key on.
 
 **Q-14 — Does the process have a stopping rule?** "Fail consistently, then
 invert" describes a loop. In a life it ends when the thing is learned. The
