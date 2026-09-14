@@ -1315,14 +1315,20 @@ go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 
 go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
 go/bin/radixnet-count --model model.count.json negative why --text "the the the the cat"
 go/bin/radixnet-count --model model.count.json negative filter --count 3   # the pair: write, then veto
+go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
+go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
+go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
+go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
 ```
 
 Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`,
-`negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget`),
-`invert`, `weights`, `info`, `converse`, `tutor`, `serve`, `version`; `--blame`
-(with `--negative PATH`) on `tutor` and `correct`; global options `--model`,
+`negative` (`blame` | `clear` | `why` | `filter` | `reasons` | `forget` | `auto`),
+`invert`, `compress`, `weights`, `info`, `converse`, `tutor`, `evolve`,
+`ollama` (`models` | `corpus` | `review`), `chatgpt` (`models` | `ask`),
+`checkpoints`, `bench`, `serve`, `version`; `--blame`
+(with `--negative PATH`) on `tutor`, `correct`, `evolve` and `ollama review`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
 none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
 limit, 80 % of the machine or container by default), `--memprofile PATH`.
@@ -1463,7 +1469,10 @@ Score, 2NRL, Negative, Tutor, Checkpoints and Graph work unchanged.
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`) |
-| `/api/evolve/*`, `/api/ollama/*` (corpus / review), `/api/images/*`, `/api/speech/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
+| `POST /api/evolve/start`, `POST /api/evolve/stop`, `GET /api/evolve/history` | the self-upgrade loop, same bodies and records as the Python server: the model generates, a discriminator judges, 2NRL follows; `blatant_mode` picks how failures drive the update and `blame` lets the critic teach the negative network. The discriminator lives beside the model as `discriminator.json` |
+| `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review` | a corpus written to order (`train` starts a job on the lines) and the adversarial review, which with `blame` teaches the negative network what failed and why |
+| `POST /api/negative/auto`, `GET /api/negative/auto/history` | the Negative tab, automatic: a `critic` job of write → review → blame, same bodies and records as the Python server |
+| `/api/images/*`, `/api/speech/*`, `/api/codegen/*`, `/api/schedule/preview` | 404 with a message naming the Python server |
 
 `tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same

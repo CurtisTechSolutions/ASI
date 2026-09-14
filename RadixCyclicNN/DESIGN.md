@@ -61,6 +61,7 @@ RadixCyclicNN/
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
     critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
+                            (ported to Go as go/radixnet/critic.go + review.go)
     schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
@@ -1325,8 +1326,21 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 
 `go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
 beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
-CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `weights`, `info`, `converse`). The
+CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `compress`, `weights`, `info`,
+`converse`, `correct`, `negative`, `tutor`, `evolve`, `ollama`, `chatgpt`, `checkpoints`, `bench`, `serve`). The
 Python implementation is untouched; the two share the `radixnet-count` model file.
+
+What is *not* ported:
+
+* **RadixNet itself** (the sine-activation model of sections 3-8, its backends and the `radix` kind).  Go is
+  deliberately the count / reward port; the two are different algorithms over the same graph, and a Go RadixNet
+  would be a second gradient trainer rather than a translation.
+* The **Stable Diffusion encoder** (`vision.py`'s `sd`), the **local Whisper backends** (`speech.py`'s
+  `faster-whisper` / `whisper`) and the **torch backend**: Python ML packages, not code to translate.  The parts of
+  those modules that *are* code - the waveform codecs, the text formats, the thumbnail encoder, an
+  OpenAI-compatible transcription server - have no such excuse and are simply not done yet.
+* Still Python-only for now, and listed in `pythonOnly` so the Go server says so rather than 404ing blankly:
+  `speech.py`, `vision.py`, `recall.py`, `codegen.py`, `schedule.py`, `tools.py` and `agent.py`.
 
 Files: `encoding.go` (code-point windows, `DecodePath`), `mt19937.go` (a Mersenne Twister with CPython's seeding,
 53-bit doubles and `getstate()` layout - `rng_state` round-trips between the languages), `fsum.go` (Shewchuk's
@@ -1661,6 +1675,21 @@ optional block:
   **Negative** tab is therefore no longer Python-only.
 * Go tests: `radixnet/negative_test.go`, `radixnet/blame_test.go`, `radixnet/duo_test.go`,
   `server/negative_test.go`.
+
+The loop of section 24.6 is ported too (`go/radixnet/critic.go`), and with it the two things it is built out of
+that Go did not have: `review.go` is the Python `ollama.py` - `CorpusFromPrompt`, `ReviewTexts`, `SampleTexts`,
+`AdversarialReview` and `SummariseReviews` - duck-typed on `LLMClient`, so ChatGPT reviews as happily as a local
+model, and `blame.go` gains `FaultsFromReviews` / `TeachReviews`.  `negative auto`, `ollama models | corpus |
+review`, `chatgpt models | ask`, `POST /api/negative/auto`, `GET /api/negative/auto/history` and the three
+`/api/ollama/*` endpoints all speak the Python server's contract, and
+`tests/test_go_parity.py::TestGoCriticParity` holds the two loops to the same prompts, the same marks, the same
+rounds and the same blame on disk.
+
+Porting it turned up one thing worth stating, because it applies to both languages: a round **samples under the
+lock and reviews without it**.  Sampling walks the graph, so doing it with the model lock released is a data race
+in Go and a torn read in Python; only the reviewer's thinking - a network call that touches nothing of ours -
+belongs outside.  That is why `SummariseReviews` / `summarise_reviews` exists as a step of its own: the loop needs
+the two halves separately, while a one-shot `AdversarialReview` can still do both.
 
 ---
 

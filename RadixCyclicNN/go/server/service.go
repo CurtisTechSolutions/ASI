@@ -155,6 +155,9 @@ type Service struct {
 	chatgptModel  string
 	tutorHistory  []map[string]any
 	criticHistory []map[string]any
+	evolveHistory []map[string]any
+	// discriminator is the critic of the evolve loop (nil until first used)
+	discriminator *radixnet.Model
 	// epochDelay slows every epoch (tests: makes a job observable while running)
 	epochDelay time.Duration
 }

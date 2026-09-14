@@ -166,6 +166,10 @@ commands:
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
 X
   invert     flip the sign of every reward
+  evolve     the self-upgrade loop: the model generates, a discriminator judges, 2NRL follows
+  compress   merge the unary chains of the graph by hand, then save
+  checkpoints list a checkpoint directory, or restore one (--restore NAME | latest)
+  bench      how fast this build counts and predicts
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
@@ -238,6 +242,14 @@ func main() {
 		cmdNegative(rest)
 	case "correct":
 		cmdCorrect(rest)
+	case "evolve":
+		cmdEvolve(rest)
+	case "compress":
+		cmdCompress(rest)
+	case "checkpoints":
+		cmdCheckpoints(rest)
+	case "bench":
+		cmdBench(rest)
 	case "invert":
 		cmdInvert(rest)
 	case "weights":

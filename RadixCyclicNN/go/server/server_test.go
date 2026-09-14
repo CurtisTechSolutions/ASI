@@ -626,7 +626,7 @@ func TestStaticAndErrors(t *testing.T) {
 	if status != 404 || !strings.Contains(doc["error"].(string), "unknown API endpoint") {
 		t.Fatalf("unknown endpoint: %d %v", status, doc)
 	}
-	status, doc = e.get("/api/evolve/history")
+	status, doc = e.get("/api/speech") // still Python-only: the waveform codecs live there
 	if status != 404 || !strings.Contains(doc["error"].(string), "not available on the Go server") {
 		t.Fatalf("python-only endpoint: %d %v", status, doc)
 	}

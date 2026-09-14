@@ -845,8 +845,12 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))
         status, doc, _ = self.client.post("/api/model/select", {"kind": "radix"})
         self.assertEqual(status, 400)
-        # Python-only tabs are told so; unknown endpoints and wrong methods behave like the Python server
-        status, doc, _ = self.client.get("/api/evolve/history")
+        # what the Go server now serves too: the evolve loop, the Ollama corpus / review, the automatic loop
+        for path in ("/api/evolve/history", "/api/ollama/models", "/api/negative/auto/history"):
+            status, doc, _ = self.client.get(path)
+            self.assertEqual(status, 200, f"{path}: {doc}")
+        # the Python-only tabs are still told so; unknown endpoints and wrong methods behave like the Python server
+        status, doc, _ = self.client.get("/api/speech")
         self.assertEqual(status, 404)
         self.assertIn("Go server", doc["error"])
         status, doc, _ = self.client.get("/api/nope")
