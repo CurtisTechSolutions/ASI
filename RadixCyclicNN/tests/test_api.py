@@ -585,7 +585,8 @@ class TestEndpoints(unittest.TestCase):
         for turn in strict["turns"]:
             thought = turn["rethink"]
             if thought is not None:
-                self.assertEqual(set(thought), {"noticed", "cut", "steps", "explored", "found"})
+                self.assertEqual(set(thought), {"kind", "noticed", "cut", "steps", "explored", "found"})
+                self.assertIn(thought["kind"], ("stutter", "repeat"))
                 self.assertTrue(thought["noticed"])
                 if thought["found"]:
                     self.assertTrue(turn["text"].startswith(thought["cut"]), (turn["text"], thought["cut"]))

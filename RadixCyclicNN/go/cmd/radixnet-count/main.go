@@ -921,7 +921,11 @@ func cmdConverse(args []string) {
 		}
 		fmt.Println(detail)
 		if r := t.Rethink; r != nil {
-			thought := fmt.Sprintf("    caught itself saying %s twice", quote(r.Noticed))
+			caught := fmt.Sprintf("repeating %s", quote(r.Noticed))
+			if r.Kind == "stutter" {
+				caught = fmt.Sprintf("saying %s twice", quote(r.Noticed))
+			}
+			thought := "    caught itself " + caught
 			switch {
 			case r.Steps == 0:
 				thought += "; the words it picked up, not its own"

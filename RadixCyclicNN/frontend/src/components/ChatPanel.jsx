@@ -20,8 +20,9 @@ const isObject = (value) => Boolean(value) && typeof value === "object";
  * positive phase: they are what a good reply here would have looked like. A
  * reply the model could only repeat is punished whatever the judge made of it,
  * and with "Avoid repeated words" on that includes a reply repeating its own
- * words - though a reply that catches itself repeating first backs up to where
- * the walk went round and explores other ways on ("Explore").
+ * words - though a reply that catches itself repeating, its own words or the
+ * conversation's, first backs up to where it would have said them again and
+ * explores other ways on ("Explore").
  *
  * The transcript reads newest first: a new exchange is appended to the top and
  * pushes the older ones down, so the latest reply is where the eye already is
@@ -297,7 +298,8 @@ export default function ChatPanel({ status }) {
 /** What an exchange's rethink record says in one line: what it caught itself doing, and how that turned out. */
 function rethinkSays(exchange) {
   const r = exchange.rethink;
-  const caught = `caught itself saying “${r.noticed}” twice`;
+  const caught =
+    r.kind === "stutter" ? `caught itself saying “${r.noticed}” twice` : `caught itself repeating “${r.noticed}”`;
   if (!r.steps) return `${caught}: the words it picked up, not its own`;
   if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)`;
   const ending = exchange.repeat ? "said it anyway" : "took a lesser answer";

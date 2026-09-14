@@ -150,29 +150,29 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(a["transcript"], b["transcript"])
         self.assertEqual([t["context"] for t in a["turns"]], [t["context"] for t in b["turns"]])
         self.assertEqual([t["fresh"] for t in a["turns"]], [t["fresh"] for t in b["turns"]])
-        # duplicates: both sides skip the same candidates, speak the same repeats and stop at the same turn
-        a = py("converse", "--turns", 40, model=self.py_model)
-        b = go("converse", "--turns", 40, model=self.go_model)
+        # duplicates: with nothing thought twice about, both sides skip the same candidates, speak the same
+        # repeats and stop at the same turn
+        a = py("converse", "--turns", 40, "--explore", 0, model=self.py_model)
+        b = go("converse", "--turns", 40, "--explore", 0, model=self.go_model)
         self.assertEqual(a["transcript"], b["transcript"])
         self.assertEqual([t["repeat"] for t in a["turns"]], [t["repeat"] for t in b["turns"]])
         self.assertTrue(a["repeats"])
         self.assertEqual(a["repeats"], b["repeats"])
         # and both know the same stutters, with the setting on and off
         self.assertEqual([t["stutter"] for t in a["turns"]], [t["stutter"] for t in b["turns"]])
-        a = py("converse", "--turns", 40, "--allow-word-repeats", model=self.py_model)
-        b = go("converse", "--turns", 40, "--allow-word-repeats", model=self.go_model)
+        a = py("converse", "--turns", 40, "--allow-word-repeats", "--explore", 0, model=self.py_model)
+        b = go("converse", "--turns", 40, "--allow-word-repeats", "--explore", 0, model=self.go_model)
         self.assertEqual(a["transcript"], b["transcript"])
         self.assertEqual([t["stutter"] for t in a["turns"]], [t["stutter"] for t in b["turns"]])
         self.assertEqual([t["repeat"] for t in a["turns"]], [t["repeat"] for t in b["turns"]])
-        # both catch themselves in the same places, keep the same words and explore the same number of paths
+        # both catch themselves in the same places, keep the same words and explore the same number of paths -
+        # and backing out of the repeats keeps a conversation going that would otherwise have run out
         a = py("converse", "--turns", 40, model=self.py_model)
         b = go("converse", "--turns", 40, model=self.go_model)
         self.assertEqual(a["transcript"], b["transcript"])
         self.assertEqual([t["rethink"] for t in a["turns"]], [t["rethink"] for t in b["turns"]])
-        a = py("converse", "--turns", 40, "--explore", 0, model=self.py_model)
-        b = go("converse", "--turns", 40, "--explore", 0, model=self.go_model)
-        self.assertEqual(a["transcript"], b["transcript"])
-        self.assertFalse([t for t in a["turns"] if t["rethink"]])
+        self.assertTrue([t for t in a["turns"] if t["rethink"]], a["transcript"])
+        self.assertGreater(a["count"], len(py("converse", "--turns", 40, "--explore", 0, model=self.py_model)["turns"]))
 
     def test_each_side_loads_and_continues_the_other(self):
         # Python loads the Go file: same predictions as its own model

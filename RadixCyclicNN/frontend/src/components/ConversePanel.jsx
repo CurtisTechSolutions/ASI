@@ -18,15 +18,17 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * the duplicates the model could not avoid are marked thumbs-down for the 2NRL
  * negative phase ("Punish duplicates") - a reply that repeats its own words
  * counts as one of those while "Avoid repeated words" is on, though a voice
- * that catches itself repeating first backs up to where the walk went round
- * and explores other ways on ("Explore"), and says so. New turns are
+ * that catches itself repeating - its own words, or the conversation's - first
+ * backs up to where it would have said them again and explores other ways on
+ * ("Explore"), and says so. New turns are
  * appended to the top of
  * the conversation and push the older ones down, so nothing has to scroll.
  */
 /** What a turn's rethink record says in one line: what it caught itself doing, and how that turned out. */
 function rethinkSays(turn) {
   const r = turn.rethink;
-  const caught = `caught itself saying “${r.noticed}” twice`;
+  const caught =
+    r.kind === "stutter" ? `caught itself saying “${r.noticed}” twice` : `caught itself repeating “${r.noticed}”`;
   if (!r.steps) return `${caught}: the words it picked up, not its own`;
   if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)`;
   const ending = turn.repeat ? "said it anyway" : "took a lesser answer";

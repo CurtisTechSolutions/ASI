@@ -65,12 +65,14 @@ EXPLORE = 3
 class Rethink:
     """A voice catching itself repeating, and what it did about it.
 
-    The metacognition of a turn: ``noticed`` is the run of words it caught itself saying twice, ``cut`` what it
-    kept of that attempt (everything said before the walk went round), ``steps`` how many times it backed up,
-    ``explored`` the paths it weighed from there and ``found`` whether one of them said something new.  A turn
-    that never had to think twice has no record at all.
+    The metacognition of a turn.  ``kind`` is what it caught: ``"stutter"`` - its own words, twice in a row - or
+    ``"repeat"``, something the conversation had already heard.  ``noticed`` is the words themselves, ``cut``
+    what it kept of that attempt (everything up to where it would have started saying them again), ``steps`` how
+    many times it backed up, ``explored`` the paths it weighed from there and ``found`` whether one of them said
+    something new.  A turn that never had to think twice has no record at all.
     """
 
+    kind: str = ""
     noticed: str = ""
     cut: str = ""
     steps: int = 0
@@ -78,8 +80,8 @@ class Rethink:
     found: bool = False
 
     def to_dict(self) -> dict:
-        return {"noticed": self.noticed, "cut": self.cut, "steps": self.steps, "explored": self.explored,
-                "found": self.found}
+        return {"kind": self.kind, "noticed": self.noticed, "cut": self.cut, "steps": self.steps,
+                "explored": self.explored, "found": self.found}
 
 
 @dataclass
@@ -175,6 +177,16 @@ def stutter(text: str, longest: int = LONGEST_STUTTER) -> str:
     return _caught(text, longest)[0]
 
 
+def _last_word_at(text: str) -> int:
+    """Where the last word of ``text`` starts (a character index), or ``-1`` when it has fewer than two.
+
+    Where a voice repeating a whole utterance has to differ: everything before it can be said again, and only
+    the end of the line is the voice's to change.
+    """
+    starts = [m.start() for m in re.finditer(r"\S+", text)]
+    return starts[-1] if len(starts) > 1 else -1
+
+
 def stutter_at(text: str, longest: int = LONGEST_STUTTER) -> int:
     """Where a :func:`stutter` starts saying itself again (a character index into ``text``), or ``-1``.
 
@@ -237,17 +249,28 @@ class Heard:
         if added:
             self.added.add(added)
 
-    def duplicate(self, text: str, reply: str = "") -> bool:
-        """Whether speaking ``text`` (a reply adding ``reply``) would repeat the conversation."""
+    def match(self, text: str, reply: str = "") -> str:
+        """What speaking ``text`` (a reply adding ``reply``) would repeat, or ``""`` when it says something new.
+
+        The words it clashes with: the utterance it was going to say again, the words an earlier reply already
+        added, or the line it would only echo - what a voice thinking twice about it has caught itself doing.
+        """
         key = normalize(text)
         if not key:
-            return False
+            return ""
         if key in self.said:
-            return True
+            return key
         added = normalize(reply)
         if added and added in self.added:
-            return True
-        return any(key in heard for heard in self.keys)
+            return added
+        for heard in self.keys:
+            if key in heard:
+                return heard
+        return ""
+
+    def duplicate(self, text: str, reply: str = "") -> bool:
+        """Whether speaking ``text`` (a reply adding ``reply``) would repeat the conversation."""
+        return bool(self.match(text, reply))
 
 
 def _check(turns: int, max_length: int, context: int, k: int, beam: int | None, temperature: float,
@@ -304,6 +327,7 @@ def backtrack(
     keep: str = "",
     heard: Heard | None = None,
     *,
+    added: str = "",
     explore: int = EXPLORE,
     mode: str = "beam",
     k: int = 5,
@@ -313,15 +337,25 @@ def backtrack(
     temperature: float = 1.0,
     rng: random.Random | None = None,
     avoid_repeats: bool = True,
+    avoid_word_repeats: bool = True,
     veto: "Veto | None" = None,
 ) -> tuple[PathResult | None, Rethink]:
-    """A voice that caught itself repeating goes back to where the loop started and looks for another way on.
+    """A voice that caught itself repeating goes back to where it would have started saying it again, and looks
+    for another way on.
 
-    ``text`` is the utterance it was about to say and :func:`stutter_at` where it began saying itself again:
-    everything before that was said once, so it is kept and the search runs again from there (a longer prefix
-    than the turn started with, which *forces* the walk to leave the loop at exactly the point it went round -
-    asking the same question again from the context would only rank the same answers).  Nothing is found, or
-    everything found repeats too?  Then it backs up one word further and looks wider, ``explore`` times over.
+    ``text`` is the utterance it was about to say (``added`` the words its reply would add to the context), and
+    what it caught itself doing decides where it backs up to:
+
+    * a **stutter** - its own words twice in a row - is cut at :func:`stutter_at`, where the walk went round:
+      everything before that was said once, so it is kept;
+    * a **repeat** of something the conversation has already heard (:meth:`Heard.match`) is cut at
+      :func:`_last_word_at`: the whole line is a retread, so it keeps as much of it as it can and differs at
+      the end - the latest point at which it still can.
+
+    The search then runs again from the cut - a longer prefix than the turn started with, which *forces* the
+    walk to leave the line at exactly that point; asking the same question again from the context would only
+    rank the same answers.  Nothing is found, or everything found repeats too?  Then it backs up one word
+    further and looks wider, ``explore`` times over.
 
     ``keep`` is what it may not rewrite - the context it picked up from the other voice - so a voice rethinks
     what it said, never what it heard.  ``(candidate, rethink)``: the candidate continues the kept words (its
@@ -329,9 +363,16 @@ def backtrack(
     :class:`Rethink` says what it noticed and did, found or not.
     """
     heard = Heard() if heard is None else heard
-    noticed, at = _caught(text, LONGEST_STUTTER)
-    record = Rethink(noticed=noticed)
-    if not noticed or explore <= 0:
+    kind, noticed, at = "", "", -1
+    if avoid_word_repeats:
+        noticed, at = _caught(text, LONGEST_STUTTER)
+        kind = "stutter" if noticed else ""
+    if not noticed and avoid_repeats:
+        noticed = heard.match(text, added)
+        if noticed:
+            kind, at = "repeat", _last_word_at(text)
+    record = Rethink(kind=kind, noticed=noticed)
+    if not noticed or at < 0 or explore <= 0:
         return None, record
     cut = text[:at]
     if len(cut) < len(keep):  # the other voice's words: not this one's to rethink
@@ -345,7 +386,8 @@ def backtrack(
             record.explored += 1
             if not cand.text.strip() or (veto is not None and veto(cand.full_text)):
                 continue
-            if stutter(cand.full_text) or (avoid_repeats and heard.duplicate(cand.full_text, cand.text)):
+            if (avoid_word_repeats and stutter(cand.full_text)) or \
+                    (avoid_repeats and heard.duplicate(cand.full_text, cand.text)):
                 continue
             record.found = True
             return cand, record
@@ -364,7 +406,7 @@ class _Pick:
     skipped: int = 0
     repeat: bool = False  # ``spoken`` repeats something: nothing else was left
     vetoed: int = 0
-    looped: PathResult | None = None  # the best candidate rejected only for repeating its own words
+    caught: PathResult | None = None  # the best candidate rejected for repeating: the one worth backing out of
 
 
 def _pick(
@@ -377,8 +419,8 @@ def _pick(
     When they all repeat something, the best of them is the fallback - the cheapest one that was never said word
     for word (an echo says at least something new about where the voice is), else the cheapest of all; speaking
     it flags the turn a ``repeat``.  A vetoed candidate is never the fallback - that is the whole point of the
-    veto.  ``looped`` is the best candidate the *only* thing wrong with which was that it said its own words
-    twice: the one worth backing out of (:func:`backtrack`) rather than dropping for a lesser answer.
+    veto.  ``caught`` is the best candidate rejected for repeating - its own words or the conversation's - the
+    one worth backing out of (:func:`backtrack`) rather than dropping for a lesser answer.
     """
     out = _Pick()
     fallback_word_for_word = True
@@ -393,8 +435,8 @@ def _pick(
         heard_before = avoid_repeats and heard.duplicate(cand.full_text, cand.text)
         went_round = avoid_word_repeats and bool(stutter(cand.full_text))
         if heard_before or went_round:
-            if went_round and not heard_before and out.looped is None:
-                out.looped = cand
+            if out.caught is None:
+                out.caught = cand
             word_for_word = normalize(cand.full_text) in heard.said
             if out.spoken is None or (fallback_word_for_word and not word_for_word):
                 out.spoken, fallback_word_for_word = cand, word_for_word
@@ -454,8 +496,9 @@ def converse(
       said before, a reply adding what an earlier reply added, an echo of a line already spoken).
     * ``avoid_word_repeats`` - skip the candidates that repeat themselves: a :func:`stutter`, the same run of
       words twice in a row inside the one utterance.
-    * ``explore`` - times a voice that caught itself repeating may back up to where the walk went round and
-      look for another way on before it gives up on the line (:func:`backtrack`; 0 turns the exploring off).
+    * ``explore`` - times a voice that caught itself repeating - its own words, or the conversation's - may
+      back up to where it would have started saying it again and look for another way on before it gives up on
+      the line (:func:`backtrack`; 0 turns the exploring off).
     * ``veto`` - a candidate the voice may not speak (the guard: see :data:`Veto`).  A turn whose every
       candidate is vetoed falls back like any other dead end - a shorter context, then a fresh text - and the
       conversation stops when there is nothing left that may be said.
@@ -548,11 +591,12 @@ def reply(
     what the speaker may not say.  Remember the turn in ``heard`` before asking
     for the next one, or the same reply comes back.
 
-    A voice about to repeat its own words does not simply give up on the line:
-    ``explore`` times over it backs up to where the walk went round and looks
-    for another way on (:func:`backtrack`), and only a voice that cannot think
-    of one changes the subject.  What it noticed and did is the turn's
-    :class:`Rethink`.
+    A voice about to repeat - its own words, or something the conversation has
+    already heard - does not simply give up on the line: ``explore`` times over
+    it backs up to where it would have started saying it again and looks for
+    another way on (:func:`backtrack`), and only a voice that cannot think of
+    one drops to a lesser answer or changes the subject.  What it noticed and
+    did is the turn's :class:`Rethink`.
 
     It is public because the other voice need not be a model at all: the chat
     loop (:mod:`radixnet.chat`) has an LLM speak every other line and calls
@@ -571,15 +615,15 @@ def reply(
     draws = k if mode == "sample" else 1
 
     def think_again(pick: _Pick, keep: str) -> tuple[PathResult | None, bool]:
-        """A candidate rejected only for repeating its own words is worth backing out of: keep what it said
-        before the walk went round and look for another way on, once per turn."""
+        """A candidate rejected for repeating - its own words, or the conversation's - is worth backing out of:
+        keep what it said up to the repetition and look for another way on, once per turn."""
         nonlocal rethought, offered
-        if pick.looped is None or explore <= 0 or rethought is not None:
+        if pick.caught is None or explore <= 0 or rethought is not None:
             return pick.spoken, pick.repeat
         found, rethought = backtrack(
-            voice, pick.looped.full_text, keep, heard, explore=explore, mode=mode, k=k, beam=beam,
-            max_length=max_length, step_penalty=step_penalty, temperature=temperature, rng=rng,
-            avoid_repeats=avoid_repeats, veto=veto,
+            voice, pick.caught.full_text, keep, heard, added=pick.caught.text, explore=explore, mode=mode, k=k,
+            beam=beam, max_length=max_length, step_penalty=step_penalty, temperature=temperature, rng=rng,
+            avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, veto=veto,
         )
         offered += rethought.explored
         return (found, False) if found is not None else (pick.spoken, pick.repeat)

@@ -517,13 +517,15 @@ func TestBacktrack(t *testing.T) {
 	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
 		t.Fatalf("Train: %v", err)
 	}
-	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60, AvoidRepeats: true}
+	opts := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60,
+		AvoidRepeats: true, AvoidWordRepeats: true}
 
 	found, record, err := ways.Backtrack("ha ha ha", opts)
 	if err != nil || found == nil || !record.Found {
 		t.Fatalf("backtrack: %v %+v", err, record)
 	}
-	if record.Noticed != "ha" || record.Cut != "ha " || record.Steps != 1 || record.Explored == 0 {
+	if record.Kind != "stutter" || record.Noticed != "ha" || record.Cut != "ha " || record.Steps != 1 ||
+		record.Explored == 0 {
 		t.Fatalf("record = %+v", record)
 	}
 	if !strings.HasPrefix(found.FullText, "ha ") || Stutter(found.FullText, LongestStutter) != "" {
@@ -544,13 +546,44 @@ func TestBacktrack(t *testing.T) {
 		t.Fatalf("keep: %v %+v", found, record)
 	}
 
+	// a whole utterance it has said before is a retread end to end: it keeps all it can and differs at the end
+	said := opts
+	said.Heard = NewHeard([]string{"ha and then the cat sat"})
+	found, record, _ = ways.Backtrack("ha and then the cat sat", said)
+	if record.Kind != "repeat" || record.Noticed != "ha and then the cat sat" || record.Steps == 0 {
+		t.Fatalf("a heard line: %+v", record)
+	}
+	if !strings.HasPrefix("ha and then the cat ", record.Cut) {
+		t.Fatalf("cut %q is not that last word, or further back", record.Cut)
+	}
+	if found != nil && !strings.HasPrefix(found.FullText, record.Cut) {
+		t.Fatalf("a way on keeps what it cut: %q from %q", found.FullText, record.Cut)
+	}
+
+	// one word is nothing to back up from, and nothing is caught with the settings off
+	one := opts
+	one.Heard = NewHeard([]string{"ha"})
+	if found, record, _ = ways.Backtrack("ha", one); found != nil || record.Kind != "repeat" || record.Steps != 0 {
+		t.Fatalf("one word: %v %+v", found, record)
+	}
+	off := said
+	off.AvoidRepeats = false
+	if found, record, _ = ways.Backtrack("ha and then the cat sat", off); found != nil || record.Kind != "" {
+		t.Fatalf("repeats allowed: %v %+v", found, record)
+	}
+	noWords := opts
+	noWords.AvoidWordRepeats = false
+	if found, record, _ = ways.Backtrack("ha ha ha", noWords); found != nil || record.Kind != "" {
+		t.Fatalf("word repeats allowed: %v %+v", found, record)
+	}
+
 	// nothing to rethink, and nothing to explore
 	if found, record, _ = ways.Backtrack("the cat sat on the mat", opts); found != nil || record.Noticed != "" {
 		t.Fatalf("clean: %v %+v", found, record)
 	}
-	off := opts
-	off.Explore = 0
-	if found, record, _ = ways.Backtrack("ha ha ha", off); found != nil || record.Steps != 0 {
+	noExplore := opts
+	noExplore.Explore = 0
+	if found, record, _ = ways.Backtrack("ha ha ha", noExplore); found != nil || record.Steps != 0 {
 		t.Fatalf("off: %v %+v", found, record)
 	}
 
@@ -615,10 +648,11 @@ func TestHeardAndRepeats(t *testing.T) {
 	}
 
 	// a long conversation on a small corpus runs out of new things to say: it speaks a duplicate once,
-	// flags it, and stops rather than saying it again
+	// flags it, and stops rather than saying it again (with the exploring off - a voice that backs out of
+	// its repeats keeps finding new things to say, which is TestBacktrack's business)
 	m := trained(t, 2, 4)
 	opts := DefaultConverseOptions()
-	opts.Turns = 40
+	opts.Turns, opts.Explore = 40, 0
 	long, err := m.Converse("", opts)
 	if err != nil {
 		t.Fatalf("converse: %v", err)

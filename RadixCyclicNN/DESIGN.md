@@ -59,7 +59,7 @@ RadixCyclicNN/
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3),
                             and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, Heard, stutter, backtrack, Rethink, reply, converse, repeats - the model
-                            conversing with itself, and thinking twice about a loop (section 22)
+                            conversing with itself, and thinking twice about a repeat (section 22)
     chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
                             (ported to Go as go/radixnet/chat.go, section 28.1)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
@@ -720,7 +720,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   at the first pass, the stop event, progress, a capped quiz marked against what it asked for), the report card, the
   faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
   neither Pillow nor a transcriber, so nothing in it is skipped.
-* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (what it keeps, what it explores, the words it may not rethink, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its loop), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
 ---
@@ -1343,34 +1343,43 @@ what one utterance says twice (`--allow-repeats` / `--allow-word-repeats`, `"avo
 `"avoid_word_repeats"` in the body, two checkboxes in the tab; both default to on). A kind that is switched off
 is neither skipped nor counted as a repeat, and so is never punished.
 
-### Second thoughts: noticing a loop and exploring out of it (`backtrack`, `Rethink`)
+### Second thoughts: noticing a repeat and exploring out of it (`backtrack`, `Rethink`)
 
-Dropping the best continuation because it stutters throws away everything it got *right*: the words before the
-walk went round were said once and were the most likely thing to say. So a voice that catches itself repeating
-does not simply take the next answer down the list - it backs up and looks for another way on.
+Dropping the best continuation because it repeats throws away everything it got *right*: the words before the
+repetition were said once and were the most likely thing to say. So a voice that catches itself repeating does
+not simply take the next answer down the list - it backs up and looks for another way on.
 
-`_pick` hands back `looped`: the best candidate the only thing wrong with which was that it said its own words
-twice. `backtrack(voice, text, keep, heard, explore=…)` then
+`_pick` hands back `caught`: the best candidate rejected for repeating, either kind.
+`backtrack(voice, text, keep, heard, added=…, explore=…)` then
 
-1. **notices** - `stutter_at(text)` is where the utterance starts saying itself again ("say morning **morning**"
-   → after `"say morning "`), and everything before it was said once;
+1. **notices** what it was about to do, which decides where it backs up to:
+   * a **stutter** - its own words twice in a row - is cut at `stutter_at(text)`, where the walk went round
+     ("say morning **morning**" → after `"say morning "`): everything before that was said once;
+   * a **repeat** of something the conversation has heard (`Heard.match`, which names the utterance, the added
+     words or the line it would echo) is cut at `_last_word_at(text)`: the line is a retread from end to end, so
+     it keeps as much of it as it can and differs at the last word - the latest point at which it still can;
 2. **backs up** to exactly there and keeps it. `keep` is the context it picked up, which it may not rewrite: a
    voice rethinks what it said, never what it heard, and a repeat inside the other voice's words is recorded and
-   left alone (`steps` 0);
+   left alone (`steps` 0), as is a one-word utterance with nothing to keep;
 3. **explores** from the cut - the search runs again with that longer prefix, which *forces* the walk to leave
-   the loop at the point it went round (asking the same question again from the context would only rank the same
+   the line at that point (asking the same question again from the context would only rank the same
    answers). Candidates that stutter, that the conversation has heard, or that the guard vetoes are passed over;
    the first one that says something new is spoken.
 4. Nothing? Then it backs up one word further and looks wider - `k * (step + 2)` candidates, so the further back
    it goes the more it weighs - `explore` times over (default 3, `--explore N`, `"explore"`, an "Explore" field
    in the tab; 0 turns it off).
 
+Each kind is only caught while its own setting is on (`avoid_word_repeats` for the stutter, `avoid_repeats` for
+the repeat), and the `Rethink`'s `kind` says which it was, so the transcripts can tell *caught itself saying "ha"
+twice* from *caught itself repeating "on the west"*.
+
 A voice that finds a way out speaks it as an ordinary turn - no `repeat`, no `stutter`, nothing to punish - and
 one that does not falls through to what it would have done anyway: the next answer down the list, a shorter
 context, a fresh text, or the flagged repeat. Either way the turn carries a **`Rethink`**: `noticed` (the words
 it caught itself saying twice), `cut` (what it kept), `steps`, `explored` (paths weighed) and `found`. That
 record is the turn's metacognition, and the CLIs and both tabs say it in a line - *caught itself saying "ha"
-twice; kept "ha " and found another way on in 3 path(s)*. One rethink per turn, so a conversation cannot spend
+twice; kept "ha " and found another way on in 3 path(s)*, *caught itself repeating "on the west"; kept "on the ",
+weighed 10 path(s), took a lesser answer*. One rethink per turn, so a conversation cannot spend
 itself thinking; the paths it weighed are counted in `candidates`.
 
 A found way on is a path explored from the cut, so its `cost` and `probability` (and `labels` / `node_ids` /

@@ -109,7 +109,7 @@ class TestBacktrack(unittest.TestCase):
 
     def test_it_keeps_what_was_said_once_and_finds_another_way(self):
         found, thought = backtrack(self.ways, "ha ha ha", k=3)
-        self.assertEqual((thought.noticed, thought.cut, thought.steps), ("ha", "ha ", 1))
+        self.assertEqual((thought.kind, thought.noticed, thought.cut, thought.steps), ("stutter", "ha", "ha ", 1))
         self.assertTrue(thought.found)
         self.assertGreater(thought.explored, 0)
         self.assertIsNotNone(found)
@@ -143,12 +143,42 @@ class TestBacktrack(unittest.TestCase):
         if again is None:
             self.assertFalse(thought.found)
 
+    def test_a_whole_utterance_it_has_said_before_is_cut_at_its_last_word(self):
+        heard = Heard(["ha and then the cat sat"])
+        found, thought = backtrack(self.ways, "ha and then the cat sat", heard=heard, k=5)
+        # the line is a retread from end to end, so it starts by keeping all it can and differing at the end
+        self.assertEqual((thought.kind, thought.noticed), ("repeat", "ha and then the cat sat"))
+        self.assertTrue(thought.steps)
+        self.assertTrue("ha and then the cat ".startswith(thought.cut), thought.cut)  # that cut, or further back
+        if found is not None:
+            self.assertTrue(found.full_text.startswith(thought.cut), (found.full_text, thought.cut))
+            self.assertNotEqual(normalize(found.full_text), "ha and then the cat sat")
+
+    def test_a_reply_adding_heard_words_is_caught_too(self):
+        heard = Heard()
+        heard.remember("ho ho hum", reply=" ho hum")
+        _found, thought = backtrack(self.ways, "ha ho hum", heard=heard, added=" ho hum", k=3)
+        self.assertEqual((thought.kind, thought.noticed), ("repeat", "ho hum"))
+        self.assertEqual(thought.cut, "ha ho ")  # it may differ from the last word on
+
+    def test_one_word_is_nothing_to_back_up_from(self):
+        found, thought = backtrack(self.ways, "ha", heard=Heard(["ha"]), k=3)
+        self.assertEqual((found, thought.kind, thought.steps), (None, "repeat", 0))
+
+    def test_nothing_is_caught_when_the_settings_are_off(self):
+        heard = Heard(["ha ho hum"])
+        found, thought = backtrack(self.ways, "ha ho hum", heard=heard, avoid_repeats=False, k=3)
+        self.assertEqual((found, thought.kind, thought.noticed), (None, "", ""))
+        found, thought = backtrack(self.ways, "ha ha ha", avoid_word_repeats=False, k=3)
+        self.assertEqual((found, thought.kind), (None, ""))
+
     def test_a_conversation_backs_out_of_the_loop_it_walks_into(self):
         model = trained()  # the sample corpus: its best continuation loops once in a long conversation
         opening = "the cat sat on the mat"
         turns = converse(model, opening, turns=25)
         thought = [t for t in turns if t.rethink is not None]
         self.assertTrue(thought, [t.text for t in turns])
+        self.assertTrue({t.rethink.kind for t in thought} <= {"stutter", "repeat"})
         for turn in thought:
             self.assertTrue(turn.rethink.noticed)
             self.assertEqual(turn.text, turn.context + turn.reply)  # still one utterance
@@ -156,7 +186,7 @@ class TestBacktrack(unittest.TestCase):
                 self.assertTrue(turn.text.startswith(turn.rethink.cut), (turn.text, turn.rethink.cut))
                 self.assertFalse(turn.repeat or turn.stutter, turn.text)
         self.assertTrue([t for t in thought if t.rethink.found], [t.text for t in thought])
-        # with the exploring off nothing is noticed, and a lesser answer stands where a rethink had one
+        # a conversation that thinks twice keeps finding things to say where one that does not runs out
         plain = converse(model, opening, turns=25, explore=0)
         self.assertFalse([t for t in plain if t.rethink is not None])
         self.assertNotEqual([t.text for t in plain], [t.text for t in turns])

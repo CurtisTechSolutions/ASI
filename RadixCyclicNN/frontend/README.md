@@ -13,9 +13,10 @@ chat view that reads newest first: a new turn is appended to the top and pushes
 the older ones down, so the latest reply is where the eye already is and nothing
 has to be scrolled to. The search skips the replies the conversation has already
 heard and, while "Avoid repeated words" is on, the ones that say the same words
-twice in a row - and a voice that catches itself repeating keeps what it said
-once, backs up to where the walk went round and explores other ways on
-("Explore"), each turn saying what it noticed and whether it found one. The
+twice in a row - and a voice that catches itself repeating, its own words or
+the conversation's, keeps what it said once, backs up to where it would have
+said them again and explores other ways on ("Explore"), each turn saying what
+it noticed and whether it found one. The
 duplicates it could not avoid come back flagged, and "Punish duplicates" marks
 them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
 

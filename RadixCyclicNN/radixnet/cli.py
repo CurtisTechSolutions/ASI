@@ -891,7 +891,8 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         console.say(detail)
         if turn.rethink is not None:
             r = turn.rethink
-            thought = f"    caught itself saying {quote(r.noticed)} twice"
+            caught = "saying {} twice" if r.kind == "stutter" else "repeating {}"
+            thought = f"    caught itself {caught.format(quote(r.noticed))}"
             if not r.steps:
                 thought += "; the words it picked up, not its own"
             elif r.found:

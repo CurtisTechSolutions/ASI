@@ -14,12 +14,15 @@ const Explore = 3
 
 // Rethink is a voice catching itself repeating, and what it did about it.
 //
-// The metacognition of a turn: Noticed is the run of words it caught itself
-// saying twice, Cut what it kept of that attempt (everything said before the
-// walk went round), Steps how many times it backed up, Explored the paths it
-// weighed from there and Found whether one of them said something new.  A turn
-// that never had to think twice has no record at all.
+// The metacognition of a turn.  Kind is what it caught: "stutter" - its own
+// words, twice in a row - or "repeat", something the conversation had already
+// heard.  Noticed is the words themselves, Cut what it kept of that attempt
+// (everything up to where it would have started saying them again), Steps how
+// many times it backed up, Explored the paths it weighed from there and Found
+// whether one of them said something new.  A turn that never had to think
+// twice has no record at all.
 type Rethink struct {
+	Kind     string `json:"kind"`
 	Noticed  string `json:"noticed"`
 	Cut      string `json:"cut"`
 	Steps    int    `json:"steps"`
@@ -86,6 +89,27 @@ const LongestStutter = 4
 func Stutter(text string, longest int) string {
 	run, _ := caught(text, longest)
 	return run
+}
+
+// lastWordAt is where the last word of text starts (a byte index), or -1 when
+// it has fewer than two: where a voice repeating a whole utterance has to
+// differ, since everything before it can be said again.
+func lastWordAt(text string) int {
+	start, count := -1, 0
+	for i := 0; i < len(text); {
+		if text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r' {
+			i++
+			continue
+		}
+		start, count = i, count+1
+		for i < len(text) && text[i] != ' ' && text[i] != '\t' && text[i] != '\n' && text[i] != '\r' {
+			i++
+		}
+	}
+	if count < 2 {
+		return -1
+	}
+	return start
 }
 
 // StutterAt is where a Stutter starts saying itself again (a byte index into
@@ -191,25 +215,31 @@ func (h *Heard) Remember(text, reply string) {
 	}
 }
 
-// Duplicate reports whether speaking text (a reply adding reply) would repeat the conversation.
-func (h *Heard) Duplicate(text, reply string) bool {
+// Match is what speaking text (a reply adding reply) would repeat, or "" when
+// it says something new: the utterance it was going to say again, the words an
+// earlier reply already added, or the line it would only echo - what a voice
+// thinking twice about it has caught itself doing.
+func (h *Heard) Match(text, reply string) string {
 	key := Normalize(text)
 	if key == "" {
-		return false
+		return ""
 	}
 	if h.said[key] {
-		return true
+		return key
 	}
 	if added := Normalize(reply); added != "" && h.added[added] {
-		return true
+		return added
 	}
 	for _, heard := range h.keys {
 		if strings.Contains(heard, key) {
-			return true
+			return heard
 		}
 	}
-	return false
+	return ""
 }
+
+// Duplicate reports whether speaking text (a reply adding reply) would repeat the conversation.
+func (h *Heard) Duplicate(text, reply string) bool { return h.Match(text, reply) != "" }
 
 // ConverseOptions configure Converse.
 type ConverseOptions struct {
@@ -292,30 +322,39 @@ func (m *Model) offer(context, mode string, count, beam, maxLength int, stepPena
 // BacktrackOptions configure Backtrack.
 type BacktrackOptions struct {
 	// Keep is what the voice may not rewrite - the context it picked up from the other voice.
-	Keep         string
-	Heard        *Heard
-	Explore      int
-	Mode         string
-	K            int
-	Beam         int
-	MaxLength    int
-	StepPenalty  float64
-	Temperature  float64
-	RNG          *MT19937
-	AvoidRepeats bool
-	Veto         func(string) bool
+	Keep string
+	// Added is what the reply would add to the context (for the repeat that is a reply adding heard words).
+	Added            string
+	Heard            *Heard
+	Explore          int
+	Mode             string
+	K                int
+	Beam             int
+	MaxLength        int
+	StepPenalty      float64
+	Temperature      float64
+	RNG              *MT19937
+	AvoidRepeats     bool
+	AvoidWordRepeats bool
+	Veto             func(string) bool
 }
 
-// Backtrack has a voice that caught itself repeating go back to where the loop
-// started and look for another way on.
+// Backtrack has a voice that caught itself repeating go back to where it would
+// have started saying it again, and look for another way on.
 //
-// text is the utterance it was about to say and StutterAt where it began
-// saying itself again: everything before that was said once, so it is kept and
-// the search runs again from there (a longer prefix than the turn started
-// with, which forces the walk to leave the loop at exactly the point it went
-// round - asking the same question again from the context would only rank the
-// same answers).  Nothing found, or everything found repeats too?  Then it
-// backs up one word further and looks wider, o.Explore times over.
+// text is the utterance it was about to say (o.Added the words its reply would
+// add to the context), and what it caught itself doing decides where it backs
+// up to: a stutter - its own words twice in a row - is cut at StutterAt, where
+// the walk went round, since everything before that was said once; a repeat of
+// something the conversation has heard (Heard.Match) is cut at lastWordAt,
+// since the whole line is a retread and it keeps as much of it as it can and
+// differs at the end.
+//
+// The search then runs again from the cut - a longer prefix than the turn
+// started with, which forces the walk to leave the line at exactly that point;
+// asking the same question again from the context would only rank the same
+// answers.  Nothing found, or everything found repeats too?  Then it backs up
+// one word further and looks wider, o.Explore times over.
 //
 // o.Keep is what it may not rewrite, so a voice rethinks what it said, never
 // what it heard.  The candidate continues the kept words (its FullText is the
@@ -326,9 +365,19 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 	if heard == nil {
 		heard = NewHeard(nil)
 	}
-	noticed, at := caught(text, LongestStutter)
-	record := &Rethink{Noticed: noticed}
-	if noticed == "" || o.Explore <= 0 {
+	kind, noticed, at := "", "", -1
+	if o.AvoidWordRepeats {
+		if noticed, at = caught(text, LongestStutter); noticed != "" {
+			kind = "stutter"
+		}
+	}
+	if noticed == "" && o.AvoidRepeats {
+		if noticed = heard.Match(text, o.Added); noticed != "" {
+			kind, at = "repeat", lastWordAt(text)
+		}
+	}
+	record := &Rethink{Kind: kind, Noticed: noticed}
+	if noticed == "" || at < 0 || o.Explore <= 0 {
 		return nil, record, nil
 	}
 	cut := text[:at]
@@ -350,7 +399,7 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 			if strings.TrimSpace(cand.Text) == "" || (o.Veto != nil && o.Veto(cand.FullText)) {
 				continue
 			}
-			if Stutter(cand.FullText, LongestStutter) != "" ||
+			if (o.AvoidWordRepeats && Stutter(cand.FullText, LongestStutter) != "") ||
 				(o.AvoidRepeats && heard.Duplicate(cand.FullText, cand.Text)) {
 				continue
 			}
@@ -382,7 +431,7 @@ type picked struct {
 	skipped int
 	repeat  bool // spoken repeats something: nothing else was left
 	vetoed  int
-	looped  *PathResult // the best candidate rejected only for repeating its own words
+	caught  *PathResult // the best candidate rejected for repeating: the one worth backing out of
 }
 
 func pick(cands []*PathResult, heard *Heard, avoidRepeats bool, veto func(string) bool, avoidWordRepeats bool) picked {
@@ -401,8 +450,8 @@ func pick(cands []*PathResult, heard *Heard, avoidRepeats bool, veto func(string
 		heardBefore := avoidRepeats && heard.Duplicate(c.FullText, c.Text)
 		wentRound := avoidWordRepeats && Stutter(c.FullText, LongestStutter) != ""
 		if heardBefore || wentRound {
-			if wentRound && !heardBefore && out.looped == nil {
-				out.looped = c
+			if out.caught == nil {
+				out.caught = c
 			}
 			wordForWord := heard.said[Normalize(c.FullText)]
 			if out.spoken == nil || (fallbackWordForWord && !wordForWord) {
@@ -571,16 +620,16 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 	if mode == "sample" {
 		draws = o.K
 	}
-	// A candidate rejected only for repeating its own words is worth backing out of: keep what it said before
-	// the walk went round and look for another way on, once per turn.
+	// A candidate rejected for repeating - its own words, or the conversation's - is worth backing out of:
+	// keep what it said up to the repetition and look for another way on, once per turn.
 	thinkAgain := func(p picked, keep string) (*PathResult, bool, error) {
-		if p.looped == nil || o.Explore <= 0 || rethought != nil {
+		if p.caught == nil || o.Explore <= 0 || rethought != nil {
 			return p.spoken, p.repeat, nil
 		}
-		found, record, err := m.Backtrack(p.looped.FullText, BacktrackOptions{
-			Keep: keep, Heard: heard, Explore: o.Explore, Mode: mode, K: o.K, Beam: o.Beam,
+		found, record, err := m.Backtrack(p.caught.FullText, BacktrackOptions{
+			Keep: keep, Added: p.caught.Text, Heard: heard, Explore: o.Explore, Mode: mode, K: o.K, Beam: o.Beam,
 			MaxLength: o.MaxLength, StepPenalty: o.StepPenalty, Temperature: o.Temperature, RNG: o.RNG,
-			AvoidRepeats: o.AvoidRepeats, Veto: o.Veto,
+			AvoidRepeats: o.AvoidRepeats, AvoidWordRepeats: o.AvoidWordRepeats, Veto: o.Veto,
 		})
 		if err != nil {
 			return nil, false, err
