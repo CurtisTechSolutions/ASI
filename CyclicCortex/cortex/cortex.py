@@ -201,7 +201,7 @@ class Cortex:
         ordinary catastrophic forgetting. Rehearsal interleaves them so the
         region keeps what it had.
 
-        NeuralCompression/FINDINGS.md §12 measured replay as the better of the two
+        Experiments/NeuralCompression/FINDINGS.md §12 measured replay as the better of the two
         consolidation routes -- it transfers the function rather than the
         parameters -- with a small margin at matched compute. It is used here for
         RETENTION, which is what it is actually good at.

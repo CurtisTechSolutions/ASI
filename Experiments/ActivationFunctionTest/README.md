@@ -16,7 +16,7 @@ As you can tell, I don't write much about my research, I like to keep things sim
 
 `self_building_sinewave.py`. Standard library only — no TensorFlow, no PyTorch,
 no gym — so it runs anywhere with nothing installed, the same rule
-`RadixCyclicNN` and `Research/experiments` follow.
+`RadixCyclicNN` and `Experiments/DepthCountedNormalisation` follow.
 
 ```
 python3 self_building_sinewave.py            # full run, ~2 min
@@ -25,7 +25,7 @@ python3 self_building_sinewave.py --check    # gradient checks only
 ```
 
 A self-building network starts too small and grows its hidden layer whenever
-learning stalls — the rule in `SBNN_RNN_ActivationFunction/main.py`. That turns
+learning stalls — the rule in `Experiments/SBNN_RNN_ActivationFunction/main.py`. That turns
 a question about an activation function into a question you can count:
 
 > **how many units does the network have to build, and how many of the ones it

@@ -23,7 +23,7 @@ library only.
 
 | Requirement | How it is realised |
 |---|---|
-| A **Single Self-Building Neural Network** instead of micro networks | §8. One SBNN per region, not one per game and not thousands per system. It grows its **hidden** layer on a plateau (as `SBNN_RNN_ActivationFunction/main.py` already does), and — new here — grows its **inputs and outputs** when a joining game brings vocabulary the region does not yet have. |
+| A **Single Self-Building Neural Network** instead of micro networks | §8. One SBNN per region, not one per game and not thousands per system. It grows its **hidden** layer on a plateau (as `Experiments/SBNN_RNN_ActivationFunction/main.py` already does), and — new here — grows its **inputs and outputs** when a joining game brings vocabulary the region does not yet have. |
 | Inputs and outputs grow to match the games | §8.3. Growth is additive and **provably non-destructive**: new units enter with zero output weight, so the function computed is bit-identical the instant after growth and the network only changes as the new units learn. |
 | Visualise the brain structure — similar games in similar regions | §5-§6. The similarity graph is partitioned into regions by modularity; a region is a set of games mutually closer to each other than to anything outside. This is topographic organisation, and it is the reason a new game lands next to the games it resembles rather than anywhere. |
 | A **cyclic** graph | §5.2. Similarity genuinely contains cycles: chess-checkers-go is a triangle with no natural parent, and a tree must break one of its edges. The graph keeps all three. `Research/CyclesAreAFeature.md` is the structural principle, here applied to game-space. |
@@ -306,7 +306,8 @@ rather than merely score — a new action kind — not on every new game.
 ## 8. `sbnn.py` — the Self-Building Neural Network
 
 One per region. Extends the growth logic of
-`SBNN_RNN_ActivationFunction/main.py` from hidden-only to inputs and outputs.
+`Experiments/SBNN_RNN_ActivationFunction/main.py` from hidden-only to inputs
+and outputs.
 
 ```python
 class SBNN:
@@ -316,7 +317,7 @@ class SBNN:
     W2: list[array]    # nh x no
     b2: array          # no
     act: str           # "tanh" | "sine"
-    b: float = 1.0     # sine frequency -- 1.0, NOT 1/3; see NeuralCompression/FINDINGS.md 5
+    b: float = 1.0     # sine frequency -- 1.0, NOT 1/3; see Experiments/NeuralCompression/FINDINGS.md 5
     history: list[dict]
 ```
 
@@ -329,7 +330,7 @@ class SBNN:
 | **outputs** | the region gains a mechanic it must produce, not merely score | one head pair |
 
 The hidden trigger is a plateau detector, not a gradient-magnitude one, and that
-is a measured choice: `NeuralCompression/FINDINGS.md` §11 found gradient
+is a measured choice: `Experiments/NeuralCompression/FINDINGS.md` §11 found gradient
 magnitude cannot distinguish *stuck* from *converged* from *still starting*, and
 using it was catastrophic. A plateau separates them. The author's existing SBNN
 already grows on a loss plateau, which is the correct signal; it is restated here
@@ -366,7 +367,7 @@ Non-destructive growth protects the function at the moment of growth. It does
 not protect it from the *training that follows*, which is ordinary catastrophic
 forgetting. Two mitigations, both already measured elsewhere in this repository:
 
-* **Replay.** When a new game joins, the region rehearses its existing games alongside the new one. `NeuralCompression/FINDINGS.md` §12 measured replay as the better of the two consolidation routes — it transfers the function rather than the parameters, so nothing has to line up. Its margin over joint training at matched compute is small (**1.05×**), so replay is used here for *retention*, which is what it is good at, not for accuracy.
+* **Replay.** When a new game joins, the region rehearses its existing games alongside the new one. `Experiments/NeuralCompression/FINDINGS.md` §12 measured replay as the better of the two consolidation routes — it transfers the function rather than the parameters, so nothing has to line up. Its margin over joint training at matched compute is small (**1.05×**), so replay is used here for *retention*, which is what it is good at, not for accuracy.
 * **Fine-tune only on the new slots first.** One pass with the pre-existing `W1` rows frozen, letting the new inputs find their footing before the whole network moves. Cheap, and it bounds the disturbance.
 
 ---
@@ -457,7 +458,7 @@ distortion exists.
 * `test_regions.py` — partitioning is deterministic under a seed; a game further than `tau_new` founds a new region; centroid is the majority set and stays representative as a region grows.
 * `test_sbnn.py` — **the growth identity: output is bit-identical immediately after `grow_hidden` and `grow_inputs`**, for 1000 random inputs. Gradient check against finite differences. Growth never reorders existing slots.
 * `test_vocabulary.py` — `extend` only appends; a slot's index never changes across any sequence of extensions; encode/decode round-trips.
-* `test_growth.py` — the plateau trigger fires on a real plateau and not during warmup or after convergence (the distinction `NeuralCompression/FINDINGS.md` §11 found essential); replay bounds forgetting measurably.
+* `test_growth.py` — the plateau trigger fires on a real plateau and not during warmup or after convergence (the distinction `Experiments/NeuralCompression/FINDINGS.md` §11 found essential); replay bounds forgetting measurably.
 * `test_transfer.py` — the §4 experiment as a regression test: **generalised zero-shot ≥ 0.60, raw zero-shot ≤ 0.55**, and raw pretraining shows negative transfer at k=5.
 * `test_routing.py` — truthful bidding is dominant, checked numerically over a bid sweep; congestion splits correctly.
 * `test_credit.py` — exact Shapley equals Monte-Carlo within tolerance for ≤ 12 regions; efficiency to 1e-9.

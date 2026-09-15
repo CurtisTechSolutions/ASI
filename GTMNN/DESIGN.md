@@ -223,7 +223,7 @@ of near-linear units is a population of linear models however wide it is.
 
 Measured on a synthetic task whose target is itself a sine of a linear
 combination — the case most favourable to this activation
-(`NeuralCompression/experiment.py sweep`):
+(`Experiments/NeuralCompression/experiment.py sweep`):
 
 | `b` | `\|z\|` to first peak | test MSE |
 |---|---|---|

@@ -8,7 +8,7 @@ form. The activation is a parameter, not a fixture — so the network adapts the
 shape of its own non-linearity rather than only its weights. And a stall is a
 signal to be acted on rather than a failure: when the loss stops improving, the
 architecture changes. (`Research/VanishingGradientIsAFeature.md` and
-`TwoNRL_CartPole/` take the other road out of a stall — invert instead of grow.)
+`Experiments/TwoNRL_CartPole/` take the other road out of a stall — invert instead of grow.)
 
 ## Contents
 
@@ -39,6 +39,6 @@ This is the *conventional* RNN read of the activation idea — the author's
 wave dropped into an otherwise ordinary recurrent network, so the effect can be
 seen without the rest of the architecture in the way. The formula is the one in
 the paper and nothing else: `a·sin(b·(x − h)) + k`.
-`Research/SineWaveActivationFunction.md` is the argument, `ActivationFunctionTest/`
+`Research/SineWaveActivationFunction.md` is the argument, `Experiments/ActivationFunctionTest/`
 is the head-to-head against sigmoid and ReLU, and
 `RadixCyclicNN/radixnet/activation.py` is the version that ships.

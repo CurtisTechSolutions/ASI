@@ -143,7 +143,7 @@ a truncated special case of the more general periodic function.
 **Decision** Use `f(x) = a·sin(b·(x − h)) + k`, defaulting to
 `a = −1, b = 1/3, h = 0, k = 0` — that is, exactly `−sin(x/3)`.
 
-**Evidence** My own comparison (`ActivationFunctionTest/`) on a
+**Evidence** My own comparison (`Experiments/ActivationFunctionTest/`) on a
 reinforcement-learning control task at 250 episodes: sigmoid 9, ReLU 10,
 sine 28–48 reward — a 2.8×–4.8× improvement over the better baseline.
 
@@ -162,8 +162,8 @@ sine 28–48 reward — a 2.8×–4.8× improvement over the better baseline.
   out what the CartPole result does and does not establish, gives a replication
   protocol, and §12 states what would change my mind. See Q-2.
 
-**Lives in** `Research/SineWaveActivationFunction.md`, `ActivationFunctionTest/`,
-`radixnet/activation.py`
+**Lives in** `Research/SineWaveActivationFunction.md`,
+`Experiments/ActivationFunctionTest/`, `radixnet/activation.py`
 
 ---
 
@@ -2490,11 +2490,11 @@ too and becomes the primary engine (Python staying as the readable reference),
 or that Go stays a specialised fast path for the count model only?
 
 **Q-10 — Scope of this document.** It covers `RadixCyclicNN`. The repository
-holds five other variations (`AbsorbingMarkovChain`, `RadixTreeRNN`,
-`RadixTrieLLM_RNN`, `RadixTreeLLM`, `SBNN_RNN_ActivationFunction`) which are
-described as further solutions to the same problem. Should this become a
-repository-wide decision log — with a section on what each variation tries and
-why it diverges — or stay scoped to this one?
+holds four other variations (`AbsorbingMarkovChain`, `RadixTreeRNN`,
+`RadixTrieLLM_RNN`, `RadixTreeLLM`) described as further solutions to the same
+problem, and the tests of the ideas themselves under `Experiments/`. Should
+this become a repository-wide decision log — with a section on what each
+variation tries and why it diverges — or stay scoped to this one?
 
 **Q-11 — ~~What does "how the transformer pivots" mean?~~ — RESOLVED.** The
 positional reading is the intended one: the character shared by two windows *is*

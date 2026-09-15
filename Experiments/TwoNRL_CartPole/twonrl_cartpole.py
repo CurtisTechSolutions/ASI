@@ -47,7 +47,8 @@ dawdling.  It drives two things, both scaled by the same number:
   purpose") applied per episode instead of per text.
 
 Every evaluation - and the whole positive phase - uses the standard CartPole
-reset, so the reported rewards stay comparable to ``ActivationFunctionTest``.
+reset, so the reported rewards stay comparable to
+``Experiments/ActivationFunctionTest``.
 """
 
 from __future__ import annotations

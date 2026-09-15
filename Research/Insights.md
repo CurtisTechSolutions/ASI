@@ -3,7 +3,7 @@
 A record of the ideas driving this repository, each with where it is specified,
 whether it has been tested, and what the evidence says. Kept as an index rather
 than an argument: the arguments live in the design documents, the numbers live in
-`NeuralCompression/FINDINGS.md`.
+`Experiments/NeuralCompression/FINDINGS.md`.
 
 Status is one of **held** (stated, not yet tested), **confirmed** (tested, holds),
 **refined** (tested, holds with a correction), or **contradicted** (tested, does
@@ -177,7 +177,7 @@ So the value is not compression. It is that **a continuous game coordinate lets
 you play a game you have never played, by placing it between games you have.**
 For an AGI architecture that is the more important of the two.
 
-*Where:* `NeuralCompression/FINDINGS.md` §1–4 · **refined**
+*Where:* `Experiments/NeuralCompression/FINDINGS.md` §1–4 · **refined**
 
 ### 16. Order the partition by similarity
 *Confirmed, and it is mandatory rather than a nicety.* Absent at N=2, 2.5× at
@@ -186,7 +186,7 @@ diverging** (9.7× with sine). Ordered, the target is a smooth function of the
 selector coordinate; shuffled, it is a high-frequency sawtooth a small network
 cannot fit.
 
-*Where:* `NeuralCompression/FINDINGS.md` §3 · **confirmed**
+*Where:* `Experiments/NeuralCompression/FINDINGS.md` §3 · **confirmed**
 
 ### 17. Avoid dust — binary doesn't work because of 16 and 32
 *Confirmed, and the mechanism is worse than waste.* **Dust is error
@@ -201,7 +201,7 @@ indistinguishable, because the selector is continuous and rescaling it is a
 smooth reparameterisation rather than a permutation. **3.1× against 1.37×, both
 pointing the same way: take the relayout, refuse the dust.**
 
-*Where:* `NeuralCompression/FINDINGS.md` §6–7 · **confirmed**
+*Where:* `Experiments/NeuralCompression/FINDINGS.md` §6–7 · **confirmed**
 
 ### 18. Same input and output size for every game, plus a game modifier
 *Held, with a concrete design.* Score **one candidate at a time**, and action
@@ -245,8 +245,8 @@ The general case for designing around vanishing gradients may hold elsewhere.
 Here the gradient vanishes because every neuron was initialised into the linear
 region of its activation, and it stops when that is corrected. See 24.
 
-*Where:* `NeuralCompression/FINDINGS.md` §10 · **contradicted** (as a property to
-accept; the observation that it occurs was correct)
+*Where:* `Experiments/NeuralCompression/FINDINGS.md` §10 · **contradicted**
+(as a property to accept; the observation that it occurs was correct)
 
 ### 21. Invert the gradient when the vanishing threshold is reached
 *Refined — the trigger was wrong, the mechanism is marginal.* Triggering on
@@ -263,7 +263,7 @@ The stated form — *all weights below X* — is the better of the two magnitude
 conditions, because a weight that never moved off its initialisation is
 unambiguous in a way a small gradient is not.
 
-*Where:* `NeuralCompression/vanishing.py`, FINDINGS §11 · **refined**
+*Where:* `Experiments/NeuralCompression/vanishing.py`, FINDINGS §11 · **refined**
 
 ### 22. Dual network: train in one, query the other — the REM analogy
 *Confirmed, and the analogy predicted the better implementation before either was
@@ -284,7 +284,8 @@ parallel; the shared network, the contended resource, only fine-tunes.
 What neither fixes: specialists alone reach 0.0081 where the best shared network
 reaches 0.0398. **Compression costs about 5× and no consolidation recovers it.**
 
-*Where:* `NeuralCompression/consolidate.py`, FINDINGS §12 · **confirmed**
+*Where:* `Experiments/NeuralCompression/consolidate.py`, FINDINGS §12 ·
+**confirmed**
 
 ### 23. Rotating inversion — invert alternating layers each cycle
 *Safe, and for the same reason useless — tested.* With an odd activation
@@ -312,7 +313,7 @@ subset per cycle, or pairing the negation with something non-involutive would
 make the excursion open, and the network would explore instead of returning.
 Untested, and the obvious next thing to try.
 
-*Where:* `NeuralCompression/vanishing.py`, FINDINGS §15 · **refined**
+*Where:* `Experiments/NeuralCompression/vanishing.py`, FINDINGS §15 · **refined**
 
 ---
 
@@ -363,9 +364,10 @@ One SBNN per *region* rather than thousands of micros. Growth is additive and
 **non-destructive**: new hidden units enter with zero outgoing weight and new
 inputs with zero incoming weight, so the network computes bit-identically the
 instant after growth and only changes as the new capacity learns. Growth on a
-**plateau**, which the existing `SBNN_RNN_ActivationFunction/main.py` already
-does and which insight 21 independently confirmed is the only trigger that
-separates *stuck* from *converged* from *still starting*.
+**plateau**, which the existing
+`Experiments/SBNN_RNN_ActivationFunction/main.py` already does and which
+insight 21 independently confirmed is the only trigger that separates *stuck*
+from *converged* from *still starting*.
 
 *Where:* `CyclicCortex/DESIGN.md` §8 · **held**
 

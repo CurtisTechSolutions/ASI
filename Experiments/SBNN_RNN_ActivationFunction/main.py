@@ -105,7 +105,7 @@ def gradient_check(seed=0, eps=1e-6, trials=200):
     """Central differences against the partials above.  Printed before every run.
 
     The numbers this file prints are only worth reading if the derivatives are
-    right, which is the rule ``ActivationFunctionTest/self_building_sinewave.py``
+    right, which is the rule ``Experiments/ActivationFunctionTest/self_building_sinewave.py``
     follows too.  Returns the worst absolute error over all five partials.
     """
     rng = np.random.default_rng(seed)
