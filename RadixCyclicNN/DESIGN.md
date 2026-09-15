@@ -2880,8 +2880,61 @@ every step where a child *would* close a phase-locked cycle is a decision the te
 `+1`.  The policy is a softmax over `sign(s) * log1p(|s| / smoothing)` — evidence, not logits — so with the default
 `smoothing = 1` it is exactly add-one smoothing over the counts: ten observations are confident, a hundred more so,
 one is barely an opinion, and an untrained layer is uniform (costing `log 3` whatever the walk does, which changes no
-ranking).  Unseen signatures fall back to a prior summed over every cycle the model has met.  `invert()` negates
-every score, so 2NRL flips the layer with the graph.
+ranking).  Unseen signatures fall back to a prior summed over every cycle the model has met — **rescaled to `prior_weight`
+observations** (default 2).  Left raw that prior judges a cycle the model has *never* met with the confidence of all
+of them at once: after three epochs of `data/sample_corpus.txt` it stands at `ride 78, escape 33`, so an unseen
+cycle is decided as if by a hundred observations, and anything else with an opinion is drowned out.  Rescaling keeps
+its *direction* — what cycles tend to look like — and gives it the weight it has actually earned about this one.
+`invert()` negates every score, so 2NRL flips the layer with the graph.
+
+### 30.3.1 `BACK` and the layer — the same knowledge at two resolutions
+
+Section 24's `BACK` sentinel and this layer are both about going round, at different grains.  `BACK` is the
+**reflex**: an edge `p -> BACK` competing for `p`'s probability, taught by voices that caught themselves repeating
+and backed out, and when it is the cheapest child `search.onward` hands the branch over — it offers nothing.  The
+layer is the **memory** of one particular cycle.  They meet in two places, and a third that turned out to be a
+mistake.
+
+**`BACK` primes the layer.**  `_meta_costs` passes the re-entered node's hand-over probability (`_back_probability`,
+the `BACK` edge's share at that phase) into `MetaLayer.log_policy(signature, back)`, where it enters as
+`back_scale * back` observations **against** riding — the same evidence scale as everything else, so the ordering
+falls out on its own:
+
+| what is known | decision |
+|---|---|
+| nothing | `ride` (weakly: the prior's direction, `prior_weight` of confidence) |
+| 2 hand-overs at the node (`P(BACK) = 0.11`) | `ride` — a weak reflex is not enough |
+| 6 hand-overs (`P(BACK) = 0.95`) | `escape` — the reflex speaks and wins |
+| …plus **1** observed ride at this exact cycle | `escape` — one observation does not override it |
+| …plus **3** observed rides | `ride` — the specific memory outranks the node's reflex |
+
+**The layer overrules the reflex.**  When `onward` has handed a branch over, `_expand` asks `MetaLayer.rides(label)`
+— what the layer remembers about cycles at *this node*, summed over every loop length it has seen there — and
+restores the real children when the answer is that it rode them.  It has to be the node-level question rather than a
+signature: a walk meeting the hand-over is on its **first** visit and has not closed a cycle yet, so there is no
+signature to look up.  With no memory the hand-over stands.  Metacognition supervising the reflex is what the
+research note describes, and this is the line where it happens.
+
+**What does not work: teaching `BACK` from the corpus** (`teach_back`, default **off**).  A corpus declining a cycle
+looks like the same lesson a voice reports by backing out, so `_teach_cycle` can pass it on.  It should not, by
+default, and the measurement says why.  `observe_back` is one-directional by design — nothing calls it except
+someone who already backed out — so an estimate fed from it alone only rises; over four epochs of the sample corpus
+`"he "` reached `P(BACK) = 0.79` and began vetoing, which took `"the sun"` out of the model's reach and left
+generation at `["lond", "ever", "water"]`.  Counting the rides too (`observe_onward`, the missing opposite) barely
+helped, because at those nodes the corpus *always* declines.  The real mismatch is one of grain: the corpus declined
+**one** child, and `BACK`'s veto drops **all seventeen** — including the escapes it actually took.  A ceiling below
+which observation may push `BACK` (`back_ceiling`) keeps it under the veto and generation survives, but it still
+costs corpus score for a speculative gain, so it is a dial rather than a default:
+
+| `back_ceiling` | nodes vetoing | generation |
+|---|---|---|
+| off | 0 | `the sun`, `the field`, `the park` |
+| 0.10 | 0 | `the sun`, `the park`, `the earth` |
+| 0.15 | 1 | collapses at `back_strength` 0.25 |
+| 0.25 | 2–3 | `lond`, `ever`, `water` |
+
+`observe_onward` and `back_probability` stay: the first is a primitive `observe_back` was missing, and the second is
+what primes the layer.
 
 ### 30.4 The search (`phasesearch.py`)
 

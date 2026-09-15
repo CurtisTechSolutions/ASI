@@ -510,6 +510,32 @@ class ResonantGraph(RadixCyclicGraph):
         self.recompute_weights()
         return e
 
+    def back_probability(self, p: int) -> float:
+        """``P(hand over | p)`` - the share ``p``'s ``BACK`` edge takes of its children, 0 when it has none."""
+        cost = self.back_cost(p)
+        return 0.0 if cost is None else math.exp(-cost)
+
+    def observe_onward(self, p: int, amount: float = 1.0) -> bool:
+        """The opposite lesson to :meth:`observe_back`: a walk at ``p`` faced a cycle and carried on.
+
+        ``observe_back`` is one-directional by design - nothing calls it except a
+        voice that already backed out - so a hand-over estimate fed from it alone
+        can only ever rise.  That is fine for experience, which is rare, and
+        wrong for observation, which is not: a corpus declines cycles constantly,
+        and teaching only the declines saturates ``BACK`` until it vetoes nodes
+        the model needs (a sample run drove ``"he "`` to ``P(BACK) = 0.79``,
+        which took ``"the sun"`` out of reach).  Counting the rides too makes the
+        estimate a *balance* - how often walks at this node went round and had to
+        stop, against how often going round was right - which is what a share of
+        the node's probability is supposed to mean.  Returns ``False`` when
+        ``p`` has no ``BACK`` edge to push back on.
+        """
+        e = self.children[p].get(BACK) if FIRST <= p < len(self.children) else None
+        if e is None or amount <= 0:
+            return False
+        self.add_reward([e], -amount)
+        return True
+
     def invert(self) -> None:
         """Rotate every edge's mean phase by ``pi`` and negate every reward.
 
@@ -622,8 +648,21 @@ class ResonantNet(GraphModel):
         amp_scale: float = 1.0,
         reward_scale: float = 1.0,
         concentration: float = 2.0,
+        teach_back: bool = False,
+        back_strength: float = 0.25,
+        back_ceiling: float = 0.10,
     ) -> None:
         self.seed = int(seed)
+        self.teach_back = bool(teach_back)
+        """Whether a corpus declining a cycle also teaches the node's ``BACK`` edge (off; see :meth:`_teach_cycle`)."""
+        self.back_strength = float(back_strength)
+        """How loudly it does - one whole traversal's worth at 1.0."""
+        self.back_ceiling = float(back_ceiling)
+        """The share observation may push ``BACK`` to; above it, only experience speaks (see :meth:`_teach_cycle`)."""
+        if self.back_strength < 0:
+            raise ValueError(f"back_strength must be >= 0, got {back_strength}")
+        if not (0.0 <= self.back_ceiling <= 1.0):
+            raise ValueError(f"back_ceiling must lie in [0, 1], got {back_ceiling}")
         self.graph = ResonantGraph(
             seed=self.seed, buckets=buckets, period=period, kick_scale=kick_scale,
             resonance_scale=resonance_scale, amp_scale=amp_scale, reward_scale=reward_scale,
@@ -698,6 +737,17 @@ class ResonantNet(GraphModel):
         a ``(node, phase)`` the walk has already been in.  When it does, the
         text either rode that child (``ride``), went to END (``abort``) or took
         something else (``escape``) - and that is the observation.
+
+        A decision *not* to ride is also the lesson ``BACK`` (section 24's
+        sentinel) is for, so with ``teach_back`` it is passed on: a walk reached
+        ``p``, could have gone round, and did not.  That is the same thing a
+        voice reports when it catches itself repeating and backs out
+        (:func:`radixnet.dialogue.backtrack`), arrived at by observation rather
+        than by experience, so it is taught the same way - the child that would
+        have looped gets dearer, the one the text took instead gets cheaper, and
+        ``p``'s hand-over estimate goes up.  It rolls the layer's per-cycle
+        memory up into the node-level reflex, which is what primes the layer at
+        cycles it has never seen.
         """
         graph = self.graph
         advance = graph.advance
@@ -715,6 +765,12 @@ class ResonantNet(GraphModel):
         signature = cycle_signature(graph.labels[target], loops[target])
         action = RIDE if taken in loops else (ABORT if taken == END else ESCAPE)
         self.metacog.observe(signature, action, strength)
+        if self.teach_back and p >= FIRST and strength > 0:
+            amount = strength * self.back_strength
+            if action is RIDE:
+                graph.observe_onward(p, amount)  # going round was right here: push the hand-over back down
+            elif graph.back_probability(p) < self.back_ceiling:
+                graph.observe_back(p, went=target, instead=None if taken == END else taken, amount=amount)
         return 1
 
     # -- passes over data ----------------------------------------------------
@@ -1228,6 +1284,9 @@ class ResonantNet(GraphModel):
             "coherence_max": coherence["max"],
             "cycles_seen": self.meta["cycles_seen"],
             "meta": self.metacog.stats(),
+            "teach_back": self.teach_back,
+            "back_strength": self.back_strength,
+            "back_ceiling": self.back_ceiling,
             "weights": self.weight_config(),
         }
 
@@ -1243,6 +1302,11 @@ class ResonantNet(GraphModel):
             "history": self.history,
             "backend": self.backend.name,
             "metacog": self.metacog.to_dict(),
+            "cycles": {
+                "teach_back": self.teach_back,
+                "back_strength": self.back_strength,
+                "back_ceiling": self.back_ceiling,
+            },
             "graph": self.graph.to_dict(),
         }
 
@@ -1254,6 +1318,10 @@ class ResonantNet(GraphModel):
         model = cls(seed=int(d.get("meta", {}).get("seed", 0)), backend=backend, device=device)
         model.graph = ResonantGraph.from_dict(d["graph"])
         model.metacog = MetaLayer.from_dict(d.get("metacog"))
+        cycles = d.get("cycles") or {}
+        model.teach_back = bool(cycles.get("teach_back", False))
+        model.back_strength = float(cycles.get("back_strength", 0.25))
+        model.back_ceiling = float(cycles.get("back_ceiling", 0.10))
         model.history = list(d.get("history") or [])
         model.meta = {**model._new_meta(model.seed), **(d.get("meta") or {})}
         return model
