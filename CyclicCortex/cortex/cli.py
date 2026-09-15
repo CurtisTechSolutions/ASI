@@ -32,6 +32,45 @@ def cmd_map(a):
     print("\nRouting log")
     for e in c.log: print("   ", e)
 
+OPPONENT = {
+    "chess":    lambda s, d, r: engine.choose(s, depth=d, rng=r),
+    "checkers": lambda s, d, r: engine.checkers_choose(s, d, r),
+    "go":       lambda s, d, r: engine.go_choose(s, d, r),
+}
+CORTEX_SIDE = {"chess": "w", "checkers": "w", "go": "b"}
+
+def play(c, name, rng, opponent_depth=2, max_plies=300):
+    """One full game: the cortex on one side, the engine on the other.
+
+    The cortex's own ranking picks the move. If that move is ILLEGAL it is
+    counted and the best legal alternative is substituted, so the game continues
+    and the illegal rate is measured rather than hidden -- which is the number
+    that says what the network learned, more than the result does.
+    """
+    g = ALL[name]; s = g.new(); me = CORTEX_SIDE[name]
+    illegal = tried = 0; plies = 0
+    for plies in range(1, max_plies+1):
+        if g.terminal(s): break
+        legal = g.legal_moves(s)
+        if not legal: break
+        if s.turn == me:
+            mv = c.choose(g, s, rng, k=24); tried += 1
+            if mv is None or not g.is_legal(s, mv):
+                illegal += 1
+                r = c.region_for(g)
+                mv = max(legal, key=lambda m: r.net.predict(c.encode(r, g, s, m))[1])
+        else:
+            mv = OPPONENT[name](s, opponent_depth, rng)
+            if mv is None: break
+        s = g.apply(s, mv)
+    w = g.winner(s) if hasattr(g, "winner") else None
+    out = {"game": name, "plies": plies, "illegal_rate": round(illegal/max(1,tried), 3),
+           "result": "win" if w == me else ("loss" if w else "unfinished/draw")}
+    if name == "go": out["score"] = s.score()
+    if name == "chess": out["material"] = engine.material(s, me)
+    if name == "checkers": out["pieces"] = (s.count("w"), s.count("b"))
+    return out
+
 def play_chess(c, rng, opponent_depth=1, max_plies=60, verbose=False):
     """The cortex plays white. Its own ranking picks the move -- if that move is
     illegal it is COUNTED and the best legal alternative is substituted, so the
@@ -60,13 +99,18 @@ def play_chess(c, rng, opponent_depth=1, max_plies=60, verbose=False):
             "material": mat, "in_check": s.in_check()}
 
 def cmd_play(a):
-    c = build(["chess"]); rng = random.Random(a.seed)
-    print("\n  training the movement region on chess...")
-    print("   ", c.train(ALL["chess"], episodes=a.episodes, rng=rng, k=12))
-    print("   ", c.evaluate(ALL["chess"], n=50, rng=random.Random(7), k=12))
-    print(f"\n  playing {a.games_n} games vs the engine (depth {a.depth})\n")
-    for i in range(a.games_n):
-        print("   ", play_chess(c, random.Random(100+i), a.depth, a.plies))
+    """Train each playable game's region, then play it against its engine."""
+    names = [n for n in a.games if n in OPPONENT]
+    c = build(names); rng = random.Random(a.seed)
+    for n in names:
+        print(f"\n  === {n} ===")
+        opp = OPPONENT[n]
+        print("    train   ", c.train(ALL[n], episodes=a.episodes, rng=rng, k=12,
+                                      opponent=opp))
+        print("    eval    ", c.evaluate(ALL[n], n=40, rng=random.Random(7), k=12,
+                                         opponent=opp))
+        for i in range(a.games_n):
+            print("    vs engine", play(c, n, random.Random(100+i), a.depth, a.plies))
 
 def cmd_sudoku(a):
     c = build(["sudoku"]); rng = random.Random(a.seed)
@@ -85,8 +129,7 @@ def cmd_sudoku(a):
                 legal = g.legal_moves(s)
                 if not legal: break
                 r = c.region_for(g)
-                mv = max(legal, key=lambda m: (lambda t: t[0]*(0.5+0.5*t[1]))(
-                    r.net.predict(c.encode(r, g, s, m))))
+                mv = max(legal, key=lambda m: r.net.predict(c.encode(r, g, s, m))[1])
             s = g.apply(mv); placed += 1
         print(f"    puzzle {i}: filled {placed}/{start}, solved={s.solved()}, "
               f"illegal picks {bad}")

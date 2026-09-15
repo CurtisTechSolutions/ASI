@@ -66,6 +66,58 @@ def test_learns_above_baseline():
     e = c.evaluate(ALL["sudoku"], n=30, rng=random.Random(1), k=10)
     assert e["legality_acc"] > e["majority_baseline"] + 0.2, e
 
+def test_checkers_rules():
+    """Promotion, forced capture and chain capture -- the three rules that make
+    checkers more than 'diagonal chess'."""
+    from cortex.board_games import Checkers, checkers_start
+    s = checkers_start()
+    assert s.count("w") == 12 and s.count("b") == 12
+    assert len(s.moves()) == 7
+    b = [["" for _ in range(8)] for _ in range(8)]; b[6][1] = "w"; b[0][7] = "b"
+    assert Checkers(b, "w").apply(((1,6),(2,7))).at(2,7) == "W", "crowning"
+    b = [["" for _ in range(8)] for _ in range(8)]
+    b[0][0] = "w"; b[1][1] = "b"; b[3][3] = "b"; b[7][7] = "B"
+    s2 = Checkers(b, "w").apply(((0,0),(2,2)))
+    assert s2.turn == "w" and s2.chain == (2,2), "chain keeps the turn"
+    assert all(m[0] == (2,2) for m in s2.moves()), "only the chaining piece moves"
+    assert s2.apply(((2,2),(4,4))).count("b") == 1, "two men captured"
+
+def test_go_rules():
+    """Pass, two-pass termination and area scoring."""
+    from cortex.board_games import Go, go_start, PASS, GN
+    g = go_start()
+    assert PASS in g.moves() and len(g.moves()) == GN*GN + 1
+    assert g.apply(PASS).apply(PASS).over(), "two passes end the game"
+    b = [["" for _ in range(GN)] for _ in range(GN)]
+    for x in range(GN): b[3][x] = "b"; b[5][x] = "w"
+    bs, ws = Go(b, "b").score()
+    assert bs == ws == GN + GN*3, f"each side owns its own side: {bs},{ws}"
+
+def test_all_games_playable():
+    """Every playable game runs a full game against its engine and terminates."""
+    from cortex import engine
+    from cortex.cli import play, OPPONENT
+    c = Cortex()
+    for n in OPPONENT: c.add_game(ALL[n])
+    for n in OPPONENT:
+        c.train(ALL[n], episodes=60, rng=random.Random(0), k=8, opponent=OPPONENT[n])
+        r = play(c, n, random.Random(1), opponent_depth=1, max_plies=60)
+        assert r["plies"] > 0 and 0.0 <= r["illegal_rate"] <= 1.0, r
+        assert r["result"] in ("win", "loss", "unfinished/draw"), r
+
+def test_engines_beat_random():
+    """The opponents must be real opponents, or 'plays legally' means nothing."""
+    from cortex.board_games import checkers_start
+    from cortex import engine
+    wins = 0
+    for g in range(6):
+        s = checkers_start(); r = random.Random(500+g)
+        for _ in range(300):
+            if not s.moves(): break
+            s = s.apply(engine.checkers_choose(s, 2 if s.turn == "w" else 0, r))
+        wins += 1 if s.winner() == "w" else 0
+    assert wins >= 5, f"depth-2 checkers should dominate random, won {wins}/6"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

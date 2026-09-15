@@ -3,7 +3,8 @@ which game it is holding, and a `generalise` that returns MECHANIC -> features:
 the common denominators, keyed by the same mechanic names that decide similarity.
 """
 import random
-from cortex.board_games import Chess, Checkers, Go, on, GN
+from cortex.board_games import (Chess, Checkers, Go, on, GN, PASS,
+                                checkers_start, go_start)
 from cortex import engine, sudoku as sud
 
 KINDS = "PNBRQK"
@@ -133,18 +134,17 @@ class CheckersGame:
     mechanics = frozenset({"ALTERNATE_TURNS","GRID_BOARD","PERFECT_INFO","ZERO_SUM",
         "TWO_PLAYER","PIECE_OWNERSHIP","JUMP_CAPTURE","STEP_MOVE","DIAGONAL_ONLY",
         "FORCED_CAPTURE","BLOCKED_BY_OCCUPANT","PROMOTE_ON_RANK"})
-    spec = {"GRID_MOVE":4, "OCCUPANCY":3, "FORCED_CAPTURE":1, "SIDE":1}
-    def new(self, seed=0):
+    spec = {"GRID_MOVE":4, "OCCUPANCY":3, "JUMP_CAPTURE":3, "FORCED_CAPTURE":1,
+            "PROMOTE_ON_RANK":2, "SIDE":1}
+    def new(self, seed=0): return checkers_start()
+    def random_state(self, rng):
         from cortex.board_games import random_checkers
-        return random_checkers(random.Random(seed))
-    def legal_moves(self, s): return s.jumps() or s.simple_moves()
+        return random_checkers(rng)
+    def legal_moves(self, s): return s.moves()
     def is_legal(self, s, mv): return s.legal(*mv)
-    def apply(self, s, mv):
-        (fx,fy),(tx,ty) = mv
-        b=[r[:] for r in s.b]; b[ty][tx]=b[fy][fx]; b[fy][fx]=""
-        if abs(tx-fx)==2: b[(fy+ty)//2][(fx+tx)//2]=""
-        return Checkers(b, "b" if s.turn=="w" else "w")
-    def terminal(self, s): return not self.legal_moves(s)
+    def apply(self, s, mv): return s.apply(mv)        # promotion + chain capture
+    def terminal(self, s): return s.winner() is not None
+    def winner(self, s): return s.winner()
     def candidates(self, s, rng, k=24):
         good=self.legal_moves(s); rng.shuffle(good)
         bad=[]
@@ -156,12 +156,34 @@ class CheckersGame:
         return good[:k]+bad[:k]
     def generalise(self, s, mv):
         (fx,fy),(tx,ty)=mv; dx,dy=tx-fx,ty-fy; t=s.at(tx,ty) if on(tx,ty) else ""
-        return {"GRID_MOVE":[dx/7.0,dy/7.0,abs(dx)/7.0,abs(dy)/7.0],
+        p = s.at(fx,fy) if on(fx,fy) else ""
+        reaches_back = 1.0 if ((p == "w" and ty == 7) or (p == "b" and ty == 0)) else 0.0
+        # The MIDPOINT. A jump is legal only if the square BETWEEN from and to
+        # holds an enemy piece -- exactly the path predicate the chess ablation
+        # found mattered most. Without it the network cannot tell a legal jump
+        # from an illegal jump-shaped move, and both score maximum grade.
+        is_jump = 1.0 if (abs(dx) == 2 and abs(dy) == 2) else 0.0
+        mid_enemy = mid_own = 0.0
+        if is_jump:
+            m = s.at((fx+tx)//2, (fy+ty)//2)
+            if m:
+                if m.lower() != s.turn: mid_enemy = 1.0
+                else: mid_own = 1.0
+        return {"JUMP_CAPTURE":[is_jump, mid_enemy, mid_own],
+                "GRID_MOVE":[dx/7.0,dy/7.0,abs(dx)/7.0,abs(dy)/7.0],
                 "OCCUPANCY":[0.0 if t else 1.0, 1.0 if (t and t.lower()==s.turn) else 0.0,
                              1.0 if (t and t.lower()!=s.turn) else 0.0],
                 "FORCED_CAPTURE":[1.0 if s.jumps() else 0.0],
+                "PROMOTE_ON_RANK":[1.0 if p.isupper() else 0.0, reaches_back],
                 "SIDE":[1.0 if s.turn=="w" else 0.0]}
-    def reward(self, s, mv): return 1.0 if abs(mv[1][0]-mv[0][0])==2 else 0.0
+    def reward(self, s, mv):
+        """Only a REAL capture is worth anything. Rewarding jump SHAPE taught the
+        grade head that any two-square move is good, which is precisely what the
+        ranking then selected for."""
+        (fx,fy),(tx,ty) = mv
+        if abs(tx-fx) != 2: return 0.0
+        m = s.at((fx+tx)//2, (fy+ty)//2)
+        return 1.0 if (m and m.lower() != s.turn) else -1.0
 
 
 class GoGame:
@@ -169,23 +191,25 @@ class GoGame:
     mechanics = frozenset({"ALTERNATE_TURNS","GRID_BOARD","PERFECT_INFO","ZERO_SUM",
         "TWO_PLAYER","PIECE_OWNERSHIP","PLACEMENT_MOVE","GROUP_LIBERTY",
         "SURROUND_CAPTURE","KO_REPETITION","NO_MOVEMENT","PASS_ALLOWED"})
-    spec = {"GRID_PLACE":3, "GROUP_LIBERTY":3, "SIDE":1}
-    def new(self, seed=0):
+    spec = {"GRID_PLACE":3, "GROUP_LIBERTY":3, "PASS_ALLOWED":1, "SIDE":1}
+    def new(self, seed=0): return go_start()
+    def random_state(self, rng):
         from cortex.board_games import random_go
-        return random_go(random.Random(seed))
-    def legal_moves(self, s):
-        return [(x,y) for y in range(GN) for x in range(GN) if s.legal(x,y)]
-    def is_legal(self, s, mv): return s.legal(*mv)
-    def apply(self, s, mv):
-        x,y=mv; b=[r[:] for r in s.b]; b[y][x]=s.turn
-        return Go(b, "w" if s.turn=="b" else "b", [r[:] for r in s.b])
-    def terminal(self, s): return not self.legal_moves(s)
+        return random_go(rng)
+    def legal_moves(self, s): return s.moves()          # placements plus PASS
+    def is_legal(self, s, mv): return mv == PASS or s.legal(*mv)
+    def apply(self, s, mv): return s.apply(mv)          # capture, ko, pass counting
+    def terminal(self, s): return s.over()
+    def winner(self, s): return s.winner()
     def candidates(self, s, rng, k=24):
         pts=[(x,y) for y in range(GN) for x in range(GN)]
         good=[p for p in pts if s.legal(*p)]; bad=[p for p in pts if not s.legal(*p)]
         rng.shuffle(good); rng.shuffle(bad)
-        return good[:k]+bad[:k]
+        return good[:k]+bad[:k]+[PASS]
     def generalise(self, s, mv):
+        if mv == PASS:
+            return {"GRID_PLACE":[0.0,0.0,0.0], "GROUP_LIBERTY":[0.0,0.0,0.0],
+                    "PASS_ALLOWED":[1.0], "SIDE":[1.0 if s.turn=="b" else 0.0]}
         x,y=mv
         if s.at(x,y): libs,caps,own = 0.0,0.0,0.0
         else:
@@ -200,8 +224,11 @@ class GoGame:
             libs,own=min(len(lb),4)/4.0, min(len(grp),6)/6.0; caps=min(caps,4)/4.0
         return {"GRID_PLACE":[x/(GN-1), y/(GN-1), 0.0 if s.at(x,y) else 1.0],
                 "GROUP_LIBERTY":[libs, caps, own],
+                "PASS_ALLOWED":[0.0],
                 "SIDE":[1.0 if s.turn=="b" else 0.0]}
-    def reward(self, s, mv): return self.generalise(s, mv)["GROUP_LIBERTY"][1]
+    def reward(self, s, mv):
+        if mv == PASS: return -0.5           # passing is rarely the best move
+        return self.generalise(s, mv)["GROUP_LIBERTY"][1]
 
 
 ALL = {g.name: g for g in (ChessGame(), SudokuGame(), CheckersGame(), GoGame())}

@@ -92,3 +92,52 @@ def _selftest():
     print("engine self-test: OK")
 
 _selftest()
+
+
+# ------------------------------------------------------- checkers opponent
+def checkers_eval(s, colour):
+    """Men are worth 1, kings 2, and advancement breaks ties."""
+    v = 0
+    for y in range(8):
+        for x in range(8):
+            p = s.at(x, y)
+            if not p: continue
+            w = 2.0 if p.isupper() else 1.0
+            adv = (y if p.lower() == "w" else 7-y) / 14.0
+            v += (w + adv) * (1 if p.lower() == colour else -1)
+    return v
+
+def checkers_choose(s, depth=1, rng=None):
+    mvs = s.moves()
+    if not mvs: return None
+    if depth <= 0: return (rng or random).choice(mvs)
+    col = s.turn; best, bm = -1e9, mvs[0]
+    for m in mvs:
+        nxt = s.apply(m)
+        sc = checkers_eval(nxt, col)
+        if depth > 1 and nxt.turn != col:
+            reps = nxt.moves()
+            if reps: sc = min(checkers_eval(nxt.apply(r), col) for r in reps)
+        if sc > best: best, bm = sc, m
+    return bm
+
+# ------------------------------------------------------------- go opponent
+def go_eval(s, colour):
+    bs, ws = s.score()
+    return (bs - ws) if colour == "b" else (ws - bs)
+
+def go_choose(s, depth=1, rng=None, sample=24):
+    """Greedy on area score over a sample of placements. Passes only when no
+    sampled placement helps, so it does not hand the game away early."""
+    from cortex.board_games import PASS
+    mvs = [m for m in s.moves() if m != PASS]
+    if not mvs: return PASS
+    rng = rng or random
+    if depth <= 0: return rng.choice(mvs)
+    cand = rng.sample(mvs, min(sample, len(mvs)))
+    col = s.turn
+    best, bm = go_eval(s, col), PASS          # PASS is the baseline: do nothing
+    for m in cand:
+        sc = go_eval(s.apply(m), col)
+        if sc > best: best, bm = sc, m
+    return bm                                  # genuinely passes when nothing helps

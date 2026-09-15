@@ -95,13 +95,19 @@ def random_chess(rng):
 
 # ------------------------------------------------------------- checkers
 class Checkers:
-    """board[y][x] = '' | 'w' | 'b' | 'W' | 'B' (upper = king). w moves +y."""
-    def __init__(self, board, turn="w"): self.b, self.turn = board, turn
+    """board[y][x] = '' | 'w' | 'b' | 'W' | 'B' (upper = king). w moves +y.
+
+    `chain` is the square a multi-jump must continue from. While it is set, the
+    turn has NOT passed and only further jumps by that piece are legal -- which
+    is a real rule and changes the legal-move set, not just the bookkeeping."""
+    def __init__(self, board, turn="w", chain=None):
+        self.b, self.turn, self.chain = board, turn, chain
     def at(self,x,y): return self.b[y][x]
     def dirs(self, p):
         if p.isupper(): return [(1,1),(1,-1),(-1,1),(-1,-1)]
         return [(1,1),(-1,1)] if p == "w" else [(1,-1),(-1,-1)]
     def simple_moves(self):
+        if self.chain: return []          # mid-chain: only jumps are available
         out = []
         for y in range(8):
             for x in range(8):
@@ -113,9 +119,10 @@ class Checkers:
         return out
     def jumps(self):
         out = []
-        for y in range(8):
-            for x in range(8):
-                p = self.at(x,y)
+        cells = [self.chain] if self.chain else [(x,y) for y in range(8) for x in range(8)]
+        for (x, y) in cells:
+            p = self.at(x,y)
+            if True:
                 if p and p.lower() == self.turn:
                     for dx,dy in self.dirs(p):
                         mx,my,nx,ny = x+dx, y+dy, x+2*dx, y+2*dy
@@ -123,11 +130,53 @@ class Checkers:
                             m = self.at(mx,my)
                             if m and m.lower() != self.turn: out.append(((x,y),(nx,ny)))
         return out
+
+    def moves(self):
+        """The legal move set: jumps if any exist (forced capture), else simples."""
+        return self.jumps() or self.simple_moves()
+
+    def apply(self, mv):
+        """Applies promotion and chain capture. If the jumping piece can jump
+        again it keeps the turn, with `chain` pinning it to that square."""
+        (fx,fy),(tx,ty) = mv
+        b = [r[:] for r in self.b]
+        p = b[fy][fx]
+        b[ty][tx] = p; b[fy][fx] = ""
+        jumped = abs(tx-fx) == 2
+        if jumped: b[(fy+ty)//2][(fx+tx)//2] = ""
+        crowned = False
+        if p == "w" and ty == 7: b[ty][tx] = "W"; crowned = True
+        if p == "b" and ty == 0: b[ty][tx] = "B"; crowned = True
+        if jumped and not crowned:
+            # crowning ENDS the turn even mid-chain; otherwise continue if able
+            nxt = Checkers(b, self.turn, (tx,ty))
+            if nxt.jumps(): return nxt
+        return Checkers(b, "b" if self.turn == "w" else "w", None)
+
+    def winner(self):
+        """The side to move with no legal moves loses -- no stalemate in checkers."""
+        if self.moves(): return None
+        return "b" if self.turn == "w" else "w"
+
+    def count(self, col):
+        return sum(1 for y in range(8) for x in range(8)
+                   if self.at(x,y) and self.at(x,y).lower() == col)
     def legal(self, fr, to):
         """FORCED CAPTURE: if any jump exists, only jumps are legal. This move's
         legality depends on moves it is not part of."""
-        js = self.jumps()
-        return (fr,to) in js if js else (fr,to) in self.simple_moves()
+        return (fr,to) in self.moves()
+
+def checkers_start():
+    """Standard opening: twelve men each on the dark squares of the first and
+    last three ranks."""
+    b = [["" for _ in range(8)] for _ in range(8)]
+    for y in range(3):
+        for x in range(8):
+            if (x+y) % 2 == 0: b[y][x] = "w"
+    for y in range(5, 8):
+        for x in range(8):
+            if (x+y) % 2 == 0: b[y][x] = "b"
+    return Checkers(b, "w")
 
 def random_checkers(rng):
     b = [["" for _ in range(8)] for _ in range(8)]
@@ -138,10 +187,13 @@ def random_checkers(rng):
 
 # ------------------------------------------------------------------ go
 GN = 9
+PASS = "pass"
+
 class Go:
-    """board[y][x] = '' | 'b' | 'w'. `prev` is the position before the last move (ko)."""
-    def __init__(self, board, turn="b", prev=None):
-        self.b, self.turn, self.prev = board, turn, prev
+    """board[y][x] = '' | 'b' | 'w'. `prev` is the position before the last move (ko).
+    `passes` counts CONSECUTIVE passes; two in a row end the game."""
+    def __init__(self, board, turn="b", prev=None, passes=0):
+        self.b, self.turn, self.prev, self.passes = board, turn, prev, passes
     def at(self,x,y): return self.b[y][x]
     def group(self, x, y, b=None):
         b = b or self.b; col = b[y][x]
@@ -175,6 +227,58 @@ class Go:
             if not libs: return False                     # suicide
         if self.prev is not None and b2 == self.prev: return False   # ko
         return True
+
+    def moves(self):
+        """Every legal placement, plus PASS -- which is always legal and is the
+        only way the game can end."""
+        return [(x,y) for y in range(GN) for x in range(GN) if self.legal(x,y)] + [PASS]
+
+    def apply(self, mv):
+        opp = "w" if self.turn == "b" else "b"
+        if mv == PASS:
+            return Go([r[:] for r in self.b], opp, self.prev, self.passes + 1)
+        x, y = mv
+        b2 = [r[:] for r in self.b]; b2[y][x] = self.turn
+        for dx,dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx,ny = x+dx, y+dy
+            if 0<=nx<GN and 0<=ny<GN and b2[ny][nx] == opp:
+                g,l = self.group(nx,ny,b2)
+                if not l:
+                    for gx,gy in g: b2[gy][gx] = ""
+        return Go(b2, opp, [r[:] for r in self.b], 0)
+
+    def over(self): return self.passes >= 2
+
+    def score(self):
+        """Area scoring: stones on the board plus empty regions reaching only one
+        colour. Returns (black, white)."""
+        seen = set(); sc = {"b": 0, "w": 0}
+        for y in range(GN):
+            for x in range(GN):
+                v = self.b[y][x]
+                if v: sc[v] += 1
+        for y in range(GN):
+            for x in range(GN):
+                if self.b[y][x] or (x,y) in seen: continue
+                region, border, stack = set(), set(), [(x,y)]
+                while stack:
+                    cx,cy = stack.pop()
+                    if (cx,cy) in region: continue
+                    region.add((cx,cy)); seen.add((cx,cy))
+                    for dx,dy in ((1,0),(-1,0),(0,1),(0,-1)):
+                        nx,ny = cx+dx, cy+dy
+                        if not (0<=nx<GN and 0<=ny<GN): continue
+                        v = self.b[ny][nx]
+                        if v: border.add(v)
+                        elif (nx,ny) not in region: stack.append((nx,ny))
+                if len(border) == 1: sc[border.pop()] += len(region)
+        return sc["b"], sc["w"]
+
+    def winner(self):
+        bs, ws = self.score()
+        return "b" if bs > ws else ("w" if ws > bs else None)
+
+def go_start(): return Go([["" for _ in range(GN)] for _ in range(GN)], "b")
 
 def random_go(rng):
     b = [["" for _ in range(GN)] for _ in range(GN)]
