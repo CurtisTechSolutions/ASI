@@ -1,0 +1,363 @@
+"""Writing tools, proving they work, and remembering what they solved.
+
+A tool enters the toolbox only by passing `grade.grade_python` -- parse, screen,
+run, contract tests, determinism. There is no "probably fine" path, because the
+whole value of a tool over re-deriving the answer is that the tool has *already
+been checked*, and an unchecked tool is strictly worse than no tool: it is a
+confident wrong answer with a name and a docstring.
+
+Contract tests are required and are written at the same time as the tool, by the
+same author. That is not the ideal -- an independent test author is better -- but
+it is the honest trade, and the failure mode it leaves (a test that asserts the
+bug) is visible in the stored source rather than hidden in a score.
+
+Tools are registered into the embedding layer as `Kind.TOOL`, linked to the goal
+that motivated them, and the text that gets embedded is **purpose plus signature
+plus every problem the tool has solved**. That last part is what makes retrieval
+work: a tool is found by the shape of the problem, not by its name. A tool called
+`normalise_rows` is unreachable by anyone who did not already know it exists;
+the same tool carrying "stripped whitespace from a ragged CSV" in its embedded
+text is found by whoever has that problem next.
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .grade import Grade, grade_python
+from .memory import Kind, Source
+from .provider import Message
+from .sandbox import run_source
+
+TOOL_SYSTEM = (
+    "You write one small, self-contained Python tool. Standard library only. "
+    "Reply with exactly two fenced blocks: first the tool, then contract tests "
+    "that assert its behaviour and print nothing on success. Define one primary "
+    "function. No I/O outside the function. No network."
+)
+
+
+@dataclass
+class ToolSpec:
+    name: str
+    purpose: str
+    source: str
+    tests: str = ""
+    signature: str = ""
+    grade: Grade | None = None
+    solved: list[str] = field(default_factory=list)   # problems this tool has handled
+    trace_id: str | None = None
+    built_by: str = "provider"      # "template" or "provider" -- see Idea.claim
+
+    def embed_text(self) -> str:
+        """What the embedding layer actually indexes. Deliberately not the source:
+        code embeds by its syntax, and nobody searches by syntax."""
+        parts = [f"tool {self.name}: {self.purpose}", self.signature]
+        parts += [f"solved: {p}" for p in self.solved]
+        return "\n".join(p for p in parts if p)
+
+    def to_json(self) -> dict:
+        return {"name": self.name, "purpose": self.purpose, "source": self.source,
+                "tests": self.tests, "signature": self.signature, "solved": self.solved,
+                "trace_id": self.trace_id,
+                "grade": self.grade.score if self.grade else None}
+
+    @classmethod
+    def from_json(cls, d: dict) -> "ToolSpec":
+        return cls(name=d["name"], purpose=d["purpose"], source=d["source"],
+                   tests=d.get("tests", ""), signature=d.get("signature", ""),
+                   solved=d.get("solved", []), trace_id=d.get("trace_id"),
+                   built_by=d.get("built_by", "provider"))
+
+
+_FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.S)
+_DEF = re.compile(r"^def\s+([a-zA-Z_]\w*)\s*\((.*?)\)", re.M)
+
+
+def parse_reply(text: str) -> tuple[str, str]:
+    """Pull the tool and its tests out of a model reply.
+
+    Two fenced blocks is the contract; one block means the tests were forgotten,
+    and that is returned as an empty test string rather than guessed at, so the
+    grader can dock it for exactly what is missing.
+    """
+    blocks = _FENCE.findall(text or "")
+    if len(blocks) >= 2:
+        return blocks[0].strip(), blocks[1].strip()
+    if len(blocks) == 1:
+        return blocks[0].strip(), ""
+    return (text or "").strip(), ""
+
+
+def signature_of(source: str) -> tuple[str, str]:
+    m = _DEF.search(source)
+    if not m:
+        return "", ""
+    return m.group(1), f"{m.group(1)}({m.group(2)})"
+
+
+# --------------------------------------------------------------------------- #
+# the offline synthesiser
+# --------------------------------------------------------------------------- #
+
+#: Goal shape -> (function name, source, tests). A rule-based synthesiser over a
+#: handful of shapes, so the loop closes with no model attached. It generalises
+#: to nothing outside this table and returns None rather than guessing -- an
+#: unrecognised goal should reach a real provider, not a plausible-looking stub
+#: that was never going to run.
+TEMPLATES: list[tuple[re.Pattern, str, str, str]] = [
+    (re.compile(r"\bmedian\b", re.I), "median",
+     '''def median(xs):
+    """Middle value of a sequence; mean of the two middle values when even."""
+    s = sorted(xs)
+    if not s:
+        raise ValueError("median of an empty sequence")
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+''',
+     '''assert median([3, 1, 2]) == 2
+assert median([1, 2, 3, 4]) == 2.5
+assert median([7]) == 7
+try:
+    median([]); raise SystemExit("should have raised")
+except ValueError:
+    pass
+'''),
+    (re.compile(r"\b(dedupe|deduplicat|unique|distinct)\w*\b", re.I), "dedupe",
+     '''def dedupe(xs):
+    """Unique items, first occurrence order preserved."""
+    seen, out = set(), []
+    for x in xs:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+''',
+     '''assert dedupe([1, 2, 1, 3, 2]) == [1, 2, 3]
+assert dedupe([]) == []
+assert dedupe(["a", "a"]) == ["a"]
+'''),
+    (re.compile(r"\bflatten\b", re.I), "flatten",
+     '''def flatten(xs):
+    """One level of nesting removed; non-iterables pass through."""
+    out = []
+    for x in xs:
+        if isinstance(x, (list, tuple)):
+            out.extend(x)
+        else:
+            out.append(x)
+    return out
+''',
+     '''assert flatten([[1, 2], [3], 4]) == [1, 2, 3, 4]
+assert flatten([]) == []
+assert flatten([[[1]]]) == [[1]]
+'''),
+    (re.compile(r"\b(csv|comma.separated)\b", re.I), "parse_csv",
+     '''def parse_csv(text, sep=","):
+    """Split text into rows of stripped fields. Blank lines are dropped."""
+    rows = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        rows.append([cell.strip() for cell in line.split(sep)])
+    return rows
+''',
+     '''assert parse_csv("a, b\\nc,d") == [["a", "b"], ["c", "d"]]
+assert parse_csv("") == []
+assert parse_csv("x\\n\\ny") == [["x"], ["y"]]
+'''),
+    (re.compile(r"\b(word|token)\s*count|\bcount\b.*\bword", re.I), "word_count",
+     '''def word_count(text):
+    """Case-folded word frequencies, in descending count order."""
+    import re as _re
+    from collections import Counter
+    words = _re.findall(r"[a-z0-9']+", (text or "").lower())
+    return dict(Counter(words).most_common())
+''',
+     '''assert word_count("a b A") == {"a": 2, "b": 1}
+assert word_count("") == {}
+assert list(word_count("x y y").keys())[0] == "y"
+'''),
+    (re.compile(r"\b(reverse|invert)\b", re.I), "reverse_words",
+     '''def reverse_words(text):
+    """Word order reversed; internal whitespace collapsed to single spaces."""
+    return " ".join(reversed((text or "").split()))
+''',
+     '''assert reverse_words("a b c") == "c b a"
+assert reverse_words("") == ""
+assert reverse_words("  x   y ") == "y x"
+'''),
+]
+
+
+def synthesise(goal: str) -> tuple[str, str, str] | None:
+    for pattern, name, source, tests in TEMPLATES:
+        if pattern.search(goal):
+            return name, source, tests
+    return None
+
+
+# --------------------------------------------------------------------------- #
+
+class Toolsmith:
+    def __init__(self, memory, provider, workshop: Path) -> None:
+        self.memory = memory
+        self.provider = provider
+        self.workshop = Path(workshop)
+        self.workshop.mkdir(parents=True, exist_ok=True)
+
+    def forge(self, goal: str, goal_trace_id: str | None = None) -> ToolSpec | None:
+        """Write a tool for a goal. The rule synthesiser first -- it is free,
+        instant and correct where it applies -- then the provider."""
+        built = synthesise(goal)
+        if built:
+            name, source, tests = built
+            origin = "template"
+        else:
+            origin = "provider"
+            try:
+                reply = self.provider.complete(
+                    [Message("system", TOOL_SYSTEM), Message("user", f"TOOL:: {goal}")],
+                    temperature=0.2, max_tokens=900)
+            except Exception:
+                return None
+            source, tests = parse_reply(reply)
+            if not source.strip():
+                return None
+            name, _ = signature_of(source)
+            if not name:
+                return None
+        fname, sig = signature_of(source)
+        return ToolSpec(name=fname or name, purpose=goal, source=source, tests=tests,
+                        signature=sig, built_by=origin)
+
+    def validate(self, spec: ToolSpec) -> Grade:
+        spec.grade = grade_python(spec.source, spec.tests)
+        return spec.grade
+
+    def register(self, spec: ToolSpec, goal_trace_id: str | None = None,
+                 threshold: float = 0.5) -> bool:
+        """Keep it only if it earned its place; remember the failure either way.
+
+        A rejected tool is written to memory as `Kind.FAILURE` with its
+        diagnostic. That is the more valuable record of the two: it stops the
+        system re-deriving the same broken approach, and `explore.py` mutates
+        those failures into the next round of experiments.
+        """
+        grade = spec.grade or self.validate(spec)
+        if grade.score < threshold:
+            self.memory.remember(
+                Kind.FAILURE,
+                f"tool {spec.name!r} for {spec.purpose!r} rejected: {grade.diagnostic}",
+                meta={"tool": spec.name, "grade": grade.score, "stages": [s.name for s in grade.stages if not s.passed]},
+                links=[goal_trace_id] if goal_trace_id else None,
+                grade=grade.score, source=Source.SELF)
+            return False
+        spec.solved.append(spec.purpose)
+        path = self.workshop / f"{spec.name}.py"
+        path.write_text(spec.source if spec.source.endswith("\n") else spec.source + "\n")
+        (self.workshop / f"{spec.name}.tests.py").write_text(spec.tests + "\n")
+        trace = self.memory.remember(
+            Kind.TOOL, spec.embed_text(),
+            meta={"tool": spec.name, "path": str(path), "signature": spec.signature,
+                  "grade": grade.score, "purpose": spec.purpose},
+            links=[goal_trace_id] if goal_trace_id else None,
+            grade=grade.score, source=Source.SELF)
+        spec.trace_id = trace.id
+        (self.workshop / f"{spec.name}.json").write_text(json.dumps(spec.to_json(), indent=2))
+        return True
+
+
+class Toolbox:
+    """The registered tools, and the way a goal finds one.
+
+    `find` is a memory query restricted to `Kind.TOOL`, so it inherits graded
+    recall: a tool that has failed since being registered sinks, without anyone
+    having to remember to delete it.
+    """
+
+    def __init__(self, memory, workshop: Path) -> None:
+        self.memory = memory
+        self.workshop = Path(workshop)
+        self.workshop.mkdir(parents=True, exist_ok=True)
+
+    def names(self) -> list[str]:
+        return sorted(p.stem for p in self.workshop.glob("*.json"))
+
+    def load(self, name: str) -> ToolSpec | None:
+        path = self.workshop / f"{name}.json"
+        if not path.exists():
+            return None
+        return ToolSpec.from_json(json.loads(path.read_text()))
+
+    def all(self) -> list[ToolSpec]:
+        return [s for s in (self.load(n) for n in self.names()) if s]
+
+    def find(self, problem: str, k: int = 3) -> list[tuple[ToolSpec, float, float]]:
+        """Tools for a problem, as (spec, composite score, raw similarity).
+
+        Both numbers are returned because they answer different questions.
+        *Similarity* decides whether a tool is even about this problem, and is
+        what a caller should threshold on. The *composite score* -- which folds
+        in how well the tool has been graded -- decides which of several
+        applicable tools to reach for first. Collapsing them into one number
+        makes a highly-trusted tool look applicable to a problem it has nothing
+        to do with.
+        """
+        out = []
+        for hit in self.memory.recall(problem, k=k, kinds=(Kind.TOOL,)):
+            spec = self.load(hit.trace.meta.get("tool", ""))
+            if spec:
+                out.append((spec, hit.score, hit.similarity))
+        return out
+
+    def invoke(self, name: str, args: list | None = None, kwargs: dict | None = None,
+               timeout: float = 10.0):
+        """Call a registered tool in the sandbox and bring back the result.
+
+        The result crosses the process boundary as JSON, so a tool returning
+        something unserialisable comes back as its `repr` with `json_ok` false
+        rather than as a crash -- the tool ran, and that is a different fact from
+        the tool failing.
+        """
+        spec = self.load(name)
+        if spec is None:
+            return {"ok": False, "error": f"no such tool: {name}"}
+        driver = (
+            f"{spec.source}\n\n"
+            "import json as _json\n"
+            f"_args = _json.loads({json.dumps(json.dumps(args or []))})\n"
+            f"_kwargs = _json.loads({json.dumps(json.dumps(kwargs or {}))})\n"
+            f"_out = {spec.name}(*_args, **_kwargs)\n"
+            "try:\n"
+            "    print('__RESULT__' + _json.dumps({'json_ok': True, 'value': _out}))\n"
+            "except TypeError:\n"
+            "    print('__RESULT__' + _json.dumps({'json_ok': False, 'value': repr(_out)}))\n")
+        run = run_source(driver, timeout=timeout)
+        if not run.ok:
+            return {"ok": False, "error": run.diagnostic, "stderr": run.stderr[-500:]}
+        for line in run.stdout.splitlines():
+            if line.startswith("__RESULT__"):
+                payload = json.loads(line[len("__RESULT__"):])
+                return {"ok": True, **payload}
+        return {"ok": False, "error": "tool produced no result", "stdout": run.stdout[-300:]}
+
+    def record_use(self, name: str, problem: str, worked: bool) -> None:
+        """Attach a solved problem to the tool and grade it.
+
+        This is the line that makes the toolbox improve with use: the problem
+        text joins the tool's embedded description, so the next query shaped like
+        this one finds it, and the grade moves its credibility in recall.
+        """
+        spec = self.load(name)
+        if spec is None:
+            return
+        if worked and problem not in spec.solved:
+            spec.solved.append(problem)
+            (self.workshop / f"{name}.json").write_text(json.dumps(spec.to_json(), indent=2))
+        trace = self.memory.remember(Kind.TOOL, spec.embed_text(),
+                                     meta={"tool": name, "path": str(self.workshop / f"{name}.py"),
+                                           "signature": spec.signature, "purpose": spec.purpose})
+        self.memory.grade(trace.id, 1.0 if worked else -1.0, Source.SELF)
