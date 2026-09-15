@@ -27,6 +27,7 @@ def ensemble(regions, cortex, game, state, mv, weights=None):
 
     Regions share no weights, so this is the ONLY channel through which one
     region's learning can reach another's game."""
+    game = cortex.adapt(game)
     num_v = num_g = den = 0.0
     for i, r in enumerate(regions):
         if r.net is None: continue

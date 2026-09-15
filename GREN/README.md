@@ -16,7 +16,10 @@ python3 -m gren.cli policies    # failure rate and rule coverage by probe policy
 python3 -m gren.cli tree        # the radix tree over discovered signatures
 python3 -m gren.cli package     # the GamePackage handed to the player network
 python3 -m gren.cli grow        # one growing network across all four games
-python3 -m tests.test_gren      # 15 tests
+python3 -m tests.test_gren      # 20 tests
+
+# hand the packages to CyclicCortex, which then builds its map from them
+python3 -m gren.cli package --out ../CyclicCortex/data/gren_packages.json
 ```
 
 Pure standard library. Probes `CyclicCortex`'s games, so both must be present.
@@ -157,12 +160,43 @@ biases can ever move and the loss sits exactly where it started — measured at
 warmup are therefore random; only later ones are identities. Asserted by
 `test_sbnn_is_not_symmetry_locked_at_init`.
 
+## The handoff: CyclicCortex now builds its map from these packages
+
+`package --out` writes a JSON file that `CyclicCortex/cortex/discovered.py`
+reads. It is a file and not an import because GREN imports CyclicCortex's
+adapters in order to probe them; the reverse direction would close the cycle.
+
+With the discovered signature substituted for the hand-written `mechanics` sets,
+**CyclicCortex produces the same three regions, the same members, the same zero
+triangle-inequality violations and the same playing strength.** The distances
+move — GREN's signature has different cardinality — but chess is still nearest
+checkers, sudoku is still the outlier, and sudoku is still nearer go than either
+board game. See `CyclicCortex/README.md`.
+
+Building the handoff exposed a confusion worth the whole exercise. The gate for
+"may this game be placed on the map" had been identification confidence, and
+sudoku scores 0.350 there — because it sits 0.80 away from everything GREN has
+seen. That is *confidently novel*, not uncertain, and a novel game is exactly the
+one that should found its own region. `GamePackage.characterisation` and
+`placeable()` split the two questions: do we know what this game is like, versus
+which known game is it.
+
+`vocabulary.py` goes further and derives the *input* layout, matching feature
+dimensions across games by their legality signature so a shared slot holds one
+quantity rather than one name. It recovers real correspondences — sudoku's
+`CONSTRAINT_UNIQUE` block separates cleanly into row, column and box — and it
+makes chess-to-checkers transfer much worse, for a reason that is a finding about
+the architecture rather than about the code: **a shared refusal code is not a
+shared rule.** Chess and checkers both refuse `OCCUPIED_TARGET`, but chess
+refuses only a target holding your own piece (taking an enemy is a capture) while
+checkers refuses any occupied target. Refusals identify a rule's shape, not its
+arguments — enough to place a game, not enough to share a weight. The numbers are
+in `CyclicCortex/README.md`; the derived vocabulary is opt-in behind
+`--discovered-vocab`.
+
 ## What is not here yet
 
 `sandbox.py` (no oracle currently executes generated code), `features.py` and
 the operator→mechanic lifting of §8.4 — GREN discovers refusal *codes*, not
 STRIPS operators, so minimality (§8.3) is unimplemented. No forest (§20), no
-`similarity.py` MDS projection, no API or frontend. The `GamePackage` is built
-but `CyclicCortex` does not yet consume it: the games there still carry
-hand-written mechanics, and replacing them with discovered ones is the next
-step, now that the two are known to agree.
+`similarity.py` MDS projection, no API or frontend.

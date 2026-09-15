@@ -409,7 +409,79 @@ The common denominators are GREN's mechanics (insight 11) promoted from a
 similarity signature into the network's actual input vocabulary: **the objects
 that decide two games are alike are the objects the network reads.**
 
-*Where:* `CyclicCortex/common_denominator.py`, `CyclicCortex/DESIGN.md` §4 · **confirmed**
+*Refined at cortex scale.* The purpose-built experiment above shares *all three*
+of its inputs. A real region does not: region 0 gives chess and checkers 8
+shared slots out of 33, and the other 25 are private. Measured there — train
+chess alone, then evaluate checkers, against checkers' **majority class** —
+transfer is **+0.023**, not +0.29. The untrained network is the wrong baseline:
+with *nothing* shared at all, checkers still reaches its majority class, because
+training chess moves the region's shared hidden layer and output bias and that
+needs no transfer whatsoever. I made that mistake first and it inflated the
+figure twelve-fold.
+
+This does not contradict the headline; it is what the headline's third bullet
+predicts. Everything removed was game-specific and untransferable, so a
+vocabulary that is 25/33 game-specific transfers about as well as its private
+part allows. The way to get the 0.646 result inside a region is to make the
+shared vocabulary *most* of the vocabulary, not to add more of it.
+
+*Where:* `CyclicCortex/common_denominator.py`, `CyclicCortex/README.md`,
+`CyclicCortex/DESIGN.md` §4 · **refined**
+
+### 30. A shared refusal code is not a shared rule
+Not an insight of Curtis's but one the architecture forced, and the sharpest
+limit found so far on identification-by-refusal (11, 12).
+
+GREN can derive CyclicCortex's *input* vocabulary as well as its mechanics:
+`gren/vocabulary.py` asks which feature dimensions separate the moves a game
+refuses with code C from the moves it accepts, then matches dimensions **across**
+games by their whole legality signature, so a shared slot holds one quantity
+rather than one name. It works — chess's and checkers' `OCCUPANCY[0]` are matched
+to each other, go's and sudoku's `GRID_PLACE[2]` are matched with a sign flip,
+and sudoku's `CONSTRAINT_UNIQUE`, which I wrote as one 3-wide block, is separated
+into row, column and box without being told there were three.
+
+And it makes chess-to-checkers transfer **catastrophically worse**: −0.409
+against the majority baseline, where the hand-written vocabulary gets +0.023.
+
+The alignment is not the fault. It reproduces my own hand-written
+occupancy-only ablation to within noise (−0.409 against −0.432) — which is what
+a correct measurement of a bad idea looks like. Chess and checkers both refuse
+`OCCUPIED_TARGET`, but chess refuses only a target holding your **own** piece,
+because taking an enemy piece is a capture, while checkers refuses **any**
+occupied target for a simple move. Same code, opposite rule. Sharing a weight
+across them teaches chess's exception into checkers. The hand-written vocabulary
+escapes this only by *diluting* those three slots with five harmless ones:
+`GRID_MOVE` sharing alone contributes exactly 0.000.
+
+**Refusals identify a rule's shape, not its arguments.** That is enough to place
+a game on the map and not enough to share a weight — which is why the mechanics
+swap is the default and the derived vocabulary is opt-in.
+
+*Where:* `GREN/gren/vocabulary.py`, `CyclicCortex/cortex/discovered.py`,
+`CyclicCortex/README.md` · **contradicted** (as a route to transfer;
+the alignment itself is confirmed)
+
+### 31. Identification and characterisation are different questions
+Also forced rather than proposed. GREN gated a `GamePackage` on one confidence
+number, and handing packages to CyclicCortex made the conflation visible: sudoku
+scored **0.350** and was refused.
+
+Sudoku scores badly because it sits 0.80 away from everything GREN has seen. That
+is *confidently novel*, not uncertain — and a novel game is precisely the one
+that should found its own region. Gating placement on identification confidence
+refuses a correctly understood game for the crime of being new.
+
+So the number splits in two. **Identification** — which known game is this —
+falls when nothing is close. **Characterisation** — do we know what this game is
+like — rises with probe coverage and a settled refusal taxonomy, and is the right
+gate for placement. Sudoku: 0.350 and 0.977.
+
+A confidence measure that answers two questions at once will be wrong about one
+of them, and the integration is what exposed which.
+
+*Where:* `GREN/gren/package.py` (`placeable`), `GREN/gren/axis.py` (`settled`),
+`CyclicCortex/cortex/discovered.py` · **refined**
 
 ---
 
@@ -417,9 +489,10 @@ that decide two games are alike are the objects the network reads.**
 
 Ordered by how much they would change, per unit of effort:
 
-0. **Does transfer survive ACROSS regions, or only within them?** (29) The measured transfer was between two grid games sharing displacement semantics — within a region, which is what regions are for. If nothing transfers between a board region and a programming region, regions are independent networks with a clustering algorithm attached, and the graph is only doing routing. Cheap to run on the existing corpus.
-1. **Does validity transfer?** (19) Train `p_valid` on chess only; measure it on checkers with the checkers modifier and no further training. If near chance, the modifier is not carrying what 18 claims and the composition is decorative. One day's work, falsifies the central claim.
-2. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
-3. **Does the population actually specialise?** (2) GTMNN rests on the congestion game doing what it claims; `gini` and `diversity` are instrumented from the first commit so it can be falsified early.
-4. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
-5. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
+0. ~~**Does transfer survive ACROSS regions, or only within them?**~~ (29) **Answered: the graph is doing routing.** Cross-region transfer is +0.025 in one case of four; the within-region shared vocabulary is +0.023 against its proper baseline. Regions earn their place by *placing* games correctly — the wrong region is measurably worse, per the negative Shapley values — not by teaching each other.
+1. ~~**Does validity transfer?**~~ (19) **Answered, and it is the same +0.023.** `p_valid` trained on chess alone leaves checkers at its majority class. The interesting follow-up is 29's refinement: build a region whose vocabulary is *mostly* shared, as `common_denominator.py` did with three inputs, and see whether 0.646 survives inside a cortex.
+2. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
+3. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
+4. **Does the population actually specialise?** (2) GTMNN rests on the congestion game doing what it claims; `gini` and `diversity` are instrumented from the first commit so it can be falsified early.
+5. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
+6. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.

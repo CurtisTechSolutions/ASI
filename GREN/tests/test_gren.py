@@ -226,6 +226,90 @@ def test_one_network_grows_across_every_game():
     assert net.ni > 30 and net.no > 8, net.shape()
     assert all(c in net.outputs for c in ("LEGAL", "OCCUPIED_TARGET")), net.outputs
 
+def test_auc_is_symmetric_and_calibrated():
+    from gren.vocabulary import _auc, _signed
+    assert abs(_auc([1,2,3],[1,2,3]) - 0.5) < 1e-9, "identical samples must be 0.5"
+    assert _auc([4,5,6],[1,2,3]) == 1.0
+    assert _auc([1,2,3],[4,5,6]) == 0.0
+    assert abs(_auc([1,1,1],[1,1,1]) - 0.5) < 1e-9, "all ties must be 0.5"
+    assert _signed([4,5,6],[1,2,3]) == 1.0 and _signed([1,2,3],[4,5,6]) == -1.0
+
+def test_legality_comes_from_is_legal_not_from_why():
+    """`why` is a DIAGNOSIS -- it assumes refusal and falls through to a default
+    code, so reading legality off it labels every move illegal. That mistake gave
+    chess a zero-size legal class and every feature a separation of 0.000."""
+    import random
+    from gren.oracle import build_all
+    from gren import vocabulary as V
+    o = build_all()["chess"]
+    rows, blocks = V.sample(o, o.game, random.Random(1), states=20, k=8)
+    assert rows and blocks
+    legal = sum(1 for c, _ in rows if c is None)
+    assert legal > 0.1 * len(rows), f"only {legal}/{len(rows)} legal -- why() misread"
+    for mv_code, _ in rows: assert mv_code is None or mv_code in CODES
+
+def test_derived_vocabulary_beats_its_own_noise_floor():
+    """Every assignment must clear the separation the SAME column reaches on
+    shuffled labels. Without the floor, finite samples give every column a score
+    above zero and the layout is noise with a threshold on it."""
+    import random
+    from gren.oracle import build_all
+    from gren import vocabulary as V
+    o = build_all()["sudoku"]
+    rows, blocks = V.sample(o, o.game, random.Random(0), states=40, k=10)
+    assert len(rows) > 200
+    assoc = V.associate(rows, V.columns(rows, blocks), seed=0)
+    detail = V.explains(assoc)
+    for key, (code, sep, floor) in detail.items():
+        if code is not None: assert abs(sep) - floor >= V.MARGIN, (key, code, sep, floor)
+    # sudoku's three uniqueness features must separate to three DIFFERENT codes:
+    # the block I wrote as one 3-wide unit is really row, column and box.
+    got = {code: k for k, (code, _, _) in detail.items()
+           if k[0] == "CONSTRAINT_UNIQUE" and code}
+    assert set(got) == {"CONSTRAINT_ROW", "CONSTRAINT_COL", "CONSTRAINT_BOX"}, got
+    assert len({k[1] for k in got.values()}) == 3, "must be three distinct indices"
+
+def test_alignment_never_puts_two_dims_of_one_game_in_a_slot():
+    """A slot is one quantity. Two dimensions of the SAME game are by
+    construction not the same quantity, so a slot holding both would be an
+    aliasing bug of exactly the kind alignment exists to prevent."""
+    from gren.oracle import build_all, CODES
+    from gren import vocabulary as V
+    lay, slots, priv, _ = V.build_aligned(build_all(), CODES, seed=0, states=60, k=12)
+    assert slots, "nothing matched at all"
+    for sl in slots:
+        assert len(sl["dims"]) >= 2, sl
+        assert len(set(sl["dims"])) == len(sl["dims"])
+        for g, (b, i, sg) in sl["dims"].items(): assert sg in (1, -1), sl
+    for g, keys in priv.items():
+        placed = {k for sl in slots for gg, (b, i, _) in sl["dims"].items()
+                  if gg == g for k in [(b, i)]}
+        assert not (set(keys) & placed), f"{g}: a dim is both shared and private"
+
+def test_export_round_trips_the_vocabulary():
+    import tempfile, os
+    from gren import package as pkg
+    from gren.oracle import build_all, CODES
+    from gren import vocabulary as V
+    oc = build_all()
+    # 60/12 is what the CLI exports at. Below it checkers produces fewer than
+    # min_class OCCUPIED_TARGET refusals and NOTHING matches -- the floor
+    # declining to align on too little evidence, which is correct behaviour.
+    lay, slots, _, _ = V.build_aligned({k: oc[k] for k in ("chess", "checkers")},
+                                       CODES, seed=0, states=60, k=12)
+    lay = {n: {c: [list(t) for t in d] for c, d in l.items()} for n, l in lay.items()}
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "h.json")
+        pkg.export([], p, vocabulary=lay, slots=slots)
+        doc = pkg.load(p)
+    assert doc["slots"] and doc["vocabulary"]["chess"]
+    for sl in doc["slots"]:
+        assert len(sl["games"]) >= 2
+        for g in sl["games"]: assert len(doc["vocabulary"][g][sl["name"]]) == 1
+    for code, dims in doc["vocabulary"]["chess"].items():
+        for b, i, sg in dims:
+            assert isinstance(b, str) and isinstance(i, int) and sg in (1, -1)
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

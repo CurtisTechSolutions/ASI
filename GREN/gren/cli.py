@@ -86,13 +86,50 @@ def cmd_grow(a):
     print(f"  hidden grew {len(grew)} time(s) on a loss plateau")
 
 def cmd_package(a):
+    """Build a GamePackage per game, and optionally write the handoff file that
+    CyclicCortex consumes in place of its hard-coded mechanics."""
+    from gren.oracle import build_all as _oracles
     ev = _explore(a.budget, a.policy, a.seed)
     corpus = {n: e.signature() for n, (e, _) in ev.items()}
+    built = []
     print()
     for n, (e, _) in ev.items():
-        p = pkg.build(e, corpus)
-        print(f"  {n}: {p.to_dict()}")
-        print(f"     accepted by the player network: {p.accepted()}\n")
+        p = pkg.build(e, corpus); built.append(p)
+        print(f"  {n:>9}: {len(p.signature)} tokens, {len(p.mechanics)} codes | "
+              f"identify {p.confidence:.3f} | characterise {p.characterisation:.3f} "
+              f"| placeable={p.placeable()}")
+        print(f"             nearest: {[(round(d,3), g) for d, g in p.candidates[:2]]}")
+    if a.out:
+        rng = random.Random(a.seed)
+        feats = {}
+        for n, o in _oracles().items():
+            g = o.game
+            names = set()
+            for _ in range(12):
+                st = (g.random_state(rng) if hasattr(g, "random_state")
+                      else g.new(seed=rng.randrange(10**6)))
+                for mv in o.candidates(st, rng, 6):
+                    try: names |= set(o.features(st, mv))
+                    except Exception: pass
+            feats[n] = sorted(names)
+        from gren import vocabulary as voc
+        from gren.oracle import CODES
+        lay, slots, priv, det = voc.build_aligned(_oracles(), CODES, seed=a.seed)
+        print("\n  input slots matched ACROSS games by legality signature:")
+        for sl in slots:
+            print(f"    {sl['name']:<20} {sl['strength']:.2f}  " + ", ".join(
+                f"{g}:{'+' if sg > 0 else '-'}{b}[{i}]"
+                for g, (b, i, sg) in sorted(sl["dims"].items())))
+        for n in sorted(det):
+            expl = sum(1 for c, _, _ in det[n].values() if c)
+            print(f"    {n:>9}: {expl} of {len(det[n])} dims explain a refusal, "
+                  f"{len(priv[n])} stay private")
+        lay = {n: {c: [list(t) for t in d] for c, d in l.items()}
+               for n, l in lay.items()}
+        size = pkg.export(built, a.out, feats, vocabulary=lay, slots=slots)
+        print(f"\n  wrote {size} bytes -> {a.out}")
+        print(f"  feature languages: " +
+              ", ".join(f"{k}={len(v)}" for k, v in feats.items()))
 
 def _spearman(a, b):
     def rk(v):
@@ -116,6 +153,7 @@ def main(argv=None):
         q.add_argument("--policy", default="eig", choices=list(POLICIES))
         q.add_argument("--seed", type=int, default=0)
         q.add_argument("--hidden", type=int, default=24)
+        q.add_argument("--out", default=None, help="write the handoff file here")
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__": main()
