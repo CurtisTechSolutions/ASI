@@ -6,6 +6,7 @@
   python3 -m cortex.cli sudoku      solve a puzzle with the sudoku region
 """
 import argparse, random, sys
+from cortex import checkpoint
 from cortex.cortex import Cortex
 from cortex.games import ALL
 from cortex.graph import distance
@@ -114,7 +115,8 @@ def play_chess(c, rng, opponent_depth=1, max_plies=60, verbose=False):
 def cmd_play(a):
     """Train each playable game's region, then play it against its engine."""
     names = [n for n in a.games if n in OPPONENT]
-    c = build(names); rng = random.Random(a.seed)
+    c = checkpoint.load(a.load) if a.load else build(names)
+    rng = random.Random(a.seed)
     for n in names:
         print(f"\n  === {n} ===")
         opp = OPPONENT[n]
@@ -127,6 +129,7 @@ def cmd_play(a):
                                          opponent=opp))
         for i in range(a.games_n):
             print("    vs engine", play(c, n, random.Random(100+i), a.depth, a.plies))
+    if a.save: print("\n  saved:", checkpoint.save(c, a.save), "bytes ->", a.save)
 
 def cmd_sudoku(a):
     c = build(["sudoku"]); rng = random.Random(a.seed)
@@ -174,11 +177,62 @@ def cmd_demo(a):
     print(f"\n    regions {st['regions']}, metric violations {st['metric_violations']}")
     for d in st["detail"]: print("    ", d)
 
+def cmd_transfer(a):
+    """Does one region's learning reach another's game? Regions share no
+    weights, so an ensemble is the only possible channel."""
+    from cortex import routing, credit
+    c = build(a.games); rng = random.Random(a.seed)
+    for n in a.games: c.train(ALL[n], episodes=a.episodes, rng=rng, k=12,
+                              opponent=OPPONENT.get(n))
+    def samples(game, n=40):
+        rr = random.Random(7); out = []
+        for st in c._states(game, rr, n, 0.5, OPPONENT.get(game.name)):
+            for mv in game.candidates(st, rr, 6): out.append((st, mv, game.is_legal(st, mv)))
+        return out
+    def acc(game, regions, S):
+        return sum(1 for st, mv, l in S
+                   if (credit.ensemble(regions, c, game, st, mv)[0] >= 0.5) == l) / len(S)
+    print(f"\n  {'game':>9} {'own region':>11} {'auction top-2':>14} {'all regions':>12} {'baseline':>9}")
+    for n in a.games:
+        game = ALL[n]; S = samples(game)
+        base = max(sum(1 for _,_,l in S if l), sum(1 for _,_,l in S if not l))/len(S)
+        own = [c.region_for(game)]
+        top2 = routing.allocate(c, game, m=2).seats
+        alln = [r for r in c.regions if r.net is not None]
+        print(f"  {n:>9} {acc(game,own,S):>11.3f} {acc(game,top2,S):>14.3f} "
+              f"{acc(game,alln,S):>12.3f} {base:>9.3f}")
+    if a.save: print("\n  saved:", checkpoint.save(c, a.save), "bytes ->", a.save)
+
+def cmd_credit(a):
+    """Shapley credit over regions, exact where the region count allows."""
+    from cortex import credit, routing
+    c = checkpoint.load(a.load) if a.load else build(a.games)
+    rng = random.Random(a.seed)
+    if not a.load:
+        for n in a.games: c.train(ALL[n], episodes=a.episodes, rng=rng, k=12,
+                                  opponent=OPPONENT.get(n))
+    print(f"\n  coverage (which regions can encode which game)\n")
+    print("  " + " "*28 + "".join(f"{g:>10}" for g in a.games))
+    for r in c.regions:
+        nm = ",".join(g.name for g in r.games)
+        print(f"  {nm:>28}" + "".join(f"{credit.coverage(r, ALL[g]):>10.2f}" for g in a.games))
+    print("\n  shapley\n")
+    for n in a.games:
+        game = ALL[n]; rr = random.Random(3); S = []
+        for st in c._states(game, rr, 20, 0.5, OPPONENT.get(n)):
+            for mv in game.candidates(st, rr, 4): S.append((st, mv, game.is_legal(st, mv)))
+        out = credit.shapley(c, game, S)
+        phis = " ".join(f"R{k}={v:+.3f}" for k, v in sorted(out["phi"].items()))
+        print(f"  {n:>9}  {phis}   total={out['total']:+.3f}  "
+              f"eff.err={out['efficiency_error']:.1e}  {out['method']}")
+        print(f"  {'':>9}  auction: {routing.allocate(c, game, m=2).to_dict()}")
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cortex")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("demo", cmd_demo), ("map", cmd_map),
-                     ("play", cmd_play), ("sudoku", cmd_sudoku)):
+                     ("play", cmd_play), ("sudoku", cmd_sudoku),
+                     ("transfer", cmd_transfer), ("credit", cmd_credit)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--episodes", type=int, default=400)
         q.add_argument("--seed", type=int, default=0)
@@ -186,6 +240,8 @@ def main(argv=None):
         q.add_argument("--depth", type=int, default=1)
         q.add_argument("--plies", type=int, default=60)
         q.add_argument("--rounds", type=int, default=40)
+        q.add_argument("--save", default=None, help="write a checkpoint here")
+        q.add_argument("--load", default=None, help="resume from a checkpoint")
         q.add_argument("--games", nargs="*", default=["chess","checkers","go","sudoku"])
     a = p.parse_args(argv); a.fn(a)
 

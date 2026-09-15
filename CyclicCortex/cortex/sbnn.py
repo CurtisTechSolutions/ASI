@@ -122,5 +122,24 @@ class SBNN:
         if self.plateaued(): return self.grow_hidden()
         return 0
 
+    # ---------------------------------------------------------- serialisation
+    def to_dict(self):
+        return {"ni": self.ni, "nh": self.nh, "act": self.act, "b": self.b,
+                "W1": self.W1, "b1": self.b1, "Wv": self.Wv, "bv": self.bv,
+                "Wg": self.Wg, "bg": self.bg,
+                "loss": self.loss, "best": self.best, "since": self.since,
+                "seen": self.seen, "log": self.log,
+                "warmup": self.warmup, "patience": self.patience,
+                "min_improve": self.min_improve, "max_hidden": self.max_hidden,
+                "growth": self.growth}
+
+    @classmethod
+    def from_dict(cls, d):
+        n = cls(d["ni"], d["nh"], act=d["act"], b=d["b"])
+        for k in ("W1","b1","Wv","bv","Wg","bg","loss","best","since","seen","log",
+                  "warmup","patience","min_improve","max_hidden","growth"):
+            setattr(n, k, d[k])
+        return n
+
     def shape(self): return {"ni": self.ni, "nh": self.nh, "params":
                              self.ni * self.nh + self.nh + 2 * self.nh + 2}

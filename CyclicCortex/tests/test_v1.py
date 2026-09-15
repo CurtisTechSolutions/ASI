@@ -183,6 +183,81 @@ def test_rule_selected_on_play_quality():
     src = inspect.getsource(Cortex.select_rule)
     assert "game.value" in src, "rule selection must score the resulting position"
 
+def test_checkpoint_round_trip():
+    """A trained cortex must reload to bit-identical predictions, or long runs
+    and cross-session training are impossible."""
+    import tempfile, os
+    from cortex import checkpoint
+    from cortex.cli import OPPONENT
+    c = Cortex(); rng = random.Random(0)
+    for n in ("chess", "go", "sudoku"): c.add_game(ALL[n])
+    c.train(ALL["go"], episodes=120, rng=rng, k=8, opponent=OPPONENT["go"])
+    d = tempfile.mkdtemp()
+    for name in ("ck.json", "ck.json.gz"):          # both plain and gzipped
+        path = os.path.join(d, name)
+        checkpoint.save(c, path)
+        c2 = checkpoint.load(path)
+        game = ALL["go"]; r1, r2 = c.region_for(game), c2.region_for(game)
+        st = game.new(); rr = random.Random(5)
+        for mv in game.candidates(st, rr, 10):
+            a = r1.net.predict(c.encode(r1, game, st, mv))
+            b = r2.net.predict(c2.encode(r2, game, st, mv))
+            assert a == b, (name, a, b)
+        assert [r.rule for r in c2.regions] == [r.rule for r in c.regions]
+        assert [[g.name for g in r.games] for r in c2.regions] == \
+               [[g.name for g in r.games] for r in c.regions]
+    d2 = tempfile.mkdtemp()                      # a clean directory for rotation
+    m = checkpoint.CheckpointManager(d2, keep=2)
+    for i in range(5): m.save(c, f"r{i}")
+    assert len(m.list()) == 2, f"rotation must keep exactly 2, kept {len(m.list())}"
+    assert m.load_latest() is not None, "the latest pointer must survive rotation"
+
+def test_coverage_and_auction():
+    from cortex import routing, credit
+    c = Cortex(); rng = random.Random(0)
+    for n in ("chess", "go", "sudoku"): c.add_game(ALL[n])
+    for n in ("chess", "go", "sudoku"): c.train(ALL[n], episodes=60, rng=rng, k=6)
+    for n in ("chess", "go", "sudoku"):
+        own = c.region_for(ALL[n])
+        assert credit.coverage(own, ALL[n]) == 1.0, "a region fully covers its own game"
+        a = routing.allocate(c, ALL[n], m=2)
+        assert a.seats and a.seats[0] is own, f"{n}: its own region should win the seat"
+        assert a.price >= 0.0
+    # congestion: a correct claim shared by two regions pays each half
+    a = routing.allocate(c, ALL["chess"], m=2)
+    r = routing.settle(a, correct=True)
+    assert abs(r["per_claimant"] - 1.0 / len(a.seats)) < 1e-9
+
+def test_shapley_exact_and_efficient():
+    """Efficiency is the axiom that makes credit conserved: the shares must sum
+    to exactly v(all) - v(none)."""
+    from cortex import credit
+    from cortex.cli import OPPONENT
+    c = Cortex(); rng = random.Random(0)
+    for n in ("chess", "go", "sudoku"): c.add_game(ALL[n])
+    for n in ("chess", "go", "sudoku"): c.train(ALL[n], episodes=120, rng=rng, k=8)
+    game = ALL["sudoku"]
+    S = []
+    rr = random.Random(3)
+    for st in c._states(game, rr, 12, 0.0, None):
+        for mv in game.candidates(st, rr, 4): S.append((st, mv, game.is_legal(st, mv)))
+    out = credit.shapley(c, game, S)
+    assert out["method"] == "exact", "three regions must enumerate, not sample"
+    assert out["efficiency_error"] < 1e-9, out["efficiency_error"]
+    own = c.region_for(game).id
+    assert out["phi"][own] == max(out["phi"].values()), "the owning region earns most"
+    # null player: a region with zero coverage contributes exactly nothing
+    zero = [r for r in c.regions if credit.coverage(r, game) == 0.0]
+    for r in zero:
+        assert abs(out["phi"][r.id]) < 1e-9, f"region {r.id} has no coverage but got credit"
+
+def test_rehearse_covers_every_game_in_the_region():
+    c = Cortex(); rng = random.Random(0)
+    c.add_game(ALL["chess"]); c.train(ALL["chess"], episodes=60, rng=rng, k=6)
+    r, info = c.add_game_and_rehearse(ALL["checkers"], rng=rng, episodes=60, k=6)
+    assert set(info["rehearsed"]) == {"chess", "checkers"}
+    assert info["samples"] > 0
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

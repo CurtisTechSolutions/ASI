@@ -15,7 +15,7 @@ python3 -m cortex.cli demo          # build, train, play chess, add sudoku
 python3 -m cortex.cli map           # the similarity graph and its regions
 python3 -m cortex.cli play          # chess against the engine
 python3 -m cortex.cli sudoku        # solve puzzles by the network's own ranking
-python3 -m tests.test_v1            # 16 tests
+python3 -m tests.test_v1            # 20 tests
 ```
 
 Pure standard library, no dependencies. **Stockfish is optional** — install it
@@ -33,6 +33,9 @@ a real engine; everything degrades to the built-in opponents without it.
 | `cortex/vocabulary.py` | mechanic → input slots; extension only appends, slot indices are permanent |
 | `cortex/sbnn.py` | the growing network, two heads (`p_valid`, `grade`), growth on a loss plateau |
 | `cortex/graph.py` | Jaccard distance over mechanics, triangle-inequality check |
+| `cortex/checkpoint.py` | save / load / rotating `CheckpointManager`. Atomic writes, gzip by extension |
+| `cortex/credit.py` | vocabulary coverage, cross-region ensembling, **Shapley over regions** — exact below 12 regions, Monte-Carlo above |
+| `cortex/routing.py` | the region-level **auction** (uniform price, so truthful bidding is dominant) and **congestion** settlement |
 | `cortex/cortex.py` | regions, routing, supervised training, **self-play with outcome credit**, **distillation from a teacher**, evaluation |
 | `cortex/stockfish.py` | Stockfish as opponent *and* teacher — persistent UCI process, FEN/UCI conversion, `evaluate`, and `score_moves` (MultiPV: every legal move scored in one search). Optional |
 
@@ -200,6 +203,77 @@ randomly generated chess positions are unreachable** — the side not to move
 already in check, or a missing king. Half the supervised training signal was
 coming from boards no game can produce. `stockfish.playable()` now filters them,
 and it is a pure function that works without Stockfish installed.
+
+## Regions as players: the auction and Shapley credit
+
+GTMNN divided credit among 4096 micros by Monte-Carlo because `2^4096` coalitions
+cannot be enumerated. A dozen regions changes the arithmetic — `2^12 = 4096`
+coalitions is a loop — so **exact Shapley is the default here** and Monte-Carlo
+the fallback. That was the specific benefit claimed for moving from micros to
+regions, and it holds.
+
+Vocabulary coverage, which is what a region bids with:
+
+| region | chess | checkers | go | sudoku |
+|---|---|---|---|---|
+| chess, checkers | 1.00 | 1.00 | 0.17 | **0.00** |
+| go | 0.12 | 0.17 | 1.00 | 0.25 |
+| sudoku | **0.00** | **0.00** | 0.17 | 1.00 |
+
+Exact Shapley over those regions, efficiency error at machine precision:
+
+| game | R0 (chess, checkers) | R1 (go) | R2 (sudoku) | eff. error |
+|---|---|---|---|---|
+| chess | **+0.473** | −0.141 | −0.000 | 5.6e-17 |
+| checkers | **+0.487** | −0.123 | −0.000 | 0.0 |
+| go | −0.116 | **+0.599** | +0.121 | 1.1e-16 |
+| sudoku | −0.000 | −0.443 | **+1.071** | 2.2e-16 |
+
+The numbers are semantically right, not merely well-formed. Each game's own
+region takes the largest positive share. Wrong regions score **negative** — they
+actively hurt. The go region earns **+0.121 on sudoku**, which is real
+cross-region value from the placement mechanics they share. And the sudoku
+region scores **exactly −0.000 on chess**, where its coverage is exactly 0.00:
+**the null-player axiom appearing in measured data.**
+
+The auction settles as it should — each game's own region wins its seat at a bid
+of 0.50 — and congestion splits a correct claim among claimants, which is the
+same split reward that made GTMNN's micros specialise, applied to regions.
+
+## Cross-region transfer: real, and small
+
+Regions share no weights, so an ensemble is the **only** channel by which one
+region's learning can reach another's game (`DESIGN.md` §15.1):
+
+| game | own region | auction top-2 | all regions | baseline |
+|---|---|---|---|---|
+| chess | 0.948 | 0.948 | 0.948 | 0.519 |
+| **checkers** | 0.905 | **0.930** | **0.930** | 0.583 |
+| go | 1.000 | 1.000 | 1.000 | 0.561 |
+| sudoku | 1.000 | 1.000 | 1.000 | 0.500 |
+
+**One case improves and the rest are flat.** Checkers gains 0.025 from the go
+region. That is a real answer to the open question rather than a hopeful one:
+the graph earns its place by *placing* games correctly — the wrong region is
+measurably worse, per the negative Shapley values — and not by regions teaching
+each other, which barely happens.
+
+## Replay on join
+
+`rehearse` interleaves every game in a region when one of them is new. Growth is
+an identity, but the training that *follows* is not protected. Measured by
+training chess alone, then admitting checkers:
+
+| | chess legality | chess top-choice-legal |
+|---|---|---|
+| before checkers joins | 0.898 | 0.933 |
+| after join, no rehearsal | 0.925 | 0.811 |
+| after join, with rehearsal | 0.885 | 0.833 |
+
+**Forgetting is mild and replay's benefit is not detectable at this scale.**
+Joining checkers even *raised* chess legality. Reported as it measured rather
+than as it was expected to: the mechanism is implemented and available, and this
+corpus is too small to show it earning its keep.
 
 **Where it stands.** Checkers and go are real players — checkers wins 2 of 4
 against a depth-1 engine and reaches 0.975 legality; go wins 1 of 4 and its

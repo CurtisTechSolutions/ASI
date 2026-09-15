@@ -46,3 +46,11 @@ class Vocabulary:
     def to_dict(self):
         return {"order": self.order, "slot": {k: list(v) for k, v in self.slot.items()},
                 "width": self.width, "epoch": self.epoch}
+
+    @classmethod
+    def from_dict(cls, d):
+        v = cls()
+        v.order = list(d["order"])
+        v.slot = {k: tuple(t) for k, t in d["slot"].items()}
+        v.width = d["width"]; v.epoch = d["epoch"]
+        return v

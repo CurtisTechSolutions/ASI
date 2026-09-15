@@ -191,6 +191,47 @@ class Cortex:
             if score > best: best, bestname = score, name
         return bestname
 
+    # ----------------------------------------------------------------- replay
+    def rehearse(self, region, rng=None, episodes=200, lr=0.05, k=12, opponent=None):
+        """Interleave every game in a region when one of them is new.
+
+        Growth is an identity (SBNN §8.2), so admitting a game changes nothing at
+        the moment it happens. What is NOT protected is the training that
+        follows: train only on the newcomer and the incumbents are overwritten by
+        ordinary catastrophic forgetting. Rehearsal interleaves them so the
+        region keeps what it had.
+
+        NeuralCompression/FINDINGS.md §12 measured replay as the better of the two
+        consolidation routes -- it transfers the function rather than the
+        parameters -- with a small margin at matched compute. It is used here for
+        RETENTION, which is what it is actually good at.
+        """
+        rng = rng or random.Random(0)
+        if not region.games: return {"rehearsed": [], "samples": 0}
+        per = max(1, episodes // len(region.games))
+        seen = 0
+        order = []
+        for _ in range(per):
+            for g in region.games: order.append(g)
+        rng.shuffle(order)
+        for g in order:
+            st = (g.random_state(rng) if hasattr(g, "random_state")
+                  else g.new(seed=rng.randrange(10**6)))
+            cands = self._balance(g, st, g.candidates(st, rng, k), rng)
+            for mv in cands:
+                legal = 1.0 if g.is_legal(st, mv) else 0.0
+                region.net.step(self.encode(region, g, st, mv), valid=legal,
+                                grade=g.reward(st, mv) if legal else 0.0, lr=lr)
+                seen += 1
+        return {"rehearsed": [g.name for g in region.games], "samples": seen}
+
+    def add_game_and_rehearse(self, game, rng=None, episodes=200, **kw):
+        """Admit a game and immediately rehearse the region it joined."""
+        r = self.add_game(game)
+        if len(r.games) > 1 and r.net is not None:
+            return r, self.rehearse(r, rng, episodes, **kw)
+        return r, {"rehearsed": [], "samples": 0}
+
     # ------------------------------------------------------------ distillation
     def distill(self, game, teacher, positions=150, rng=None, lr=0.05,
                 depth=8, multipv=24, scale=400.0, opponent=None, selfplay=0.5):

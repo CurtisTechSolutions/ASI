@@ -39,6 +39,16 @@ class SimilarityGraph:
             if self.dist(a, c) > self.dist(a, b) + self.dist(b, c) + 1e-12: bad += 1
         return bad
 
+    def to_dict(self):
+        return {"names": self.names, "mech": [sorted(m) for m in self.mech],
+                "tau": self.tau}
+
+    @classmethod
+    def from_dict(cls, d):
+        g = cls(tau=d["tau"])
+        for n, m in zip(d["names"], d["mech"]): g.add(n, m)
+        return g
+
     def matrix(self):
         n = len(self.names)
         return [[self.dist(i, j) for j in range(n)] for i in range(n)]
