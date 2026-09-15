@@ -538,6 +538,7 @@ To turn this from an indication into a result:
 | `RadixCyclicNN/radixnet/graph.py` | per-node `a, b, h, k`; `Z_RANGE = 4.5` matched to the quarter period |
 | `RadixCyclicNN/radixnet/backend.py` | the same formulas inlined for the hot loop, CPU and GPU, asserted to produce identical numbers |
 | `SBNN_RNN_ActivationFunction/main.py` | the "learnable activation" principle in a conventional RNN with BPTT |
+| `ActivationFunctionTest/self_building_sinewave.py` | the four learnable parameters inside a self-building network, standard library only - five arms, five seeds, and the section 6 dead fraction measured on the pre-activations a trained network actually produces |
 
 The edge signal in RadixCyclicNN is `w · f_p(z_p) · f_c(z_c)` — weight times the
 activation of the parent times the activation of the child. The consequence of a
