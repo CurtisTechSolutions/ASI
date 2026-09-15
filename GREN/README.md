@@ -1,57 +1,168 @@
-# GREN
+# GREN — V1
 
-**G**ame **R**ule **E**ncoder **N**etwork — part one of a two-part architecture.
+**G**ame **R**ule **E**ncoder **N**etwork. GREN does not play. It works out
+**which game is being played**, by guessing, being refused, and treating every
+*no* as the lesson.
 
-GREN does not play. GREN works out **which game is being played**, by guessing,
-being told no, and treating every *no* as the lesson. When it knows, it hands a
-finished rule package to `GTMNN/`, which plays the game it is handed.
+`DESIGN.md` is the specification. This is what runs.
 
-> Once you understand the game, then and only then can you play the game.
+## Quick start
 
-The job is **identification by similarity**, not induction from nothing. GREN
-holds a corpus of games it already knows and asks *"which of these does this new
-thing refuse like?"* — a nearest-neighbour query over partial evidence, refined
-by probes chosen to separate the candidates still standing. Learning a rule set
-from zero is the degenerate case where nothing in the corpus is close, and it
-costs three to four orders of magnitude more.
+```bash
+cd GREN
+python3 -m gren.cli explore     # probe every game; what does each one refuse?
+python3 -m gren.cli similar     # discovered similarity vs CyclicCortex's hand-written sets
+python3 -m gren.cli policies    # failure rate and rule coverage by probe policy
+python3 -m gren.cli tree        # the radix tree over discovered signatures
+python3 -m gren.cli package     # the GamePackage handed to the player network
+python3 -m gren.cli grow        # one growing network across all four games
+python3 -m tests.test_gren      # 15 tests
+```
 
-## Contents
+Pure standard library. Probes `CyclicCortex`'s games, so both must be present.
 
-| file | what it is |
+## The result that matters
+
+**CyclicCortex hard-codes the mechanic set of every game it plays. GREN
+discovers those sets by probing, and the two agree.**
+
+Spearman correlation between GREN's discovered pairwise distances and the
+hand-written mechanic sets: **ρ = 0.886**, with the closest pair (chess ↔
+checkers) the same under both.
+
+| pair | GREN discovered | hand-written |
+|---|---|---|
+| chess / checkers | **0.368** | **0.529** |
+| chess / go | 0.579 | 0.684 |
+| checkers / go | 0.632 | 0.667 |
+| go / sudoku | 0.800 | 0.778 |
+| chess / sudoku | 0.840 | 0.905 |
+| checkers / sudoku | 0.880 | 0.900 |
+
+Nothing about the ordering was given to GREN. It played moves, was told no, and
+recovered the structure from the pattern of refusals — which is DESIGN §2's
+claim (*a game's identity is its refusal boundary*) holding on real games.
+
+## How it works
+
+An oracle **names its own refusal kinds**, the way a compiler emits `E0308`
+rather than a bare rejection. That is not GREN cheating — §15 of the spec says a
+structured code *is* the class, because rediscovering clusters over `rustc`
+output when `rustc` hands you the code is inventing a worse version of an
+existing answer. What GREN discovers is **which codes a game actually has, and
+in what proportion**:
+
+| game | codes found | dominant refusals |
+|---|---|---|
+| chess | 7 | `WRONG_PATTERN` 80%, `BLOCKED_PATH` 8%, `SELF_CHECK` 7% |
+| checkers | 7 | `EMPTY_SOURCE`, `NOT_YOURS`, `WRONG_PATTERN`, `FORCED_ALTERNATIVE` |
+| go | 2 | `OCCUPIED_TARGET` 99%, `SUICIDE` 1% |
+| sudoku | 4 | `OCCUPIED_TARGET` 47%, `CONSTRAINT_ROW` 31%, `CONSTRAINT_COL` 17% |
+
+Sixteen codes exist in the shared vocabulary; a game has only the ones probing
+finds. Go really does refuse in only two ways.
+
+## The 50% failure rate
+
+Choosing probes by expected information gain is provably maximised at
+`p(legal) = 0.5` for a binary oracle, so the target failure rate is **derived,
+not set**. Measured at a 1200-probe budget:
+
+| game | failure rate under `eig` |
 |---|---|
-| `DESIGN.md` | the full specification — the contract every module is implemented against, in 32 sections |
+| chess | **0.480** |
+| checkers | 0.545 |
+| sudoku | 0.282 |
+| go | 0.159 |
 
-**There is no code in this directory yet.** `DESIGN.md` is the whole of it: a
-spec written to be implemented against, not notes. Read it fully before writing
-anything here.
+Chess and checkers land near the prediction. **Go and sudoku do not, and the
+reason is structural rather than a tuning failure:** most points on a go board
+are legal (legality density 0.84), so there is no 50/50 split available to find.
+The prediction holds where the boundary is tight and does not where it is loose,
+which is the honest scope of §4.
 
-## What the spec covers
+**Rule coverage is the stronger result.** On chess:
 
-| § | what it settles |
-|---|---|
-| 1 | every requirement in the author's own words, mapped to the section that realises it |
-| 2-3 | the claim (a game is identified by what it refuses) and the retrieval task built on it |
-| 4 | why failing on purpose is optimal, and why the target failure rate is exactly **50%** — it falls out of the information-gain objective rather than being set as a knob |
-| 5 | what is identifiable and what is only *placeable*; why programming is the domain worth optimising for |
-| 7-8 | the package layout and the decomposition into smallest parts |
-| 9 | the axis catalogue — the dimensions of game-space |
-| 10-18 | the modules: `verdict`, `action`, `oracle`, `sandbox`, `features`, `reasons`, `rule`, `probe`, `axis` |
-| 19-21 | `radix.py` (a radix tree with the mechanics of a trie), `forest.py`, `similarity.py` |
-| 22 | `package.py` — the `GamePackage` handed to GTMNN, and the two-head micro (`p_valid` from GREN, `grade` from GTMNN) |
-| 23-28 | `explorer`, `checkpoint`, `bench`, `cli`, `api`, `frontend/`, tests |
-| 29-32 | performance, other ways to solve this, cross-cutting invariants, open questions |
+| policy | failure rate | codes found |
+|---|---|---|
+| random | 0.598 | **4** |
+| boundary | 0.577 | **7** |
+| eig | **0.445** | **7** |
 
-## Planned shape
+Random probing finds four of chess's seven refusal kinds. Probing *at the
+boundary* finds all seven. A policy that only ever trips the common refusal
+never learns the rare rules, and that is what a probe policy is for.
 
-Python package `gren`, Python 3.11+, **standard library only** — the same rule
-`RadixCyclicNN/` and `AudioImage/` follow. CLI, stdlib HTTP JSON API and a
-Vite + React frontend, so it stays a recognisable sibling of the other projects.
+## A radix tree with the mechanics of a trie
 
-## Related
+Both halves are load-bearing, and their interaction is one rule:
+**a terminal node is never merged away.**
 
-* `GTMNN/DESIGN.md` — part two, which plays the game GREN identifies. It refuses
-  a package below a confidence threshold, so the ordering is enforced rather
-  than suggested.
-* `RadixCyclicNN/DESIGN.md` §5.2 — the split and merge rules GREN's radix tree
-  follows exactly.
-* `Research/CyclesAreAFeature.md` — the structural argument underneath both.
+A general class can be a strict prefix of a specific one — `board /
+two-player / perfect` is a real answer that can be used while identification
+continues, and it has exactly one child, so without the clause compression
+would silently delete it. `test_radix_never_merges_a_terminal` asserts it
+directly.
+
+Partial-evidence retrieval branches on unknown tokens rather than guessing, so
+the answer is a cluster:
+
+```
+['category=board']          -> ['chess', 'checkers', 'go']
+['refuses=CONSTRAINT_ROW']  -> ['sudoku', 'chess', 'checkers']
+```
+
+## Self-Building Neural Networks
+
+GREN starts knowing **nothing**: no features, and no refusal kinds at all. Both
+vocabularies are discovered by probing, so both layers grow. One network across
+all four games (`python3 -m gren.cli grow`):
+
+| after | inputs | outputs | params | predict acc |
+|---|---|---|---|---|
+| chess | 18 | 8 | 656 | 0.710 |
+| checkers | 31 | 11 | 1043 | 0.949 |
+| go | 40 | 13 | 1309 | 0.889 |
+| sudoku | 48 | 16 | 1576 | 0.782 |
+
+It begins at **0 inputs and 0 outputs** and grows to 48 and 16 — an input the
+first time a feature name appears, an output the first time a refusal code is
+seen. The growth log shows the mechanism directly: sudoku's arrival adds inputs
+44–48, and its `CONSTRAINT_ROW` / `CONSTRAINT_COL` / `CONSTRAINT_BOX` refusals
+add outputs 14–16.
+
+This is what makes the real expected-information-gain objective computable. The
+histogram policy scores a probe from a running tally that knows nothing about
+the probe itself — a prior, not a prediction. The learned policy asks the network
+for `p(outcome | features(state, action))` and probes where that distribution is
+most uncertain, which is §17.3 as specified.
+
+### All three growths are identities, and two of them were subtle
+
+**Hidden** is easy: new units enter with zero *outgoing* weight. **Inputs** are
+easy: zero *incoming*. **Outputs are not**, and the obvious fixes both fail:
+
+* Zero weight and zero bias gives the new class `exp(0) = 1` of the mass and disturbs every existing one.
+* A large *fixed* negative bias is not enough either. A softmax cares only about **relative** logits, and after training the existing logits can sit far below any constant — so the new class becomes the maximum and takes everything. Measured: **0.244 of the distribution moved.**
+
+It enters with zero weights and a bias 40 below the largest existing bias, so its
+logit is constant and provably negligible whatever the input. New classes arrive
+at a share of ~1e-18 and are still learnable afterwards (0.967 on a third class).
+
+**And identity-preserving growth is wrong at initialisation.** Zero rows *and*
+zero columns symmetry-lock the network: `ah = tanh(0) = 0` zeroes the W2 update,
+which zeroes the hidden gradient, which zeroes the W1 update. Nothing but the
+biases can ever move and the loss sits exactly where it started — measured at
+0.7003, forever, on a trivially separable task. Rows and columns created during
+warmup are therefore random; only later ones are identities. Asserted by
+`test_sbnn_is_not_symmetry_locked_at_init`.
+
+## What is not here yet
+
+`sandbox.py` (no oracle currently executes generated code), `features.py` and
+the operator→mechanic lifting of §8.4 — GREN discovers refusal *codes*, not
+STRIPS operators, so minimality (§8.3) is unimplemented. No forest (§20), no
+`similarity.py` MDS projection, no API or frontend. The `GamePackage` is built
+but `CyclicCortex` does not yet consume it: the games there still carry
+hand-written mechanics, and replacing them with discovered ones is the next
+step, now that the two are known to agree.

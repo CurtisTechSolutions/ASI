@@ -354,10 +354,70 @@ the correct response is to leave and escalate to metacognition.
 
 ---
 
+## Cortical organisation
+
+### 26. A Single Self-Building Neural Network instead of micro networks
+> Inputs and outputs grow to match the games.
+
+One SBNN per *region* rather than thousands of micros. Growth is additive and
+**non-destructive**: new hidden units enter with zero outgoing weight and new
+inputs with zero incoming weight, so the network computes bit-identically the
+instant after growth and only changes as the new capacity learns. Growth on a
+**plateau**, which the existing `SBNN_RNN_ActivationFunction/main.py` already
+does and which insight 21 independently confirmed is the only trigger that
+separates *stuck* from *converged* from *still starting*.
+
+*Where:* `CyclicCortex/DESIGN.md` §8 · **held**
+
+### 27. Similar games in similar regions — brain structure
+The similarity graph partitions into regions by modularity; each region owns one
+network; a new game lands next to what it resembles or founds a new region if
+nothing is close enough. This changes what carries game identity: **it moves out
+of the input vector and into the graph position**, which is why the region's
+network does not need to be told which game it is playing.
+
+*Where:* `CyclicCortex/DESIGN.md` §6, §9 · **held**
+
+### 28. A cyclic graph where distance is similarity
+*Confirmed.* Jaccard distance over mechanic sets is a **proper metric** — checked
+over 210 ordered triples with **zero triangle-inequality violations** — so
+"distance is similarity" has a consistent geometry rather than being a figure of
+speech.
+
+And it must be **cyclic**: chess/checkers 0.609, checkers/go ~0.730, chess/go
+0.769 form a triangle in which none is the parent. A tree must break one edge.
+This makes the relationship to insight 13 precise: **the radix tree is a
+projection of this graph, not a rival to it** — the tree makes retrieval
+sublinear, the graph is what is actually true, and where they disagree the graph
+is right.
+
+*Where:* `CyclicCortex/DESIGN.md` §5 · **confirmed**
+
+### 29. Common denominators — generalised, minified inputs
+> For chess, a piece moving one space would count here. This allows us to train
+> the same network on checkers as well.
+
+*Confirmed, and more strongly than stated.* Training on king moves then testing
+on checkers, zero-shot: **0.646** on a generalised vocabulary against **0.514 —
+exactly chance —** on a raw board encoding. Three findings beyond the headline:
+
+* **Raw pretraining is actively harmful** (−0.220 at k=5). A board-specific encoding makes the network *worse* at the second game than starting from nothing, because square indices mean different things in different games. This is the failure mode the generalised vocabulary exists to prevent, and it is not hypothetical.
+* **It is not an artefact of good feature design.** Stripping the features that encode the checkers rule (`is_diagonal`, `forwardness`) left zero-shot **identical** at 0.646 and made the transfer *gain* larger. The advantage is the shared coordinate system, not the chosen features.
+* **Three inputs are enough.** `(dx, dy, target_empty)` matches eight hand-designed features and beats seventy-two. Minification is not a compromise for capacity — the minimal shared vocabulary is the *best* one, because everything removed was game-specific and therefore untransferable.
+
+The common denominators are GREN's mechanics (insight 11) promoted from a
+similarity signature into the network's actual input vocabulary: **the objects
+that decide two games are alike are the objects the network reads.**
+
+*Where:* `CyclicCortex/common_denominator.py`, `CyclicCortex/DESIGN.md` §4 · **confirmed**
+
+---
+
 ## What to test next
 
 Ordered by how much they would change, per unit of effort:
 
+0. **Does transfer survive ACROSS regions, or only within them?** (29) The measured transfer was between two grid games sharing displacement semantics — within a region, which is what regions are for. If nothing transfers between a board region and a programming region, regions are independent networks with a clustering algorithm attached, and the graph is only doing routing. Cheap to run on the existing corpus.
 1. **Does validity transfer?** (19) Train `p_valid` on chess only; measure it on checkers with the checkers modifier and no further training. If near chance, the modifier is not carrying what 18 claims and the composition is decorative. One day's work, falsifies the central claim.
 2. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
 3. **Does the population actually specialise?** (2) GTMNN rests on the congestion game doing what it claims; `gini` and `diversity` are instrumented from the first commit so it can be falsified early.
