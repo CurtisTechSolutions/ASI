@@ -305,8 +305,9 @@ class SelfBuildingNet:
             u = self.b[i] * d
             return self.a[i] * math.sin(u) + self.k[i], self.a[i] * self.b[i] * math.cos(u)
         if self.kind == "sine-fixed":
+            # the same formula, a/b/k pinned at the defaults so only h is free
             u = DEFAULT_B * d
-            return DEFAULT_A * math.sin(u), DEFAULT_A * DEFAULT_B * math.cos(u)
+            return DEFAULT_A * math.sin(u) + DEFAULT_K, DEFAULT_A * DEFAULT_B * math.cos(u)
         if self.kind == "sigmoid":
             s = sigmoid(d)
             return s, s * (1.0 - s)

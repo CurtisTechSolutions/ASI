@@ -195,7 +195,9 @@ class SineActivation:            # convenience object (tests/docs, never in hot 
     def __call__(self, x) -> float
     def derivative(self, x) -> float
     def partials(self, x) -> tuple
-    def inverted(self) -> "SineActivation"     # a -> -a
+    def inverted(self) -> "SineActivation"     # a -> -a AND k -> -k: f = a*sin(u)+k, so
+                                               # negating a alone leaves -f + 2k, which is
+                                               # the negation only while k is still 0
     def to_dict(self) -> dict ; @classmethod from_dict(cls, d)
 ```
 

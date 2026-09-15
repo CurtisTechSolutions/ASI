@@ -33,9 +33,10 @@ import math, random
 MARGIN = 40.0        # how far below the existing logits a new class enters
 
 class GrowingSBNN:
-    def __init__(self, nh=24, seed=0, act="tanh", b=1.0):
+    def __init__(self, nh=24, seed=0, act="tanh", b=1.0, a=-1.0, h=0.0, k=0.0):
         self.rng = random.Random(seed)
         self.nh, self.act, self.b = nh, act, b
+        self.a, self.h, self.k = a, h, k
         self.ni = 0; self.no = 0
         self.inputs = {}             # feature name -> index
         self.outputs = {}            # label (code or "LEGAL") -> index
@@ -123,9 +124,19 @@ class GrowingSBNN:
 
     # ---------------------------------------------------------------- forward
     def _f(self, z):
-        return math.tanh(z) if self.act == "tanh" else -math.sin(self.b * z)
-    def _df(self, z, a):
-        return 1.0 - a*a if self.act == "tanh" else -math.cos(self.b * z) * self.b
+        """``f(z) = a*sin(b*(z-h)) + k`` -- Research/SineWaveActivationFunction.md 4.
+
+        The author's formula in full: amplitude, frequency, phase, offset. At the
+        defaults ``a=-1, h=0, k=0`` this is ``-sin(b*z)``, the same function this
+        net has always computed; ``b`` is 1.0 rather than the paper's 1/3 for the
+        measured reason in NeuralCompression/FINDINGS.md 5.
+        """
+        if self.act == "tanh": return math.tanh(z)
+        return self.a * math.sin(self.b * (z - self.h)) + self.k
+    def _df(self, z, fz):
+        """``df/dz = a*b*cos(b*(z-h))``; ``fz`` is ``f(z)``, which only tanh reuses."""
+        if self.act == "tanh": return 1.0 - fz*fz
+        return self.a * self.b * math.cos(self.b * (z - self.h))
 
     def _vec(self, feats, grow=False):
         x = [0.0] * self.ni
@@ -204,14 +215,18 @@ class GrowingSBNN:
                 "params": self.ni*self.nh + self.nh + self.nh*self.no + self.no}
 
     def to_dict(self):
-        return {"nh": self.nh, "ni": self.ni, "no": self.no, "act": self.act, "b": self.b,
+        return {"nh": self.nh, "ni": self.ni, "no": self.no, "act": self.act,
+                "a": self.a, "b": self.b, "h": self.h, "k": self.k,
                 "inputs": self.inputs, "outputs": self.outputs, "out_names": self.out_names,
                 "W1": self.W1, "b1": self.b1, "W2": self.W2, "b2": self.b2,
                 "loss": self.loss, "seen": self.seen, "log": self.log}
 
     @classmethod
     def from_dict(cls, d):
-        n = cls(nh=d["nh"], act=d["act"], b=d["b"])
+        # a/h/k default to the paper's values so checkpoints written before the
+        # formula was spelled out still load to the same function.
+        n = cls(nh=d["nh"], act=d["act"], b=d["b"],
+                a=d.get("a", -1.0), h=d.get("h", 0.0), k=d.get("k", 0.0))
         for k in ("ni","no","inputs","outputs","out_names","W1","b1","W2","b2",
                   "loss","seen","log"): setattr(n, k, d[k])
         return n

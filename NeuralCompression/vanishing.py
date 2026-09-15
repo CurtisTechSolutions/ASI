@@ -20,8 +20,9 @@ import math, random
 
 class DeepMLP:
     """ni -> nh -> ... -> 1, `depth` hidden layers. Deep enough to vanish."""
-    def __init__(self, ni, nh, depth, rng, act="sine", b=1.0/3.0):
+    def __init__(self, ni, nh, depth, rng, act="sine", b=1.0/3.0, a=-1.0, h=0.0, k=0.0):
         self.ni, self.nh, self.depth, self.act, self.b = ni, nh, depth, act, b
+        self.a, self.h, self.k = a, h, k
         dims = [ni] + [nh]*depth
         self.W = [[[rng.uniform(-1,1)/math.sqrt(dims[l]) for _ in range(dims[l+1])]
                    for _ in range(dims[l])] for l in range(depth)]
@@ -30,9 +31,17 @@ class DeepMLP:
         self.bo = 0.0
 
     def f(self, z):
-        return math.tanh(z) if self.act == "tanh" else -math.sin(self.b*z)
-    def df(self, z, a):
-        return 1.0-a*a if self.act == "tanh" else -math.cos(self.b*z)*self.b
+        """``f(z) = a*sin(b*(z-h)) + k`` -- Research/SineWaveActivationFunction.md 4.
+
+        The author's formula in full. At the defaults ``a=-1, h=0, k=0`` it is
+        ``-sin(b*z)``, which every number below was measured on; ``b`` is what
+        this file sweeps (1/3 against 1)."""
+        if self.act == "tanh": return math.tanh(z)
+        return self.a*math.sin(self.b*(z-self.h))+self.k
+    def df(self, z, fz):
+        """``df/dz = a*b*cos(b*(z-h))``; ``fz`` is ``f(z)``, which only tanh reuses."""
+        if self.act == "tanh": return 1.0-fz*fz
+        return self.a*self.b*math.cos(self.b*(z-self.h))
 
     def forward(self, x):
         zs, as_ = [], [x]
@@ -51,7 +60,9 @@ class DeepMLP:
     def negate_layer(self, l):
         """w -> -w for hidden layer l. With an ODD activation this is a symmetry
         operation, not noise: -sin(b*(-z)) = -(-sin(b*z)), so the layer's output
-        negates exactly and the function computed stays structurally related."""
+        negates exactly and the function computed stays structurally related.
+        f(z) = a*sin(b*(z-h)) + k is odd only while h = k = 0, which is the
+        default here; a run that moves either off zero loses this symmetry."""
         for row in self.W[l]:
             for j in range(len(row)): row[j] = -row[j]
         for j in range(len(self.B[l])): self.B[l][j] = -self.B[l][j]
