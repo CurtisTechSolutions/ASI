@@ -222,15 +222,19 @@ if __name__ == "__main__":
         print()
 
     print("\nB. Inversion as an escape (depth 4, where the gradient has vanished)\n")
-    print(f"  {'activation':>12} {'policy':>16} {'test MSE':>10} {'fires':>7}")
+    print("  'fires' is the TOTAL over the three seeds, and 'worst' is the worst single")
+    print("  seed -- a mean hides the fact that ONE inversion can destroy a healthy net.\n")
+    print(f"  {'activation':>12} {'policy':>18} {'test MSE':>10} {'worst seed':>11} {'fires':>6}")
     for act, b, lbl in (("sine", 1/3, "sine b=1/3"), ("sine", 1.0, "sine b=1"), ("tanh", 1/3, "tanh")):
         base = None
         for name, inv in (("none", None),
                           ("invert on grad", {"trigger": "grad"}),
-                          ("invert on weight", {"trigger": "weight"})):
+                          ("invert on weight", {"trigger": "weight"}),
+                          ("invert on plateau", {"trigger": "plateau"})):
             vals = [run(4, act, b, inv, seed=s) for s in range(3)]
-            m = sum(v[0] for v in vals)/len(vals); fired = sum(v[2] for v in vals)//len(vals)
+            m = sum(v[0] for v in vals)/len(vals)
+            fired = sum(v[2] for v in vals); worst = max(v[0] for v in vals)
             if base is None: base = m
             mark = "" if name == "none" else f"   ({base/m:.2f}x)"
-            print(f"  {lbl:>12} {name:>16} {m:>10.5f} {fired:>7}{mark}")
+            print(f"  {lbl:>12} {name:>18} {m:>10.5f} {worst:>11.5f} {fired:>6}{mark}")
         print()

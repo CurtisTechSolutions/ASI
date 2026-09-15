@@ -249,21 +249,30 @@ region of its activation, and it stops when that is corrected. See 24.
 accept; the observation that it occurs was correct)
 
 ### 21. Invert the gradient when the vanishing threshold is reached
-*Refined — the trigger was wrong, the mechanism is marginal.* Triggering on
-**gradient magnitude** is catastrophic (243–520× worse on healthy networks): a
-small gradient means stuck *or* converged *or* still starting, and magnitude
-cannot separate them. The correct signal is a **plateau** — past a warmup, the
-running loss has not improved for a window. That is harmless where the network is
-healthy and gives **1.24×** where the gradient genuinely vanished.
+*Contradicted — no trigger tested helps, and most of them are catastrophic.*
+Three detectors were built: gradient magnitude, weight magnitude, and a loss
+**plateau**. Across three seeds and two healthy activations plus one genuinely
+stalled one, **the best result any of them achieves is 1.00× — no effect at
+all** — and on a healthy network every policy that fires does damage, by 1.8× to
+520×. A single inversion is enough: the weight trigger fired *once*, on one seed,
+and took that seed from 0.00016 to 0.0961.
 
-But 1.24× recovers a condition that fixing `b` removes 536× of. *Build the
-trigger if the stall is real; do not build it instead of fixing the stall.*
+Triggering on **gradient magnitude** is the worst of the three (243–520× worse on
+healthy networks), because a small gradient means stuck *or* converged *or* still
+starting and magnitude cannot separate them. A **plateau** is the better
+*detector* — 6 fires against the gradient trigger's 132 on healthy tanh — but
+detecting the stall correctly does not make climbing out of it work.
 
-The stated form — *all weights below X* — is the better of the two magnitude
-conditions, because a weight that never moved off its initialisation is
-unambiguous in a way a small gradient is not.
+**An earlier 1.24× for plateau-with-long-bursts is withdrawn: it does not
+reproduce.** Sweeping burst length on the stalled network gives 1.00×, 0.98×,
+0.88×, then divergence — monotonically worse. Gating on "the loss is still bad"
+does make the policy safe, by reducing it to **zero fires**.
 
-*Where:* `NeuralCompression/vanishing.py`, FINDINGS §11 · **refined**
+Keep the plateau detector for deciding when to **grow** a network
+(`CyclicCortex/DESIGN.md` §8 uses it for exactly that). Do not build the
+inversion it was meant to trigger. Fixing `b` is worth 536× on the same stall.
+
+*Where:* `NeuralCompression/vanishing.py`, FINDINGS §11 · **contradicted**
 
 ### 22. Dual network: train in one, query the other — the REM analogy
 *Confirmed, and the analogy predicted the better implementation before either was
