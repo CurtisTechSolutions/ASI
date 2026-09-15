@@ -5,9 +5,12 @@ from gren.probe import POLICIES
 from gren.reasons import ReasonTaxonomy
 
 class Explorer:
-    def __init__(self, oracle, policy="eig", seed=0):
+    def __init__(self, oracle, policy="eig", seed=0, net=None):
         self.oracle = oracle
-        self.policy = POLICIES[policy](seed=seed)
+        if policy == "learned":
+            self.policy = POLICIES[policy](seed=seed, net=net)
+        else:
+            self.policy = POLICIES[policy](seed=seed)
         self.evidence = Evidence(oracle.name)
         self.evidence.declare(oracle.declared())
         self.taxonomy = ReasonTaxonomy()
@@ -25,7 +28,11 @@ class Explorer:
                 v = self.oracle.probe(st, mv)
                 self.taxonomy.classify(v)
                 self.evidence.observe(v)
-                if hasattr(self.policy, "observe"): self.policy.observe(v)
+                if self.policy.name == "learned":
+                    try: feats = self.oracle.features(st, mv)
+                    except Exception: feats = None
+                    self.policy.observe(v, feats)
+                elif hasattr(self.policy, "observe"): self.policy.observe(v)
                 else: self.policy.note(v)
         return self.report()
 
@@ -36,7 +43,10 @@ class Explorer:
                 "codes": len(e.codes), "taxonomy": len(self.taxonomy),
                 "legality_density": round(e.legality_density, 3),
                 "reason_entropy": round(e.reason_entropy, 2),
-                "signature_size": len(e.signature())}
+                "signature_size": len(e.signature()),
+                **({"model": self.policy.net.shape(),
+                    "predict_acc": round(self.policy.accuracy, 3)}
+                   if self.policy.name == "learned" else {})}
 
 def identify(evidence, corpus):
     """Nearest known game by signature distance. `corpus` maps name -> signature."""

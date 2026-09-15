@@ -80,6 +80,13 @@ class GameOracle:
     def why(self, state, action):
         raise NotImplementedError
 
+    def features(self, state, action):
+        """The feature language, §14. This is where domain knowledge legitimately
+        lives -- a rule outside it cannot be induced, only observed as an
+        unexplained refusal class. Names are the SBNN's input vocabulary, and it
+        grows an input the first time one appears."""
+        return {}
+
 
 class ChessOracle(GameOracle):
     def declared(self):
@@ -103,6 +110,31 @@ class ChessOracle(GameOracle):
                 return "BLOCKED_PATH", "a piece stands between source and target"
             return "WRONG_PATTERN", f"not a legal move pattern for {p[1]}"
         return "SELF_CHECK", "that move leaves your own king in check"
+
+
+    def features(self, s, mv):
+        from cortex.board_games import Chess, on
+        (fx, fy), (tx, ty) = mv
+        if not (on(fx, fy) and on(tx, ty)): return {"ch_off": 1.0}
+        dx, dy = tx-fx, ty-fy
+        p, t = s.at(fx, fy), s.at(tx, ty)
+        sx = (dx > 0) - (dx < 0); sy = (dy > 0) - (dy < 0)
+        blockers = 0
+        if (dx == 0 or dy == 0 or abs(dx) == abs(dy)) and max(abs(dx), abs(dy)):
+            x, y = fx+sx, fy+sy
+            while (x, y) != (tx, ty) and on(x, y):
+                if s.at(x, y): blockers += 1
+                x += sx; y += sy
+        f = {"ch_dx": dx/7.0, "ch_dy": dy/7.0, "ch_adx": abs(dx)/7.0,
+             "ch_ady": abs(dy)/7.0, "ch_src_empty": 0.0 if p else 1.0,
+             "ch_tgt_own": 1.0 if (t and t[0] == s.turn) else 0.0,
+             "ch_tgt_enemy": 1.0 if (t and t[0] != s.turn) else 0.0,
+             "ch_mine": 1.0 if (p and p[0] == s.turn) else 0.0,
+             "ch_blockers": min(blockers, 3)/3.0,
+             "ch_diag": 1.0 if abs(dx) == abs(dy) and dx else 0.0,
+             "ch_straight": 1.0 if (dx == 0) != (dy == 0) else 0.0}
+        for k in "PNBRQK": f["ch_is_" + k] = 1.0 if (p and p[1] == k) else 0.0
+        return f
 
 
 class CheckersOracle(GameOracle):
@@ -133,6 +165,25 @@ class CheckersOracle(GameOracle):
         return "WRONG_PATTERN", "not a legal move"
 
 
+    def features(self, s, mv):
+        from cortex.board_games import on
+        (fx, fy), (tx, ty) = mv
+        if not (on(fx, fy) and on(tx, ty)): return {"ck_off": 1.0}
+        dx, dy = tx-fx, ty-fy
+        p, t = s.at(fx, fy), s.at(tx, ty)
+        mid = s.at((fx+tx)//2, (fy+ty)//2) if abs(dx) == 2 and abs(dy) == 2 else ""
+        return {"ck_dx": dx/7.0, "ck_dy": dy/7.0, "ck_adx": abs(dx)/7.0,
+                "ck_src_empty": 0.0 if p else 1.0,
+                "ck_mine": 1.0 if (p and p.lower() == s.turn) else 0.0,
+                "ck_crowned": 1.0 if (p and p.isupper()) else 0.0,
+                "ck_tgt_occupied": 1.0 if t else 0.0,
+                "ck_jump": 1.0 if abs(dx) == 2 else 0.0,
+                "ck_mid_enemy": 1.0 if (mid and mid.lower() != s.turn) else 0.0,
+                "ck_diag": 1.0 if abs(dx) == abs(dy) and dx else 0.0,
+                "ck_jumps_exist": 1.0 if s.jumps() else 0.0,
+                "ck_forward": 1.0 if (dy > 0) == (s.turn == "w") else 0.0}
+
+
 class GoOracle(GameOracle):
     def declared(self):
         return {"players": "2", "turn_structure": "alternating",
@@ -161,6 +212,29 @@ class GoOracle(GameOracle):
         return "REPETITION", "that recreates the previous position"
 
 
+    def features(self, s, mv):
+        from cortex.board_games import GN, PASS
+        if mv == PASS: return {"go_pass": 1.0}
+        x, y = mv
+        if not (0 <= x < GN and 0 <= y < GN): return {"go_off": 1.0}
+        occ = 1.0 if s.at(x, y) else 0.0
+        libs = caps = adj = 0
+        if not occ:
+            b2 = [r[:] for r in s.b]; b2[y][x] = s.turn
+            opp = "w" if s.turn == "b" else "b"
+            for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+                nx, ny = x+dx, y+dy
+                if 0 <= nx < GN and 0 <= ny < GN and b2[ny][nx] == opp:
+                    adj += 1
+                    g, l = s.group(nx, ny, b2)
+                    if not l: caps += len(g)
+            _, lb = s.group(x, y, b2); libs = len(lb)
+        return {"go_x": x/(GN-1), "go_y": y/(GN-1), "go_occupied": occ,
+                "go_libs": min(libs, 4)/4.0, "go_caps": min(caps, 4)/4.0,
+                "go_adj_enemy": adj/4.0,
+                "go_edge": min(x, y, GN-1-x, GN-1-y)/4.0}
+
+
 class SudokuOracle(GameOracle):
     def declared(self):
         return {"players": "1", "turn_structure": "free", "category": "puzzle",
@@ -180,6 +254,20 @@ class SudokuOracle(GameOracle):
         if any(s.g[by+j][bx+i] == v for j in range(3) for i in range(3)):
             return "CONSTRAINT_BOX", "that value already appears in the box"
         return "WRONG_PATTERN", "not a legal placement"
+
+
+    def features(self, s, mv):
+        x, y, v = mv
+        if not (0 <= x < 9 and 0 <= y < 9 and 1 <= v <= 9):
+            return {"su_range": 1.0}
+        bx, by = (x//3)*3, (y//3)*3
+        return {"su_x": x/8.0, "su_y": y/8.0, "su_v": v/9.0,
+                "su_filled": 1.0 if s.g[y][x] else 0.0,
+                "su_in_row": 1.0 if any(s.g[y][i] == v for i in range(9)) else 0.0,
+                "su_in_col": 1.0 if any(s.g[i][x] == v for i in range(9)) else 0.0,
+                "su_in_box": 1.0 if any(s.g[by+j][bx+i] == v
+                                        for j in range(3) for i in range(3)) else 0.0,
+                "su_cands": len(s.candidates(x, y))/9.0 if not s.g[y][x] else 0.0}
 
 
 def build_all():

@@ -144,6 +144,88 @@ def test_package_gates_on_confidence():
     thin = Evidence("mystery"); thin.declare({"category": "board"})
     assert not pkg.build(thin, {}).accepted(), "no probes means no confidence"
 
+def test_sbnn_all_three_growths_are_identities():
+    """Growth must be free: the network computes exactly what it computed
+    before, the instant after growing."""
+    from gren.sbnn import GrowingSBNN
+    rng = random.Random(0)
+    n = GrowingSBNN(nh=8, seed=1)
+    feats = [{"a": rng.uniform(-1, 1), "b": rng.uniform(-1, 1)} for _ in range(120)]
+    tgt = lambda f: "LEGAL" if f["a"] > 0 else "OCCUPIED_TARGET"
+    for _ in range(60):
+        for f in feats: n.step(f, tgt(f))
+    acc = sum(1 for f in feats if max(n.predict(f), key=n.predict(f).get) == tgt(f)) / len(feats)
+    assert acc > 0.9, f"a separable task must be learnable, got {acc}"
+    before = [n.predict(f) for f in feats]
+    for label, fn in (("hidden", lambda: n.grow_hidden(6)),
+                      ("inputs", lambda: n.feature_index("unseen")),
+                      ("outputs", lambda: n.label_index("SUICIDE"))):
+        fn()
+        after = [n.predict(f) for f in feats]
+        drift = max(abs(a[k] - b[k]) for a, b in zip(before, after) for k in a)
+        assert drift < 1e-12, f"{label} growth disturbed the output by {drift}"
+
+def test_sbnn_new_output_enters_negligible_and_becomes_learnable():
+    """A softmax cares only about RELATIVE logits: a fixed large negative bias is
+    not enough, because trained logits can sit below any constant and the new
+    class then becomes the maximum."""
+    from gren.sbnn import GrowingSBNN
+    rng = random.Random(0)
+    n = GrowingSBNN(nh=8, seed=1)
+    feats = [{"a": rng.uniform(-1, 1)} for _ in range(80)]
+    for _ in range(80):
+        for f in feats: n.step(f, "LEGAL" if f["a"] > 0 else "SUICIDE")
+    n.label_index("REPETITION")
+    share = max(n.predict(f)["REPETITION"] for f in feats)
+    assert share < 1e-6, f"a new class must enter negligible, got {share}"
+    tgt = lambda f: "REPETITION" if f["a"] > 0.6 else ("LEGAL" if f["a"] > 0 else "SUICIDE")
+    for _ in range(80):
+        for f in feats: n.step(f, tgt(f))
+    acc = sum(1 for f in feats if max(n.predict(f), key=n.predict(f).get) == tgt(f)) / len(feats)
+    assert acc > 0.8, f"the grown-in class must be learnable, got {acc}"
+
+def test_sbnn_is_not_symmetry_locked_at_init():
+    """Zero-weight rows AND columns make growth free and make INITIALISATION
+    impossible: ah = tanh(0) = 0 zeroes every gradient and only the biases move."""
+    from gren.sbnn import GrowingSBNN
+    rng = random.Random(0)
+    n = GrowingSBNN(nh=6, seed=2)
+    feats = [{"a": rng.uniform(-1, 1)} for _ in range(60)]
+    for _ in range(30):
+        for f in feats: n.step(f, "LEGAL" if f["a"] > 0 else "SUICIDE")
+    assert any(abs(v) > 1e-9 for row in n.W1 for v in row), "W1 never moved"
+    assert any(abs(v) > 1e-9 for row in n.W2 for v in row), "W2 never moved"
+    assert n.loss < 0.6, f"loss stuck at {n.loss}"
+
+def test_sbnn_round_trip():
+    from gren.sbnn import GrowingSBNN
+    rng = random.Random(0)
+    n = GrowingSBNN(nh=6, seed=3)
+    feats = [{"a": rng.uniform(-1, 1), "c": rng.uniform(-1, 1)} for _ in range(40)]
+    for _ in range(20):
+        for f in feats: n.step(f, "LEGAL" if f["a"] > 0 else "OCCUPIED_TARGET")
+    m = GrowingSBNN.from_dict(n.to_dict())
+    for f in feats:
+        a, b = n.predict(f), m.predict(f)
+        assert all(abs(a[k] - b[k]) < 1e-15 for k in a)
+
+def test_one_network_grows_across_every_game():
+    """The demonstration: a single net starts with no inputs and no outputs and
+    grows to cover four games, discovering both vocabularies by probing."""
+    from gren.sbnn import GrowingSBNN
+    net = GrowingSBNN(nh=16, seed=0)
+    assert net.ni == 0 and net.no == 0, "it starts knowing nothing"
+    seen = []
+    for name, o in build_all().items():
+        ex = Explorer(o, policy="learned", seed=0, net=net)
+        r = ex.run(budget=400, k=8)
+        seen.append((net.ni, net.no))
+    for (i1, o1), (i2, o2) in zip(seen, seen[1:]):
+        assert i2 > i1, "each new game brings new features"
+        assert o2 >= o1, "output count never shrinks"
+    assert net.ni > 30 and net.no > 8, net.shape()
+    assert all(c in net.outputs for c in ("LEGAL", "OCCUPIED_TARGET")), net.outputs
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

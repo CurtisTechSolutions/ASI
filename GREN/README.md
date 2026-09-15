@@ -15,7 +15,8 @@ python3 -m gren.cli similar     # discovered similarity vs CyclicCortex's hand-w
 python3 -m gren.cli policies    # failure rate and rule coverage by probe policy
 python3 -m gren.cli tree        # the radix tree over discovered signatures
 python3 -m gren.cli package     # the GamePackage handed to the player network
-python3 -m tests.test_gren      # 10 tests
+python3 -m gren.cli grow        # one growing network across all four games
+python3 -m tests.test_gren      # 15 tests
 ```
 
 Pure standard library. Probes `CyclicCortex`'s games, so both must be present.
@@ -110,6 +111,51 @@ the answer is a cluster:
 ['category=board']          -> ['chess', 'checkers', 'go']
 ['refuses=CONSTRAINT_ROW']  -> ['sudoku', 'chess', 'checkers']
 ```
+
+## Self-Building Neural Networks
+
+GREN starts knowing **nothing**: no features, and no refusal kinds at all. Both
+vocabularies are discovered by probing, so both layers grow. One network across
+all four games (`python3 -m gren.cli grow`):
+
+| after | inputs | outputs | params | predict acc |
+|---|---|---|---|---|
+| chess | 18 | 8 | 656 | 0.710 |
+| checkers | 31 | 11 | 1043 | 0.949 |
+| go | 40 | 13 | 1309 | 0.889 |
+| sudoku | 48 | 16 | 1576 | 0.782 |
+
+It begins at **0 inputs and 0 outputs** and grows to 48 and 16 — an input the
+first time a feature name appears, an output the first time a refusal code is
+seen. The growth log shows the mechanism directly: sudoku's arrival adds inputs
+44–48, and its `CONSTRAINT_ROW` / `CONSTRAINT_COL` / `CONSTRAINT_BOX` refusals
+add outputs 14–16.
+
+This is what makes the real expected-information-gain objective computable. The
+histogram policy scores a probe from a running tally that knows nothing about
+the probe itself — a prior, not a prediction. The learned policy asks the network
+for `p(outcome | features(state, action))` and probes where that distribution is
+most uncertain, which is §17.3 as specified.
+
+### All three growths are identities, and two of them were subtle
+
+**Hidden** is easy: new units enter with zero *outgoing* weight. **Inputs** are
+easy: zero *incoming*. **Outputs are not**, and the obvious fixes both fail:
+
+* Zero weight and zero bias gives the new class `exp(0) = 1` of the mass and disturbs every existing one.
+* A large *fixed* negative bias is not enough either. A softmax cares only about **relative** logits, and after training the existing logits can sit far below any constant — so the new class becomes the maximum and takes everything. Measured: **0.244 of the distribution moved.**
+
+It enters with zero weights and a bias 40 below the largest existing bias, so its
+logit is constant and provably negligible whatever the input. New classes arrive
+at a share of ~1e-18 and are still learnable afterwards (0.967 on a third class).
+
+**And identity-preserving growth is wrong at initialisation.** Zero rows *and*
+zero columns symmetry-lock the network: `ah = tanh(0) = 0` zeroes the W2 update,
+which zeroes the hidden gradient, which zeroes the W1 update. Nothing but the
+biases can ever move and the loss sits exactly where it started — measured at
+0.7003, forever, on a trivially separable task. Rows and columns created during
+warmup are therefore random; only later ones are identities. Asserted by
+`test_sbnn_is_not_symmetry_locked_at_init`.
 
 ## What is not here yet
 

@@ -67,6 +67,24 @@ def cmd_tree(a):
         got = [g for _, g in t.retrieve(known)][:3]
         print(f"    {str(sorted(known)):>34} -> {got}")
 
+def cmd_grow(a):
+    """One Self-Building network across every game: inputs grow per new feature
+    name, outputs per newly discovered refusal code."""
+    from gren.sbnn import GrowingSBNN
+    net = GrowingSBNN(nh=a.hidden, seed=a.seed)
+    print(f"\n  one network, starting with {net.ni} inputs and {net.no} outputs\n")
+    print(f"  {'after':>10} {'inputs':>7} {'outputs':>8} {'hidden':>7} {'params':>8} "
+          f"{'predict acc':>12} {'fail rate':>10}")
+    for name, o in build_all().items():
+        ex = Explorer(o, policy="learned", seed=a.seed, net=net)
+        r = ex.run(budget=a.budget, k=10)
+        sh = r["model"]
+        print(f"  {name:>10} {sh['ni']:>7} {sh['no']:>8} {sh['nh']:>7} {sh['params']:>8} "
+              f"{r['predict_acc']:>12.3f} {r['failure_rate']:>10.3f}")
+    print(f"\n  discovered refusal codes: {sorted(k for k in net.outputs if k != 'LEGAL')}")
+    grew = [e for e in net.log if e["grew"] == "hidden"]
+    print(f"  hidden grew {len(grew)} time(s) on a loss plateau")
+
 def cmd_package(a):
     ev = _explore(a.budget, a.policy, a.seed)
     corpus = {n: e.signature() for n, (e, _) in ev.items()}
@@ -92,11 +110,12 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("explore", cmd_explore), ("similar", cmd_similar),
                      ("policies", cmd_policies), ("tree", cmd_tree),
-                     ("package", cmd_package)):
+                     ("package", cmd_package), ("grow", cmd_grow)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--budget", type=int, default=1200)
         q.add_argument("--policy", default="eig", choices=list(POLICIES))
         q.add_argument("--seed", type=int, default=0)
+        q.add_argument("--hidden", type=int, default=24)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__": main()

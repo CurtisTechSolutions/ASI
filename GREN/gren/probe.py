@@ -115,4 +115,70 @@ def _perturb(action, rng):
         return (x + rng.choice([-1, 0, 1]), y + rng.choice([-1, 0, 1]))
     return action
 
-POLICIES = {"random": Random, "boundary": Boundary, "eig": EIG}
+class Learned(Policy):
+    """EIG under a LEARNED model of the refusal distribution.
+
+    The plain EIG policy scores a probe from a running histogram, which knows
+    nothing about the probe itself -- it is a prior, not a prediction. This one
+    asks a GrowingSBNN for p(outcome | features(state, action)) and picks the
+    probe whose predicted distribution has the highest entropy, which is the
+    objective §17.3 actually specifies.
+
+    The network is shared across games and grows to fit them: an input per new
+    feature name, an output per newly discovered refusal code.
+    """
+    name = "learned"
+
+    def __init__(self, seed=0, net=None, lr=0.05, explore=0.2):
+        super().__init__(seed)
+        from gren.sbnn import GrowingSBNN
+        self.net = net if net is not None else GrowingSBNN(nh=24, seed=seed)
+        self.lr = lr; self.explore = explore
+        self.correct = 0; self.scored = 0
+
+    def observe(self, verdict, feats=None):
+        if feats is None: return self.note(verdict)
+        label = ("LEGAL" if verdict.outcome == Outcome.LEGAL
+                 else (verdict.reason_code or "UNKNOWN"))
+        p = self.net.predict(feats)
+        if p:
+            self.scored += 1
+            if max(p, key=p.get) == label: self.correct += 1
+        before = _entropy(p)
+        self.net.step(feats, label, lr=self.lr)
+        self.note(verdict, surprise=max(0.0, before))
+
+    @property
+    def accuracy(self):
+        return self.correct / self.scored if self.scored else 0.0
+
+    def propose(self, oracle, state, k=12):
+        """Score a pool by predicted entropy and take the most uncertain. A
+        probe the model is sure about teaches nothing, whichever way it is sure."""
+        pool = list(oracle.candidates(state, self.rng, k * 3))
+        legal = oracle.actions(state)
+        if legal:
+            pool += [_perturb(self.rng.choice(legal), self.rng) for _ in range(k)]
+            pool += self.rng.sample(legal, min(k // 2, len(legal)))
+        if self.net.no < 2:
+            self.rng.shuffle(pool); return pool[:k]
+        keep = max(1, int(k * (1.0 - self.explore)))
+        scored = []
+        for a in pool:
+            try: f = oracle.features(state, a)
+            except Exception: continue
+            scored.append((_entropy(self.net.predict(f)), a))
+        scored.sort(key=lambda t: -t[0])
+        out = [a for _, a in scored[:keep]]
+        rest = [a for _, a in scored[keep:]]
+        self.rng.shuffle(rest)
+        return out + rest[:k - len(out)]
+
+def _entropy(p):
+    if not p: return 1.0
+    h = 0.0
+    for v in p.values():
+        if v > 0: h -= v * math.log2(v)
+    return h
+
+POLICIES = {"random": Random, "boundary": Boundary, "eig": EIG, "learned": Learned}
