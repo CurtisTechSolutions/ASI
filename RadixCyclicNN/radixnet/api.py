@@ -90,7 +90,7 @@ from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
-from .dialogue import DEFAULT_SPEAKERS
+from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .duo import FilterConfig, NegativeFilter
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeNet
@@ -330,8 +330,10 @@ class ModelService:
         self.tool_options: dict[str, Any] = {
             "offline": False, "allow_private": False, "search_url": None, "web_timeout": 20.0,
             "max_bytes": 2_000_000, "python_tool": False, "sandbox_timeout": 10.0,
+            "browser": False, "page_timeout": 30.0,
             **(tool_options or {}),
         }
+        self._browser: Any = None  # one headless Chrome for the whole server, started on first use
         self.backend_name = backend
         self.device = device
         self.seed = int(seed)
@@ -349,9 +351,11 @@ class ModelService:
         self._agent_history: list[dict] = []
         self._tutor_history: list[dict] = []
         self._critic_history: list[dict] = []
+        self._chat_history: list[dict] = []
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
+        self.guard_config = FilterConfig()  # how strictly the negative network guards the output paths
         self._path_kind = model_class(kind).kind  # the kind ``model_path`` belongs to
         if self.model_path and os.path.isfile(self.model_path):
             self.model: GraphModel = load_model(self.model_path, backend=backend, device=device)
@@ -488,7 +492,7 @@ class ModelService:
 
     @property
     def kind(self) -> str:
-        """The active model's kind (``"radix"`` or ``"count"``)."""
+        """The active model's kind (``"radix"``, ``"count"`` or ``"resonant"``)."""
         return self.model.kind
 
     def model_path_for(self, kind: str) -> str | None:
@@ -701,10 +705,68 @@ class ModelService:
         )
         return stats
 
-    def predict(self, prefix: str, **options: Any) -> dict:
-        """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each)."""
+    def guard(self, model: GraphModel | None = None) -> NegativeFilter | None:
+        """The pair on the way out: the negative network guarding ``model``'s output, or ``None``.
+
+        Every answer this service hands out - :meth:`generate`,
+        :meth:`predict`, :meth:`converse` - goes through this filter, so the
+        two networks work in tandem without anyone asking for it: the positive
+        model writes and the negative one, built from nothing but the tutor's
+        failures, vetoes what it recognises (:mod:`radixnet.duo`).
+
+        ``None`` - no guard, the output goes out as written - when there is
+        nothing to guard *with*: the negative network is the active model (it
+        cannot filter itself), there is none in memory and none saved beside
+        the model, or the one there has never been taught a failure and would
+        veto nothing.  An empty negative network is never *created* here - an
+        answer is not the place to bring one into being.  Call it with the
+        model lock held; the output paths do.
+        """
+        model = self.model if model is None else model
+        if isinstance(model, NegativeNet):
+            return None  # generating *from* the failures: there is no positive half to guard
+        negative = self._parked.get(NegativeNet.kind)
+        if negative is None:
+            path = self.model_path_for(NegativeNet.kind)
+            if not (path and os.path.isfile(path)):
+                return None
+            negative = self.negative_model()  # loads it from that file and parks it
+        if negative is model:
+            return None
+        pair = NegativeFilter(model, negative, self.guard_config)
+        return pair if pair.ready else None
+
+    @staticmethod
+    def _guard_report(pair: NegativeFilter, verdicts: list[dict], **extra: Any) -> dict:
+        """What the guard did, for the caller to show: the vetoes, with the reason and the fragment behind each."""
+        rejected = [v for v in verdicts if v["decision"] == "reject"]
+        return {
+            "on": True,
+            "vetoed": len(rejected),
+            "rejected": rejected,
+            "verdicts": verdicts,
+            "negative": pair.negative.stats(),
+            "config": pair.describe()["config"],
+            **extra,
+        }
+
+    def predict(self, prefix: str, *, guard: bool = True, **options: Any) -> dict:
+        """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each).
+
+        The negative network guards the answer (:meth:`guard`): the best
+        continuation it does *not* veto is the one that comes back, and when
+        it vetoes every one of them nothing does - ``continuation`` is empty,
+        ``full_text`` is the prefix alone and ``guard`` says why.
+        ``guard=False`` hands out what the positive model wrote, unfiltered.
+        """
         with self.session() as model:
             result = model.predict(prefix, **options)
+            pair = self.guard(model) if guard else None
+            report = None
+            if pair is not None:
+                result, verdicts = pair.rank(prefix, result)  # the survivors, best first
+                report = self._guard_report(pair, verdicts, candidates=len(verdicts),
+                                            kept=len(verdicts) - sum(v["decision"] == "reject" for v in verdicts))
         payload = {
             "prefix": prefix,
             "kind": model.kind,
@@ -717,6 +779,7 @@ class ModelService:
             "node_ids": list(result.node_ids),
             "expanded": result.expanded,
             "reached_end": result.reached_end,
+            "guard": report,
         }
         if isinstance(result, Prediction):
             payload.update(
@@ -725,14 +788,40 @@ class ModelService:
             )
         return payload
 
-    def generate(self, **options: Any) -> dict:
-        """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path."""
-        with self.session() as model:
-            results = model.generate(**options)
-        return {"samples": [_sample_dict(r) for r in results]}
+    def generate(self, guard: bool = True, **options: Any) -> dict:
+        """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path.
 
-    def converse(self, opening: str = "", turns: int = 6, partner: str | None = None, **options: Any) -> dict:
-        """The active model converses with itself, or with the model of another kind kept in memory (``partner``)."""
+        The negative network guards them (:meth:`guard`): the model is asked
+        for ``over_sample`` times as many as were wanted and what the negative
+        half recognises as failure never reaches the answer.  Fewer than
+        ``count`` samples come back when it vetoed too much - that is
+        information, and ``guard`` carries every veto with its reason.
+        ``guard=False`` returns what the positive model wrote, unfiltered.
+        """
+        with self.session() as model:
+            pair = self.guard(model) if guard else None
+            if pair is None:
+                return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
+            count = options.pop("count", 1)
+            outcome = pair.generate(count=count, **options)
+        return {
+            "samples": [_sample_dict(r) for r in outcome["results"]],
+            "guard": self._guard_report(
+                pair, outcome["verdicts"], candidates=outcome["candidates"], kept=len(outcome["kept"]),
+                asked=outcome["asked"], rate=outcome["rate"],
+            ),
+        }
+
+    def converse(
+        self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True, **options: Any,
+    ) -> dict:
+        """The active model converses with itself, or with the model of another kind kept in memory (``partner``).
+
+        The negative network guards every turn (:meth:`guard`): a reply it
+        vetoes is left unsaid and the voice looks for another one, exactly as
+        it does for a line it has already spoken.  Each turn counts its own
+        vetoes (``vetoed``) and ``guard`` carries them with their reasons.
+        """
         with self.session() as model:
             other: GraphModel | None = None
             if partner and partner.strip().lower() != model.kind:
@@ -745,8 +834,17 @@ class ModelService:
                     raise ApiError(
                         400, f"no {kind} model in memory to converse with; select that kind once to load it"
                     )
+            pair = self.guard(model) if guard else None
+            report = None
             try:
-                spoken = model.converse(opening, turns, partner=other, **options)
+                if pair is None:
+                    spoken = model.converse(opening, turns, partner=other, **options)
+                else:
+                    outcome = pair.converse(opening, turns, partner=other, **options)
+                    spoken = outcome["turns"]
+                    # ``vetoed`` counts the distinct texts refused, ``refusals`` how often one was (a turn may be offered
+                    # the same candidate again after its context was shortened)
+                    report = self._guard_report(pair, outcome["verdicts"], refusals=outcome["vetoed"])
             except (TypeError, ValueError) as exc:
                 raise ApiError(400, str(exc)) from exc
         speakers = list(options.get("speakers") or DEFAULT_SPEAKERS)
@@ -756,6 +854,9 @@ class ModelService:
             "speakers": speakers,
             "turns": [t.to_dict() for t in spoken],
             "count": len(spoken),
+            # the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
+            "repeats": dialogue_repeats(spoken),
+            "guard": report,
         }
 
     def score(self, text: str) -> dict:
@@ -785,6 +886,53 @@ class ModelService:
             raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
         with self.session() as model:
             return _graph_view(model.graph, limit)
+
+    def paths(self, limit: int = 50) -> dict:
+        """The judged paths: what each step did in the context it was taken from."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "paths"):
+                raise ApiError(400, f"the {model.kind} model does not count paths")
+            graph = model.graph
+            rows = []
+            for row in model.paths(limit=limit):
+                prev = graph.labels[row["prev"]] if row["prev"] < len(graph.labels) else ""
+                parent = graph.edge_parent[row["edge"]] if row["edge"] < len(graph.edge_parent) else -1
+                child = next((c for c, e in graph.children[parent].items() if e == row["edge"]), -1) if parent >= 0 else -1
+                rows.append({
+                    **row,
+                    "after": prev,
+                    "parent": parent,
+                    "parent_label": graph.labels[parent] if 0 <= parent < len(graph.labels) else "",
+                    "child": child,
+                    "child_label": graph.labels[child] if 0 <= child < len(graph.labels) else "",
+                })
+            return {
+                "totals": graph.path_totals(), "paths": rows, "limit": limit,
+                "path_scale": graph.weight_config()["path_scale"],
+            }
+
+    def node_ratios(self, limit: int = 20, node: str | None = None) -> dict:
+        """Each node against the nodes around it: its traffic and its reward, shared out both ways."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "node_ratios"):
+                raise ApiError(400, f"the {model.kind} model does not count node ratios")
+            graph = model.graph
+            wanted = None
+            if node:
+                wanted = next((i for i, label in enumerate(graph.labels) if label == node and graph.alive[i]), None)
+                if wanted is None:
+                    found = graph.lookup(node) if len(node) == 3 else None
+                    if found is None:
+                        raise ApiError(404, f"no node labelled {node!r}: give a node label, or one of its trigrams")
+                    wanted = found[0]
+            return {
+                "nodes": model.node_ratios(limit=limit, node=wanted), "limit": limit,
+                "node": node, "total_nodes": graph.num_nodes(), "totals": graph.path_totals(),
+            }
 
     # -- the negative network ------------------------------------------------
 
@@ -958,6 +1106,7 @@ class ModelService:
                     }
                 else:
                     result = pair.generate(count=count, **generate)
+                    result.pop("results")  # the walks behind the texts; JSON carries the texts
             except (TypeError, ValueError) as exc:
                 raise ApiError(400, str(exc)) from exc
             result["pair"] = pair.describe()
@@ -1057,14 +1206,17 @@ class ModelService:
     def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
         """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
 
-        ``options`` (count model only): ``count_scale``, ``global_scale``,
-        ``window_scale``, ``reward_scale``, ``window``.
+        ``options`` are the score-function settings of the kind that has them:
+        ``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``
+        and ``window`` for the count model; ``buckets``, ``period``,
+        ``kick_scale``, ``resonance_scale``, ``amp_scale``, ``reward_scale``
+        and ``concentration`` for the resonant one.
         """
         self._ensure_idle()
         cls = model_class(kind or self.kind)
         extra = {k: v for k, v in options.items() if v is not None}
-        if extra and cls.kind != "count":
-            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) apply to the count model only")
+        if extra and not hasattr(cls, "weight_config"):
+            raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) do not apply to the {cls.kind} model")
         try:
             model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
         except (TypeError, ValueError) as exc:
@@ -1072,10 +1224,14 @@ class ModelService:
         return self._replace_model(model)
 
     def configure_weights(self, **options: Any) -> dict:
-        """Change the count model's dual frequency function (400 for RadixNet); returns the config and stats."""
+        """Change the active model's score function (400 for RadixNet); returns the config and stats.
+
+        The count model takes the dual frequency function's scales, the
+        resonant one its phase and resonance settings.
+        """
         with self.mutating() as model:
-            if model.kind != "count":
-                raise ApiError(400, "the weight function can be configured on the count model only (select it first)")
+            if not hasattr(model, "configure_weights"):
+                raise ApiError(400, f"the {model.kind} model has no configurable weight function (select another kind first)")
             try:
                 config = model.configure_weights(**{k: v for k, v in options.items() if v is not None})
             except ValueError as exc:
@@ -1386,12 +1542,14 @@ class ModelService:
         web_timeout: float | None = None,
         max_bytes: int | None = None,
         python_tool: bool | None = None,
+        browser: bool | None = None,
     ) -> ToolBox:
         """The tools of one request: the server's defaults with the request's overrides applied."""
         options = dict(self.tool_options)
         for key, value in (
             ("offline", offline), ("allow_private", allow_private), ("search_url", search_url),
             ("web_timeout", web_timeout), ("max_bytes", max_bytes), ("python_tool", python_tool),
+            ("browser", browser),
         ):
             if value is not None:
                 options[key] = value
@@ -1403,29 +1561,58 @@ class ModelService:
                     allow_private=options["allow_private"], search_url=options["search_url"] or None,
                 )
             sandbox = Sandbox(timeout=options["sandbox_timeout"]) if options["python_tool"] else None
-            return default_toolbox(web, sandbox=sandbox, upload_dir=self.upload_dir, offline=options["offline"])
+            drawn_by = self.browser(options["page_timeout"]) if options["browser"] and not options["offline"] else None
+            return default_toolbox(web, sandbox=sandbox, upload_dir=self.upload_dir, offline=options["offline"],
+                                   browser=drawn_by)
         except (ValueError, TypeError) as exc:
             raise ApiError(400, str(exc)) from exc
 
+    def browser(self, page_timeout: float = 30.0) -> Any:
+        """The one headless Chrome of this server, started on first use and shared by every request.
+
+        A browser takes a second or two to start, so one per request would be
+        unusable; it is stopped with the server.
+        """
+        from .browser import BrowserClient, describe as describe_browser
+
+        with self._upload_lock:  # any lock will do: this only guards the one-time construction
+            if self._browser is None:
+                found = describe_browser()
+                if not found["available"]:
+                    raise ApiError(400, f"the browser is not available: {found['error']}")
+                self._browser = BrowserClient(page_timeout=page_timeout)
+            return self._browser
+
     def describe_tools(self) -> dict:
+        from .browser import describe as describe_browser
+
         box = self.toolbox()
         return {
             "tools": box.describe(), "names": box.names(), "count": len(box),
             "options": dict(self.tool_options), "upload_dir": self.upload_dir,
             "call_format": '<tool>name {"argument": "value"}</tool>',
+            "browser": describe_browser(),
         }
 
     def call_tool(self, toolbox: ToolBox, name: str, arguments: dict) -> dict:
         """Run one tool outside any job (the model lock is not taken: no tool touches the model)."""
         return toolbox.call(name, arguments).to_dict()
 
-    def start_agent(self, tasks: list[Task], config: AgentConfig, client: OllamaClient, toolbox: ToolBox) -> dict:
-        """Start an ``agent`` job: criteria, tool calls, judging, teaching and 2NRL over ``tasks``."""
+    def start_agent(
+        self, tasks: list[Task], config: AgentConfig, client: OllamaClient, toolbox: ToolBox, blame: bool = False,
+    ) -> dict:
+        """Start an ``agent`` job: criteria, tool calls, judging, teaching and 2NRL over ``tasks``.
+
+        With ``blame`` the judge also teaches the negative network: every failed
+        attempt is blamed for what went wrong in it, and the correct run of the
+        same task is the correction the diff is taken against.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
-            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock)
+            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock, negative=negative)
             trainer.run(
                 tasks, progress=self._progress(job, self._agent_history), stop_event=job.stop_event,
                 checkpoint_manager=manager,
@@ -1434,14 +1621,20 @@ class ModelService:
         return self._start_job("agent", work)
 
     def start_explore(
-        self, steps: int | None, config: AgentConfig, client: OllamaClient, toolbox: ToolBox, seeds: list[str] | None = None
+        self, steps: int | None, config: AgentConfig, client: OllamaClient, toolbox: ToolBox,
+        seeds: list[str] | None = None, blame: bool = False,
     ) -> dict:
-        """Start an ``explore`` job: the network chooses every task itself (``steps`` ``None`` / 0 = until stopped)."""
+        """Start an ``explore`` job: the network chooses every task itself (``steps`` ``None`` / 0 = until stopped).
+
+        ``blame`` teaches the negative network from every failure it finds
+        along the way, exactly as :meth:`start_agent` does.
+        """
         config.validate()
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
+        negative = self.negative_model() if blame else None
 
         def work(job: Job) -> None:
-            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock)
+            trainer = AgentTrainer(self.model, client, toolbox, config, external=self.pause_lock, negative=negative)
             trainer.frontier.extend(seeds or ())
             trainer.explore(
                 steps=steps, progress=self._progress(job, self._agent_history), stop_event=job.stop_event,
@@ -1505,6 +1698,40 @@ class ModelService:
     def critic_history(self) -> dict:
         return {"history": list(self._critic_history)}
 
+    def start_chat(self, config: Any, client: LLMClient, judge_client: LLMClient | None = None) -> dict:
+        """Start a ``chat`` job: the LLM converses with the model, marks every reply, and both networks learn.
+
+        The partner keeps its lines short and easy to carry on from, the model
+        replies by continuing them (:func:`radixnet.dialogue.reply`), and the
+        judge marks each reply against the line it answered
+        (:mod:`radixnet.chat`).  Unlike the critic this loop *does* train the
+        positive model - the replies that passed are rewarded and the ones that
+        failed punished - so it takes the model lock like any other training
+        job; the negative network learns from the same verdicts when one is in
+        memory.
+        """
+        from .chat import Chat
+
+        config.validate()
+        negative = self.negative_model() if config.blame or config.guard else None
+
+        def work(job: Job) -> None:
+            loop = Chat(self.model, client, config, negative=negative, external=self.pause_lock,
+                        judge_client=judge_client)
+            loop.run(progress=self._progress(job, self._chat_history), stop_event=job.stop_event)
+
+        return self._start_job("chat", work)
+
+    def chat_history(self) -> dict:
+        return {"history": list(self._chat_history)}
+
+    def chat_card(self) -> dict | None:
+        """The report at the end of the last conversation run, or ``None`` when it has never run."""
+        for record in reversed(self._chat_history):
+            if record.get("kind") == "report":
+                return dict(record)
+        return None
+
     def critic_card(self) -> dict | None:
         """The report at the end of the last automatic run, or ``None`` when it has never run."""
         for record in reversed(self._critic_history):
@@ -1525,7 +1752,10 @@ class ModelService:
     # -- lifecycle -----------------------------------------------------------
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """Stop a running job and wait (bounded) for its thread to finish."""
+        """Stop a running job and wait (bounded) for its thread to finish; close the browser if one was started."""
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            browser.close()
         job = self._job
         if job is None or not job.running:
             return
@@ -1592,9 +1822,11 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     edge_count = graph.edge_count
     edge_reward = getattr(graph, "edge_reward", None)
     shares_of = getattr(graph, "shares", None)
+    window_counts = getattr(graph, "window_edge_count", None)   # the count model only
+    advance = getattr(graph, "advance", None)                   # the resonant model only
     edges = []
     for p in ids:
-        shares = {e: (all_, recent) for _c, e, all_, recent in shares_of(p)} if shares_of is not None else {}
+        shares = {e: (first, second) for _c, e, first, second in shares_of(p)} if shares_of is not None else {}
         for c, e, cost in graph.child_costs(p):
             if c in chosen:
                 edge = {
@@ -1604,8 +1836,11 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
                 }
                 if edge_reward is not None:
                     edge["reward"] = edge_reward[e]
+                if window_counts is not None:
                     edge["share"], edge["recent_share"] = shares.get(e, (0.0, 0.0))
-                    edge["recent_count"] = graph.window_edge_count[e]
+                    edge["recent_count"] = window_counts[e]
+                elif advance is not None:
+                    edge["coherence"], edge["mu"] = shares.get(e, (0.0, 0.0))
                 edges.append(edge)
     edges.sort(key=lambda d: (d["source"], d["target"]))
     view = {
@@ -1615,8 +1850,13 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     if edge_reward is not None:
         view["total_traversals"] = graph.total_traversals.value
         view["total_traversals_resets"] = graph.total_traversals.resets
+    if window_counts is not None:
         view["window_traversals"] = graph.window_traversals
         view["window"] = graph.window
+    if advance is not None:
+        view["buckets"] = graph.buckets
+        for node in nodes:
+            node["advance"] = advance[node["id"]]
     return view
 
 
@@ -2093,6 +2333,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     prefix = f.text("prefix")
     return 200, svc.predict(
         prefix,
+        guard=f.flag("guard", True),
         length=f.integer("length", 20, minimum=0),
         mode=f.text("mode", "dijkstra"),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
@@ -2106,6 +2347,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.generate(
+        guard=f.flag("guard", True),
         count=f.integer("count", 1, minimum=0),
         max_length=f.integer("max_length", 60, minimum=0),
         mode=f.text("mode", "sample"),
@@ -2123,6 +2365,7 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         opening=f.text("opening", ""),
         turns=f.integer("turns", 6, minimum=0),
         partner=partner or None,
+        guard=f.flag("guard", True),
         mode=f.text("mode", "beam"),
         max_length=f.integer("max_length", 60, minimum=0),
         context=f.integer("context", 12, minimum=0),
@@ -2134,6 +2377,9 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         speakers=f.names("speakers") or list(DEFAULT_SPEAKERS),
         history=f.texts_optional("history", "history_text"),
         avoid_repeats=f.flag("avoid_repeats", True),
+        avoid_word_repeats=f.flag("avoid_word_repeats", True),
+        explore=f.integer("explore", EXPLORE, minimum=0),
+        learn=f.flag("learn", True),
     )
 
 
@@ -2212,12 +2458,23 @@ def _r_load(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _weight_options(f: Fields) -> dict:
+    """Score-function settings of every kind that has one; the model rejects the ones it does not know."""
     return {
+        # count model
         "count_scale": f.number("count_scale", None),
         "global_scale": f.number("global_scale", None),
         "window_scale": f.number("window_scale", None),
-        "reward_scale": f.number("reward_scale", None),
+        "path_scale": f.number("path_scale", None),
         "window": f.integer("window", None, minimum=1),
+        # resonant model
+        "buckets": f.integer("buckets", None, minimum=1),
+        "period": f.number("period", None),
+        "kick_scale": f.number("kick_scale", None),
+        "resonance_scale": f.number("resonance_scale", None),
+        "amp_scale": f.number("amp_scale", None),
+        "concentration": f.number("concentration", None),
+        # both
+        "reward_scale": f.number("reward_scale", None),
     }
 
 
@@ -2363,6 +2620,77 @@ def _r_negative_auto_history(svc: ModelService, f: Fields, q: dict) -> tuple[int
     return 200, svc.critic_history()
 
 
+def _chat_config(f: Fields) -> Any:
+    """The conversation settings of a request body (:class:`~radixnet.chat.ChatConfig` defaults)."""
+    from .chat import ChatConfig
+
+    d = ChatConfig()
+    config = ChatConfig(
+        conversations=f.integer("conversations", d.conversations, minimum=0),
+        turns=f.integer("turns", d.turns, minimum=1),
+        topic=f.text("topic", d.topic),
+        opening=f.text("opening", d.opening),
+        persona=f.text("persona", d.persona),
+        context=f.integer("context", d.context, minimum=0),
+        max_length=f.integer("max_length", d.max_length, minimum=1),
+        mode=f.text("mode", d.mode).strip().lower(),
+        k=f.integer("k", d.k, minimum=1),
+        temperature=f.number("temperature", d.temperature, minimum=0.0),
+        partner_temperature=f.number("partner_temperature", d.partner_temperature, minimum=0.0),
+        threshold=f.number("threshold", d.threshold, minimum=0.0),
+        provider=_provider_field(f, "provider", "partner_provider", d.provider),
+        partner_model=f.text("partner_model", None) or f.text("model", None) or d.partner_model,
+        judge_model=f.text("judge_model", None) or d.judge_model,
+        guard=f.flag("guard", d.guard),
+        blame=f.flag("blame", d.blame),
+        clear_passes=f.flag("clear_passes", d.clear_passes),
+        learn=f.flag("learn", d.learn),
+        teach_partner=f.flag("teach_partner", d.teach_partner),
+        avoid_repeats=f.flag("avoid_repeats", d.avoid_repeats),
+        avoid_word_repeats=f.flag("avoid_word_repeats", d.avoid_word_repeats),
+        explore=f.integer("explore", d.explore, minimum=0),
+        neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
+        pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
+        neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
+        pos_lr=f.number("pos_lr", d.pos_lr, minimum=0.0),
+        batch_size=f.integer("batch_size", d.batch_size, minimum=1),
+        strength=f.number("strength", d.strength, minimum=0.0),
+        epochs=f.integer("epochs", d.epochs, minimum=0),
+        seed=f.integer("seed", d.seed),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
+
+
+def _r_chat_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Start a conversation job: the LLM talks to the model, marks every reply, and both networks learn."""
+    config = _chat_config(f)
+    timeout = f.number("timeout", None, minimum=1.0)
+    client = svc.llm_client(config.provider, f.text("url", None), config.partner_model or None, timeout)
+    judge = client
+    judge_url = f.text("judge_url", None)
+    if config.judge_model or judge_url:
+        judge = svc.llm_client(config.provider, judge_url, config.judge_model or None, timeout)
+    job = svc.start_chat(config, client, judge_client=judge)
+    return 202, {
+        "job": job, "config": config.to_dict(), "url": client.url, "partner": client.model, "judge": judge.model,
+        "speakers": list(_chat_speakers()),
+    }
+
+
+def _chat_speakers() -> tuple[str, str]:
+    from .chat import DEFAULT_SPEAKERS
+
+    return DEFAULT_SPEAKERS
+
+
+def _r_chat_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.chat_history()
+
+
 def _r_negative_save(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.negative_save(f.text("path", None))
 
@@ -2389,6 +2717,25 @@ def _r_graph(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     except ValueError:
         raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
     return 200, svc.graph(limit)
+
+
+def _r_paths(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["50"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    return 200, svc.paths(limit)
+
+
+def _r_nodes(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["20"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    node = q.get("node", [None])[-1]
+    return 200, svc.node_ratios(limit, node)
 
 
 def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -2986,6 +3333,7 @@ def _toolbox_from(svc: ModelService, f: Fields, q: dict | None = None) -> ToolBo
 
     return svc.toolbox(
         offline=flag("offline"), allow_private=flag("allow_private"), python_tool=flag("python_tool"),
+        browser=flag("browser"),
         search_url=f.text("search_url", None), web_timeout=f.number("web_timeout", None, minimum=0.1),
         max_bytes=f.integer("max_bytes", None, minimum=1024),
     )
@@ -3029,6 +3377,8 @@ def _agent_config(f: Fields) -> AgentConfig:
         blatant_mode=blatant,
         blatant_margin=f.number("blatant_margin", d.blatant_margin, minimum=0.001),
         blatant_boost=f.number("blatant_boost", d.blatant_boost, minimum=1.0),
+        avoid_blamed=f.flag("avoid_blamed", d.avoid_blamed),
+        avoid_threshold=f.number("avoid_threshold", d.avoid_threshold, minimum=0.0),
         neg_epochs=f.integer("neg_epochs", d.neg_epochs, minimum=0),
         pos_epochs=f.integer("pos_epochs", d.pos_epochs, minimum=0),
         neg_lr=f.number("neg_lr", d.neg_lr, minimum=0.0),
@@ -3101,8 +3451,10 @@ def _r_agent_start(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     config = _agent_config(f)
     toolbox = _toolbox_from(svc, f)
     client = _agent_client(svc, f, config)
-    job = svc.start_agent(tasks, config, client, toolbox)
-    return 202, {"job": job, "tasks": [t.to_dict() for t in tasks], "tools": toolbox.names(), "config": config.to_dict()}
+    blame = f.flag("blame", False)
+    job = svc.start_agent(tasks, config, client, toolbox, blame=blame)
+    return 202, {"job": job, "tasks": [t.to_dict() for t in tasks], "tools": toolbox.names(),
+                 "config": config.to_dict(), "blame": blame}
 
 
 def _r_agent_explore(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3111,8 +3463,10 @@ def _r_agent_explore(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     client = _agent_client(svc, f, config)
     steps = f.integer("steps", 10, minimum=0)
     seeds = [s for s in f.texts_optional("seed_urls", "seed_url") if s.strip()]
-    job = svc.start_explore(steps or None, config, client, toolbox, seeds)
-    return 202, {"job": job, "steps": steps or None, "seeds": seeds, "tools": toolbox.names(), "config": config.to_dict()}
+    blame = f.flag("blame", False)
+    job = svc.start_explore(steps or None, config, client, toolbox, seeds, blame=blame)
+    return 202, {"job": job, "steps": steps or None, "seeds": seeds, "tools": toolbox.names(),
+                 "config": config.to_dict(), "blame": blame}
 
 
 def _r_agent_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3222,6 +3576,8 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         batch=f.integer("batch", d.batch, minimum=1),
         adapt=f.flag("adapt", d.adapt),
         drills=f.integer("drills", d.drills, minimum=0),
+        variants=f.integer("variants", d.variants, minimum=0),
+        variant_weight=f.number("variant_weight", d.variant_weight, minimum=0.0),
         plan=f.integer("plan", d.plan, minimum=0),
         batches=f.integer("batches", d.batches, minimum=0),
         teach_answer=f.flag("teach_answer", d.teach_answer),
@@ -3350,14 +3706,22 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict,
      "continue a prefix: {prefix, length, mode: dijkstra | beam | sample, to_end, step_penalty, temperature, max_length "
-     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations)}"),
+     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), guard (default on: "
+     "the negative network vetoes the continuations it recognises as failures)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
-     "dijkstra, temperature, seed, prefix, step_penalty, beam}"),
+     "dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the "
+     "negative network vetoes what it recognises as failure)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
-     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats}"),
+     "speakers, history (utterances so far, to continue), partner (another kind in memory answers), avoid_repeats "
+     "(what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a "
+     "reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn "
+     "(default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes "
+     "round - a conversation with this on changes the model), "
+     "guard (default on: a reply the negative network vetoes is left unsaid)} "
+     "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl,
      "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "
@@ -3377,9 +3741,13 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
     ("POST", "/api/reset", _r_reset,
-     "replace the model with a fresh one: {seed, kind, count model: count_scale, global_scale, window_scale, reward_scale, window}"),
+     "replace the model with a fresh one: {seed, kind, and the kind's score-function settings - count: "
+     "count_scale, global_scale, window_scale, reward_scale, window; resonant: buckets, period, kick_scale, "
+     "resonance_scale, amp_scale, reward_scale, concentration}"),
     ("POST", "/api/model/weights", _r_model_weights,
-     "count model: change the dual frequency function {count_scale, global_scale, window_scale, reward_scale, window} -> {weights, stats}"),
+     "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
+     "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "
+     "concentration} -> {weights, stats}"),
     ("GET", "/api/negative", _r_negative,
      "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
      "filter settings"),
@@ -3400,6 +3768,16 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/negative/settings", _r_negative_settings,
      "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
     ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
+    ("POST", "/api/chat/start", _r_chat_start,
+     "start a chat job - an LLM converses with the model and marks every reply: {conversations (0 = until "
+     "stopped), turns, topic, opening, persona, context, max_length, mode: beam|sample, k, temperature, "
+     "partner_temperature, threshold, provider: ollama|chatgpt, partner_model, judge_model, url, judge_url, "
+     "timeout, guard (the negative network vetoes a reply before it is spoken), blame, clear_passes, learn "
+     "(2NRL on the marked replies), teach_partner (the partner's own lines join the positive phase), "
+     "avoid_repeats, avoid_word_repeats, explore, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size, strength, "
+     "epochs, seed}"),
+    ("GET", "/api/chat/history", _r_chat_history,
+     "exchange / conversation / report records of all chat runs"),
     ("POST", "/api/negative/auto", _r_negative_auto,
      "the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every "
      "failure blame the negative network - {rounds (0 = until stopped), count, prefix, max_length, temperature, "
@@ -3411,6 +3789,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/checkpoints/save", _r_checkpoint_save, "write a checkpoint: {tag}"),
     ("POST", "/api/checkpoints/restore", _r_checkpoint_restore, "restore a checkpoint: {name}"),
     ("GET", "/api/graph", _r_graph, "top nodes by visit count and the edges among them (?limit=150)"),
+    ("GET", "/api/paths", _r_paths,
+     "count model: the judged paths (?limit=50) - what each step did in the context it was taken from: "
+     "{totals, path_scale, paths: [{after, parent_label, child_label, seen, correct, incorrect, correct_ratio, "
+     "seen_ratio, term}]}"),
+    ("GET", "/api/nodes", _r_nodes,
+     "count model: each node against the nodes around it (?limit=20, ?node=LABEL) - {nodes: [{node, label, visits, "
+     "from: [{label, seen, seen_ratio, reward, reward_ratio, path_seen, path_ratio, correct, incorrect, "
+     "correct_ratio}], to: [...], in_totals, out_totals}]}"),
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload,
@@ -3465,13 +3851,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the external tools the network can call by writing <tool>name {...}</tool>: names, arguments, JSON schemas"),
     ("POST", "/api/tools/call", _r_tool_call,
      "call one tool directly: {tool, arguments} or {call: 'name {\"arg\": \"value\"}'} + tool overrides "
-     "{offline, allow_private, search_url, web_timeout, max_bytes, python_tool} -> the ToolResult"),
+     "{offline, allow_private, search_url, web_timeout, max_bytes, python_tool, browser} -> the ToolResult"),
     ("POST", "/api/agent/start", _r_agent_start,
      "start an agent job over tasks: {tasks | tasks_text | task_files, phase: model|teacher|both, rounds, max_steps, "
-     "mediation: repair|always|never, criteria, judge, teach, blatant_mode, blatant_margin, blatant_boost, 2NRL options}"),
+     "mediation: repair|always|never, criteria, judge, teach, blame (teach the negative network from the failures), "
+     "blatant_mode, blatant_margin, blatant_boost, 2NRL options}"),
     ("POST", "/api/agent/explore", _r_agent_explore,
-     "start an explore job - the network chooses every task itself: {steps (0 = until stopped), seed_urls, ...the "
-     "agent options}"),
+     "start an explore job - the network chooses every task itself: {steps (0 = until stopped), seed_urls, blame, "
+     "...the agent options}"),
     ("GET", "/api/agent/history", _r_agent_history, "criteria / step / attempt / task records of all agent and explore runs"),
     ("POST", "/api/agent/criteria", _r_agent_criteria,
      "the acceptance criteria the LLM writes for {tasks}, without attempting anything"),
@@ -3485,7 +3872,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "neg_epochs, pos_epochs, neg_lr, pos_lr, brief, plan, batches (auto run: each batch planned from the last, "
      "0 = until stopped), tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
      "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
-     "failed), ...}"),
+     "failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same "
+     "mistake, blamed at 'variant_weight' of its severity), ...}"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "

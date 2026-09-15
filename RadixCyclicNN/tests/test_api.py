@@ -21,6 +21,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import __version__, api  # noqa: E402
+from radixnet.dialogue import stutter as dialogue_stutter  # noqa: E402
+from radixnet.graph import FIRST  # noqa: E402
 from radixnet.model import RadixNet, TrainConfig  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +44,7 @@ STATS_KEYS = {
 JOB_KEYS = {"id", "type", "state", "progress", "history", "error", "started_at", "finished_at", "stop_requested"}
 PREDICT_KEYS = {
     "prefix", "kind", "continuation", "full_text", "cost", "probability", "step_costs", "path", "node_ids", "expanded",
-    "reached_end",
+    "reached_end", "guard",
 }
 NODE_KEYS = {"id", "label", "count", "count_resets", "activation", "z", "a", "b", "h", "k"}
 EDGE_KEYS = {"source", "target", "weight", "count", "count_resets", "prob", "cost"}
@@ -519,7 +521,7 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual((status, status2), (200, 200))
         self.assertEqual(data, data2)
         status, data, _ = self.client.post("/api/generate", {"count": 0})
-        self.assertEqual((status, data), (200, {"samples": []}))
+        self.assertEqual((status, data), (200, {"samples": [], "guard": None}))  # no negative network: nothing to guard with
         # beam: the K most likely complete texts from the prediction search
         status, data, _ = self.client.post("/api/generate", {"count": 3, "mode": "beam", "max_length": 40, "beam": 24})
         self.assertEqual(status, 200, data)
@@ -564,6 +566,36 @@ class TestEndpoints(unittest.TestCase):
                 self.assertEqual(turn["text"], turn["context"] + turn["reply"])
         texts = [t["text"] for t in turns]
         self.assertEqual(len(set(texts)), len(texts))
+        # the duplicates the search could not avoid come back ready to be punished (POST /api/feedback "bad")
+        self.assertEqual(data["repeats"], [t["text"] for t in turns if t["repeat"]])
+        status, long, _ = self.client.post("/api/converse", {"opening": CORPUS[0], "turns": 40})
+        self.assertEqual(status, 200, long)
+        said_twice = [t["text"] for t in long["turns"] if t["repeat"]]
+        self.assertTrue(said_twice, "a long conversation on a small corpus runs out of new things to say")
+        self.assertEqual(set(long["repeats"]), set(said_twice))
+        self.assertEqual(len(long["repeats"]), len({t.strip().casefold() for t in long["repeats"]}))
+        # a reply may not repeat its own words either, unless the setting says it may
+        body = {"opening": CORPUS[0], "turns": 25}
+        status, strict, _ = self.client.post("/api/converse", body)
+        status2, loose, _ = self.client.post("/api/converse", {**body, "avoid_word_repeats": False})
+        self.assertEqual((status, status2), (200, 200))
+        for turn in strict["turns"] + loose["turns"]:
+            self.assertEqual(turn["stutter"], bool(dialogue_stutter(turn["text"])), turn["text"])
+        self.assertFalse([t for t in strict["turns"] if t["stutter"] and not t["repeat"]])
+        # the exploring is a setting of its own: what it noticed and did rides on the turn
+        for turn in strict["turns"]:
+            thought = turn["rethink"]
+            if thought is not None:
+                self.assertEqual(set(thought), {"kind", "noticed", "cut", "steps", "explored", "found", "taught"})
+                self.assertIn(thought["kind"], ("stutter", "repeat"))
+                self.assertTrue(thought["noticed"])
+                if thought["found"]:
+                    self.assertTrue(turn["text"].startswith(thought["cut"]), (turn["text"], thought["cut"]))
+        status, plain, _ = self.client.post("/api/converse", {**body, "explore": 0})
+        self.assertEqual(status, 200, plain)
+        self.assertFalse([t for t in plain["turns"] if t["rethink"] is not None])
+        status, data, _ = self.client.post("/api/converse", {"explore": -1})
+        self.assertEqual(status, 400, data)
         # continue: the history is picked up, indices and speakers carry on
         status, more, _ = self.client.post("/api/converse", {"turns": 2, "history": texts, "speakers": ["me", "you"]})
         self.assertEqual(status, 200, more)
@@ -892,7 +924,7 @@ class TestPersistence(unittest.TestCase):
         prediction = {k: prediction[k] for k in text_fields}  # node ids are compacted on save
         status, data, _ = self.client.post("/api/reset", {"seed": 3})
         self.assertEqual(status, 200)
-        self.assertEqual((data["nodes"], data["edges"], data["epochs_total"]), (2, 0, 0))
+        self.assertEqual((data["nodes"], data["edges"], data["epochs_total"]), (FIRST, 0, 0))
         self.assertEqual(self.service.model.seed, 3)
         status, data, _ = self.client.post("/api/load", {"path": other})
         self.assertEqual(status, 200)
@@ -956,7 +988,7 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(data["latest"]["tag"], "before-reset")
         stats = self.client.get("/api/status")[1]
         self.client.post("/api/reset", {"seed": 1})
-        self.assertEqual(self.client.get("/api/status")[1]["nodes"], 2)
+        self.assertEqual(self.client.get("/api/status")[1]["nodes"], FIRST)
         status, restored, _ = self.client.post("/api/checkpoints/restore", {"name": record["name"]})
         self.assertEqual(status, 200)
         self.assertEqual((restored["nodes"], restored["edges"], restored["epochs_total"]),

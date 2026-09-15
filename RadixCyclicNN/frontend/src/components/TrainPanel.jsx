@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
-import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
+import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import LineChart from "./LineChart.jsx";
@@ -50,6 +50,8 @@ export default function TrainPanel({ status }) {
 
   const otherJobRunning = jobIsRunning(status) && !running;
   const countKind = Boolean(status && status.kind === "count");
+  // no learning rates, batches or schedules: the count and resonant models learn by counting
+  const rateless = countingKind(status);
   const goEngine = Boolean(status && status.engine === "go");
   // Go server: what one training text is (each text is handled by its own goroutine)
   const [split, setSplit] = useState("lines");
@@ -112,7 +114,7 @@ export default function TrainPanel({ status }) {
       setWeightsBusy(false);
     }
   }
-  const scheduled = !countKind && (lrSchedule.trim() !== "" || actLrSchedule.trim() !== "");
+  const scheduled = !rateless && (lrSchedule.trim() !== "" || actLrSchedule.trim() !== "");
 
   const loadHistory = useCallback(async () => {
     try {
@@ -298,17 +300,26 @@ export default function TrainPanel({ status }) {
             onChange={setBatchSize}
             min={1}
             step={1}
-            disabled={running || countKind}
-            hint={countKind ? "not used by the count model" : undefined}
+            disabled={running || rateless}
+            hint={rateless ? `not used by the ${status.model_label || status.kind} model` : undefined}
           />
         </div>
         {countKind ? (
           <p className="muted">
-            Count / reward model: every epoch counts one more traversal of each text's path (edge weight = log(1 +
-            traversals) + rewards). There are no learning rates or batches to set.
+            Count / reward model: every epoch counts one more traversal of each text's path (edge weight = the
+            edge's share of its node's traversals, all time and recently, plus rewards). There are no learning
+            rates or batches to set.
           </p>
         ) : null}
-        <div className="row" hidden={countKind}>
+        {rateless && !countKind ? (
+          <p className="muted">
+            Resonant model: every epoch walks each text carrying its <b>phase</b> and counts each traversal into
+            its edge's circular mean, so an edge learns the phase at which it fires and how coherently. The cycle
+            decisions the text made train the metacognitive layer beside it. There are no learning rates or
+            batches to set.
+          </p>
+        ) : null}
+        <div className="row" hidden={rateless}>
           <NumberField label="Learning rate" hint="lr0" value={lr} onChange={setLr} min={0} disabled={running} />
           <NumberField
             label="Activation lr"
@@ -319,7 +330,7 @@ export default function TrainPanel({ status }) {
             disabled={running}
           />
         </div>
-        <fieldset className="schedule" hidden={countKind}>
+        <fieldset className="schedule" hidden={rateless}>
           <legend>Learning-rate schedule (graph function of the epoch)</legend>
           <SelectField
             label="Preset"

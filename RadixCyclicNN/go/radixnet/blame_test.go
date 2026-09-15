@@ -2,6 +2,7 @@ package radixnet
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -109,6 +110,60 @@ func TestFaultsFromLessons(t *testing.T) {
 		"It repeats the same word over and over.", floatPtr(1), false)}, 6, "tutor")
 	if len(fallback) != 1 || fallback[0].Reason != "repetition" {
 		t.Fatalf("the critique decides when the teacher named no mistake: %+v", fallback)
+	}
+}
+
+func TestAWidenedMistakeBlamesItsWholeFamily(t *testing.T) {
+	lesson := tutorLessons()[0]
+	lesson.Why = "A singular subject takes a singular verb; the student drops the -s."
+	lesson.Variants = []TutorCorrection{
+		{Wrong: "the dog sleep in the sun", Right: "the dog sleeps in the sun", Weight: 0.5},
+		{Wrong: "she walk to the shop", Right: "she walks to the shop", Weight: 0.5},
+		{Wrong: "the cat sit on the mat"}, // a repeat of the student's own sentence: dropped
+		{Wrong: ""},
+	}
+	faults, passed := FaultsFromLessons([]*Lesson{lesson}, 6, "tutor")
+	if len(faults) != 3 {
+		t.Fatalf("the mistake and its two usable variants: %+v", faults)
+	}
+	for _, fault := range faults {
+		if fault.Reason != "agreement" {
+			t.Fatalf("the same mistake keeps the same reason: %+v", fault)
+		}
+	}
+	if faults[1].Source != "tutor:similar" || faults[2].Source != "tutor:similar" {
+		t.Fatalf("a variant says where it came from: %+v", faults)
+	}
+	if !closeTo(faults[1].Severity, faults[0].Severity*0.5) {
+		t.Fatalf("the student never wrote it, so it weighs less: %g vs %g", faults[1].Severity, faults[0].Severity)
+	}
+	if faults[1].Correction != "the dog sleeps in the sun" || !strings.Contains(faults[1].Note, "drops the -s") {
+		t.Fatalf("a variant is diffed against its own correct form, noted with the explanation: %+v", faults[1])
+	}
+	found := false
+	for _, text := range passed {
+		if text == "she walks to the shop" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("what the teacher wrote is clean text: %v", passed)
+	}
+
+	negative, err := NewNegativeModel(11, DefaultNegativeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := TeachLessons(negative, []*Lesson{lesson}, 6, true, "tutor", TeachOptions{})
+	if err != nil || report.Blamed != 3 {
+		t.Fatalf("the whole family is blamed: %+v %v", report, err)
+	}
+	// a sentence the network never wrote is now known to be wrong in the same way
+	if verdict := negative.Judge("the dog sleep in the sun", DefaultJudgeOptions()); verdict.Verdict == "pass" {
+		t.Fatalf("the family should be recognised: %+v", verdict)
+	}
+	if negative.Judge("the dog sleeps in the sun", DefaultJudgeOptions()).Verdict != "pass" {
+		t.Fatal("its correct form is clean")
 	}
 }
 

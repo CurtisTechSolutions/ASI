@@ -72,6 +72,15 @@ type negativeWeightsDoc struct {
 	Reasons          reasonRegistryDoc `json:"reasons"`
 }
 
+// pathsDoc is the judged paths: one row per (the node that called the step, the edge it took).
+type pathsDoc struct {
+	Prev      []int   `json:"prev"`
+	Edge      []int   `json:"edge"`
+	Seen      []int64 `json:"seen"`
+	Correct   []int64 `json:"correct"`
+	Incorrect []int64 `json:"incorrect"`
+}
+
 type weightsDoc struct {
 	WeightConfig
 	Kind                  string `json:"kind"`
@@ -152,6 +161,7 @@ type GraphDoc struct {
 	Edges                  edgesDoc    `json:"edges"`
 	RngState               []any       `json:"rng_state"`
 	Weights                *weightsDoc `json:"weights,omitempty"`
+	Paths                  *pathsDoc   `json:"paths,omitempty"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -253,6 +263,38 @@ func (g *Graph) ToDoc() *GraphDoc {
 	}
 	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward",
 		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events}
+	rows := make([][3]int64, 0, len(g.paths))
+	keys := make([][2]int, 0, len(g.paths))
+	for key, row := range g.paths {
+		ni, ok := edgeIndex[key.Edge]
+		pi, known := remap[key.Prev]
+		if !ok || !known {
+			continue
+		}
+		keys = append(keys, [2]int{pi, ni})
+		rows = append(rows, [3]int64{row.Seen, row.Correct, row.Incorrect})
+	}
+	order2 := make([]int, len(keys))
+	for i := range order2 {
+		order2[i] = i
+	}
+	// the two implementations keep their tables in different orders; the file has one
+	sort.Slice(order2, func(i, j int) bool {
+		a, b := keys[order2[i]], keys[order2[j]]
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		return a[1] < b[1]
+	})
+	paths := &pathsDoc{Prev: []int{}, Edge: []int{}, Seen: []int64{}, Correct: []int64{}, Incorrect: []int64{}}
+	for _, at := range order2 {
+		paths.Prev = append(paths.Prev, keys[at][0])
+		paths.Edge = append(paths.Edge, keys[at][1])
+		paths.Seen = append(paths.Seen, rows[at][0])
+		paths.Correct = append(paths.Correct, rows[at][1])
+		paths.Incorrect = append(paths.Incorrect, rows[at][2])
+	}
+	doc.Paths = paths
 	return doc
 }
 
@@ -267,14 +309,74 @@ func reasonPairs(entries []ReasonBlame) [][2]float64 {
 }
 
 // GraphFromDoc rebuilds a graph from its document.
+// withBack gives a graph document the Back sentinel: format 3 as it is, anything
+// older upgraded.  Files written before Back existed have Start and End and then
+// their real nodes, so the sentinel is inserted at Back and every node id from
+// there up shifts by one.  It arrives unvisited and with no edges: a model that
+// has never caught itself repeating has nothing to say about where it goes round.
+func withBack(d *GraphDoc) {
+	if d.FormatVersion >= 3 {
+		return
+	}
+	labels := d.Nodes.Labels
+	if len(labels) < Back || (len(labels) > Back && labels[Back] == BackLabel) {
+		return
+	}
+	insertStr := func(v []string, at int, x string) []string {
+		return append(v[:at:at], append([]string{x}, v[at:]...)...)
+	}
+	insertF := func(v []float64, at int, x float64) []float64 {
+		if v == nil {
+			return nil
+		}
+		return append(v[:at:at], append([]float64{x}, v[at:]...)...)
+	}
+	insertI := func(v []int64, at int, x int64) []int64 {
+		if v == nil {
+			return nil
+		}
+		return append(v[:at:at], append([]int64{x}, v[at:]...)...)
+	}
+	// the sentinel takes Start's activation parameters, whatever kind of model wrote the file, and its own
+	// fixed state
+	at := func(v []float64, fallback float64) float64 {
+		if len(v) > Start {
+			return v[Start]
+		}
+		return fallback
+	}
+	d.Nodes.Labels = insertStr(labels, Back, BackLabel)
+	d.Nodes.Z = insertF(d.Nodes.Z, Back, BackZ)
+	d.Nodes.A = insertF(d.Nodes.A, Back, at(d.Nodes.A, 0))
+	d.Nodes.B = insertF(d.Nodes.B, Back, at(d.Nodes.B, defaultB))
+	d.Nodes.H = insertF(d.Nodes.H, Back, at(d.Nodes.H, defaultH))
+	d.Nodes.K = insertF(d.Nodes.K, Back, at(d.Nodes.K, 1))
+	d.Nodes.Count = insertI(d.Nodes.Count, Back, 0)
+	d.Nodes.CountResets = insertI(d.Nodes.CountResets, Back, 0)
+	shift := func(i int) int {
+		if i >= Back {
+			return i + 1
+		}
+		return i
+	}
+	for i := range d.Edges.Src {
+		d.Edges.Src[i] = shift(d.Edges.Src[i])
+	}
+	for i := range d.Edges.Dst {
+		d.Edges.Dst[i] = shift(d.Edges.Dst[i])
+	}
+	d.FormatVersion = graphFormatVersion
+}
+
 func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	if d.Format != graphFormat {
 		return nil, fmt.Errorf("not a %s document", graphFormat)
 	}
+	withBack(d)
 	labels := d.Nodes.Labels
 	n := len(labels)
-	if n < 2 || labels[Start] != StartLabel || labels[End] != EndLabel {
-		return nil, fmt.Errorf("graph document is missing the START/END sentinels")
+	if n < First || labels[Start] != StartLabel || labels[End] != EndLabel || labels[Back] != BackLabel {
+		return nil, fmt.Errorf("graph document is missing the START/END/BACK sentinels")
 	}
 	for _, arr := range [][]float64{d.Nodes.Z, d.Nodes.A, d.Nodes.B, d.Nodes.H, d.Nodes.K} {
 		if arr != nil && len(arr) != n {
@@ -307,6 +409,9 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	if w.has("window_scale") {
 		opts.WindowScale = w.WindowScale
 	}
+	if w.has("path_scale") {
+		opts.PathScale = w.PathScale
+	}
 	if w.has("window") {
 		opts.Window = w.Window
 		if opts.Window < 1 {
@@ -334,7 +439,7 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	for nid := 0; nid < n; nid++ {
 		g.Alive[nid] = true
 		g.labelLen[nid] = runeLen(labels[nid])
-		if nid < 2 {
+		if nid < First {
 			continue
 		}
 		label := []rune(labels[nid])
@@ -404,6 +509,17 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			seen += c
 		}
 		g.Traversals = NewCounter(seen, 0)
+	}
+	if p := d.Paths; p != nil {
+		for i := range p.Prev {
+			if i >= len(p.Edge) || p.Edge[i] < 0 || p.Edge[i] >= m || p.Prev[i] < 0 || p.Prev[i] >= n {
+				continue
+			}
+			row := g.pathRow(p.Prev[i], p.Edge[i], true)
+			row.Seen = at64(p.Seen, i)
+			row.Correct = at64(p.Correct, i)
+			row.Incorrect = at64(p.Incorrect, i)
+		}
 	}
 	if d.Weights != nil {
 		g.TotalTraversals = NewCounter(d.Weights.TotalTraversals, d.Weights.TotalTraversalsResets)
@@ -727,4 +843,12 @@ func copyMap(m map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// at64 reads one counter of a paths block, tolerating a short column.
+func at64(values []int64, i int) int64 {
+	if i < len(values) {
+		return values[i]
+	}
+	return 0
 }

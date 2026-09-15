@@ -34,6 +34,10 @@ func badRequest(format string, args ...any) error {
 	return &apiError{400, fmt.Sprintf(format, args...)}
 }
 
+func notFound(format string, args ...any) error {
+	return &apiError{404, fmt.Sprintf(format, args...)}
+}
+
 func utcNow() string { return time.Now().UTC().Format("2006-01-02T15:04:05-07:00") }
 
 func splitTexts(content, unit string, pageLines int) []string {
@@ -127,6 +131,16 @@ type Options struct {
 	// always comes from the server's $OPENAI_API_KEY.
 	ChatGPTURL   string
 	ChatGPTModel string
+	// Tools are the defaults of the /api/tools and /api/agent endpoints: what
+	// the network may call, and how far it may reach.
+	Offline      bool    // no web tools at all
+	AllowPrivate bool    // let the web tools reach private addresses
+	SearchURL    string  // a different search endpoint
+	WebTimeout   float64 // seconds per web request (0: 20)
+	MaxBytes     int     // cap on a fetched page (0: 2 MB)
+	PythonTool   bool    // also offer the sandboxed `python` tool
+	SandboxTime  float64 // seconds a sandboxed program may run (0: 10)
+	NoIsolation  bool    // do not run sandboxed programs in their own network namespace
 }
 
 // Service holds the model, the current job and the directories.  Readers
@@ -148,12 +162,25 @@ type Service struct {
 	started   time.Time
 	// negative is the negative network this server filters with (nil until first used)
 	negative *radixnet.Model
+	// negMu guards that lazy load: the output paths reach it under the read lock
+	negMu sync.Mutex
+	// guardConfig is how strictly the negative network guards the output paths
+	guardConfig radixnet.FilterConfig
 	// the teacher defaults of the tutor endpoints and the records of every tutor run
-	ollamaURL    string
-	ollamaModel  string
-	chatgptURL   string
-	chatgptModel string
-	tutorHistory []map[string]any
+	ollamaURL      string
+	ollamaModel    string
+	chatgptURL     string
+	chatgptModel   string
+	tutorHistory   []map[string]any
+	criticHistory  []map[string]any
+	codegenHistory []map[string]any
+	agentHistory   []map[string]any
+	chatHistory    []map[string]any
+	// tools are the server's defaults for the external tools the network may call
+	tools         toolDefaults
+	evolveHistory []map[string]any
+	// discriminator is the critic of the evolve loop (nil until first used)
+	discriminator *radixnet.Model
 	// epochDelay slows every epoch (tests: makes a job observable while running)
 	epochDelay time.Duration
 }
@@ -186,7 +213,20 @@ func NewService(opts Options) (*Service, error) {
 	m.Workers = workers
 	m.G.Workers = workers
 	m.Exact = opts.Exact
-	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact, started: time.Now(), logf: opts.Log}
+	tools := defaultToolDefaults()
+	tools.Offline, tools.AllowPrivate, tools.PythonTool = opts.Offline, opts.AllowPrivate, opts.PythonTool
+	tools.SearchURL, tools.NetworkIsolat = opts.SearchURL, !opts.NoIsolation
+	if opts.WebTimeout > 0 {
+		tools.WebTimeout = opts.WebTimeout
+	}
+	if opts.MaxBytes > 0 {
+		tools.MaxBytes = opts.MaxBytes
+	}
+	if opts.SandboxTime > 0 {
+		tools.SandboxTime = opts.SandboxTime
+	}
+	s := &Service{model: m, modelPath: path, seed: opts.Seed, workers: workers, exact: opts.Exact,
+		started: time.Now(), logf: opts.Log, guardConfig: radixnet.DefaultFilterConfig(), tools: tools}
 	s.ollamaURL = radixnet.DefaultOllamaURL()
 	if url, err := radixnet.NormaliseOllamaURL(opts.OllamaURL); err == nil {
 		s.ollamaURL = url
@@ -733,6 +773,98 @@ func (s *Service) History() (map[string]any, error) {
 }
 
 // Graph is GET /api/graph: the top-limit nodes by visit count plus START / END and the edges among them.
+// Paths is the judged paths: what each step did in the context it was taken from.
+func (s *Service) Paths(limit int) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		rows := []map[string]any{}
+		for _, row := range m.Paths(limit, -1) {
+			parent := g.ParentOfEdge(row.Edge)
+			child := -1
+			if parent >= 0 {
+				for _, t := range g.Children(parent) {
+					if t.E == row.Edge {
+						child = t.P
+					}
+				}
+			}
+			rows = append(rows, map[string]any{
+				"prev": row.Prev, "edge": row.Edge, "seen": row.Seen, "correct": row.Correct,
+				"incorrect": row.Incorrect, "correct_ratio": row.CorrectRatio, "seen_ratio": row.SeenRatio,
+				"term": row.Term, "after": g.Label(row.Prev), "parent": parent,
+				"parent_label": g.Label(parent), "child": child, "child_label": g.Label(child),
+			})
+		}
+		totals := g.PathTotals()
+		return map[string]any{
+			"totals": map[string]any{
+				"contexts": totals.Contexts, "judged": totals.Judged, "seen": totals.Seen,
+				"correct": totals.Correct, "incorrect": totals.Incorrect,
+			},
+			"paths": rows, "limit": limit, "path_scale": g.WeightConfig().PathScale,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// NodeRatios is each node against the nodes around it: its traffic and its
+// reward, shared out over the previous and the next nodes.
+func (s *Service) NodeRatios(limit int, node string) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		wanted := -1
+		if node != "" {
+			for i := 0; i < g.NumNodeIDs(); i++ {
+				if g.Label(i) == node {
+					wanted = i
+					break
+				}
+			}
+			if wanted < 0 {
+				found, _, ok := g.Lookup(node)
+				if !ok {
+					return nil, notFound("no node labelled %q: give a node label, or one of its trigrams", node)
+				}
+				wanted = found
+			}
+		}
+		totals := g.PathTotals()
+		rows := g.NodeRatioRows(limit, wanted)
+		if rows == nil {
+			rows = []radixnet.NodeStats{}
+		}
+		return map[string]any{
+			"nodes": rows, "limit": limit, "node": nodeQuery(node), "total_nodes": g.NumNodes(),
+			"totals": map[string]any{
+				"contexts": totals.Contexts, "judged": totals.Judged, "seen": totals.Seen,
+				"correct": totals.Correct, "incorrect": totals.Incorrect,
+			},
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// nodeQuery echoes the ?node= that was asked for - null when none was, as the
+// Python server reports it.
+func nodeQuery(node string) any {
+	if node == "" {
+		return nil
+	}
+	return node
+}
+
 func (s *Service) Graph(limit int) (map[string]any, error) {
 	if limit < 0 {
 		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
@@ -808,21 +940,109 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 }
 
 // Predict / Generate / Score / Converse run under the read lock.
+//
+// Every answer they hand out goes through the guard: the positive model
+// writes and the negative network, built from nothing but the tutor's
+// failures, vetoes what it recognises (radixnet.Filter).  Each returns the
+// guard's report alongside the answer - nil when nothing guarded it.
 
-func (s *Service) Predict(prefix string, o radixnet.PredictOptions) (*radixnet.Prediction, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Predict(prefix, o) })
-	if err != nil {
-		return nil, badRequest("%v", err)
+// guard is the pair on the way out, or nil when there is nothing to guard
+// with: no negative network in memory and none saved beside the model, or one
+// that has never been taught a failure and would veto nothing.  An empty
+// negative network is never created here - an answer is not the place to
+// bring one into being.  Call it with the model lock held; the output paths
+// do.
+func (s *Service) guard() *radixnet.Filter {
+	negative := s.negative
+	if negative == nil {
+		path := s.negativePath()
+		if path == "" {
+			return nil
+		}
+		if _, err := os.Stat(path); err != nil {
+			return nil
+		}
+		var err error
+		if negative, err = s.negativeModel(); err != nil { // loads it from that file and parks it
+			return nil
+		}
 	}
-	return out.(*radixnet.Prediction), nil
+	pair, err := radixnet.NewFilter(s.model, negative, s.guardConfig)
+	if err != nil || !pair.Ready() {
+		return nil
+	}
+	return pair
 }
 
-func (s *Service) Generate(o radixnet.GenerateOptions) ([]*radixnet.PathResult, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Generate(o) })
-	if err != nil {
-		return nil, badRequest("%v", err)
+// guardReport is what the guard did, for the caller to show: the vetoes, with
+// the reason and the fragment behind each.
+func guardReport(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
 	}
-	return out.([]*radixnet.PathResult), nil
+	out := map[string]any{
+		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool) (*radixnet.Prediction, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		found, err := m.Predict(prefix, o)
+		if err != nil || !guard {
+			return found, err
+		}
+		if pair := s.guard(); pair != nil {
+			ranked, verdicts := pair.Rank(prefix, found) // the survivors, best first
+			kept := 0
+			for _, verdict := range verdicts {
+				if verdict.Decision != "reject" {
+					kept++
+				}
+			}
+			report = guardReport(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
+			return ranked, nil
+		}
+		return found, nil
+	})
+	if err != nil {
+		return nil, nil, badRequest("%v", err)
+	}
+	return out.(*radixnet.Prediction), report, nil
+}
+
+func (s *Service) Generate(o radixnet.GenerateOptions, guard bool) ([]*radixnet.PathResult, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		pair := (*radixnet.Filter)(nil)
+		if guard {
+			pair = s.guard()
+		}
+		if pair == nil {
+			return m.Generate(o)
+		}
+		count := o.Count
+		outcome, err := pair.Generate(count, o)
+		if err != nil {
+			return nil, err
+		}
+		report = guardReport(pair, outcome.Verdicts, map[string]any{
+			"candidates": outcome.Candidates, "kept": len(outcome.Kept), "asked": outcome.Asked, "rate": outcome.Rate,
+		})
+		return outcome.Results, nil
+	})
+	if err != nil {
+		return nil, nil, badRequest("%v", err)
+	}
+	return out.([]*radixnet.PathResult), report, nil
 }
 
 func (s *Service) Score(text string) radixnet.Score {
@@ -830,12 +1050,29 @@ func (s *Service) Score(text string) radixnet.Score {
 	return out.(radixnet.Score)
 }
 
-func (s *Service) Converse(opening string, o radixnet.ConverseOptions) ([]*radixnet.Turn, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Converse(opening, o) })
+func (s *Service) Converse(opening string, o radixnet.ConverseOptions, guard bool) ([]*radixnet.Turn, map[string]any, error) {
+	var report map[string]any
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		pair := (*radixnet.Filter)(nil)
+		if guard {
+			pair = s.guard()
+		}
+		if pair == nil {
+			return m.Converse(opening, o)
+		}
+		outcome, err := pair.Converse(opening, o)
+		if err != nil {
+			return nil, err
+		}
+		// "vetoed" counts the distinct texts refused, "refusals" how often one was (a turn may be
+		// offered the same candidate again after its context was shortened)
+		report = guardReport(pair, outcome.Verdicts, map[string]any{"refusals": outcome.Vetoed})
+		return outcome.Turns, nil
+	})
 	if err != nil {
-		return nil, badRequest("%v", err)
+		return nil, nil, badRequest("%v", err)
 	}
-	return out.([]*radixnet.Turn), nil
+	return out.([]*radixnet.Turn), report, nil
 }
 
 // UploadTexts reads training texts from uploads (400 when uploads are disabled).

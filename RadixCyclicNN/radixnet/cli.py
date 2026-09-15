@@ -32,7 +32,8 @@ from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
-from .dialogue import DEFAULT_SPEAKERS, transcript
+from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
+from .encoding import WINDOW
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -50,10 +51,16 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "beam", "sample")
-KINDS = ("radix", "count", "negative")
+KINDS = ("radix", "count", "negative", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
 DEFAULT_NEGATIVE_MODEL = "model.negative.json"
-DEFAULT_KIND_MODELS = {"count": DEFAULT_COUNT_MODEL, "negative": DEFAULT_NEGATIVE_MODEL}
+DEFAULT_RESONANT_MODEL = "model.resonant.json"
+DEFAULT_KIND_MODELS = {
+    "count": DEFAULT_COUNT_MODEL,
+    "negative": DEFAULT_NEGATIVE_MODEL,
+    "resonant": DEFAULT_RESONANT_MODEL,
+}
+"""Default ``--model`` per kind, so one kind never overwrites another's default file."""
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -384,6 +391,13 @@ class LessonPrinter(_RowPrinter):
                     self.console.note(f"    correct: {quote(clip(str(correction), 80))}")
                 if comment:
                     self.console.note(f"    teacher: {clip(str(comment), 100)}")
+                why = record.get("why")
+                if why:
+                    self.console.note(f"    why:     {clip(str(why), 100)}")
+                for variant in record.get("variants") or []:
+                    wrong = quote(clip(str(variant.get("wrong", "")), 60))
+                    right = str(variant.get("right") or "")
+                    self.console.note(f"    same:    {wrong}" + (f" -> {quote(clip(right, 50))}" if right else ""))
         elif kind == "round":
             weakest = ", ".join(record.get("weakest") or []) or "nothing"
             learned = record.get("action") or "nothing to learn"
@@ -392,6 +406,12 @@ class LessonPrinter(_RowPrinter):
                 f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
                 f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
             )
+            if record.get("similar"):
+                self.console.note(
+                    f"    negative network: {record.get('explained')} mistake(s) explained, "
+                    f"{record.get('similar')} more sentence(s) wrong the same way, "
+                    f"{record.get('negative_blamed')} blamed on {record.get('negative_edges')} edge(s)"
+                )
         elif kind == "report":
             self.console.note(
                 f"report card: {record.get('passed')}/{record.get('lessons')} passed over {record.get('rounds')} round(s), "
@@ -764,6 +784,13 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     )
     options.update(k=args.k, beam=args.beam)
     result = model.predict(args.prefix, **options)
+    pair = open_guard(args, console, model)
+    guard: dict | None = None
+    if pair is not None:
+        # the guard re-ranks what the search already offered: the best continuation it does not veto
+        result, verdicts = pair.rank(args.prefix, result)
+        guard = _guard_doc(pair, verdicts, candidates=len(verdicts),
+                           kept=sum(v["decision"] != "reject" for v in verdicts))
     console.pairs([
         ("model", kind_label(model)),
         ("prefix", quote(args.prefix)),
@@ -810,17 +837,32 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
             top=[{**r.to_dict(), "probability": path_probability(r)} for r in result.top],
             bottom=[{**r.to_dict(), "probability": path_probability(r)} for r in result.bottom],
         )
+    if guard is not None:
+        _print_vetoes(console, guard["verdicts"], "continuations")
+    doc["guard"] = guard
     return doc
 
 
 def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
-    results = model.generate(
-        max_length=args.max_length, mode=args.mode, temperature=args.temperature, count=args.count, seed=args.seed,
+    pair = open_guard(args, console, model)
+    options = dict(
+        max_length=args.max_length, mode=args.mode, temperature=args.temperature, seed=args.seed,
         prefix=args.prefix, step_penalty=args.step_penalty, beam=args.beam,
     )
+    guard: dict | None = None
+    if pair is None:
+        results = model.generate(count=args.count, **options)
+    else:
+        # the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back
+        outcome = pair.generate(count=args.count, **options)
+        results = outcome["results"]
+        guard = _guard_doc(pair, outcome["verdicts"], candidates=outcome["candidates"], asked=outcome["asked"],
+                           kept=len(outcome["kept"]), rate=outcome["rate"])
     rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
     console.table(("#", "cost", "prob", "end", "text"), rows)
+    if guard is not None:
+        _print_vetoes(console, guard["verdicts"])
     return {
         "samples": [{**r.to_dict(), "probability": path_probability(r)} for r in results],
         "count": len(results),
@@ -828,6 +870,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         "prefix": args.prefix,
         "max_length": args.max_length,
         "temperature": args.temperature,
+        "guard": guard,
     }
 
 
@@ -839,13 +882,26 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
             raise CliError(f"partner model file not found: {args.partner}")
         partner = load_model(args.partner, backend=args.backend, device=args.device)
     speakers = [name.strip() for name in args.speakers.split(",") if name.strip()] or list(DEFAULT_SPEAKERS)
-    turns = model.converse(
-        args.opening, args.turns, mode=args.mode, max_length=args.max_length, context=args.context,
-        temperature=args.temperature, k=args.k, beam=args.beam, step_penalty=args.step_penalty, seed=args.seed,
-        speakers=speakers, partner=partner, avoid_repeats=not args.allow_repeats,
+    pair = open_guard(args, console, model)
+    options = dict(
+        mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
+        beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
+        avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
+        explore=args.explore, learn=not args.no_learn,
     )
+    guard: dict | None = None
+    if pair is None:
+        turns = model.converse(args.opening, args.turns, **options)
+    else:
+        # a reply the negative network vetoes is left unsaid; the voice looks for another one
+        outcome = pair.converse(args.opening, args.turns, **options)
+        turns = outcome["turns"]
+        guard = _guard_doc(pair, outcome["verdicts"], refusals=outcome["vetoed"])
     for turn in turns:
-        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given), ("repeat", turn.repeat)) if on]
+        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given),
+                                 ("repeat", turn.repeat), ("repeats itself", turn.stutter)) if on]
+        if turn.vetoed:
+            flags.append(f"{turn.vetoed} vetoed")
         console.say(f"{turn.speaker}: {turn.text}")
         detail = f"    cost {fmt(turn.cost)}  p {fmt(turn.probability)}"
         if turn.context:
@@ -853,9 +909,34 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         if flags:
             detail += f"  [{', '.join(flags)}]"
         console.say(detail)
+        if turn.rethink is not None:
+            r = turn.rethink
+            caught = "saying {} twice" if r.kind == "stutter" else "repeating {}"
+            thought = f"    caught itself {caught.format(quote(r.noticed))}"
+            if not r.steps:
+                thought += "; the words it picked up, not its own"
+            elif r.found:
+                thought += f"; kept {quote(r.cut)} and found another way on in {r.explored} path(s)"
+            else:
+                ending = "said it anyway" if turn.repeat else "took a lesser answer"
+                thought += f"; kept {quote(r.cut)}, weighed {r.explored} path(s), {ending}"
+            console.say(thought)
     if not turns:
         console.say("(nothing to say: train the model first)")
+    if guard is not None:
+        _print_vetoes(console, guard["verdicts"], "replies")
+    said_twice = dialogue_repeats(turns)
+    if said_twice:
+        console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
+        console.say("    radixnet feedback " + " ".join(f"--bad-text {quote(t)}" for t in said_twice))
+    taught = sorted({t.rethink.taught for t in turns if t.rethink is not None and t.rethink.taught >= 0})
+    saved = None
+    if taught and args.save:
+        saved = save_model(model, args.out or args.model)
+    elif taught:
+        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
     return {
+        "guard": guard,
         "turns": [t.to_dict() for t in turns],
         "count": len(turns),
         "speakers": speakers,
@@ -863,6 +944,9 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         "opening": args.opening,
         "kind": model.kind,
         "partner_kind": partner.kind if partner is not None else None,
+        "repeats": said_twice,
+        "taught": taught,
+        **({"saved": saved} if saved is not None else {}),
         "transcript": transcript(turns),
     }
 
@@ -890,6 +974,12 @@ def _phase_pairs(model: GraphModel, args: argparse.Namespace) -> list[tuple[str,
         return [
             ("negative", f"{args.neg_epochs} pass(es): reward -= {args.strength} on every edge of the bad paths"),
             ("positive", f"{args.pos_epochs} pass(es): traversal counted and reward += {args.strength} on the good paths"),
+        ]
+    if model.kind == "resonant":
+        return [
+            ("negative", f"{args.neg_epochs} pass(es): lock the phases onto the bad paths"),
+            ("invert", "rotate every edge's mean phase by pi - what resonated now cancels"),
+            ("positive", f"{args.pos_epochs} pass(es): relock the phases on the good paths, reward += {args.strength}"),
         ]
     return [
         ("negative", f"epochs={args.neg_epochs} lr={args.neg_lr}"),
@@ -1177,6 +1267,18 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+_WEIGHT_OPTIONS = {
+    "count": ("count_scale", "global_scale", "window_scale", "reward_scale", "path_scale", "window"),
+    "resonant": ("buckets", "period", "kick_scale", "resonance_scale", "amp_scale", "reward_scale", "concentration"),
+}
+"""Which ``weights`` options each kind understands."""
+
+_ALL_WEIGHT_OPTIONS = {name for names in _WEIGHT_OPTIONS.values() for name in names}
+
+
+def _flag(name: str) -> str:
+    return "--" + name.replace("_", "-")
+
 def cmd_speech_info(args: argparse.Namespace, console: Console) -> dict:
     from .speech import describe
 
@@ -1340,12 +1442,19 @@ def cmd_speech_decode(args: argparse.Namespace, console: Console) -> dict:
 
 def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
     model, origin = open_model(args, console, required=True)
-    if model.kind != "count":
-        raise CliError(f"{args.model} holds a {model.kind} model; the weight function belongs to the count model (--kind count)")
-    options = {
-        "count_scale": args.count_scale, "global_scale": args.global_scale, "window_scale": args.window_scale,
-        "reward_scale": args.reward_scale, "window": args.window,
-    }
+    if model.kind not in _WEIGHT_OPTIONS:
+        raise CliError(
+            f"{args.model} holds a {model.kind} model; the weight function belongs to the count and resonant "
+            f"models (--kind count / --kind resonant)"
+        )
+    mine = _WEIGHT_OPTIONS[model.kind]
+    stray = sorted(n for n in _ALL_WEIGHT_OPTIONS - set(mine) if getattr(args, n, None) is not None)
+    if stray:
+        raise CliError(
+            f"{', '.join(_flag(n) for n in stray)} do(es) not apply to the {model.kind} model; it takes "
+            f"{', '.join(_flag(n) for n in mine)}"
+        )
+    options = {name: getattr(args, name, None) for name in mine}
     changes = {k: v for k, v in options.items() if v is not None}
     saved = None
     if changes:
@@ -1356,14 +1465,32 @@ def cmd_weights(args: argparse.Namespace, console: Console) -> dict:
         saved = save_model(model, args.out or args.model)
     config = model.weight_config()
     stats = model.stats()
+    if model.kind == "resonant":
+        rows = [
+            ("function", "amp_scale * log(share of the parent) + reward_scale * reward "
+                         "+ resonance_scale * coherence * cos(phase - mu)"),
+            ("buckets", f"{config['buckets']} phases on the ring"),
+            ("period", f"{fmt(config['period'])} characters per turn of the clock"),
+            ("kick_scale", f"{fmt(config['kick_scale'])} (0 = the phase is the position; > 0 = it carries the path)"),
+            ("resonance_scale", config["resonance_scale"]),
+            ("amp_scale", config["amp_scale"]),
+            ("reward_scale", config["reward_scale"]),
+            ("concentration", f"{fmt(config['concentration'])} (shrinks a thinly observed edge's coherence)"),
+            ("coherence", f"mean {fmt(stats['coherence_mean'])}, max {fmt(stats['coherence_max'])}"),
+        ]
+    else:
+        rows = [
+            ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
+            ("count_scale", config["count_scale"]),
+            ("global_scale", config["global_scale"]),
+            ("window_scale", config["window_scale"]),
+            ("reward_scale", config["reward_scale"]),
+            ("path_scale", f"{config['path_scale']} over {stats['path_contexts']} judged path(s)"),
+            ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        ]
     console.pairs([
         ("model", origin.describe()),
-        ("function", "global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward + count_scale * log(1 + count)"),
-        ("count_scale", config["count_scale"]),
-        ("global_scale", config["global_scale"]),
-        ("window_scale", config["window_scale"]),
-        ("reward_scale", config["reward_scale"]),
-        ("window", f"{config['window']} traversals ({stats['window_traversals']} inside now)"),
+        *rows,
         ("total traversals", stats["total_traversals"]),
         ("changed", ", ".join(f"{k}={v}" for k, v in changes.items()) if changes else "nothing"),
         ("saved", saved["path"] if saved else "-"),
@@ -1455,6 +1582,106 @@ def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
         "negative": result["negative"], "positive": result["positive"], "inverted": result["inverted"],
         "interrupted": interrupted, "saved": saved, "stats": model.stats(),
     }
+
+
+def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
+    """What the judged walks did, step by step: correct / incorrect per path, not per edge."""
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "paths"):
+        raise CliError(f"{args.model} holds a {model.kind} model; path counters belong to the count model")
+    graph = model.graph
+    totals = graph.path_totals()
+    node = _resolve_node(graph, args.node) if getattr(args, "node", None) else None
+    rows = model.paths(limit=args.limit, node=node)
+    console.pairs([
+        ("model", origin.describe()),
+        ("contexts", f"{totals['contexts']} ({totals['judged']} judged)"),
+        ("counted", f"{totals['correct']} correct / {totals['incorrect']} incorrect of {totals['seen']} seen"),
+        ("path_scale", graph.weight_config()["path_scale"]),
+    ])
+    console.say()
+    if not rows:
+        console.say("nothing has been judged yet: reward or punish a text, or let the tutor correct one")
+        return {"totals": totals, "paths": [], "stats": model.stats()}
+    console.table(
+        ["after", "step", "correct", "incorrect", "seen", "correct %", "seen %", "term"],
+        [[
+            quote(graph.labels[row["prev"]]) if row["prev"] < len(graph.labels) else row["prev"],
+            _step_label(graph, row["edge"]),
+            row["correct"], row["incorrect"], row["seen"],
+            "-" if row["correct_ratio"] is None else f"{row['correct_ratio'] * 100:.0f}%",
+            "-" if row["seen_ratio"] is None else f"{row['seen_ratio'] * 100:.0f}%",
+            f"{row['term']:+.3f}",
+        ] for row in rows],
+    )
+    return {"totals": totals, "paths": rows, "stats": model.stats()}
+
+
+def _resolve_node(graph, text: str) -> int:
+    """A node id from a label the user typed: the whole label first, then the trigram it holds."""
+    wanted = str(text)
+    for node, label in enumerate(graph.labels):
+        if label == wanted and graph.alive[node]:
+            return node
+    found = graph.lookup(wanted) if len(wanted) == WINDOW else None
+    if found is None:
+        raise CliError(f"no node labelled {wanted!r}: give a node label, or one of its trigrams")
+    return found[0]
+
+
+def _ratio_cell(value: float | None) -> str:
+    """A ratio as a percentage, or ``-`` when there was nothing to divide by."""
+    return "-" if value is None else f"{value * 100:.0f}%"
+
+
+def cmd_nodes(args: argparse.Namespace, console: Console) -> dict:
+    """Each node against the nodes around it: what share of its traffic and of its reward goes each way."""
+    model, origin = open_model(args, console, required=True)
+    if not hasattr(model, "node_ratios"):
+        raise CliError(f"{args.model} holds a {model.kind} model; node ratios belong to the count model")
+    graph = model.graph
+    node = _resolve_node(graph, args.node) if args.node else None
+    rows = model.node_ratios(limit=args.limit, node=node)
+    totals = graph.path_totals()
+    console.pairs([
+        ("model", origin.describe()),
+        ("nodes", f"{graph.num_nodes()} alive, {len(rows)} shown"),
+        ("counted", f"{totals['correct']} correct / {totals['incorrect']} incorrect "
+                    f"over {totals['judged']} judged context(s) of {totals['contexts']}"),
+    ])
+    if not rows:
+        console.say()
+        console.say("no such node" if args.node else "the graph is empty: train something first")
+        return {"nodes": [], "stats": model.stats()}
+    for row in rows:
+        console.say()
+        console.say(f"{quote(row['label'])}  visited {row['visits']}x  "
+                    f"({row['in_totals']['edges']} in, {row['out_totals']['edges']} out)")
+        table = []
+        for side, label in (("from", "from"), ("to", "to")):
+            for r in row[side]:
+                table.append([
+                    label, quote(r["label"]), r["seen"], _ratio_cell(r["seen_ratio"]),
+                    f"{r['reward']:+.2f}", _ratio_cell(r["reward_ratio"]),
+                    r["path_seen"], _ratio_cell(r["path_ratio"]),
+                    r["correct"], r["incorrect"], _ratio_cell(r["correct_ratio"]),
+                ])
+        console.table(
+            ["", "node", "seen", "seen %", "reward", "reward %", "judged", "of edge", "correct", "wrong", "correct %"],
+            table,
+        )
+    return {"nodes": rows, "stats": model.stats()}
+
+
+def _step_label(graph, edge: int) -> str:
+    """``parent -> child`` as the two labels, for a path row."""
+    parent = graph.edge_parent[edge] if edge < len(graph.edge_parent) else -1
+    if parent < 0 or parent >= len(graph.labels):
+        return f"edge {edge}"
+    for child, e in graph.children[parent].items():
+        if e == edge:
+            return f"{graph.labels[parent]} -> {graph.labels[child]}"
+    return f"edge {edge}"
 
 
 def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
@@ -1553,6 +1780,85 @@ def open_negative(args: argparse.Namespace, console: Console, *, required: bool)
         )
     seed = effective_seed(args)
     return NegativeNet(seed=seed), Origin("new", None, f"seed {seed}")
+
+
+def add_guard_flags(p: argparse.ArgumentParser) -> None:
+    """``--no-guard`` / ``--negative`` / ``--over-sample``: the negative network on the way out.
+
+    Every command that writes something runs the pair by default - the
+    positive model writes, the negative one vetoes what it recognises as a
+    failure the tutor has corrected (:func:`open_guard`).
+    """
+    group = p.add_argument_group("the guard (the negative network filters the output)")
+    group.add_argument("--no-guard", action="store_true",
+                       help="do not filter: print what the positive model wrote, whatever the negative network says")
+    group.add_argument("--negative", metavar="FILE",
+                       help=f"the negative network to filter with (default: beside --model, {DEFAULT_NEGATIVE_MODEL})")
+    group.add_argument("--threshold", type=float, metavar="RISK",
+                       help="veto at this risk (blame per transition); default: the negative model's own")
+    group.add_argument("--min-coverage", type=float, metavar="SHARE",
+                       help="share of a text that must be known failure before any rule may veto it")
+    group.add_argument("--over-sample", type=pos_int, metavar="N", default=3,
+                       help="generate: candidates drawn per wanted text, so the guard has something to choose from")
+
+
+def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel) -> Any:
+    """The negative network guarding ``positive``'s output, or ``None`` when there is nothing to guard with.
+
+    The pair on every answer this program prints (see :mod:`radixnet.duo`):
+    the positive model writes and the negative one, at :func:`negative_path`,
+    vetoes what it recognises as a failure the tutor has already corrected.
+    ``None`` - the output goes out as written - when ``--no-guard`` was given,
+    when there is no negative model file beside the model, or when the one
+    there has never been taught a failure and so would veto nothing.
+    """
+    from .duo import FilterConfig, NegativeFilter
+    from .negative import NegativeNet
+
+    if getattr(args, "no_guard", False) or isinstance(positive, NegativeNet):
+        return None
+    path = negative_path(args)
+    if not path or not os.path.isfile(path):
+        return None
+    negative = load_model(path, backend=args.backend, device=args.device)
+    if not isinstance(negative, NegativeNet):
+        raise CliError(f"{path} holds a {negative.kind} model, not a negative one")
+    pair = NegativeFilter(positive, negative, FilterConfig(
+        threshold=getattr(args, "threshold", None), min_coverage=getattr(args, "min_coverage", None),
+        over_sample=getattr(args, "over_sample", None) or 3,
+    ))
+    if not pair.ready:
+        return None
+    g = negative.graph
+    console.note(f"guard: {path} ({fmt(g.total_blame)} blame over {len(g.reasons)} reasons)")
+    return pair
+
+
+def _print_vetoes(console: Console, verdicts: list[dict], what: str = "candidates") -> None:
+    """The guard's work: what it let through, what it stopped and why."""
+    rejected = [v for v in verdicts if v["decision"] == "reject"]
+    console.say()
+    console.say(f"guard: {len(verdicts) - len(rejected)} of {len(verdicts)} {what} passed the negative network")
+    if rejected:
+        console.table(
+            ("rule", "risk", "peak", "ratio", "reason", "vetoed"),
+            [[v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
+              v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))] for v in rejected],
+        )
+
+
+def _guard_doc(pair: Any, verdicts: list[dict], **extra: Any) -> dict:
+    """The guard's report for ``--json``: every veto, with the reason and the fragment behind it."""
+    rejected = [v for v in verdicts if v["decision"] == "reject"]
+    return {
+        "on": True,
+        "vetoed": len(rejected),
+        "rejected": rejected,
+        "verdicts": verdicts,
+        "negative": pair.negative.stats(),
+        "config": pair.describe()["config"],
+        **extra,
+    }
 
 
 def _negative_texts(args: argparse.Namespace, what: str) -> list[str]:
@@ -1705,6 +2011,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
             count=args.count, mode=args.mode, max_length=args.max_length, temperature=args.temperature,
             prefix=args.prefix, seed=args.seed, step_penalty=args.step_penalty,
         )
+        doc.pop("results")  # the walks behind the texts; the document carries the texts
     console.say()
     console.table(
         ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
@@ -1808,6 +2115,120 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
         "records": records, "report": card, "interrupted": interrupted,
         "negative": _save_negative(console, negative, out),
     }
+
+
+def cmd_chat(args: argparse.Namespace, console: Console) -> dict:
+    """An LLM converses with the model and marks every reply; the failures blame, the passes teach."""
+    from .chat import DEFAULT_SPEAKERS as DEFAULT_CHAT_SPEAKERS
+    from .chat import Chat, ChatConfig
+    from .chatgpt import api_key_configured
+    from .llm import LLMError, make_client
+
+    if args.provider == "chatgpt" and not api_key_configured():
+        raise CliError(
+            "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT converse, "
+            "or use --provider ollama"
+        )
+    config = ChatConfig(
+        conversations=args.conversations, turns=args.turns, topic=args.topic or "", opening=args.opening or "",
+        persona=args.persona or "", context=args.context, max_length=args.max_length, mode=args.mode, k=args.k,
+        temperature=args.temperature, partner_temperature=args.partner_temperature, threshold=args.threshold,
+        provider=args.provider, partner_model=args.partner_model or args.ollama_model or "",
+        judge_model=args.judge_model or "", guard=not args.no_guard, blame=not args.no_blame,
+        clear_passes=not args.no_clear, learn=not args.no_learn, teach_partner=not args.no_teach_partner,
+        avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
+        explore=args.explore, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs,
+        neg_lr=args.neg_lr, pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength,
+        epochs=args.epochs, seed=effective_seed(args),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        client = make_client(config.provider, args.url, config.partner_model or None, args.timeout)
+        judge = client
+        if config.judge_model or args.judge_url:
+            judge = make_client(config.provider, args.judge_url or args.url, config.judge_model or None, args.timeout)
+    except (LLMError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    model, origin = open_model(args, console, required=True)
+    negative = neg_origin = None
+    if config.blame or config.guard:
+        negative, neg_origin = open_negative(args, console, required=False)
+    out = args.out or args.model
+    console.pairs([
+        ("model", origin.describe()),
+        ("partner", f"{config.provider}: {client.model} at {client.url}"),
+        ("judge", f"{judge.model} at {judge.url}"),
+        ("conversations", "until stopped (Ctrl-C)" if not config.conversations else config.conversations),
+        ("per conversation", f"{config.turns} repl(ies), {config.max_length} chars, picking up {config.context}"),
+        ("topic", config.topic or "the partner chooses"),
+        ("pass mark", f"{config.threshold:g}/10"),
+        ("guard", "on" if config.guard and negative is not None else "off"),
+        ("learns", "2NRL on the marked replies" + (" + the partner's lines" if config.teach_partner else "")
+                   if config.learn else "nothing (--no-learn)"),
+        *([("negative network", neg_origin.describe())] if neg_origin is not None else []),
+        ("output", out),
+    ])
+    console.say()
+    rows: list[list[Any]] = []
+    stop = threading.Event()
+
+    def show(record: dict) -> None:
+        kind = record.get("kind")
+        if kind == "exchange":
+            console.say(f"{DEFAULT_CHAT_SPEAKERS[0]}: {record['said']}")
+            console.say(f"{DEFAULT_CHAT_SPEAKERS[1]}: {record['reply']}")
+            detail = f"    picked up {quote(record['context'])}" if record["context"] else "    (a fresh line)"
+            if record["vetoed"]:
+                detail += f"  [{record['vetoed']} vetoed]"
+            console.say(detail)
+            return
+        if kind != "conversation":
+            return
+        rows.append([
+            record["conversation"], record["exchanges"], record["passed"], record["failed"],
+            fmt(record["mean_rating"]), fmt(record["overall_rating"]), record["vetoed"], record["blamed"],
+            record["action"] or "-", record["stalled"] or "-",
+        ])
+        console.note(
+            f"conversation {record['conversation']}: {record['failed']}/{record['exchanges']} replies failed, "
+            f"mean mark {fmt(record['mean_rating'])}/10" + (f" ({record['stalled']})" if record["stalled"] else "")
+        )
+        console.say()
+
+    loop = Chat(model, client, config, negative=negative, judge_client=judge)
+    records, interrupted = run_interruptible(
+        lambda: loop.run(progress=show, stop_event=stop), stop, console, "conversation",
+    )
+    console.table(
+        ("#", "replies", "passed", "failed", "mean mark", "overall", "vetoed", "blamed", "learned", "ended"), rows,
+    )
+    card = records[-1] if records and records[-1].get("kind") == "report" else {}
+    console.say()
+    console.say(
+        f"{card.get('conversations', 0)} conversation(s), {card.get('exchanges', 0)} repl(ies): "
+        f"{card.get('passed', 0)} passed, {card.get('failed', 0)} failed; mean mark "
+        f"{fmt(card.get('mean_rating'))}/10"
+        + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
+    )
+    saved = None
+    if config.learn:
+        if interrupted:
+            console.note(f"stopped after {card.get('conversations', 0)} conversation(s); saving")
+        saved = save_model(model, out)["path"]
+        console.say(f"saved {saved}")
+    else:
+        console.note("nothing was learned (--no-learn): the model is untouched")
+    doc = {
+        "config": config.to_dict(), "url": client.url, "partner": client.model, "judge": judge.model,
+        "records": records, "report": card, "interrupted": interrupted, "saved": saved,
+        "speakers": list(DEFAULT_CHAT_SPEAKERS),
+    }
+    if negative is not None:
+        doc["negative"] = _save_negative(console, negative, negative_path(args))
+    return doc
 
 
 def cmd_negative_reasons(args: argparse.Namespace, console: Console) -> dict:
@@ -1986,8 +2407,20 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
            ("traversals", f"{counter_text(stats, 'total_traversals')} total, {stats['window_traversals']} inside "
                           f"the sliding window of {stats['window']}"),
            ("weights", f"global_scale={fmt(stats['global_scale'])} window_scale={fmt(stats['window_scale'])} "
-                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])}")]
+                       f"reward_scale={fmt(stats['reward_scale'])} count_scale={fmt(stats['count_scale'])} "
+                       f"path_scale={fmt(stats['path_scale'])}"),
+           ("paths", f"{stats['path_contexts']} context(s), {stats['path_correct']} correct / "
+                     f"{stats['path_incorrect']} incorrect of {stats['path_seen']} seen")]
           if model.kind == "count" else []),
+        *([("traversals", f"{stats['total_traversals']} total"),
+           ("phase", f"{stats['buckets']} buckets, period {fmt(stats['weights']['period'])} chars, "
+                     f"kick_scale {fmt(stats['weights']['kick_scale'])}"),
+           ("coherence", f"mean {fmt(stats['coherence_mean'])}, max {fmt(stats['coherence_max'])}"),
+           ("metacognition", f"{stats['meta']['signatures']} cycle signature(s) from {stats['cycles_seen']} cycle(s); "
+                             f"{', '.join(f'{a}={fmt(v)}' for a, v in stats['meta']['totals'].items())}"),
+           ("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
+                       f"{stats['feedback_passes']} feedback pass(es)")]
+          if model.kind == "resonant" else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -2121,8 +2554,7 @@ def cmd_codegen(args: argparse.Namespace, console: Console) -> dict:
     console.say()
     printer = ProblemPrinter(console)
     stop = threading.Event()
-    trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client)
-    trainer = CodeGenTrainer(model, client, sandbox, config, negative=negative)
+    trainer = CodeGenTrainer(model, client, sandbox, config, judge_client=judge_client, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(problems, progress=printer, stop_event=stop, checkpoint_manager=manager),
@@ -2167,7 +2599,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
         grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
-        plan=args.plan or 0, batches=args.batches,
+        variants=args.variants, variant_weight=args.variant_weight, plan=args.plan or 0, batches=args.batches,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
         pos_lr=args.pos_lr, batch_size=args.batch_size, strength=args.strength, replay=not args.no_replay,
@@ -2222,7 +2654,12 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     negative = neg_origin = None
     if args.blame:
         negative, neg_origin = open_negative(args, console, required=False)
-        console.pairs([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}")])
+        console.pairs([
+            ("negative model", f"{neg_origin.describe()} -> {negative_path(args)}"),
+            ("widening", f"the teacher explains why and writes {config.variants} more sentence(s) with the same "
+                         f"mistake, blamed at {fmt(config.variant_weight)} of its severity"
+                         if config.variants else "off (--variants 0): the failed sentences alone"),
+        ])
         console.say()
     trainer = TutorTrainer(model, client, config, negative=negative)
     try:
@@ -2331,8 +2768,17 @@ def build_toolbox(args: argparse.Namespace) -> Any:
         from .codegen import Sandbox
 
         sandbox = Sandbox(timeout=args.sandbox_timeout, isolate_network=not args.no_network_isolation)
+    browser = None
+    if getattr(args, "browser", False) and not args.offline:
+        from .browser import BrowserClient, describe as describe_browser
+
+        found = describe_browser()
+        if not found["available"]:
+            raise CliError(f"--browser: {found['error']}")
+        browser = BrowserClient(page_timeout=args.page_timeout, headless=not args.no_headless)
     try:
-        return default_toolbox(web, sandbox=sandbox, upload_dir=args.upload_dir or None, offline=args.offline)
+        return default_toolbox(web, sandbox=sandbox, upload_dir=args.upload_dir or None, offline=args.offline,
+                               browser=browser)
     except (ValueError, TypeError) as exc:
         raise CliError(str(exc)) from exc
 
@@ -2350,6 +2796,7 @@ def _agent_config(args: argparse.Namespace, manager: Any) -> Any:
         teach_on_failure=not args.no_teach, observation_chars=args.observation_chars,
         twonrl_per=getattr(args, "twonrl_per", "task"), replay=not args.no_replay, read_reward=args.read_reward,
         blatant_mode=args.blatant_mode, blatant_margin=args.blatant_margin, blatant_boost=args.blatant_boost,
+        avoid_blamed=not args.no_avoid,
         neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr, pos_lr=args.pos_lr,
         batch_size=args.batch_size, checkpoint_every=checkpoint_every(args, manager), seed=args.seed or 0,
     )
@@ -2360,7 +2807,8 @@ def _agent_config(args: argparse.Namespace, manager: Any) -> Any:
     return config
 
 
-def _agent_preamble(console: Console, args, model, origin, config, client, toolbox, source: str, out: str) -> None:
+def _agent_preamble(console: Console, args, model, origin, config, client, toolbox, source: str, out: str,
+                    neg_origin: Any = None) -> None:
     console.pairs([
         ("model", origin.describe()),
         ("backend", backend_label(model)),
@@ -2370,9 +2818,12 @@ def _agent_preamble(console: Console, args, model, origin, config, client, toolb
         ("judge", (config.judge_model or config.agent_model) if config.use_judge else "off (the known answer only)"),
         ("mediation", f"{config.mediation} (the LLM repairs the calls the network cannot write yet)"),
         ("steps", f"{config.max_steps} tool calls per attempt, {config.model_attempts} attempt(s) by the network"
-                  + (f", then the teacher demonstrates" if config.teach_on_failure else ", no teaching")),
+                  + (", then the teacher demonstrates" if config.teach_on_failure else ", no teaching")),
         ("failure", f"{config.blatant_mode}: margin={config.blatant_margin:g} boost={config.blatant_boost:g} "
                     f"(train on the failures the harder the worse they are, then invert)"),
+        *([("negative model", f"{neg_origin.describe()} -> {negative_path(args)}"
+                              + ("" if config.avoid_blamed else "; still offering what it has seen fail"))]
+          if neg_origin is not None else []),
         ("2NRL", f"negative epochs={config.neg_epochs} lr={config.neg_lr}, positive epochs={config.pos_epochs} "
                  f"lr={config.pos_lr}, batch={config.batch_size}, replay={'on' if config.replay else 'off'}"),
         ("output", out),
@@ -2394,6 +2845,19 @@ def cmd_tools(args: argparse.Namespace, console: Console) -> dict:
              for t in toolbox.tools()],
         )
         return {"tools": toolbox.describe(), "offline": args.offline}
+    if args.action == "browser":
+        from .browser import describe as describe_browser
+
+        found = describe_browser()
+        console.pairs([
+            ("available", found["available"]),
+            ("chromedriver", f"{found['chromedriver'] or '-'} ({found['chromedriver_version'] or 'no version'})"),
+            ("chrome", f"{found['chrome'] or '-'} ({found['chrome_version'] or 'no version'})"),
+        ])
+        if found["error"]:
+            console.say()
+            console.say(found["error"])
+        return found
     if args.action == "describe":
         try:
             tool = toolbox.get(args.tool)
@@ -2434,6 +2898,32 @@ def cmd_tools(args: argparse.Namespace, console: Console) -> dict:
     return result.to_dict()
 
 
+def cmd_mcp(args: argparse.Namespace, console: Console) -> None:
+    """Serve the tools and the network over MCP on stdin / stdout."""
+    from .mcp import McpServer, model_tools
+
+    toolbox = build_toolbox(args)
+    model = negative = client = None
+    if not args.no_model:
+        model, origin = open_model(args, console, required=False)
+        if args.blame or os.path.isfile(negative_path(args)):
+            negative, _neg_origin = open_negative(args, console, required=False)
+        if not args.no_solve:
+            client = _ollama_client_for(args, args.agent_model or None)
+        for tool in model_tools(model, toolbox=toolbox, client=client, negative=negative):
+            toolbox.register(tool)
+    # stdout carries the protocol, so everything a person reads goes to stderr
+    console.note(f"radixnet MCP server: {len(toolbox)} tool(s) on stdin/stdout")
+    console.note("  " + ", ".join(toolbox.names()))
+    if model is not None:
+        console.note(f"  model: {origin.describe()}" + (", negative network attached" if negative else ""))
+    try:
+        McpServer(toolbox).run(log=sys.stderr)
+    except KeyboardInterrupt:
+        pass
+    return None
+
+
 def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
     """Solve a list of tasks with tools: criteria, attempts, judging, teaching, 2NRL."""
     from .agent import AgentTrainer, load_tasks
@@ -2448,12 +2938,14 @@ def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
     toolbox = build_toolbox(args)
     client = _ollama_client_for(args, config.agent_model)
     model, origin = open_model(args, console, required=False)
+    negative, neg_origin = (open_negative(args, console, required=False) if args.blame else (None, None))
     out = args.out or args.model
     _agent_preamble(console, args, model, origin, config, client, toolbox,
-                    f"{len(tasks)} from {args.tasks}, {config.rounds} round(s) of {' -> '.join(config.phases)}", out)
+                    f"{len(tasks)} from {args.tasks}, {config.rounds} round(s) of {' -> '.join(config.phases)}", out,
+                    neg_origin)
     printer = TaskPrinter(console)
     stop = threading.Event()
-    trainer = AgentTrainer(model, client, toolbox, config)
+    trainer = AgentTrainer(model, client, toolbox, config, negative=negative)
     try:
         records, interrupted = run_interruptible(
             lambda: trainer.run(tasks, progress=printer, stop_event=stop, checkpoint_manager=manager),
@@ -2462,7 +2954,8 @@ def cmd_agent(args: argparse.Namespace, console: Console) -> dict:
     except (OllamaError, ValueError) as exc:
         raise CliError(str(exc)) from exc
     saved = _finish_training(console, model, out, interrupted, printer, "task")
-    return _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+    return _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model,
+                         negative)
 
 
 def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
@@ -2475,16 +2968,17 @@ def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
     toolbox = build_toolbox(args)
     client = _ollama_client_for(args, config.agent_model)
     model, origin = open_model(args, console, required=False)
+    negative, neg_origin = (open_negative(args, console, required=False) if args.blame else (None, None))
     out = args.out or args.model
     steps = args.steps
     _agent_preamble(console, args, model, origin, config, client, toolbox,
-                    f"chosen by the network: {steps or 'until Ctrl-C'} step(s)", out)
+                    f"chosen by the network: {steps or 'until Ctrl-C'} step(s)", out, neg_origin)
     if args.seed_url:
         trailer = list(args.seed_url)
         console.note(f"starting frontier: {', '.join(trailer)}")
     printer = TaskPrinter(console)
     stop = threading.Event()
-    trainer = AgentTrainer(model, client, toolbox, config)
+    trainer = AgentTrainer(model, client, toolbox, config, negative=negative)
     trainer.frontier.extend(args.seed_url or ())
     try:
         records, interrupted = run_interruptible(
@@ -2494,7 +2988,8 @@ def cmd_explore(args: argparse.Namespace, console: Console) -> dict:
     except (OllamaError, ValueError) as exc:
         raise CliError(str(exc)) from exc
     saved = _finish_training(console, model, out, interrupted, printer, "step")
-    doc = _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model)
+    doc = _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model,
+                        negative)
     doc["frontier"] = list(trainer.frontier)
     doc["visited"] = list(trainer.visited)
     console.say(f"{len(trainer.visited)} page(s) read, {len(trainer.frontier)} still on the frontier")
@@ -2510,7 +3005,8 @@ def _ollama_client_for(args: argparse.Namespace, model: str) -> Any:
         raise CliError(str(exc)) from exc
 
 
-def _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model) -> dict:
+def _agent_report(console, args, origin, out, config, toolbox, trainer, records, interrupted, saved, model,
+                  negative: Any = None) -> dict:
     """The shared summary and JSON document of `agent` and `explore`."""
     done = [r for r in records if r.get("kind") in ("task", "explore")]
     solved = sum(1 for r in done if r.get("correct"))
@@ -2521,13 +3017,19 @@ def _agent_report(console, args, origin, out, config, toolbox, trainer, records,
     console.say(
         f"{solved}/{len(done)} task(s) solved ({by_model} by the network); {own}/{calls} tool call(s) written by the "
         f"network itself" + (f" ({own / calls:.0%})" if calls else "") + f"; {fails} failure(s) trained on"
+        + (f"; {trainer.avoided} candidate(s) passed over as known failures" if trainer.avoided else "")
     )
     doc = {
         "model": origin.to_dict(), "out": out, "config": config.to_dict(), "tools": toolbox.names(),
         "records": records, "attempts": trainer.history, "solved": solved, "model_solved": by_model,
         "calls": calls, "own_calls": own, "autonomy": (own / calls) if calls else None, "failures": fails,
         "criteria": trainer.criteria, "solutions": trainer.solved, "interrupted": interrupted, "saved": saved,
-        "stats": model.stats(),
+        "stats": model.stats(), "avoided": trainer.avoided,
+        "negative": None if negative is None else {
+            "blamed": sum(r.get("negative_blamed") or 0 for r in done),
+            "edges": sum(r.get("negative_edges") or 0 for r in done),
+            **_save_negative(console, negative, negative_path(args)),
+        },
     }
     if getattr(args, "report", None):
         with open(args.report, "w", encoding="utf-8") as fh:
@@ -2761,7 +3263,7 @@ def cmd_serve(args: argparse.Namespace, console: Console) -> None:
     tool_options = {
         "offline": args.offline, "allow_private": args.allow_private, "search_url": args.search_url or None,
         "web_timeout": args.web_timeout, "max_bytes": args.max_bytes, "python_tool": args.python_tool,
-        "sandbox_timeout": args.sandbox_timeout,
+        "sandbox_timeout": args.sandbox_timeout, "browser": args.browser, "page_timeout": args.page_timeout,
     }
     doc = {
         "host": args.host,
@@ -2889,10 +3391,12 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                        help="RNG seed for a newly created model (default 0) and for `generate` sampling")
     group.add_argument("--kind", choices=KINDS, default=default(None),
                        help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
-                            "reward model (edge weight = log(1 + traversals) + rewards, top-K / bottom-K prediction), "
-                            "negative = the negative network (failures only, blamed with the tutor's reasons); a "
-                            "loaded file's own kind always wins.  With --kind count / negative the default --model is "
-                            f"{DEFAULT_COUNT_MODEL} / {DEFAULT_NEGATIVE_MODEL}")
+                            "reward model (edge weight = the edge's share of its node's traversals plus rewards, "
+                            "top-K / bottom-K prediction), negative = the negative network (failures only, blamed "
+                            "with the tutor's reasons), resonant = the phase model (edges learn the phase at which "
+                            "they fire; a phase-locked cycle goes to the metacognitive layer); a loaded file's own "
+                            "kind always wins.  The default --model follows the kind "
+                            f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 
@@ -2941,6 +3445,12 @@ def _add_tool_options(parser: argparse.ArgumentParser, upload_dir: bool = True) 
                        help="seconds to wait for one page")
     group.add_argument("--max-bytes", type=_int_at_least(1024), default=2_000_000, metavar="N",
                        help="most bytes read from one page")
+    group.add_argument("--browser", action="store_true",
+                       help="draw pages in a real headless Chrome (WebDriver) instead of fetching them, so a site "
+                            "that renders itself with JavaScript is readable")
+    group.add_argument("--no-headless", action="store_true", help="show the browser window (--browser)")
+    group.add_argument("--page-timeout", type=_float_at_least(1.0), default=30.0, metavar="SECONDS",
+                       help="seconds a page may take to draw (--browser)")
     group.add_argument("--python-tool", action="store_true", help="also offer the sandboxed `python` tool")
     group.add_argument("--sandbox-timeout", type=_float_at_least(0.1), default=10.0, metavar="SECONDS",
                        help="seconds a sandboxed program may run (--python-tool)")
@@ -2996,6 +3506,15 @@ def _add_agent_options(parser: argparse.ArgumentParser) -> None:
                             "failure counts as blatant")
     group.add_argument("--blatant-boost", type=_float_at_least(1.0), default=4.0, metavar="X",
                        help="largest learning-rate multiplier a failure can earn")
+
+    group = parser.add_argument_group("negative network")
+    group.add_argument("--blame", action="store_true",
+                       help="teach the negative network why each attempt failed: the judge's reason, the gap as the "
+                            "severity, and - when a correct run exists - only the characters that differ from it")
+    group.add_argument("--no-avoid", action="store_true",
+                       help="with --blame, still offer candidates the negative network has seen fail")
+    group.add_argument("--negative", metavar="PATH",
+                       help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
 
     group = parser.add_argument_group("2NRL options")
     group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (failure) phase")
@@ -3147,6 +3666,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    add_guard_flags(p)
     p.set_defaults(handler=cmd_predict)
 
     # generate -------------------------------------------------------------
@@ -3163,6 +3683,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
     p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
+    add_guard_flags(p)
     p.set_defaults(handler=cmd_generate)
 
     # converse -------------------------------------------------------------
@@ -3186,7 +3707,74 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speakers", default=",".join(DEFAULT_SPEAKERS), metavar="A,B", help="names of the voices")
     p.add_argument("--partner", metavar="FILE", help="a second model file that speaks the second voice")
     p.add_argument("--allow-repeats", action="store_true", help="do not skip continuations the conversation already heard")
+    p.add_argument("--allow-word-repeats", action="store_true",
+                   help="do not skip a reply that repeats its own words (\"say morning morning\")")
+    p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                   help="times a reply that caught itself repeating may back up and look for another way on "
+                        "(0 = not at all)")
+    p.add_argument("--no-learn", action="store_true",
+                   help="do not teach the graph where it goes round (leave the model exactly as it was)")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
+
+    # chat -------------------------------------------------------------------
+    p = command(
+        "chat", "an LLM converses with the model and marks every reply",
+        "The other side of the line is a real language model.  It says a short line, the network replies\n"
+        "by continuing it (the same search `converse` uses), they take turns, and then the LLM marks every\n"
+        "reply out of 10 against the line it answered - and the conversation as a whole.  What failed blames\n"
+        "the negative network, what passed clears it, and 2NRL trains the model on both, with the partner's\n"
+        "own lines joining the positive phase: they are what a good reply here would have looked like.\n"
+        "Ctrl-C stops after the conversation in progress and saves.",
+    )
+    p.add_argument("--conversations", type=nonneg_int, default=1, help="conversations to hold (0: until Ctrl-C)")
+    p.add_argument("--turns", type=pos_int, default=4, help="replies the model gives per conversation")
+    p.add_argument("--topic", metavar="TEXT", help="what to talk about (default: the partner chooses)")
+    p.add_argument("--opening", metavar="TEXT", help="the first line, spoken as given (default: the partner opens)")
+    p.add_argument("--persona", metavar="TEXT", help="who the partner is being (\"a curious child\", \"a vet\")")
+    p.add_argument("--context", type=nonneg_int, default=12, help="characters of the previous line a reply picks up")
+    p.add_argument("--max-length", type=pos_int, default=60, help="characters a reply may add to its context")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="how a reply is found")
+    p.add_argument("--k", type=pos_int, default=5, help="candidates considered per reply")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature of the replies")
+    p.add_argument("--partner-temperature", type=nonneg_float, default=0.8,
+                   help="sampling temperature of the partner's lines")
+    p.add_argument("--threshold", type=nonneg_float, default=6.0, metavar="MARK",
+                   help="pass mark out of 10: below it a reply is a failure")
+    p.add_argument("--provider", choices=PROVIDERS, default=DEFAULT_PROVIDER,
+                   help="who converses and marks: a local Ollama model, or ChatGPT (needs $OPENAI_API_KEY)")
+    p.add_argument("--partner-model", metavar="NAME", help="the partner's model (default: the provider's)")
+    p.add_argument("--judge-model", metavar="NAME", help="a different model for marking (default: the partner's)")
+    p.add_argument("--url", metavar="URL", help="the partner's base URL (default: the provider's)")
+    p.add_argument("--judge-url", metavar="URL", help="base URL of the judge (default: --url)")
+    p.add_argument("--timeout", type=nonneg_float, metavar="SECONDS", help="per-request timeout")
+    p.add_argument("--allow-repeats", action="store_true", help="let the model say something already heard")
+    p.add_argument("--allow-word-repeats", action="store_true",
+                   help="let a reply repeat its own words (\"say morning morning\")")
+    p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                   help="times a reply that caught itself repeating may back up and look for another way on")
+    p.add_argument("--no-guard", action="store_true",
+                   help="do not let the negative network veto a reply before it is spoken")
+    p.add_argument("--no-blame", action="store_true", help="do not blame the failed replies")
+    p.add_argument("--no-clear", action="store_true", help="do not let the passed replies clear blame")
+    p.add_argument("--no-learn", action="store_true", help="mark the conversation but do not train on it")
+    p.add_argument("--no-teach-partner", action="store_true",
+                   help="keep the partner's own lines out of the positive phase")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"the negative network to teach and guard with (default: {DEFAULT_NEGATIVE_MODEL})")
+    p.add_argument("--epochs", type=nonneg_int, default=1, help="blame epochs per conversation")
+    group = p.add_argument_group("2NRL options")
+    group.add_argument("--neg-epochs", type=nonneg_int, default=2, help="epochs of the negative (punish) phase")
+    group.add_argument("--pos-epochs", type=nonneg_int, default=3, help="epochs of the positive (reward) phase")
+    group.add_argument("--neg-lr", type=nonneg_float, default=0.5, help="learning rate of the negative phase")
+    group.add_argument("--pos-lr", type=nonneg_float, default=0.1, help="learning rate of the positive phase")
+    group.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step")
+    group.add_argument("--strength", type=nonneg_float, metavar="S",
+                       help="count / reward model: the magnitude of a penalty or reward")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_chat)
 
     # score ----------------------------------------------------------------
     p = command(
@@ -3371,11 +3959,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # weights --------------------------------------------------------------
     p = command(
-        "weights", "count model: show or change the dual frequency weight function",
+        "weights", "count / resonant model: show or change the score function",
         "The count / reward model weighs an edge by its share of its node's traversals - all time and inside a\n"
         "sliding window of the last --window traversals - plus its rewards:\n"
         "  weight = global_scale * log(R_all) + window_scale * log(R_recent) + reward_scale * reward\n"
         "         (+ count_scale * log(1 + count), off by default).\n"
+        "The resonant model adds the phase to that share:\n"
+        "  score  = amp_scale * log(share) + reward_scale * reward + resonance_scale * coherence * cos(phase - mu)\n"
+        "with the phase one of --buckets positions on a ring, advanced by --period characters per turn plus\n"
+        "--kick-scale times each trigram's own phase (0 = a pure position clock, > 0 = a rolling signature of\n"
+        "the path) and --concentration shrinking a thinly observed edge's coherence towards 0.\n"
         "Without options the current function and the tracked totals are shown; with options the model is\n"
         "changed, every weight recomputed and the model saved.",
     )
@@ -3383,7 +3976,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--global-scale", type=float, metavar="X", help="weight of the all-time share log(R_all)")
     p.add_argument("--window-scale", type=float, metavar="X", help="weight of the sliding-window share log(R_recent)")
     p.add_argument("--reward-scale", type=float, metavar="X", help="weight of the rewards")
-    p.add_argument("--window", type=pos_int, metavar="N", help="traversals the sliding window remembers")
+    p.add_argument("--path-scale", type=float, metavar="X",
+                   help="count model: weight of the judged paths: log((correct + s) / (incorrect + s)) of the step "
+                        "in the context it was taken from (0 turns the path counters off)")
+    p.add_argument("--window", type=pos_int, metavar="N", help="count model: traversals the sliding window remembers")
+    p.add_argument("--buckets", type=pos_int, metavar="N", help="resonant model: phases on the ring")
+    p.add_argument("--period", type=nonneg_float, metavar="X", help="resonant model: characters per turn of the clock")
+    p.add_argument("--kick-scale", type=float, metavar="X",
+                   help="resonant model: how much each trigram's own phase kicks the clock (0 = position only)")
+    p.add_argument("--resonance-scale", type=float, metavar="X", help="resonant model: weight of the resonance term")
+    p.add_argument("--amp-scale", type=float, metavar="X", help="resonant model: weight of the log share")
+    p.add_argument("--concentration", type=nonneg_float, metavar="X",
+                   help="resonant model: shrinkage of a thinly observed edge's coherence")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_weights)
 
@@ -3418,6 +4022,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_feedback)
 
+    # paths ----------------------------------------------------------------
+    p = command(
+        "paths", "what the judged walks did, step by step",
+        "A reward or a penalty lands on a *path*, not on an edge: the counters are kept per step in the company\n"
+        "it kept - the node that called it - so the same edge can be the right move after one word and the wrong\n"
+        "one after another.  This lists those contexts with their correct / incorrect counts, how much of the\n"
+        "edge's traffic came through them (seen %) and the term they add to the weight.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=20, help="rows to show, most judged first (0 = all)")
+    p.add_argument("--node", metavar="LABEL", help="only the steps leaving this node (a node label, or a trigram it holds)")
+    p.set_defaults(handler=cmd_paths)
+
+    # nodes ----------------------------------------------------------------
+    p = command(
+        "nodes", "each node against the nodes around it",
+        "What a node's traffic and its reward look like from where it stands: a row per previous node and a row\n"
+        "per next node, each with its share of that side (seen %, reward %) and what the judged paths made of\n"
+        "it.  The shares are of the side, not of the node - a node is entered without an in-edge whenever a\n"
+        "text starts on it - and the reward share is signed, so a penalty reads as a negative share of the\n"
+        "pressure on the node.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=10, help="nodes to show, most visited first (0 = all)")
+    p.add_argument("--node", metavar="LABEL", help="only this node (a node label, or a trigram it holds)")
+    p.set_defaults(handler=cmd_nodes)
+
     # correct --------------------------------------------------------------
     p = command(
         "correct", "teach one correction: only what changed moves",
@@ -3433,7 +4062,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strength", type=nonneg_float, default=1.0, help="magnitude of one unit of feedback")
     p.add_argument("--weight", type=nonneg_float, default=1.0, help="how bad the attempt was: the penalty is strength x weight")
     p.add_argument("--reward", type=nonneg_float, default=1.0, help="what the correction is worth")
-    p.add_argument("--keep", type=nonneg_float, default=0.25, help="what the unchanged part of the correction still earns")
+    p.add_argument("--keep", type=nonneg_float, default=0.0, help="what the unchanged part of the correction still earns (0: only the fix; a whole path is rewarded when the output was right)")
     p.add_argument("--no-count", action="store_true", help="do not traverse the correction (it is counted by default)")
     p.add_argument("--dry-run", action="store_true", help="show the alignment without touching the model")
     p.add_argument("--blame", action="store_true",
@@ -3745,6 +4374,8 @@ def build_parser() -> argparse.ArgumentParser:
     from .tutor import (
         DEFAULT_PLAN_LESSONS,
         DEFAULT_TUTOR_MODEL as tutor_default_model,
+        DEFAULT_VARIANTS as TUTOR_DEFAULT_VARIANTS,
+        MAX_VARIANTS as TUTOR_MAX_VARIANTS,
         MODES as TUTOR_MODES,
         TWONRL_PER as TUTOR_TWONRL_PER,
     )
@@ -3812,9 +4443,10 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-diff-corrections", action="store_true",
                        help="learn a correction as two whole sentences (the old way) instead of from its diff "
                             "with what the network wrote")
-    group.add_argument("--keep-weight", type=nonneg_float, default=0.25,
-                       help="what the unchanged part of a correction still earns: 0 teaches the fix alone, "
-                            "1 rewards the whole corrected sentence")
+    group.add_argument("--keep-weight", type=nonneg_float, default=0.0,
+                       help="what the unchanged part of a correction still earns: 0 (the default) teaches the fix "
+                            "alone - a whole path is rewarded when the output was correct - and 1 rewards the "
+                            "whole corrected sentence")
     group = p.add_argument_group("2NRL options")
     group.add_argument("--twonrl-per", choices=TUTOR_TWONRL_PER, default="round", help="learn once per round, or after every lesson")
     group.add_argument("--min-weight", type=nonneg_float, default=0.25,
@@ -3835,6 +4467,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "is the reason, its mark the severity, and only the characters it corrected are blamed")
     p.add_argument("--negative", metavar="PATH",
                    help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    group = p.add_argument_group("why it is wrong, and the same mistake again (--blame only)")
+    group.add_argument("--variants", type=nonneg_int, default=TUTOR_DEFAULT_VARIANTS, metavar="N",
+                       help="ask the teacher why each failed sentence is wrong and for N more sentences that make "
+                            "the same mistake, each with its correct form; they are blamed under the same reason, so "
+                            f"the negative network learns the mistake and not one sentence (0 = do not ask, max {TUTOR_MAX_VARIANTS})")
+    group.add_argument("--variant-weight", type=nonneg_float, default=0.5, metavar="X",
+                       help="their share of the failure's severity (the student never wrote them)")
     p.set_defaults(handler=cmd_tutor)
 
     # chatgpt ---------------------------------------------------------------
@@ -3879,6 +4518,15 @@ def build_parser() -> argparse.ArgumentParser:
     a = actions.add_parser("list", help="list the tools and their arguments", formatter_class=_HelpFormatter)
     _add_tool_options(a)
     a.set_defaults(handler=cmd_tools)
+    a = actions.add_parser(
+        "browser", help="what --browser would drive: the chromedriver and Chrome found, and their versions",
+        description="Report the Chrome and chromedriver the --browser option would use, without starting them.\n"
+                    "They must share a major version; $RADIXNET_CHROMEDRIVER and $RADIXNET_CHROME override the search.",
+        formatter_class=_HelpFormatter,
+    )
+    _add_tool_options(a)
+    a.set_defaults(handler=cmd_tools)
+
     a = actions.add_parser("describe", help="one tool in detail, with its JSON schema", formatter_class=_HelpFormatter)
     a.add_argument("--tool", required=True, metavar="NAME", help="the tool to describe")
     _add_tool_options(a)
@@ -3938,6 +4586,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.add_argument("--report", metavar="FILE", help="write a JSON report (config, records, criteria, solutions)")
     p.set_defaults(handler=cmd_explore)
+
+    p = command(
+        "mcp", "serve the tools and the network over the Model Context Protocol (stdio)",
+        "Speak MCP on stdin / stdout so any MCP client - Claude Desktop, an editor, another agent - can use\n"
+        "this instance: the external tools (browsing, the calculator, optionally the sandbox and the uploaded\n"
+        "files) and the network itself (predict, generate, score, stats, solve a task through the agent loop,\n"
+        "and judge a text against the negative network).  Nothing is printed on stdout but the protocol.",
+    )
+    p.add_argument("--no-model", action="store_true", help="offer the external tools only, without the network")
+    p.add_argument("--no-solve", action="store_true",
+                   help="do not offer radixnet_solve (which needs an LLM for the criteria and the judging)")
+    p.add_argument("--blame", action="store_true",
+                   help="load the negative network even when its file does not exist yet (radixnet_judge)")
+    p.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    p.add_argument("--agent-model", metavar="NAME", help="Ollama model for radixnet_solve (default: the usual one)")
+    p.add_argument("--url", metavar="URL", help="Ollama base URL (default: $OLLAMA_HOST or http://127.0.0.1:11434)")
+    p.add_argument("--timeout", type=_float_at_least(1.0), metavar="SECONDS", help="seconds to wait for one answer")
+    _add_tool_options(p)
+    p.set_defaults(handler=cmd_mcp)
 
     # ollama ---------------------------------------------------------------
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url

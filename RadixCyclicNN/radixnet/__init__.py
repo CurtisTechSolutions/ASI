@@ -35,8 +35,11 @@ from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict
 from .countnet import CountRewardGraph, CountRewardNet
 from .duo import FilterConfig, NegativeFilter
+from .metacog import MetaLayer
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeGraph, NegativeNet
+from .phasesearch import phase_beam, phase_dijkstra, phase_walk
+from .resonance import ResonantGraph, ResonantNet, trigram_phase
 from .search import PathResult, dijkstra_predict, sample_walk
 from .speech import (
     ASR_BACKENDS,
@@ -56,6 +59,7 @@ __all__ = [
     "__version__",
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
     "NegativeNet", "NegativeGraph", "NegativeFilter", "FilterConfig",
+    "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",
     "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
     "get_backend", "describe_backends", "torch_available",
@@ -68,4 +72,5 @@ __all__ = [
     "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",
     "PathResult", "dijkstra_predict", "sample_walk",
+    "phase_beam", "phase_dijkstra", "phase_walk",
 ]

@@ -6,6 +6,7 @@ import TrainPanel from "./components/TrainPanel.jsx";
 import PredictPanel from "./components/PredictPanel.jsx";
 import GeneratePanel from "./components/GeneratePanel.jsx";
 import ConversePanel from "./components/ConversePanel.jsx";
+import ChatPanel from "./components/ChatPanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import NegativePanel from "./components/NegativePanel.jsx";
@@ -19,24 +20,27 @@ import SpeechPanel from "./components/SpeechPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
-// pythonOnly tabs need the Python server (its sine network, the corpus / review calls to Ollama, the
-// sandbox, the image and speech encoders); the Go server (`radixnet-count serve`) runs the count / reward
-// model only and hides them. The Tutor tab is not one of them: both servers run the lessons.
+// Both servers now run every tab: the lessons, the evolve loop, the Ollama corpus and review, code
+// generation, tool use and the image and speech encoders. The Go side's images use a thumbnail rather than
+// the diffusion VAE, and its speech needs the words to come with the audio, which is what this page dictates
+// anyway; a tab that still needed the Python server would carry `pythonOnly: true` and be hidden when the Go
+// server (`radixnet-count serve`) answers.
 const TABS = [
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "predict", label: "Predict", Component: PredictPanel },
   { id: "generate", label: "Generate", Component: GeneratePanel },
   { id: "converse", label: "Converse", Component: ConversePanel },
+  { id: "chat", label: "Chat", Component: ChatPanel },
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
   { id: "negative", label: "Negative", Component: NegativePanel },
-  { id: "evolve", label: "Evolve", Component: EvolvePanel, pythonOnly: true },
-  { id: "ollama", label: "Ollama", Component: OllamaPanel, pythonOnly: true },
+  { id: "evolve", label: "Evolve", Component: EvolvePanel },
+  { id: "ollama", label: "Ollama", Component: OllamaPanel },
   { id: "tutor", label: "Tutor", Component: TutorPanel },
-  { id: "code", label: "Code", Component: CodeGenPanel, pythonOnly: true },
-  { id: "agent", label: "Agent", Component: AgentPanel, pythonOnly: true },
-  { id: "images", label: "Images", Component: ImagesPanel, pythonOnly: true },
-  { id: "speech", label: "Speech", Component: SpeechPanel, pythonOnly: true },
+  { id: "code", label: "Code", Component: CodeGenPanel },
+  { id: "agent", label: "Agent", Component: AgentPanel },
+  { id: "images", label: "Images", Component: ImagesPanel },
+  { id: "speech", label: "Speech", Component: SpeechPanel },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];

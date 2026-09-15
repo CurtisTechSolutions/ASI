@@ -11,8 +11,8 @@ type CorrectOptions struct {
 	// Reward is what the correction is worth: the fix gains Strength * Reward.
 	Reward float64
 	// Keep is what the unchanged part of the correction still earns, as a
-	// fraction of Reward (0 teaches the fix alone, 1 is the old whole-sentence
-	// thumbs up).
+	// fraction of Reward.  It is 0 by default: a whole path is rewarded when
+	// the *output* was correct (Model.Reward), not when it had to be corrected.
 	Keep float64
 	// NoCount leaves the correction's traversals uncounted (they are counted by default:
 	// a corrected sentence is correct English whatever changed).
@@ -21,21 +21,23 @@ type CorrectOptions struct {
 
 // DefaultCorrectOptions: one unit of feedback either way, a quarter of it for the words that did not change.
 func DefaultCorrectOptions() CorrectOptions {
-	return CorrectOptions{Strength: 1, Weight: 1, Reward: 1, Keep: 0.25}
+	return CorrectOptions{Strength: 1, Weight: 1, Reward: 1, Keep: 0}
 }
 
 // Correction reports what one taught correction moved.
 type Correction struct {
-	Edits      int     `json:"edits"`
-	Changes    []Edit  `json:"changes"`
-	Penalised  int     `json:"penalised"`
-	Rewarded   int     `json:"rewarded"`
-	Kept       int     `json:"kept"`
-	Penalty    float64 `json:"penalty"`
-	Reward     float64 `json:"reward"`
-	Loss       float64 `json:"loss"`
-	WrongChars int     `json:"wrong_chars"`
-	RightChars int     `json:"right_chars"`
+	Edits           int     `json:"edits"`
+	Changes         []Edit  `json:"changes"`
+	Penalised       int     `json:"penalised"`
+	Rewarded        int     `json:"rewarded"`
+	Kept            int     `json:"kept"`
+	Penalty         float64 `json:"penalty"`
+	Reward          float64 `json:"reward"`
+	Loss            float64 `json:"loss"`
+	WrongChars      int     `json:"wrong_chars"`
+	RightChars      int     `json:"right_chars"`
+	MarkedCorrect   int     `json:"marked_correct"`
+	MarkedIncorrect int     `json:"marked_incorrect"`
 }
 
 // Correct teaches one correction: it moves only the trigram nodes the two
@@ -49,7 +51,9 @@ type Correction struct {
 //     replaced lose Strength * Weight of reward - and only those: the words
 //     both sentences agree on keep what they earned;
 //   - the steps of right that wrote what the teacher put there instead gain
-//     Strength * Reward, the rest of the correction Keep times as much;
+//     Strength * Reward; the rest of the correction earns Keep times as much,
+//     and Keep is 0 by default - a whole path is rewarded when the output was
+//     correct, not when it had to be corrected;
 //   - the correction is traversed once, as a training pass does, unless NoCount.
 //
 // An edge both sentences walk over a changed span - the network wrote the
@@ -86,17 +90,20 @@ func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, err
 	}
 	penalties := map[int]float64{}
 	order := []int{}
+	blamed := []PathKey{}
 	if wrongGrams != nil && len(wrongSpans) > 0 && base*o.Weight > 0 {
-		for _, e := range m.stepsOver(wrongGrams, runeLen(wrong), wrongSpans) {
-			if _, seen := penalties[e]; !seen {
-				order = append(order, e)
+		blamed = m.stepsOver(wrongGrams, runeLen(wrong), wrongSpans)
+		for _, step := range blamed {
+			if _, seen := penalties[step.Edge]; !seen {
+				order = append(order, step.Edge)
 			}
-			penalties[e] = -base * o.Weight
+			penalties[step.Edge] = -base * o.Weight
 		}
 	}
 	rewards := map[int]float64{}
 	rewardOrder := []int{}
 	fixed := map[int]bool{}
+	taught := []PathKey{}
 	if rightGrams != nil {
 		transitions, err := g.ObserveSequence(rightGrams, !o.NoCount)
 		if err != nil {
@@ -104,12 +111,14 @@ func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, err
 		}
 		if !o.NoCount {
 			g.RecordTraversals(edgesOf(transitions))
+			g.RecordPath(transitions, PathUnjudged, false) // the correction's own traffic
 			m.metaAddInt("trained_texts", 1)
 			m.metaAddInt("trained_chars", int64(runeLen(right)))
 		}
 		if len(rightSpans) > 0 {
-			for _, e := range m.stepsOver(rightGrams, runeLen(right), rightSpans) {
-				fixed[e] = true
+			taught = m.stepsOver(rightGrams, runeLen(right), rightSpans)
+			for _, step := range taught {
+				fixed[step.Edge] = true
 			}
 		}
 		for _, t := range transitions {
@@ -146,6 +155,15 @@ func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, err
 		}
 		out.Reward += rewards[e]
 	}
+	// the counters follow the reward: what was blamed is a wrong path here, what was taught a right one
+	stillBlamed := blamed[:0:0]
+	for _, step := range blamed {
+		if _, both := rewards[step.Edge]; !both {
+			stillBlamed = append(stillBlamed, step)
+		}
+	}
+	out.MarkedIncorrect = g.MarkSteps(stillBlamed, false)
+	out.MarkedCorrect = g.MarkSteps(taught, true)
 	if out.Penalised > 0 || out.Rewarded > 0 || out.Kept > 0 {
 		m.metaAddInt("feedback_passes", 1)
 		m.metaAddFloat("rewards_total", out.Reward)
@@ -163,20 +181,24 @@ func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, err
 // characters it overlaps its parent by, and the step into END with the
 // position just past the last character - where a sentence that stopped too
 // early went wrong.
-func (m *Model) stepsOver(grams []string, length int, spans []Span) []int {
+func (m *Model) stepsOver(grams []string, length int, spans []Span) []PathKey {
 	g := m.G
 	path, ok := g.NodePath(grams)
 	if !ok || len(path) < 2 {
 		return nil
 	}
-	out := []int{}
+	out := []PathKey{}
 	position := 0 // trigram index of the node being entered
 	for index := 1; index < len(path); index++ {
 		node := path[index]
+		prev := Start // who called the step: START begins every walk
+		if index >= 2 {
+			prev = path[index-2]
+		}
 		e, has := g.Edge(path[index-1], node)
 		if node == End {
 			if has && spansTouch(length, length+1, spans) {
-				out = append(out, e)
+				out = append(out, PathKey{prev, e})
 			}
 			break
 		}
@@ -186,7 +208,7 @@ func (m *Model) stepsOver(grams []string, length int, spans []Span) []int {
 			lo = 0
 		}
 		if has && spansTouch(lo, position+size, spans) {
-			out = append(out, e)
+			out = append(out, PathKey{prev, e})
 		}
 		position += size - Overlap
 	}

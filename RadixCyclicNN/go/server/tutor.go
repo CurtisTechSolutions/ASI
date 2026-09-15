@@ -78,7 +78,9 @@ func (s *Service) DefaultTutorModelFor(provider string) string {
 // StartTutor starts a tutor job: rounds of exercise, completion, grade and
 // 2NRL.  With blame every failed sentence also teaches the negative network why
 // it failed: the mistake the teacher named is the reason, its mark the
-// severity, and only the characters the correction changed are blamed.
+// severity, and only the characters the correction changed are blamed - and the
+// teacher is asked why it is wrong and for variants more sentences with the
+// same mistake, blamed at variant_weight of its severity.
 func (s *Service) StartTutor(config radixnet.TutorConfig, client, grader radixnet.LLMClient, blame bool) (map[string]any, error) {
 	if err := config.Validate(); err != nil {
 		return nil, badRequest("%v", err)
@@ -226,7 +228,7 @@ func init() {
 	route("GET", "/api/tutor", rTutor)
 	doc("GET", "/api/tutor", "the English tutor: the teachers on offer (ollama, chatgpt: url, model, configured), the error types a completion is marked with, the completion modes and every default setting")
 	route("POST", "/api/tutor/start", rTutorStart)
-	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, batches (auto run: each batch planned from the last, 0 = until stopped), exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it failed), ...}")
+	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, batches (auto run: each batch planned from the last, 0 = until stopped), exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same mistake, blamed at 'variant_weight' of its severity), variants, variant_weight, ...}")
 	route("GET", "/api/tutor/history", rTutorHistory)
 	doc("GET", "/api/tutor/history", "lesson / round / report records of all tutor runs")
 	route("GET", "/api/chatgpt/models", rChatGPTModels)
@@ -393,6 +395,8 @@ func tutorConfigFrom(rq *request) (radixnet.TutorConfig, error) {
 	integer("batch", d.Batch, 1, &c.Batch)
 	flag("adapt", d.Adapt, &c.Adapt)
 	integer("drills", d.Drills, 0, &c.Drills)
+	integer("variants", d.Variants, 0, &c.Variants)
+	number("variant_weight", d.VariantWeight, 0, &c.VariantWeight)
 	integer("plan", d.Plan, 0, &c.Plan)
 	integer("batches", d.Batches, 0, &c.Batches)
 	flag("teach_answer", d.TeachAnswer, &c.TeachAnswer)

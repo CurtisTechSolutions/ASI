@@ -950,7 +950,7 @@ class NegativeNet(GraphModel):
         grams = self.encoder.encode(wrong)
         self._register([grams])  # the failure joins the structure; the correction never does
         cleared = {e for _p, e in self._shared_edges(right)} if len(right) >= _W else set()
-        blamed = [e for e in self._steps_over(grams, len(wrong), wrong_spans) if e not in cleared]
+        blamed = [e for _prev, e in self._steps_over(grams, len(wrong), wrong_spans) if e not in cleared]
         if blamed and amount:
             result["blamed"] = self.graph.record_failure(blamed, amount, tag)
             meta_add(self.meta, "failures_total", 1)

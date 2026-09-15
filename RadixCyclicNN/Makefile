@@ -45,6 +45,7 @@ PROMPT      ?= short true sentences about animals and the weather
 LINES       ?= 20
 STYLE       ?= good
 THRESHOLD   ?= 6
+VARIANTS    ?= 3
 TOPIC       ?= everyday life
 FOCUS       ?= subject-verb agreement
 ROUNDS      ?= 3
@@ -70,6 +71,8 @@ CODEGEN_MODEL ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_MODEL),gemma4)
 CODEGEN_URL ?= $(if $(filter chatgpt,$(TUTOR)),$(CHATGPT_URL),$(OLLAMA_URL))
 CODEGEN_MODEL ?= gemma4
 TASKS       ?= data/sample_tasks.txt
+BLAME       ?=
+BROWSER     ?=
 STEPS       ?= 10
 AGENT_MODEL ?=
 MAX_STEPS   ?= 6
@@ -94,7 +97,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         speech-info speech-teach speech-listen speech-tutor speech-decode \
-        tools agent explore explore-forever \
+        tools agent explore explore-forever mcp \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
 
@@ -241,8 +244,8 @@ TUTOR_FLAGS := --tutor-provider $(TUTOR) $(if $(TUTOR_URL),--url $(TUTOR_URL),) 
 tutor: ## English lessons about TOPIC (TUTOR=ollama|chatgpt teaches): ROUNDS rounds of EXERCISES openings, marked out of 10, learned by 2NRL
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --drills $(DRILLS) --threshold $(THRESHOLD) --report tutor-report.json
 
-tutor-blame: ## English lessons that also teach the negative network why each sentence failed
-	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --blame --negative $(NEGATIVE)
+tutor-blame: ## English lessons that also teach the negative network why each sentence failed, and VARIANTS more sentences with the same mistake
+	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds $(ROUNDS) --exercises $(EXERCISES) --blame --negative $(NEGATIVE) --variants $(VARIANTS)
 
 tutor-dry: ## One round of lessons about TOPIC, marked and reported but not trained on
 	$(RADIXNET) $(GLOBAL) tutor $(TUTOR_FLAGS) --topic "$(TOPIC)" --rounds 1 --exercises $(EXERCISES) --threshold $(THRESHOLD) --dry-run
@@ -297,7 +300,8 @@ speech-tutor: ## Ask the model to say AUDIO back, mark what comes back and blame
 speech-decode: ## Turn an encoded or predicted waveform text (TEXT=...) back into AUDIO
 	$(RADIXNET) $(GLOBAL) speech decode --text "$(TEXT)" --out $(AUDIO)
 OLLAMA_FLAGS_URL := $(if $(OLLAMA_URL),--url $(OLLAMA_URL),)
-AGENT_FLAGS := $(OLLAMA_FLAGS_URL) $(if $(AGENT_MODEL),--agent-model $(AGENT_MODEL),) --max-steps $(MAX_STEPS)
+AGENT_FLAGS := $(OLLAMA_FLAGS_URL) $(if $(AGENT_MODEL),--agent-model $(AGENT_MODEL),) --max-steps $(MAX_STEPS) \
+               $(if $(BLAME),--blame,) $(if $(BROWSER),--browser,)
 
 ##@ Tool use (browsing + Ollama criteria, judging and teaching)
 tools: ## List the external tools the network can call
@@ -311,6 +315,9 @@ explore: ## Let the network choose its own tasks and browse for STEPS steps
 
 explore-forever: ## Explore until Ctrl-C (the model is saved on stop)
 	$(MAKE) explore STEPS=0
+
+mcp: ## Serve the tools and the network over the Model Context Protocol (stdio)
+	$(RADIXNET) $(GLOBAL) mcp
 
 ##@ Serve (local)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)

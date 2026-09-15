@@ -50,6 +50,7 @@ const DEFAULT_SETTINGS = {
   negEpochs: "2",
   posEpochs: "3",
   negLr: "0.5",
+  strength: "1",
   posLr: "0.1",
   batchSize: "4",
 };
@@ -700,6 +701,8 @@ export default function CodeGenPanel({ status }) {
   const { job, running, busy, error, start, stop, clearError } = useJob("codegen");
 
   const otherJobRunning = jobIsRunning(status) && !running;
+  // the count / reward model pushes by a strength rather than a learning rate (2NRL, the Ratings card)
+  const countKind = Boolean(status && status.kind === "count");
   const s = settings;
   const field = (name) => (value) => setSettings((prev) => ({ ...prev, [name]: value }));
   const provider = s.teacherProvider;
@@ -760,6 +763,7 @@ export default function CodeGenPanel({ status }) {
         neg_lr: Math.max(0, parseNumber(s.negLr, 0.5)),
         pos_lr: Math.max(0, parseNumber(s.posLr, 0.1)),
         batch_size: Math.max(1, parseInteger(s.batchSize, 4)),
+        ...(countKind ? { strength: Math.max(0, parseNumber(s.strength, 1)) } : {}),
         ...sharedFields(s),
       }),
     );
@@ -966,7 +970,14 @@ export default function CodeGenPanel({ status }) {
             step={1}
             disabled={running}
           />
-          <NumberField label="Negative lr" value={s.negLr} onChange={field("negLr")} min={0} disabled={running} />
+          <NumberField
+            label={countKind ? "Strength" : "Negative lr"}
+            hint={countKind ? "how hard 2NRL pushes" : undefined}
+            value={countKind ? s.strength : s.negLr}
+            onChange={field(countKind ? "strength" : "negLr")}
+            min={0}
+            disabled={running}
+          />
           <NumberField label="Positive lr" value={s.posLr} onChange={field("posLr")} min={0} disabled={running} />
           <NumberField
             label="Batch size"
