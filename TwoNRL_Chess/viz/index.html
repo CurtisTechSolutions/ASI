@@ -300,7 +300,9 @@ footer { padding-block: 40px 0; color: var(--ink-3); font-size: .82rem; display:
     <h2>The negative phase goes the wrong way on purpose</h2>
     <p class="note">Refusals per move on the held-out positions, averaged over three seeds. The inverting arms
       climb through phase 1 &mdash; that is the network being driven toward its own failures at the full learning
-      rate &mdash; and drop vertically at the flip. Log scale, because the range is two orders of magnitude.</p>
+      rate &mdash; and drop vertically at the flip. Phase 1 ends when the network reproduces its own failure,
+      not on a fixed round, so the flip lands where each arm's learning put it. Log scale, because the range is
+      two orders of magnitude.</p>
   </div>
   <div class="controls" id="curve-controls"><span class="ctl-label">Arms</span></div>
   <figure>

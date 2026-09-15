@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "$0")"
 
 SEEDS=${SEEDS:-"0 1 2"}
-ROUNDS=${ROUNDS:-24}
+ROUNDS=${ROUNDS:-40}
 GAMES=${GAMES:-10}
 JOBS=${JOBS:-4}
 COMMON="--seeds $SEEDS --rounds $ROUNDS --games $GAMES --jobs $JOBS"

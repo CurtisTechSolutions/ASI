@@ -107,7 +107,8 @@ CP_CLIP = 1000.0       # a mate is worth 10000; without a clip it is the whole m
 class Config:
     arm: str = "2nrl"
     hidden: tuple[int, ...] = (32, 32)
-    rounds: int = 24
+    rounds: int = 40                 # phase 1 now decides its own length, so the
+                                     # run has to be long enough for both phases
     games: int = 10                  # training games per round
     # 2NRL's rates: the research ratio is neg:pos = 5:1 and act_lr = lr/10.
     neg_lr: float = 0.01
@@ -124,6 +125,12 @@ class Config:
     buffer_rounds: int = 5           # how many rounds of failures a block trains on
     invert_mode: str = "unit"        # "unit" = negate every unit (§4.3's primitive);
                                      # "readout" = negate only the output
+    invert_trigger: str = "plateau"  # "plateau" = flip when the failure is learned;
+                                     # "schedule" = flip at neg_fraction of the run
+    invert_patience: int = 3         # rounds without improvement before the flip
+    invert_min_delta: float = 0.01   # one probability point counts as improvement
+    reproduce_at: float = 0.90       # §3: phase 1 runs "until the model reproduces it"
+    plateau_floor: float = 0.50      # §12 item 4: a half-learned failure may not plateau
     schedule: str = "phased"         # "phased" = §3's three phases across the run;
                                      # "per-round" = a negative block, an inversion
                                      # and a positive block inside every round
@@ -340,6 +347,98 @@ def target_entropy(batch: Batch, target: np.ndarray, bins: int = 10) -> float:
     return float(-(p * np.log(p)).sum())
 
 
+class FlipTrigger:
+    """When phase 1 has done its job - and a deadline, so phase 3 is never empty.
+
+    ``Research/2NRL.md`` §12 item 4 is an open question and this is an answer to
+    it:
+
+        *"I train on the garbage for a fixed small number of epochs. The entropy
+        account in §5 implies phase 1 should run until the failure mode is well
+        represented, since a half-learned failure inverts into a half-useful
+        signal. There is probably an optimal depth and it probably depends on
+        H(q). I have not looked."*
+
+    So the flip is an **event, not a date**, and it fires on the first of three,
+    each of which is an observation rather than an estimate (§6.4):
+
+    ``reproduced``
+        The network now puts at least ``reproduce_at`` of its probability on the
+        failure it is being trained toward.  This is §3 read literally - phase 1
+        is *"ordinary training on the wrong answer, at full learning rate, until
+        the model reproduces it"* - and it is the condition that should normally
+        fire.
+    ``plateau``
+        It has stopped getting better at that for ``invert_patience`` rounds in a
+        row, having already got past ``plateau_floor`` - there is nothing left in
+        the failure to represent.  The floor is there because §12 item 4 warns
+        that *"a half-learned failure inverts into a half-useful signal"*: a
+        network still reproducing its failure less than half the time has not
+        finished phase 1, it has merely stopped improving for a moment, and
+        without the floor two noisy rounds end phase 1 at p = 0.43.
+    ``deadline``
+        Round ``rounds - 1``, and this is the reason for the ``n - 1``.  Phase 1
+        may run as long as it likes but no longer than that, so **there is always
+        at least one round of phase 3 left to repair with**.  An inversion is
+        global and blunt (§12 item 2) and phase 3 is what repairs the detail; a
+        flip on the final round would leave nothing to do it with.
+
+    Which one fired is recorded per run, so a write-up can say whether phase 1
+    finished or merely ran out of rounds.
+
+    Every arm consults the same trigger on its own first-block loss, the
+    controls included, so the shape of the schedule is matched even though the
+    round it turns on is each arm's own.  Only the inverting arms then flip.
+    """
+
+    def __init__(self, cfg: "Config") -> None:
+        self.mode = cfg.invert_trigger
+        self.patience = max(1, cfg.invert_patience)
+        self.min_delta = cfg.invert_min_delta
+        self.reproduce_at = cfg.reproduce_at
+        self.floor = cfg.plateau_floor
+        self.best_p = 0.0
+        self.deadline = max(1, cfg.rounds - 1)
+        self.scheduled = max(1, int(round(cfg.rounds * cfg.neg_fraction)))
+        self.best, self.stalled = float("inf"), 0
+        self.fired_at: int | None = None
+        self.reason: str | None = None
+
+    def observe(self, round_index: int, nll: float | None) -> bool:
+        """Called once, right after the negative block.  True means flip now."""
+        if self.fired_at is not None:
+            return False
+        if self.mode == "schedule":
+            if round_index >= self.scheduled:
+                self.fired_at, self.reason = round_index, "schedule"
+                return True
+            return False
+        if nll is not None and not math.isnan(nll):
+            # exp(-NLL) is the geometric mean probability the network now puts on
+            # the failure it is being trained toward - literally how well it
+            # reproduces it, and comparable from round to round in a way the raw
+            # loss is not, because the failure buffer keeps growing underneath it.
+            p = math.exp(-nll)
+            if p >= self.reproduce_at:
+                self.fired_at, self.reason = round_index, "reproduced"
+                return True
+            if p > self.best_p + self.min_delta:
+                self.best_p, self.stalled = p, 0
+            else:
+                self.stalled += 1
+        # A plateau below the floor is not a finished phase 1, it is a phase 1
+        # that has not started working yet - §12 item 4's half-learned failure,
+        # which "inverts into a half-useful signal". Only a network that already
+        # reproduces its failure more often than not is allowed to stop here.
+        if self.stalled >= self.patience and self.best_p >= self.floor:
+            self.fired_at, self.reason = round_index, "plateau"
+            return True
+        if round_index >= self.deadline:                 # the n - 1 guarantee
+            self.fired_at, self.reason = round_index, "deadline"
+            return True
+        return False
+
+
 def run_block(net, opt, batch: Batch, target: np.ndarray, weights: np.ndarray,
               cfg: Config, updates: int, nprng: np.random.Generator,
               repel: bool = False) -> float:
@@ -359,8 +458,8 @@ def run_block(net, opt, batch: Batch, target: np.ndarray, weights: np.ndarray,
 
 
 def train_round(agent: Agent, cfg: Config, samples: list[dict],
-                nprng: np.random.Generator, phase: str, invert_now: bool,
-                probe=None) -> dict:
+                nprng: np.random.Generator, phase: str, should_end_phase1,
+                probe=None, on_flip=None) -> dict:
     """One round of training.
 
     ``phase`` is ``"negative"``, ``"positive"`` or ``"both"``.  The first two are
@@ -369,15 +468,22 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
     round.  Every arm gets the same number of updates at the same rates
     whichever is chosen - only the target and the inversion differ.
 
+    ``should_end_phase1`` is handed the negative block's loss the moment that
+    block finishes and answers whether phase 1 is over.  Every arm asks it; only
+    the inverting arms then flip, so the controls switch learning rate on the
+    same rule without acquiring an inversion they are not supposed to have.
+
     ``probe`` is called immediately before and immediately after the sign flip,
     with nothing in between, so ``inversion_before`` and ``inversion_after``
     measure **the inversion alone** - no training, no play, one closed-form
     operation.  That is the number this whole experiment exists to produce.
+    ``on_flip`` is given ``"before"`` and ``"after"`` at the same two instants,
+    for whatever else wants to watch (the checkpoints the page is built from).
     """
     if not samples:
         return {"n": 0, "negative_nll": float("nan"), "positive_nll": float("nan"),
                 "inverted": False, "negative_entropy": 0.0, "mean_weight": 0.0,
-                "rule_share": 0.0, "phase": phase}
+                "rule_share": 0.0, "phase": phase, "phase1_done": False}
     batch = Batch(samples, cfg.width)
     weights = batch.weight
     net, arm = agent.net, cfg.arm
@@ -385,7 +491,7 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
            "rule_share": float((batch.is_rule > 0).mean()),
            "mean_loss_cp": float(batch.loss_cp.mean()), "phase": phase,
            "negative_nll": float("nan"), "positive_nll": float("nan"),
-           "inverted": False, "negative_entropy": 0.0}
+           "inverted": False, "negative_entropy": 0.0, "phase1_done": False}
 
     def negative_block(updates: int) -> None:
         opt = Adam(net, lr=cfg.neg_lr, act_lr=cfg.neg_lr / 10.0)
@@ -405,6 +511,8 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
     def invert() -> None:
         rows = np.asarray(batch.X[:64], dtype=np.float64)
         before = net.forward(rows, train=False)
+        if on_flip is not None:
+            on_flip("before")
         if probe is not None:
             out["inversion_before"] = probe()
         # Both operators produce -output exactly, so phase 2 cannot tell them
@@ -413,18 +521,22 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
         out["inversion_error"] = float(np.abs(net.forward(rows, train=False) + before).max())
         if probe is not None:
             out["inversion_after"] = probe()
+        if on_flip is not None:
+            on_flip("after")
         out["inverted"] = True
 
     updates = cfg.neg_updates + cfg.pos_updates
     if phase == "negative":
         negative_block(updates)
-        if invert_now and arm in INVERTING:
-            invert()
+        if should_end_phase1(out["negative_nll"]):
+            out["phase1_done"] = True
+            if arm in INVERTING:
+                invert()
     elif phase == "positive":
         positive_block(updates)
     else:                                   # "both": the per-round schedule
         negative_block(cfg.neg_updates)
-        if invert_now and arm in INVERTING:
+        if arm in INVERTING:
             invert()
         positive_block(cfg.pos_updates)
     return out
@@ -504,8 +616,8 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
         print(f"  [{cfg.arm:12s} seed {cfg.seed}] round  0  legal@1 {h['top1_legal']:.3f}  "
               f"refusals {h['refusals']:6.1f}  cp loss {h['cp_loss']:6.1f}  (untrained)")
 
-    neg_rounds = (max(1, int(round(cfg.rounds * cfg.neg_fraction)))
-                  if cfg.schedule == "phased" else 0)
+    trigger = FlipTrigger(cfg)
+    phase1_over = False
     best_seen, stalled, growth_events = float("inf"), 0, []
     last_phase = ""
     # A short replay of the last few rounds' failures. A block of updates on the
@@ -517,18 +629,18 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
                        if s["is_rule"] > 0 or s["loss_cp"] > cfg.blunder_margin])
         failures = [s for group in buffer for s in group]
         if cfg.schedule == "phased":
-            phase = "negative" if r <= neg_rounds else "positive"
-            invert_now = r == neg_rounds
+            phase = "positive" if phase1_over else "negative"
         else:
-            phase, invert_now = "both", True
+            phase = "both"
         if phase != last_phase:                    # a phase change resets the stall
             best_seen, stalled, last_phase = float("inf"), 0, phase
-        if invert_now and cfg.arm in INVERTING:
-            checkpoint("phase1_end")
-        train = train_round(agent, cfg, failures, nprng, phase, invert_now,
-                            probe=lambda: evaluate_heldout(agent, tracked))
-        if train.get("inverted"):
-            checkpoint("after_invert")
+        train = train_round(
+            agent, cfg, failures, nprng, phase,
+            should_end_phase1=lambda nll, _r=r: trigger.observe(_r, nll),
+            probe=lambda: evaluate_heldout(agent, tracked),
+            on_flip=lambda when: checkpoint("phase1_end" if when == "before" else "after_invert"))
+        if train.get("phase1_done"):
+            phase1_over = True
         ev = evaluate_heldout(agent, tracked)
 
         # ---- the self-building half: widen on a stall ----------------------
@@ -554,7 +666,9 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
                   f"legal@1 {ev['top1_legal']:.3f}  refusals {ev['refusals']:6.1f}  "
                   f"cp loss {ev['cp_loss']:6.1f}  failures {train['n']:4d} "
                   f"({train['rule_share']:.0%} rule)  {train['phase']:8s}"
-                  f"{'  INVERTED' if train['inverted'] else ''}{grew}")
+                  f"{'  INVERTED (' + str(trigger.reason) + ')' if train['inverted'] else ''}"
+                  f"{'  phase 1 over' if train.get('phase1_done') and not train['inverted'] else ''}"
+                  f"{grew}")
 
     checkpoint("final")
     final = play_round(agent, judge, opponent, cfg, rng, nprng, cfg.eval_games,
@@ -565,7 +679,7 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
            "vs_stockfish": final, "opponent": opponent.describe(),
            "hidden": list(agent.net.hidden_sizes), "parameters": agent.net.n_params(),
            "growth": growth_events, "activation": agent.net.act_report(),
-           "negative_rounds": neg_rounds,
+           "negative_rounds": trigger.fired_at, "flip_reason": trigger.reason,
            "engine_calls": judge.calls, "engine_cache_hits": judge.hits,
            "history": history, "seconds": round(time.time() - started, 1)}
     judge.close()
@@ -633,6 +747,17 @@ def main() -> None:
                    help="unit: negate every unit, §4.3's primitive (default).  "
                         "readout: negate only the network's output, leaving the "
                         "hidden units untouched")
+    p.add_argument("--invert-trigger", choices=["plateau", "schedule"],
+                   default=Config.invert_trigger,
+                   help="plateau: flip the round the negative loss stops improving, "
+                        "and by round n-1 at the latest (default).  "
+                        "schedule: flip at --neg-fraction of the run, as a fixed date")
+    p.add_argument("--invert-patience", type=int, default=Config.invert_patience)
+    p.add_argument("--plateau-floor", type=float, default=Config.plateau_floor)
+    p.add_argument("--reproduce-at", type=float, default=Config.reproduce_at,
+                   help="how much of its probability the network must put on the "
+                        "failure before phase 1 is done (§3's \"until the model "
+                        "reproduces it\")")
     p.add_argument("--schedule", choices=["phased", "per-round"], default=Config.schedule,
                    help="phased: §3's three phases over the run (default).  "
                         "per-round: a negative block, an inversion and a positive "
@@ -661,6 +786,10 @@ def main() -> None:
                          track_positions=args.track_positions,
                          schedule=args.schedule, neg_fraction=args.neg_fraction,
                          invert_mode=args.invert_mode,
+                         invert_trigger=args.invert_trigger,
+                         invert_patience=args.invert_patience,
+                         reproduce_at=args.reproduce_at,
+                         plateau_floor=args.plateau_floor,
                          growth=0 if args.no_growth else Config.growth,
                          heldout=args.heldout, stockfish=args.stockfish,
                          checkpoints=args.checkpoints)

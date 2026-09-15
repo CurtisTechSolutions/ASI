@@ -33,12 +33,43 @@ by being refused, then the **payoffs**, by being graded.
 
 <!--HEADLINE-->
 
+## Phase 1 ends when the failure is learned, not on a date
+
+§12 item 4 is an open question in the paper:
+
+> I train on the garbage for a fixed small number of epochs. The entropy account
+> in §5 implies phase 1 should run until the failure mode is *well* represented,
+> since a half-learned failure inverts into a half-useful signal. There is
+> probably an optimal depth and it probably depends on `H(q)`. I have not looked.
+
+So the sign flip is an **event, not a date**. It fires on the first of three,
+each an observation rather than an estimate (§6.4), and which one fired is
+recorded per run:
+
+| trigger | what it means |
+|---|---|
+| `reproduced` | the network now puts ≥ 90% of its probability on the failure it is being trained toward — §3 read literally, *"until the model reproduces it"* |
+| `plateau` | it has stopped getting better at that for 3 rounds running, having already passed 50% |
+| `deadline` | round **n − 1**, so there is always at least one round of phase 3 left to repair with |
+
+The floor under `plateau` is there because of §12 item 4's own warning. Without
+it, two noisy rounds early on end phase 1 at p = 0.43 — a half-learned failure,
+which is exactly the thing that inverts into a half-useful signal. A network
+still reproducing its failure less than half the time has not finished phase 1;
+it has merely stopped improving for a moment.
+
+Every arm consults the same trigger on its own first-block loss, the controls
+included, so the shape of the schedule is matched even though the round it turns
+on is each arm's own. Only the inverting arms then flip. `--invert-trigger
+schedule` restores the fixed `neg_fraction` date as an ablation.
+
 ## The three phases
 
 Exactly [`TwoNRL_CartPole`](../TwoNRL_CartPole/)'s structure, carried from
 control to a board game:
 
-1. **negative** — the network plays, fails, and is trained at the full `neg_lr`
+1. **negative** — for as many rounds as the trigger above allows, the network
+   plays, fails, and is trained at the full `neg_lr`
    **toward the failures it produced**: the moves the board refused, and the
    blunders it settled for. It gets worse on purpose, and its games generate
    more failure to learn from. This is the "train on garbage" phase and the
@@ -71,9 +102,9 @@ replaced by positives and the inversion removed.
 
 Three further arms are ablations of the method rather than of the negative set:
 `--schedule per-round` inverts inside every round instead of once (§9.3's
-perpetual loop), `--neg-fraction` varies how much of the run phase 1 gets
-(§12 item 4), and `--invert-mode readout` swaps the operator for the read-out
-flip described above.
+perpetual loop), `--invert-trigger schedule` puts phase 1 back on a fixed date
+so the learned trigger can be measured against one, and `--invert-mode readout`
+swaps the operator for the read-out flip described above.
 
 <!--ARMS-->
 
