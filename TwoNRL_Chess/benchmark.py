@@ -27,6 +27,13 @@ so the numbers do not move when the machine is busy.
 
 from __future__ import annotations
 
+import os as _os
+
+# One BLAS thread, for the same reason experiment.py does it.  Set before numpy.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_var, "1")
+
 import argparse
 import glob
 import itertools
@@ -42,7 +49,7 @@ import numpy as np
 from agent import Agent
 from engine import Judge, Opponent, find_stockfish
 from features import material
-from moves import to_move
+
 from sbnn import SineNet
 
 RESIGN_CP = 1200

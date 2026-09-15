@@ -29,6 +29,25 @@ def load_runs(paths: list[str]) -> dict[str, list[dict]]:
            {arm: rs for arm, rs in arms.items() if arm not in ORDER}
 
 
+def negative_entropy(runs: list[dict]) -> list[float]:
+    """H(q) is only defined on the rounds that actually ran a negative block."""
+    return [h["train"]["negative_entropy"] for r in runs for h in r["history"][1:]
+            if h["train"].get("phase") in ("negative", "both") and h["train"].get("n")]
+
+
+def inversions(runs: list[dict]) -> list[dict]:
+    """Every recorded sign flip, with the held-out scores either side of it."""
+    out = []
+    for run in runs:
+        for h in run["history"][1:]:
+            t = h["train"]
+            if t.get("inverted") and "inversion_before" in t:
+                out.append({"seed": run["seed"], "round": h["round"],
+                            "before": t["inversion_before"], "after": t["inversion_after"],
+                            "error": t.get("inversion_error", 0.0)})
+    return out
+
+
 def stat(runs: list[dict], path: tuple[str, ...]) -> tuple[float, float]:
     vals = []
     for run in runs:
@@ -50,13 +69,43 @@ def table_headline(arms: dict[str, list[dict]]) -> None:
           "agrees with Stockfish |")
     print("|---|---|---|---|---|---|")
     for arm, runs in arms.items():
-        ent = [h["train"]["negative_entropy"] for r in runs for h in r["history"][1:]]
+        ent = negative_entropy(runs)
         legal = stat(runs, ("heldout", "top1_legal"))
         refus = stat(runs, ("heldout", "refusals"))
         cpl = stat(runs, ("heldout", "cp_loss"))
         agree = stat(runs, ("heldout", "agreement"))
         print(f"| `{arm}` | {np.mean(ent) if ent else 0:.2f} | {fmt(*legal, 3)} | "
               f"{fmt(*refus, 1)} | {fmt(*cpl, 1)} | {fmt(*agree, 3)} |")
+
+
+def table_inversion(arms: dict[str, list[dict]]) -> None:
+    """What the sign flip alone buys: no training between the two columns."""
+    rows = []
+    for arm, runs in arms.items():
+        flips = inversions(runs)
+        if not flips:
+            continue
+        for key, label, places in (("refusals", "refusals per move", 1),
+                                   ("top1_legal", "legal first try", 3),
+                                   ("cp_loss", "centipawn loss", 1)):
+            before = np.array([f["before"][key] for f in flips])
+            after = np.array([f["after"][key] for f in flips])
+            rows.append((arm, label, before.mean(), before.std(), after.mean(),
+                         after.std(), places, len(flips),
+                         max(f["error"] for f in flips)))
+    if not rows:
+        return
+    print("\n### Phase 2 on its own: one sign flip, no training\n")
+    print("| arm | metric | before the flip | after the flip | change |")
+    print("|---|---|---|---|---|")
+    for arm, label, bm, bs, am, asd, places, n, _ in rows:
+        if label == "legal first try":
+            change = f"×{am / bm:.1f}" if bm > 0 else "—"
+        else:
+            change = f"×{bm / am:.1f} better" if am > 0 and bm > am else f"×{am / bm:.1f} worse"
+        print(f"| `{arm}` | {label} | {fmt(bm, bs, places)} | {fmt(am, asd, places)} | {change} |")
+    worst = max(r[8] for r in rows)
+    print(f"\nMeasured negation error over every flip: **{worst:.1e}**.")
 
 
 def table_games(arms: dict[str, list[dict]]) -> None:
@@ -132,6 +181,7 @@ def main() -> None:
         raise SystemExit(f"no run JSON in {args.results}/ - run `make run` first")
     print(f"# Tables rebuilt from {len(runs)} result file(s)")
     table_headline(arms)
+    table_inversion(arms)
     table_games(arms)
     table_curve(arms)
     table_growth(arms)

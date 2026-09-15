@@ -25,7 +25,8 @@ The loop, one round at a time
    proportional boosting, "the worse the failure, the harder the network is
    pushed to reproduce it".
 3. **Train.**  §3's three phases, spread over the run exactly as
-   ``TwoNRL_CartPole`` spreads them.  The first half of the rounds is
+   ``TwoNRL_CartPole`` spreads them.  The first ``neg_fraction`` of the rounds
+   (30% by default) is
    **phase 1**: the network plays, fails, and is trained at the full ``neg_lr``
    *toward* the failures it produced - so it gets worse on purpose, and its
    games generate more failure to learn from.  Then **phase 2**, one inversion.
@@ -44,16 +45,20 @@ The loop, one round at a time
 
 The arms
 --------
-=================  ===================================================  ========
-arm                first block trains toward                            H(q)
-=================  ===================================================  ========
-``2nrl``           its **own failure** - the move the board refused,     medium
-                   or the blunder it settled for - then **invert**
-``2nrl-worst``     Stockfish's **worst legal move**, then **invert**     lowest
-``2nrl-random``    a **uniformly random legal move**, then **invert**    highest
+=================  ====================================================
+arm                the first block trains toward
+=================  ====================================================
+``2nrl``           its **own failure** - the move the board refused, or
+                   the blunder it settled for - then **invert**
+``2nrl-worst``     Stockfish's **worst legal move**, then **invert**
+``2nrl-random``    a **uniformly random legal move**, then **invert**
 ``positive``       Stockfish's best move; **no inversion** (control D)
-``repulsion``      **away from** its own failure; no inversion (arm E)   medium
-=================  ===================================================  ========
+``repulsion``      **away from** its own failure; no inversion (arm E)
+=================  ====================================================
+
+``target_entropy`` measures ``H(q)`` for each of those negative sets rather than
+assuming an ordering for them, which is what §5 turns on and what §7.2 wants
+made measurable.
 
 Every arm ends on the same positive fine-tune toward Stockfish's best move, so
 ``positive`` is exactly ``2nrl`` with the negatives replaced by positives and
@@ -62,6 +67,15 @@ the load-bearing comparison.
 """
 
 from __future__ import annotations
+
+import os as _os
+
+# One BLAS thread per worker.  Every matrix here is small, the parallelism that
+# matters is across runs, and four workers each opening a machine-sized thread
+# pool spend their time fighting each other.  Set before numpy is imported.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_var, "1")
 
 import argparse
 import collections
@@ -123,7 +137,7 @@ class Config:
     growth_min_delta: float = 1e-3
     max_hidden: int = 256
     eval_games: int = 10             # games against Stockfish at the end of the run
-    track_positions: int = 200       # held-out positions scored every round
+    track_positions: int = 120       # held-out positions scored every round
     heldout: str = dataset.DEFAULT_PATH
     seed: int = 0
     stockfish: str | None = None
@@ -338,7 +352,8 @@ def run_block(net, opt, batch: Batch, target: np.ndarray, weights: np.ndarray,
 
 
 def train_round(agent: Agent, cfg: Config, samples: list[dict],
-                nprng: np.random.Generator, phase: str, invert_now: bool) -> dict:
+                nprng: np.random.Generator, phase: str, invert_now: bool,
+                probe=None) -> dict:
     """One round of training.
 
     ``phase`` is ``"negative"``, ``"positive"`` or ``"both"``.  The first two are
@@ -346,6 +361,11 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
     which runs a negative block, the inversion and a positive block inside the
     round.  Every arm gets the same number of updates at the same rates
     whichever is chosen - only the target and the inversion differ.
+
+    ``probe`` is called immediately before and immediately after the sign flip,
+    with nothing in between, so ``inversion_before`` and ``inversion_after``
+    measure **the inversion alone** - no training, no play, one closed-form
+    operation.  That is the number this whole experiment exists to produce.
     """
     if not samples:
         return {"n": 0, "negative_nll": float("nan"), "positive_nll": float("nan"),
@@ -376,10 +396,14 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
                                         np.ones(len(batch)), cfg, updates, nprng)
 
     def invert() -> None:
-        probe = np.asarray(batch.X[:64], dtype=np.float64)
-        before = net.forward(probe, train=False)
+        rows = np.asarray(batch.X[:64], dtype=np.float64)
+        before = net.forward(rows, train=False)
+        if probe is not None:
+            out["inversion_before"] = probe()
         net.invert()
-        out["inversion_error"] = float(np.abs(net.forward(probe, train=False) + before).max())
+        out["inversion_error"] = float(np.abs(net.forward(rows, train=False) + before).max())
+        if probe is not None:
+            out["inversion_after"] = probe()
         out["inverted"] = True
 
     updates = cfg.neg_updates + cfg.pos_updates
@@ -476,7 +500,8 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
             phase, invert_now = "both", True
         if phase != last_phase:                    # a phase change resets the stall
             best_seen, stalled, last_phase = float("inf"), 0, phase
-        train = train_round(agent, cfg, failures, nprng, phase, invert_now)
+        train = train_round(agent, cfg, failures, nprng, phase, invert_now,
+                            probe=lambda: evaluate_heldout(agent, tracked))
         ev = evaluate_heldout(agent, tracked)
 
         # ---- the self-building half: widen on a stall ----------------------
@@ -549,7 +574,8 @@ def summarise(runs: list[dict]) -> None:
             return np.array([r["heldout"][key] for r in rs])
         legal, refus, cpl = col("top1_legal"), col("refusals"), col("cp_loss")
         score = np.array([r["vs_stockfish"]["score"] for r in rs])
-        ent = [h["train"]["negative_entropy"] for r in rs for h in r["history"][1:]]
+        ent = [h["train"]["negative_entropy"] for r in rs for h in r["history"][1:]
+               if h["train"].get("phase") in ("negative", "both") and h["train"]["n"]]
         print(f"{arm:<14}{np.mean(ent) if ent else 0:6.2f}"
               f"{legal.mean():11.3f} +-{legal.std():5.3f}"
               f"{refus.mean():9.1f} +-{refus.std():5.1f}"

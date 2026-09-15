@@ -30,7 +30,7 @@ import numpy as np
 
 from features import FEATURE_DIM as BOARD_DIM
 from features import encode
-from moves import (INPUT_DIM, MOVE_DIM, N_ACTIONS, dense, preactivation,
+from moves import (INPUT_DIM, N_ACTIONS, dense, preactivation,
                    square_contents, to_action, to_move)
 from sbnn import SineNet
 

@@ -20,7 +20,7 @@ import numpy as np
 from agent import Agent, Batch, apply_grad, cross_entropy_grad, nll, policy
 from features import (CHECK_OFFSET, FEATURE_DIM, NO_MOVES_OFFSET, TURN_OFFSET,
                       encode, encode_children)
-from moves import (INPUT_DIM, N_ACTIONS, dense, preactivation, square_contents,
+from moves import (INPUT_DIM, N_ACTIONS, dense, preactivation,
                    to_action, to_move)
 from sbnn import ACT_PARAMS, MIN_B, Adam, SineNet
 

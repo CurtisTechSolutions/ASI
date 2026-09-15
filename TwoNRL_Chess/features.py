@@ -61,7 +61,10 @@ def encode_children(board: chess.Board, moves: list[chess.Move], pov: chess.Colo
                     out: np.ndarray | None = None) -> np.ndarray:
     """``(len(moves), FEATURE_DIM)``: the position each move leads to, ``pov``'s view.
 
-    ``board`` is left exactly as it was found.
+    ``board`` is left exactly as it was found.  The player does not use this -
+    it scores *(position, move)* pairs, for the reasons in ``agent.py`` - and it
+    is here so ``test_sbnn.py`` can build the position-scoring alternative and
+    show its search breaking the inversion.
     """
     rows = np.zeros((len(moves), FEATURE_DIM)) if out is None else out
     for i, move in enumerate(moves):
