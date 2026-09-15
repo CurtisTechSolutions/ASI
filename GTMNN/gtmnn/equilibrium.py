@@ -86,6 +86,45 @@ def exploitability(game, actions):
     return worst
 
 
+def mixed_exploitability(game, profile, samples=256, rng=None):
+    """Exploitability of a MIXED profile, not of its argmax.
+
+    The pure version is meaningless wherever the equilibrium is mixed: in
+    rock-paper-scissors EVERY pure profile is exploitable by 2.0, so measuring it
+    scores all five solvers identically at their worst and hides the fact that
+    the uniform mixture is exactly unexploitable. Measured before this was
+    separated: every solver "scored" 1.0-2.0 on RPS and 0% Nash.
+
+    Opponents' actions are drawn from their own rows, so this is an estimate with
+    a sampling error of order 1/sqrt(samples); exact enumeration would be
+    prod(slots) per seat and is not worth it at M=64."""
+    rng = rng or random.Random(0)
+    n = len(profile)
+    if n == 0: return 0.0
+    draws = []
+    for _ in range(samples):
+        a = []
+        for row in profile:
+            x = rng.random(); acc = 0.0; pick = len(row) - 1
+            for s, v in enumerate(row):
+                acc += v
+                if x <= acc: pick = s; break
+            a.append(pick)
+        draws.append(a)
+    worst = 0.0
+    for seat in range(n):
+        tot = [0.0] * len(profile[seat])
+        for a in draws:
+            us = game.slot_utilities(seat, a)
+            for s in range(len(tot)): tot[s] += us[s]
+        ok = game.playable(seat)
+        exp_u = sum(profile[seat][s] * tot[s] / samples
+                    for s in range(len(tot)) if ok[s])
+        br = max(tot[s] / samples for s in range(len(tot)) if ok[s])
+        if br - exp_u > worst: worst = br - exp_u
+    return worst
+
+
 def solve(game, method="regret_plus", iters=64, rng=None, tol=1e-6, pool=None):
     rng = rng or random.Random(0)
     fn = {"best_response": _best_response, "fictitious": _fictitious,

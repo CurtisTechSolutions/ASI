@@ -17,6 +17,14 @@ class Payoff:
     # which, and StageGame.loads() hands over the right one.
     summary = "loads"
 
+    # What the game states about ITSELF. gtmnn/trie.py asks these rather than
+    # hard-coding a class list, so a new game joins the index by answering the
+    # same questions and nothing in the trie changes.
+    zero_sum = False            # one player's gain is another's loss
+    player_specific = False     # two players can value the same action differently
+    monotone_in_load = False    # payoff non-increasing in how many chose it
+    ordinal_potential = False   # weaker than exact, still gives the FIP
+
     def utility(self, seat, action_slot, loads, ctx): raise NotImplementedError
     def is_exact_potential(self): return False
     def potential(self, loads, ctx): return None
@@ -45,6 +53,7 @@ class CorrectnessCongestion(Payoff):
     "q" in "Iraq" is worth B. Micros are not told to specialise and are not
     regularised into it -- they are paid for it."""
     name = "correctness_congestion"
+    monotone_in_load = True
 
     def utility(self, seat, action_slot, loads, ctx):
         sym = ctx.slot_symbol[seat][action_slot]
@@ -82,6 +91,8 @@ class BeliefCongestion(Payoff):
     whose improvement paths genuinely loop. Iterating longer does not help.
     Leaving does (meta.py)."""
     name = "belief_congestion"
+    monotone_in_load = True
+    player_specific = True      # seat i scores an action by its OWN q_i
 
     def utility(self, seat, action_slot, loads, ctx):
         sym = ctx.slot_symbol[seat][action_slot]
@@ -101,6 +112,13 @@ class Inverted(Payoff):
     def __init__(self, inner):
         self.inner = inner
         self.name = "inverted_" + inner.name
+        self.summary = inner.summary
+        self.zero_sum = inner.zero_sum
+        self.player_specific = inner.player_specific
+        self.ordinal_potential = inner.ordinal_potential
+        # Negating a payoff flips the direction of congestion: -B/n RISES with n.
+        # Saying otherwise would hand Milchtaich a hypothesis it does not have.
+        self.monotone_in_load = False
 
     def utility(self, seat, action_slot, loads, ctx):
         return -self.inner.utility(seat, action_slot, loads, ctx)
@@ -135,6 +153,7 @@ class PrisonersDilemma(MatrixGame):
     population's ONLY route to a wider view, from R=8 to 2R=16, without growing
     a single weight matrix. It has to be earned from a partner, not allocated."""
     name = "prisoners_dilemma"
+    ordinal_potential = True    # dominant strategies give a trivial ordinal potential
     T, Rw, P, S = 1.6, 1.0, 0.2, -0.4
     table = (((1.0, 1.0), (-0.4, 1.6)),
              ((1.6, -0.4), (0.2, 0.2)))
@@ -144,6 +163,7 @@ class StagHunt(MatrixGame):
     """Coalition commitment. (stag, stag) is payoff-dominant, (hare, hare) is
     risk-dominant -- exactly the tension of committing to a minority answer."""
     name = "stag_hunt"
+    ordinal_potential = True    # (4,4)/(3,3) coordination: an ordinal potential exists
     table = (((4.0, 4.0), (0.0, 3.0)),
              ((3.0, 0.0), (3.0, 3.0)))
 
@@ -160,6 +180,7 @@ class RockPaperScissors(MatrixGame):
     where B's is, C beats A where C's is. Nothing forbids the loop from closing,
     and when it does there is no single best micro to defer to."""
     name = "rock_paper_scissors"
+    zero_sum = True
     table = (((0.0, 0.0), (-1.0, 1.0), (1.0, -1.0)),
              ((1.0, -1.0), (0.0, 0.0), (-1.0, 1.0)),
              ((-1.0, 1.0), (1.0, -1.0), (0.0, 0.0)))

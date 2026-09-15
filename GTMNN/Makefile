@@ -31,7 +31,7 @@ GENS   ?= 3
 COMMON = --micros $(MICROS) --features $(FEATS) --rf $(RF) --seats $(SEATS) \
          --iters $(ITERS) --permutations $(PERMS) --seed $(SEED)
 
-.PHONY: help check test demo game shapley cycles auction modifier transfer evolve all clean
+.PHONY: help check test demo game shapley cycles auction modifier transfer trie evolve all clean
 
 help: ## Show this help
 	@echo "GTMNN make targets  (override variables like: make demo MICROS=512)"
@@ -44,7 +44,7 @@ check: ## Byte-compile the package and its tests (a syntax check, no tools neede
 	$(PY) -m compileall -q gtmnn tests && echo "ok"
 
 ##@ Tests
-test: ## 36 tests -- the Shapley axioms are the load-bearing ones
+test: ## 47 tests -- the Shapley axioms are the load-bearing ones
 	$(PY) -m tests.test_gtmnn
 
 ##@ The population
@@ -67,6 +67,9 @@ cycles: ## Rock-paper-scissors: the cycle detector and the time-average
 auction: ## Sweep a micro's bid -- no misreport beats the truth
 	$(CLI) auction --seed $(SEED)
 
+trie: ## The game-theory trie, and every solver against every other
+	$(CLI) trie --seats $(SEATS) --iters $(ITERS) --trials $(TRIALS)
+
 ##@ The GREN handoff
 modifier: ## Modifier cosine against the Ochiai similarity of the mechanic sets
 	$(CLI) modifier
@@ -75,7 +78,7 @@ transfer: ## Train on chess, evaluate checkers -- with and without the modifier
 	$(CLI) transfer $(COMMON) --trials $(TRIALS) --lr $(LR)
 
 ##@ Everything
-all: check test shapley cycles modifier ## Check, test, then every claim that is fast
+all: check test shapley cycles trie modifier ## Check, test, then every claim that is fast
 
 clean: ## Remove byte-code caches
 	rm -rf __pycache__ gtmnn/__pycache__ tests/__pycache__

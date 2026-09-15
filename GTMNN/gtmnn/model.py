@@ -10,6 +10,7 @@ from gtmnn.backend import get_backend
 from gtmnn.features import Alphabet, FeatureHasher, coverage_gaps
 from gtmnn.micro import MicroPool
 from gtmnn.payoff import CorrectnessCongestion, BeliefCongestion, Inverted
+from gtmnn.trie import build as build_trie, classify as classify_game
 
 FORMAT_VERSION = 1
 
@@ -23,7 +24,8 @@ class TrainConfig:
                                      # than the weights that use it
     seats: int = 64
     iters: int = 64
-    solver: str = "regret_plus"
+    solver: str = "auto"        # "auto" asks gtmnn/trie.py what is PROVABLE about
+                                # the payoff in hand and takes that solver
     permutations: int = 32
     B: float = 1.0
     lam: float = 0.5
@@ -86,6 +88,30 @@ class Prediction:
                 "steps": [s.to_dict() for s in self.steps]}
 
 
+_TRIE = None
+
+
+def solver_for(payoff, seats, requested="auto"):
+    """Which solver to run, derived rather than configured.
+
+    `auto` classifies the payoff on the trie's axes and takes the deepest rule
+    whose premises the path satisfies -- best_response where a potential function
+    proves the finite improvement property, fictitious on a two-player zero-sum
+    game, regret matching where nothing stronger is provable. Anything else is
+    passed through unchanged, so a caller can still force one.
+
+    This is what makes the trie load-bearing instead of a diagram: the solver is
+    a consequence of what is provable about the game in hand, and a new payoff
+    gets the right solver by answering the same questions rather than by someone
+    remembering to add a branch here."""
+    if requested and requested != "auto": return requested
+    global _TRIE
+    if _TRIE is None: _TRIE = build_trie()[0]
+    _, facts = classify_game(payoff, seats=seats)
+    node = _TRIE.walk(facts)[-1]
+    return _TRIE.solver(node)[0]
+
+
 def gini(xs):
     """The specialisation readout. A population where everyone earns the same is
     a population that has not differentiated."""
@@ -135,7 +161,8 @@ class GTMNet:
             agg = array("d", [1.0 / V]) * V
             return StepResult(agg, eq_mod.Equilibrium([], [], 0, True), alloc, [], None, None, sg)
 
-        eq = eq_mod.solve(sg, cfg.solver, iters=cfg.iters, rng=self.rng, pool=pool)
+        method = solver_for(sg.payoff, len(sg.seats), cfg.solver)
+        eq = eq_mod.solve(sg, method, iters=cfg.iters, rng=self.rng, pool=pool)
         coals = (coal_mod.propose(pool, sg.seats, eq.profile, sg.ctx, rng=self.rng)
                  if cfg.coalitions else [])
         agg = game_mod.aggregate(sg, eq.profile, pool)
@@ -146,7 +173,7 @@ class GTMNet:
             if t:
                 mres = meta_mod.resolve(eq, alloc, sg, agg, pool, self.meta_pool,
                                         0, cfg.max_depth, self.rng, t, cfg.iters,
-                                        coalitions=coals, solver=cfg.solver)
+                                        coalitions=coals, solver=method)
                 agg = mres.distribution
 
         phi = None

@@ -5,6 +5,7 @@
   python3 -m gtmnn.cli shapley    the credit axioms, checked numerically
   python3 -m gtmnn.cli cycles     rock-paper-scissors: the cycle and the meta-player
   python3 -m gtmnn.cli auction    is truthful bidding really dominant?
+  python3 -m gtmnn.cli trie       the game-theory trie, and every solver compared
   python3 -m gtmnn.cli transfer   GREN modifier: does chess transfer to checkers?
   python3 -m gtmnn.cli modifier   modifier cosine against Ochiai similarity
   python3 -m gtmnn.cli evolve     cull, birth and evolutionary stability
@@ -213,6 +214,92 @@ def cmd_transfer(a):
               f"{st.mean(k):>10.3f}+-{st.pstdev(k):.3f}")
 
 
+def cmd_trie(a):
+    """The trie over game-theoretic structure, and the tournament that checks it."""
+    from gtmnn.trie import build
+    from gtmnn.tournament import run, verify, SOLVERS
+    t, placed = build(seats=a.seats)
+    print("\nA TRIE OVER WHAT IS PROVABLE. The root asserts nothing; each level adds")
+    print("one fact, so a node's guarantees are a function of its PATH and nothing else.\n")
+
+    def show(node=0, indent=""):
+        n = t.nodes[node]
+        lab = "." if node == 0 else "=".join(n.token)
+        sv, _ = t.solver(node)
+        g = t.guarantees(node)
+        games = ("  <- " + ", ".join(n.games)) if n.games else ""
+        print(f"{indent}{lab:<30}{sv:<15}{len(g)} thm{games}")
+        for c in n.children.values(): show(c, indent + "  ")
+    show()
+
+    print("\nWhat each theorem needs, and where it starts to hold:\n")
+    for name, (node, f) in sorted(placed.items()):
+        seen = []
+        for nd in t.walk(f):
+            for thm, _ in t.guarantees(nd):
+                if thm not in seen:
+                    seen.append(thm)
+                    d = t.nodes[nd].depth
+                    tok = "." if nd == 0 else "=".join(t.nodes[nd].token)
+                    print(f"  {name:<32} d{d} {tok:<28} {thm}")
+        print()
+
+    from gtmnn.trie import TrieNetworks
+    print("\nA NETWORK AT EVERY NODE -- reaching a node is how you find the one to ask\n")
+    tn = TrieNetworks(t, F=64, n=32, R=8, H=6, K=4, seed=a.seed)
+    facts = placed["correctness_congestion"][1]
+    pth = t.walk(facts)
+    for nd in (pth[3], pth[-1]): tn.attach(nd)
+    tn.note(pth[3])
+    for f, lab in ((facts, "correctness_congestion"),):
+        nd, _, backed = tn.resolve(f)
+        print(f"  {lab}: walks to d{t.nodes[pth[-1]].depth}, that node is cold, so it "
+              f"backs off to d{t.nodes[nd].depth}")
+        print(f"     {'/'.join(f'{k}={v}' for k, v in t.facts(nd).items())}")
+    tn.note(pth[-1])
+    nd, _, backed = tn.resolve(facts)
+    print(f"  once the leaf has played: answers at d{t.nodes[nd].depth}, "
+          f"backed_off={backed}")
+    print("\n  Routing and backoff are verified. What backoff is WORTH here is not:")
+    print("  over 5 seeds it beats a cold leaf by +0.006 with a per-seed swing of")
+    print("  +-0.15 -- nothing. The class it backs off to has barely learned either,")
+    print("  which is the same weak-credit-path result the README opens with.")
+
+
+    if a.trials < 1: return
+    print(f"EVERY SOLVER AGAINST EVERY OTHER  ({a.trials} games per class)\n")
+    res = run(trials=a.trials, iters=a.iters, seed=a.seed)
+    print("mixed exploitability -- 0 means the mixed profile is unexploitable\n")
+    print(f"{'game class':<26}" + "".join(f"{x[:13]:>14}" for x in SOLVERS))
+    for cls, per in res.items():
+        best = min(per, key=lambda x: per[x]["mean_mexpl"])
+        print(f"{cls:<26}" + "".join(
+            f"{(format(per[x]['mean_mexpl'], '.4f') + ('*' if x == best else '')):>14}"
+            for x in SOLVERS))
+    print("\n  * = best in class.  The PURE measure is meaningless where the equilibrium")
+    print("  is mixed: on rock-paper-scissors every pure profile is exploitable by 2.0,")
+    print("  which scores all five identically at their worst.\n")
+    print(f"{'game class':<26}" + "".join(f"{x[:13]:>14}" for x in SOLVERS) + "   ms/game")
+    for cls, per in res.items():
+        print(f"{cls:<26}" + "".join(f"{per[x]['ms']:>14.2f}" for x in SOLVERS))
+
+    print("\nDOES THE TRIE'S RECOMMENDATION WIN IN ITS OWN CLASS?\n")
+    rows = verify(res, t, placed)
+    print(f"{'class':<26}{'recommended':<16}{'measured best':<16}{'rank':>5}   verdict")
+    for r in rows:
+        v = "vindicated" if r["vindicated"] else f"conservative (see below)"
+        print(f"{r['class']:<26}{r['recommended']:<16}{r['best_measured']:<16}"
+              f"{r['rank_of_recommended']:>5}   {v}")
+    bad = [r for r in rows if not r["vindicated"]]
+    for r in bad:
+        print(f"\n  {r['class']}: the trie says {r['recommended']} because "
+              f"{r['why']}.")
+        print(f"  Measured, {r['best_measured']} wins ({r['best_expl']:.4f} against "
+              f"{r['rec_expl']:.4f}). Both are right:")
+        print("  the theorem is a WORST-CASE guarantee and the tournament is an average")
+        print("  case. The trie's job is to say which is which, not to predict the mean.")
+
+
 def cmd_evolve(a):
     net = _net(a)
     cfg = _cfg(a, epochs=1)
@@ -236,7 +323,7 @@ def main(argv=None):
     for name, fn in (("demo", cmd_demo), ("game", cmd_game), ("shapley", cmd_shapley),
                      ("cycles", cmd_cycles), ("auction", cmd_auction),
                      ("modifier", cmd_modifier), ("transfer", cmd_transfer),
-                     ("evolve", cmd_evolve)):
+                     ("trie", cmd_trie), ("evolve", cmd_evolve)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--micros", type=int, default=192)
         q.add_argument("--features", type=int, default=128)

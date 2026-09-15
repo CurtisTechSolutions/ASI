@@ -17,7 +17,7 @@ from gtmnn import equilibrium as eq_mod, game as game_mod, shapley as shap_mod
 from gtmnn.backend import get_backend
 from gtmnn.games import GameFeatures, load_mechanics, state_tokens, cand_tokens, ILLEGAL, LEGAL
 from gtmnn.micro import MicroPool
-from gtmnn.model import TrainConfig, gini
+from gtmnn.model import TrainConfig, gini, solver_for
 
 
 def adapters(names=("chess", "checkers", "go", "sudoku")):
@@ -58,7 +58,8 @@ class GamePlayer:
                                       reserve=cfg.reserve, charge=False,
                                       B=cfg.B, lam=cfg.lam, ids=ids)
         if not sg.seats: return 0.5, None, None
-        eq = eq_mod.solve(sg, cfg.solver, iters=cfg.iters, rng=self.rng, pool=self.pool)
+        eq = eq_mod.solve(sg, solver_for(sg.payoff, len(sg.seats), cfg.solver),
+                          iters=cfg.iters, rng=self.rng, pool=self.pool)
         agg = game_mod.aggregate(sg, eq.profile, self.pool)
         return agg[LEGAL], sg, eq
 
@@ -69,7 +70,8 @@ class GamePlayer:
                                       reserve=cfg.reserve, charge=True,
                                       B=cfg.B, lam=cfg.lam, ids=ids)
         if not sg.seats: return None
-        eq = eq_mod.solve(sg, cfg.solver, iters=cfg.iters, rng=self.rng, pool=self.pool)
+        eq = eq_mod.solve(sg, solver_for(sg.payoff, len(sg.seats), cfg.solver),
+                          iters=cfg.iters, rng=self.rng, pool=self.pool)
         phi = shap_mod.shapley_values(sg, eq.profile, self.pool, y,
                                       permutations=cfg.permutations, rng=self.rng)
         us = sg.utilities(eq.actions)

@@ -576,6 +576,79 @@ control that catches it is cheap — withhold the label and recompute.
 
 *Where:* `GTMNN/gtmnn/model.py` (`belief_loss`), `GTMNN/README.md` · **confirmed**
 
+### 34. A trie over what is PROVABLE, not over what a thing is
+The radix tree in GREN indexes games by what they *refuse*. The same mechanic one
+layer up indexes them by their game-theoretic structure — and there the levels
+have a meaning the refusal tree does not have: **descending is accumulating
+premises.**
+
+The root does nothing. It asserts no property and guarantees only Nash 1950, true
+of every finite game. Each level adds one fact, ordered so that every step
+strictly narrows, and a node's guarantees are then a function of its path and
+nothing else. The theorems fire at different depths: von Neumann at depth 2
+(`players=2`, `payoff=opposed`), Milchtaich at depth 4 the moment monotone load
+is asserted, Rosenthal only at depth 5 with the whole congestion prefix. **The
+path is the proof**, which is why it is a trie and not a lookup table — an
+internal node is a real answer you can act on before reaching a leaf.
+
+Two things follow that a diagram would not have given:
+
+* **The recommendation is falsifiable, and mostly holds.** Running all five
+  solvers on every class, the trie's pick measures best in **5 of 6**. The
+  exception is instructive rather than embarrassing: on the player-specific
+  congestion game the trie says `regret_plus` because Milchtaich warns a
+  best-response path *may* cycle, and `best_response` measures better. Both are
+  right — one is a worst-case guarantee, the other an average case. Hunting the
+  cycle across seven geometries and 1 400 games **found none**. The trie's job is
+  to say which choice is provably safe, not to predict the mean.
+* **The solver stopped being a configuration option.** `solver="auto"` classifies
+  the payoff in hand and takes the deepest rule whose premises the path satisfies.
+  Measured: 1.8× faster at a loss inside the seed spread. A new payoff now gets
+  the right solver by answering the same questions, rather than by someone
+  remembering to add a branch.
+
+The general form: **an index whose levels are premises turns a classification
+into a derivation.** GREN's tree answers "which game is this"; this one answers
+"what am I allowed to assume", and the second is the one that changes code.
+
+**A network at every node.** Reaching a node is how you find the population to
+query, and a cold leaf backs off to the nearest trained ancestor — which is what
+the terminal-flag-on-internal-nodes design is FOR. "A congestion game with a
+common payoff" is a usable answer while the specific class below it is still
+cold. The routing is verified in every seed: `resolve` takes the deepest trained
+node, backs off when the leaf is cold, stops the moment it has played. What
+backoff is *worth* is **+0.006 over 5 seeds with a ±0.15 swing** — nothing. One
+seed had shown +0.22 and it was noise, the same trap as 32. The class it backs
+off to has barely learned either, so this is downstream of insight 2 and is worth
+re-measuring only once that is fixed.
+
+**Scope, deliberately narrow.** A trie here indexes games and nothing else: GREN's
+by what a game refuses, this one by its structure. Neither carries activations or
+stands in for a network. The moment one does, it stops being an index and the
+guarantees stop meaning anything.
+
+*Where:* `GTMNN/gtmnn/trie.py`, `GTMNN/gtmnn/tournament.py`, `GTMNN/README.md` ·
+**confirmed** (the index and the solver derivation; the backoff benefit is not
+yet measurable)
+
+### 35. Measure the mixed profile, not its argmax
+Another mistake caught by its own control, recorded so it is not repeated.
+
+Exploitability — max over players of (best-response utility − realised utility) —
+is the honest convergence measure, zero exactly at Nash. I computed it on the
+profile's **argmax**, which is meaningless wherever the equilibrium is mixed. On
+rock-paper-scissors *every* pure profile is exploitable (1.0 when the two match,
+2.0 when they do not), so the measure scored all five solvers identically at
+their worst and hid the thing that matters: the uniform mixture is exactly
+unexploitable, and the solvers differ enormously in how close they get to it
+(fictitious 0.19, best response 2.00).
+
+The tell was a column of identical bad numbers. A metric that cannot separate
+five methods on the one game built specifically to separate them is measuring
+the wrong object.
+
+*Where:* `GTMNN/gtmnn/equilibrium.py` (`mixed_exploitability`) · **confirmed**
+
 ---
 
 ## What to test next

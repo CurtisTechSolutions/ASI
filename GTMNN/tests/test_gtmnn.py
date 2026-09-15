@@ -469,6 +469,175 @@ def test_game_features_keep_the_three_blocks_separate():
         "only the modifier may differ between games at the same state/candidate"
 
 
+# ------------------------------------------------------------------- trie
+def test_trie_root_asserts_nothing():
+    """The top level does nothing: it discriminates on no axis and guarantees
+    only what holds for every finite game."""
+    from gtmnn.trie import build
+    t, placed = build()
+    root = t.nodes[0]
+    assert root.token is None and root.depth == 0 and root.parent == -1
+    g = [n for n, _ in t.guarantees(0)]
+    assert g == ["Nash 1950", "Hart & Mas-Colell 2000"], g
+    assert t.solver(0)[0] == "regret_plus", "the root can only offer the universal solver"
+
+
+def test_each_level_is_strictly_more_specific():
+    """Descending never loses a guarantee and the fact count equals the depth."""
+    from gtmnn.trie import build
+    t, placed = build()
+    for name, (node, facts) in placed.items():
+        seen = t.walk(facts)
+        prev = set()
+        for nd in seen:
+            assert t.nodes[nd].depth == len(t.path(nd)), (name, nd)
+            got = {n for n, _ in t.guarantees(nd)}
+            assert prev <= got, f"{name}: descending lost a guarantee at depth {t.nodes[nd].depth}"
+            prev = got
+        assert t.nodes[seen[-1]].depth == len(facts), (name, len(facts))
+
+
+def test_guarantees_are_a_function_of_the_path_alone():
+    from gtmnn.trie import build, THEOREMS
+    t, _ = build()
+    for i, n in enumerate(t.nodes):
+        f = t.facts(i)
+        want = [(nm, w) for nm, req, w in THEOREMS
+                if all(f.get(k) == v for k, v in req.items())]
+        assert t.guarantees(i) == want, i
+
+
+def test_the_right_theorems_fire_at_the_right_depth():
+    """Rosenthal needs the full congestion prefix; Milchtaich fires the moment
+    monotone load is asserted; von Neumann needs only two players and opposed."""
+    from gtmnn.trie import build
+    t, placed = build()
+    def depth_of(game, thm):
+        for nd in t.walk(placed[game][1]):
+            if any(n == thm for n, _ in t.guarantees(nd)): return t.nodes[nd].depth
+        return None
+    assert depth_of("correctness_congestion", "Rosenthal 1973") == 5
+    assert depth_of("belief_congestion", "Milchtaich 1996") == 4
+    assert depth_of("rock_paper_scissors", "von Neumann 1928") == 2
+    assert depth_of("belief_congestion", "Rosenthal 1973") is None, \
+        "Rosenthal must not fire on a player-specific game"
+    assert depth_of("correctness_congestion", "Milchtaich 1996") is None
+
+
+def test_games_declare_their_own_properties():
+    """The trie asks the payoff; nothing here is a hard-coded class list."""
+    from gtmnn.payoff import (CorrectnessCongestion, BeliefCongestion,
+                              RockPaperScissors, Inverted)
+    assert BeliefCongestion().player_specific and BeliefCongestion().monotone_in_load
+    assert not CorrectnessCongestion().player_specific
+    assert CorrectnessCongestion().monotone_in_load
+    assert RockPaperScissors().zero_sum
+    inv = Inverted(CorrectnessCongestion())
+    assert inv.is_exact_potential(), "negating an exact potential leaves it exact"
+    assert not inv.monotone_in_load, "-B/n RISES with n; Milchtaich must not fire"
+
+
+def test_solver_is_derived_not_configured():
+    from gtmnn.model import solver_for
+    from gtmnn import payoff as pay
+    assert solver_for(pay.CorrectnessCongestion(), 8) == "best_response"
+    assert solver_for(pay.BeliefCongestion(), 8) == "regret_plus"
+    assert solver_for(pay.RockPaperScissors(), 2) == "fictitious"
+    assert solver_for(pay.BeliefCongestion(), 8, "replicator") == "replicator", \
+        "an explicit request must still win"
+
+
+def test_mixed_exploitability_sees_what_the_pure_one_cannot():
+    """On rock-paper-scissors EVERY pure profile is exploitable by 2.0, so the
+    pure measure scores all five solvers identically at their worst. The uniform
+    mixture is exactly unexploitable and only the mixed measure can say so."""
+    from gtmnn.equilibrium import mixed_exploitability, exploitability
+    from gtmnn.game import StageGame, GameContext
+    from gtmnn.payoff import RockPaperScissors
+    c = GameContext(alphabet_size=3, y=None)
+    c.slot_symbol = [[0, 1, 2], [0, 1, 2]]; c.playable = [[True] * 3] * 2
+    g = StageGame([0, 1], c, RockPaperScissors())
+    uniform = [array("d", [1 / 3] * 3), array("d", [1 / 3] * 3)]
+    # Every pure profile is exploitable: 1.0 when the two match (0 -> +1 by
+    # switching), 2.0 when they do not (-1 -> +1).
+    for p1 in range(3):
+        for p2 in range(3):
+            e = exploitability(g, [p1, p2])
+            assert e >= 1.0 - 1e-12, ([p1, p2], e)
+    assert exploitability(g, [0, 1]) == 2.0
+    assert mixed_exploitability(g, uniform, samples=4000, rng=random.Random(0)) < 0.1
+    pure = [array("d", [1.0, 0.0, 0.0]), array("d", [1.0, 0.0, 0.0])]
+    assert mixed_exploitability(g, pure, samples=512, rng=random.Random(0)) > 0.9
+
+
+def test_tournament_reproduces_the_trie_recommendation_where_it_is_tight():
+    """5 of 6 classes: the solver the trie recommends is the one that measures
+    best. The exception is belief_congestion, where the trie is deliberately
+    CONSERVATIVE -- Milchtaich warns best response may cycle, so the trie takes
+    the guaranteed solver over the empirically faster one."""
+    from gtmnn.tournament import run, verify
+    from gtmnn.trie import build
+    t, placed = build()
+    res = run(trials=6, iters=32, seed=3)
+    rows = verify(res, t, placed)
+    assert rows, "nothing verified"
+    by = {r["class"]: r for r in rows}
+    assert by["correctness_congestion"]["vindicated"]
+    assert by["rock_paper_scissors"]["recommended"] == "fictitious"
+    assert not by["belief_congestion"]["vindicated"], \
+        "if this starts passing, the trie stopped being conservative -- check why"
+
+
+def test_reaching_a_node_is_how_you_find_the_network():
+    """Each node may own a population; resolve() says which one answers."""
+    from gtmnn.trie import build, TrieNetworks
+    t, placed = build()
+    net = TrieNetworks(t, F=32, n=8, R=4, H=3, K=2, seed=0)
+    facts = placed["correctness_congestion"][1]
+    path = t.walk(facts)
+    leaf, general = path[-1], path[3]
+    assert net.resolve(facts) == (None, None, False), "nothing attached yet"
+    net.attach(leaf); net.attach(general)
+    assert net.resolve(facts) == (None, None, False), "attached but never played"
+    net.note(general)
+    nd, pool, backed = net.resolve(facts)
+    assert nd == general and backed is True, (nd, general, backed)
+    assert pool is net.pools[general]
+    net.note(leaf)
+    nd, pool, backed = net.resolve(facts)
+    assert nd == leaf and backed is False, "a trained leaf must stop the backoff"
+
+
+def test_backoff_climbs_to_the_nearest_trained_ancestor():
+    """A leaf that has never played is not an answer; the general class above it
+    is. That is why the terminal flag sits on internal nodes too."""
+    from gtmnn.trie import build, TrieNetworks
+    t, placed = build()
+    net = TrieNetworks(t, F=32, n=8, R=4, H=3, K=2, seed=0)
+    facts = placed["correctness_congestion"][1]
+    path = t.walk(facts)
+    for nd in path: net.attach(nd)
+    net.note(path[1])                                  # only d1 has played
+    nd, _, backed = net.resolve(facts)
+    assert nd == path[1] and backed, (nd, path[1])
+    net.note(path[3])                                  # a deeper one plays
+    nd, _, _ = net.resolve(facts)
+    assert nd == path[3], "backoff must stop at the DEEPEST trained node"
+
+
+def test_two_classes_route_to_different_networks():
+    from gtmnn.trie import build, TrieNetworks
+    t, placed = build()
+    net = TrieNetworks(t, F=32, n=8, R=4, H=3, K=2, seed=0)
+    a = placed["correctness_congestion"][1]
+    b = placed["rock_paper_scissors"][1]
+    for f in (a, b):
+        nd = t.walk(f)[-1]; net.attach(nd); net.note(nd)
+    na, pa, _ = net.resolve(a)
+    nb, pb, _ = net.resolve(b)
+    assert na != nb and pa is not pb, "distinct classes must not share a population"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

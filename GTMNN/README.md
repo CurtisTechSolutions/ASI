@@ -19,9 +19,10 @@ python3 -m gtmnn.cli shapley     # the four axioms, checked numerically
 python3 -m gtmnn.cli cycles      # rock-paper-scissors: the cycle detector
 python3 -m gtmnn.cli auction     # is truthful bidding really dominant?
 python3 -m gtmnn.cli modifier    # GREN's mechanic sets, hashed
+python3 -m gtmnn.cli trie        # the game-theory trie; every solver compared
 python3 -m gtmnn.cli transfer    # does chess transfer to checkers?
 python3 -m gtmnn.cli evolve      # cull, birth, evolutionary stability
-python3 -m tests.test_gtmnn      # 36 tests
+python3 -m tests.test_gtmnn      # 47 tests
 ```
 
 Pure standard library. `gtmnn.games` and `gtmnn.play` read `CyclicCortex`'s game
@@ -45,6 +46,152 @@ Every one of these is asserted in `tests/test_gtmnn.py` rather than claimed here
 | **Truthful bidding is dominant** | over a bid sweep, no misreport beats the truth (Vickrey 1961) |
 | **Inversion is an involution** | twice is bit-identical, and it leaves wealth and reputation alone |
 | **Determinism** | the feature hash is FNV-1a, not `hash()`; identical output across a subprocess boundary with different `PYTHONHASHSEED` |
+
+## A trie over what is provable
+
+`gtmnn/trie.py` indexes the game catalogue by **game-theoretic structure**,
+general at the root and specific at the leaves. The top level does nothing: it
+asserts no property and guarantees only what holds of every finite game. Each
+level down adds exactly one fact.
+
+```
+.                             regret_plus     every finite game
+  players=n                   regret_plus
+    payoff=common             regret_plus
+      structure=congestion    regret_plus
+        monotone=non-incr.    regret_plus
+          potential=exact     best_response   <- correctness_congestion
+    payoff=player-specific    regret_plus
+      structure=congestion    regret_plus
+        monotone=non-incr.    regret_plus
+          potential=none      regret_plus     <- belief_congestion
+  players=2                   regret_plus
+    payoff=opposed            fictitious
+      structure=matrix        fictitious
+        ...
+          potential=none      fictitious      <- rock_paper_scissors
+    payoff=common             regret_plus
+      structure=matrix        regret_plus
+        ...
+          potential=ordinal   best_response   <- stag_hunt, prisoners_dilemma
+```
+
+**A node's guarantees are a function of its path and nothing else.** Descending
+is accumulating premises, and the theorems that fire at a node are exactly those
+whose hypotheses the prefix satisfies:
+
+| theorem | starts holding at | for |
+|---|---|---|
+| Nash 1950 | depth 0 — the root | everything |
+| von Neumann 1928 | depth 2 (`players=2`, `payoff=opposed`) | rock-paper-scissors |
+| Milchtaich 1996 | depth 4, the moment `monotone` is asserted | belief congestion |
+| Rosenthal 1973 | depth 5, needing the whole congestion prefix | correctness congestion |
+
+That is the trie half, the same one `GREN/gren/radix.py` takes: a terminal flag
+on any node, so an internal node is a real answer — "a two-player zero-sum game"
+already tells you fictitious play converges, and you can act on it before
+reaching a leaf. There is deliberately **no** path compression here: GREN
+compresses because its signatures are long and only a few tokens discriminate,
+whereas these paths are five deep and every level discriminates, so compression
+would buy nothing and would cost the property that depth equals facts asserted.
+
+Each game *declares* its own properties (`zero_sum`, `player_specific`,
+`monotone_in_load`, `ordinal_potential`), so a new game joins the index by
+answering the same questions and nothing in the trie changes.
+
+### Every solver against every other
+
+The trie says which solver is *guaranteed* to work in each class. That is
+falsifiable, so `cli trie` falsifies it — all five solvers, same games, seed for
+seed. Mean **mixed** exploitability, 0 = the mixed profile is unexploitable:
+
+| game class | best_response | fictitious | regret | regret_plus | replicator |
+|---|---|---|---|---|---|
+| correctness congestion | **0.0000** | 0.0000 | 0.0339 | 0.0365 | 0.4846 |
+| belief congestion | **0.0000** | 0.0006 | 0.0292 | 0.0298 | 0.2220 |
+| inverted correctness | **0.0000** | 0.0000 | 0.0877 | 0.0896 | 0.1422 |
+| rock-paper-scissors | 2.0000 | **0.1855** | 0.3730 | 0.2472 | 0.3022 |
+| stag hunt | **0.0000** | 0.0000 | 0.3350 | 0.3452 | 0.0717 |
+| prisoner's dilemma | **0.0000** | 0.0000 | 0.0390 | 0.0390 | 0.1653 |
+
+**The mixed measure is the point.** The pure one — exploitability of the
+profile's argmax — is meaningless wherever the equilibrium is mixed: on
+rock-paper-scissors *every* pure profile is exploitable (1.0 matched, 2.0
+mismatched), so it scored all five solvers identically at their worst and hid
+the fact that the uniform mixture is exactly unexploitable. I measured the wrong
+thing first.
+
+**5 of 6 classes vindicate the trie's recommendation.** The exception is
+belief congestion, where the trie says `regret_plus` and `best_response`
+measures better. Both are right: Milchtaich guarantees a pure equilibrium exists
+and warns that an *arbitrary* best-response path may cycle — a worst-case claim.
+Hunting for that cycle across seven geometries and **1 400 games found none**;
+best response converged every time, in about two sweeps, and 20× faster. The
+trie's job is to say which choice is provably safe, not to predict the mean.
+
+### The solver is now derived, not configured
+
+`TrainConfig.solver` defaults to `"auto"`, which asks the trie about the payoff
+in hand: `best_response` for the training game (exact potential, Rosenthal),
+`regret_plus` at inference (player-specific, Milchtaich), `fictitious` on a
+two-player zero-sum game. An explicit request still wins.
+
+| | belief loss | sec/epoch |
+|---|---|---|
+| `solver="auto"` | 3.153 ± 0.213 | **0.19** |
+| `solver="regret_plus"` | 3.245 ± 0.315 | 0.35 |
+
+**1.8× faster at no cost in loss** — the loss gap sits inside the seed spread, so
+only the speed is a real difference. That is what makes the trie load-bearing
+rather than a diagram: a new payoff gets the right solver by answering the same
+questions, instead of someone remembering to add a branch.
+
+### A network at every node
+
+Reaching a node is how you find the network to ask. Each node of the trie may own
+a population, and the trie itself still only *classifies* — it holds no
+activations and computes no prediction. It says which population answers; the
+population answers.
+
+The mechanism that earns the terminal-flag-on-internal-nodes design is
+**backoff**. A query walks as deep as the facts allow, then climbs back to the
+nearest ancestor whose population has actually played:
+
+```
+correctness_congestion: walks to d5, that node is cold, so it backs off to d3
+   players=n/payoff=common/structure=congestion
+once the leaf has played: answers at d5, backed_off=False
+```
+
+"A congestion game with a common payoff" is a usable answer while "…with an exact
+potential and non-increasing load" is still cold — a general class is a strict
+prefix of a specific one, and the prefix is queryable on its own.
+
+**The routing is verified; what backoff is worth here is not.** `resolve()` picks
+the deepest trained node, backs off when the leaf is cold, and stops backing off
+the moment the leaf has played — in every seed. But measured over 5 seeds,
+backing off to the trained general class beats querying the cold leaf by
+**+0.006**, with a per-seed swing of ±0.15. That is nothing. A single seed had
+shown +0.22 and, as with the game modifier, it was noise.
+
+The reason is not the mechanism: the class it backs off to has barely learned
+either, which is the same weak-credit-path result this README opens with. Backoff
+is worth measuring again once that is fixed, and not before.
+
+### Scope
+
+A trie belongs to game theory and game classification and to nothing else here.
+There are exactly two in the repository:
+
+| | indexes by | answers |
+|---|---|---|
+| `GREN/gren/radix.py` | what a game refuses | which game *is* this |
+| `GTMNN/gtmnn/trie.py` | its game-theoretic structure | what may I *assume* about it |
+
+Neither touches prediction, features, micro weights or credit. The only hook into
+model code is `solver_for`, which classifies the payoff in hand to pick a solver.
+The moment a trie starts carrying activations or standing in for a network it
+stops being an index and the guarantees stop meaning anything.
 
 ## Two losses, and why both are reported
 
