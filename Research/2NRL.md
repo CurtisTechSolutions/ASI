@@ -75,6 +75,12 @@ the same idea:
 The first two are implemented, and they are 2NRL. The third is not, and §6 is
 about that gap rather than about pretending it is closed.
 
+Where I learned this most plainly was games. I would fail at a game **on
+purpose**, over and over, to work out its rules — and once I had the rules I
+figured out the rest very quickly. That shape, a long deliberate flat stretch
+followed by a fast one, is not incidental to the method. It is what the method
+looks like from outside, and §6.5 is about why.
+
 ---
 
 ## 3. The procedure
@@ -289,7 +295,8 @@ The third commitment is the one I have **not** built. The gap is worth stating
 precisely, because the obvious reading of that sentence is wrong — and because
 the part of it I used to call unformalisable turns out not to be. §6.1 to §6.3
 say what the commitment is and what is missing; §6.4 says what the trigger is,
-and §6.5 what the whole thing is a search *for*.
+and §6.5 what the whole thing is a search *for* — the rules of the game, which
+is where I learned all of this in the first place.
 
 ### 6.1 What it is not
 
@@ -392,30 +399,82 @@ computed for other reasons. They remain the fallback for the case the two
 triggers do not cover: a run that is genuinely getting warmer without having yet
 been paid or arrived anywhere.
 
-### 6.5 Failing to understand the game
+### 6.5 Failing at the game to learn its rules
 
-Behind the trigger is the framing I actually work in, and it is game-theoretic. A
-task is a game. A game has rewards. The agent's problem at the start is not that
-it plays the game badly — it is that it does not know what the game *is* or what
-it pays.
+The framing I actually work in is game-theoretic, and games are where the method
+came from.
 
-The conventional move is to learn the reward structure directly: explore, observe
-payoffs, fit a model of the game. The 2NRL move is the opposite, and it is the
-same double negative one level up:
+A game is two things: **rules** and **payoffs**. The rules say which moves exist
+and which are legal. The payoffs say what the legal moves are worth. Starting
+out you know neither. The usual approach goes after the second — play, observe
+the payoff, fit a model of the reward, repeat.
 
-> We view this as game theory, and focus on failing to understand the game and
-> its rewards via a helper first. So we fail to understand the game.
+I went after the first, and I went after it by losing on purpose:
 
-Deliberately. Fail to understand the game, all the way, the way phase 1 fails to
-produce the right answer all the way — and then invert *that*. Where §3 applies
-the double negative to an output, this applies it to the agent's model of the
-game itself.
+> I failed on purpose at games to understand the rules, and then figured out the
+> rest very quickly once I knew the rules.
 
-**And this is what the helper is for.** Not to teach in the ordinary sense, and
-explicitly not to play: in the agent loop the LLM has four roles and *solving the
-task is the last one it is given*. It writes the acceptance criteria before
-anything is attempted, judges the attempt against them, and demonstrates with the
-same real tools when the attempt failed.
+#### Why deliberate failure is the efficient probe of a rule
+
+Because **a rule is invisible while you are obeying it.**
+
+Play a legal move and the game says nothing. You learn one bit — *that was
+allowed* — and it does not tell you where the edge of *allowed* is. Play an
+illegal one and the game answers exactly: not that, and here is the line. A
+boundary is located by crossing it, never by staying well inside it.
+
+So the information a move carries about the rules is not symmetric. Success is
+cheap and says almost nothing about structure. Failure is expensive and says
+precisely where the structure is. If what you are trying to recover is the rule
+set, then deliberately walking off the board is the *targeted* experiment and
+playing well is the wasteful one.
+
+That is all "fail on purpose" means. It is not temperament and it is not
+grit. It is experiment design, and it is the same design as phase 1 of §3: go
+all the way into the failure, because the failure is where the information is.
+
+Rules and payoffs are different objects, and they want opposite strategies:
+
+| | Rules | Payoffs |
+|---|---|---|
+| shape | hard boundaries, usually deterministic | a landscape, usually noisy |
+| how many | few | many |
+| learned by | violating them | sampling them |
+| one observation gives | the location of a boundary | one noisy value |
+| once known | the action space collapses | you still have to search it |
+
+The last row is the one that matters, and it is what "the rest went quickly"
+means.
+
+#### The phase transition
+
+Knowing the rules of chess does not make you good at chess. Not knowing them
+makes playing it impossible. Rules do not tell you what to do — they collapse
+*anything at all* down to *the legal moves*, and that is an enormous reduction in
+what is left to search.
+
+So the curve has a shape, and it is not a smooth climb. There is a long flat
+stretch that looks like failing and is actually rule-discovery, and then a fast
+rise once the collapse happens and the remaining problem is small enough to
+finish. I recognise that shape from my own learning and it is why I trust the
+method: the flat part is not wasted, it is buying the collapse.
+
+That is also the honest version of "explore widely, then pull hard" from §6.2.
+The wide phase is not random casting about. It is probing for rules. The narrow
+phase is possible because the rules arrived and shrank the space — so the reason
+narrowing works is not that I got lucky, it is that there is less left to search.
+
+And it says what §6.4's trigger is really detecting. A reward, or a known area of
+completion, is not merely a good outcome to celebrate. **It is evidence that a
+rule has been learned** — the first sign the collapse has happened and that
+narrowing will now pay.
+
+#### What the helper is for: it writes the rules down
+
+The helper's job follows directly, and it is not teaching. In the agent loop the
+LLM has four roles and *solving the task is the last one it is given*. Its
+**first** role is to write the acceptance criteria before anything is attempted —
+and the acceptance criteria **are the rules of the game, stated before play**.
 
 ```
 task -> acceptance criteria (LLM, written first) -> the network calls tools
@@ -424,25 +483,44 @@ task -> acceptance criteria (LLM, written first) -> the network calls tools
      -> train on the failures, invert, fine-tune (2NRL)
 ```
 
-Read that in the light of §5 and the helper's job becomes clear. §5 says the
-information recoverable by inverting a failure is bounded by how *consistent* the
-failure is: a systematic failure inverts into signal, a random one inverts into
-nothing. A network turned loose on a game it does not understand fails
-**randomly** — its misunderstandings are high-entropy and there is nothing in
-them to invert. A network failing against criteria that were *written down
-first*, by a helper, and judged against the same fixed standard every time, fails
-**consistently**. The failures are wrong in the same way.
+Now read that against §5 and the reason for the ordering becomes clear. §5 says
+what inverting a failure can recover is bounded by how *consistent* the failure
+is: systematic failure inverts into signal, random failure inverts into nothing.
 
-So the helper is not a teacher. It is an entropy reducer on the negative set. It
-exists to make the misunderstanding systematic enough to be worth negating, which
-is the precondition the whole procedure runs on. That is why it writes the
-criteria first and solves last: a helper that solved the task would remove the
-failure, and the failure is the input.
+A network turned loose on a game whose rules were never stated fails
+**randomly**. Its failures are high-entropy — wrong in a different way every
+time — and there is nothing in them to invert. A network failing against criteria
+written down first and judged by the same fixed standard every time fails
+**against a specific rule**. Those failures are wrong in the same way, and that
+is exactly the low-entropy negative set §5 requires.
 
-This also says what "finding a reward" is *for*. The trigger in §6.4 is not a
-signal to celebrate. It is the moment the game stops being unknown — the point
-at which failing to understand it has produced something to invert, and the
-exploration can narrow onto it.
+So the helper is not a teacher. It is what makes failure *rule-shaped*, and
+rule-shaped failure is what is worth negating. That is why it writes the criteria
+first and solves last: a helper that solved the task would remove the failure,
+and the failure is the input.
+
+The clearest instance is already running. The network calls tools by *writing*
+them — `<tool>web_fetch {"url": "..."}</tool>` — so the call format is a rule of
+the game in the most literal sense, a syntax that is either legal or not. The
+network cannot write it at first, and the helper **repairs the calls the network
+cannot write yet**. That is failing at a rule and being shown the rule, and the
+whole attempt becomes one training text either way.
+
+#### What this predicts
+
+- **Learning curves under this regime should be hockey-sticks, not smooth
+  climbs.** A long flat stretch, then a fast rise. A smooth curve would mean the
+  system is fitting payoffs incrementally rather than acquiring rules and
+  collapsing the space, which is the opposite of what I claim it does.
+- **Rule-failures should fall before reward rises,** and sharply. Malformed tool
+  calls, criteria missed on a technicality, outputs in the wrong shape — those
+  should disappear first, and the payoff should improve *after*. If reward climbs
+  while rule-failures stay flat, the system is learning the payoff landscape
+  directly and the rules story is decoration.
+- **Stating the rules should matter more than stating them well.** Withholding
+  the acceptance criteria — letting the network fail without a written standard —
+  should hurt more than making the criteria vague, because the criteria's job is
+  to make failure consistent, not to make it correct.
 
 ---
 
@@ -759,13 +837,22 @@ got fairly criticised for.
   trigger is settled, though: narrow when the network is **rewarded**, or when it
   reaches a **known area of completion**. Both are events the system already
   emits, not estimates it would have to infer.
-- A task is a game, and the agent starts out not knowing the game or what it
-  pays. So it fails to understand the game first, deliberately, with a helper —
-  the double negative one level up, applied to the model of the game rather than
-  to an output. The helper writes the acceptance criteria first and solves last,
-  because its job is not to teach: it is to make the misunderstanding
-  *consistent* enough to be worth inverting. Without it the failures are random,
-  and §5 says random failure inverts into nothing.
+- A game is rules plus payoffs, and you start out knowing neither. The usual
+  move is to go after the payoffs by sampling them. I go after the **rules**, by
+  losing on purpose — which is how I learned this in the first place. A rule is
+  invisible while you obey it: a legal move tells you almost nothing, an illegal
+  one tells you exactly where the line is. Failure is not the cost of learning
+  the rules, it is the instrument.
+- Which is why the curve is a hockey-stick and not a climb. A long flat stretch
+  that looks like failing is rule-discovery; then the rules collapse the action
+  space from *anything at all* down to *the legal moves*, and the rest goes fast.
+  The flat part is buying the collapse. That is the honest version of "explore
+  widely, then pull hard": narrowing works because there is less left to search.
+- So the acceptance criteria the helper writes before play **are the rules,
+  stated up front**, and that is its whole job — not teaching. Rules stated in
+  advance make failure *rule-shaped* instead of random, and §5 says only
+  consistent failure inverts into anything. A helper that solved the task would
+  remove the failure, and the failure is the input.
 - It has never been measured against a baseline. §11 is the experiment, and arm C
   is the one that would tell me I am wrong.
 
