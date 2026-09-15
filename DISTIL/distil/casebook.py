@@ -61,16 +61,19 @@ class Case:
         return "\n".join(parts)
 
     def to_meta(self) -> dict:
+        # `trace_id` is what makes a case gradeable after the fact. Dropping it
+        # meant every case returned by `Casebook.all()` had trace_id None and
+        # could never be re-graded by anyone reading them back.
         return {"problem": self.problem, "solution": self.solution, "grade": self.grade,
                 "via": self.via, "evidence": self.evidence, "cost": self.cost,
-                "tags": self.tags}
+                "tags": self.tags, "trace_id": self.trace_id}
 
     @classmethod
     def from_meta(cls, meta: dict) -> "Case":
         return cls(problem=meta.get("problem", ""), solution=meta.get("solution", ""),
                    grade=meta.get("grade", 0.0), via=meta.get("via", ""),
                    evidence=meta.get("evidence", ""), cost=meta.get("cost", 1.0),
-                   tags=meta.get("tags", []))
+                   tags=meta.get("tags", []), trace_id=meta.get("trace_id"))
 
 
 @dataclass
@@ -110,6 +113,8 @@ class Casebook:
         trace = self.memory.remember(Kind.SOLUTION, case.embed_text(), meta=case.to_meta(),
                                      links=links, grade=grade, source=source, identity=key)
         case.trace_id = trace.id
+        trace.meta["trace_id"] = trace.id     # the id is only known after the write
+        self.memory.store.touch(trace)
         return case
 
     def precedents(self, problem: str, k: int = 3, worked_only: bool = False) -> list[Precedent]:

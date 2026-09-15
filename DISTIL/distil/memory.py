@@ -166,6 +166,11 @@ class Recollection:
 
 
 class Memory:
+    #: The policy recorded in the last loaded store's header, if any. Kept for
+    #: inspection rather than applied: `policy.json` is the live setting, and a
+    #: store silently overriding it would give one setting two sources of truth.
+    saved_policy: Policy | None = None
+
     def __init__(self, embedder, policy: Policy | None = None, clock=time.time,
                  store: TraceStore | None = None) -> None:
         self.embedder = embedder
@@ -414,6 +419,8 @@ class Memory:
                 if d.get("__header__"):
                     if d.get("vocab") and hasattr(self.embedder, "vocab"):
                         self.embedder.vocab = Vocabulary.from_json(d["vocab"])
+                    if d.get("policy"):
+                        self.saved_policy = Policy.from_json(d["policy"])
                     continue
                 self.store.put(Trace.from_json(d))
                 count += 1

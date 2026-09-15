@@ -74,11 +74,23 @@ class ToolSpec:
 
     @classmethod
     def from_json(cls, d: dict) -> "ToolSpec":
-        return cls(name=d["name"], purpose=d["purpose"], source=d["source"],
+        # `grade` is written by to_json and used to be dropped here, so a tool
+        # loaded from disk looked ungraded and every caller gating on
+        # `spec.grade` fell through to its "unknown" branch. Only the score is
+        # persisted, so it returns as a score-only Grade -- exactly what the
+        # stored data supports, and no more.
+        spec = cls(name=d["name"], purpose=d["purpose"], source=d["source"],
                    tests=d.get("tests", ""), signature=d.get("signature", ""),
                    solved=d.get("solved", []), trace_id=d.get("trace_id"),
                    built_by=d.get("built_by", "provider"),
                    transport=d.get("transport", "python"), deps=d.get("deps", []))
+        score = d.get("grade")
+        if score is not None:
+            from .grade import Stage
+            spec.grade = Grade(float(score), Source.SELF,
+                               [Stage("recorded", float(score) > 0, "score restored from disk")],
+                               "restored from disk")
+        return spec
 
 
 _FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.S)
@@ -211,11 +223,16 @@ def synthesise(goal: str) -> tuple[str, str, str] | None:
 # --------------------------------------------------------------------------- #
 
 class Toolsmith:
-    def __init__(self, memory, provider, workshop: Path) -> None:
+    def __init__(self, memory, provider, workshop: Path, toolbox=None) -> None:
         self.memory = memory
         self.provider = provider
         self.workshop = Path(workshop)
         self.workshop.mkdir(parents=True, exist_ok=True)
+        # Held so `register` can bundle dependencies on its fallback validate.
+        # Without it a composite registered without an explicit validate call was
+        # graded against its own source alone, failed with NameError, was
+        # rejected, and a false FAILURE about a working tool went into memory.
+        self.toolbox = toolbox
 
     def forge(self, goal: str, goal_trace_id: str | None = None) -> ToolSpec | None:
         """Write a tool for a goal. The rule synthesiser first -- it is free,
@@ -249,7 +266,13 @@ class Toolsmith:
         dependency is missing at call time, which is the one failure the grading
         layer exists to catch before it reaches the toolbox.
         """
-        source = toolbox.bundle(spec) if (toolbox and spec.deps) else spec.source
+        toolbox = toolbox or self.toolbox
+        try:
+            source = toolbox.bundle(spec) if (toolbox and spec.deps) else spec.source
+        except ValueError as exc:
+            from .grade import Stage
+            spec.grade = Grade(-1.0, Source.SELF, [Stage("bundle", False, str(exc))], str(exc))
+            return spec.grade
         spec.grade = grade_python(source, spec.tests)
         return spec.grade
 
@@ -262,7 +285,7 @@ class Toolsmith:
         system re-deriving the same broken approach, and `explore.py` mutates
         those failures into the next round of experiments.
         """
-        grade = spec.grade or self.validate(spec)
+        grade = spec.grade or self.validate(spec, self.toolbox)
         if grade.score < threshold:
             self.memory.remember(
                 Kind.FAILURE,
@@ -284,6 +307,26 @@ class Toolsmith:
         spec.trace_id = trace.id
         (self.workshop / f"{spec.name}.json").write_text(json.dumps(spec.to_json(), indent=2))
         return True
+
+
+def _schema_problems(spec, kwargs: dict, memory) -> list[str]:
+    """Check MCP arguments against the schema recorded at discovery.
+
+    Only what is unambiguous from a JSON Schema and cheap to check locally:
+    required keys, and keys the server never declared. Deeper validation belongs
+    to the server, which owns the contract.
+    """
+    schema = next((t.meta.get("schema") for t in memory.of_kind(Kind.TOOL)
+                   if t.meta.get("tool") == spec.name), None)
+    if not isinstance(schema, dict):
+        return []
+    problems = [f"{spec.name}: required argument {k!r} is missing"
+                for k in (schema.get("required") or []) if k not in kwargs]
+    props = schema.get("properties")
+    if isinstance(props, dict) and props:
+        problems += [f"{spec.name}: {k!r} is not an argument this tool declares"
+                     for k in kwargs if k not in props]
+    return problems
 
 
 class Toolbox:
@@ -322,16 +365,20 @@ class Toolbox:
         downstream (`find`, `invoke`, `record_use`, `agent.solve`) on a single
         type instead of branching on transport in five places.
         """
-        path = self.workshop / f"{name}.json"
-        if path.exists():
-            return ToolSpec.from_json(json.loads(path.read_text()))
+        # Memory first for MCP tools. A server's catalogue is whatever the
+        # server says today; a JSON file from an earlier discovery is a snapshot
+        # that can disagree with it. Checking disk first also let a local tool
+        # whose name contains a dot shadow a real MCP tool of that qualified name.
         for trace in self.memory.of_kind(Kind.TOOL):
             if trace.meta.get("tool") == name and trace.meta.get("transport") == "mcp":
                 return ToolSpec(
                     name=name, purpose=trace.meta.get("purpose", ""), source="",
                     signature=trace.meta.get("signature", ""), transport="mcp",
-                    built_by="mcp", solved=trace.meta.get("solved", []),
+                    built_by="mcp", solved=list(trace.meta.get("solved", [])),
                     trace_id=trace.id)
+        path = self.workshop / f"{name}.json"
+        if path.exists():
+            return ToolSpec.from_json(json.loads(path.read_text()))
         return None
 
     def all(self) -> list[ToolSpec]:
@@ -375,8 +422,16 @@ class Toolbox:
         parts = []
         for dep_name in spec.deps:
             dep = self.load(dep_name)
-            if dep is None or dep.transport != "python":
-                continue          # an MCP dependency cannot be inlined; see invoke
+            if dep is None:
+                raise ValueError(f"{spec.name} depends on {dep_name!r}, which is not registered")
+            if dep.transport != "python":
+                # Skipping it silently graded the tool against source that is not
+                # what runs: validation passed on a bundle missing the dependency
+                # and the call then died with NameError. An out-of-process
+                # dependency cannot be inlined, so refuse rather than pretend.
+                raise ValueError(
+                    f"{spec.name} depends on {dep_name!r}, which runs over "
+                    f"{dep.transport} and cannot be inlined into the sandbox")
             parts.append(self.bundle(dep, seen))
         parts.append(spec.source)
         return "\n\n".join(p for p in parts if p.strip())
@@ -394,11 +449,25 @@ class Toolbox:
         if spec is None:
             return {"ok": False, "error": f"no such tool: {name}"}
         if spec.transport == "mcp":
-            # Another process owns this one. Arguments go as a dict, because MCP
-            # tools are keyword-only by schema -- there is no positional form.
+            # MCP tools are keyword-only by schema: there is no positional form,
+            # so positional arguments cannot be delivered. They used to be
+            # dropped while the call still reported ok=True -- a silent wrong
+            # answer, the worst outcome a tool call has.
+            if args:
+                return {"ok": False, "error": (
+                    f"{name} is an mcp tool and takes named arguments only; "
+                    f"pass kwargs, not {len(args)} positional value(s)")}
             if self.mcp is None:
                 return {"ok": False, "error": f"{name} is an mcp tool but no registry is attached"}
-            out = self.mcp.call(name, kwargs or {})
+            problems = _schema_problems(spec, kwargs or {}, self.memory)
+            if problems:
+                # The schema was recorded at discovery and never consulted.
+                # Checking it turns a confusing server-side error into a precise
+                # local one, without a round trip.
+                return {"ok": False, "error": "; ".join(problems)}
+            mcp_name = next((t.meta.get("mcp_name") for t in self.memory.of_kind(Kind.TOOL)
+                             if t.meta.get("tool") == name), None)
+            out = self.mcp.call(name, kwargs or {}, tool_name=mcp_name)
             return {"ok": out.ok, "value": out.content, "json_ok": False,
                     **({} if out.ok else {"error": out.error})}
         driver = (
@@ -432,8 +501,22 @@ class Toolbox:
             return
         if worked and problem not in spec.solved:
             spec.solved.append(problem)
-            (self.workshop / f"{name}.json").write_text(json.dumps(spec.to_json(), indent=2))
-        trace = self.memory.remember(Kind.TOOL, spec.embed_text(),
-                                     meta={"tool": name, "path": str(self.workshop / f"{name}.py"),
-                                           "signature": spec.signature, "purpose": spec.purpose})
-        self.memory.grade(trace.id, 1.0 if worked else -1.0, Source.SELF)
+            if spec.transport == "python":
+                (self.workshop / f"{name}.json").write_text(json.dumps(spec.to_json(), indent=2))
+
+        # Update the trace this tool already has. `remember` with fresh meta
+        # created a SECOND trace for MCP tools -- their embed_text differs from
+        # what discovery wrote -- so grades piled up on a duplicate while the
+        # trace `load` and `names` actually read never moved. The same tool got
+        # better and worse at once, in two places.
+        existing = next((t for t in self.memory.of_kind(Kind.TOOL)
+                         if t.meta.get("tool") == name), None)
+        if existing is None:
+            existing = self.memory.remember(
+                Kind.TOOL, spec.embed_text(),
+                meta={"tool": name, "signature": spec.signature, "purpose": spec.purpose,
+                      "transport": spec.transport, "solved": list(spec.solved)})
+        else:
+            existing.meta["solved"] = list(spec.solved)
+            self.memory.store.touch(existing)
+        self.memory.grade(existing.id, 1.0 if worked else -1.0, Source.SELF)

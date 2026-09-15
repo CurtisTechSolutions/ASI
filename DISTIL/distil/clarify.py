@@ -198,10 +198,31 @@ def first_step_actionable(frame: GameFrame, plan) -> tuple[bool, str]:
     first = plan.items[0]
     if first in plan.needs_person:
         return False, f"first agenda item needs a person: {first}"
+    if not plan.capabilities:
+        return False, "no capability was evaluated: nothing is known to be playable"
     # A capability gap is not a blocker -- forging is itself a primitive, and
     # "write the tool you are missing" is exactly the step to take. What blocks
     # is an item nothing can discharge without an answer from someone.
     return True, f"first agenda item is executable: {first}"
+
+
+def _skippable(asked: set[str]) -> set[str]:
+    """Gaps already asked about that are not worth repeating.
+
+    Incidentals are asked once; a blocking gap stays askable while it is
+    unresolved, because it is the only thing standing between the caller and a
+    first step.
+    """
+    return {g for g in asked if g not in Gap.BLOCKING}
+
+
+_DENIALS = ("don't know", "dont know", "do not know", "no idea", "unknown",
+            "unclear", "not sure", "unsure", "n/a", "tbd", "none")
+
+
+def _denies_knowledge(answer: str) -> bool:
+    low = (answer or "").strip().lower()
+    return any(low == d or low.startswith(d) for d in _DENIALS)
 
 
 class Clarifier:
@@ -253,7 +274,14 @@ class Clarifier:
         """
         for trace in self.memory.of_kind(Kind.FACT):
             if trace.meta.get("gap") == gap and trace.meta.get("task") == frame.task:
-                return trace.text
+                # The stored ANSWER, not the sentence that wraps it. Returning
+                # `trace.text` fed "about the game 'x': objective is y" straight
+                # back into `absorb`, which set that whole string as the
+                # objective -- and because it no longer equalled the task, the
+                # frame then read as understood. A rejected objective laundered
+                # itself into an accepted one through the memory layer.
+                answer = trace.meta.get("answer")
+                return answer if answer else None
         return None
 
     # -- absorbing ------------------------------------------------------------
@@ -280,27 +308,39 @@ class Clarifier:
                 frame.inputs = [a.strip() for a in answer.replace(";", ",").split(",") if a.strip()][:6]
             elif gap == Gap.OUTPUTS:
                 frame.outputs = [a.strip() for a in answer.replace(";", ",").split(",") if a.strip()][:6]
-            elif gap == Gap.PAYOFF and answer:
-                frame.information = Information.IMPERFECT     # payoffs are now known
+            elif gap == Gap.PAYOFF:
+                # "I don't know" is an answer, and it is not the answer that
+                # makes the payoffs known. Treating any non-empty reply as
+                # knowledge flipped the game out of INCOMPLETE on the strength of
+                # someone saying they had no idea.
+                if not _denies_knowledge(answer):
+                    frame.information = Information.IMPERFECT
             frame.evidence.append(f"{gap} supplied by the user")
             self.memory.remember(
                 Kind.FACT, f"about the game {frame.task!r}: {gap} is {answer}",
-                meta={"task": frame.task, "gap": gap}, grade=1.0, source=Source.USER)
+                meta={"task": frame.task, "gap": gap, "answer": answer},
+                grade=1.0, source=Source.USER)
         frame.confidence = self._confidence(frame)
         return frame
 
     @staticmethod
     def _confidence(frame: GameFrame) -> float:
-        """Recomputed from what is now filled, over the same seven axes `Framer`
-        scores. Kept here rather than mutating `Framer` so a user-supplied answer
-        and a lexically-guessed one are scored on the same scale."""
+        """Recomputed from what is now filled, over the axes that can vary.
+
+        Two corrections. The objective is scored with `objective_unclear`, the
+        same test the gate uses -- it previously used the "is it the task
+        restated?" comparison that test was written to replace, so a frame could
+        be judged actionable and unconfident at once. And `bool(frame.players)`
+        is gone: `players` always has a value (it defaults to vs-nature), so it
+        contributed a constant 1 to every score and one of the seven axes
+        measured nothing.
+        """
         filled = sum([
-            bool(frame.objective and frame.objective.strip() != frame.task.strip()),
+            not objective_unclear(frame),
             bool(frame.actions), bool(frame.referee), bool(frame.inputs),
             bool(frame.outputs), frame.information != Information.INCOMPLETE,
-            bool(frame.players),
         ])
-        return round(min(1.0, filled / 7.0), 3)
+        return round(min(1.0, filled / 6.0), 3)
 
     # -- the loop -------------------------------------------------------------
 
@@ -326,14 +366,7 @@ class Clarifier:
                 self.framer.remember(frame)
                 return Clarification(frame, plan, [], round_no, sorted(asked),
                                      contested, resolved, True, reason)
-            # Incidentals are asked once; a *blocking* gap is asked again while
-            # it remains unanswered. Skipping everything already asked was tidier
-            # and wrong: with the objective unanswered and nothing else left to
-            # ask, the loop ran out of questions and gave up on the one thing
-            # that was actually preventing progress. "Ask until the first step is
-            # done" means exactly this gap, and only this gap, is worth repeating.
-            skip = {g for g in asked if g not in Gap.BLOCKING}
-            pending = self.questions(frame, plan, skip=skip)
+            pending = self.questions(frame, plan, skip=_skippable(asked))
             if not pending or ask is None or round_no == max_rounds:
                 self.framer.remember(frame)
                 why = (reason if not pending else
@@ -349,31 +382,45 @@ class Clarifier:
             if to_ask:
                 answers.update(ask(to_ask) or {})
             asked.update(q.gap for q in pending)
-            repeated = {q.gap for q in pending if q.gap in Gap.BLOCKING}
 
-            before = frame.confidence
+            before = set(gaps(frame, plan))
             frame = self.absorb(frame, answers)
             # A gap that was asked about and did not move the frame is contested,
             # not forgotten. Re-asking it would be asking the same question of
             # someone who has already tried to answer it.
-            for q in pending:
-                target = resolved if answers.get(q.gap) else contested
-                if q.gap not in target:
-                    target.append(q.gap)
-            # An answer can arrive for a gap raised in an earlier round. Without
-            # this, the gap stays on the contested list forever and the report
-            # says a question is open that the person already answered.
-            for gap in answers:
-                if answers[gap] and gap in contested:
-                    contested.remove(gap)
-                    if gap not in resolved:
-                        resolved.append(gap)
             caps = capabilities(frame, self.memory, self.toolbox)
             plan = agenda(frame, caps)
-            if frame.confidence <= before and not answers:
-                break
+
+            # Resolved means the gap is GONE from the frame, not that a string
+            # was supplied for it. An answer the frame could not use -- an empty
+            # actions list, a referee of "nothing" -- was being filed as resolved
+            # and the report claimed progress that had not happened.
+            still_open = set(gaps(frame, plan))
+            for gap in {q.gap for q in pending} | set(answers):
+                target, other = ((contested, resolved) if gap in still_open
+                                 else (resolved, contested))
+                if gap in other:
+                    other.remove(gap)      # a gap is in exactly one of the two
+                if gap not in target:
+                    target.append(gap)
+
+            if still_open == before and not answers:
+                # No answers and no movement. Comparing confidence here was
+                # wrong: `absorb` rescales it to a different denominator than
+                # `Framer` uses, so the first pass through always "improved" by
+                # a change of scale rather than by learning anything.
+                rounds_run = round_no + 1
+                self.framer.remember(frame)
+                return Clarification(frame, plan, self.questions(frame, plan, skip=_skippable(asked)),
+                                     rounds_run, sorted(asked), contested, resolved,
+                                     False, "asked, and nothing came back that moved the frame")
 
         ok, reason = first_step_actionable(frame, plan)
         self.framer.remember(frame)
-        return Clarification(frame, plan, [] if ok else self.questions(frame, plan, skip=asked),
+        # `skip=asked` here withheld the blocking question from the caller on
+        # exactly the path where it is the only thing worth asking -- the loop
+        # ran out of rounds with the objective still unknown and then returned no
+        # questions at all.
+        return Clarification(frame, plan,
+                             [] if ok else self.questions(frame, plan, skip=_skippable(asked)),
                              max_rounds, sorted(asked), contested, resolved, ok, reason)

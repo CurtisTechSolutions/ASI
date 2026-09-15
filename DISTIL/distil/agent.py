@@ -66,7 +66,8 @@ class Distil:
         self.mcp = McpRegistry(self.memory, self.workspace)
         self.mcp.load_config(self.workspace.home / "mcp.json")
         self.toolbox = Toolbox(self.memory, self.workspace.workshop, self.mcp)
-        self.toolsmith = Toolsmith(self.memory, self.provider, self.workspace.workshop)
+        self.toolsmith = Toolsmith(self.memory, self.provider, self.workspace.workshop,
+                                   toolbox=self.toolbox)
         self.reasoner = Reasoner(self.memory, self.provider, self.policy, self.toolbox)
         self.framer = Framer(self.memory, self.provider)
         self.clarifier = Clarifier(self.memory, self.framer, self.toolbox)
@@ -171,7 +172,7 @@ class Distil:
             found = self.toolbox.find(goal_text, k=1)
             if found and found[0][2] >= 0.35:            # threshold on similarity
                 spec, _, similarity = found[0]
-                if (spec.grade is None or spec.grade.score > 0) and spec.solved:
+                if (spec.grade is None or spec.grade.score > 0) and _proven(spec, self.memory):
                     self.toolbox.record_use(spec.name, goal_text, True)
                     attempts.append({"goal": goal_text, "reframe": reframe,
                                      "via": f"existing tool {spec.name}", "ok": True,
@@ -285,3 +286,23 @@ class Distil:
 def _thought(kind: str, text: str, **payload):
     from .reason import Thought
     return Thought(kind, text, payload)
+
+
+def _proven(spec, memory) -> bool:
+    """Has this tool actually carried a problem before?
+
+    For a locally forged tool the evidence is `solved`, written when its contract
+    tests passed. An MCP tool has no contract tests and `solved` starts empty, so
+    gating on `solved` alone made every MCP tool permanently unreachable through
+    `solve` -- the condition could not be satisfied by any sequence of events.
+
+    So an MCP tool counts as proven once it has been used successfully at least
+    once and carries a positive grade. That keeps the rule honest in both
+    directions: nothing is reused on faith, and nothing is unreachable forever.
+    """
+    if spec.solved:
+        return True
+    if spec.transport != "mcp" or not spec.trace_id:
+        return False
+    trace = memory.get(spec.trace_id)
+    return bool(trace and trace.verified and (trace.mean_grade or 0) > 0)

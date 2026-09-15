@@ -36,6 +36,7 @@ Registering them as verified would be claiming evidence that does not exist.
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import queue
@@ -123,6 +124,17 @@ class McpServer:
         self.started = False
         self._lines: queue.Queue = queue.Queue()
         self._reader: threading.Thread | None = None
+        # stderr must be drained continuously. A server that logs to stderr --
+        # most of them do -- fills the 64KB pipe buffer and then blocks forever
+        # on its next write, which looks like a hung server and is actually a
+        # client that never read. Bounded, because a chatty server should cost a
+        # fixed amount of memory.
+        self._errors: collections.deque = collections.deque(maxlen=200)
+        self._errthread: threading.Thread | None = None
+        # One request at a time. Two concurrent _request calls each read from
+        # the same queue, so each consumed the other's reply, discarded it as
+        # "not mine", and both timed out.
+        self._lock = threading.Lock()
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -137,8 +149,15 @@ class McpServer:
         except (OSError, ValueError) as exc:
             return McpResult(False, error=f"could not start {self.name}: {exc}")
 
-        self._reader = threading.Thread(target=self._pump, daemon=True)
+        # Each pump is handed its own sink. Looking up `self._lines` at write
+        # time meant a reader left over from a previous process wrote into the
+        # *next* process's queue, injecting stale replies into a fresh session.
+        self._reader = threading.Thread(target=self._pump,
+                                        args=(self.proc.stdout, self._lines), daemon=True)
         self._reader.start()
+        self._errthread = threading.Thread(target=self._drain,
+                                           args=(self.proc.stderr, self._errors), daemon=True)
+        self._errthread.start()
 
         init = self._request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
@@ -159,21 +178,29 @@ class McpServer:
     def close(self) -> None:
         if self.proc is None:
             return
+        proc, self.proc = self.proc, None
         try:
-            if self.proc.stdin:
-                self.proc.stdin.close()
-            self.proc.terminate()
+            if proc.stdin:
+                proc.stdin.close()
+            proc.terminate()
             try:
-                self.proc.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
-        except (OSError, ValueError):
+                proc.kill()
+                proc.wait(timeout=5)       # reap it: kill() alone leaves a zombie
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
         finally:
-            self.proc = None
             self.started = False
-            self._reader = None
+            # Let the pumps finish against the pipes they were given, then start
+            # clean. Because each pump holds its own sink, replacing these is
+            # safe even if a thread is still draining.
+            for thread in (self._reader, self._errthread):
+                if thread is not None:
+                    thread.join(timeout=2)
+            self._reader = self._errthread = None
             self._lines = queue.Queue()
+            self._errors = collections.deque(maxlen=200)
 
     def __enter__(self) -> "McpServer":
         self.start()
@@ -201,12 +228,13 @@ class McpServer:
                  timeout: float | None = None) -> McpResult:
         if self.proc is None:
             return McpResult(False, error="server is not running")
-        self._id += 1
-        want = self._id
-        if not self._send({"jsonrpc": "2.0", "id": want, "method": method,
-                           "params": params or {}}):
-            return McpResult(False, error=f"could not write to {self.name}")
-        return self._await(want, timeout if timeout is not None else self.timeout)
+        with self._lock:
+            self._id += 1
+            want = self._id
+            if not self._send({"jsonrpc": "2.0", "id": want, "method": method,
+                               "params": params or {}}):
+                return McpResult(False, error=f"could not write to {self.name}")
+            return self._await(want, timeout if timeout is not None else self.timeout)
 
     def _await(self, want_id: int, timeout: float) -> McpResult:
         """Read until the response with our id arrives, or the budget runs out.
@@ -225,6 +253,11 @@ class McpServer:
             if line is None:
                 code = self.proc.poll() if self.proc else None
                 if code is not None:
+                    # The child is gone. Clear `started` so the next call brings
+                    # up a fresh process instead of writing into a dead pipe
+                    # forever -- a crashed server used to stay "started" for the
+                    # life of the registry and every later call failed.
+                    self.started = False
                     return McpResult(False, error=f"{self.name} exited ({code}): {self._stderr()}")
                 return McpResult(False, error=f"{self.name} timed out after {timeout:.0f}s")
             line = line.strip()
@@ -242,7 +275,7 @@ class McpServer:
                                  error=f"{err.get('code', '?')}: {err.get('message', 'unknown')}")
             return McpResult(True, raw=msg)
 
-    def _pump(self) -> None:
+    def _pump(self, stdout, sink) -> None:
         """Blocking reads on a daemon thread, into a queue.
 
         This used to be `select()` on `proc.stdout` and it was subtly,
@@ -257,16 +290,26 @@ class McpServer:
         A thread doing blocking `readline()` has no such split: one place reads,
         one buffer, and the timeout lives on `queue.get` where it belongs.
         """
-        stdout = self.proc.stdout if self.proc else None
         if stdout is None:
             return
         try:
             for line in stdout:
-                self._lines.put(line)
+                sink.put(line)
         except (OSError, ValueError):
             pass
         finally:
-            self._lines.put(None)          # EOF sentinel
+            sink.put(None)                 # EOF sentinel
+
+    @staticmethod
+    def _drain(stderr, sink) -> None:
+        """Keep the stderr pipe empty so the child never blocks writing to it."""
+        if stderr is None:
+            return
+        try:
+            for line in stderr:
+                sink.append(line)
+        except (OSError, ValueError):
+            pass
 
     def _readline(self, timeout: float) -> str | None:
         """One line from stdout, or None on timeout/EOF."""
@@ -276,28 +319,45 @@ class McpServer:
             return None
 
     def _stderr(self) -> str:
-        if self.proc is None or self.proc.stderr is None:
-            return ""
-        try:
-            return (self.proc.stderr.read() or "")[-300:]
-        except (OSError, ValueError):
-            return ""
+        """Whatever the drain thread has collected.
+
+        This used to be `proc.stderr.read()`, an unbounded read with no timeout
+        on a pipe whose writer may still be alive -- so the call that was meant
+        to explain a failure could itself hang indefinitely.
+        """
+        return "".join(self._errors)[-300:]
 
     # -- the two calls that matter ---------------------------------------------
 
-    def list_tools(self) -> list[McpTool]:
+    def list_tools(self, page_limit: int = 50) -> list[McpTool]:
+        """Every tool, following `nextCursor` to the end of the catalogue.
+
+        The protocol paginates. Reading only the first page silently truncated
+        any server exposing more tools than its page size -- and a missing tool
+        is indistinguishable from a server that does not offer it, so the
+        truncation would never have been noticed.
+        """
         if not self.started:
             started = self.start()
             if not started.ok:
                 return []
-        out = self._request("tools/list")
-        if not out.ok:
-            return []
-        tools = out.raw.get("result", {}).get("tools", []) or []
-        return [McpTool(server=self.name, name=t.get("name", ""),
-                        description=t.get("description", "") or "",
-                        schema=t.get("inputSchema", {}) or {})
-                for t in tools if t.get("name")]
+        found: list[McpTool] = []
+        cursor, pages = None, 0
+        while pages < page_limit:
+            out = self._request("tools/list", {"cursor": cursor} if cursor else {})
+            if not out.ok:
+                break
+            result = out.raw.get("result", {}) or {}
+            for t in (result.get("tools") or []):
+                if t.get("name"):
+                    found.append(McpTool(server=self.name, name=t["name"],
+                                         description=t.get("description", "") or "",
+                                         schema=t.get("inputSchema", {}) or {}))
+            cursor = result.get("nextCursor")
+            pages += 1
+            if not cursor:
+                break
+        return found
 
     def call(self, tool: str, arguments: dict | None = None,
              timeout: float | None = None) -> McpResult:
@@ -362,6 +422,12 @@ class McpRegistry:
         experiments.
         """
         report = {"servers": {}, "tools": 0, "failed": []}
+        if name is not None and name not in self.servers:
+            # Degrade rather than KeyError: a caller naming a server that is not
+            # configured has made a mistake worth reporting, not worth crashing
+            # the whole discovery pass over.
+            report["failed"].append({"server": name, "error": "no such server configured"})
+            return report
         targets = [self.servers[name]] if name else list(self.servers.values())
         for server in targets:
             started = server.start()
@@ -379,14 +445,24 @@ class McpRegistry:
                     meta={"tool": tool.qualified, "transport": "mcp", "server": server.name,
                           "mcp_name": tool.name, "schema": tool.schema,
                           "signature": f"{tool.qualified}({', '.join(tool.arguments())})",
-                          "purpose": tool.description or tool.name},
+                          "purpose": tool.description or tool.name,
+                          # Written so `Toolbox.load` has something to read: it
+                          # looks for meta["solved"] and discovery never set it,
+                          # so every MCP tool loaded with solved=[] forever and
+                          # the reuse path could never be satisfied.
+                          "solved": []},
                     identity=f"mcp:{tool.qualified}")
             report["servers"][server.name] = [t.name for t in tools]
             report["tools"] += len(tools)
         return report
 
-    def call(self, qualified: str, arguments: dict | None = None) -> McpResult:
-        server_name, _, tool_name = qualified.partition(".")
+    def call(self, qualified: str, arguments: dict | None = None,
+             tool_name: str | None = None) -> McpResult:
+        """`qualified` is "server.tool". `tool_name` overrides the split, which
+        matters because a server name may itself contain a dot and `partition`
+        would then hand the server half a tool it does not have."""
+        server_name, _, split = qualified.partition(".")
+        tool_name = tool_name or split
         server = self.servers.get(server_name)
         if server is None:
             return McpResult(False, error=f"no such mcp server: {server_name}")

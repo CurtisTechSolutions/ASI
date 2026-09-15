@@ -132,7 +132,11 @@ class GameFrame:
                 "inputs": self.inputs, "outputs": self.outputs, "objective": self.objective,
                 "information": self.information, "payoff": self.payoff,
                 "horizon": self.horizon, "stochastic": self.stochastic,
-                "referee": self.referee, "confidence": self.confidence}
+                "referee": self.referee, "confidence": self.confidence,
+                # Why each axis was set. Without it a frame recalled from memory
+                # states its conclusions and loses every reason for them, which
+                # is the half worth keeping when the conclusions are wrong.
+                "evidence": self.evidence}
 
     def embed_text(self) -> str:
         """What memory indexes, so "which game is this like?" is a recall query.

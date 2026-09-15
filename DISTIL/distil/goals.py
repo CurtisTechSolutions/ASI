@@ -45,7 +45,16 @@ class Verifier:
 
     @property
     def automatic(self) -> bool:
-        return self.kind in ("python", "predicate")
+        """Can this be checked without a person?
+
+        A 'predicate' verifier is a callable, and callables do not serialise.
+        After a round trip the kind survives and `fn` is None, so this reported
+        `automatic=True` for a check that no longer existed -- a goal that looked
+        machine-verifiable and had nothing to run.
+        """
+        if self.kind == "predicate":
+            return self.fn is not None
+        return self.kind == "python"
 
 
 @dataclass

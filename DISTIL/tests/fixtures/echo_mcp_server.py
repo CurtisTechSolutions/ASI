@@ -9,6 +9,11 @@ works against exactly one server.
 import json
 import sys
 
+#: Behaviour switches, selected by argv, so one fixture can exercise the failure
+#: modes a well-behaved server never shows: a chatty stderr that fills the pipe,
+#: a paginated tool catalogue, and a process that dies mid-session.
+MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
+
 TOOLS = [
     {"name": "echo", "description": "Return the text you were given",
      "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}},
@@ -32,6 +37,12 @@ def reply(rid, result):
 
 
 def main():
+    if MODE == "chatty":
+        # ~200KB to stderr before doing anything. A client that does not drain
+        # the pipe blocks the child here, forever.
+        for i in range(4000):
+            sys.stderr.write("log line %d: padding padding padding padding padding\n" % i)
+        sys.stderr.flush()
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -46,6 +57,16 @@ def main():
                         "serverInfo": {"name": "echo-fixture", "version": "1"}})
         elif method == "notifications/initialized":
             continue                                  # a notification: no reply
+        elif method == "tools/list" and MODE == "paged":
+            cursor = (msg.get("params") or {}).get("cursor")
+            if not cursor:
+                reply(rid, {"tools": TOOLS[:1], "nextCursor": "page2"})
+            elif cursor == "page2":
+                reply(rid, {"tools": TOOLS[1:2], "nextCursor": "page3"})
+            else:
+                reply(rid, {"tools": TOOLS[2:]})
+        elif method == "tools/call" and MODE == "crash":
+            raise SystemExit(3)
         elif method == "tools/list":
             # Noise the client must survive: a non-JSON line, then a notification
             # with no id, then the actual response.

@@ -1012,16 +1012,77 @@ def test_incidental_questions_are_asked_once_but_blockers_come_back():
     the objective go unasked because it was raised once and ignored is how the
     loop gives up on the only thing preventing progress."""
     seen = []
+    answers = iter([{"referee": "the bench suite"}, {"inputs": "a csv export"},
+                    {"outputs": "a report"}])
 
     def ask(questions):
         seen.extend(q.gap for q in questions)
-        return {}                       # answer nothing, forcing more rounds
+        return next(answers, {})        # progress on everything BUT the objective
 
     _, c = _clarifier()
-    c.clarify("make the thing better", ask=ask, max_rounds=3)
+    out = c.clarify("make the thing better", ask=ask, max_rounds=3)
     incidental = [g for g in seen if g not in Gap.BLOCKING]
     assert len(incidental) == len(set(incidental)), f"repeated incidentals: {incidental}"
     assert seen.count(Gap.OBJECTIVE) > 1, "a blocking gap must be asked again"
+    assert not out.actionable
+    assert Gap.OBJECTIVE in [q.gap for q in out.questions], "and still be handed back"
+
+
+def test_answering_nothing_stops_early_but_still_surfaces_the_blocker():
+    """Re-asking a caller who answered nothing is pestering, not persistence --
+    but the loop must not then return empty-handed. `skip=asked` on the exit path
+    withheld the one question worth asking."""
+    rounds = []
+
+    def ask(questions):
+        rounds.append([q.gap for q in questions])
+        return {}
+
+    _, c = _clarifier()
+    out = c.clarify("improve the design", ask=ask, max_rounds=3)
+    assert len(rounds) == 1, "no point asking again when nothing came back"
+    assert out.rounds == 1, "the reported round count must match what happened"
+    assert not out.actionable
+    assert Gap.OBJECTIVE in [q.gap for q in out.questions]
+
+
+def test_a_gap_is_never_both_resolved_and_contested():
+    _, c = _clarifier()
+    rounds = iter([{"referee": "a bench"}, {"objective": "p99 under 200ms"}])
+    out = c.clarify("make the thing better", ask=lambda qs: next(rounds, {}))
+    assert not (set(out.resolved) & set(out.contested))
+
+
+def test_an_answer_the_frame_cannot_use_is_not_resolved():
+    """Resolved means the gap is gone, not that a string was supplied."""
+    _, c = _clarifier()
+    out = c.clarify("make the thing better",
+                    ask=lambda qs: {Gap.REFEREE: "nothing"}, max_rounds=1)
+    assert Gap.REFEREE not in out.resolved, "'nothing' leaves the referee unset"
+
+
+def test_memory_cannot_launder_a_record_into_an_objective():
+    """The stored fact wraps the answer in a sentence. Feeding that sentence back
+    as the objective made the frame differ from the task and therefore read as
+    understood -- a rejected objective accepted via the memory layer."""
+    d, c = _clarifier()
+    frame = d.framer.frame("make the importer better")
+    c.absorb(frame, {Gap.OBJECTIVE: "p99 under 200ms"})
+    again = d.framer.frame("make the importer better")
+    answered = [q for q in c.questions(again, None) if q.answered_by_memory]
+    assert answered
+    assert answered[0].answered_by_memory == "p99 under 200ms", \
+        "the answer, not the record that wraps it"
+
+
+def test_saying_you_do_not_know_the_payoffs_is_not_knowing_them():
+    from distil.frame import GameFrame, Information
+    _, c = _clarifier()
+    f = GameFrame(task="t", information=Information.INCOMPLETE)
+    c.absorb(f, {Gap.PAYOFF: "no idea"})
+    assert f.information == Information.INCOMPLETE
+    c.absorb(f, {Gap.PAYOFF: "we both want the deal to close"})
+    assert f.information != Information.INCOMPLETE
 
 
 def test_a_blocking_gap_answered_late_still_unblocks():
@@ -1142,6 +1203,84 @@ def test_an_unknown_tool_surfaces_the_jsonrpc_error():
         assert not out.ok and "unknown tool" in out.error
 
 
+def test_a_chatty_stderr_does_not_deadlock_the_server():
+    """The failure this guards: stderr was opened as a pipe and never read, so a
+    server logging more than the 64KB buffer blocked forever on its next write.
+    It looked exactly like a hung server and was a client that never drained."""
+    s = McpServer("chatty", [sys.executable, FIXTURE, "chatty"])
+    try:
+        assert s.start().ok
+        assert len(s.list_tools()) == 3
+        assert s.call("add", {"a": 1, "b": 1}).content == "2"
+    finally:
+        s.close()
+
+
+def test_the_whole_tool_catalogue_is_read_across_pages():
+    """A server that paginates used to have everything past page one silently
+    dropped, and a missing tool is indistinguishable from one not offered."""
+    s = McpServer("paged", [sys.executable, FIXTURE, "paged"])
+    try:
+        assert {t.name for t in s.list_tools()} == {"echo", "add", "explode"}
+    finally:
+        s.close()
+
+
+def test_concurrent_requests_do_not_consume_each_others_replies():
+    """Two _request calls read from one queue, so each discarded the other's
+    reply as 'not mine' and both timed out."""
+    import threading
+    s = echo_server()
+    try:
+        s.start()
+        results, errors = [], []
+
+        def hammer(n):
+            try:
+                results.append(s.call("add", {"a": n, "b": 0}).content)
+            except Exception as exc:                       # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hammer, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not errors, errors
+        assert sorted(results) == [str(i) for i in range(6)], results
+    finally:
+        s.close()
+
+
+def test_a_crashed_server_is_restarted_on_the_next_call():
+    """`started` stayed True after the child died, so every later call wrote
+    into a dead pipe and failed for the life of the registry."""
+    s = McpServer("crash", [sys.executable, FIXTURE, "crash"])
+    try:
+        assert s.start().ok
+        first = s.call("echo", {"text": "x"})
+        assert not first.ok, "the fixture exits on tools/call"
+        assert not s.started, "a dead child must not still count as started"
+        assert s.start().ok, "the next start brings up a fresh process"
+    finally:
+        s.close()
+
+
+def test_closing_twice_is_safe_and_reaps_the_child():
+    s = echo_server()
+    s.start()
+    proc = s.proc
+    s.close()
+    s.close()
+    assert proc.poll() is not None, "the child must be reaped, not left a zombie"
+
+
+def test_discovering_an_unknown_server_degrades():
+    d = fresh()
+    report = d.mcp.discover("not-configured")
+    assert report["failed"] and "no such server" in report["failed"][0]["error"]
+
+
 def test_a_server_that_cannot_start_degrades_rather_than_raising():
     s = McpServer("broken", [sys.executable, "/nonexistent/server.py"])
     out = s.start()
@@ -1208,6 +1347,76 @@ def test_a_missing_or_corrupt_config_is_not_an_error():
 # composition and serialisation
 # --------------------------------------------------------------------------- #
 
+def test_no_serialiser_writes_a_key_its_reader_ignores():
+    """A generic guard for the bug class the review found in eight places.
+
+    Every writer/reader pair is checked in both directions: a key written but
+    never read is state that silently disappears, and a key read but never
+    written is a default masquerading as data. Both were live here -- ToolSpec
+    dropped deps, Case dropped trace_id, GameFrame dropped evidence, Memory
+    wrote a policy nothing loaded.
+    """
+    import dataclasses
+
+    def survives(obj, dump, load, skip=()):
+        back = load(dump(obj))
+        return [f.name for f in dataclasses.fields(obj)
+                if f.name not in skip
+                and getattr(back, f.name) != getattr(obj, f.name)]
+
+    spec = ToolSpec(name="n", purpose="p", source="s", tests="t", signature="sig",
+                    solved=["x"], trace_id="tid", built_by="template",
+                    transport="mcp", deps=["a", "b"])
+    assert not survives(spec, lambda o: o.to_json(), ToolSpec.from_json, skip=("grade",))
+
+    case = Case(problem="p", solution="s", grade=1.0, via="v", evidence="e",
+                cost=2.0, trace_id="tid", tags=["t"])
+    assert not survives(case, lambda o: o.to_meta(), Case.from_meta)
+
+    frame = GameFrame(task="t", players=Players.N_PARTY, actions=["a"], inputs=["i"],
+                      outputs=["o"], objective="obj", information=Information.IMPERFECT,
+                      payoff=Payoff.ZERO_SUM, horizon=Horizon.REPEATED, stochastic=True,
+                      referee="r", confidence=0.5, evidence=["because"])
+    back = GameFrame(**{k: v for k, v in frame.to_json().items()})
+    assert back.evidence == ["because"], "the reasons for a frame must survive"
+
+    from distil.goals import Goal
+    goal = GoalTree("t").add("do it", verifier=Verifier("python", "assert 1"))
+    assert Goal.from_json(goal.to_json()).verifier.body == "assert 1"
+
+    policy = Policy(branch_factor=5, credit_decay=0.3)
+    assert not survives(policy, lambda o: o.to_json(), Policy.from_json)
+
+
+def test_a_restored_tool_reports_the_grade_it_was_given():
+    spec = ToolSpec(name="n", purpose="p", source="s", tests="t")
+    spec.grade = grade_python("def n():\n    return 1\n", "assert n() == 1")
+    back = ToolSpec.from_json(spec.to_json())
+    assert back.grade is not None and back.grade.score == spec.grade.score
+
+
+def test_a_predicate_verifier_is_not_automatic_once_its_callable_is_gone():
+    """Callables do not serialise. The kind survived and `fn` did not, so a
+    round-tripped goal claimed to be machine-checkable with nothing to run."""
+    from distil.goals import Goal
+    live = Verifier("predicate", fn=lambda: True)
+    assert live.automatic
+    tree = GoalTree("t")
+    g = tree.add("do it", verifier=live)
+    assert not Goal.from_json(g.to_json()).verifier.automatic
+
+
+def test_the_policy_in_a_saved_store_is_read_back():
+    m = Memory(HashEmbedder(), Policy(branch_factor=7))
+    m.remember(Kind.FACT, "a fact")
+    path = tmpdir() / "memory.jsonl"
+    m.save(path)
+    n = Memory(HashEmbedder())
+    n.load(path)
+    assert n.saved_policy is not None and n.saved_policy.branch_factor == 7
+    assert n.policy.branch_factor != 7, "it is recorded for inspection, not applied"
+
+
 def test_every_toolspec_field_survives_the_disk_round_trip():
     """Regression for a real bug: to_json() omitted built_by, transport and deps
     while from_json() read all three, so a composite tool loaded from disk had
@@ -1247,6 +1456,109 @@ def test_a_dependency_appears_before_its_dependent_in_the_bundle():
                     deps=["median"])
     bundled = d.toolbox.bundle(spec)
     assert bundled.index("def median") < bundled.index("def wrapper")
+
+
+def test_an_mcp_tool_refuses_positional_arguments_instead_of_dropping_them():
+    """They used to be discarded while the call still reported ok=True, which is
+    a silent wrong answer -- the worst outcome a tool call has."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    out = d.toolbox.invoke("echo.add", [2, 40])
+    assert not out["ok"] and "named arguments only" in out["error"]
+    assert d.toolbox.invoke("echo.add", kwargs={"a": 2, "b": 40})["value"] == "42"
+    d.mcp.close()
+
+
+def test_mcp_arguments_are_checked_against_the_recorded_schema():
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    missing = d.toolbox.invoke("echo.add", kwargs={"a": 1})
+    assert not missing["ok"] and "required argument" in missing["error"]
+    undeclared = d.toolbox.invoke("echo.add", kwargs={"a": 1, "b": 2, "c": 3})
+    assert not undeclared["ok"] and "not an argument" in undeclared["error"]
+    d.mcp.close()
+
+
+def test_using_an_mcp_tool_grades_the_trace_it_already_has():
+    """record_use called remember() with different text, creating a SECOND trace;
+    grades accumulated on the duplicate while the trace load() reads never moved."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    before = len([t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "echo.add"])
+    d.toolbox.record_use("echo.add", "added two numbers", True)
+    after = [t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "echo.add"]
+    assert len(after) == before == 1, "the tool must not fork into two traces"
+    assert after[0].mean_grade is not None and after[0].mean_grade > 0
+    assert "added two numbers" in d.toolbox.load("echo.add").solved
+    d.mcp.close()
+
+
+def test_an_mcp_tool_becomes_reusable_once_it_has_worked():
+    """The `solved` gate was unsatisfiable for MCP tools by construction, so they
+    were permanently unreachable through solve()."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    from distil.agent import _proven
+    spec = d.toolbox.load("echo.add")
+    assert not _proven(spec, d.memory), "nothing is reused on faith"
+    d.toolbox.record_use("echo.add", "added two numbers", True)
+    assert _proven(d.toolbox.load("echo.add"), d.memory)
+    d.mcp.close()
+
+
+def test_a_dependency_that_cannot_be_inlined_fails_validation_loudly():
+    """Skipping it graded the tool against source that is not what runs:
+    validation passed and the call then died with NameError."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    spec = ToolSpec(name="wrapper", purpose="p",
+                    source="def wrapper():\n    return 1\n",
+                    tests="assert wrapper() == 1", signature="wrapper()",
+                    deps=["echo.add"])
+    grade = d.toolsmith.validate(spec, d.toolbox)
+    assert grade.score == -1.0 and "cannot be inlined" in grade.diagnostic
+    assert not d.toolsmith.register(spec)
+    d.mcp.close()
+
+
+def test_an_unregistered_dependency_is_reported_not_skipped():
+    d = fresh()
+    spec = ToolSpec(name="w", purpose="p", source="def w():\n    return 1\n",
+                    tests="assert w() == 1", signature="w()", deps=["nonexistent"])
+    grade = d.toolsmith.validate(spec, d.toolbox)
+    assert grade.score == -1.0 and "not registered" in grade.diagnostic
+
+
+def test_register_bundles_dependencies_without_an_explicit_validate():
+    """Its fallback validate() had no toolbox, so a working composite was
+    rejected and a false FAILURE about it was written to memory."""
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    spec = ToolSpec(
+        name="mid_of_col", purpose="median of a column",
+        source="def mid_of_col(text, col=0):\n"
+               "    return median([float(r[col]) for r in parse_csv(text)])\n",
+        tests='assert mid_of_col("1\\n3\\n2") == 2.0',
+        signature="mid_of_col(text, col=0)", deps=["median", "parse_csv"])
+    assert d.toolsmith.register(spec), "register must bundle on its own"
+    assert d.toolbox.invoke("mid_of_col", ["10\n30\n20"])["value"] == 20.0
+
+
+def test_the_live_mcp_record_wins_over_a_stale_snapshot():
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    # a stale file of the same qualified name must not shadow the live tool
+    (d.workspace.workshop / "echo.add.json").write_text(json.dumps(
+        {"name": "echo.add", "purpose": "stale", "source": "", "transport": "python"}))
+    spec = d.toolbox.load("echo.add")
+    assert spec.transport == "mcp" and spec.purpose != "stale"
+    d.mcp.close()
 
 
 def test_a_dependency_cycle_does_not_hang_the_bundler():
