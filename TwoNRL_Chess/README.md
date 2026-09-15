@@ -161,6 +161,8 @@ when the machine is busy.
 | `benchmark.py` | head to head, common opponent, and the random-mover floor |
 | `test_sbnn.py` | the correctness proofs |
 | `summarize.py` | rebuilds the tables in this README from the run JSON |
+| `export_viz.py` | scores the action space from the phase-boundary networks, for the page |
+| `viz/` | the visualisation: one self-contained HTML file with the data inside it |
 | `results/` | run logs and JSON behind every table here |
 
 ## Running it
@@ -172,8 +174,14 @@ make quick       # one seed, four rounds: the whole loop end to end
 make data        # rebuild the held-out exam (already committed)
 make run         # the headline: 2NRL against the same thing without it
 make bench       # play the trained networks against each other
-make all         # proofs, every arm, the benchmark, then the tables
+make viz         # build the page: viz/index.html
+make all         # proofs, every arm, the benchmark, the tables, then the page
 ```
+
+`make viz` captures the network at each of 2NRL's four states - `untrained`,
+`phase1_end`, `after_invert`, `final` - and scores all 4096 moves from each, so
+the page can put the two sides of the sign flip next to each other. Open
+`viz/index.html` from a clone; it needs no server.
 
 Every target takes overrides, as in `TwoNRL_CartPole`:
 

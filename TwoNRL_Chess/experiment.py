@@ -139,6 +139,7 @@ class Config:
     eval_games: int = 10             # games against Stockfish at the end of the run
     track_positions: int = 120       # held-out positions scored every round
     heldout: str = dataset.DEFAULT_PATH
+    checkpoints: str | None = None   # save the network at every phase boundary
     seed: int = 0
     stockfish: str | None = None
 
@@ -474,6 +475,20 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
     positions = dataset.load(cfg.heldout)
     tracked = positions[:cfg.track_positions]
 
+    def checkpoint(name: str) -> None:
+        """Keep the network as it was at a phase boundary.
+
+        Phase 2 is a single operation and the whole argument turns on what it
+        does, so `untrained`, `phase1_end`, `after_invert` and `final` are the
+        four states worth being able to look at side by side.  `export_viz.py`
+        scores the action space from them.
+        """
+        if not cfg.checkpoints:
+            return
+        _os.makedirs(cfg.checkpoints, exist_ok=True)
+        agent.net.save(_os.path.join(cfg.checkpoints, f"{cfg.arm}_seed{cfg.seed}_{name}.npz"))
+
+    checkpoint("untrained")
     history = [{"round": 0, **evaluate_heldout(agent, tracked),
                 "hidden": list(agent.net.hidden_sizes)}]
     if verbose:
@@ -500,8 +515,12 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
             phase, invert_now = "both", True
         if phase != last_phase:                    # a phase change resets the stall
             best_seen, stalled, last_phase = float("inf"), 0, phase
+        if invert_now and cfg.arm in INVERTING:
+            checkpoint("phase1_end")
         train = train_round(agent, cfg, failures, nprng, phase, invert_now,
                             probe=lambda: evaluate_heldout(agent, tracked))
+        if train.get("inverted"):
+            checkpoint("after_invert")
         ev = evaluate_heldout(agent, tracked)
 
         # ---- the self-building half: widen on a stall ----------------------
@@ -529,6 +548,7 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
                   f"({train['rule_share']:.0%} rule)  {train['phase']:8s}"
                   f"{'  INVERTED' if train['inverted'] else ''}{grew}")
 
+    checkpoint("final")
     final = play_round(agent, judge, opponent, cfg, rng, nprng, cfg.eval_games,
                        collect=False, temperature=0.0)[1]
     out = {"arm": cfg.arm, "seed": cfg.seed, "config": asdict(cfg),
@@ -609,6 +629,8 @@ def main() -> None:
                    help="in the phased schedule, the share of rounds spent failing")
     p.add_argument("--no-growth", action="store_true", help="freeze the architecture")
     p.add_argument("--heldout", default=Config.heldout)
+    p.add_argument("--checkpoints", default=None,
+                   help="directory to save the network at each phase boundary")
     p.add_argument("--stockfish", default=None)
     p.add_argument("--jobs", type=int, default=1, help="(arm, seed) jobs to run in parallel")
     p.add_argument("--weights", default="weights", help="directory for the trained networks")
@@ -627,7 +649,8 @@ def main() -> None:
                          track_positions=args.track_positions,
                          schedule=args.schedule, neg_fraction=args.neg_fraction,
                          growth=0 if args.no_growth else Config.growth,
-                         heldout=args.heldout, stockfish=args.stockfish)
+                         heldout=args.heldout, stockfish=args.stockfish,
+                         checkpoints=args.checkpoints)
             jobs.append((cfg, args.weights))
 
     print(f"=== {len(jobs)} runs: arms {args.arms}, seeds {args.seeds}, "

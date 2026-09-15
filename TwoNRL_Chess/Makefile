@@ -22,11 +22,12 @@ OPENINGS    ?= 12
 RESULTS     ?= results
 WEIGHTS     ?= weights
 POSITIONS   ?= 400
+VIZ_SEED    ?= 0
 
 COMMON = --seeds $(SEEDS) --rounds $(ROUNDS) --games $(GAMES) \
          --eval-games $(EVAL_GAMES) --jobs $(JOBS) --weights $(WEIGHTS)
 
-.PHONY: help install check test data run entropy repulsion all-arms per-round phase-depth no-growth bench bench-all quick all summary clean
+.PHONY: help install check test data run entropy repulsion all-arms per-round phase-depth no-growth viz viz-data bench bench-all quick all summary clean
 
 help: ## Show this help
 	@echo "2NRL on chess make targets  (override variables like: make run SEEDS=\"0 1\")"
@@ -94,6 +95,19 @@ quick: ## One seed, a few rounds - a smoke test of the whole loop
 	$(EXPERIMENT) --seeds 0 --rounds 4 --games 4 --eval-games 4 --jobs 2 \
 		--arms 2nrl positive --weights $(WEIGHTS)
 
+##@ Visualisation
+viz: ## Capture the phase-boundary networks, export the data, and build viz/index.html
+	$(EXPERIMENT) --arms 2nrl --seeds $(VIZ_SEED) --rounds $(ROUNDS) --games $(GAMES) \
+		--eval-games 4 --jobs 1 --weights $(WEIGHTS) --checkpoints viz/checkpoints \
+		--out $(RESULTS)/viz_run.json
+	$(PY) export_viz.py --results $(RESULTS) --seed $(VIZ_SEED)
+	$(PY) viz/build.py
+	@echo "open viz/index.html"
+
+viz-data: ## Rebuild viz/index.html from the checkpoints already captured
+	$(PY) export_viz.py --results $(RESULTS) --seed $(VIZ_SEED)
+	$(PY) viz/build.py
+
 ##@ Benchmarking
 bench: ## Play the trained arms against each other and a common opponent
 	@mkdir -p $(RESULTS)
@@ -107,10 +121,10 @@ bench-all: ## The same, over every arm that has trained weights
 		--out $(RESULTS)/benchmark.json
 
 ##@ Everything
-all: test run entropy repulsion per-round bench-all summary ## Proofs, every arm, then the tables
+all: test run entropy repulsion per-round bench-all summary viz ## Proofs, every arm, the tables, then the page
 
 summary: ## Rebuild the README tables from whatever is in RESULTS/
 	$(PY) summarize.py --results $(RESULTS)
 
-clean: ## Remove byte-code caches (RESULTS/ is kept - it backs the README)
+clean: ## Remove byte-code caches (RESULTS/ and viz/ are kept - they back the README)
 	rm -rf __pycache__
