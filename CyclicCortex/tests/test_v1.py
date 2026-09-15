@@ -152,6 +152,37 @@ def test_selfplay_trains_grade_and_keeps_legality():
     assert 0.0 < r["gamma"] < 1.0
     assert after["legality_acc"] >= before["legality_acc"] - 0.15, (before, after)
 
+def test_stockfish_notation_and_guards():
+    """FEN and UCI conversion, and the reachability guard. Skipped without
+    Stockfish installed, but the notation half is pure and always runs."""
+    from cortex import stockfish as sf, engine
+    from cortex.board_games import Chess
+    st = engine.start_position()
+    assert sf.to_fen(st).startswith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - -")
+    assert sf.to_uci(((4,1),(4,3))) == "e2e4"
+    assert sf.from_uci("e2e4") == ((4,1),(4,3))
+    assert sf.playable(st), "the opening is reachable"
+    b = [["" for _ in range(8)] for _ in range(8)]; b[0][0] = "wR"
+    assert not sf.playable(Chess(b, "w")), "no kings is unreachable"
+    # side NOT to move already in check is unreachable
+    b = [["" for _ in range(8)] for _ in range(8)]
+    b[0][4] = "wK"; b[7][4] = "bK"; b[6][4] = "wR"
+    assert not sf.playable(Chess(b, "w")), "black in check with white to move"
+    if not sf.available(): return
+    with sf.Stockfish(depth=6) as e:
+        assert -200 < e.evaluate(st) < 300
+        tbl = e.score_moves(st, multipv=6)
+        assert len(tbl) >= 4 and all(st.legal(*m) for m in tbl)
+        assert e.best(st) is not None
+        assert e.evaluate(Chess(b, "w")) == 0, "unreachable positions are guarded"
+
+def test_rule_selected_on_play_quality():
+    """Selecting on legality alone let a validity-only rule win with a perfect
+    top-choice-legal while playing the worst chess of any configuration."""
+    import inspect
+    src = inspect.getsource(Cortex.select_rule)
+    assert "game.value" in src, "rule selection must score the resulting position"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

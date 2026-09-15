@@ -15,10 +15,12 @@ python3 -m cortex.cli demo          # build, train, play chess, add sudoku
 python3 -m cortex.cli map           # the similarity graph and its regions
 python3 -m cortex.cli play          # chess against the engine
 python3 -m cortex.cli sudoku        # solve puzzles by the network's own ranking
-python3 -m tests.test_v1            # 14 tests
+python3 -m tests.test_v1            # 16 tests
 ```
 
-Pure standard library, no dependencies.
+Pure standard library, no dependencies. **Stockfish is optional** — install it
+(`apt-get install stockfish`, or set `STOCKFISH_PATH`) to play and learn against
+a real engine; everything degrades to the built-in opponents without it.
 
 ## What V1 contains
 
@@ -31,7 +33,8 @@ Pure standard library, no dependencies.
 | `cortex/vocabulary.py` | mechanic → input slots; extension only appends, slot indices are permanent |
 | `cortex/sbnn.py` | the growing network, two heads (`p_valid`, `grade`), growth on a loss plateau |
 | `cortex/graph.py` | Jaccard distance over mechanics, triangle-inequality check |
-| `cortex/cortex.py` | regions, routing, supervised training, **self-play with outcome credit**, evaluation |
+| `cortex/cortex.py` | regions, routing, supervised training, **self-play with outcome credit**, **distillation from a teacher**, evaluation |
+| `cortex/stockfish.py` | Stockfish as opponent *and* teacher — persistent UCI process, FEN/UCI conversion, `evaluate`, and `score_moves` (MultiPV: every legal move scored in one search). Optional |
 
 ## What it does
 
@@ -150,6 +153,53 @@ lengths.
 *Unfinished games need a value.* Fifty self-play chess games once produced fifty
 draws and therefore zero gradient, because they all hit the ply cap. Each game
 now supplies a bounded, zero-sum `value(state, side)` used when no winner exists.
+
+## Stockfish: what worked and what did not
+
+Stockfish is wired in two ways — as an **opponent** (throttled by Skill Level)
+and as a **teacher**, whose MultiPV search scores every legal move in a position
+in one call. 120 positions yield ~1900 supervised targets in 6 seconds, where
+self-play yields one number per game.
+
+**The distillation did not work, and the diagnostic says why.** Spearman
+correlation between the grade head and Stockfish's centipawns, on held-out
+real-game positions:
+
+| grade trained from | ρ vs Stockfish | picks Stockfish's best move |
+|---|---|---|
+| heuristic | **0.133** | 0.267 |
+| distilled, 200 positions | −0.056 | 0.000 |
+| distilled, 800 positions | −0.086 | 0.033 |
+
+No correlation, and four times the data makes it slightly worse. The function is
+not in the hypothesis class: Stockfish evaluates with an NNUE over the whole
+board, and this network sees ~27 features describing one move through 36 hidden
+units. Adding `EXCHANGE` and `POSITION` features (does the move hang the piece,
+material balance, gives check, centre) did not close it either. **A teacher
+cannot teach what the student's vocabulary cannot express** — the same ceiling
+that the checkers midpoint and the go influence features ran into, reached here
+from the strong side.
+
+**Two real defects surfaced on the way, and both are fixed.**
+
+*Distillation was corrupting the validity head.* Training `valid=1.0` on every
+teacher-scored move floods it with positives — a teacher only ever scores legal
+moves — and dropped legality from 0.925 to 0.748. Distillation now trains grade
+only. Two heads, two signals, never conflated.
+
+*Rule selection was optimising the wrong thing.* It picked the rule whose top
+choice was most often legal, so after distillation it chose the validity-only
+rule at a perfect 1.000 top-choice-legal, **discarded the grade head entirely**,
+and produced the worst material of any configuration. A rule that reliably plays
+a legal blunder is not a good rule. Selection now scores the position the move
+leads to, with an illegal pick taking the worst value — legality enforced by
+consequence rather than as the whole target.
+
+**And one measurement worth having.** Checked against Stockfish, **99 of 200
+randomly generated chess positions are unreachable** — the side not to move
+already in check, or a missing king. Half the supervised training signal was
+coming from boards no game can produce. `stockfish.playable()` now filters them,
+and it is a pure function that works without Stockfish installed.
 
 **Where it stands.** Checkers and go are real players — checkers wins 2 of 4
 against a depth-1 engine and reaches 0.975 legality; go wins 1 of 4 and its

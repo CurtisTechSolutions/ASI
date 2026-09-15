@@ -32,6 +32,19 @@ def cmd_map(a):
     print("\nRouting log")
     for e in c.log: print("   ", e)
 
+_SF = {}
+def stockfish_opponent(skill=5, depth=6):
+    """Stockfish as the chess opponent, throttled by Skill Level so the cortex
+    has something it can measure progress against. Falls back to the built-in
+    engine when Stockfish is not installed."""
+    from cortex import stockfish as sfmod
+    if not sfmod.available(): return None
+    if "sf" not in _SF:
+        _SF["sf"] = sfmod.Stockfish(depth=depth)
+        _SF["sf"].set_skill(skill)
+    sf = _SF["sf"]
+    return lambda s, d, r: sf.best(s, depth=max(1, d))
+
 OPPONENT = {
     "chess":    lambda s, d, r: engine.choose(s, depth=d, rng=r),
     "checkers": lambda s, d, r: engine.checkers_choose(s, d, r),

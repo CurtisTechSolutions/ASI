@@ -2,7 +2,7 @@
 owning ONE Self-Building Neural Network over the common denominators of its
 games. A game is routed to a region and played by that region's network.
 """
-import random
+import math, random
 from cortex.graph import SimilarityGraph, distance
 from cortex.vocabulary import Vocabulary
 from cortex.sbnn import SBNN
@@ -147,8 +147,19 @@ class Cortex:
                 "rule": r.rule, "shape": r.net.shape()}
 
     def select_rule(self, game, rng, opponent=None, selfplay=0.5, n=40, k=12):
-        """Pick the region's decision rule by how often its top choice is legal.
-        Measured on held-out states, not chosen by hand."""
+        """Pick the region's decision rule by how well it PLAYS, not merely by
+        how often its pick is legal.
+
+        Selecting on legality alone was a real defect: after distillation the
+        validity-only rule scored a perfect 1.000 top-choice-legal, was therefore
+        selected, and discarded the grade head entirely -- so the material result
+        was the WORST of every configuration despite the cleanest legality. A
+        rule that always plays a legal blunder is not a good rule.
+
+        The objective is the value of the position the move leads to, with an
+        illegal pick scoring the worst value available, so legality is enforced by
+        consequence rather than by being the whole target.
+        """
         r = self.region_for(game)
         # Select on the distribution the rule will FACE. Using the training
         # mixture instead let checkers pick a rule scoring 0.425 in evaluation and
@@ -161,12 +172,61 @@ class Cortex:
             if not cand: continue
             cache.append((s, [(*r.net.predict(self.encode(r, game, s, mv)), mv)
                               for mv in cand]))
-        best, bestname = -1.0, "pv"
+        me = "b" if game.name == "go" else "w"
+        has_value = hasattr(game, "value")
+        best, bestname = -1e9, "pv"
         for name in self.RULES:
-            hits = sum(1 for s, sc in cache if game.is_legal(s, self.rank(sc, name)))
-            acc = hits / max(1, len(cache))
-            if acc > best: best, bestname = acc, name
+            total = 0.0
+            for st, sc in cache:
+                mv = self.rank(sc, name)
+                if not game.is_legal(st, mv):
+                    total -= 1.0                       # an illegal pick is the worst case
+                elif has_value:
+                    turn = getattr(st, "turn", me)
+                    v = game.value(game.apply(st, mv), turn)
+                    total += v
+                else:
+                    total += 1.0
+            score = total / max(1, len(cache))
+            if score > best: best, bestname = score, name
         return bestname
+
+    # ------------------------------------------------------------ distillation
+    def distill(self, game, teacher, positions=150, rng=None, lr=0.05,
+                depth=8, multipv=24, scale=400.0, opponent=None, selfplay=0.5):
+        """Train GRADE from a teacher's per-move evaluation.
+
+        Self-play gives ONE number per game, spread over ~100 moves by a
+        discount. A teacher scores EVERY legal move in EVERY position, so one
+        position yields ~24 supervised targets instead of a share of one. That is
+        the difference between sparse and dense supervision, and it is the whole
+        reason to use an engine as a teacher rather than only as an opponent.
+
+        Centipawns are squashed to [-1,1] by tanh(cp/scale): grade must stay
+        bounded and comparable across games, and a linear map would let a mate
+        score dominate every ordinary move.
+        """
+        rng = rng or random.Random(0)
+        r = self.region_for(game)
+        states = self._states(game, rng, positions, selfplay, opponent)
+        scored = skipped = 0
+        for st in states:
+            try:
+                tbl = teacher.score_moves(st, depth=depth, multipv=multipv)
+            except Exception:
+                skipped += 1; continue
+            if not tbl: skipped += 1; continue
+            for mv, cp in tbl.items():
+                if not game.is_legal(st, mv): continue      # teacher outranged us
+                x = self.encode(r, game, st, mv)
+                # GRADE ONLY. Training valid=1.0 here floods the validity head
+                # with positives -- the teacher only ever scores legal moves --
+                # and measurably wrecked it: legality 0.925 -> 0.748, and playing
+                # strength with it. Two heads, two signals, never conflated.
+                r.net.step(x, grade=math.tanh(cp / scale), lr=lr)
+                scored += 1
+        return {"game": game.name, "positions": len(states), "moves_scored": scored,
+                "skipped": skipped, "shape": r.net.shape()}
 
     # --------------------------------------------------------- outcome credit
     def selfplay(self, game, rounds=40, rng=None, opponent=None, side=None,

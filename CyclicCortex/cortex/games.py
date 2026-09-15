@@ -15,7 +15,7 @@ class ChessGame:
         "TWO_PLAYER","PIECE_OWNERSHIP","DISPLACEMENT_CAPTURE","PIECE_TYPES",
         "SLIDING_MOVE","STEP_MOVE","ROYAL_PIECE","CHECK_CONSTRAINT","BLOCKED_BY_OCCUPANT"})
     spec = {"GRID_MOVE":4, "OCCUPANCY":3, "PIECE_TYPES":6, "SLIDING_MOVE":3,
-            "ROYAL_PIECE":2, "SIDE":1}
+            "ROYAL_PIECE":2, "EXCHANGE":4, "POSITION":4, "SIDE":1}
 
     def new(self, seed=0): return engine.start_position()
     def legal_moves(self, s): return engine.legal_moves(s)
@@ -46,8 +46,17 @@ class ChessGame:
 
     def random_state(self, rng):
         """Training positions: random midgames give far more variety than the
-        opening, and legality is what is being learned, not openings."""
+        opening, and legality is what is being learned, not openings.
+
+        Filtered to REACHABLE positions. Measured against Stockfish, 99 of 200
+        raw random boards are positions no game can produce -- the side not to
+        move already in check, or a missing king -- so half the training signal
+        was coming from boards that cannot occur."""
         from cortex.board_games import random_chess
+        from cortex.stockfish import playable
+        for _ in range(40):
+            st = random_chess(rng)
+            if playable(st): return st
         return random_chess(rng)
 
     def generalise(self, s, mv):
@@ -66,7 +75,34 @@ class ChessGame:
         if on(tx,ty) and p: b2[ty][tx] = b2[fy][fx]; b2[fy][fx] = ""
         nxt = Chess(b2, s.turn); ks = nxt.king_sq(s.turn)
         exposed = 1.0 if (ks and nxt.attacked(ks, "b" if s.turn=="w" else "w")) else 0.0
+        # EXCHANGE and POSITION: whether the move HANGS the piece, and what the
+        # board looks like. Without them the vocabulary describes only the move,
+        # and a grade head cannot predict a position-dependent evaluation from
+        # move-only features however good the teacher is. Hanging a piece is what
+        # a -1500 material score is made of.
+        V = {"P":1.0, "N":3.2, "B":3.3, "R":5.0, "Q":9.0, "K":0.0}
+        opp = "b" if s.turn == "w" else "w"
+        b2 = [r[:] for r in s.b]
+        if p: b2[ty][tx] = b2[fy][fx]; b2[fy][fx] = ""
+        nx = Chess(b2, s.turn)
+        att = 1.0 if nx.attacked((tx,ty), opp) else 0.0        # destination is hit
+        dfd = 1.0 if nx.attacked((tx,ty), s.turn) else 0.0     # and defended by us
+        mover_v = V.get(p[1], 0.0)/9.0 if p else 0.0
+        taken_v = V.get(t[1], 0.0)/9.0 if t else 0.0
+        hanging = 1.0 if (att and not dfd and mover_v > taken_v) else 0.0
+        mat = 0.0
+        for yy in range(8):
+            for xx in range(8):
+                q = s.at(xx,yy)
+                if q: mat += V.get(q[1],0.0) * (1 if q[0]==s.turn else -1)
+        gives_check = 0.0
+        nk = Chess(b2, opp); ks = nk.king_sq(opp)
+        if ks and nk.attacked(ks, s.turn): gives_check = 1.0
+        centre = 1.0 - (abs(tx-3.5)+abs(ty-3.5))/7.0
         return {
+            "EXCHANGE":   [taken_v, mover_v, hanging, att - dfd],
+            "POSITION":   [max(-1.0, min(1.0, mat/15.0)), gives_check, centre,
+                           1.0 if s.attacked((fx,fy), opp) else 0.0],
             "GRID_MOVE":  [dx/7.0, dy/7.0, abs(dx)/7.0, abs(dy)/7.0],
             "OCCUPANCY":  [0.0 if t else 1.0,
                            1.0 if (t and t[0]==s.turn) else 0.0,
