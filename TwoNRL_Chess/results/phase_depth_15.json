@@ -1,0 +1,3060 @@
+{
+  "runs": [
+    {
+      "arm": "2nrl",
+      "seed": 0,
+      "config": {
+        "arm": "2nrl",
+        "hidden": [
+          32,
+          32
+        ],
+        "rounds": 24,
+        "games": 6,
+        "neg_lr": 0.01,
+        "pos_lr": 0.002,
+        "neg_updates": 40,
+        "pos_updates": 40,
+        "minibatch": 64,
+        "tau": 1.0,
+        "explore": 0.5,
+        "width": 12,
+        "blunder_margin": 50.0,
+        "refusal_margin": 4.0,
+        "boost": 3.0,
+        "buffer_rounds": 5,
+        "schedule": "phased",
+        "neg_fraction": 0.15,
+        "judge_depth": 6,
+        "opp_skill": 0,
+        "opp_depth": 4,
+        "opp_elo": null,
+        "opening_plies": 4,
+        "max_plies": 80,
+        "resign_cp": 1200,
+        "growth": 8,
+        "growth_patience": 3,
+        "growth_min_delta": 0.001,
+        "max_hidden": 256,
+        "eval_games": 10,
+        "track_positions": 120,
+        "heldout": "/home/user/ASI/TwoNRL_Chess/data/heldout.json",
+        "seed": 0,
+        "stockfish": null
+      },
+      "heldout": {
+        "agreement": 0.0175,
+        "top1_legal": 0.015,
+        "refusals": 76.22,
+        "cp_loss": 329.435,
+        "cp_loss_median": 201.5,
+        "blunder_rate": 0.5025,
+        "positions": 400
+      },
+      "heldout_tracked": {
+        "agreement": 0.03333333333333333,
+        "top1_legal": 0.016666666666666666,
+        "refusals": 48.53333333333333,
+        "cp_loss": 366.925,
+        "cp_loss_median": 268.5,
+        "blunder_rate": 0.5583333333333333,
+        "positions": 120
+      },
+      "vs_stockfish": {
+        "score": 0.0,
+        "acpl": 636.2411596736596,
+        "refusals": 78.25755536130535,
+        "top1_legal": 0.012916666666666665,
+        "gave_up": 3,
+        "plies": 24.6,
+        "blunder_rate": 0.752,
+        "material": -1230.0,
+        "games": 10
+      },
+      "opponent": {
+        "skill": 0,
+        "depth": 4,
+        "elo": null
+      },
+      "hidden": [
+        40,
+        32
+      ],
+      "parameters": 40037,
+      "growth": [
+        {
+          "round": 4,
+          "added": 8,
+          "hidden": [
+            40,
+            32
+          ]
+        }
+      ],
+      "activation": [
+        {
+          "a": 0.6472346536956821,
+          "b": 0.43625973572499605,
+          "h": -0.002853748344862148,
+          "k": -7.967229259145956e-06
+        },
+        {
+          "a": 1.050062619633885,
+          "b": 0.380149376022235,
+          "h": 0.0007220093498702909,
+          "k": 0.0021894100848904555
+        },
+        {
+          "a": -1.6905203616357147,
+          "b": 0.48904177004770505,
+          "h": -0.024507120588211206,
+          "k": 2.2365871292377806e-11
+        }
+      ],
+      "negative_rounds": 4,
+      "engine_calls": 2007,
+      "engine_cache_hits": 2,
+      "history": [
+        {
+          "round": 0,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.0,
+          "refusals": 195.71666666666667,
+          "cp_loss": 332.325,
+          "cp_loss_median": 261.5,
+          "blunder_rate": 0.5916666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ]
+        },
+        {
+          "round": 1,
+          "agreement": 0.05,
+          "top1_legal": 0.0,
+          "refusals": 571.1916666666667,
+          "cp_loss": 417.6,
+          "cp_loss_median": 311.5,
+          "blunder_rate": 0.625,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 69,
+            "mean_weight": 2.971014492753623,
+            "rule_share": 1.0,
+            "mean_loss_cp": 439.1449275362319,
+            "phase": "negative",
+            "negative_nll": 0.8404591441897242,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 493.3301587301587,
+            "refusals": 295.0396825396826,
+            "top1_legal": 0.0,
+            "gave_up": 7,
+            "plies": 22.666666666666668,
+            "blunder_rate": 0.7971014492753623,
+            "material": -1183.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 2,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.0,
+          "refusals": 463.075,
+          "cp_loss": 385.28333333333336,
+          "cp_loss_median": 284.0,
+          "blunder_rate": 0.5666666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 135,
+            "mean_weight": 2.9851851851851854,
+            "rule_share": 1.0,
+            "mean_loss_cp": 578.2814814814815,
+            "phase": "negative",
+            "negative_nll": 0.8751206045996349,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 1008.0578926520103,
+            "refusals": 432.7151218062983,
+            "top1_legal": 0.0,
+            "gave_up": 9,
+            "plies": 21.833333333333332,
+            "blunder_rate": 0.8787878787878788,
+            "material": -1516.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 3,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.0,
+          "refusals": 559.3583333333333,
+          "cp_loss": 355.6,
+          "cp_loss_median": 255.5,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 192,
+            "mean_weight": 2.9869791666666665,
+            "rule_share": 1.0,
+            "mean_loss_cp": 691.8541666666666,
+            "phase": "negative",
+            "negative_nll": 1.0857189691789726,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 1681.8514345131991,
+            "refusals": 390.3753076988371,
+            "top1_legal": 0.0,
+            "gave_up": 6,
+            "plies": 19.166666666666668,
+            "blunder_rate": 0.7368421052631579,
+            "material": -533.3333333333334,
+            "games": 6
+          }
+        },
+        {
+          "round": 4,
+          "agreement": 0.05,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 120.875,
+          "cp_loss": 368.31666666666666,
+          "cp_loss_median": 253.5,
+          "blunder_rate": 0.575,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 257,
+            "mean_weight": 2.9863813229571985,
+            "rule_share": 1.0,
+            "mean_loss_cp": 732.2256809338521,
+            "phase": "negative",
+            "negative_nll": 1.0173109692933182,
+            "positive_nll": NaN,
+            "inverted": true,
+            "negative_entropy": -0.0,
+            "inversion_before": {
+              "agreement": 0.06666666666666667,
+              "top1_legal": 0.0,
+              "refusals": 509.48333333333335,
+              "cp_loss": 370.68333333333334,
+              "cp_loss_median": 297.5,
+              "blunder_rate": 0.5916666666666667,
+              "positions": 120
+            },
+            "inversion_error": 0.0,
+            "inversion_after": {
+              "agreement": 0.05,
+              "top1_legal": 0.008333333333333333,
+              "refusals": 120.875,
+              "cp_loss": 368.31666666666666,
+              "cp_loss_median": 253.5,
+              "blunder_rate": 0.575,
+              "positions": 120
+            }
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 1268.2564616755792,
+            "refusals": 607.405592691622,
+            "top1_legal": 0.0,
+            "gave_up": 17,
+            "plies": 21.833333333333332,
+            "blunder_rate": 0.7846153846153846,
+            "material": -316.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 5,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 37.833333333333336,
+          "cp_loss": 363.2416666666667,
+          "cp_loss_median": 223.5,
+          "blunder_rate": 0.5333333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 347,
+            "mean_weight": 2.9747838616714697,
+            "rule_share": 1.0,
+            "mean_loss_cp": 615.821325648415,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.6828257267843258,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 274.6913029100529,
+            "refusals": 184.67410714285714,
+            "top1_legal": 0.0,
+            "gave_up": 6,
+            "plies": 29.5,
+            "blunder_rate": 0.8444444444444444,
+            "material": -1450.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 6,
+          "agreement": 0.008333333333333333,
+          "top1_legal": 0.058333333333333334,
+          "refusals": 34.4,
+          "cp_loss": 367.1333333333333,
+          "cp_loss_median": 256.0,
+          "blunder_rate": 0.5833333333333334,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 356,
+            "mean_weight": 2.94311797752809,
+            "rule_share": 0.9943820224719101,
+            "mean_loss_cp": 602.7865168539325,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.4640973618404298,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 435.2798837736338,
+            "refusals": 54.742747992748,
+            "top1_legal": 0.054503367003367,
+            "gave_up": 0,
+            "plies": 26.333333333333332,
+            "blunder_rate": 0.725,
+            "material": -1400.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 7,
+          "agreement": 0.025,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 34.516666666666666,
+          "cp_loss": 368.425,
+          "cp_loss_median": 271.5,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 360,
+            "mean_weight": 2.895138888888889,
+            "rule_share": 0.9916666666666667,
+            "mean_loss_cp": 520.0972222222222,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.3762491012152034,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 302.46866281866284,
+            "refusals": 41.92308802308802,
+            "top1_legal": 0.016666666666666666,
+            "gave_up": 0,
+            "plies": 22.833333333333332,
+            "blunder_rate": 0.7285714285714285,
+            "material": -1366.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 8,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 35.166666666666664,
+          "cp_loss": 365.60833333333335,
+          "cp_loss_median": 258.0,
+          "blunder_rate": 0.5833333333333334,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 401,
+            "mean_weight": 2.882369077306733,
+            "rule_share": 0.9900249376558603,
+            "mean_loss_cp": 391.6209476309227,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.2438569296351358,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 240.9331367162249,
+            "refusals": 50.799512497306615,
+            "top1_legal": 0.020833333333333332,
+            "gave_up": 0,
+            "plies": 32.166666666666664,
+            "blunder_rate": 0.7346938775510204,
+            "material": -1316.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 9,
+          "agreement": 0.08333333333333333,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 42.891666666666666,
+          "cp_loss": 328.6666666666667,
+          "cp_loss_median": 210.5,
+          "blunder_rate": 0.5083333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 411,
+            "mean_weight": 2.8657177615571774,
+            "rule_share": 0.9878345498783455,
+            "mean_loss_cp": 321.53284671532845,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.340963111391498,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 369.9765151515151,
+            "refusals": 77.23699494949494,
+            "top1_legal": 0.011111111111111112,
+            "gave_up": 0,
+            "plies": 24.5,
+            "blunder_rate": 0.7733333333333333,
+            "material": -1350.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 10,
+          "agreement": 0.05,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 53.9,
+          "cp_loss": 346.925,
+          "cp_loss_median": 219.5,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 397,
+            "mean_weight": 2.8383123425692696,
+            "rule_share": 0.9848866498740554,
+            "mean_loss_cp": 298.6926952141058,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1653861810177932,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 163.32069061542745,
+            "refusals": 52.933277638540794,
+            "top1_legal": 0.037037037037037035,
+            "gave_up": 0,
+            "plies": 25.5,
+            "blunder_rate": 0.717948717948718,
+            "material": -1483.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 11,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 53.525,
+          "cp_loss": 341.71666666666664,
+          "cp_loss_median": 203.0,
+          "blunder_rate": 0.5083333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 397,
+            "mean_weight": 2.855314861460957,
+            "rule_share": 0.9874055415617129,
+            "mean_loss_cp": 256.647355163728,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1468834393433243,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 193.9848484848485,
+            "refusals": 102.5852396514161,
+            "top1_legal": 0.009259259259259259,
+            "gave_up": 1,
+            "plies": 25.5,
+            "blunder_rate": 0.7307692307692307,
+            "material": -1250.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 12,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 49.18333333333333,
+          "cp_loss": 375.9,
+          "cp_loss_median": 238.0,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 398,
+            "mean_weight": 2.870753768844221,
+            "rule_share": 0.9899497487437185,
+            "mean_loss_cp": 305.95979899497485,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0712078983800675,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 631.4235902985903,
+            "refusals": 57.614973914973916,
+            "top1_legal": 0.012820512820512822,
+            "gave_up": 0,
+            "plies": 23.666666666666668,
+            "blunder_rate": 0.8194444444444444,
+            "material": -1050.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 13,
+          "agreement": 0.025,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 55.675,
+          "cp_loss": 353.46666666666664,
+          "cp_loss_median": 246.0,
+          "blunder_rate": 0.5666666666666667,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 374,
+            "mean_weight": 2.8682620320855614,
+            "rule_share": 0.9893048128342246,
+            "mean_loss_cp": 300.5882352941176,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.06078583142896,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 215.20971204721204,
+            "refusals": 64.71690577940578,
+            "top1_legal": 0.018518518518518517,
+            "gave_up": 0,
+            "plies": 24.166666666666668,
+            "blunder_rate": 0.7432432432432432,
+            "material": -1266.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 14,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.025,
+          "refusals": 48.141666666666666,
+          "cp_loss": 352.51666666666665,
+          "cp_loss_median": 238.5,
+          "blunder_rate": 0.575,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 395,
+            "mean_weight": 2.857594936708861,
+            "rule_share": 0.9924050632911392,
+            "mean_loss_cp": 286.8708860759494,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1163209956539766,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 330.44547928922924,
+            "refusals": 84.11520424020425,
+            "top1_legal": 0.0,
+            "gave_up": 0,
+            "plies": 31.5,
+            "blunder_rate": 0.6770833333333334,
+            "material": -1416.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 15,
+          "agreement": 0.025,
+          "top1_legal": 0.0,
+          "refusals": 48.95,
+          "cp_loss": 348.3,
+          "cp_loss_median": 245.5,
+          "blunder_rate": 0.575,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 397,
+            "mean_weight": 2.8602015113350125,
+            "rule_share": 0.9949622166246851,
+            "mean_loss_cp": 312.61460957178844,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1757956211075142,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 342.90527065527067,
+            "refusals": 87.03176638176637,
+            "top1_legal": 0.025925925925925925,
+            "gave_up": 1,
+            "plies": 26.166666666666668,
+            "blunder_rate": 0.7,
+            "material": -1383.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 16,
+          "agreement": 0.025,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 47.225,
+          "cp_loss": 346.19166666666666,
+          "cp_loss_median": 245.5,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 400,
+            "mean_weight": 2.846875,
+            "rule_share": 0.9975,
+            "mean_loss_cp": 350.0275,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0298169908468155,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 410.99860446570966,
+            "refusals": 100.18257132730815,
+            "top1_legal": 0.0,
+            "gave_up": 0,
+            "plies": 26.5,
+            "blunder_rate": 0.7777777777777778,
+            "material": -1250.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 17,
+          "agreement": 0.05,
+          "top1_legal": 0.0,
+          "refusals": 51.55833333333333,
+          "cp_loss": 334.80833333333334,
+          "cp_loss_median": 210.5,
+          "blunder_rate": 0.525,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 411,
+            "mean_weight": 2.8680048661800486,
+            "rule_share": 0.9902676399026764,
+            "mean_loss_cp": 348.11678832116786,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0695397155611044,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 458.0294536618066,
+            "refusals": 92.64292357968829,
+            "top1_legal": 0.04722222222222222,
+            "gave_up": 0,
+            "plies": 26.833333333333332,
+            "blunder_rate": 0.7804878048780488,
+            "material": -766.6666666666666,
+            "games": 6
+          }
+        },
+        {
+          "round": 18,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 71.19166666666666,
+          "cp_loss": 351.96666666666664,
+          "cp_loss_median": 245.0,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 407,
+            "mean_weight": 2.8753071253071254,
+            "rule_share": 0.9926289926289926,
+            "mean_loss_cp": 407.012285012285,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9586936454098437,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 1953.596576668945,
+            "refusals": 123.9157998434314,
+            "top1_legal": 0.0,
+            "gave_up": 3,
+            "plies": 23.0,
+            "blunder_rate": 0.7714285714285715,
+            "material": -1200.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 19,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 72.51666666666667,
+          "cp_loss": 366.15833333333336,
+          "cp_loss_median": 262.0,
+          "blunder_rate": 0.5916666666666667,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 403,
+            "mean_weight": 2.8976426799007444,
+            "rule_share": 0.9900744416873449,
+            "mean_loss_cp": 374.0843672456576,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9022895053888602,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 195.44987005331834,
+            "refusals": 84.68602202395306,
+            "top1_legal": 0.026709401709401708,
+            "gave_up": 1,
+            "plies": 30.5,
+            "blunder_rate": 0.7849462365591398,
+            "material": -1416.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 20,
+          "agreement": 0.05,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 67.80833333333334,
+          "cp_loss": 345.06666666666666,
+          "cp_loss_median": 211.5,
+          "blunder_rate": 0.5333333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 411,
+            "mean_weight": 2.894160583941606,
+            "rule_share": 0.9781021897810219,
+            "mean_loss_cp": 347.11192214111924,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.8946195461789895,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 176.93712121212124,
+            "refusals": 72.73272005772007,
+            "top1_legal": 0.06875901875901876,
+            "gave_up": 1,
+            "plies": 28.5,
+            "blunder_rate": 0.7471264367816092,
+            "material": -1366.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 21,
+          "agreement": 0.05,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 76.70833333333333,
+          "cp_loss": 335.01666666666665,
+          "cp_loss_median": 226.0,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 410,
+            "mean_weight": 2.899390243902439,
+            "rule_share": 0.975609756097561,
+            "mean_loss_cp": 309.0390243902439,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.8645895014417677,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 192.66051799507682,
+            "refusals": 92.4487946693829,
+            "top1_legal": 0.015151515151515152,
+            "gave_up": 0,
+            "plies": 26.166666666666668,
+            "blunder_rate": 0.7625,
+            "material": -1533.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 22,
+          "agreement": 0.025,
+          "top1_legal": 0.05,
+          "refusals": 64.69166666666666,
+          "cp_loss": 352.01666666666665,
+          "cp_loss_median": 233.0,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 404,
+            "mean_weight": 2.8669554455445545,
+            "rule_share": 0.9801980198019802,
+            "mean_loss_cp": 284.86138613861385,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.8533374195012868,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 421.30087412587415,
+            "refusals": 79.67250712250713,
+            "top1_legal": 0.012820512820512822,
+            "gave_up": 3,
+            "plies": 24.833333333333332,
+            "blunder_rate": 0.8289473684210527,
+            "material": -1516.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 23,
+          "agreement": 0.05,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 61.9,
+          "cp_loss": 334.1,
+          "cp_loss_median": 227.0,
+          "blunder_rate": 0.5416666666666666,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 425,
+            "mean_weight": 2.8501882352941177,
+            "rule_share": 0.971764705882353,
+            "mean_loss_cp": 274.9764705882353,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.7879761576043789,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 617.1648229548229,
+            "refusals": 74.11815832315831,
+            "top1_legal": 0.03774928774928775,
+            "gave_up": 2,
+            "plies": 30.0,
+            "blunder_rate": 0.7362637362637363,
+            "material": -1216.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 24,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 48.53333333333333,
+          "cp_loss": 366.925,
+          "cp_loss_median": 268.5,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 409,
+            "mean_weight": 2.835770171149144,
+            "rule_share": 0.9682151589242054,
+            "mean_loss_cp": 296.0464547677262,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.8870794698375993,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 312.2387144331417,
+            "refusals": 70.62183399675659,
+            "top1_legal": 0.028322440087145972,
+            "gave_up": 1,
+            "plies": 24.833333333333332,
+            "blunder_rate": 0.8157894736842105,
+            "material": -1183.3333333333333,
+            "games": 6
+          }
+        }
+      ],
+      "seconds": 97.3,
+      "weights": "weights_depth15/2nrl_seed0.npz"
+    },
+    {
+      "arm": "2nrl",
+      "seed": 1,
+      "config": {
+        "arm": "2nrl",
+        "hidden": [
+          32,
+          32
+        ],
+        "rounds": 24,
+        "games": 6,
+        "neg_lr": 0.01,
+        "pos_lr": 0.002,
+        "neg_updates": 40,
+        "pos_updates": 40,
+        "minibatch": 64,
+        "tau": 1.0,
+        "explore": 0.5,
+        "width": 12,
+        "blunder_margin": 50.0,
+        "refusal_margin": 4.0,
+        "boost": 3.0,
+        "buffer_rounds": 5,
+        "schedule": "phased",
+        "neg_fraction": 0.15,
+        "judge_depth": 6,
+        "opp_skill": 0,
+        "opp_depth": 4,
+        "opp_elo": null,
+        "opening_plies": 4,
+        "max_plies": 80,
+        "resign_cp": 1200,
+        "growth": 8,
+        "growth_patience": 3,
+        "growth_min_delta": 0.001,
+        "max_hidden": 256,
+        "eval_games": 10,
+        "track_positions": 120,
+        "heldout": "/home/user/ASI/TwoNRL_Chess/data/heldout.json",
+        "seed": 1,
+        "stockfish": null
+      },
+      "heldout": {
+        "agreement": 0.0525,
+        "top1_legal": 0.0275,
+        "refusals": 47.38,
+        "cp_loss": 303.93,
+        "cp_loss_median": 188.5,
+        "blunder_rate": 0.485,
+        "positions": 400
+      },
+      "heldout_tracked": {
+        "agreement": 0.06666666666666667,
+        "top1_legal": 0.016666666666666666,
+        "refusals": 49.8,
+        "cp_loss": 346.5,
+        "cp_loss_median": 234.5,
+        "blunder_rate": 0.5416666666666666,
+        "positions": 120
+      },
+      "vs_stockfish": {
+        "score": 0.0,
+        "acpl": 383.6742553688142,
+        "refusals": 41.713800186741366,
+        "top1_legal": 0.030882352941176472,
+        "gave_up": 0,
+        "plies": 21.6,
+        "blunder_rate": 0.7727272727272727,
+        "material": -1280.0,
+        "games": 10
+      },
+      "opponent": {
+        "skill": 0,
+        "depth": 4,
+        "elo": null
+      },
+      "hidden": [
+        48,
+        32
+      ],
+      "parameters": 48005,
+      "growth": [
+        {
+          "round": 11,
+          "added": 8,
+          "hidden": [
+            40,
+            32
+          ]
+        },
+        {
+          "round": 17,
+          "added": 8,
+          "hidden": [
+            48,
+            32
+          ]
+        }
+      ],
+      "activation": [
+        {
+          "a": 0.3721228770413397,
+          "b": 0.42253536076844894,
+          "h": -7.032426020339411e-05,
+          "k": 0.00042492472381004995
+        },
+        {
+          "a": 1.0337592097100257,
+          "b": 0.38977886199256895,
+          "h": 0.00034224781657182443,
+          "k": 0.0003563604492551007
+        },
+        {
+          "a": -1.6962723517875067,
+          "b": 0.4839479153865382,
+          "h": 0.00313022879183544,
+          "k": 5.966507284238005e-11
+        }
+      ],
+      "negative_rounds": 4,
+      "engine_calls": 1958,
+      "engine_cache_hits": 1,
+      "history": [
+        {
+          "round": 0,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.0,
+          "refusals": 91.40833333333333,
+          "cp_loss": 310.2916666666667,
+          "cp_loss_median": 203.0,
+          "blunder_rate": 0.5,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ]
+        },
+        {
+          "round": 1,
+          "agreement": 0.016666666666666666,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 284.75,
+          "cp_loss": 422.81666666666666,
+          "cp_loss_median": 405.5,
+          "blunder_rate": 0.6416666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 65,
+            "mean_weight": 2.9884615384615385,
+            "rule_share": 1.0,
+            "mean_loss_cp": 509.96923076923076,
+            "phase": "negative",
+            "negative_nll": 0.8651783682074186,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 621.6257936507936,
+            "refusals": 227.8524531024531,
+            "top1_legal": 0.0,
+            "gave_up": 3,
+            "plies": 21.166666666666668,
+            "blunder_rate": 0.8,
+            "material": -1450.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 2,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.0,
+          "refusals": 424.0833333333333,
+          "cp_loss": 387.40833333333336,
+          "cp_loss_median": 308.5,
+          "blunder_rate": 0.6083333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 139,
+            "mean_weight": 2.991007194244604,
+            "rule_share": 1.0,
+            "mean_loss_cp": 400.2517985611511,
+            "phase": "negative",
+            "negative_nll": 0.8867263297454993,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 372.46611143486143,
+            "refusals": 538.0332896270396,
+            "top1_legal": 0.0,
+            "gave_up": 13,
+            "plies": 24.333333333333332,
+            "blunder_rate": 0.8108108108108109,
+            "material": -1316.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 3,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 489.23333333333335,
+          "cp_loss": 407.53333333333336,
+          "cp_loss_median": 407.5,
+          "blunder_rate": 0.6833333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 204,
+            "mean_weight": 2.9938725490196076,
+            "rule_share": 1.0,
+            "mean_loss_cp": 419.4852941176471,
+            "phase": "negative",
+            "negative_nll": 0.967224673948458,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 489.56328671328674,
+            "refusals": 587.0722027972027,
+            "top1_legal": 0.0,
+            "gave_up": 13,
+            "plies": 21.333333333333332,
+            "blunder_rate": 0.8,
+            "material": -1316.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 4,
+          "agreement": 0.025,
+          "top1_legal": 0.0,
+          "refusals": 112.09166666666667,
+          "cp_loss": 344.6,
+          "cp_loss_median": 232.5,
+          "blunder_rate": 0.5333333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 279,
+            "mean_weight": 2.9955197132616487,
+            "rule_share": 1.0,
+            "mean_loss_cp": 414.42652329749103,
+            "phase": "negative",
+            "negative_nll": 0.8080938689337818,
+            "positive_nll": NaN,
+            "inverted": true,
+            "negative_entropy": -0.0,
+            "inversion_before": {
+              "agreement": 0.058333333333333334,
+              "top1_legal": 0.0,
+              "refusals": 471.175,
+              "cp_loss": 372.2583333333333,
+              "cp_loss_median": 308.0,
+              "blunder_rate": 0.6,
+              "positions": 120
+            },
+            "inversion_error": 0.0,
+            "inversion_after": {
+              "agreement": 0.025,
+              "top1_legal": 0.0,
+              "refusals": 112.09166666666667,
+              "cp_loss": 344.6,
+              "cp_loss_median": 232.5,
+              "blunder_rate": 0.5333333333333333,
+              "positions": 120
+            }
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 504.0399572649572,
+            "refusals": 547.9929995929997,
+            "top1_legal": 0.0,
+            "gave_up": 9,
+            "plies": 24.666666666666668,
+            "blunder_rate": 0.8133333333333334,
+            "material": -1383.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 5,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.025,
+          "refusals": 48.925,
+          "cp_loss": 351.23333333333335,
+          "cp_loss_median": 245.5,
+          "blunder_rate": 0.575,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 374,
+            "mean_weight": 2.982620320855615,
+            "rule_share": 1.0,
+            "mean_loss_cp": 398.89572192513367,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.684219638902908,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 429.57764182890963,
+            "refusals": 174.04487844061882,
+            "top1_legal": 0.0,
+            "gave_up": 5,
+            "plies": 31.333333333333332,
+            "blunder_rate": 0.8105263157894737,
+            "material": -983.3333333333334,
+            "games": 6
+          }
+        },
+        {
+          "round": 6,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 31.741666666666667,
+          "cp_loss": 352.7916666666667,
+          "cp_loss_median": 271.0,
+          "blunder_rate": 0.5916666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 375,
+            "mean_weight": 2.9564266666666668,
+            "rule_share": 0.9973333333333333,
+            "mean_loss_cp": 432.71733333333333,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.3363608860955116,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 1026.6865588115588,
+            "refusals": 78.40993844118844,
+            "top1_legal": 0.026709401709401708,
+            "gave_up": 1,
+            "plies": 22.166666666666668,
+            "blunder_rate": 0.7164179104477612,
+            "material": -1016.6666666666666,
+            "games": 6
+          }
+        },
+        {
+          "round": 7,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 34.583333333333336,
+          "cp_loss": 363.675,
+          "cp_loss_median": 254.0,
+          "blunder_rate": 0.5416666666666666,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 385,
+            "mean_weight": 2.9147012987012983,
+            "rule_share": 0.9896103896103896,
+            "mean_loss_cp": 465.14285714285717,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.3177369445254579,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 576.8074044011544,
+            "refusals": 41.61954365079365,
+            "top1_legal": 0.032512626262626264,
+            "gave_up": 0,
+            "plies": 27.666666666666668,
+            "blunder_rate": 0.7857142857142857,
+            "material": -1433.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 8,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.025,
+          "refusals": 37.766666666666666,
+          "cp_loss": 369.14166666666665,
+          "cp_loss_median": 248.0,
+          "blunder_rate": 0.5666666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 396,
+            "mean_weight": 2.8690909090909087,
+            "rule_share": 0.9848484848484849,
+            "mean_loss_cp": 521.89898989899,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1139890002253376,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 2136.1949988328665,
+            "refusals": 23.126283846872084,
+            "top1_legal": 0.02022058823529412,
+            "gave_up": 0,
+            "plies": 25.0,
+            "blunder_rate": 0.7368421052631579,
+            "material": -1116.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 9,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.0,
+          "refusals": 32.74166666666667,
+          "cp_loss": 350.725,
+          "cp_loss_median": 240.0,
+          "blunder_rate": 0.5416666666666666,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 412,
+            "mean_weight": 2.8276456310679605,
+            "rule_share": 0.9781553398058253,
+            "mean_loss_cp": 488.06796116504853,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1866322141773737,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 258.94166666666666,
+            "refusals": 60.667857142857144,
+            "top1_legal": 0.03306878306878307,
+            "gave_up": 0,
+            "plies": 30.333333333333332,
+            "blunder_rate": 0.782608695652174,
+            "material": -1566.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 10,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 28.758333333333333,
+          "cp_loss": 337.125,
+          "cp_loss_median": 273.5,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 401,
+            "mean_weight": 2.80359102244389,
+            "rule_share": 0.9775561097256857,
+            "mean_loss_cp": 472.16708229426433,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.146854069300298,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 302.6904379933792,
+            "refusals": 138.73057040998216,
+            "top1_legal": 0.015151515151515152,
+            "gave_up": 5,
+            "plies": 28.0,
+            "blunder_rate": 0.7411764705882353,
+            "material": -816.6666666666666,
+            "games": 6
+          }
+        },
+        {
+          "round": 11,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 25.866666666666667,
+          "cp_loss": 368.875,
+          "cp_loss_median": 305.5,
+          "blunder_rate": 0.6083333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 417,
+            "mean_weight": 2.796954436450839,
+            "rule_share": 0.9760191846522782,
+            "mean_loss_cp": 400.8201438848921,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1957300987103459,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 299.1846785710563,
+            "refusals": 55.435716035483836,
+            "top1_legal": 0.018518518518518517,
+            "gave_up": 0,
+            "plies": 26.833333333333332,
+            "blunder_rate": 0.7439024390243902,
+            "material": -1350.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 12,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 35.56666666666667,
+          "cp_loss": 368.9,
+          "cp_loss_median": 256.5,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 391,
+            "mean_weight": 2.799769820971867,
+            "rule_share": 0.9718670076726342,
+            "mean_loss_cp": 443.16368286445015,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1183795383615127,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.16666666666666666,
+            "acpl": 2203.0389957264956,
+            "refusals": 77.26949786324788,
+            "top1_legal": 0.07407407407407407,
+            "gave_up": 2,
+            "plies": 19.5,
+            "blunder_rate": 0.7333333333333333,
+            "material": -1000.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 13,
+          "agreement": 0.075,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 34.45,
+          "cp_loss": 306.025,
+          "cp_loss_median": 202.5,
+          "blunder_rate": 0.5083333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 406,
+            "mean_weight": 2.7985467980295566,
+            "rule_share": 0.9778325123152709,
+            "mean_loss_cp": 338.7857142857143,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9951802680910887,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 254.70019841269843,
+            "refusals": 47.27023809523809,
+            "top1_legal": 0.0,
+            "gave_up": 0,
+            "plies": 30.0,
+            "blunder_rate": 0.6703296703296703,
+            "material": -1266.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 14,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 44.175,
+          "cp_loss": 341.6,
+          "cp_loss_median": 230.5,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 383,
+            "mean_weight": 2.799295039164491,
+            "rule_share": 0.97911227154047,
+            "mean_loss_cp": 330.3028720626632,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9442456646112423,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 215.93194444444444,
+            "refusals": 96.25833333333333,
+            "top1_legal": 0.022222222222222223,
+            "gave_up": 2,
+            "plies": 22.166666666666668,
+            "blunder_rate": 0.8235294117647058,
+            "material": -1283.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 15,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 43.59166666666667,
+          "cp_loss": 329.73333333333335,
+          "cp_loss_median": 198.0,
+          "blunder_rate": 0.475,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 385,
+            "mean_weight": 2.806831168831169,
+            "rule_share": 0.9792207792207792,
+            "mean_loss_cp": 306.5272727272727,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0320505180312145,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 161.1074296074296,
+            "refusals": 75.619338994339,
+            "top1_legal": 0.0,
+            "gave_up": 0,
+            "plies": 28.166666666666668,
+            "blunder_rate": 0.686046511627907,
+            "material": -1383.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 16,
+          "agreement": 0.1,
+          "top1_legal": 0.058333333333333334,
+          "refusals": 34.775,
+          "cp_loss": 327.875,
+          "cp_loss_median": 222.5,
+          "blunder_rate": 0.5333333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 392,
+            "mean_weight": 2.800076530612245,
+            "rule_share": 0.9821428571428571,
+            "mean_loss_cp": 281.59183673469386,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0347504590432945,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 188.7147859450491,
+            "refusals": 41.99746963562753,
+            "top1_legal": 0.023923444976076555,
+            "gave_up": 0,
+            "plies": 29.5,
+            "blunder_rate": 0.7777777777777778,
+            "material": -1250.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 17,
+          "agreement": 0.025,
+          "top1_legal": 0.05,
+          "refusals": 31.4,
+          "cp_loss": 345.71666666666664,
+          "cp_loss_median": 230.0,
+          "blunder_rate": 0.525,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 402,
+            "mean_weight": 2.7980597014925372,
+            "rule_share": 0.9875621890547264,
+            "mean_loss_cp": 215.31592039800995,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9992523722711747,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 336.278613053613,
+            "refusals": 81.95056332556334,
+            "top1_legal": 0.03333333333333333,
+            "gave_up": 2,
+            "plies": 22.166666666666668,
+            "blunder_rate": 0.7205882352941176,
+            "material": -1466.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 18,
+          "agreement": 0.025,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 29.15,
+          "cp_loss": 330.975,
+          "cp_loss_median": 226.5,
+          "blunder_rate": 0.5416666666666666,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 398,
+            "mean_weight": 2.8161306532663315,
+            "rule_share": 0.9874371859296482,
+            "mean_loss_cp": 245.94723618090453,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0153865450533075,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 390.3373458899775,
+            "refusals": 76.77185625047467,
+            "top1_legal": 0.0,
+            "gave_up": 2,
+            "plies": 28.5,
+            "blunder_rate": 0.7816091954022989,
+            "material": -1200.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 19,
+          "agreement": 0.08333333333333333,
+          "top1_legal": 0.058333333333333334,
+          "refusals": 24.266666666666666,
+          "cp_loss": 311.69166666666666,
+          "cp_loss_median": 213.5,
+          "blunder_rate": 0.525,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 406,
+            "mean_weight": 2.8209852216748765,
+            "rule_share": 0.9852216748768473,
+            "mean_loss_cp": 242.19950738916256,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9566736337725162,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 185.8346674567263,
+            "refusals": 83.18657616892911,
+            "top1_legal": 0.04139194139194139,
+            "gave_up": 0,
+            "plies": 24.833333333333332,
+            "blunder_rate": 0.7631578947368421,
+            "material": -1100.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 20,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.058333333333333334,
+          "refusals": 30.833333333333332,
+          "cp_loss": 337.93333333333334,
+          "cp_loss_median": 228.0,
+          "blunder_rate": 0.5416666666666666,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 374,
+            "mean_weight": 2.7869518716577537,
+            "rule_share": 0.9786096256684492,
+            "mean_loss_cp": 301.33957219251334,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9320596397419072,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 733.4545454545455,
+            "refusals": 45.53619528619529,
+            "top1_legal": 0.03367003367003367,
+            "gave_up": 0,
+            "plies": 17.666666666666668,
+            "blunder_rate": 0.8333333333333334,
+            "material": -1233.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 21,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.041666666666666664,
+          "refusals": 33.03333333333333,
+          "cp_loss": 315.4583333333333,
+          "cp_loss_median": 206.5,
+          "blunder_rate": 0.5,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 367,
+            "mean_weight": 2.8186376021798365,
+            "rule_share": 0.9727520435967303,
+            "mean_loss_cp": 399.3923705722071,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.841952490498316,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 620.1598290598291,
+            "refusals": 77.75143467643468,
+            "top1_legal": 0.03952991452991453,
+            "gave_up": 0,
+            "plies": 27.166666666666668,
+            "blunder_rate": 0.8292682926829268,
+            "material": -1183.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 22,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.03333333333333333,
+          "refusals": 35.083333333333336,
+          "cp_loss": 342.65,
+          "cp_loss_median": 210.5,
+          "blunder_rate": 0.5166666666666667,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 371,
+            "mean_weight": 2.7974932614555255,
+            "rule_share": 0.9757412398921833,
+            "mean_loss_cp": 401.07547169811323,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.9474338328149781,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 304.4951277480689,
+            "refusals": 42.575450584274115,
+            "top1_legal": 0.015151515151515152,
+            "gave_up": 0,
+            "plies": 23.5,
+            "blunder_rate": 0.8472222222222222,
+            "material": -1283.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 23,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 48.516666666666666,
+          "cp_loss": 351.4166666666667,
+          "cp_loss_median": 284.5,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 360,
+            "mean_weight": 2.7950833333333334,
+            "rule_share": 0.9694444444444444,
+            "mean_loss_cp": 383.4972222222222,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.7819441821623287,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 283.8945637695638,
+            "refusals": 68.4814047064047,
+            "top1_legal": 0.05170940170940171,
+            "gave_up": 2,
+            "plies": 25.5,
+            "blunder_rate": 0.7307692307692307,
+            "material": -1216.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 24,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 49.8,
+          "cp_loss": 346.5,
+          "cp_loss_median": 234.5,
+          "blunder_rate": 0.5416666666666666,
+          "positions": 120,
+          "hidden": [
+            48,
+            32
+          ],
+          "train": {
+            "n": 359,
+            "mean_weight": 2.7724791086350975,
+            "rule_share": 0.9721448467966574,
+            "mean_loss_cp": 388.7409470752089,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 0.8614376835517993,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 215.925636835931,
+            "refusals": 45.250557231439586,
+            "top1_legal": 0.04245014245014245,
+            "gave_up": 0,
+            "plies": 25.166666666666668,
+            "blunder_rate": 0.7662337662337663,
+            "material": -1616.6666666666667,
+            "games": 6
+          }
+        }
+      ],
+      "seconds": 96.4,
+      "weights": "weights_depth15/2nrl_seed1.npz"
+    },
+    {
+      "arm": "2nrl",
+      "seed": 2,
+      "config": {
+        "arm": "2nrl",
+        "hidden": [
+          32,
+          32
+        ],
+        "rounds": 24,
+        "games": 6,
+        "neg_lr": 0.01,
+        "pos_lr": 0.002,
+        "neg_updates": 40,
+        "pos_updates": 40,
+        "minibatch": 64,
+        "tau": 1.0,
+        "explore": 0.5,
+        "width": 12,
+        "blunder_margin": 50.0,
+        "refusal_margin": 4.0,
+        "boost": 3.0,
+        "buffer_rounds": 5,
+        "schedule": "phased",
+        "neg_fraction": 0.15,
+        "judge_depth": 6,
+        "opp_skill": 0,
+        "opp_depth": 4,
+        "opp_elo": null,
+        "opening_plies": 4,
+        "max_plies": 80,
+        "resign_cp": 1200,
+        "growth": 8,
+        "growth_patience": 3,
+        "growth_min_delta": 0.001,
+        "max_hidden": 256,
+        "eval_games": 10,
+        "track_positions": 120,
+        "heldout": "/home/user/ASI/TwoNRL_Chess/data/heldout.json",
+        "seed": 2,
+        "stockfish": null
+      },
+      "heldout": {
+        "agreement": 0.035,
+        "top1_legal": 0.01,
+        "refusals": 109.44,
+        "cp_loss": 322.655,
+        "cp_loss_median": 201.5,
+        "blunder_rate": 0.5025,
+        "positions": 400
+      },
+      "heldout_tracked": {
+        "agreement": 0.016666666666666666,
+        "top1_legal": 0.0,
+        "refusals": 112.875,
+        "cp_loss": 371.95,
+        "cp_loss_median": 289.5,
+        "blunder_rate": 0.5916666666666667,
+        "positions": 120
+      },
+      "vs_stockfish": {
+        "score": 0.0,
+        "acpl": 508.3368184429949,
+        "refusals": 153.25631557984497,
+        "top1_legal": 0.013025210084033612,
+        "gave_up": 4,
+        "plies": 28.9,
+        "blunder_rate": 0.7346938775510204,
+        "material": -1110.0,
+        "games": 10
+      },
+      "opponent": {
+        "skill": 0,
+        "depth": 4,
+        "elo": null
+      },
+      "hidden": [
+        40,
+        32
+      ],
+      "parameters": 40037,
+      "growth": [
+        {
+          "round": 16,
+          "added": 8,
+          "hidden": [
+            40,
+            32
+          ]
+        }
+      ],
+      "activation": [
+        {
+          "a": 0.6479224081664792,
+          "b": 0.41828672402882,
+          "h": 0.0015991931842109677,
+          "k": -0.00039724836817049534
+        },
+        {
+          "a": 1.0425887375499776,
+          "b": 0.38930691853755917,
+          "h": 0.0011220098423325216,
+          "k": -0.0006127735824110474
+        },
+        {
+          "a": -1.6963454534957032,
+          "b": 0.5065677383182641,
+          "h": -0.015799680870304086,
+          "k": 2.716348509318984e-10
+        }
+      ],
+      "negative_rounds": 4,
+      "engine_calls": 1966,
+      "engine_cache_hits": 0,
+      "history": [
+        {
+          "round": 0,
+          "agreement": 0.016666666666666666,
+          "top1_legal": 0.05,
+          "refusals": 173.575,
+          "cp_loss": 458.48333333333335,
+          "cp_loss_median": 356.5,
+          "blunder_rate": 0.6666666666666666,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ]
+        },
+        {
+          "round": 1,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.0,
+          "refusals": 708.6333333333333,
+          "cp_loss": 411.64166666666665,
+          "cp_loss_median": 381.0,
+          "blunder_rate": 0.7,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 83,
+            "mean_weight": 2.960843373493976,
+            "rule_share": 1.0,
+            "mean_loss_cp": 372.6265060240964,
+            "phase": "negative",
+            "negative_nll": 0.9050262114665365,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": -0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 354.2227272727273,
+            "refusals": 157.59204545454546,
+            "top1_legal": 0.022222222222222223,
+            "gave_up": 2,
+            "plies": 28.0,
+            "blunder_rate": 0.8,
+            "material": -1283.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 2,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.0,
+          "refusals": 672.65,
+          "cp_loss": 333.06666666666666,
+          "cp_loss_median": 245.0,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 151,
+            "mean_weight": 2.9701986754966887,
+            "rule_share": 0.9933774834437086,
+            "mean_loss_cp": 364.6423841059603,
+            "phase": "negative",
+            "negative_nll": 0.9392227189737052,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": 0.03982755791135904
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 368.3788961038961,
+            "refusals": 538.4592502405002,
+            "top1_legal": 0.011904761904761904,
+            "gave_up": 14,
+            "plies": 22.166666666666668,
+            "blunder_rate": 0.8088235294117647,
+            "material": -1466.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 3,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.0,
+          "refusals": 656.4833333333333,
+          "cp_loss": 366.525,
+          "cp_loss_median": 263.5,
+          "blunder_rate": 0.5833333333333334,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 212,
+            "mean_weight": 2.974056603773585,
+            "rule_share": 0.9952830188679245,
+            "mean_loss_cp": 435.8301886792453,
+            "phase": "negative",
+            "negative_nll": 0.8137168233990095,
+            "positive_nll": NaN,
+            "inverted": false,
+            "negative_entropy": 0.029972755033097265
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 688.9887085137085,
+            "refusals": 498.42212602212595,
+            "top1_legal": 0.0,
+            "gave_up": 11,
+            "plies": 20.0,
+            "blunder_rate": 0.7377049180327869,
+            "material": -1233.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 4,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.0,
+          "refusals": 99.98333333333333,
+          "cp_loss": 357.68333333333334,
+          "cp_loss_median": 289.0,
+          "blunder_rate": 0.5916666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 293,
+            "mean_weight": 2.9803754266211606,
+            "rule_share": 0.9965870307167235,
+            "mean_loss_cp": 453.0887372013652,
+            "phase": "negative",
+            "negative_nll": 0.8278586073224392,
+            "positive_nll": NaN,
+            "inverted": true,
+            "negative_entropy": 0.022793393104650055,
+            "inversion_before": {
+              "agreement": 0.05,
+              "top1_legal": 0.0,
+              "refusals": 668.825,
+              "cp_loss": 374.18333333333334,
+              "cp_loss_median": 291.5,
+              "blunder_rate": 0.5916666666666667,
+              "positions": 120
+            },
+            "inversion_error": 0.0,
+            "inversion_after": {
+              "agreement": 0.058333333333333334,
+              "top1_legal": 0.0,
+              "refusals": 99.98333333333333,
+              "cp_loss": 357.68333333333334,
+              "cp_loss_median": 289.0,
+              "blunder_rate": 0.5916666666666667,
+              "positions": 120
+            }
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 549.1909722222223,
+            "refusals": 452.1782407407407,
+            "top1_legal": 0.0,
+            "gave_up": 8,
+            "plies": 26.5,
+            "blunder_rate": 0.7654320987654321,
+            "material": -983.3333333333334,
+            "games": 6
+          }
+        },
+        {
+          "round": 5,
+          "agreement": 0.008333333333333333,
+          "top1_legal": 0.025,
+          "refusals": 53.68333333333333,
+          "cp_loss": 355.68333333333334,
+          "cp_loss_median": 245.0,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 374,
+            "mean_weight": 2.9752673796791442,
+            "rule_share": 0.9973262032085561,
+            "mean_loss_cp": 416.29411764705884,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.8414696700950015,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 266.8580357142857,
+            "refusals": 162.4684523809524,
+            "top1_legal": 0.0,
+            "gave_up": 2,
+            "plies": 26.5,
+            "blunder_rate": 0.7654320987654321,
+            "material": -1366.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 6,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 55.6,
+          "cp_loss": 352.6666666666667,
+          "cp_loss_median": 272.5,
+          "blunder_rate": 0.6333333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 368,
+            "mean_weight": 2.9599184782608696,
+            "rule_share": 0.9918478260869565,
+            "mean_loss_cp": 521.0625,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.5842213932199882,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 971.0666666666666,
+            "refusals": 94.25251322751323,
+            "top1_legal": 0.032407407407407406,
+            "gave_up": 1,
+            "plies": 25.333333333333332,
+            "blunder_rate": 0.7142857142857143,
+            "material": -1000.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 7,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 62.61666666666667,
+          "cp_loss": 366.3833333333333,
+          "cp_loss_median": 296.0,
+          "blunder_rate": 0.575,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 366,
+            "mean_weight": 2.9453551912568305,
+            "rule_share": 0.9918032786885246,
+            "mean_loss_cp": 493.827868852459,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.4869639597901232,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 212.8028846153846,
+            "refusals": 104.95103276353278,
+            "top1_legal": 0.012820512820512822,
+            "gave_up": 2,
+            "plies": 21.5,
+            "blunder_rate": 0.7727272727272727,
+            "material": -1116.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 8,
+          "agreement": 0.05,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 67.825,
+          "cp_loss": 349.175,
+          "cp_loss_median": 238.5,
+          "blunder_rate": 0.5583333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 380,
+            "mean_weight": 2.9296052631578946,
+            "rule_share": 0.9921052631578947,
+            "mean_loss_cp": 459.5578947368421,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.4777289458531178,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 427.35515873015873,
+            "refusals": 107.65277777777777,
+            "top1_legal": 0.0,
+            "gave_up": 1,
+            "plies": 24.5,
+            "blunder_rate": 0.7733333333333333,
+            "material": -1133.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 9,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.025,
+          "refusals": 62.53333333333333,
+          "cp_loss": 337.2083333333333,
+          "cp_loss_median": 219.5,
+          "blunder_rate": 0.5333333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 378,
+            "mean_weight": 2.927910052910053,
+            "rule_share": 0.9920634920634921,
+            "mean_loss_cp": 457.031746031746,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.2502019439908874,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 578.2103951117109,
+            "refusals": 126.1171324411456,
+            "top1_legal": 0.0,
+            "gave_up": 0,
+            "plies": 26.166666666666668,
+            "blunder_rate": 0.759493670886076,
+            "material": -1200.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 10,
+          "agreement": 0.075,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 62.25,
+          "cp_loss": 376.56666666666666,
+          "cp_loss_median": 269.0,
+          "blunder_rate": 0.5333333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 362,
+            "mean_weight": 2.926408839779006,
+            "rule_share": 0.988950276243094,
+            "mean_loss_cp": 470.66574585635357,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.29988598131943,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 286.87189754689757,
+            "refusals": 133.2682178932179,
+            "top1_legal": 0.011904761904761904,
+            "gave_up": 1,
+            "plies": 21.166666666666668,
+            "blunder_rate": 0.6615384615384615,
+            "material": -1183.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 11,
+          "agreement": 0.05,
+          "top1_legal": 0.0,
+          "refusals": 72.93333333333334,
+          "cp_loss": 389.4916666666667,
+          "cp_loss_median": 335.0,
+          "blunder_rate": 0.6083333333333333,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 370,
+            "mean_weight": 2.9232702702702706,
+            "rule_share": 0.9945945945945946,
+            "mean_loss_cp": 366.2432432432432,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.2420914826092704,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 404.02398070339245,
+            "refusals": 147.56831621537503,
+            "top1_legal": 0.0,
+            "gave_up": 1,
+            "plies": 28.166666666666668,
+            "blunder_rate": 0.8117647058823529,
+            "material": -1183.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 12,
+          "agreement": 0.025,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 81.025,
+          "cp_loss": 393.475,
+          "cp_loss_median": 346.5,
+          "blunder_rate": 0.6,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 369,
+            "mean_weight": 2.938644986449865,
+            "rule_share": 0.997289972899729,
+            "mean_loss_cp": 433.7886178861789,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.172918190363757,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 655.8533272283272,
+            "refusals": 130.484126984127,
+            "top1_legal": 0.0,
+            "gave_up": 2,
+            "plies": 21.5,
+            "blunder_rate": 0.7846153846153846,
+            "material": -1083.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 13,
+          "agreement": 0.041666666666666664,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 90.74166666666666,
+          "cp_loss": 362.60833333333335,
+          "cp_loss_median": 307.5,
+          "blunder_rate": 0.5916666666666667,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 362,
+            "mean_weight": 2.948508287292818,
+            "rule_share": 0.9972375690607734,
+            "mean_loss_cp": 439.89502762430936,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1129978946446313,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.16666666666666666,
+            "acpl": 821.667824074074,
+            "refusals": 101.27685185185184,
+            "top1_legal": 0.0,
+            "gave_up": 1,
+            "plies": 22.166666666666668,
+            "blunder_rate": 0.8235294117647058,
+            "material": -1066.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 14,
+          "agreement": 0.05,
+          "top1_legal": 0.0,
+          "refusals": 79.48333333333333,
+          "cp_loss": 349.6666666666667,
+          "cp_loss_median": 262.0,
+          "blunder_rate": 0.5833333333333334,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 365,
+            "mean_weight": 2.926520547945205,
+            "rule_share": 0.9917808219178083,
+            "mean_loss_cp": 416.9890410958904,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.2324270426077126,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 497.55844579397217,
+            "refusals": 179.79487940250326,
+            "top1_legal": 0.019883040935672513,
+            "gave_up": 5,
+            "plies": 27.0,
+            "blunder_rate": 0.7195121951219512,
+            "material": -1183.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 15,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 79.31666666666666,
+          "cp_loss": 349.53333333333336,
+          "cp_loss_median": 229.0,
+          "blunder_rate": 0.55,
+          "positions": 120,
+          "hidden": [
+            32,
+            32
+          ],
+          "train": {
+            "n": 408,
+            "mean_weight": 2.932156862745098,
+            "rule_share": 0.9950980392156863,
+            "mean_loss_cp": 426.77450980392155,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.2084295533022504,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 413.0073289283816,
+            "refusals": 147.00886686413003,
+            "top1_legal": 0.0,
+            "gave_up": 4,
+            "plies": 35.666666666666664,
+            "blunder_rate": 0.6944444444444444,
+            "material": -1200.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 16,
+          "agreement": 0.06666666666666667,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 97.66666666666667,
+          "cp_loss": 353.2583333333333,
+          "cp_loss_median": 221.5,
+          "blunder_rate": 0.5083333333333333,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 396,
+            "mean_weight": 2.932196969696969,
+            "rule_share": 0.98989898989899,
+            "mean_loss_cp": 438.300505050505,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1757452253691802,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 700.173141186299,
+            "refusals": 96.96449456975773,
+            "top1_legal": 0.020676691729323307,
+            "gave_up": 1,
+            "plies": 24.166666666666668,
+            "blunder_rate": 0.821917808219178,
+            "material": -966.6666666666666,
+            "games": 6
+          }
+        },
+        {
+          "round": 17,
+          "agreement": 0.05,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 86.53333333333333,
+          "cp_loss": 381.25,
+          "cp_loss_median": 292.0,
+          "blunder_rate": 0.5666666666666667,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 409,
+            "mean_weight": 2.9276283618581904,
+            "rule_share": 0.9877750611246944,
+            "mean_loss_cp": 386.6748166259169,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.2133226877738035,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 425.7761124231519,
+            "refusals": 164.7880323136902,
+            "top1_legal": 0.012820512820512822,
+            "gave_up": 1,
+            "plies": 25.666666666666668,
+            "blunder_rate": 0.7692307692307693,
+            "material": -1033.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 18,
+          "agreement": 0.05,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 82.35,
+          "cp_loss": 323.85,
+          "cp_loss_median": 193.0,
+          "blunder_rate": 0.48333333333333334,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 404,
+            "mean_weight": 2.9267326732673262,
+            "rule_share": 0.9876237623762376,
+            "mean_loss_cp": 388.9306930693069,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0880074808882445,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 739.7694989106753,
+            "refusals": 173.9635076252723,
+            "top1_legal": 0.00980392156862745,
+            "gave_up": 2,
+            "plies": 21.166666666666668,
+            "blunder_rate": 0.75,
+            "material": -1066.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 19,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.0,
+          "refusals": 84.65,
+          "cp_loss": 376.95,
+          "cp_loss_median": 253.5,
+          "blunder_rate": 0.5666666666666667,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 393,
+            "mean_weight": 2.938498727735369,
+            "rule_share": 0.989821882951654,
+            "mean_loss_cp": 393.7251908396947,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.151695148770116,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 426.9232970732971,
+            "refusals": 149.38628593628593,
+            "top1_legal": 0.011111111111111112,
+            "gave_up": 2,
+            "plies": 23.166666666666668,
+            "blunder_rate": 0.6901408450704225,
+            "material": -1200.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 20,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 82.35833333333333,
+          "cp_loss": 334.7416666666667,
+          "cp_loss_median": 199.5,
+          "blunder_rate": 0.5,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 363,
+            "mean_weight": 2.927906336088154,
+            "rule_share": 0.9889807162534435,
+            "mean_loss_cp": 372.57851239669424,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.15530958709852,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 272.0123864697394,
+            "refusals": 185.90720864103218,
+            "top1_legal": 0.0,
+            "gave_up": 5,
+            "plies": 25.5,
+            "blunder_rate": 0.7948717948717948,
+            "material": -1216.6666666666667,
+            "games": 6
+          }
+        },
+        {
+          "round": 21,
+          "agreement": 0.016666666666666666,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 103.28333333333333,
+          "cp_loss": 374.8,
+          "cp_loss_median": 252.0,
+          "blunder_rate": 0.5666666666666667,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 366,
+            "mean_weight": 2.9515027322404372,
+            "rule_share": 0.9918032786885246,
+            "mean_loss_cp": 437.2950819672131,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0325198518332375,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 769.6690476190475,
+            "refusals": 179.3738095238095,
+            "top1_legal": 0.016666666666666666,
+            "gave_up": 4,
+            "plies": 25.0,
+            "blunder_rate": 0.7631578947368421,
+            "material": -1100.0,
+            "games": 6
+          }
+        },
+        {
+          "round": 22,
+          "agreement": 0.058333333333333334,
+          "top1_legal": 0.008333333333333333,
+          "refusals": 98.65,
+          "cp_loss": 363.48333333333335,
+          "cp_loss_median": 268.5,
+          "blunder_rate": 0.5833333333333334,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 380,
+            "mean_weight": 2.9427631578947366,
+            "rule_share": 0.9947368421052631,
+            "mean_loss_cp": 443.65,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.177999423013023,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 349.3920638185344,
+            "refusals": 143.29178174766412,
+            "top1_legal": 0.0,
+            "gave_up": 3,
+            "plies": 30.333333333333332,
+            "blunder_rate": 0.6630434782608695,
+            "material": -1233.3333333333333,
+            "games": 6
+          }
+        },
+        {
+          "round": 23,
+          "agreement": 0.03333333333333333,
+          "top1_legal": 0.016666666666666666,
+          "refusals": 110.25,
+          "cp_loss": 375.68333333333334,
+          "cp_loss_median": 301.0,
+          "blunder_rate": 0.5833333333333334,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 392,
+            "mean_weight": 2.9343112244897958,
+            "rule_share": 0.9948979591836735,
+            "mean_loss_cp": 458.42602040816325,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.1481575682156002,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 567.5262896825396,
+            "refusals": 102.7432208994709,
+            "top1_legal": 0.0,
+            "gave_up": 1,
+            "plies": 24.666666666666668,
+            "blunder_rate": 0.72,
+            "material": -816.6666666666666,
+            "games": 6
+          }
+        },
+        {
+          "round": 24,
+          "agreement": 0.016666666666666666,
+          "top1_legal": 0.0,
+          "refusals": 112.875,
+          "cp_loss": 371.95,
+          "cp_loss_median": 289.5,
+          "blunder_rate": 0.5916666666666667,
+          "positions": 120,
+          "hidden": [
+            40,
+            32
+          ],
+          "train": {
+            "n": 387,
+            "mean_weight": 2.9295865633074936,
+            "rule_share": 0.9974160206718347,
+            "mean_loss_cp": 462.0077519379845,
+            "phase": "positive",
+            "negative_nll": NaN,
+            "positive_nll": 1.0062228754879274,
+            "inverted": false,
+            "negative_entropy": 0.0
+          },
+          "play": {
+            "score": 0.0,
+            "acpl": 401.3528679653679,
+            "refusals": 158.32593795093794,
+            "top1_legal": 0.0,
+            "gave_up": 3,
+            "plies": 21.666666666666668,
+            "blunder_rate": 0.7575757575757576,
+            "material": -1333.3333333333333,
+            "games": 6
+          }
+        }
+      ],
+      "seconds": 91.8,
+      "weights": "weights_depth15/2nrl_seed2.npz"
+    }
+  ]
+}

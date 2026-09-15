@@ -18,15 +18,36 @@ RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 ORDER = ["2nrl", "2nrl-worst", "2nrl-random", "positive", "repulsion"]
 
 
+DEFAULT_SCHEDULE = "phased"
+DEFAULT_NEG_FRACTION = 0.3
+
+
+def label_of(run: dict) -> str:
+    """The arm, plus whatever it changed - the ablations reuse the arm names.
+
+    ``per_round.json`` and the phase-depth files all run the arm called
+    ``2nrl``, so pooling on ``run["arm"]`` alone would silently average four
+    different configurations into one row.
+    """
+    cfg = run.get("config", {})
+    label = run["arm"]
+    if cfg.get("schedule", DEFAULT_SCHEDULE) != DEFAULT_SCHEDULE:
+        return f"{label} (per-round)"
+    fraction = cfg.get("neg_fraction", DEFAULT_NEG_FRACTION)
+    if abs(fraction - DEFAULT_NEG_FRACTION) > 1e-9:
+        return f"{label} (phase 1 = {fraction:.0%})"
+    return label
+
+
 def load_runs(paths: list[str]) -> dict[str, list[dict]]:
     arms: dict[str, list[dict]] = {}
     for path in paths:
         with open(path) as fh:
             blob = json.load(fh)
         for run in blob.get("runs", []):
-            arms.setdefault(run["arm"], []).append(run)
-    return {arm: arms[arm] for arm in ORDER if arm in arms} | \
-           {arm: rs for arm, rs in arms.items() if arm not in ORDER}
+            arms.setdefault(label_of(run), []).append(run)
+    ordered = {a: arms[a] for a in ORDER if a in arms}
+    return ordered | {a: rs for a, rs in sorted(arms.items()) if a not in ordered}
 
 
 def negative_entropy(runs: list[dict]) -> list[float]:
