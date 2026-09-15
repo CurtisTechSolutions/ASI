@@ -50,6 +50,7 @@ def main() -> None:
     main_r = load("results/twonrl_results.json")
     abl = load("results/ablation_no_venture.json")
     speed = load("results/grading_speed_results.json")
+    noweights = load("results/ablation_no_weights.json")
     if not main_r:
         sys.exit("results/twonrl_results.json not found - run the experiment first")
 
@@ -70,6 +71,12 @@ def main() -> None:
         m = np.mean([r["failure_state_dependence"]["majority_action_share"] for r in speed["runs"]])
         a = np.mean([r["failure_state_dependence"]["anti_balance_agreement"] for r in speed["runs"]])
         rows.append(f"| ratio delta `L_min/L` (saturates at the max radius) | {i:.1f} | "
+                    f"majority action {m:.0%}, anti-balance {a:.0%} |")
+    if noweights:
+        i = np.mean([r["after_invert"]["mean"] for r in noweights["runs"]])
+        m = np.mean([r["failure_state_dependence"]["majority_action_share"] for r in noweights["runs"]])
+        a = np.mean([r["failure_state_dependence"]["anti_balance_agreement"] for r in noweights["runs"]])
+        rows.append(f"| graded loss, but no `bad_weights` (every failure trains equally) | {i:.1f} | "
                     f"majority action {m:.0%}, anti-balance {a:.0%} |")
     if abl:
         i = np.mean([r["after_invert"]["mean"] for r in abl["runs"]])

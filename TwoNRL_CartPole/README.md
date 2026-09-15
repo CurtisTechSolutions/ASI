@@ -96,16 +96,15 @@ to learn from. Out on the surface the gap is 9.9 against 6.8.
 |---|---|---|
 | **graded loss `|target - achieved|` drives the radius** | **499.4** | majority action 53%, anti-balance 94% |
 | ratio delta `L_min/L` (saturates at the max radius) | 344.5 | majority action 56%, anti-balance 85% |
+| graded loss, but no `bad_weights` (every failure trains equally) | 447.3 | majority action 53%, anti-balance 92% |
 | no venturing out at all (standard resets) | 36.4 | majority action 87%, anti-balance 63% |
 
-Environment steps per run: 188,330 (negative 60,558, positive 127,772); the control is given the same budget.
-
-Largest inversion error over every run: `0.0e+00`.
-
-Both parts of the exploration rule are load-bearing: without venturing out the
+Every part of the exploration rule is load-bearing. Without venturing out the
 failure policy collapses to a constant action and the inversion buys nothing
-(36.4); with a saturating ratio instead of a graded loss it works but leaves a
-third of the performance on the table (344.5).
+(36.4). With a saturating ratio instead of a graded loss it works but leaves a
+third of the performance on the table (344.5). Dropping `bad_weights`, so every
+failure trains equally hard regardless of how well it hit the target, costs
+about 50 points (447.3).
 
 ## Inverting a feed-forward stack: the parity correction
 
@@ -154,23 +153,40 @@ exactness is a property of the activation function, not of the training scheme.
 | `sinenet.py` | the network: learnable per-neuron sine activation, backprop, Adam with a separate `act_lr`, and `invert()` |
 | `twonrl_cartpole.py` | the three-phase experiment, the graded loss and the venture-out rule |
 | `test_invert.py` | 14 correctness proofs: analytic gradients vs finite differences, exactness of the inversion, the parity no-op |
+| `Makefile` | one target per version; `make help` lists them |
 | `summarize.py` | rebuilds the tables above from the run JSON |
 | `results/` | run logs and JSON for every table here |
 
 ## Running it
 
 ```bash
-pip install numpy gymnasium
-
-python3 test_invert.py                                     # proofs
-python3 twonrl_cartpole.py --seeds 0 1 2 --control \
-        --out results/twonrl_results.json                  # the experiment
-python3 twonrl_cartpole.py --seeds 0 1 2 --fixed-starts    # ablation: no venturing out
-python3 twonrl_cartpole.py --seeds 0 1 2 --grading speed   # ablation: ratio instead of graded loss
-python3 summarize.py                                       # rebuild the tables
+make install        # numpy + gymnasium, the only two dependencies
+make help           # every target
+make test           # the 14 correctness proofs
+make quick          # one seed, ~30 s: the whole cycle end to end
+make run            # the headline result (3 seeds + step-matched control)
+make all            # proofs, then every version below, then rebuild the tables
 ```
 
-Roughly three minutes a seed on one core, pure NumPy.
+Each version is one target, and each reproduces the row of the ablation table
+above and writes its own JSON into `results/`:
+
+| target | what changes | inverted, no training |
+|---|---|---|
+| `make margin` (= `make run`) | graded loss `\|target - achieved\|` sets the radius | **499.4** |
+| `make speed` | ratio delta `L_min/L`, which saturates at the cap | 344.5 |
+| `make no-weights` | drops `two_nrl`'s `bad_weights` | 447.3 |
+| `make no-venture` | never ventures out - standard resets | 36.4 |
+
+Override anything on the command line, as in `RadixCyclicNN/Makefile`:
+
+```bash
+make margin SEEDS="0 1 2 3 4" NEG_UPDATES=200
+```
+
+Roughly three minutes a seed on one core, pure NumPy. The ablations fine-tune
+for a single update (`ABL_POS_UPDATES`) because what they measure is what the
+inversion alone buys, not the final score.
 
 ## Caveats
 
