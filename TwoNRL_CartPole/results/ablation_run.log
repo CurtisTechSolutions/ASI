@@ -1,0 +1,63 @@
+
+=== 2NRL, seed 0 (standard negative-phase starts) ===
+  untrained                      reward    80.3
+    negative  update    1/150  mean episode length    54.0  graded loss 0.58  venture radius 0.58
+    negative  update   15/150  mean episode length    10.7  graded loss 0.66  venture radius 0.66
+    negative  update   30/150  mean episode length     9.5  graded loss 0.67  venture radius 0.67
+    negative  update   45/150  mean episode length     9.6  graded loss 0.68  venture radius 0.68
+    negative  update   60/150  mean episode length     9.2  graded loss 0.66  venture radius 0.66
+    negative  update   75/150  mean episode length     9.3  graded loss 0.67  venture radius 0.67
+    negative  update   90/150  mean episode length     9.3  graded loss 0.66  venture radius 0.66
+    negative  update  105/150  mean episode length     9.4  graded loss 0.67  venture radius 0.67
+    negative  update  120/150  mean episode length     9.3  graded loss 0.67  venture radius 0.67
+    negative  update  135/150  mean episode length     9.4  graded loss 0.69  venture radius 0.69
+    negative  update  150/150  mean episode length     9.4  graded loss 0.70  venture radius 0.70
+  after negative phase           reward     9.4   (fail length 9.4, graded loss 0.70, radius 0.70, majority action 100%, anti-balance 50%)
+  after INVERSION (no training)  reward     9.4   (negation error 0.0e+00)
+    positive  update    1/1  mean episode length     9.6
+  after fine-tune                reward     9.2   over 100 episodes   
+
+=== 2NRL, seed 1 (standard negative-phase starts) ===
+  untrained                      reward     9.0
+    negative  update    1/150  mean episode length    12.7  graded loss 0.69  venture radius 0.69
+    negative  update   15/150  mean episode length     9.8  graded loss 0.65  venture radius 0.65
+    negative  update   30/150  mean episode length     9.4  graded loss 0.67  venture radius 0.67
+    negative  update   45/150  mean episode length     9.3  graded loss 0.65  venture radius 0.65
+    negative  update   60/150  mean episode length     9.0  graded loss 0.64  venture radius 0.64
+    negative  update   75/150  mean episode length     9.1  graded loss 0.64  venture radius 0.64
+    negative  update   90/150  mean episode length     9.1  graded loss 0.63  venture radius 0.63
+    negative  update  105/150  mean episode length     9.2  graded loss 0.64  venture radius 0.64
+    negative  update  120/150  mean episode length     9.4  graded loss 0.66  venture radius 0.66
+    negative  update  135/150  mean episode length     9.5  graded loss 0.64  venture radius 0.64
+    negative  update  150/150  mean episode length     9.4  graded loss 0.65  venture radius 0.65
+  after negative phase           reward     9.4   (fail length 9.4, graded loss 0.65, radius 0.65, majority action 64%, anti-balance 86%)
+  after INVERSION (no training)  reward    79.3   (negation error 0.0e+00)
+    positive  update    1/1  mean episode length    73.8
+  after fine-tune                reward    81.5   over 100 episodes   
+
+=== 2NRL, seed 2 (standard negative-phase starts) ===
+  untrained                      reward     9.9
+    negative  update    1/150  mean episode length    19.3  graded loss 0.69  venture radius 0.69
+    negative  update   15/150  mean episode length    10.9  graded loss 0.68  venture radius 0.68
+    negative  update   30/150  mean episode length     9.6  graded loss 0.68  venture radius 0.68
+    negative  update   45/150  mean episode length     9.5  graded loss 0.67  venture radius 0.67
+    negative  update   60/150  mean episode length     9.3  graded loss 0.67  venture radius 0.67
+    negative  update   75/150  mean episode length     9.5  graded loss 0.69  venture radius 0.69
+    negative  update   90/150  mean episode length     9.4  graded loss 0.67  venture radius 0.67
+    negative  update  105/150  mean episode length     9.4  graded loss 0.67  venture radius 0.67
+    negative  update  120/150  mean episode length     9.7  graded loss 0.66  venture radius 0.66
+    negative  update  135/150  mean episode length     9.6  graded loss 0.67  venture radius 0.67
+    negative  update  150/150  mean episode length     9.3  graded loss 0.67  venture radius 0.67
+  after negative phase           reward     9.4   (fail length 9.3, graded loss 0.67, radius 0.67, majority action 96%, anti-balance 54%)
+  after INVERSION (no training)  reward    20.6   (negation error 0.0e+00)
+    positive  update    1/1  mean episode length    20.6
+  after fine-tune                reward    21.3   over 100 episodes   
+
+==============================================================================
+stage                           seed 0      seed 1      seed 2        mean
+untrained                         80.3         9.0         9.9        33.1
+trained to fail                    9.4         9.4         9.4         9.4
+INVERTED (no training)             9.4        79.3        20.6        36.4
+fine-tuned                         9.2        81.5        21.3        37.4
+==============================================================================
+wrote results/ablation_no_venture.json

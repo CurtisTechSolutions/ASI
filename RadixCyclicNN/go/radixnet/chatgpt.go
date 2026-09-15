@@ -381,6 +381,33 @@ func (c *ChatGPTClient) Generate(prompt string, o LLMOptions) (string, error) {
 	}
 }
 
+// Chat is one chat turn: the assistant's text.  messages are
+// {"role", "content"} maps, as the chat-completions API takes them.
+func (c *ChatGPTClient) Chat(messages []map[string]any, o LLMOptions) (string, error) {
+	model := strings.TrimSpace(o.Model)
+	if model == "" {
+		model = c.Model
+	}
+	body := map[string]any{"model": model, "messages": messages}
+	if o.Temperature > 0 {
+		body["temperature"] = o.Temperature
+	}
+	if o.JSON {
+		body["response_format"] = map[string]any{"type": "json_object"}
+	}
+	for {
+		raw, err := c.request("POST", "/chat/completions", body, o.Timeout)
+		if err != nil {
+			if field := rejectedField(err, body); field != "" {
+				delete(body, field) // this model does not take that field: ask again without it
+				continue
+			}
+			return "", err
+		}
+		return chatCompletionText(raw)
+	}
+}
+
 // chatCompletionText is the assistant text of a chat-completions response.
 func chatCompletionText(raw []byte) (string, error) {
 	var doc struct {

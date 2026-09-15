@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
@@ -60,6 +62,106 @@ func openNegative(required bool) *radixnet.Model {
 	return configure(m)
 }
 
+// noGuard turns the guard off for one command: print what the positive model
+// wrote, whatever the negative network says.
+var noGuard = false
+
+// guardConfig is how strictly the guard filters (the flags below set it).
+var guardConfig = radixnet.DefaultFilterConfig()
+
+// addGuardFlags registers the guard on a command that writes something: the
+// negative network filters its output by default.
+func addGuardFlags(fs *flag.FlagSet) {
+	addNegativeFlag(fs)
+	fs.BoolVar(&noGuard, "no-guard", noGuard,
+		"do not filter: print what the positive model wrote, whatever the negative network says")
+	fs.Func("threshold", "veto at this risk (blame per transition); default: the negative model's own", func(v string) error {
+		f, err := strconv.ParseFloat(v, 64)
+		guardConfig.Threshold = &f
+		return err
+	})
+	fs.Func("min-coverage", "share of a text that must be known failure before any rule may veto it", func(v string) error {
+		f, err := strconv.ParseFloat(v, 64)
+		guardConfig.MinCoverage = &f
+		return err
+	})
+	fs.IntVar(&guardConfig.OverSample, "over-sample", guardConfig.OverSample,
+		"generate: candidates drawn per wanted text, so the guard has something to choose from")
+}
+
+// openGuard is the negative network guarding positive's output, or nil when
+// there is nothing to guard with: --no-guard was given, there is no negative
+// model file beside the model, or the one there has never been taught a
+// failure and so would veto nothing.  The pair on every answer this program
+// prints (radixnet.Filter): the positive model writes, the negative one
+// vetoes what it recognises as a failure the tutor has already corrected.
+func openGuard(positive *radixnet.Model) *radixnet.Filter {
+	if noGuard || positive.IsNegative() {
+		return nil
+	}
+	path := negativeFile()
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	negative := openNegative(true)
+	pair, err := radixnet.NewFilter(positive, negative, guardConfig)
+	if err != nil {
+		fail("%v", err)
+	}
+	if !pair.Ready() {
+		return nil
+	}
+	note("guard: %s (%.4f blame over %d reasons)", path, negative.G.Neg.TotalBlame, len(negative.G.Neg.ReasonNames))
+	return pair
+}
+
+// printVetoes reports the guard's work: what it let through, what it stopped
+// and why.
+func printVetoes(verdicts []*radixnet.FilterVerdict, what string) {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
+	}
+	fmt.Printf("\nguard: %d of %d %s passed the negative network\n", len(verdicts)-len(rejected), len(verdicts), what)
+	if len(rejected) == 0 {
+		return
+	}
+	fmt.Printf("%-8s %8s %8s %8s  %-18s %s\n", "rule", "risk", "peak", "ratio", "reason", "vetoed")
+	for _, verdict := range rejected {
+		rule := "-"
+		if verdict.Rule != nil {
+			rule = *verdict.Rule
+		}
+		reason := "-"
+		if len(verdict.Reasons) > 0 {
+			reason = verdict.Reasons[0].Reason
+		}
+		fmt.Printf("%-8s %8.4f %8.4f %8.4f  %-18s %s\n", rule, verdict.Risk, verdict.Peak, verdict.Ratio, reason,
+			quote(clip(verdict.Text, 46)))
+	}
+}
+
+// guardDoc is the guard's report for --json: every veto, with the reason and
+// the fragment behind it.
+func guardDoc(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
+	rejected := []*radixnet.FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
+	}
+	out := map[string]any{
+		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
 func saveNegative(m *radixnet.Model) string {
 	path := negativeFile()
 	if err := m.Save(path); err != nil {
@@ -99,6 +201,7 @@ actions:
   filter    the pair: the positive model writes, the negative one vetoes (or judge --text / --data)
   reasons   what the tutor has blamed, and the journal of what it said
   forget    drop or fade the blame behind --reason (the tutor can be wrong too)
+  auto      teach it automatically: the model writes, an LLM reviews, the failures are blamed
 
 The negative model lives beside --model unless --negative says otherwise.
 `)
@@ -123,10 +226,12 @@ func cmdNegative(args []string) {
 		cmdNegativeReasons(rest)
 	case "forget":
 		cmdNegativeForget(rest)
+	case "auto":
+		cmdNegativeAuto(rest)
 	case "help", "-h", "--help":
 		negativeUsage()
 	default:
-		fail("unknown negative action %q (blame, clear, why, filter, reasons, forget)", action)
+		fail("unknown negative action %q (blame, clear, why, filter, reasons, forget, auto)", action)
 	}
 }
 
@@ -435,4 +540,121 @@ func cmdNegativeForget(args []string) {
 		emit(map[string]any{"reason": result.Reason, "edges": result.Edges, "blame_removed": result.BlameRemoved,
 			"saved": path, "reasons": m.Reasons(), "stats": m.Stats()})
 	}
+}
+
+// cmdNegativeAuto is the Negative tab without anyone typing a failure into it:
+// the model writes, an LLM reviews, the failures are blamed - round after round.
+func cmdNegativeAuto(args []string) {
+	cfg := radixnet.DefaultCriticConfig()
+	fs := flag.NewFlagSet("negative auto", flag.ExitOnError)
+	rounds := fs.Int("rounds", cfg.Rounds, "rounds to run (0: until interrupted)")
+	count := fs.Int("count", cfg.Count, "texts the model writes per round")
+	prefix := fs.String("prefix", "", "continue this prefix instead of writing from scratch")
+	maxLength := fs.Int("max-length", cfg.MaxLength, "characters per text")
+	temperature := fs.Float64("temperature", cfg.Temperature, "sampling temperature of the writing")
+	threshold := fs.Float64("threshold", cfg.Threshold, "pass mark out of 10: below it the text is blamed")
+	context := fs.String("context", "", "what the reviewer is told the texts are meant to be (its yardstick)")
+	provider := fs.String("provider", cfg.Provider, "who reviews: ollama | chatgpt")
+	reviewerModel := fs.String("reviewer-model", "", "the reviewer's model (default: the provider's)")
+	url := fs.String("url", "", "the reviewer's base URL (default: the provider's)")
+	timeout := fs.Float64("timeout", 0, "per-request timeout in seconds")
+	epochs := fs.Int("epochs", cfg.Epochs, "blame epochs per round")
+	noClear := fs.Bool("no-clear", false, "do not let the texts it passed take blame off what they share")
+	addNegativeFlag(fs)
+	_ = fs.Parse(args)
+
+	cfg.Rounds, cfg.Count, cfg.Prefix, cfg.MaxLength = *rounds, *count, *prefix, *maxLength
+	cfg.Temperature, cfg.Threshold, cfg.Context = *temperature, *threshold, *context
+	cfg.Provider, cfg.ReviewerModel, cfg.Epochs = *provider, *reviewerModel, *epochs
+	cfg.ClearPasses = !*noClear
+	seed := seedFlag
+	cfg.Seed = &seed
+	if err := cfg.Validate(); err != nil {
+		fail("%v", err)
+	}
+	if cfg.Provider == radixnet.ProviderChatGPT && !radixnet.ChatGPTConfigured() {
+		fail("no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE) to let ChatGPT review, " +
+			"or use -provider ollama")
+	}
+	client, err := radixnet.NewLLMClient(cfg.Provider, *url, cfg.ReviewerModel, time.Duration(*timeout*float64(time.Second)))
+	if err != nil {
+		fail("%v", err)
+	}
+	model := openModel(true)
+	negative := openNegative(false)
+	loop, err := radixnet.NewCritic(model, negative, client, cfg)
+	if err != nil {
+		fail("%v", err)
+	}
+	roundsText := fmt.Sprintf("%d", cfg.Rounds)
+	if cfg.Rounds == 0 {
+		roundsText = "until interrupted"
+	}
+	say("negative model: %s", negativeFile())
+	say("reviewer: %s: %s at %s", cfg.Provider, client.ModelName(), client.BaseURL())
+	say("%s round(s) x %d text(s) of %d chars, pass at %g/10%s", roundsText, cfg.Count, cfg.MaxLength, cfg.Threshold,
+		map[bool]string{true: "", false: " (passes do not clear)"}[cfg.ClearPasses])
+	if strings.TrimSpace(cfg.Context) != "" {
+		say("context: %s", cfg.Context)
+	}
+	say("")
+	stop := interruptible()
+	loop.Stop = stop
+	if !jsonMode {
+		loop.Progress = func(record map[string]any) {
+			if record["kind"] != "round" {
+				return
+			}
+			say("round %v: %v/%v failed, blamed %v over %v edge(s), cleared %v%s",
+				record["round"], record["failed"], record["texts"], record["blamed"], record["edges"],
+				record["cleared"], reasonSummary(record["reasons"]))
+		}
+	}
+	records, err := loop.Run()
+	if err != nil {
+		fail("%v", err)
+	}
+	saved := saveNegative(negative)
+	card := map[string]any{}
+	if len(records) > 0 {
+		if last := records[len(records)-1]; last["kind"] == "report" {
+			card = last
+		}
+	}
+	say("")
+	say("%v round(s): reviewed %v, blamed %v, cleared %v; mean mark %s/10%s",
+		card["rounds"], card["reviewed"], card["blamed"], card["cleared"], fmtMark(card["mean_rating"]),
+		trendSummary(card["trend"]))
+	say("negative model: %s", saved)
+	reasonTable(negative, 10)
+	if jsonMode {
+		emit(map[string]any{
+			"config": cfg, "url": client.BaseURL(), "reviewer": client.ModelName(),
+			"records": records, "report": card, "negative": map[string]any{
+				"path": saved, "reasons": negative.Reasons(), "stats": negative.Stats(),
+			},
+		})
+	}
+}
+
+// reasonSummary renders a round's reason histogram as "; repetition x3".
+func reasonSummary(value any) string {
+	counts, ok := value.(map[string]int)
+	if !ok || len(counts) == 0 {
+		return ""
+	}
+	parts := []string{}
+	for _, reason := range radixnet.ReasonOrder(counts) {
+		parts = append(parts, fmt.Sprintf("%s x%d", reason, counts[reason]))
+	}
+	return "; " + strings.Join(parts, ", ")
+}
+
+// trendSummary renders the report card's trend as ", trend +1.25".
+func trendSummary(value any) string {
+	trend, ok := value.(float64)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(", trend %+.2f", trend)
 }

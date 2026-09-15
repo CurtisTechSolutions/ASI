@@ -1299,11 +1299,6 @@ ol.dialogue li.turn.b {
   align-items: flex-end;
 }
 
-ol.dialogue li.end {
-  height: 0;
-  margin: 0;
-}
-
 ol.dialogue .speaker {
   display: flex;
   align-items: center;
@@ -1391,6 +1386,62 @@ ol.dialogue li.rated.down .bubble {
   text-decoration: none;
 }
 
+/* why a sentence is wrong, and the teacher's sentences that are wrong the same way */
+.same-mistake p {
+  margin: 0 0 4px;
+  color: var(--muted);
+}
+
+.same-mistake ul.plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.same-mistake li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.same-mistake del {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.same-mistake ins {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+  text-decoration: none;
+}
+
+/* the guard: what the negative network stopped on the way out */
+.guard {
+  border-left: 3px solid var(--border);
+  padding: 2px 0 2px 10px;
+  margin: 10px 0;
+}
+
+.guard.vetoed {
+  border-left-color: var(--warn);
+}
+
+.guard p {
+  margin: 0;
+}
+
+.guard .verdicts {
+  margin-bottom: 6px;
+}
+
 /* the negative network: verdicts, blamed fragments and the journal */
 .verdict {
   border: 1px solid var(--border);
@@ -1439,6 +1490,8 @@ blockquote.brief {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
+}
+
 /* Agent tab: the live log of criteria, proposals, tool calls and attempts */
 ul.log {
   list-style: none;
@@ -1487,4 +1540,32 @@ ul.log ol.criteria {
 
 .verdict.fail {
   color: #dc2626;
+}
+
+/* judged paths in the status bar: correct against incorrect */
+.statusbar b.ok {
+  color: var(--ok);
+}
+
+.statusbar b.bad {
+  color: var(--danger);
+}
+
+/* A node against its neighbours: the reward a way in or out carries, and the judged walks on it. */
+.node-ratios {
+  margin-top: 6px;
+}
+
+table.data th.text {
+  text-align: left;
+}
+
+table.data td.ok,
+table.data b.ok {
+  color: var(--ok);
+}
+
+table.data td.bad,
+table.data b.bad {
+  color: var(--danger);
 }

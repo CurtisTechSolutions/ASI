@@ -194,6 +194,42 @@ class TestTutorLessons(unittest.TestCase):
         self.assertEqual([span["fragment"] for span in verdict["spans"]], ["sit "])
         self.assertEqual(model.judge("the cat sits on the mat")["verdict"], "pass")
 
+    def test_a_widened_mistake_blames_its_whole_family(self):
+        lesson = dict(LESSONS[0])
+        lesson["why"] = "A singular subject takes a singular verb; the student drops the -s."
+        lesson["variants"] = [
+            {"wrong": "the dog sleep in the sun", "right": "the dog sleeps in the sun", "weight": 0.5},
+            {"wrong": "she walk to the shop", "right": "she walks to the shop", "weight": 0.5},
+        ]
+        faults, passed = blame.faults_from_lessons([lesson], threshold=6.0)
+        self.assertEqual([f["text"] for f in faults],
+                         ["the cat sit on the mat", "the dog sleep in the sun", "she walk to the shop"])
+        self.assertEqual({f["reason"] for f in faults}, {"agreement"})  # the same mistake, so the same reason
+        self.assertEqual([f["source"] for f in faults], ["tutor", "tutor:similar", "tutor:similar"])
+        self.assertEqual(faults[1]["severity"], faults[0]["severity"] * 0.5)  # the student never wrote it
+        self.assertEqual(faults[1]["correction"], "the dog sleeps in the sun")
+        self.assertIn("drops the -s", faults[1]["note"])  # the teacher's explanation, not the marking comment
+        self.assertIn("she walks to the shop", passed)  # what the teacher wrote is clean text
+
+    def test_a_widened_mistake_teaches_the_negative_network_the_shape_of_it(self):
+        lesson = dict(LESSONS[0])
+        lesson["variants"] = [{"wrong": "the dog sleep in the sun", "right": "the dog sleeps in the sun", "weight": 0.5}]
+        model = NegativeNet(seed=11)
+        report = blame.teach_lessons(model, [lesson])
+        self.assertEqual(report["blamed"], 2)
+        self.assertEqual(model.stats()["sources"], {"tutor": 1, "tutor:similar": 1})
+        # a sentence the network never wrote is now known to be wrong in the same way
+        verdict = model.judge("the dog sleep in the sun")
+        self.assertNotEqual(verdict["verdict"], "pass")
+        self.assertEqual(verdict["reasons"][0]["reason"], "agreement")
+        self.assertEqual(model.judge("the dog sleeps in the sun")["verdict"], "pass")
+
+    def test_a_variant_that_repeats_the_sentence_is_dropped(self):
+        lesson = dict(LESSONS[0])
+        lesson["variants"] = [{"wrong": "the cat sit on the mat", "right": "the cat sits on the mat"}, {"wrong": ""}]
+        faults, _passed = blame.faults_from_lessons([lesson])
+        self.assertEqual(len(faults), 1)
+
     def test_an_unrecognised_mistake_falls_back_to_the_critique(self):
         faults, _ = blame.faults_from_lessons([{
             "sentence": "the the the cat", "exercise": {},

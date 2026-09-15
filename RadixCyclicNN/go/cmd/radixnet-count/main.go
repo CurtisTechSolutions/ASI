@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
@@ -56,6 +59,12 @@ func subFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	addGlobalFlags(fs)
 	return fs
+}
+
+// note is a line about the run itself: it goes to stderr, so --json output
+// stays one document on stdout.
+func note(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 func fail(format string, args ...any) {
@@ -162,12 +171,27 @@ commands:
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
-  negative   the negative network: blame | clear | why | filter | reasons | forget
+  paths      what the judged walks did, step by step: correct / incorrect per path, not per edge
+  nodes      each node against the nodes around it: its traffic and its reward, shared out both ways
+  negative   the failures, and why: blame | clear | why | filter | reasons | forget | auto
+  codegen    write Python programs: the teacher tutors, the sandbox runs them, 2NRL follows
+  tools      the external tools the network can call: list | describe | call
+  agent      tool use: the network browses and solves, an LLM sets the bar and teaches
+  explore    the network picks its own tasks and browses on its own initiative
   invert     flip the sign of every reward
+  image      images as text: info | encode | tutor | decode
+  speech     teaching by talking: info | teach | tutor | decode
+  evolve     the self-upgrade loop: the model generates, a discriminator judges, 2NRL follows
+  compress   merge the unary chains of the graph by hand, then save
+  checkpoints list a checkpoint directory, or restore one (--restore NAME | latest)
+  bench      how fast this build counts and predicts
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
+  chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
+  ollama     a corpus written to order, and the adversarial review (models | corpus | review)
+  chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   version    print the version
 
@@ -232,8 +256,24 @@ func main() {
 		cmdTwoNRL(rest)
 	case "negative":
 		cmdNegative(rest)
+	case "paths":
+		cmdPaths(rest)
+	case "nodes":
+		cmdNodes(rest)
 	case "correct":
 		cmdCorrect(rest)
+	case "image":
+		cmdImage(rest)
+	case "speech":
+		cmdSpeech(rest)
+	case "evolve":
+		cmdEvolve(rest)
+	case "compress":
+		cmdCompress(rest)
+	case "checkpoints":
+		cmdCheckpoints(rest)
+	case "bench":
+		cmdBench(rest)
 	case "invert":
 		cmdInvert(rest)
 	case "weights":
@@ -242,8 +282,22 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "chat":
+		cmdChat(rest)
+	case "ollama":
+		cmdOllama(rest)
+	case "chatgpt":
+		cmdChatGPT(rest)
 	case "tutor":
 		cmdTutor(rest)
+	case "codegen":
+		cmdCodeGen(rest)
+	case "tools":
+		cmdTools(rest)
+	case "agent":
+		cmdAgent(rest)
+	case "explore":
+		cmdExplore(rest)
 	case "serve":
 		cmdServe(rest)
 	case "version":
@@ -377,6 +431,7 @@ func cmdPredict(args []string) {
 	toEnd := fs.Bool("to-end", false, "run to the end of a text")
 	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
+	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
 	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength}
@@ -384,8 +439,23 @@ func cmdPredict(args []string) {
 	if err != nil {
 		fail("%v", err)
 	}
+	var guard map[string]any
+	var verdicts []*radixnet.FilterVerdict
+	if pair := openGuard(m); pair != nil {
+		// the guard re-ranks what the search already offered: the best continuation it does not veto
+		kept := 0
+		p, verdicts = pair.Rank(*prefix, p)
+		for _, verdict := range verdicts {
+			if verdict.Decision != "reject" {
+				kept++
+			}
+		}
+		guard = guardDoc(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
+	}
 	if jsonMode {
-		emit(predictDoc(*prefix, p))
+		doc := predictDoc(*prefix, p)
+		doc["guard"] = guard
+		emit(doc)
 		return
 	}
 	fmt.Printf("prefix       %s\ncontinuation %s\nfull text    %s\ncost %.4f  p %.4g  path %s\n", quote(*prefix), quote(p.Text), quote(p.FullText), p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
@@ -401,6 +471,9 @@ func cmdPredict(args []string) {
 			fmt.Printf("  %2d %8.4f %10.4g %s\n", i+1, r.Cost, r.Probability(), quote(r.FullText))
 		}
 	}
+	if guard != nil {
+		printVetoes(verdicts, "continuations")
+	}
 }
 
 func cmdGenerate(args []string) {
@@ -413,6 +486,7 @@ func cmdGenerate(args []string) {
 	stepPenalty := fs.Float64("step-penalty", 0, "beam / dijkstra: extra cost per edge")
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
+	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
 	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam}
@@ -420,9 +494,23 @@ func cmdGenerate(args []string) {
 		s := seedFlag
 		opts.Seed = &s
 	}
-	results, err := m.Generate(opts)
-	if err != nil {
-		fail("%v", err)
+	var results []*radixnet.PathResult
+	var guard map[string]any
+	var verdicts []*radixnet.FilterVerdict
+	var err error
+	if pair := openGuard(m); pair == nil {
+		if results, err = m.Generate(opts); err != nil {
+			fail("%v", err)
+		}
+	} else {
+		// the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back
+		outcome, err := pair.Generate(*count, opts)
+		if err != nil {
+			fail("%v", err)
+		}
+		results, verdicts = outcome.Results, outcome.Verdicts
+		guard = guardDoc(pair, verdicts, map[string]any{"candidates": outcome.Candidates, "asked": outcome.Asked,
+			"kept": len(outcome.Kept), "rate": outcome.Rate})
 	}
 	if jsonMode {
 		samples := make([]map[string]any, 0, len(results))
@@ -430,7 +518,8 @@ func cmdGenerate(args []string) {
 			samples = append(samples, map[string]any{"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
 				"labels": r.Labels, "node_ids": r.NodeIDs, "step_costs": r.StepCosts, "expanded": r.Expanded, "reached_end": r.ReachedEnd})
 		}
-		emit(map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength, "temperature": *temperature})
+		emit(map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength,
+			"temperature": *temperature, "guard": guard})
 		return
 	}
 	fmt.Printf("%3s %9s %10s %4s  %s\n", "#", "cost", "prob", "end", "text")
@@ -440,6 +529,9 @@ func cmdGenerate(args []string) {
 			end = "yes"
 		}
 		fmt.Printf("%3d %9.4f %10.4g %4s  %s\n", i+1, r.Cost, r.Probability(), end, quote(r.Text))
+	}
+	if guard != nil {
+		printVetoes(verdicts, "candidates")
 	}
 }
 
@@ -561,6 +653,119 @@ func cmdTwoNRL(args []string) {
 	}
 }
 
+func cmdPaths(args []string) {
+	fs := subFlagSet("paths")
+	limit := fs.Int("limit", 20, "rows to show, most judged first (0 = all)")
+	node := fs.String("node", "", "only the steps leaving this node (a node label, or a trigram it holds)")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	g := m.G
+	totals := g.PathTotals()
+	rows := m.Paths(*limit, resolveNode(g, *node))
+	say("contexts   %d (%d judged)", totals.Contexts, totals.Judged)
+	say("counted    %d correct / %d incorrect of %d seen", totals.Correct, totals.Incorrect, totals.Seen)
+	say("path_scale %g", g.WeightConfig().PathScale)
+	if len(rows) == 0 {
+		say("nothing has been judged yet: reward or punish a text, or let the tutor correct one")
+	} else {
+		say("")
+		say("%-14s %-24s %7s %9s %5s %9s %6s %7s", "after", "step", "correct", "incorrect", "seen", "correct %", "seen %", "term")
+		for _, row := range rows {
+			say("%-14s %-24s %7d %9d %5d %9s %6s %+7.3f",
+				quoteLabel(g, row.Prev), stepLabel(g, row.Edge), row.Correct, row.Incorrect, row.Seen,
+				percentOf(row.CorrectRatio), percentOf(row.SeenRatio), row.Term)
+		}
+	}
+	if jsonMode {
+		emit(map[string]any{"totals": totals, "paths": rows, "stats": m.Stats()})
+	}
+}
+
+// resolveNode is a node id from a label the user typed: the whole label first,
+// then the trigram it holds.  An empty label means "every node" (-1).
+func resolveNode(g *radixnet.Graph, text string) int {
+	if text == "" {
+		return -1
+	}
+	for node := 0; node < g.NumNodeIDs(); node++ {
+		if g.Label(node) == text {
+			return node
+		}
+	}
+	if node, _, ok := g.Lookup(text); ok {
+		return node
+	}
+	fail("no node labelled %q: give a node label, or one of its trigrams", text)
+	return -1
+}
+
+func cmdNodes(args []string) {
+	fs := subFlagSet("nodes")
+	limit := fs.Int("limit", 10, "nodes to show, most visited first (0 = all)")
+	node := fs.String("node", "", "only this node (a node label, or a trigram it holds)")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	g := m.G
+	rows := g.NodeRatioRows(*limit, resolveNode(g, *node))
+	totals := g.PathTotals()
+	say("nodes      %d alive, %d shown", g.NumNodes(), len(rows))
+	say("counted    %d correct / %d incorrect over %d judged context(s) of %d",
+		totals.Correct, totals.Incorrect, totals.Judged, totals.Contexts)
+	if len(rows) == 0 {
+		say("%s", map[bool]string{true: "no such node", false: "the graph is empty: train something first"}[*node != ""])
+	}
+	for _, row := range rows {
+		say("")
+		say("%s  visited %dx  (%d in, %d out)", strconv.Quote(row.Label), row.Visits,
+			row.InTotals.Edges, row.OutTotals.Edges)
+		say("%-4s %-14s %5s %7s %7s %9s %7s %8s %8s %6s %10s",
+			"", "node", "seen", "seen %", "reward", "reward %", "judged", "of edge", "correct", "wrong", "correct %")
+		for _, side := range []struct {
+			name string
+			rows []radixnet.NeighbourStats
+		}{{"from", row.From}, {"to", row.To}} {
+			for _, r := range side.rows {
+				say("%-4s %-14s %5d %7s %+7.2f %9s %7d %8s %8d %6d %10s",
+					side.name, strconv.Quote(r.Label), r.Seen, fmt.Sprintf("%.0f%%", r.SeenRatio*100),
+					r.Reward, fmt.Sprintf("%.0f%%", r.RewardRatio*100), r.PathSeen, percentOf(r.PathRatio),
+					r.Correct, r.Incorrect, percentOf(r.CorrectRatio))
+			}
+		}
+	}
+	if jsonMode {
+		emit(map[string]any{"nodes": rows, "stats": m.Stats()})
+	}
+}
+
+// quoteLabel is a node's label in quotes (whitespace is part of it).
+func quoteLabel(g *radixnet.Graph, node int) string {
+	if node < 0 || node >= g.NumNodeIDs() {
+		return fmt.Sprintf("node %d", node)
+	}
+	return strconv.Quote(g.Label(node))
+}
+
+// stepLabel is "parent -> child" as the two labels, for a path row.
+func stepLabel(g *radixnet.Graph, edge int) string {
+	parent := g.ParentOfEdge(edge)
+	if parent < 0 {
+		return fmt.Sprintf("edge %d", edge)
+	}
+	for _, t := range g.Children(parent) {
+		if t.E == edge {
+			return fmt.Sprintf("%s -> %s", g.Label(parent), g.Label(t.P))
+		}
+	}
+	return fmt.Sprintf("edge %d", edge)
+}
+
+func percentOf(ratio *float64) string {
+	if ratio == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", *ratio*100)
+}
+
 func cmdCorrect(args []string) {
 	fs := subFlagSet("correct")
 	wrong := fs.String("wrong", "", "what the network wrote")
@@ -568,7 +773,7 @@ func cmdCorrect(args []string) {
 	strength := fs.Float64("strength", 1.0, "magnitude of one unit of feedback")
 	weight := fs.Float64("weight", 1.0, "how bad the attempt was: the penalty is strength x weight")
 	reward := fs.Float64("reward", 1.0, "what the correction is worth")
-	keep := fs.Float64("keep", 0.25, "what the unchanged part of the correction still earns")
+	keep := fs.Float64("keep", 0, "what the unchanged part of the correction still earns (0: only the fix; a whole path is rewarded when the output was right)")
 	noCount := fs.Bool("no-count", false, "do not traverse the correction (it is counted by default)")
 	dryRun := fs.Bool("dry-run", false, "show the alignment without touching the model")
 	blame := fs.Bool("blame", false, "also teach the negative network: the same diff, blaming only the characters you changed")
@@ -666,6 +871,7 @@ func cmdWeights(args []string) {
 	windowScale := fs.Float64("window-scale", -1, "weight of log(recent share)")
 	rewardScale := fs.Float64("reward-scale", -1, "weight of the reward")
 	countScale := fs.Float64("count-scale", -1, "weight of log(1 + traversals)")
+	pathScale := fs.Float64("path-scale", -1, "weight of the judged paths (0 turns the path counters off)")
 	window := fs.Int("window", 0, "sliding window size")
 	_ = fs.Parse(args)
 	m := openModel(true)
@@ -681,6 +887,9 @@ func cmdWeights(args []string) {
 	}
 	if *countScale >= 0 {
 		changes["count_scale"] = *countScale
+	}
+	if *pathScale >= 0 {
+		changes["path_scale"] = *pathScale
 	}
 	if *window > 0 {
 		changes["window"] = float64(*window)
@@ -752,12 +961,18 @@ func cmdConverse(args []string) {
 	speakers := fs.String("speakers", "A,B", "names of the voices")
 	partner := fs.String("partner", "", "a second model file that speaks the second voice")
 	allowRepeats := fs.Bool("allow-repeats", false, "do not skip continuations already heard")
+	allowWordRepeats := fs.Bool("allow-word-repeats", false, "do not skip a reply that repeats its own words")
+	explore := fs.Int("explore", radixnet.Explore, "times a reply that caught itself repeating may back up and look for another way on")
+	noLearn := fs.Bool("no-learn", false, "do not teach the graph where it goes round (leave the model exactly as it was)")
+	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
+	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
 	opts := radixnet.DefaultConverseOptions()
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
+	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -781,13 +996,41 @@ func cmdConverse(args []string) {
 		opts.Partner = p
 		partnerKind = "count"
 	}
-	turnsOut, err := m.Converse(*opening, opts)
-	if err != nil {
-		fail("%v", err)
+	var turnsOut []*radixnet.Turn
+	var guard map[string]any
+	var verdicts []*radixnet.FilterVerdict
+	var err error
+	if pair := openGuard(m); pair == nil {
+		if turnsOut, err = m.Converse(*opening, opts); err != nil {
+			fail("%v", err)
+		}
+	} else {
+		// a reply the negative network vetoes is left unsaid; the voice looks for another one
+		outcome, err := pair.Converse(*opening, opts)
+		if err != nil {
+			fail("%v", err)
+		}
+		turnsOut, verdicts = outcome.Turns, outcome.Verdicts
+		guard = guardDoc(pair, verdicts, map[string]any{"refusals": outcome.Vetoed})
+	}
+	saidTwice := radixnet.Repeats(turnsOut)
+	taught := []int{}
+	seenNode := map[int]bool{}
+	for _, t := range turnsOut {
+		if t.Rethink != nil && t.Rethink.Taught >= 0 && !seenNode[t.Rethink.Taught] {
+			seenNode[t.Rethink.Taught] = true
+			taught = append(taught, t.Rethink.Taught)
+		}
+	}
+	sort.Ints(taught)
+	doc := map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode,
+		"opening": *opening, "kind": "count", "partner_kind": partnerKind, "repeats": saidTwice,
+		"taught": taught, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
+	if len(taught) > 0 && *saveLearned {
+		doc["saved"] = saveModel(m)
 	}
 	if jsonMode {
-		emit(map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode, "opening": *opening,
-			"kind": "count", "partner_kind": partnerKind, "transcript": radixnet.Transcript(turnsOut)})
+		emit(doc)
 		return
 	}
 	for _, t := range turnsOut {
@@ -806,13 +1049,53 @@ func cmdConverse(args []string) {
 		if t.Repeat {
 			flags = append(flags, "repeat")
 		}
+		if t.Stutter {
+			flags = append(flags, "repeats itself")
+		}
+		if t.Vetoed > 0 {
+			flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))
+		}
 		if len(flags) > 0 {
 			detail += "  [" + strings.Join(flags, ", ") + "]"
 		}
 		fmt.Println(detail)
+		if r := t.Rethink; r != nil {
+			caught := fmt.Sprintf("repeating %s", quote(r.Noticed))
+			if r.Kind == "stutter" {
+				caught = fmt.Sprintf("saying %s twice", quote(r.Noticed))
+			}
+			thought := "    caught itself " + caught
+			switch {
+			case r.Steps == 0:
+				thought += "; the words it picked up, not its own"
+			case r.Found:
+				thought += fmt.Sprintf("; kept %s and found another way on in %d path(s)", quote(r.Cut), r.Explored)
+			default:
+				ending := "took a lesser answer"
+				if t.Repeat {
+					ending = "said it anyway"
+				}
+				thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
+			}
+			fmt.Println(thought)
+		}
 	}
 	if len(turnsOut) == 0 {
 		fmt.Println("(nothing to say: train the model first)")
+	}
+	if guard != nil {
+		printVetoes(verdicts, "replies")
+	}
+	if len(taught) > 0 && !*saveLearned {
+		fmt.Printf("it learned to hand over at %d node(s); --save writes that into the model\n", len(taught))
+	}
+	if len(saidTwice) > 0 {
+		fmt.Printf("%d utterance(s) the model could only repeat - punish them (2NRL negative phase):\n", len(saidTwice))
+		parts := make([]string, len(saidTwice))
+		for i, t := range saidTwice {
+			parts[i] = "--bad-text " + quote(t)
+		}
+		fmt.Println("    radixnet-count feedback " + strings.Join(parts, " "))
 	}
 }
 
@@ -864,6 +1147,10 @@ func cmdTutor(args []string) {
 	noReplay := fs.Bool("no-replay", false, "do not keep teaching earlier corrections")
 	blame := fs.Bool("blame", false, "teach the negative network why each failed sentence failed: the mistake the "+
 		"teacher named is the reason, its mark the severity, and only the characters it corrected are blamed")
+	variants := fs.Int("variants", cfg.Variants, "with -blame: ask the teacher why each failed sentence is wrong and "+
+		"for N more sentences that make the same mistake, blamed under the same reason (0 = do not ask)")
+	variantWeight := fs.Float64("variant-weight", cfg.VariantWeight,
+		"their share of the failure's severity (the student never wrote them)")
 	addNegativeFlag(fs)
 	_ = fs.Parse(args)
 
@@ -880,6 +1167,7 @@ func cmdTutor(args []string) {
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
 	cfg.DiffCorrections, cfg.KeepWeight = !*noDiff, *keepWeight
 	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
+	cfg.Variants, cfg.VariantWeight = *variants, *variantWeight
 	if err := cfg.Validate(); err != nil { // also resolves the providers and the models they imply
 		fail("%v", err)
 	}
@@ -910,6 +1198,10 @@ func cmdTutor(args []string) {
 		negative = openNegative(false)
 		trainer.Negative = negative
 		say("negative network: %s (every failed sentence is blamed for what the teacher marked it down for)", negativeFile())
+		if cfg.Variants > 0 {
+			say("widening: the teacher explains why and writes %d more sentence(s) with the same mistake, "+
+				"blamed at %g of its severity", cfg.Variants, cfg.VariantWeight)
+		}
 	}
 	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s: %s at %s, marked by %s: %s, pass at %g/10 (grammar %g)",
 		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorProvider, cfg.TutorModel, client.BaseURL(),
@@ -1084,12 +1376,16 @@ func cmdServe(args []string) {
 	chatgptURL := fs.String("chatgpt-url", "", "OpenAI base URL for a ChatGPT teacher (default: $OPENAI_BASE_URL or https://api.openai.com/v1)")
 	chatgptModel := fs.String("chatgpt-model", "", "default ChatGPT model (default: $RADIXNET_OPENAI_MODEL); the key is the server's own $OPENAI_API_KEY")
 	ollamaModel := fs.String("ollama-model", "", "default teacher model for /api/tutor (default: $RADIXNET_TUTOR_MODEL or $RADIXNET_OLLAMA_MODEL)")
+	addToolFlags(fs)
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
 		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
 		ChatGPTURL: *chatgptURL, ChatGPTModel: *chatgptModel,
+		Offline: toolFlags.Offline, AllowPrivate: toolFlags.AllowPrivate, SearchURL: toolFlags.SearchURL,
+		WebTimeout: toolFlags.Timeout, MaxBytes: toolFlags.MaxBytes, PythonTool: toolFlags.PythonTool,
+		SandboxTime: toolFlags.SandboxTimeout, NoIsolation: toolFlags.NoIsolation,
 	})
 	if err != nil {
 		fail("%v", err)
@@ -1136,5 +1432,29 @@ func writeHeapProfile() {
 	runtime.GC()
 	if err := pprof.WriteHeapProfile(f); err != nil {
 		fmt.Fprintf(os.Stderr, "memprofile: %v\n", err)
+	}
+}
+
+// interruptible returns a stop function that turns true on the first Ctrl-C, so
+// a loop running "until interrupted" finishes the round it is in and saves
+// rather than dying half-taught.  A second Ctrl-C kills the process outright.
+func interruptible() func() bool {
+	stopped := make(chan struct{})
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-signals
+		close(stopped)
+		fmt.Fprintln(os.Stderr, "interrupted: finishing the current round, then saving (Ctrl-C again aborts)")
+		<-signals
+		os.Exit(130)
+	}()
+	return func() bool {
+		select {
+		case <-stopped:
+			return true
+		default:
+			return false
+		}
 	}
 }

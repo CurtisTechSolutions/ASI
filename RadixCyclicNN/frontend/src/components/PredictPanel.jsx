@@ -1,10 +1,11 @@
 import { Fragment, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
-import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
+import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -99,6 +100,7 @@ export default function PredictPanel({ status }) {
   const [toEnd, setToEnd] = useState(false);
   const [stepPenalty, setStepPenalty] = useState("0");
   const [temperature, setTemperature] = useState("1.0");
+  const [guard, setGuard] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -106,7 +108,11 @@ export default function PredictPanel({ status }) {
   const [lastLiked, setLastLiked] = useState(null);
   const { job, running, busy, error: jobError, start, clearError } = useJob("feedback");
 
-  const countKind = Boolean(status && status.kind === "count");
+  const countKind = countingKind(status);  // takes a strength; predicts with the beam by default
+  // only the count model aliases "dijkstra" to the beam - on the resonant model it is a real, exact mode
+  const beamOnly = Boolean(status && status.kind === "count");
+  // the resonant model searches (node, chars, phase): k-best is exact AND runs the metacognitive layer
+  const resonantKind = Boolean(status && status.kind === "resonant");
   const likeDisabled = busy || running || jobIsRunning(status);
 
   async function like(text) {
@@ -125,7 +131,7 @@ export default function PredictPanel({ status }) {
     setLoading(true);
     setError(null);
     try {
-      const effectiveMode = countKind && mode === "dijkstra" ? "beam" : mode;
+      const effectiveMode = beamOnly && mode === "dijkstra" ? "beam" : mode;
       const body = {
         prefix,
         length: parseInteger(length, 20),
@@ -133,6 +139,7 @@ export default function PredictPanel({ status }) {
         to_end: toEnd,
         step_penalty: parseNumber(stepPenalty, 0),
         temperature: parseNumber(temperature, 1),
+        guard,
       };
       if (effectiveMode === "beam") {
         body.k = parseInteger(k, 5);
@@ -184,15 +191,22 @@ export default function PredictPanel({ status }) {
                     ["dijkstra", "beam (top K and bottom K)"],
                     ["sample", "sample (stochastic)"],
                   ]
-                : [
-                    ["dijkstra", "dijkstra (shortest path)"],
-                    ["beam", "beam (top K and bottom K)"],
-                    ["sample", "sample (stochastic)"],
-                  ]
+                : resonantKind
+                  ? [
+                      ["kbest", "k-best (the exact K cheapest walks)"],
+                      ["dijkstra", "dijkstra (the single cheapest walk)"],
+                      ["beam", "beam (top K and bottom K)"],
+                      ["sample", "sample (stochastic)"],
+                    ]
+                  : [
+                      ["dijkstra", "dijkstra (shortest path)"],
+                      ["beam", "beam (top K and bottom K)"],
+                      ["sample", "sample (stochastic)"],
+                    ]
             }
           />
         </div>
-        {mode === "beam" || (countKind && mode === "dijkstra") ? (
+        {mode === "beam" || mode === "kbest" || (beamOnly && mode === "dijkstra") ? (
           <div className="row">
             <NumberField
               label="K"
@@ -227,12 +241,18 @@ export default function PredictPanel({ status }) {
           />
         </div>
         <CheckField label="Run to END (cheapest complete path)" checked={toEnd} onChange={setToEnd} />
+        <CheckField
+          label="Filter with the negative network"
+          hint="the best continuation it does not veto; none survives, none comes back"
+          checked={guard}
+          onChange={setGuard}
+        />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading}>
             {loading ? "Predicting…" : "Predict"}
           </button>
         </div>
-        {mode === "beam" || (countKind && mode === "dijkstra") ? (
+        {mode === "beam" || mode === "kbest" || (beamOnly && mode === "dijkstra") ? (
           <p className="muted">
             The beam search returns the K most likely continuations and the K least likely ones of the same length
             in one prediction; the same search generates whole texts on the Generate tab.
@@ -243,6 +263,7 @@ export default function PredictPanel({ status }) {
 
       <div className="card">
         <h2>Result</h2>
+        <GuardNotice guard={result && result.guard} what="continuations" />
         {!result ? (
           <p className="muted">Enter a prefix and press Predict. The highlighted part is the predicted continuation.</p>
         ) : (

@@ -228,7 +228,7 @@ func init() {
 	route("POST", "/api/model/select", rModelSelect)
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
-	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, window}")
+	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
 	route("POST", "/api/train", rTrain)
 	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
@@ -236,11 +236,11 @@ func init() {
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, guard (default on: the negative network vetoes the continuations it recognises as failures)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -265,6 +265,10 @@ func init() {
 	doc("POST", "/api/checkpoints/restore", "{name}: load a checkpoint")
 	route("GET", "/api/graph", rGraph)
 	doc("GET", "/api/graph", "?limit=150: the most visited nodes and the edges among them, with counts, shares and rewards")
+	route("GET", "/api/paths", rPaths)
+	doc("GET", "/api/paths", "?limit=50: the judged paths - what each step did in the context it was taken from: {totals, path_scale, paths}")
+	route("GET", "/api/nodes", rNodes)
+	doc("GET", "/api/nodes", "?limit=20&node=LABEL: each node against the nodes around it - its traffic and its reward, shared out over the previous and the next nodes: {nodes, totals}")
 	route("GET", "/api/history", rHistory)
 	doc("GET", "/api/history", "training history")
 	route("GET", "/api/uploads", rUploads)
@@ -278,10 +282,12 @@ func init() {
 }
 
 // pythonOnly lists endpoint prefixes the Python server implements and this one does not.
-var pythonOnly = []string{"/api/evolve", "/api/ollama", "/api/images", "/api/speech", "/api/codegen", "/api/schedule/preview"}
+var pythonOnly = []string{"/api/schedule/preview"}
 
 // The tutor (/api/tutor, see tutor.go) is served here too: Ollama sets and
-// marks the exercises, this server's count / reward model answers them.
+// marks the exercises, this server's count / reward model answers them.  So are
+// the evolve loop (evolve.go), the Ollama corpus and review, the Negative
+// tab's automatic loop (critic.go) and code generation (codegen.go).
 
 func rIndex(rq *request) (int, any, error) {
 	return 200, map[string]any{"engine": "go", "version": Version, "endpoints": endpointDocs}, nil
@@ -315,7 +321,7 @@ func rModelSelect(rq *request) (int, any, error) {
 
 func weightOptions(f fields) (map[string]float64, error) {
 	opts := map[string]float64{}
-	for _, name := range []string{"count_scale", "global_scale", "window_scale", "reward_scale"} {
+	for _, name := range []string{"count_scale", "global_scale", "window_scale", "reward_scale", "path_scale"} {
 		v, present, err := f.number(name, 0, nil)
 		if err != nil {
 			return nil, err
@@ -560,7 +566,11 @@ func rPredict(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	p, err := rq.svc.Predict(prefix, o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	p, report, err := rq.svc.Predict(prefix, o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -576,7 +586,7 @@ func rPredict(rq *request) (int, any, error) {
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
-		"top": top, "bottom": bottom,
+		"top": top, "bottom": bottom, "guard": report,
 	}, nil
 }
 
@@ -620,7 +630,11 @@ func rGenerate(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	results, err := rq.svc.Generate(o)
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	results, report, err := rq.svc.Generate(o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -628,7 +642,7 @@ func rGenerate(rq *request) (int, any, error) {
 	for _, r := range results {
 		samples = append(samples, sampleDict(r))
 	}
-	return 200, map[string]any{"samples": samples}, nil
+	return 200, map[string]any{"samples": samples, "guard": report}, nil
 }
 
 func rConverse(rq *request) (int, any, error) {
@@ -690,14 +704,29 @@ func rConverse(rq *request) (int, any, error) {
 	if o.AvoidRepeats, err = f.flag("avoid_repeats", true); err != nil {
 		return 0, nil, err
 	}
-	turns, err := rq.svc.Converse(opening, o)
+	if o.AvoidWordRepeats, err = f.flag("avoid_word_repeats", true); err != nil {
+		return 0, nil, err
+	}
+	if o.Explore, _, err = f.integer("explore", radixnet.Explore, intp(0)); err != nil {
+		return 0, nil, err
+	}
+	if o.Learn, err = f.flag("learn", true); err != nil {
+		return 0, nil, err
+	}
+	guard, err := f.flag("guard", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	turns, report, err := rq.svc.Converse(opening, o, guard)
 	if err != nil {
 		return 0, nil, err
 	}
 	if turns == nil {
 		turns = []*radixnet.Turn{}
 	}
-	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns, "count": len(turns)}, nil
+	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
+	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}, nil
 }
 
 func rScore(rq *request) (int, any, error) {
@@ -896,6 +925,33 @@ func rCheckpointRestore(rq *request) (int, any, error) {
 		return 0, nil, badRequest("'name' must not be empty")
 	}
 	out, err := rq.svc.RestoreCheckpoint(name)
+	return 200, out, err
+}
+
+func rPaths(rq *request) (int, any, error) {
+	limit := 50
+	if raw, ok := rq.queryValue("limit"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, nil, badRequest("query parameter 'limit' must be an integer (got %q)", raw)
+		}
+		limit = n
+	}
+	out, err := rq.svc.Paths(limit)
+	return 200, out, err
+}
+
+func rNodes(rq *request) (int, any, error) {
+	limit := 20
+	if raw, ok := rq.queryValue("limit"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, nil, badRequest("query parameter 'limit' must be an integer (got %q)", raw)
+		}
+		limit = n
+	}
+	node, _ := rq.queryValue("node")
+	out, err := rq.svc.NodeRatios(limit, node)
 	return 200, out, err
 }
 

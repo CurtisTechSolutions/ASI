@@ -1,0 +1,491 @@
+{
+  "runs": [
+    {
+      "seed": 0,
+      "config": {
+        "hidden": 24,
+        "tau": 0.2,
+        "gamma": 0.99,
+        "neg_lr": 0.01,
+        "pos_lr": 0.002,
+        "neg_entropy": 0.02,
+        "pos_entropy": 0.01,
+        "neg_batch_steps": 400,
+        "pos_batch_steps": 2000,
+        "neg_updates": 150,
+        "pos_updates": 1,
+        "eval_episodes": 20,
+        "final_eval_episodes": 100,
+        "adaptive_starts": true,
+        "weight_by_delta": false,
+        "grading": "margin",
+        "seed": 0
+      },
+      "untrained": {
+        "mean": 80.3,
+        "std": 20.142244164938525,
+        "min": 50.0,
+        "max": 117.0,
+        "episodes": 20
+      },
+      "failure_episode_length": 8.04,
+      "failure_graded_loss": 0.5254669879845211,
+      "final_start_radius": 0.5254669879845211,
+      "failure_state_dependence": {
+        "majority_action_share": 0.5011337868480725,
+        "anti_balance_agreement": 0.9319724393253805
+      },
+      "after_negative": {
+        "mean": 8.9,
+        "std": 0.30000000000000004,
+        "min": 8.0,
+        "max": 9.0,
+        "episodes": 20
+      },
+      "inversion_max_error": 0.0,
+      "after_invert": {
+        "mean": 500.0,
+        "std": 0.0,
+        "min": 500.0,
+        "max": 500.0,
+        "episodes": 100
+      },
+      "env_steps": {
+        "negative": 60678,
+        "positive": 2000,
+        "total": 62678
+      },
+      "after_finetune": {
+        "mean": 500.0,
+        "std": 0.0,
+        "min": 500.0,
+        "max": 500.0,
+        "episodes": 100
+      },
+      "activation_parameters": [
+        {
+          "a": 1.0133388010336,
+          "b": 0.34662055092546457,
+          "h": -0.00041140338782300994,
+          "k": 0.0004876246549585941
+        },
+        {
+          "a": -1.0576757723655206,
+          "b": 0.38356137080670794,
+          "h": -9.642138497849206e-05,
+          "k": -4.7704895589362195e-18
+        }
+      ],
+      "log": [
+        {
+          "phase": "negative",
+          "update": 1,
+          "mean_episode_length": 28.571428571428573,
+          "graded_loss": 0.435,
+          "start_radius": 0.435
+        },
+        {
+          "phase": "negative",
+          "update": 15,
+          "mean_episode_length": 13.1,
+          "graded_loss": 0.524,
+          "start_radius": 0.524
+        },
+        {
+          "phase": "negative",
+          "update": 30,
+          "mean_episode_length": 9.01,
+          "graded_loss": 0.515,
+          "start_radius": 0.515
+        },
+        {
+          "phase": "negative",
+          "update": 45,
+          "mean_episode_length": 8.38,
+          "graded_loss": 0.542,
+          "start_radius": 0.542
+        },
+        {
+          "phase": "negative",
+          "update": 60,
+          "mean_episode_length": 7.95,
+          "graded_loss": 0.51,
+          "start_radius": 0.51
+        },
+        {
+          "phase": "negative",
+          "update": 75,
+          "mean_episode_length": 7.84,
+          "graded_loss": 0.529,
+          "start_radius": 0.529
+        },
+        {
+          "phase": "negative",
+          "update": 90,
+          "mean_episode_length": 7.65,
+          "graded_loss": 0.5,
+          "start_radius": 0.5
+        },
+        {
+          "phase": "negative",
+          "update": 105,
+          "mean_episode_length": 7.61,
+          "graded_loss": 0.535,
+          "start_radius": 0.535
+        },
+        {
+          "phase": "negative",
+          "update": 120,
+          "mean_episode_length": 7.65,
+          "graded_loss": 0.514,
+          "start_radius": 0.514
+        },
+        {
+          "phase": "negative",
+          "update": 135,
+          "mean_episode_length": 7.87,
+          "graded_loss": 0.517,
+          "start_radius": 0.517
+        },
+        {
+          "phase": "negative",
+          "update": 150,
+          "mean_episode_length": 8.04,
+          "graded_loss": 0.525,
+          "start_radius": 0.525
+        },
+        {
+          "phase": "positive",
+          "update": 1,
+          "mean_episode_length": 500.0
+        }
+      ],
+      "seconds": 3.9
+    },
+    {
+      "seed": 1,
+      "config": {
+        "hidden": 24,
+        "tau": 0.2,
+        "gamma": 0.99,
+        "neg_lr": 0.01,
+        "pos_lr": 0.002,
+        "neg_entropy": 0.02,
+        "pos_entropy": 0.01,
+        "neg_batch_steps": 400,
+        "pos_batch_steps": 2000,
+        "neg_updates": 150,
+        "pos_updates": 1,
+        "eval_episodes": 20,
+        "final_eval_episodes": 100,
+        "adaptive_starts": true,
+        "weight_by_delta": false,
+        "grading": "margin",
+        "seed": 1
+      },
+      "untrained": {
+        "mean": 9.0,
+        "std": 0.4472135954999579,
+        "min": 8.0,
+        "max": 10.0,
+        "episodes": 20
+      },
+      "failure_episode_length": 7.76,
+      "failure_graded_loss": 0.5403813655675203,
+      "final_start_radius": 0.5403813655675203,
+      "failure_state_dependence": {
+        "majority_action_share": 0.562358276643991,
+        "anti_balance_agreement": 0.8912998765939942
+      },
+      "after_negative": {
+        "mean": 9.2,
+        "std": 0.6000000000000001,
+        "min": 8.0,
+        "max": 10.0,
+        "episodes": 20
+      },
+      "inversion_max_error": 0.0,
+      "after_invert": {
+        "mean": 372.66,
+        "std": 26.825443146386228,
+        "min": 310.0,
+        "max": 475.0,
+        "episodes": 100
+      },
+      "env_steps": {
+        "negative": 60532,
+        "positive": 2025,
+        "total": 62557
+      },
+      "after_finetune": {
+        "mean": 412.1,
+        "std": 31.67254331435984,
+        "min": 335.0,
+        "max": 472.0,
+        "episodes": 100
+      },
+      "activation_parameters": [
+        {
+          "a": 1.004557870072368,
+          "b": 0.3394500352276189,
+          "h": -0.0012152373809624685,
+          "k": 0.0013942454858732977
+        },
+        {
+          "a": -1.0673516346647145,
+          "b": 0.3705834428399484,
+          "h": 0.001101049734030593,
+          "k": -6.071532165918825e-18
+        }
+      ],
+      "log": [
+        {
+          "phase": "negative",
+          "update": 1,
+          "mean_episode_length": 8.76086956521739,
+          "graded_loss": 0.421,
+          "start_radius": 0.421
+        },
+        {
+          "phase": "negative",
+          "update": 15,
+          "mean_episode_length": 8.68,
+          "graded_loss": 0.543,
+          "start_radius": 0.543
+        },
+        {
+          "phase": "negative",
+          "update": 30,
+          "mean_episode_length": 8.0,
+          "graded_loss": 0.54,
+          "start_radius": 0.54
+        },
+        {
+          "phase": "negative",
+          "update": 45,
+          "mean_episode_length": 7.66,
+          "graded_loss": 0.52,
+          "start_radius": 0.52
+        },
+        {
+          "phase": "negative",
+          "update": 60,
+          "mean_episode_length": 7.67,
+          "graded_loss": 0.525,
+          "start_radius": 0.525
+        },
+        {
+          "phase": "negative",
+          "update": 75,
+          "mean_episode_length": 7.78,
+          "graded_loss": 0.509,
+          "start_radius": 0.509
+        },
+        {
+          "phase": "negative",
+          "update": 90,
+          "mean_episode_length": 7.87,
+          "graded_loss": 0.528,
+          "start_radius": 0.528
+        },
+        {
+          "phase": "negative",
+          "update": 105,
+          "mean_episode_length": 7.81,
+          "graded_loss": 0.518,
+          "start_radius": 0.518
+        },
+        {
+          "phase": "negative",
+          "update": 120,
+          "mean_episode_length": 7.72,
+          "graded_loss": 0.521,
+          "start_radius": 0.521
+        },
+        {
+          "phase": "negative",
+          "update": 135,
+          "mean_episode_length": 7.75,
+          "graded_loss": 0.533,
+          "start_radius": 0.533
+        },
+        {
+          "phase": "negative",
+          "update": 150,
+          "mean_episode_length": 7.76,
+          "graded_loss": 0.54,
+          "start_radius": 0.54
+        },
+        {
+          "phase": "positive",
+          "update": 1,
+          "mean_episode_length": 289.2857142857143
+        }
+      ],
+      "seconds": 3.4
+    },
+    {
+      "seed": 2,
+      "config": {
+        "hidden": 24,
+        "tau": 0.2,
+        "gamma": 0.99,
+        "neg_lr": 0.01,
+        "pos_lr": 0.002,
+        "neg_entropy": 0.02,
+        "pos_entropy": 0.01,
+        "neg_batch_steps": 400,
+        "pos_batch_steps": 2000,
+        "neg_updates": 150,
+        "pos_updates": 1,
+        "eval_episodes": 20,
+        "final_eval_episodes": 100,
+        "adaptive_starts": true,
+        "weight_by_delta": false,
+        "grading": "margin",
+        "seed": 2
+      },
+      "untrained": {
+        "mean": 9.95,
+        "std": 0.38405728739343037,
+        "min": 9.0,
+        "max": 11.0,
+        "episodes": 20
+      },
+      "failure_episode_length": 7.66,
+      "failure_graded_loss": 0.5030800818089384,
+      "final_start_radius": 0.5030800818089384,
+      "failure_state_dependence": {
+        "majority_action_share": 0.5238095238095238,
+        "anti_balance_agreement": 0.927385849444673
+      },
+      "after_negative": {
+        "mean": 8.9,
+        "std": 0.30000000000000004,
+        "min": 8.0,
+        "max": 9.0,
+        "episodes": 20
+      },
+      "inversion_max_error": 0.0,
+      "after_invert": {
+        "mean": 469.3,
+        "std": 63.4889754209343,
+        "min": 256.0,
+        "max": 500.0,
+        "episodes": 100
+      },
+      "env_steps": {
+        "negative": 60528,
+        "positive": 2077,
+        "total": 62605
+      },
+      "after_finetune": {
+        "mean": 471.6,
+        "std": 58.44792554060409,
+        "min": 290.0,
+        "max": 500.0,
+        "episodes": 100
+      },
+      "activation_parameters": [
+        {
+          "a": 1.0150482601627326,
+          "b": 0.34859887399609946,
+          "h": -0.0005187140350232636,
+          "k": 0.0003116761665262372
+        },
+        {
+          "a": -1.056627589051173,
+          "b": 0.3840907668588539,
+          "h": -6.156180967154424e-05,
+          "k": 6.139294801699169e-18
+        }
+      ],
+      "log": [
+        {
+          "phase": "negative",
+          "update": 1,
+          "mean_episode_length": 11.542857142857143,
+          "graded_loss": 0.436,
+          "start_radius": 0.436
+        },
+        {
+          "phase": "negative",
+          "update": 15,
+          "mean_episode_length": 8.53,
+          "graded_loss": 0.547,
+          "start_radius": 0.547
+        },
+        {
+          "phase": "negative",
+          "update": 30,
+          "mean_episode_length": 8.29,
+          "graded_loss": 0.542,
+          "start_radius": 0.542
+        },
+        {
+          "phase": "negative",
+          "update": 45,
+          "mean_episode_length": 8.04,
+          "graded_loss": 0.547,
+          "start_radius": 0.547
+        },
+        {
+          "phase": "negative",
+          "update": 60,
+          "mean_episode_length": 7.7,
+          "graded_loss": 0.531,
+          "start_radius": 0.531
+        },
+        {
+          "phase": "negative",
+          "update": 75,
+          "mean_episode_length": 7.71,
+          "graded_loss": 0.509,
+          "start_radius": 0.509
+        },
+        {
+          "phase": "negative",
+          "update": 90,
+          "mean_episode_length": 7.78,
+          "graded_loss": 0.516,
+          "start_radius": 0.516
+        },
+        {
+          "phase": "negative",
+          "update": 105,
+          "mean_episode_length": 7.65,
+          "graded_loss": 0.54,
+          "start_radius": 0.54
+        },
+        {
+          "phase": "negative",
+          "update": 120,
+          "mean_episode_length": 7.77,
+          "graded_loss": 0.518,
+          "start_radius": 0.518
+        },
+        {
+          "phase": "negative",
+          "update": 135,
+          "mean_episode_length": 7.94,
+          "graded_loss": 0.523,
+          "start_radius": 0.523
+        },
+        {
+          "phase": "negative",
+          "update": 150,
+          "mean_episode_length": 7.66,
+          "graded_loss": 0.503,
+          "start_radius": 0.503
+        },
+        {
+          "phase": "positive",
+          "update": 1,
+          "mean_episode_length": 296.7142857142857
+        }
+      ],
+      "seconds": 3.7
+    }
+  ],
+  "controls": []
+}

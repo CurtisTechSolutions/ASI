@@ -120,6 +120,14 @@ func NewFilter(positive, negative *Model, config FilterConfig) (*Filter, error) 
 	return &Filter{Positive: positive, Negative: negative, Config: config}, nil
 }
 
+// Ready reports whether the negative half has anything to say: a failure has
+// been blamed and not fully cleared.  An empty negative network vetoes
+// nothing, so a filter around one costs the over-sampling and buys nothing -
+// this is what the output paths ask before putting the pair in the way.
+func (f *Filter) Ready() bool {
+	return f.Negative.G.Neg != nil && f.Negative.G.Neg.TotalBlame > 0
+}
+
 // FilterVerdict is the pair's verdict on one text.
 type FilterVerdict struct {
 	Text           string       `json:"text"`
@@ -215,7 +223,10 @@ func replaceSuffix(text, suffix, replacement string) string {
 
 // FilterOutcome is what a batch of candidates came to.
 type FilterOutcome struct {
-	Texts      []string         `json:"texts"`
+	Texts []string `json:"texts"`
+	// Results are the walks behind Texts (cost, probability, path), in the same
+	// order; they never go on the wire, where the texts are what is wanted.
+	Results    []*PathResult    `json:"-"`
 	Kept       []string         `json:"kept"`
 	Rejected   []*FilterVerdict `json:"rejected"`
 	Verdicts   []*FilterVerdict `json:"verdicts"`
@@ -227,7 +238,7 @@ type FilterOutcome struct {
 // Filter judges every text; with Config.Learn the rejected ones are blamed as
 // new failures.
 func (f *Filter) Filter(texts []string) (*FilterOutcome, error) {
-	out := &FilterOutcome{Texts: []string{}, Kept: []string{}, Rejected: []*FilterVerdict{},
+	out := &FilterOutcome{Texts: []string{}, Results: []*PathResult{}, Kept: []string{}, Rejected: []*FilterVerdict{},
 		Verdicts: []*FilterVerdict{}, Candidates: len(texts), Asked: len(texts)}
 	for _, text := range texts {
 		verdict := f.Judge(text)
@@ -269,7 +280,8 @@ func (f *Filter) Generate(count int, o GenerateOptions) (*FilterOutcome, error) 
 	if count < 0 {
 		return nil, fmt.Errorf("count must be >= 0, got %d", count)
 	}
-	out := &FilterOutcome{Texts: []string{}, Kept: []string{}, Rejected: []*FilterVerdict{}, Verdicts: []*FilterVerdict{}}
+	out := &FilterOutcome{Texts: []string{}, Results: []*PathResult{}, Kept: []string{},
+		Rejected: []*FilterVerdict{}, Verdicts: []*FilterVerdict{}}
 	if count == 0 {
 		return out, nil
 	}
@@ -280,12 +292,12 @@ func (f *Filter) Generate(count int, o GenerateOptions) (*FilterOutcome, error) 
 		return nil, err
 	}
 	candidates := []string{}
-	seen := map[string]bool{}
+	paths := map[string]*PathResult{}
 	for _, result := range results {
-		if result.Text == "" || seen[result.Text] {
+		if result.Text == "" || paths[result.Text] != nil {
 			continue
 		}
-		seen[result.Text] = true
+		paths[result.Text] = result
 		candidates = append(candidates, result.Text)
 	}
 	outcome, err := f.Filter(candidates)
@@ -299,21 +311,119 @@ func (f *Filter) Generate(count int, o GenerateOptions) (*FilterOutcome, error) 
 			keepers = append(keepers, verdict)
 		}
 	}
-	sort.SliceStable(keepers, func(i, j int) bool {
-		if keepers[i].Risk != keepers[j].Risk {
-			return keepers[i].Risk < keepers[j].Risk
-		}
-		return keepers[i].Ratio < keepers[j].Ratio
-	})
+	// cleanest first; a stable sort keeps the model's own order among equally clean texts
+	sort.SliceStable(keepers, func(i, j int) bool { return keepers[i].Risk < keepers[j].Risk })
 	texts := []string{}
+	walks := []*PathResult{}
 	for i, verdict := range keepers {
 		if i >= count {
 			break
 		}
 		texts = append(texts, verdict.Text)
+		walks = append(walks, paths[verdict.Text])
 	}
-	outcome.Texts = texts
+	outcome.Texts, outcome.Results = texts, walks
 	return outcome, nil
+}
+
+// Rank is a finished prediction with the vetoed continuations taken out of
+// it, and a verdict on each.
+//
+// The search has already run, so this re-ranks what it offered rather than
+// asking for more: a guarded prediction costs one judgement per continuation
+// and no second search.  Top keeps the survivors in the search's own order
+// and the best of them becomes the prediction itself; when none survives, the
+// prediction is the prefix and nothing else (Expanded still reports the
+// search that was run).
+func (f *Filter) Rank(prefix string, result *Prediction) (*Prediction, []*FilterVerdict) {
+	offered := result.Top
+	if len(offered) == 0 {
+		best := result.PathResult
+		offered = []*PathResult{&best}
+	}
+	verdicts := make([]*FilterVerdict, 0, len(offered))
+	kept := []*PathResult{}
+	for _, candidate := range offered {
+		verdict := f.Judge(prefix + candidate.Text)
+		verdicts = append(verdicts, verdict)
+		if verdict.Decision != "reject" {
+			kept = append(kept, candidate)
+		}
+	}
+	best := &PathResult{Labels: []string{}, NodeIDs: []int{}, StepCosts: []float64{}, FullText: prefix}
+	if len(kept) > 0 {
+		best = kept[0]
+	}
+	ranked := *result
+	expanded := result.Expanded
+	ranked.PathResult = *best
+	ranked.Expanded = expanded
+	ranked.Top = kept
+	return &ranked, verdicts
+}
+
+// ConverseOutcome is a conversation held through the pair.
+type ConverseOutcome struct {
+	Turns    []*Turn          `json:"turns"`
+	Rejected []*FilterVerdict `json:"rejected"`
+	Verdicts []*FilterVerdict `json:"verdicts"`
+	Vetoed   int              `json:"vetoed"`
+}
+
+// Converse holds a conversation through the pair: every candidate reply the
+// negative network refuses is left unsaid.
+//
+// The conversation is the positive model's (Model.Converse); the filter only
+// supplies the veto, so a turn whose every candidate is vetoed falls back
+// exactly as a dead end does - a shorter context, then a fresh text - and the
+// conversation stops when there is nothing left that may be said.
+func (f *Filter) Converse(opening string, o ConverseOptions) (*ConverseOutcome, error) {
+	verdicts := []*FilterVerdict{}
+	seen := map[string]bool{} // the same candidate can be offered again after a shorter context
+	o.Veto = func(text string) bool {
+		refused, known := seen[text]
+		if !known {
+			verdict := f.Judge(text)
+			refused = verdict.Decision == "reject"
+			seen[text] = refused
+			verdicts = append(verdicts, verdict)
+		}
+		return refused
+	}
+	spoken, err := f.Positive.Converse(opening, o)
+	if err != nil {
+		return nil, err
+	}
+	if spoken == nil {
+		spoken = []*Turn{}
+	}
+	rejected := []*FilterVerdict{}
+	for _, verdict := range verdicts {
+		if verdict.Decision == "reject" {
+			rejected = append(rejected, verdict)
+		}
+	}
+	if len(rejected) > 0 && f.Config.Learn {
+		blamed := []string{}
+		for _, verdict := range rejected {
+			if runeLen(verdict.Text) >= Window {
+				blamed = append(blamed, verdict.Text)
+			}
+		}
+		reason := f.Config.Reason
+		if reason == "" {
+			reason = "filtered"
+		}
+		if _, err := f.Negative.Blame(blamed, BlameOptions{Reason: reason, Source: "filter",
+			Note: "vetoed in conversation"}); err != nil {
+			return nil, err
+		}
+	}
+	vetoed := 0
+	for _, turn := range spoken {
+		vetoed += turn.Vetoed
+	}
+	return &ConverseOutcome{Turns: spoken, Rejected: rejected, Verdicts: verdicts, Vetoed: vetoed}, nil
 }
 
 // FilterPrediction is a filtered continuation of a prefix.

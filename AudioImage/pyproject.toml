@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audioimage"
+version = "0.1.0"
+description = "Audio as a picture: a waveform encoded into a 2D plane (X = time, Y = frequency, black = full amplitude) and decoded back to sound. Pure Python, standard library only."
+readme = "README.md"
+requires-python = ">=3.11"
+# Licensed under the custom source-available license in ../LICENSE (repository root).
+dependencies = []
+
+[project.scripts]
+audioimage = "audioimage.cli:main"
+
+[tool.setuptools]
+packages = ["audioimage"]

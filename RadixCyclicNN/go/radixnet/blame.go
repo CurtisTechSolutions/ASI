@@ -159,6 +159,31 @@ func FaultsFromLessons(lessons []*Lesson, threshold float64, source string) ([]F
 				fault.Correction = correction
 			}
 			faults = append(faults, fault)
+			why := strings.Join(strings.Fields(lesson.Why), " ")
+			for _, variant := range lesson.Variants {
+				wrong := strings.Join(strings.Fields(variant.Wrong), " ")
+				right := strings.Join(strings.Fields(variant.Right), " ")
+				if wrong == "" || wrong == sentence {
+					continue
+				}
+				weight := variant.Weight
+				if weight < 0 {
+					weight = 0
+				}
+				note := why
+				if note == "" {
+					note = lesson.Grade.Comment
+				}
+				similar := Fault{
+					Text: wrong, Reason: reason, Severity: fault.Severity * weight, Note: note,
+					Source: source + ":similar",
+				}
+				if right != "" && right != wrong {
+					similar.Correction = right
+					add(right)
+				}
+				faults = append(faults, similar)
+			}
 		}
 		add(correction)
 		add(answer)
@@ -285,5 +310,137 @@ func TeachLessons(negative *Model, lessons []*Lesson, threshold float64, clearPa
 		return nil, err
 	}
 	report.Source, report.Threshold = source, threshold
+	return report, nil
+}
+
+// FaultsFromReviews turns an adversarial review into faults and the texts that
+// clear blame.
+//
+// Everything the reviewer did not pass becomes a fault whose reason comes from
+// its critique and whose severity comes from its rating; the texts it passed
+// come back separately so they can take blame off what they share.
+func FaultsFromReviews(reviews []Review, threshold float64, source string) ([]Fault, []string) {
+	faults := []Fault{}
+	passed := []string{}
+	for _, review := range reviews {
+		if review.Text == "" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(review.Verdict)) == "pass" {
+			passed = append(passed, review.Text)
+			continue
+		}
+		faults = append(faults, Fault{
+			Text:     review.Text,
+			Reason:   Classify(review.Critique, ClassifyOptions{Verdict: review.Verdict, Rating: review.Rating}),
+			Severity: SeverityFromRating(review.Rating, threshold),
+			Note:     review.Critique,
+			Source:   source,
+		})
+	}
+	return faults, passed
+}
+
+// TeachReviews feeds an adversarial review straight into the negative network.
+func TeachReviews(negative *Model, reviews []Review, threshold float64, clearPasses bool, source string,
+	o TeachOptions) (*TeachReport, error) {
+	if source == "" {
+		source = "review"
+	}
+	if threshold <= 0 {
+		threshold = 6
+	}
+	faults, passed := FaultsFromReviews(reviews, threshold, source)
+	if !clearPasses {
+		passed = nil
+	}
+	report, err := Teach(negative, faults, passed, o)
+	if err != nil {
+		return nil, err
+	}
+	report.Source, report.Threshold = source, threshold
+	return report, nil
+}
+
+// CodeReasons are the reason tags of a reviewed *program*.
+var CodeReasons = []string{"timeout", "crash", "wrong-output", "task-not-done", "style", "naming", DefaultReason}
+
+// CodeSeverity is how heavily each code failure is blamed (1 = one ordinary failure).
+var CodeSeverity = map[string]float64{
+	"timeout": 1.5, "crash": 1.5, "wrong-output": 1.25, "task-not-done": 1.0,
+	"style": 0.5, "naming": 0.5, DefaultReason: 1.0,
+}
+
+// CodeReason is why a code attempt was rejected, from the sandbox, the style
+// report and the judge, in the order those matter.
+func CodeReason(attempt *Attempt) string {
+	if attempt == nil {
+		return DefaultReason
+	}
+	run, style, verdict := attempt.Run, attempt.Style, attempt.Verdict
+	switch {
+	case run != nil && run.TimedOut:
+		return "timeout"
+	case run != nil && !run.OK:
+		return "crash"
+	case run != nil && run.ExpectedOK != nil && !*run.ExpectedOK:
+		return "wrong-output"
+	case verdict.Task != nil && !*verdict.Task:
+		return "task-not-done"
+	case !verdict.Naming || !style.NamingOK:
+		return "naming"
+	case !verdict.PEP8 || !style.PEP8OK:
+		return "style"
+	}
+	words := verdict.Critique
+	if strings.TrimSpace(words) == "" {
+		words = strings.Join(firstN(verdict.Issues, 3), "; ")
+	}
+	return Classify(words, ClassifyOptions{})
+}
+
+// FaultsFromAttempts turns a problem's attempts into faults and the texts that
+// clear blame: a rejected program is blamed for what the sandbox, the style
+// checker or the judge found, and the accepted ones clear.
+func FaultsFromAttempts(attempts []*Attempt, source string) ([]Fault, []string) {
+	faults := []Fault{}
+	correct := []string{}
+	for _, attempt := range attempts {
+		if attempt == nil || attempt.Text == "" {
+			continue
+		}
+		if attempt.Verdict.Correct {
+			correct = append(correct, attempt.Text)
+			continue
+		}
+		reason := CodeReason(attempt)
+		severity, ok := CodeSeverity[reason]
+		if !ok {
+			severity = 1
+		}
+		faults = append(faults, Fault{
+			Text: attempt.Text, Reason: reason, Severity: severity,
+			Note: attempt.Feedback(), Source: source,
+		})
+	}
+	return faults, correct
+}
+
+// TeachAttempts feeds the code-generation teacher's rejected attempts into the
+// negative network.
+func TeachAttempts(negative *Model, attempts []*Attempt, clearPasses bool, source string,
+	o TeachOptions) (*TeachReport, error) {
+	if source == "" {
+		source = "codegen"
+	}
+	faults, correct := FaultsFromAttempts(attempts, source)
+	if !clearPasses {
+		correct = nil
+	}
+	report, err := Teach(negative, faults, correct, o)
+	if err != nil {
+		return nil, err
+	}
+	report.Source = source
 	return report, nil
 }
