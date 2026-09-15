@@ -49,6 +49,9 @@ make cartpole      # TwoNRL_CartPole's
 
 Or work inside one directly — `cd GREN && make test` does what you would expect.
 
+`Memory/` carries no code yet: it is a specified, unbuilt design (insight 36),
+with the experiment that would falsify its premise written down first.
+
 Variables set on the command line flow down into the project Makefiles, and
 their defaults live with them rather than at the root:
 

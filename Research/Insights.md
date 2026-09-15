@@ -649,6 +649,56 @@ the wrong object.
 
 *Where:* `GTMNN/gtmnn/equilibrium.py` (`mixed_exploitability`) · **confirmed**
 
+### 36. Memory is the trajectory, not the answer
+> Solve memory by keeping track of the trajectory through the model, input and
+> output data, then storing this in a new NN that is a stack-based idea where the
+> top of the stack has precedence compared to similar paths further down.
+
+Every network here discards the most informative thing it produces. GREN walks a
+radix path to identify a game and keeps the answer. CyclicCortex routes to a
+region and keeps the prediction. GTMNN seats 64 micros of 4096, solves an
+equilibrium, and throws away *who was seated and what they argued*. The
+trajectory is that discarded object — the path taken, not the destination — and
+the claim is that it is what memory should be keyed on.
+
+**The precedence order is the sharp part.** GREN's radix tree resolves a tie by
+SPECIFICITY: a deeper terminal beats a shallower one, because "chess" beats "a
+two-player board game" when both match. A stack resolves it by RECENCY: the top
+beats everything below, whatever its specificity. Those are two different orders
+over the same set of matching paths and they disagree — the specific-but-stale
+entry and the general-but-fresh one are both real answers. Which should win is
+empirical, and both policies can run over the same stack, so it is settleable.
+
+A stack also buys something no weight-based memory has: **shadowing without
+erasure**, exactly like a scope chain. Popping restores what was underneath, so
+memory gets an undo.
+
+Two existing threads meet here. `CyclicCortex::rehearse` exists because admitting
+a new game overwrites the incumbents, and replay is the mitigation — a trajectory
+store attacks the same problem from the other side and `rehearse` is the measured
+baseline to beat. And insight 22's dual-network/REM consolidation has never had a
+rule for *what* to consolidate; a stack supplies one, in that entries which keep
+getting shadowed are what the base network should absorb, and entries that keep
+being hit alone are what it still cannot represent.
+
+**The premise is falsifiable and cheap to falsify, so that goes first.** If a
+trajectory-keyed lookup does not beat an ordinary input-keyed one on the same
+episodes, the trajectory carries no structure the input lacks and the whole
+design reduces to a cache with extra steps. Given that "similar things
+generalise" has now failed three independent measurements in this repository
+(29, 30, 32), the experiment should be built to fail loudly.
+
+Unresolved and load-bearing: what a trajectory IS across three networks with
+three different path alphabets; what "similar" means for two paths (the phrase
+"similar paths further down" is doing enormous work); one global stack or a stack
+per prefix; and growth, since a stack that only grows is a log rather than a
+memory. Also a scope collision — a path-keyed store is trie-shaped, and a trie
+here is for game theory and game classification only. Either this uses a
+different structure or that rule needs a stated exception; it should not quietly
+become a third trie.
+
+*Where:* `Memory/README.md` · **held**
+
 ---
 
 ## What to test next
@@ -657,9 +707,10 @@ Ordered by how much they would change, per unit of effort:
 
 0. ~~**Does transfer survive ACROSS regions, or only within them?**~~ (29) **Answered: the graph is doing routing.** Cross-region transfer is +0.025 in one case of four; the within-region shared vocabulary is +0.023 against its proper baseline. Regions earn their place by *placing* games correctly — the wrong region is measurably worse, per the negative Shapley values — not by teaching each other.
 1. ~~**Does validity transfer?**~~ (19) **Answered, and it is the same +0.023.** `p_valid` trained on chess alone leaves checkers at its majority class. The interesting follow-up is 29's refinement: build a region whose vocabulary is *mostly* shared, as `common_denominator.py` did with three inputs, and see whether 0.646 survives inside a cortex.
-2. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
-3. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
-4. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
-5. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
-6. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
-7. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
+2. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `Memory/` needs building.
+3. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
+4. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
+5. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
+6. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
+7. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
+8. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
