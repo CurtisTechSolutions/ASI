@@ -18,12 +18,13 @@ It all started when I was frustrated with the current AGI/LLM hype. I was buildi
 
 ## Running it
 
-Everything is driven from one Makefile at the root. `make help` lists every
-target, grouped by project:
+Every project carries its own Makefile, and one at the root ties them together.
+`make help` lists every target, at either level:
 
 ```bash
-make help          # every target
+make help          # every root target
 make deps          # what the optional dependencies are, and whether they are here
+make test-quick    # GREN + CyclicCortex, ~40s
 make test          # every suite that needs nothing installed
 make handoff       # GREN probes every game, then CyclicCortex rebuilds its map from it
 make demo          # the CyclicCortex tour: train, play chess, add sudoku
@@ -33,14 +34,25 @@ Most of the repository is pure standard-library `python3` and runs with nothing
 installed. `make deps` says which of the remaining pieces need `numpy`,
 `gymnasium`, `torch`, Stockfish or Go, and which targets those are.
 
-Three directories carry their own Makefile for their own commands — `AudioImage`,
-`RadixCyclicNN` and `TwoNRL_CartPole`; the root delegates to them rather than
-repeating them, so `make audioimage` lists AudioImage's targets.
-
-Override any variable on the command line:
+The root delegates with `make -C` rather than repeating commands, so each one
+has a single home. To see what a project offers, ask it:
 
 ```bash
-make handoff BUDGET=3000          # more probes per game
-make demo EPISODES=1200 SEED=7
-make map GAMES="chess checkers"
+make gren          # GREN's targets — explore, similar, policies, tree, grow, package
+make cortex        # CyclicCortex's — demo, map, play, sudoku, transfer, credit
+make compression   # NeuralCompression's four experiments
+make audioimage    # AudioImage's
+make radixcyclic   # RadixCyclicNN's
+make cartpole      # TwoNRL_CartPole's
+```
+
+Or work inside one directly — `cd GREN && make test` does what you would expect.
+
+Variables set on the command line flow down into the project Makefiles, and
+their defaults live with them rather than at the root:
+
+```bash
+make handoff BUDGET=3000              # more probes per game, reaches GREN
+make demo EPISODES=1200 SEED=7        # reaches CyclicCortex
+make -C CyclicCortex map DISCOVERED=1 # route on GREN's measurement, not the hand-written sets
 ```

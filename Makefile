@@ -1,57 +1,37 @@
-# ASI — one entry point for every project in the repository.  `make help` lists
-# every target.
+# ASI — one entry point for the repository.  `make help` lists every target.
 #
-# Everything under Tests, GREN, CyclicCortex, Compression and Experiments is
-# pure standard-library python3 and runs with nothing installed.  `make deps`
-# reports what the remaining targets need and whether it is here.
+# Each project owns its own Makefile and its own defaults; this one delegates
+# with `make -C` rather than repeating them, so every command has exactly one
+# home.  `make gren`, `make cortex`, `make compression`, `make audioimage`,
+# `make radixcyclic` and `make cartpole` list what each project offers.
 #
-# Sub-projects that carry their own Makefile (AudioImage, RadixCyclicNN,
-# TwoNRL_CartPole) are delegated to rather than duplicated — `make audioimage`
-# lists theirs.
+# Variables set on the COMMAND LINE flow down into the project Makefiles, so
+# `make handoff BUDGET=3000` reaches GREN and `make demo EPISODES=1200` reaches
+# CyclicCortex.  Their defaults live with them, not here.
 #
-# Override any variable on the command line, e.g. `make handoff BUDGET=3000`.
+# Everything under Tests and The handoff is pure standard-library python3 and
+# runs with nothing installed.  `make deps` reports what the rest needs.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-# ---- settings ---------------------------------------------------------------
-PY        ?= python3
-SEED      ?= 0
-GAMES     ?= chess checkers go sudoku
-HANDOFF   ?= CyclicCortex/data/gren_packages.json
+PY ?= python3
 
-# GREN: probes per game, and the policy that picks them
-BUDGET    ?= 1500
-POLICY    ?= eig
-HIDDEN    ?= 24
+PROJECTS := GREN CyclicCortex NeuralCompression AudioImage RadixCyclicNN TwoNRL_CartPole
 
-# CyclicCortex: training positions per game, self-play games, plies per game,
-# opponent search depth, and seeds per measurement
-EPISODES  ?= 400
-ROUNDS    ?= 40
-PLIES     ?= 60
-DEPTH     ?= 1
-SEEDS_N   ?= 3
-
-GREN_CLI  := cd GREN && $(PY) -m gren.cli
-CX_CLI    := cd CyclicCortex && $(PY) -m cortex.cli
-
-.PHONY: help deps check audioimage radixcyclic cartpole test test-quick test-gren test-cortex test-audioimage test-radixcyclic \
-        test-cartpole handoff package discovered explore similar policies tree grow \
-        demo map map-discovered play sudoku transfer credit compression partition \
-        vanishing consolidate compression-all denominators information \
-        depth-normalisation activation all clean
+.PHONY: help deps check test test-quick test-gren test-cortex test-audioimage \
+        test-radixcyclic test-cartpole handoff package discovered demo map \
+        depth-normalisation activation gren cortex compression audioimage \
+        radixcyclic cartpole all clean
 
 help: ## Show this help
 	@echo "ASI make targets  (override variables like: make handoff BUDGET=3000)"
 	@awk 'BEGIN {FS = ":.*## "} /^##@/ {printf "\n%s\n", substr($$0, 5)} \
 		 /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
-	@echo "Defaults: SEED=$(SEED)  BUDGET=$(BUDGET)  POLICY=$(POLICY)  EPISODES=$(EPISODES)"
-	@echo "          GAMES=\"$(GAMES)\"  HANDOFF=$(HANDOFF)"
 
 ##@ Setup
-deps: ## Report what the optional dependencies are and whether they are here
+deps: ## Report what the optional dependencies are, and whether they are here
 	@echo "Pure standard library — always available:"
 	@echo "    GREN, CyclicCortex, NeuralCompression, AudioImage, RadixCyclicNN (python side),"
 	@echo "    Research/experiments, and \`make activation\`"
@@ -66,9 +46,11 @@ deps: ## Report what the optional dependencies are and whether they are here
 	@command -v go >/dev/null && echo "    go           present" \
 		|| echo "    go           MISSING  -> make -C RadixCyclicNN go-build"
 
-check: ## Byte-compile every pure-python package (a syntax check, no tools needed)
-	$(PY) -m compileall -q GREN/gren GREN/tests CyclicCortex/cortex CyclicCortex/tests \
-		NeuralCompression Research/experiments utils && echo "ok"
+check: ## Byte-compile every pure-python project (a syntax check, no tools needed)
+	@$(MAKE) --no-print-directory -C GREN check
+	@$(MAKE) --no-print-directory -C CyclicCortex check
+	@$(MAKE) --no-print-directory -C NeuralCompression check
+	@$(PY) -m compileall -q Research/experiments utils && echo "ok"
 
 ##@ Tests
 test: test-gren test-cortex test-audioimage test-radixcyclic ## Every suite that needs nothing installed (minutes: RadixCyclicNN trains models)
@@ -76,109 +58,68 @@ test: test-gren test-cortex test-audioimage test-radixcyclic ## Every suite that
 test-quick: test-gren test-cortex ## Just GREN and CyclicCortex (~40s) — the fast loop
 
 test-gren: ## GREN: verdicts, the radix tree, growth identities, the derived vocabulary
-	cd GREN && $(PY) -m tests.test_gren
+	@$(MAKE) --no-print-directory -C GREN test
 
 test-cortex: ## CyclicCortex: regions, SBNN growth, Shapley, and the GREN handoff
-	cd CyclicCortex && $(PY) -m tests.test_v1 && $(PY) -m tests.test_discovered
+	@$(MAKE) --no-print-directory -C CyclicCortex test
 
 test-audioimage: ## AudioImage's own suite
-	$(MAKE) -C AudioImage test
+	@$(MAKE) --no-print-directory -C AudioImage test
 
 test-radixcyclic: ## RadixCyclicNN's own suite
-	$(MAKE) -C RadixCyclicNN test
+	@$(MAKE) --no-print-directory -C RadixCyclicNN test
 
 test-cartpole: ## TwoNRL_CartPole's 14 proofs (needs numpy + gymnasium)
-	$(MAKE) -C TwoNRL_CartPole test
+	@$(MAKE) --no-print-directory -C TwoNRL_CartPole test
 
-##@ The GREN -> CyclicCortex handoff
-handoff: package discovered ## Probe every game, then rebuild the cortex's map from what was measured
+##@ The GREN -> CyclicCortex handoff  (the one pipeline that spans two projects)
+handoff: ## Probe every game, then rebuild the cortex's map from what was measured
+	@$(MAKE) --no-print-directory -C GREN package
+	@$(MAKE) --no-print-directory -C CyclicCortex discovered
 
-package: ## GREN probes every game and writes the GamePackages into CyclicCortex/data/
-	$(GREN_CLI) package --budget $(BUDGET) --policy $(POLICY) --seed $(SEED) \
-		--out ../$(HANDOFF)
+package: ## Just the GREN half: probe every game and write the handoff
+	@$(MAKE) --no-print-directory -C GREN package
 
-discovered: ## Compare the discovered map against the hand-written one, and measure what sharing is worth
-	$(CX_CLI) discovered --games $(GAMES) --games-n $(SEEDS_N) --episodes $(EPISODES)
+discovered: ## Just the CyclicCortex half: the discovered map against the hand-written one
+	@$(MAKE) --no-print-directory -C CyclicCortex discovered
 
-##@ GREN — learn a game's identity from what it refuses
-explore: ## Probe every game: what does each one refuse, and how often?
-	$(GREN_CLI) explore --budget $(BUDGET) --policy $(POLICY) --seed $(SEED)
-
-similar: ## Discovered similarity against CyclicCortex's hand-written sets
-	$(GREN_CLI) similar --budget $(BUDGET) --policy $(POLICY) --seed $(SEED)
-
-policies: ## Failure rate and rule coverage by probe policy
-	$(GREN_CLI) policies --budget $(BUDGET) --seed $(SEED)
-
-tree: ## The radix tree over discovered signatures (trie mechanics, path compression)
-	$(GREN_CLI) tree --budget $(BUDGET) --policy $(POLICY) --seed $(SEED)
-
-grow: ## One Self-Building network growing its inputs and outputs across all four games
-	$(GREN_CLI) grow --budget $(BUDGET) --policy $(POLICY) --seed $(SEED) --hidden $(HIDDEN)
-
-##@ CyclicCortex — one network per region of a cyclic similarity graph
-demo: ## The tour: build the cortex, train, play chess, add sudoku, show every region
-	$(CX_CLI) demo --episodes $(EPISODES) --rounds $(ROUNDS) --plies $(PLIES) --seed $(SEED)
+##@ Shortcuts  (the two you land on; each project's Makefile has the rest)
+demo: ## The CyclicCortex tour: train, play chess, add sudoku, show every region
+	@$(MAKE) --no-print-directory -C CyclicCortex demo
 
 map: ## The similarity graph, its regions, and the routing log
-	$(CX_CLI) map --games $(GAMES)
+	@$(MAKE) --no-print-directory -C CyclicCortex map
 
-map-discovered: ## The same map, built from GREN's measurement instead of the hand-written sets
-	$(CX_CLI) map --games $(GAMES) --discovered --discovered-vocab
-
-play: ## Play a full game against the engine (PLIES plies, opponent depth DEPTH)
-	$(CX_CLI) play --episodes $(EPISODES) --plies $(PLIES) --depth $(DEPTH) --seed $(SEED)
-
-sudoku: ## Train the sudoku region and solve a puzzle with it
-	$(CX_CLI) sudoku --episodes $(EPISODES) --seed $(SEED)
-
-transfer: ## What one region's learning is worth to another game
-	$(CX_CLI) transfer --games $(GAMES) --episodes $(EPISODES) --seed $(SEED)
-
-credit: ## Exact Shapley credit over regions, plus the routing auction
-	$(CX_CLI) credit --games $(GAMES) --episodes $(EPISODES) --seed $(SEED)
-
-##@ Neural compression — can one network hold many games?
-compression: ## Split the output range, one band per game, plus a selector
-	cd NeuralCompression && $(PY) experiment.py
-
-partition: ## Partition layout: what dust costs, and what a relayout costs
-	cd NeuralCompression && $(PY) partition.py
-
-vanishing: ## The vanishing gradient as a feature: invert out of it
-	cd NeuralCompression && $(PY) vanishing.py
-
-consolidate: ## The dual network: train granularly, consolidate into the second
-	cd NeuralCompression && $(PY) consolidate.py
-
-compression-all: compression partition vanishing consolidate ## Every compression experiment, in order
-
-##@ Experiments
-denominators: ## Does a generalised vocabulary let one network learn chess and checkers?
-	cd CyclicCortex && $(PY) common_denominator.py
-
-information: ## What information does move legality actually require?
-	cd CyclicCortex && $(PY) information.py
-
+##@ Experiments with no project Makefile of their own
 depth-normalisation: ## Is the vanishing gradient a measurement problem?  (minutes)
 	cd Research/experiments && $(PY) depth_counted_normalisation.py
 
 activation: ## A self-building network measured on its activation function  (minutes)
 	cd ActivationFunctionTest && $(PY) self_building_sinewave.py
 
-##@ Sub-projects  (each carries its own Makefile — these list its targets)
-audioimage: ## AudioImage: audio encoded into a 2D plane and decoded back
-	$(MAKE) -C AudioImage help
+##@ Projects  (each lists its own targets)
+gren: ## GREN — learn a game's identity from what it refuses
+	@$(MAKE) --no-print-directory -C GREN help
 
-radixcyclic: ## RadixCyclicNN: the count / reward model, Go port, frontend and Docker stack
-	$(MAKE) -C RadixCyclicNN help
+cortex: ## CyclicCortex — one network per region of a cyclic similarity graph
+	@$(MAKE) --no-print-directory -C CyclicCortex help
 
-cartpole: ## TwoNRL_CartPole: fail on purpose, invert, fine-tune
-	$(MAKE) -C TwoNRL_CartPole help
+compression: ## NeuralCompression — can one network hold many games?
+	@$(MAKE) --no-print-directory -C NeuralCompression help
+
+audioimage: ## AudioImage — audio encoded into a 2D plane, and decoded back
+	@$(MAKE) --no-print-directory -C AudioImage help
+
+radixcyclic: ## RadixCyclicNN — the count / reward model, Go port, frontend, Docker
+	@$(MAKE) --no-print-directory -C RadixCyclicNN help
+
+cartpole: ## TwoNRL_CartPole — fail on purpose, invert, fine-tune
+	@$(MAKE) --no-print-directory -C TwoNRL_CartPole help
 
 ##@ Everything
 all: check test ## Byte-compile everything, then run every suite that needs nothing installed
 
-clean: ## Remove byte-code caches everywhere (results and handoffs are kept)
-	find . -name __pycache__ -type d -prune -not -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
+clean: ## Remove caches and generated scratch everywhere (committed results and the handoff are kept)
+	@for d in $(PROJECTS); do $(MAKE) --no-print-directory -C $$d clean >/dev/null; done
+	@find . -name __pycache__ -type d -prune -not -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
 	@echo "ok"
