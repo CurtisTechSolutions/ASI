@@ -194,8 +194,8 @@ follows the kind - `model.count.json`, `model.resonant.json`),
 |---|---|
 | `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
-| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (every kind; the count and resonant models' default): `--k 5` (top K and bottom K continuations in one search), `--beam N`; the guard flags below. On the resonant model `dijkstra` is the exact search over `(node, chars, phase)` and runs without the metacognitive layer |
-| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; the guard flags below |
+| `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|kbest\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`; `--mode beam` (every kind; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N`; the guard flags below. `--mode kbest` is the resonant model's default: the exact K cheapest walks over `(node, chars, phase)`, metacognitive layer included; its `dijkstra` is the same search with one label per state, and so cycle-blind |
+| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra\|kbest`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`; `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; `kbest` (the resonant model's default) returns the same list *exactly* and stops as soon as it has it; the guard flags below |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`, `--allow-word-repeats`, `--explore 3` (times a reply that caught itself repeating - its own words, or the conversation's - may back up and look for another way on), `--no-learn` (do not teach the graph where it goes round), `--save` / `--out` (write what it learned back); prints the transcript with cost, probability and the words each reply picked up, then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; the guard flags below |
 | `chat` | an LLM converses with the model and marks every reply (a reply it could only repeat is punished whatever the judge said): `--conversations 1` (0 = until Ctrl-C), `--turns 4` (replies per conversation), `--topic TEXT`, `--opening TEXT`, `--persona TEXT`, `--context 12`, `--max-length 60`, `--mode beam\|sample`, `--k 5`, `--temperature`, `--partner-temperature`, `--threshold 6` (pass mark), `--provider ollama\|chatgpt`, `--partner-model`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--no-guard` (do not veto a reply before it is spoken), `--no-blame`, `--no-clear`, `--no-learn` (mark it but do not train), `--no-teach-partner`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--negative PATH`, `--epochs`, 2NRL options, `--out` |
@@ -1024,7 +1024,7 @@ kind, so `load` always restores the right one.
 | training | epochs over mini-batches with `lr` / `act_lr` (and their schedules) | every epoch counts one more traversal of each text's path (all time, in the sliding window and in the global total) | every epoch walks each text carrying its **phase** and counts each traversal into its edge's circular mean; the cycle decisions the text made train the metacognitive layer beside it |
 | feedback (thumbs, 2NRL, codegen judge, adversarial review) | train on the bad texts, invert, fine-tune on the good ones | `punish`: reward −= `strength` on every edge of a bad path; `reward`: a traversal plus reward += `strength`; nothing is inverted | `punish` penalises **and decoheres** a path (its phase lock is scrambled), `reward` rewards and sharpens; 2NRL trains on the bad texts, inverts, then relocks on the good ones |
 | `invert` | negates every weight and every node's activation (`a` and `k`) | flips the sign of every reward | rotates every edge's mean phase by `pi` - what resonated now cancels - and flips the layer with it |
-| prediction | Dijkstra's cheapest path (or sampling) | a beam search that returns the **top K** (most likely) and **bottom K** (least likely) continuations of one prefix in one call; the best one is the prediction | the same two beams over `(node, chars, phase)`, with a **phase-locked cycle handed to the metacognitive layer**; `dijkstra` is the exact cheapest path over that product graph and runs without the layer |
+| prediction | Dijkstra's cheapest path (or sampling) | a beam search that returns the **top K** (most likely) and **bottom K** (least likely) continuations of one prefix in one call; the best one is the prediction | **k-best** over `(node, chars, phase)`: Dijkstra with K labels per state, so the K cheapest walks come back *exactly* and each one carries its own path, which is what lets a **phase-locked cycle be handed to the metacognitive layer**. `dijkstra` (one label) is kept for the single-path guarantee and is cycle-blind; `beam` is kept for the bottom K |
 
 ```bash
 python -m radixnet --kind count train --data data/sample_corpus.txt --epochs 3     # -> model.count.json
@@ -1100,6 +1100,29 @@ bucket 5   t sat 0.807   t down 0.097   t ran away 0.097
 so the model continues `"the cat "` with `"sat down"` and `"a big cat "` with
 `"ran away"` - while the identical model with `--resonance-scale 0` answers
 `"ran away"` to both.
+
+**The search: Dijkstra with K labels per state.**  One label per state is what
+makes Dijkstra a shortest path — and also what makes it blind: a single label
+cannot say *which* walk reached the state, so there is no path for the
+metacognitive layer to look at.  Letting a state be settled up to `k` times
+fixes both at once.  The `k` goals pop in cost order and are the `k` cheapest
+walks **exactly**, and every label reads back to its own path, so the cycle it
+is standing in is visible.  `k = 1` is Dijkstra to the expansion; above that the
+cost grows with `k`, not with the width of a frontier, because the search still
+stops at the `k`-th finished walk:
+
+```
+prefix "the ", k = 5, to the end of a text     states expanded
+  dijkstra (k = 1)                                   49
+  k-best                                            159     exact
+  beam                                             1312     an approximation
+```
+
+That is the default for both `predict` and `generate`.  `dijkstra` is kept for
+the single-label guarantee, and `beam` because it is the only one that can
+answer the **bottom** half — in a cyclic graph the worst walk is unboundedly bad
+(loop once more and it is worse), so "least likely" needs a frontier's bound
+rather than a goal count.
 
 **Cycles are a decision, not a hazard.**  Coming back to a node at a *new* phase
 is progress: the signal has moved on.  Coming back at the *same* phase is a loop
@@ -2011,6 +2034,7 @@ RadixCyclicNN/
 * **Self-compression is lossy on purpose**: merging a unary chain keeps the parent's parameters; the chain was deterministic (probability 1, cost 0), so predictions are unchanged.
 * **The resonant model's phase is defined per trigram, not per node**, so a node's advance is the sum over the trigrams its label covers. A split and a merge move trigrams between labels but never change which trigrams exist, so compression leaves the phase exactly where it was - and the phase of any text is a function of the text alone, no walk needed.
 * **A phase-locked cycle is the only cycle worth a decision**: returning to a node at a new phase is progress, returning at the same phase repeats for ever. That is what the metacognitive layer is asked about, and its answer is a cost, never a prohibition.
+* **Metacognition and exactness are not a trade — the number of labels per state is.** One label per state makes a shortest path and makes it blind; K labels per state give the K cheapest walks exactly *and* give every label a path to look at. Dijkstra is the K=1 case of the search that replaced it, not a different algorithm.
 * **Counters cycle rather than grow**: an integer that only counts up is a fault waiting to happen, so every one of them goes back to 0 at `10^15` and counts the reset. The pair is exact, both halves stay inside a double, and the wrapping is done by a sweep between epochs instead of a check on every increment - so the counting loops (and the Go port's goroutines) are untouched.
 
 ## License

@@ -2890,20 +2890,41 @@ and the search is still exact: the product graph is finite (`buckets` times bigg
 `kick_scale = 0` makes the phase a function of the emitted length alone and the product collapses back to the
 ordinary unrolled graph at no extra cost.
 
+* `phase_kbest` — **the default**: Dijkstra with `k` labels per state instead of one.  One label per state is what
+  makes Dijkstra a shortest path and also what makes it blind — a single label cannot say *which* walk reached the
+  state, so the layer has nothing to look at.  Letting a state be settled up to `k` times fixes both at once: the
+  `k` goals pop in cost order and are the `k` cheapest walks *exactly* (the standard k-shortest-walks argument;
+  loops are allowed, and a walk that goes round again is simply one of the candidates), and every label reads back
+  to its own path, so the cycle it is standing in is visible and the layer can price it — **in the exact search,
+  not only in the beam**.  `k = 1` is `phase_dijkstra` to the expansion.  Cost grows with `k`, not with the width
+  of a frontier, because the search still stops at the `k`-th finished walk: on `data/sample_corpus.txt`, `k = 5`
+  from `"the "` expands 159 states where the beam of the same `k` expands 1312, for an answer the beam can only
+  approximate.  A trained layer prices a move by what is on the path, which no longer decomposes over states, so
+  exactness then holds only up to the `k`-labels-per-state bound — but that bound is per state rather than per
+  frontier, so it degrades where the graph *branches* instead of wherever the cheapest region happens to be.
 * `phase_dijkstra` — the cheapest path, same contract as `search.dijkstra_predict` (goal, cap, fallback,
   `include_context`), `search.onward` included, so a node the model has learned to go round (its `BACK` edge
-  cheapest, section 24's sentinel) offers nothing and the search goes on with its others.  **No metacognition**: an exact search cannot depend on which path reached a state.
-* `phase_beam` — the `k` cheapest and `k` dearest complete paths, same two-beam shape as `beam.beam_predict`.  Every
-  entry carries the `(node, phase)` states already on its path, so a cycle is detected *per path*: the tightest loop
-  names the signature, the child that closes it takes the layer's `ride` cost, END takes `abort` and every other
-  child takes `escape`.  Nothing is forbidden — a cycle the corpus rides stays cheap to ride.
+  cheapest, section 24's sentinel) offers nothing and the search goes on with its others.  **No metacognition**: one
+  label per state cannot depend on which path reached it.  Kept for exactly that guarantee.
+* `phase_beam` — the `k` cheapest and `k` dearest complete paths, same two-beam shape as `beam.beam_predict`.  Kept
+  because it is the only mode that can answer the **bottom** half: in a cyclic graph the worst walk is unboundedly
+  bad (loop once more and it is worse), so "least likely" needs a frontier's bound rather than a goal count, and a
+  k-best search cannot give it.  Every entry carries the `(node, phase)` states already on its path, so a cycle is
+  detected *per path*: the tightest loop names the signature, the child that closes it takes the layer's `ride`
+  cost, END takes `abort` and every other child takes `escape`.  Nothing is forbidden — a cycle the corpus rides
+  stays cheap to ride.
 * `phase_walk` — one stochastic walk, layer included.
 
-`ResonantNet.predict(prefix, mode="beam" | "dijkstra" | "sample", k, beam, ...)` is those three; `mode` defaults to
-`"beam"` so the layer runs.  `score` walks the text `START -> ... -> END` carrying the phase, charges
+`ResonantNet.predict(prefix, mode="kbest" | "dijkstra" | "beam" | "sample", k, beam, ...)` is those four; `mode`
+defaults to `"kbest"`, which is both exact and where the layer runs.  `_expand(graph, meta, node, phase, depth,
+step_penalty)` is shared by every path-carrying search: `depth` maps each `(node, phase)` on the path to where it
+first appeared, which is all the layer needs — a child landing on one closes a phase-locked cycle, and the
+difference is the loop's length.  `score` walks the text `START -> ... -> END` carrying the phase, charges
 `log(UNKNOWN_PROB)` for an unknown trigram or a missing edge exactly as `GraphModel.score` does (so an unseen text
 scores *worse* than a trained one instead of looking deterministic) and never changes the model.
-`generate` is the inherited prediction-search-to-END.
+`generate` defaults to `"kbest"` too: generation asks for the `count` most likely *complete* texts, which is
+precisely what a k-best search answers exactly and at a fraction of a beam's cost; the other modes are
+`GraphModel.generate`'s.
 
 ### 30.5 What it changes, measured
 
