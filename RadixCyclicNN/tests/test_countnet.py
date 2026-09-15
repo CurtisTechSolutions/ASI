@@ -10,13 +10,14 @@ import os
 import sys
 import tempfile
 import unittest
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import diff  # noqa: E402
 from radixnet.beam import Prediction, beam_predict, default_beam, path_probability  # noqa: E402
 from radixnet.countnet import COUNT_MODEL_FORMAT, CountRewardGraph, CountRewardNet  # noqa: E402
-from radixnet.graph import END, START  # noqa: E402
+from radixnet.graph import BACK, END, START  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -368,7 +369,7 @@ class TestPersistenceAndKinds(unittest.TestCase):
             model_from_dict({"format": "nope"})
 
     def test_kind_registry(self):
-        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "negative"])
+        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "negative", "resonant"])
         self.assertIs(model_class("count"), CountRewardNet)
         self.assertIs(model_class(None), RadixNet)
         self.assertIs(model_class(" Radix "), RadixNet)
@@ -433,7 +434,7 @@ class TestApi(unittest.TestCase):
         status, data, _ = self.client.get("/api/model")
         self.assertEqual(status, 200)
         self.assertEqual(data["kind"], "radix")
-        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "negative"])
+        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "negative", "resonant"])
         self.assertEqual(data["paths"]["count"], os.path.join(self.tmp.name, "model.count.json"))
         data = self.select("count")
         self.assertEqual((data["kind"], data["origin"]), ("count", "new"))
@@ -496,6 +497,21 @@ class TestApi(unittest.TestCase):
         self.assertEqual(st["path_correct"], paths["totals"]["correct"])
         status, data, _ = self.client.get("/api/paths?limit=nope")
         self.assertEqual(status, 400)
+        # and the same judgements from the node's point of view
+        status, nodes, _ = self.client.get("/api/nodes?limit=4")
+        self.assertEqual(status, 200, nodes)
+        self.assertTrue(0 < len(nodes["nodes"]) <= 4)
+        picked = next((n for n in nodes["nodes"] if len(n["to"]) > 1), None)
+        self.assertIsNotNone(picked, "no node in the top 4 branches")
+        self.assertAlmostEqual(sum(r["seen_ratio"] for r in picked["to"]), 1.0)
+        self.assertTrue(set(picked["to"][0]) >= {"node", "label", "edge", "seen", "seen_ratio", "reward",
+                                                 "reward_ratio", "path_seen", "path_ratio", "correct", "incorrect",
+                                                 "correct_ratio"})
+        status, one, _ = self.client.get(f"/api/nodes?node={quote(picked['label'])}")
+        self.assertEqual((status, len(one["nodes"])), (200, 1))
+        self.assertEqual(one["nodes"][0]["node"], picked["node"])
+        self.assertEqual(self.client.get("/api/nodes?node=no+such+label")[0], 404)
+        self.assertEqual(self.client.get("/api/nodes?limit=nope")[0], 400)
         status, data, _ = self.client.post("/api/save", {})
         self.assertEqual(status, 200)
         self.assertTrue(data["path"].endswith("model.count.json"))
@@ -525,7 +541,7 @@ class TestApi(unittest.TestCase):
         self.select("radix")
         status, data, _ = self.client.post("/api/model/weights", {"window": 10})
         self.assertEqual(status, 400)
-        self.assertIn("count model", data["error"])
+        self.assertIn("weight function", data["error"])
         status, data, _ = self.client.post("/api/reset", {"kind": "radix", "window": 10})
         self.assertEqual(status, 400)
 
@@ -862,6 +878,122 @@ class TestPathCounters(unittest.TestCase):
         without = [cost for _c, _e, cost in graph.child_costs(parent, prev)]
         self.assertEqual(without, [cost for _c, _e, cost in graph.child_costs(parent)])
         self.assertNotEqual(with_paths, without)
+
+
+class TestNodeRatios(unittest.TestCase):
+    """A node against the nodes around it: what share of its traffic and of its reward goes each way."""
+
+    def branching(self):
+        """A graph with a real choice in it, one arm rewarded and the other punished."""
+        model = CountRewardNet(seed=1)
+        model.train(["the cat sat on the mat", "a cat ran to the park", "the cat sat on the log"], epochs=2)
+        model.correct("the cat ran to the mat", "the cat sat on the mat")
+        return model
+
+    def branch_node(self, model):
+        """The node the two arms leave from."""
+        graph = model.graph
+        node = next(i for i, label in enumerate(graph.labels) if label == "at ")
+        self.assertGreater(len(graph.children[node]), 1)
+        return node
+
+    def test_each_side_shares_out_the_traffic_it_carried(self):
+        model = self.branching()
+        row = model.graph.node_ratios(self.branch_node(model))
+        for side, totals in (("from", "in_totals"), ("to", "out_totals")):
+            rows = row[side]
+            self.assertTrue(rows)
+            self.assertAlmostEqual(sum(r["seen_ratio"] for r in rows), 1.0)
+            self.assertEqual(sum(r["seen"] for r in rows), row[totals]["seen"])
+            self.assertEqual(len(rows), row[totals]["edges"])
+            seen = [r["seen"] for r in rows]  # most walked first
+            self.assertEqual(seen, sorted(seen, reverse=True))
+
+    def test_the_reward_share_is_signed_and_adds_up_to_the_side(self):
+        model = self.branching()
+        row = model.graph.node_ratios(self.branch_node(model))
+        out = row["to"]
+        rewarded = [r for r in out if r["reward"] > 0]
+        punished = [r for r in out if r["reward"] < 0]
+        self.assertTrue(rewarded and punished, "the correction should have moved one arm each way")
+        self.assertTrue(all(r["reward_ratio"] > 0 for r in rewarded))
+        self.assertTrue(all(r["reward_ratio"] < 0 for r in punished))
+        mass = sum(abs(r["reward"]) for r in out)
+        self.assertAlmostEqual(sum(abs(r["reward_ratio"]) for r in out), 1.0)
+        self.assertAlmostEqual(mass, sum(abs(r["reward"]) for r in out))
+
+    def test_the_judged_paths_land_on_the_way_they_were_walked(self):
+        model = self.branching()
+        row = model.graph.node_ratios(self.branch_node(model))
+        right = next(r for r in row["to"] if r["label"] == "t sat")
+        wrong = next(r for r in row["to"] if r["label"] == "t ran ")
+        self.assertEqual((right["correct"], right["incorrect"]), (1, 0))
+        self.assertEqual((wrong["correct"], wrong["incorrect"]), (0, 1))
+        self.assertEqual((right["correct_ratio"], wrong["correct_ratio"]), (1.0, 0.0))
+        # path_ratio is how much of the edge's traffic a judged context has been watching
+        self.assertEqual(wrong["path_ratio"], wrong["path_seen"] / wrong["seen"])
+        # the out-side as a whole: two of its three judged ways were walked in a correct answer
+        self.assertEqual((row["out_totals"]["correct"], row["out_totals"]["incorrect"]), (2, 1))
+        self.assertAlmostEqual(row["out_totals"]["correct_ratio"], 2 / 3)
+
+    def test_an_unjudged_graph_has_the_shares_but_no_verdicts(self):
+        model = CountRewardNet(seed=1)
+        model.train(["the cat sat on the mat", "a cat ran to the park"], epochs=2)
+        rows = model.node_ratios(limit=0)
+        self.assertTrue(rows)
+        for row in rows:
+            for side in ("from", "to"):
+                for r in row[side]:
+                    self.assertEqual((r["correct"], r["incorrect"], r["path_seen"]), (0, 0, 0))
+                    self.assertIsNone(r["correct_ratio"])
+                    self.assertEqual(r["reward_ratio"], 0.0)
+            self.assertIsNone(row["in_totals"]["correct_ratio"])
+
+    def test_the_shares_are_of_the_side_not_of_the_visits(self):
+        """A node a text starts on is entered without an in-edge, so its in-side is smaller than its visits."""
+        model = CountRewardNet(seed=1)
+        model.train(["the cat sat", "the cat ran"], epochs=2)
+        graph = model.graph
+        start = graph.children[0]  # START's children are the nodes texts begin on
+        node = next(iter(start))
+        row = graph.node_ratios(node)
+        self.assertLessEqual(row["in_totals"]["seen"], row["visits"])
+        self.assertAlmostEqual(sum(r["seen_ratio"] for r in row["from"]), 1.0)
+
+    def test_the_table_is_most_visited_first_and_one_node_can_be_asked_for(self):
+        model = self.branching()
+        rows = model.node_ratios(limit=3)
+        self.assertEqual(len(rows), 3)
+        visits = [r["visits"] for r in rows]
+        self.assertEqual(visits, sorted(visits, reverse=True))
+        node = self.branch_node(model)
+        one = model.node_ratios(limit=0, node=node)
+        self.assertEqual([r["node"] for r in one], [node])
+        self.assertIsNone(model.graph.node_ratios(len(model.graph.labels) + 5))
+
+    def test_back_is_an_ordinary_row(self):
+        """BACK needs no special case: its edge says what share of the walks leaving here have learned to go round."""
+        model = CountRewardNet(seed=1)
+        model.train(["the cat sat on the mat", "a cat ran to the park", "the cat sat on the log"], epochs=2)
+        graph = model.graph
+        node = self.branch_node(model)
+        went = next(iter(graph.children[node]))
+        graph.observe_back(node, went=went, amount=1.0)
+        row = graph.node_ratios(node)
+        back = next(r for r in row["to"] if r["node"] == BACK)
+        looped = next(r for r in row["to"] if r["node"] == went)
+        self.assertGreater(back["seen_ratio"], 0.0)
+        self.assertGreater(back["reward_ratio"], 0.0)  # the hand-over earned it
+        self.assertLess(looped["reward_ratio"], 0.0)  # the step it was about to loop through paid for it
+        self.assertAlmostEqual(sum(r["seen_ratio"] for r in row["to"]), 1.0)
+
+    def test_a_dead_node_has_no_ratios(self):
+        model = self.branching()
+        graph = model.graph
+        dead = next((i for i, alive in enumerate(graph.alive) if not alive), None)
+        if dead is None:
+            self.skipTest("this corpus compressed nothing away")
+        self.assertIsNone(graph.node_ratios(dead))
 
 
 if __name__ == "__main__":

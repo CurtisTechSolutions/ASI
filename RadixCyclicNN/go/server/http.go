@@ -267,6 +267,8 @@ func init() {
 	doc("GET", "/api/graph", "?limit=150: the most visited nodes and the edges among them, with counts, shares and rewards")
 	route("GET", "/api/paths", rPaths)
 	doc("GET", "/api/paths", "?limit=50: the judged paths - what each step did in the context it was taken from: {totals, path_scale, paths}")
+	route("GET", "/api/nodes", rNodes)
+	doc("GET", "/api/nodes", "?limit=20&node=LABEL: each node against the nodes around it - its traffic and its reward, shared out over the previous and the next nodes: {nodes, totals}")
 	route("GET", "/api/history", rHistory)
 	doc("GET", "/api/history", "training history")
 	route("GET", "/api/uploads", rUploads)
@@ -936,6 +938,20 @@ func rPaths(rq *request) (int, any, error) {
 		limit = n
 	}
 	out, err := rq.svc.Paths(limit)
+	return 200, out, err
+}
+
+func rNodes(rq *request) (int, any, error) {
+	limit := 20
+	if raw, ok := rq.queryValue("limit"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, nil, badRequest("query parameter 'limit' must be an integer (got %q)", raw)
+		}
+		limit = n
+	}
+	node, _ := rq.queryValue("node")
+	out, err := rq.svc.NodeRatios(limit, node)
 	return 200, out, err
 }
 

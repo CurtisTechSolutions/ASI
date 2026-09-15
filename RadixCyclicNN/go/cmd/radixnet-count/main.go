@@ -172,6 +172,7 @@ commands:
   2nrl       penalise --bad texts, then count + reward --good texts
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
   paths      what the judged walks did, step by step: correct / incorrect per path, not per edge
+  nodes      each node against the nodes around it: its traffic and its reward, shared out both ways
   negative   the failures, and why: blame | clear | why | filter | reasons | forget | auto
   codegen    write Python programs: the teacher tutors, the sandbox runs them, 2NRL follows
   tools      the external tools the network can call: list | describe | call
@@ -257,6 +258,8 @@ func main() {
 		cmdNegative(rest)
 	case "paths":
 		cmdPaths(rest)
+	case "nodes":
+		cmdNodes(rest)
 	case "correct":
 		cmdCorrect(rest)
 	case "image":
@@ -653,11 +656,12 @@ func cmdTwoNRL(args []string) {
 func cmdPaths(args []string) {
 	fs := subFlagSet("paths")
 	limit := fs.Int("limit", 20, "rows to show, most judged first (0 = all)")
+	node := fs.String("node", "", "only the steps leaving this node (a node label, or a trigram it holds)")
 	_ = fs.Parse(args)
 	m := openModel(true)
 	g := m.G
 	totals := g.PathTotals()
-	rows := m.Paths(*limit, -1)
+	rows := m.Paths(*limit, resolveNode(g, *node))
 	say("contexts   %d (%d judged)", totals.Contexts, totals.Judged)
 	say("counted    %d correct / %d incorrect of %d seen", totals.Correct, totals.Incorrect, totals.Seen)
 	say("path_scale %g", g.WeightConfig().PathScale)
@@ -674,6 +678,62 @@ func cmdPaths(args []string) {
 	}
 	if jsonMode {
 		emit(map[string]any{"totals": totals, "paths": rows, "stats": m.Stats()})
+	}
+}
+
+// resolveNode is a node id from a label the user typed: the whole label first,
+// then the trigram it holds.  An empty label means "every node" (-1).
+func resolveNode(g *radixnet.Graph, text string) int {
+	if text == "" {
+		return -1
+	}
+	for node := 0; node < g.NumNodeIDs(); node++ {
+		if g.Label(node) == text {
+			return node
+		}
+	}
+	if node, _, ok := g.Lookup(text); ok {
+		return node
+	}
+	fail("no node labelled %q: give a node label, or one of its trigrams", text)
+	return -1
+}
+
+func cmdNodes(args []string) {
+	fs := subFlagSet("nodes")
+	limit := fs.Int("limit", 10, "nodes to show, most visited first (0 = all)")
+	node := fs.String("node", "", "only this node (a node label, or a trigram it holds)")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	g := m.G
+	rows := g.NodeRatioRows(*limit, resolveNode(g, *node))
+	totals := g.PathTotals()
+	say("nodes      %d alive, %d shown", g.NumNodes(), len(rows))
+	say("counted    %d correct / %d incorrect over %d judged context(s) of %d",
+		totals.Correct, totals.Incorrect, totals.Judged, totals.Contexts)
+	if len(rows) == 0 {
+		say("%s", map[bool]string{true: "no such node", false: "the graph is empty: train something first"}[*node != ""])
+	}
+	for _, row := range rows {
+		say("")
+		say("%s  visited %dx  (%d in, %d out)", strconv.Quote(row.Label), row.Visits,
+			row.InTotals.Edges, row.OutTotals.Edges)
+		say("%-4s %-14s %5s %7s %7s %9s %7s %8s %8s %6s %10s",
+			"", "node", "seen", "seen %", "reward", "reward %", "judged", "of edge", "correct", "wrong", "correct %")
+		for _, side := range []struct {
+			name string
+			rows []radixnet.NeighbourStats
+		}{{"from", row.From}, {"to", row.To}} {
+			for _, r := range side.rows {
+				say("%-4s %-14s %5d %7s %+7.2f %9s %7d %8s %8d %6d %10s",
+					side.name, strconv.Quote(r.Label), r.Seen, fmt.Sprintf("%.0f%%", r.SeenRatio*100),
+					r.Reward, fmt.Sprintf("%.0f%%", r.RewardRatio*100), r.PathSeen, percentOf(r.PathRatio),
+					r.Correct, r.Incorrect, percentOf(r.CorrectRatio))
+			}
+		}
+	}
+	if jsonMode {
+		emit(map[string]any{"nodes": rows, "stats": m.Stats()})
 	}
 }
 
@@ -1087,6 +1147,10 @@ func cmdTutor(args []string) {
 	noReplay := fs.Bool("no-replay", false, "do not keep teaching earlier corrections")
 	blame := fs.Bool("blame", false, "teach the negative network why each failed sentence failed: the mistake the "+
 		"teacher named is the reason, its mark the severity, and only the characters it corrected are blamed")
+	variants := fs.Int("variants", cfg.Variants, "with -blame: ask the teacher why each failed sentence is wrong and "+
+		"for N more sentences that make the same mistake, blamed under the same reason (0 = do not ask)")
+	variantWeight := fs.Float64("variant-weight", cfg.VariantWeight,
+		"their share of the failure's severity (the student never wrote them)")
 	addNegativeFlag(fs)
 	_ = fs.Parse(args)
 
@@ -1103,6 +1167,7 @@ func cmdTutor(args []string) {
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
 	cfg.DiffCorrections, cfg.KeepWeight = !*noDiff, *keepWeight
 	cfg.NegEpochs, cfg.PosEpochs, cfg.Strength, cfg.Replay = *negEpochs, *posEpochs, *strength, !*noReplay
+	cfg.Variants, cfg.VariantWeight = *variants, *variantWeight
 	if err := cfg.Validate(); err != nil { // also resolves the providers and the models they imply
 		fail("%v", err)
 	}
@@ -1133,6 +1198,10 @@ func cmdTutor(args []string) {
 		negative = openNegative(false)
 		trainer.Negative = negative
 		say("negative network: %s (every failed sentence is blamed for what the teacher marked it down for)", negativeFile())
+		if cfg.Variants > 0 {
+			say("widening: the teacher explains why and writes %d more sentence(s) with the same mistake, "+
+				"blamed at %g of its severity", cfg.Variants, cfg.VariantWeight)
+		}
 	}
 	say("tutor: %s, %d round(s) x %d exercise(s), teacher %s: %s at %s, marked by %s: %s, pass at %g/10 (grammar %g)",
 		cfg.Topic, cfg.Rounds, cfg.Exercises, cfg.TutorProvider, cfg.TutorModel, client.BaseURL(),

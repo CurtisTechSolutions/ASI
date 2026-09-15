@@ -273,6 +273,33 @@ class TestGoParity(unittest.TestCase):
         self.assertGreater(a_stats["path_correct"], 0)
         self.assertGreater(a_stats["path_incorrect"], 0)
 
+    def test_a_node_is_read_the_same_way_from_both_sides(self):
+        """The node ratios: both languages share a node's traffic and its reward out the same way."""
+        py_path = os.path.join(TMP.name, "ratios_py.count.json")
+        go_path = os.path.join(TMP.name, "ratios_go.count.json")
+        corpus = os.path.join(TMP.name, "ratios_corpus.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write("the cat sat on the mat\na cat ran to the park\nthe cat sat on the log\n")
+        for path, run in ((py_path, py), (go_path, go)):
+            run("--seed", 1, *(("--kind", "count") if run is py else ()), "train", "--data", corpus, "--epochs", 2, model=path)
+            run("correct", "--wrong", "the cat ran to the mat", "--right", "the cat sat on the mat", model=path)
+        a = py("nodes", "--limit", 0, model=py_path)["nodes"]
+        b = go("nodes", "--limit", 0, model=go_path)["nodes"]
+        self.assertEqual(len(a), len(b))
+        for i, (x, y) in enumerate(zip(a, b)):  # == over the parsed rows: Go writes 0 where Python writes 0.0
+            self.assertEqual(x, y, f"node row {i}")
+        branch = next((row for row in a if len(row["to"]) > 1 and row["out_totals"]["incorrect"]), None)
+        self.assertIsNotNone(branch, "the correction should have split a branch's verdicts")
+        self.assertAlmostEqual(sum(r["seen_ratio"] for r in branch["to"]), 1.0)
+        self.assertAlmostEqual(sum(abs(r["reward_ratio"]) for r in branch["to"]), 1.0)
+        self.assertTrue(any(r["reward_ratio"] > 0 for r in branch["to"]))
+        self.assertTrue(any(r["reward_ratio"] < 0 for r in branch["to"]))
+        # and asking for that one node by its label reads the same on both sides
+        one_py = py("nodes", "--node", branch["label"], model=py_path)["nodes"]
+        one_go = go("nodes", "--node", branch["label"], model=go_path)["nodes"]
+        self.assertEqual(one_py, one_go)
+        self.assertEqual([row["node"] for row in one_py], [branch["node"]])
+
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")
         go_path = os.path.join(TMP.name, "fb_go.count.json")
@@ -453,6 +480,47 @@ class TestGoTutorParity(unittest.TestCase):
             self.assertEqual(py_stats[key], go_stats[key], key)
         for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
             self.assertLessEqual(abs(py_stats[key] - go_stats[key]), 1e-9, key)
+
+    def test_both_tutors_widen_a_mistake_the_same_way(self):
+        """--blame --variants: the same question to the teacher, and the same family in the negative network."""
+        py_negative = self.py_path.replace(".count.json", ".count.negative.json")
+        go_negative = self.go_path.replace(".count.json", ".count.negative.json")
+        for path in (py_negative, go_negative):
+            if os.path.exists(path):
+                os.remove(path)
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--blame", "--variants", 2, "--variant-weight", 0.5,
+                   "--neg-epochs", 1, "--pos-epochs", 1)
+        a = py(*options, "--negative", py_negative, model=self.py_path, env=self.env)
+        py_calls = self.calls()
+        self.fake.requests.clear()
+        b = go(*options, "--negative", go_negative, model=self.go_path, env=self.env)
+        go_calls = self.calls()
+
+        # the same conversation, the extra "why" call included
+        self.assertEqual(len(py_calls), len(go_calls))
+        for i, (first, second) in enumerate(zip(py_calls, go_calls)):
+            self.assertEqual(first, second, f"call {i} differs between the two tutors")
+        self.assertEqual(sum(1 for system, _ in py_calls if "explaining a beginner's mistake" in system), 1)
+
+        # the same explanation and the same family on every lesson
+        self.assertEqual([l["why"] for l in a["lessons"]], [l["why"] for l in b["lessons"]])
+        self.assertEqual([l["variants"] for l in a["lessons"]], [l["variants"] for l in b["lessons"]])
+        self.assertTrue(all(len(l["variants"]) == 2 for l in a["lessons"]))
+        rounds = [r for r in a["records"] if r["kind"] == "round"]
+        self.assertEqual(rounds[0]["similar"], 2 * rounds[0]["lessons"])
+
+        # and the same negative network afterwards
+        p, g = load_json(py_negative)["graph"], load_json(go_negative)["graph"]
+        self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+        self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+        assert_close(self, p["edges"]["blame"], g["edges"]["blame"], 1e-12)
+        self.assertEqual(p["edges"]["reasons"], g["edges"]["reasons"])
+        for model, negative in ((self.py_path, py_negative), (self.go_path, go_negative)):
+            runner = py if model == self.py_path else go
+            verdict = runner("negative", "why", "--text", "the dogs sits on the mat 0", "--negative", negative,
+                             model=model)["verdicts"][0]
+            self.assertNotEqual(verdict["verdict"], "pass")  # a sentence neither network ever wrote
 
     def test_both_tutors_plan_the_same_next_lessons(self):
         options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",

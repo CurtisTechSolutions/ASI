@@ -96,10 +96,11 @@ in Python and in Go without the two models diverging.
 
 ### 3.3 What moves
 
-| | the learned quantity | decays toward | untouched |
+| | what moves | decays toward | untouched |
 |---|---|---|---|
 | sine graph (`RadixCyclicGraph`) | `edge_w[e]` | **the node's mean out-weight** | node activation params |
 | count graph (`CountRewardGraph`) | `edge_reward[e]` | **0** | `edge_count`, `window_edge_count` |
+| resonant graph (`ResonantGraph`) | `edge_reward[e]`, `(edge_cx, edge_cy)` | **0**, **no preferred phase** | `edge_cw`, `edge_count` |
 | negative graph (`NegativeGraph`) | — out of scope — | | |
 
 *Sine.* `m = sum(w) / deg` over the node's out-edges, computed **before** any of
@@ -121,6 +122,15 @@ make Python/Go parity depend on float-to-int rounding. This is also enough on
 its own — the count model's hand-over is carried by the reward
 (`observe_back` -> `add_reward`), which is why it wins in ~3 lessons instead of
 the ~40 the count alone needed.
+
+*Resonant.* Two things, for the same reason: the reward fades toward 0 as in the
+count model, and the circular accumulator `(edge_cx, edge_cy)` is scaled by the
+same factor — which is exactly `sharpen(edges, factor)`, an operation the model
+already has, and which means *this edge no longer has a phase it likes to fire
+at*. The accumulated weight `edge_cw` and the counts are left alone, as the
+record of how much was seen; only the direction and strength of the preference
+fade. `observe_back` there already counts the hand-over **without a phase**, so
+what decays is precisely what the hand-over put in: a reward and a share.
 
 *Negative.* It already has `forget(reason, factor)`, which is manual on purpose
 — the tutor can be wrong, and blame is released deliberately. Left alone; named
@@ -146,8 +156,8 @@ It is also free. The swept set is exactly `parents[BACK]`, a dict the graph
 already keeps, so the default sweep is O(hand-overs × degree), not O(E). And a
 real node's degree is bounded by the alphabet: a child's first trigram is the
 parent's last trigram shifted one character, so distinct children mean distinct
-characters, plus `END` and `BACK`. Measured on the sample corpus: mean 1.76,
-max 17.
+characters, plus `END` and `BACK`. Measured over the real nodes of the sample
+corpus: mean 1.73, max 17.
 
 **No sentinel is ever swept, under any scope.** `START` is the only one with
 out-edges, its degree is not bounded by the alphabet (its children are the
@@ -226,10 +236,10 @@ class RadixCyclicGraph:
         """Sweep -> {"nodes", "edges", "dropped", "elapsed", "half_life", "scope"}."""
 ```
 
-`CountRewardGraph` overrides the per-node step (rewards, not weights) and calls
-`recompute_weights()` once at the end; `configure()` accepts `decay_half_life`
-and `decay_scope` alongside the existing scales, and `weight_config()` reports
-them.
+`CountRewardGraph` and `ResonantGraph` override the per-node step (rewards, the
+phase accumulator — not weights) and call `recompute_weights()` once at the end;
+`configure()` accepts `decay_half_life` and `decay_scope` alongside the existing
+scales, and `weight_config()` reports them.
 
 * **CLI** — `radixnet decay --model M [--half-life N] [--scope back|node|all] [--save]`,
   printing *settled N node(s), moved M edge(s), forgot K hand-over(s)*; and
@@ -253,8 +263,9 @@ spent on disk**, only for the graph time it has lived through. The upgrade is a
 
 `go/radixnet/graph.go` (`DecayHalfLife`, `DecayScope`, `decayedAt`, `Settle`,
 `Decay`), the count model's override, `json.go` (format 4 + `withDecay`),
-`server/http.go`, `cmd/radixnet-count`. Two rules that decide whether parity
-holds:
+`server/http.go`, `cmd/radixnet-count`. The resonant model and the
+metacognitive layer are Python-only, so they carry no parity obligation until
+they are ported. Two rules that decide whether parity holds:
 
 * the factor is written as the *identical* expression in both — `0.5 ** (e/h)`
   and `math.Pow(0.5, e/h)` — and the mean is summed in the same explicit
@@ -284,7 +295,8 @@ the same `decay` dict.
 * a format-3 file loads and does not decay for the time it was on disk;
 * prediction does not settle anything: `predict` twice on a decaying model
   returns the same thing and leaves `traversals`, weights and stamps untouched;
-* the count model's counts are unchanged by a sweep, its rewards are not;
+* the count model's counts are unchanged by a sweep, its rewards are not; the
+  resonant model's `edge_cw` and counts are unchanged, its coherence falls;
 * Go parity as in §6.
 
 ## 8. What this does not do
@@ -297,6 +309,13 @@ the same `decay` dict.
   means, so if that is wanted it is a separate decision, not a knob here.
 * **It does not make a wrong hand-over cheap today.** Until the sweep has run
   enough times, the branch stays closed; §3.5 sets how long.
+* **It does not touch the metacognitive layer** (`metacog.MetaLayer`), whose
+  cycle signatures carry ride / escape / abort scores that never fade either.
+  Deliberately: those scores are not self-sealing the way a hand-over is — a
+  signature the layer scores `abort` on is still consulted every time that cycle
+  comes round, and the corpus keeps scoring it — so they are corrected by the
+  ordinary route. If they should fade too, it is the same algorithm on a
+  different container and a separate decision.
 * **It does not decide the rate from evidence.** 10 000 traversals is a
   defensible default with an interpretation, not a measured optimum. What Q-1
   asks for is a *measurement*: how long a hand-over should last before the model
@@ -333,4 +352,4 @@ the same `decay` dict.
   `s_p` in O(1)) — genuinely O(1) per node, and rejected anyway: `edge_w` would
   stop being the weight, which breaks `to_csr`, `apply_csr_weights`,
   `recompute_weights`, `invert`, both backends, the Go port and every inspector.
-  The measured degree bound (mean 1.76) makes the optimisation pointless.
+  The measured degree bound (mean 1.73) makes the optimisation pointless.

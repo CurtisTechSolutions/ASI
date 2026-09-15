@@ -1280,11 +1280,17 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"``, ``"count"`` and ``"negative"``)."""
-    from .countnet import CountRewardNet  # local imports: both build on this module
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"negative"`` and ``"resonant"``)."""
+    from .countnet import CountRewardNet  # local imports: they all build on this module
     from .negative import NegativeNet
+    from .resonance import ResonantNet
 
-    return {RadixNet.kind: RadixNet, CountRewardNet.kind: CountRewardNet, NegativeNet.kind: NegativeNet}
+    return {
+        RadixNet.kind: RadixNet,
+        CountRewardNet.kind: CountRewardNet,
+        NegativeNet.kind: NegativeNet,
+        ResonantNet.kind: ResonantNet,
+    }
 
 
 def model_kinds() -> list[dict]:

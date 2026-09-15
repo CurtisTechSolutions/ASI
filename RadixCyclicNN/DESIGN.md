@@ -114,7 +114,7 @@ class SineActivation:            # convenience object (used by tests/docs, not i
     def __call__(self, x) -> float
     def derivative(self, x) -> float
     def partials(self, x) -> tuple
-    def inverted(self) -> "SineActivation"     # a -> -a
+    def inverted(self) -> "SineActivation"     # a -> -a AND k -> -k (the negation of the unit: f = a*sin(u)+k)
     def to_dict(self) -> dict ; @classmethod from_dict(cls, d)
 
 def edge_signal(w: float, fp: float, fc: float) -> float    # w * fp * fc  ("activation of child * activation of parent")
@@ -285,7 +285,9 @@ def compress(self) -> int
     # Repeatedly merge all mergeable unary chains until none remain. Returns number of merges.
 
 def invert(self) -> None
-    # w -> -w for every alive edge, a -> -a for every node (incl. START/END), inverted = not inverted, version += 1
+    # w -> -w for every alive edge; a -> -a AND k -> -k for every node (incl. START/END), which is the exact
+    # negation of the unit: f = a*sin(b(x-h))+k, so flipping `a` alone leaves -f + 2k and only negates while
+    # k == 0 - and k is learned (df/dk = 1). Then inverted = not inverted, version += 1
 
 def child_scores(self, p: int) -> list[tuple[int, float]]     # [(child_id, score)], score = w * f_p * f_c
 def child_probs(self, p: int) -> list[tuple[int, float]]      # softmax over child_scores (numerically stable)
@@ -918,7 +920,9 @@ def overall_score(grammar, spelling, fluency, grammar_weight=0.6) -> float | Non
 @dataclass Exercise:  id, prefix, focus, answer        # .cue == cue(prefix)
 @dataclass Grade:     score, grammar, spelling, fluency, passed, error, correction, comment, graded_by
                       # graded_by: the marking provider ("ollama" | "chatgpt"), "empty" or "unrated"
-@dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade
+@dataclass Lesson:    exercise, attempt, mode, continuation, sentence, cost, probability, reached_end, seconds, grade,
+                      why, variants                     # the widening (below): filled only for a blamed failure
+@dataclass Correction: wrong, right, weight             # what was written, what should have been, how much it counts
 
 def write_exercises(client, topic, count=5, *, focus=None, level="beginner", weak=(), words="3 to 6", model=None)
     # JSON mode: {"exercises": [{"prefix", "focus", "answer"}]}; parse_exercises tolerates bare lists, plain lines,
@@ -931,7 +935,30 @@ def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0
     # unreadable answer -> score None, graded_by="unrated", counted as a failure
 def report_card(lessons) -> dict          # {"lessons","graded","passed","failed","pass_rate","mean_score",
                                           #  "mean_grammar","mean_spelling","mean_fluency","errors","weakest"}
+
+DEFAULT_VARIANTS = 3;  MAX_VARIANTS = 10;  MAX_WHY_CHARS = 400
+def explain_mistakes(client, lessons, *, topic="", count=3, weight=0.5, model=None, batch=10, temperature=0.9,
+                     external=None) -> list[Lesson]
+    # one JSON call per batch of failures: {"mistakes": [{"index", "why", "again": [{"wrong", "right"}]}]}
+    # fills lesson.why (the rule that was broken, clipped) and lesson.variants (Correction(wrong, right, weight));
+    # blank completions are skipped (nothing was written to be wrong about), repeats of the student's own sentence
+    # and of each other are dropped, a "right" equal to its "wrong" is treated as absent, and an unreadable answer
+    # leaves the lesson exactly as it was
 ```
+
+**Why it is wrong, and the same mistake again.**  A mark says *that* a sentence is wrong; the negative network
+(section 24) wants to know *why*, and wants the mistake more than once.  So step 4 of a round is
+`TutorTrainer.widen()`: every failed sentence goes back to the teacher with the mistake it was marked for and the
+correction, and comes back with the **rule** it broke and `variants` more short sentences that break the same rule
+the same way, each with its own correct form.  They are ordinary faults to `blame.faults_from_lessons`
+(section 24) - the same reason, the diff against their own correction, `variant_weight` (0.5) of the failure's
+severity because the student never wrote them - and they reach nothing else: the model being taught never sees a
+sentence it did not write.  The question is only asked when a negative network is attached (`--blame`) and
+`variants` > 0, so a run without one asks nothing extra; a teacher that cannot answer costs the widening, not the
+round (a `"note"` record).  Cost: one call per batch of failures.  The Go tutor does the same, word for word
+(`ExplainMistakes`, `TutorTrainer.Widen`, `FaultsFromLessons`, `-variants` / `-variant-weight`): `tests/test_go_parity.py`
+runs both with `--blame --variants 2` against one fake teacher and asserts the same conversation, the same family
+on every lesson and byte-identical negative networks afterwards.
 
 The report card at the end of a run is handed back to the teacher, which turns it into the syllabus of the
 lessons that follow:
@@ -1014,7 +1041,7 @@ the next batch, taught to it.  A batch that cannot be planned ends the run rathe
 between batches never starts one, and the batch it stops in still reports.
 
 Records: `{"kind": "lesson", batch, round, exercise, prefix, focus, attempt, mode, continuation, sentence, score, grammar,
-spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds}` (`changes` is what
+spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds, why, variants}` (`changes` is what
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
 `pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
@@ -1028,7 +1055,10 @@ each new batch with `{"kind": "batch", batch, step, brief, topic, level, words, 
 With `--blame` (`TutorTrainer(negative=...)`, `POST /api/tutor/start {"blame": true}`) every failed sentence of a
 round also teaches the **negative network** (section 24) why it failed: the mistake the teacher named is the reason,
 its mark the severity, its sentence of teaching the note, and the correction is diffed so only the characters it
-changed are blamed. The round records then carry `negative_blamed`, `negative_edges` and `negative_reasons`.
+changed are blamed. The round records then carry `negative_blamed`, `negative_edges` and `negative_reasons`, plus
+`explained` and `similar` — how many mistakes the teacher explained and how many more sentences it wrote that are
+wrong in the same way (`--variants N`, `--variant-weight X`, `{"variants": N, "variant_weight": X}`; the lesson
+records carry them as `why` and `variants`).
 
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
@@ -1057,7 +1087,9 @@ Frontend: a **Tutor** tab (not Python-only - the Go server serves the same endpo
 key), the settings ("Teach corrections from the diff" and "Unchanged words keep" among them), "Dry run", a chart of the mean score and grammar
 per round, the report card with the mistake histogram, a table of rounds (with what the corrections moved) and one
 of every lesson (marks, mistake, what the network wrote, the correction, the changed words struck out against what
-replaced them, the teacher's line).  **Plan** (`POST /api/tutor/plan`) sits under each report card - the dry run's
+replaced them, the teacher's line, and - when the negative network is being taught - why it is wrong with the
+sentences the teacher wrote that are wrong the same way, each struck out against its correct form; "Same mistake
+again" and "Their blame" sit beside the blame checkbox).  **Plan** (`POST /api/tutor/plan`) sits under each report card - the dry run's
 and the run's - and a **Lesson plan** card closes the tab: the summary, the step up (`hold` / `stretch` /
 `advance` with its note), the brief for the next batch with **Teach the next batch** (which loads the brief and
 the upgraded level, openings, pass mark and drills into the settings above), the weak points as pills, and a row
@@ -1069,9 +1101,11 @@ button becomes *Start auto run*, the Rounds table gains a `batch` column, the re
 every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
 per batch) so the settings show what the server is teaching.
 
-Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, answers drill requests and
-plans the next lessons; the parsers, the marking, the planner, the loop with a scripted model, the endpoints and
-the CLI), the ChatGPT teacher of
+Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
+it again, answers drill requests and plans the next lessons; the parsers, the marking, the widening -
+`_parse_explanations`, `explain_mistakes`, `TutorTrainer.widen`, a round that widens and one that does not - the
+planner, the loop with a scripted model, the endpoints and the CLI), `tests/test_blame.py` (a widened lesson
+becomes its whole family of faults) and the same in Go (`go/radixnet/tutor_test.go`, `blame_test.go`), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
 model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
 
@@ -1143,6 +1177,39 @@ Tests: `tests/test_countnet.py::TestPathCounters` and `go/radixnet/paths_test.go
 judgement starts the table and a later pass only updates it, the same edge is right after one word and wrong after
 another and its cost follows, the round trip, compression, the scale off), and
 `tests/test_go_parity.py::test_judged_paths_price_the_same_step_differently` for the two implementations.
+
+### 16.6 Node ratios (`CountRewardGraph.node_ratios`) — the same numbers, read from the node
+
+16.5 keys a judgement by who called the step. This reads the graph the other way round: one node, and what its
+traffic and its reward look like shared out over the nodes on either side of it. Nothing new is stored - it is a
+view over `edge_count`, `edge_reward` and the path table - so it costs nothing until it is asked for.
+
+* **The two sides.** `node_ratios(node)` returns `from` (a row per previous node: the in-edge that arrives) and
+  `to` (a row per next node: the out-edge that leaves), plus `in_totals` / `out_totals` over each. The pairs are
+  sorted by neighbour id before anything is summed, so both implementations add the shares up in the same order
+  and write the same floats; the rows then come back most walked first (`-seen`, `-reward`, `node`).
+* **The shares.** `seen_ratio` is the edge's share of the traversals on *its side* (the exact totals, so a wrapped
+  counter still divides correctly). `reward_ratio` is its share of the reward on that side, taken over the
+  magnitudes and kept **signed**: `r / sum|r|`, so a penalty reads as a negative share of the pressure on the node
+  and an arm holding all of it reads ±1. The denominators are the side's own, not `count[node]`: a node is entered
+  without an in-edge whenever a text starts on it.
+* **The verdicts.** `edge_paths(edge)` sums the path table over every caller that reached an edge, giving
+  `path_seen` (how much of the edge's traffic a judged context has been watching, `path_ratio` as a share of the
+  edge's traversals) and `correct` / `incorrect` / `correct_ratio`. So 16.5 answers "was this step right *after
+  that word*" and this answers "of everything leaving this node, how much went the way that was right". `BACK`
+  (5.1.1) needs no special case: its edge is an ordinary one, so it reads as the share of the walks leaving the
+  node that have learned to go round, beside the penalty on the step they were about to loop through.
+* **What reports it.** `node_ratio_rows(limit, node)` orders the nodes by visit count; `radixnet nodes` /
+  `radixnet-count nodes` (`--limit`, `--node LABEL`, a node label or a trigram it holds) print both sides, and
+  `GET /api/nodes?limit=20&node=LABEL` returns them - 404 for a label the graph does not hold. The Graph tab
+  fetches the same endpoint when a node is clicked. Counts are reported as the odometer reading plus its resets
+  (`seen` / `seen_resets`, `visits` / `visit_resets`), the convention `/api/graph` already uses.
+
+Tests: `tests/test_countnet.py::TestNodeRatios` and `go/radixnet/nodes_test.go` (each side's shares add up to one,
+the reward share is signed and its magnitudes add up to one, the judged paths land on the arm that was walked, an
+unjudged graph has the shares but no verdicts, the shares are of the side and not of the visits, the table is most
+visited first), the endpoint in both server test suites, and
+`tests/test_go_parity.py::test_a_node_is_read_the_same_way_from_both_sides`.
 
 ---
 
@@ -1807,7 +1874,13 @@ characters, and so does the Go port.
 `faults_from_lessons(lessons, threshold)` reads a round of the English tutor (section 16.1): the mistake it named
 (`grade.error`, one of `tutor.ERROR_TYPES`) is the reason, its mark is the severity, its sentence of teaching is the
 note and its correction rides along so `teach` routes the fault through `NegativeNet.correct`; the sentences that
-passed, the corrections themselves and the teacher's model answers all clear blame.
+passed, the corrections themselves and the teacher's model answers all clear blame.  A lesson the teacher was asked
+*why* about (`tutor.explain_mistakes`, section 16.3) also carries its `variants` - more sentences that make the same
+mistake, each with its correct form - and every one becomes a fault of its own: the same reason, the teacher's
+explanation as the note, `<source>:similar` as the source, the variant's own `weight` (0.5) times the failure's
+severity, and its correct form both the diff to blame against and one more sentence that clears blame.  One mistake
+therefore teaches the *shape* of the mistake: a sentence the network never wrote is already suspect (`judge`), while
+nothing synthetic reaches the model being taught.
 `classify(critique, verdict=, rating=)`
 picks a reason out of `REASONS` (`empty`, `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`,
 `contradiction`, `false`, `incoherent`, `off-topic`, `other`, plus `unrated`) by matching the tutor's own words;
@@ -2715,3 +2788,172 @@ radixnet mcp --browser                                # browsing in a real Chrom
 ```json
 {"mcpServers": {"radixnet": {"command": "python", "args": ["-m", "radixnet", "--model", "model.json", "mcp"]}}}
 ```
+
+## 30. The resonant model (`resonance.py`, `metacog.py`, `phasesearch.py`) — an analog phase, and cycles that hand off
+
+A fourth kind on the same self-compressing graph, selectable at run time
+(`--kind resonant`, `POST /api/model/select {kind: "resonant"}`, the header selector).  It takes up the two research
+notes the other kinds leave on the table.
+
+`Research/SineWaveActivationFunction.md` says a brain is an *analog computer*, so sine waves are how information is
+encoded.  `RadixNet` reads that as a **pointwise** sine — every node passes its state through `-sin(z/3)`.  This model
+reads the other half: a sine has a **phase**, phases **add** along a path, and signals that meet in phase reinforce
+while signals that meet in antiphase cancel.  `Research/CyclesAreAFeature.md` says cycles are a feature and that *when
+we encounter a cycle we use metacognition or another part of the brain instead*.  The phase is what makes that
+actionable, and `metacog.py` is that other part.
+
+### 30.1 The phase — a ring counter the text itself turns
+
+A walk carries one number more than the node it stands on: its phase, one of `buckets` positions on a ring (so the
+model is a finite automaton over `(node, phase)`, not an approximation of a continuous system).  Every **trigram**
+advances it by a fixed integer:
+
+```
+advance(t) = round(buckets / period + kick_scale * trigram_phase(t) * buckets / TAU)   (mod buckets)
+```
+
+* `buckets / period` is a **clock**: with the default `period == buckets` one character is one bucket, so the phase
+  says where in the rhythm the walk is — how far into a line, a word, an indent.
+* `trigram_phase(t)` is a **kick**: a stable BLAKE2b hash of the trigram, in `[0, TAU)` (not `hash()`, which is
+  randomised per process and would make a saved model read differently after a restart).  `kick_scale = 0` (the
+  default) leaves a pure position clock — dense, quickly learned; turning it up makes the phase a rolling signature
+  of the whole path — real long-range context on a three-character graph — at the price of far sparser statistics
+  per phase.
+
+Defining the advance **per trigram and summing** is what makes the phase survive the radix operations:
+`ResonantGraph.advance[n] = label_advance(labels[n])` is the sum over the trigrams a node's label covers, a split and
+a merge move trigrams between labels but never change which trigrams exist, so `split` and `merge_child` leave the
+total across the path exactly where it was (`node_advance` forces 0 on every id below `FIRST`, whose labels `"<s>"`, `"</s>"` and
+`"<back>"` are long enough to look like ordinary ones).  It also makes the phase a function of the emitted text alone —
+`text_bucket(text)` — so a prediction's starting phase is read straight off the prefix with no walk, and it is
+exactly the phase a walk that emitted that prefix would carry.
+
+### 30.2 The edges — a circular mean, and coherence for free
+
+An edge does not learn a phase *offset*; it learns the phases at which it was actually taken.  Each traversal at
+bucket `b` adds the unit vector of that bucket to the edge's accumulator `(edge_cx, edge_cy)` with weight `edge_cw`:
+
+```
+mu        = atan2(cy, cx)                        # the mean phase at which this transition fires
+coherence = hypot(cx, cy) / (cw + concentration) # how consistently, in [0, 1]
+score(p -> c | psi) = amp_scale * log(share of the parent) + reward_scale * reward
+                    + resonance_scale * coherence * cos(psi - mu)
+```
+
+`share` is the edge's smoothed share of its parent's traversals (`(count + 0.5) / (parent total + 0.5 * degree)`), so
+with `resonance_scale = 0` the model *is* a clean smoothed frequency model and the phase adds to it.  `concentration`
+(default 2) shrinks the resultant length, so a single traversal — whose resultant length is exactly 1 — reads as an
+opinion, not a certainty.  `coherence` is free confidence: it measures how **context-dependent** a transition is,
+with nothing added to the model to measure it.  An incoherent edge falls back to plain frequency; a coherent one is
+cheap in phase and dear out of phase.  Children are drawn by a softmax over those scores, so
+`P(child | parent, phase)` — the first distribution here that depends on more than the parent.
+
+Every node is created with `a = 0, k = 1`, so its activation is the constant 1 and the base class's phase-free
+scores, probabilities, costs, splits and merges all keep working; they read as the model's **phase-marginal** — what
+it believes before the phase is taken into account.
+
+Learning is counting: a traversal, a unit vector, a reward.  No gradient, no learning rate, no ordering effect
+(`TrainConfig.lr` / `act_lr` / `batch_size` are accepted and ignored; feedback magnitude is `strength`).
+`observe_back` (section 24's `BACK` sentinel) is overridden for the same reason the count model overrides it: a
+weight here is a *function* of the counts, the rewards and the phase, so nothing may be written to `edge_w` by hand
+— the next `recompute_weights` would erase it.  Going round is counted on the `BACK` edge and what to do instead is
+a penalty on the step that looped and a reward on the step taken after backing up.  The hand-over is counted
+**without a phase** (`record_traversal(e, None, ...)`, which grows the mean's weight but not its vector, so the
+coherence falls towards 0): a voice that backed out of a repeat walked outside this model's search and cannot say
+which phase it was in, so `BACK` competes on its share rather than pretending to a phase it never learned.
+`invert()` negates the accumulators, which rotates every `mu` by `pi`: what resonated now cancels — 2NRL's inversion
+in one line and with an exact meaning.  `reward` counts a traversal, adds `+strength` and *sharpens* the phase lock;
+`punish` subtracts and *decoheres* it (taking away the context in which the path was right, this model's own way of
+forgetting); `invert_paths` rotates a failed path's edges into antiphase (`activation`) or decoheres them (`state`).
+
+### 30.3 Cycles — the handoff
+
+Coming back to a node at a **new** phase is progress: the signal has moved on.  Coming back at the **same** phase is a
+true loop that would repeat for ever.  So the phase is exactly what separates productive recurrence from being stuck,
+and only the second kind is a cycle worth a decision.
+
+`metacog.MetaLayer` holds, per **cycle signature** — the re-entered node's first trigram and how many steps the loop
+closes over, clamped at 8, e.g. `"lol:4"` — a score for each of three actions: `ride` (go round again: right for
+`"aaa"`, `"lol lol lol"`, `"----"`, indentation), `escape` (take the cheapest child that does not close the loop) and
+`abort` (walk to END).  The scores are learned the way everything else here is: while training walks a real text,
+every step where a child *would* close a phase-locked cycle is a decision the text made, and whatever it did scores
+`+1`.  The policy is a softmax over `sign(s) * log1p(|s| / smoothing)` — evidence, not logits — so with the default
+`smoothing = 1` it is exactly add-one smoothing over the counts: ten observations are confident, a hundred more so,
+one is barely an opinion, and an untrained layer is uniform (costing `log 3` whatever the walk does, which changes no
+ranking).  Unseen signatures fall back to a prior summed over every cycle the model has met.  `invert()` negates
+every score, so 2NRL flips the layer with the graph.
+
+### 30.4 The search (`phasesearch.py`)
+
+A state is `(node, chars_emitted, phase_bucket)`.  The cost of an edge now depends on the whole path that led to it,
+and the search is still exact: the product graph is finite (`buckets` times bigger), so optimal substructure holds.
+`kick_scale = 0` makes the phase a function of the emitted length alone and the product collapses back to the
+ordinary unrolled graph at no extra cost.
+
+* `phase_kbest` — **the default**: Dijkstra with `k` labels per state instead of one.  One label per state is what
+  makes Dijkstra a shortest path and also what makes it blind — a single label cannot say *which* walk reached the
+  state, so the layer has nothing to look at.  Letting a state be settled up to `k` times fixes both at once: the
+  `k` goals pop in cost order and are the `k` cheapest walks *exactly* (the standard k-shortest-walks argument;
+  loops are allowed, and a walk that goes round again is simply one of the candidates), and every label reads back
+  to its own path, so the cycle it is standing in is visible and the layer can price it — **in the exact search,
+  not only in the beam**.  `k = 1` is `phase_dijkstra` to the expansion.  Cost grows with `k`, not with the width
+  of a frontier, because the search still stops at the `k`-th finished walk: on `data/sample_corpus.txt`, `k = 5`
+  from `"the "` expands 159 states where the beam of the same `k` expands 1312, for an answer the beam can only
+  approximate.  A trained layer prices a move by what is on the path, which no longer decomposes over states, so
+  exactness then holds only up to the `k`-labels-per-state bound — but that bound is per state rather than per
+  frontier, so it degrades where the graph *branches* instead of wherever the cheapest region happens to be.
+* `phase_dijkstra` — the cheapest path, same contract as `search.dijkstra_predict` (goal, cap, fallback,
+  `include_context`), `search.onward` included, so a node the model has learned to go round (its `BACK` edge
+  cheapest, section 24's sentinel) offers nothing and the search goes on with its others.  **No metacognition**: one
+  label per state cannot depend on which path reached it.  Kept for exactly that guarantee.
+* `phase_beam` — the `k` cheapest and `k` dearest complete paths, same two-beam shape as `beam.beam_predict`.  Kept
+  because it is the only mode that can answer the **bottom** half: in a cyclic graph the worst walk is unboundedly
+  bad (loop once more and it is worse), so "least likely" needs a frontier's bound rather than a goal count, and a
+  k-best search cannot give it.  Every entry carries the `(node, phase)` states already on its path, so a cycle is
+  detected *per path*: the tightest loop names the signature, the child that closes it takes the layer's `ride`
+  cost, END takes `abort` and every other child takes `escape`.  Nothing is forbidden — a cycle the corpus rides
+  stays cheap to ride.
+* `phase_walk` — one stochastic walk, layer included.
+
+`ResonantNet.predict(prefix, mode="kbest" | "dijkstra" | "beam" | "sample", k, beam, ...)` is those four; `mode`
+defaults to `"kbest"`, which is both exact and where the layer runs.  `_expand(graph, meta, node, phase, depth,
+step_penalty)` is shared by every path-carrying search: `depth` maps each `(node, phase)` on the path to where it
+first appeared, which is all the layer needs — a child landing on one closes a phase-locked cycle, and the
+difference is the loop's length.  `score` walks the text `START -> ... -> END` carrying the phase, charges
+`log(UNKNOWN_PROB)` for an unknown trigram or a missing edge exactly as `GraphModel.score` does (so an unseen text
+scores *worse* than a trained one instead of looking deterministic) and never changes the model.
+`generate` defaults to `"kbest"` too: generation asks for the `count` most likely *complete* texts, which is
+precisely what a k-best search answers exactly and at a fraction of a beam's cost; the other modes are
+`GraphModel.generate`'s.
+
+### 30.5 What it changes, measured
+
+Train `["the cat sat down", "a big cat ran away"]` and look at the node `"at "`, which three different contexts reach.
+Phase-free its three children are exactly `1/3` each — the model cannot tell them apart.  Per phase they are not:
+`"t sat"` is `0.807` at bucket 5, `"t down"` `0.807` at bucket 3, `"t ran aw"` `0.691` at bucket 0.  End to end the
+model continues `"the cat "` with `"sat down"` and `"a big cat "` with `"ran away"`; the identical model with
+`resonance_scale = 0` answers `"ran away"` to both (`tests/test_resonance.py`).
+
+### 30.6 Wiring
+
+`ResonantGraph.to_dict` adds `edges.cx / cy / cw / reward` in the same edge order as the base, and `weights` (the
+seven settings plus `total_traversals`); `from_dict` rebuilds `advance` from the labels.  `ResonantNet.to_dict` adds
+`metacog`.  `format` is `"radixnet-resonant"`, so `load_model`, `model_from_dict`, the checkpointer and `POST
+/api/load` restore it like any other kind.  CLI: `--kind resonant` (default file `model.resonant.json`), `weights`
+takes `--buckets / --period / --kick-scale / --resonance-scale / --amp-scale / --reward-scale / --concentration` and
+**rejects** another kind's options by name instead of ignoring them, `info` shows the phase, the coherence and the
+layer, `2nrl` describes the three phases.  API: `/api/model/weights` and `/api/reset` take the same settings (the
+model rejects the ones it does not know), `/api/graph` reports `coherence` and `mu` per edge, `advance` per node and
+`buckets` on the view, `/api/status` carries `coherence_mean`, `cycles_seen` and `meta`.  Frontend: the header
+selector picks it up from `status.kinds` on its own; `util.countingKind` hides the learning-rate and schedule fields
+and shows the `strength` field for every kind that learns by counting (only the count model aliases `dijkstra` to the
+beam — on this model `dijkstra` is a real, exact mode), the status bar adds coherence / phases and cycles /
+signatures, and the Evolve tab describes the failure modes in this model's terms.
+
+Tests: `tests/test_resonance.py` — the phase (stability, sentinels, invariance under split and merge, clock vs kick,
+`text_bucket`), the graph (unit activations, coherence growth and shrinkage, resonance in and out of phase,
+`invert` / `rotate` / `sharpen`, `configure` rephasing), the layer (uniform when untrained, add-one policy, punish,
+invert, prior fallback, round trip), the net (records, falling loss, the three prediction modes, generation, scoring,
+cycle learning, the layer moving the beam while Dijkstra ignores it, reward / punish / decohere, 2NRL with weights,
+`invert_paths`, stats, argument validation), persistence (file, gzip, wrong kind, checkpoints), the kind registry,
+the evolver and `converse`, the CLI and the HTTP API.

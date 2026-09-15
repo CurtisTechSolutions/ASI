@@ -587,12 +587,25 @@ class RadixCyclicGraph:
         return None if traced is None else traced[1]
 
     def invert(self) -> None:
-        """Flip every alive edge weight and every node's ``a``; toggle ``inverted``."""
+        """Negate every alive edge weight and every node's activation; toggle ``inverted``.
+
+        A node's activation is ``f(x) = a * sin(b * (x - h)) + k``, so negating
+        it means negating **both** ``a`` and ``k``: flipping the amplitude
+        alone leaves ``-a * sin(u) + k``, which is ``-f(x) + 2k`` and equals
+        ``-f(x)`` only while ``k`` is 0.  ``k`` is learned (``df/dk`` is 1, so
+        every training step moves it), so by the time 2NRL inverts anything it
+        is not 0 and the difference is real: the edge signal
+        ``w * f_p * f_c`` would not change sign cleanly and the softmax over a
+        node's children would not reverse.  With both negated every edge signal
+        is exactly negated, the ranking reverses exactly, and two inversions
+        are the identity.
+        """
         ew = self.edge_w
         for e, ok in enumerate(self.edge_alive):
             if ok:
                 ew[e] = -ew[e]
         self.a = [-v for v in self.a]
+        self.k = [-v for v in self.k]
         self.inverted = not self.inverted
         self.version += 1
 
@@ -614,15 +627,22 @@ class RadixCyclicGraph:
         """
         if mode not in ("activation", "state"):
             raise ValueError(f"mode must be 'activation' or 'state', got {mode!r}")
-        target = self.a if mode == "activation" else self.z
+        # "activation" scales the whole output of the unit, which is `a * sin(u) + k`,
+        # so both the amplitude and the offset move: at amount 1 that is an exact
+        # negation and at 0.5 the node really does go neutral (f = 0).  Scaling `a`
+        # alone would leave f = k at 0.5 and -f + 2k at 1.  "state" scales the node's
+        # trained value instead, which is a different operation (see the docstring).
+        targets = (self.a, self.k) if mode == "activation" else (self.z,)
         alive = self.alive
         items = nodes.items() if isinstance(nodes, dict) else ((n, amount) for n in set(nodes))
         changed = 0
         for n, amt in items:
             amt = float(amt)
-            if n < FIRST or n >= len(target) or not alive[n] or amt <= 0:
+            if n < FIRST or n >= len(self.a) or not alive[n] or amt <= 0:
                 continue
-            target[n] *= 1.0 - 2.0 * amt
+            scale = 1.0 - 2.0 * amt
+            for target in targets:
+                target[n] *= scale
             changed += 1
         if changed:
             self.version += 1

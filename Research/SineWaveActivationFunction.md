@@ -263,7 +263,9 @@ one for a logistic sigmoid either.
 
 I use this. It is the mechanism behind **2NRL** (train on the failures → invert
 → fine-tune on the correct data): `invert()` in RadixCyclicNN flips every edge
-weight and every activation amplitude, and what was likely becomes unlikely.
+weight and every unit's activation — amplitude `a` and offset `k` together, since
+`f = a·sin(u) + k` and negating `a` alone leaves `−f + 2k` — and what was likely
+becomes unlikely.
 That whole training algorithm is only available because the activation function
 has a sign parameter. The activation function choice bought me a training
 algorithm.
@@ -594,8 +596,11 @@ paper on cycles.
 - The unit never permanently dies: `|f'|` returns to its maximum every half
   period, while sigmoid's dead fraction grows toward 100% and ReLU's is a fixed
   50%.
-- `a → −a` is an exact negation of the unit. That is what makes 2NRL's
-  `invert()` possible, and neither ReLU nor sigmoid has such a parameter.
+- Negating a unit is exact: `a → −a` together with `k → −k` gives `−f(x)` to
+  machine precision. That is what makes 2NRL's `invert()` possible, and neither
+  ReLU nor sigmoid has a sign parameter to do it with. The offset has to go with
+  the amplitude — `a → −a` alone is `−f + 2k`, which is the negation only while
+  `k` is still 0, and `k` is learned.
 - `df/dh = −df/dx` exactly: the phase parameter *is* a per-unit input bias.
 - The cost is global monotonicity, mitigated by population coding, by
   initialising inside one arm, and by `b` being learnable.

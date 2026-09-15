@@ -76,6 +76,7 @@ export default function EvolvePanel({ status }) {
   }
 
   const countKind = Boolean(status && status.kind === "count");
+  const resonantKind = Boolean(status && status.kind === "resonant");
 
   const jobHistory = asArray(job && job.history);
   const history = running || jobHistory.length > 0 ? jobHistory : serverHistory;
@@ -189,9 +190,21 @@ export default function EvolvePanel({ status }) {
               disabled={running}
               options={[
                 ["none", "off: the worst half is uniform 2NRL garbage"],
-                ["fail_invert", countKind ? "penalise every failure, the worse the more (count model)" : "train on every failure, the worse the more, then invert the model"],
-                ["activation", countKind ? "penalise failed paths locally (count model)" : "local: invert the activation function (a) along failed paths"],
-                ["state", countKind ? "penalise failed paths locally (count model)" : "local: invert the trained node value (z) along failed paths"],
+                ["fail_invert", countKind
+                  ? "penalise every failure, the worse the more (count model)"
+                  : resonantKind
+                    ? "lock the phases onto every failure, the worse the more, then rotate them by pi"
+                    : "train on every failure, the worse the more, then invert the model"],
+                ["activation", countKind
+                  ? "penalise failed paths locally (count model)"
+                  : resonantKind
+                    ? "local: rotate the edges of failed paths into antiphase"
+                    : "local: invert the activation function (a) along failed paths"],
+                ["state", countKind
+                  ? "penalise failed paths locally (count model)"
+                  : resonantKind
+                    ? "local: decohere the edges of failed paths (their phase lock is erased)"
+                    : "local: invert the trained node value (z) along failed paths"],
               ]}
             />
             <NumberField

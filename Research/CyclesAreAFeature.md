@@ -452,8 +452,9 @@ If a model keeps producing the same wrong output, no amount of searching *within
 its current landscape helps — the output is the minimum, that is why it keeps
 coming back. So invert the landscape. **2NRL**: train on the failures, invert
 the network so that everything likely becomes unlikely, then fine-tune on the
-correct data at a smaller learning rate. `invert()` flips every edge weight and
-every activation amplitude; what was an attractor becomes a repeller. The
+correct data at a smaller learning rate. `invert()` negates every edge weight and
+every unit's activation (amplitude and offset together); what was an attractor
+becomes a repeller. The
 procedure has its own paper (`2NRL.md`); what concerns this one is what the
 cyclic structure does to it.
 
