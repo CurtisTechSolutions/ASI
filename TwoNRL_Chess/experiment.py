@@ -14,7 +14,8 @@ by being refused, and then the **payoffs**, by being graded.
 
 The loop, one round at a time
 -----------------------------
-1. **Play.**  ``games`` games against a skill-limited Stockfish.  Each decision
+1. **Play.**  ``games`` games against Stockfish at Skill Level 20 - the engine
+   with no handicap on it at all.  Each decision
    records how many refusals it took to find a legal move, and each *accepted*
    move is ranked by a full-strength Stockfish in a single ``MultiPV`` search -
    one engine call, identical for every arm, yielding the best move, the worst
@@ -107,7 +108,7 @@ class Config:
     arm: str = "2nrl"
     hidden: tuple[int, ...] = (32, 32)
     rounds: int = 24
-    games: int = 8                   # training games per round
+    games: int = 10                  # training games per round
     # 2NRL's rates: the research ratio is neg:pos = 5:1 and act_lr = lr/10.
     neg_lr: float = 0.01
     pos_lr: float = 0.002
@@ -121,13 +122,18 @@ class Config:
     refusal_margin: float = 4.0      # refusals; the rule-failure equivalent of the above
     boost: float = 3.0               # cap on §6.1's proportional boosting
     buffer_rounds: int = 5           # how many rounds of failures a block trains on
+    invert_mode: str = "unit"        # "unit" = negate every unit (§4.3's primitive);
+                                     # "readout" = negate only the output
     schedule: str = "phased"         # "phased" = §3's three phases across the run;
                                      # "per-round" = a negative block, an inversion
                                      # and a positive block inside every round
     neg_fraction: float = 0.3        # in "phased", how much of the run is phase 1
     judge_depth: int = 6
-    opp_skill: int = 0
-    opp_depth: int = 4
+    # Stockfish at its ceiling: Skill Level 20 is the engine with no handicap at
+    # all. Skill and depth are separate knobs - skill is how well it plays the
+    # search it does, depth is how much search it gets - so both are raised.
+    opp_skill: int = 20
+    opp_depth: int = 8
     opp_elo: int | None = None
     opening_plies: int = 4
     max_plies: int = 80
@@ -401,7 +407,9 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
         before = net.forward(rows, train=False)
         if probe is not None:
             out["inversion_before"] = probe()
-        net.invert()
+        # Both operators produce -output exactly, so phase 2 cannot tell them
+        # apart. They leave the parameters in different places, and phase 3 can.
+        (net.invert_readout if cfg.invert_mode == "readout" else net.invert)()
         out["inversion_error"] = float(np.abs(net.forward(rows, train=False) + before).max())
         if probe is not None:
             out["inversion_after"] = probe()
@@ -621,6 +629,10 @@ def main() -> None:
     p.add_argument("--eval-games", type=int, default=Config.eval_games)
     p.add_argument("--buffer-rounds", type=int, default=Config.buffer_rounds)
     p.add_argument("--track-positions", type=int, default=Config.track_positions)
+    p.add_argument("--invert-mode", choices=["unit", "readout"], default=Config.invert_mode,
+                   help="unit: negate every unit, §4.3's primitive (default).  "
+                        "readout: negate only the network's output, leaving the "
+                        "hidden units untouched")
     p.add_argument("--schedule", choices=["phased", "per-round"], default=Config.schedule,
                    help="phased: §3's three phases over the run (default).  "
                         "per-round: a negative block, an inversion and a positive "
@@ -648,6 +660,7 @@ def main() -> None:
                          buffer_rounds=args.buffer_rounds, width=args.width,
                          track_positions=args.track_positions,
                          schedule=args.schedule, neg_fraction=args.neg_fraction,
+                         invert_mode=args.invert_mode,
                          growth=0 if args.no_growth else Config.growth,
                          heldout=args.heldout, stockfish=args.stockfish,
                          checkpoints=args.checkpoints)

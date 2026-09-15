@@ -33,6 +33,8 @@ def label_of(run: dict) -> str:
     label = run["arm"]
     if cfg.get("schedule", DEFAULT_SCHEDULE) != DEFAULT_SCHEDULE:
         return f"{label} (per-round)"
+    if cfg.get("invert_mode", "unit") != "unit":
+        return f"{label} (read-out flip)"
     fraction = cfg.get("neg_fraction", DEFAULT_NEG_FRACTION)
     if abs(fraction - DEFAULT_NEG_FRACTION) > 1e-9:
         return f"{label} (phase 1 = {fraction:.0%})"

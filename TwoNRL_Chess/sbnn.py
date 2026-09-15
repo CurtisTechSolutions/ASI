@@ -40,27 +40,27 @@ computes the same function for every input the instant after growing, and
 zeros stay zeros under the sign flips, so the inversion stays exact.
 ``test_sbnn.py`` asserts both.
 
-Inverting a feed-forward stack: the parity correction
------------------------------------------------------
-In the radix graph an edge's score is a *product*, ``w * f(z_p) * f(z_c)``, so
-flipping every weight and every amplitude flips the score exactly once.  A
-feed-forward stack **composes** instead, and there the same literal rule
-cancels itself: with ``h = k = 0`` the sine is odd, so per layer
-``z' = -z`` and ``f'(z') = (-a) sin(b(-z)) = f(z)`` - unchanged.  Flipping
-everything is a no-op (:meth:`invert_literal` demonstrates it).
+Inverting a stack: negate every unit, and let each one keep its evidence
+-----------------------------------------------------------------------
+§4.3's primitive is a statement about a *unit*: ``a -> -a`` with ``k -> -k``
+negates ``a*sin(b*(x-h)) + k`` exactly, for every ``x``.  Inversion is that
+applied to every unit - a logical NOT run through the network, rather than a
+sign flip on the output.
 
-:meth:`invert` breaks parity exactly once.  Writing ``s`` for the sign
-entering a layer, ``t`` for the sign forced onto its pre-activation and
-``sigma`` for its output sign::
+Composition adds one piece of bookkeeping.  A negated unit feeds the next
+layer a negated input, which would flip that layer's pre-activation and let the
+odd sine undo the negation just applied; flipping that layer's weights cancels
+it, so the unit still sees the ``z`` it saw before.  The first layer reads the
+feature vector, which nobody negated, so its weights stay put.  Flip those too
+and the whole operation cancels itself - which is :meth:`invert_literal`, kept
+because the no-op is the clearest way to show why the exception is there.
 
-    W' = t*s*W      bias' = t*bias
-    t = +1:   a' =  sigma*a    h' =  h    k' = sigma*k
-    t = -1:   a' = -sigma*a    h' = -h    k' = sigma*k
+    a -> -a ,  k -> -k                       every unit is negated
+    W -> -W    for every layer but the first  so it still sees the same z
 
-``t = -s`` flips every weight matrix (the research's rule) and ``sigma = -1``
-from the break layer on negates the output once.  The result is exact to
-machine precision: ``net_inverted(x) == -net(x)``, so the move the failure
-policy most wanted is the one it now least wants.
+Afterwards every pre-activation is unchanged, every unit's output is exactly
+negated, and the network's output with it - so ``argmax`` becomes ``argmin``,
+and running it twice is the identity.
 """
 
 from __future__ import annotations
@@ -204,39 +204,92 @@ class SineNet:
 
     # ---------------------------------------------------------------- 2NRL
 
-    def invert(self, parity_break: int = -1) -> None:
-        """2NRL step 2: negate the network's output exactly once.
+    def invert(self) -> None:
+        """2NRL step 2: negate every unit in the network - a logical NOT, not a
+        sign flip on the read-out.
 
-        Exact: after this call ``forward(x) == -forward_before(x)`` to machine
-        precision, so ``argmax`` becomes ``argmin``.  It is an involution, and
-        the hidden activations are bit-for-bit unchanged - the inversion does
-        not damage what the negative phase learned, it re-reads it with the
-        opposite sign.
+        ``Research/2NRL.md`` §4.3 gives the primitive, and it is a statement
+        about a *unit*, not about the output::
+
+            a -> -a ,  k -> -k          negates that unit, exactly
+
+        because ``-a*sin(b*(x-h)) + (-k) == -(a*sin(b*(x-h)) + k)`` for every
+        ``x``.  The unit's verdict flips and nothing else about it moves: not
+        its phase ``h``, not its frequency ``b``, not its bias.  §13 says the
+        same in one line - ``W -> -W``, and ``a -> -a`` with ``k -> -k``.
+
+        Applying that to every unit is what this method does.  The one thing
+        composition adds is bookkeeping about what each unit *sees*.  In the
+        radix graph a node's pre-activation ``z_p`` is a node state, so negating
+        the two endpoint units and the edge weight flips the edge signal exactly
+        once and there is nothing further to do.  In a stack, layer ``i``'s input
+        is layer ``i-1``'s **output**, which has just been negated - so its
+        pre-activation would flip too, and an odd sine would undo the very
+        negation we applied.  Flipping that layer's weights cancels it::
+
+            z_i' = (-W_i)(-y_{i-1}) + bias_i = W_i y_{i-1} + bias_i = z_i
+
+        The first layer is the exception, and it is the whole of the exception:
+        its input is the feature vector, which nobody negated, so its weights
+        stay as they are.  Flip those too and you get :meth:`invert_literal`,
+        where the odd sine cancels the unit negation and the operation is a
+        no-op.
+
+        So, for every layer::
+
+            a -> -a ,  k -> -k                       every unit is negated
+            W -> -W    for every layer but the first  so it still sees the same z
+
+        Three things hold afterwards, and ``test_sbnn.py`` asserts all three:
+        every pre-activation is **unchanged**, so each unit is looking at
+        exactly the evidence it looked at before; every unit's output is
+        **exactly negated**, so the verdict on that evidence is reversed
+        throughout; and the network's output is therefore ``-output``, so
+        ``argmax`` becomes ``argmin`` and the move the failure policy most
+        wanted is the one it now least wants.  It is its own inverse, which is
+        ``¬¬P ⟹ P``.
+        """
+        for i, layer in enumerate(self.layers):
+            if i > 0:
+                layer.W *= -1.0        # so this unit still sees the same z
+            layer.a *= -1.0            # negate the unit: the paper's primitive
+            layer.k *= -1.0
+        self.inverted = not self.inverted
+
+    def invert_readout(self) -> None:
+        """The alternative: negate the output, leaving the hidden units alone.
+
+        Flip every weight matrix and every bias, and break parity once at the
+        last layer.  This also gives ``forward(x) == -forward_before(x)``
+        exactly, and it is what ``TwoNRL_CartPole/sinenet.py`` does - but it
+        negates the *read-out* rather than the network.  Every hidden unit comes
+        through it unchanged, so nothing inside the network has been negated at
+        all; only the last layer's reading of it has.
+
+        Kept because the two operators agree on the function and disagree on
+        where they leave the parameters, which is a difference phase 3 can see
+        even though phase 2 cannot.  ``--invert-mode readout`` runs it.
         """
         n = len(self.layers)
-        j = parity_break % n
-        s = 1.0                                   # sign of the incoming signal
         for i, layer in enumerate(self.layers):
-            t = -s                                # forces W' = t*s*W = -W
-            sigma = -1.0 if i >= j else 1.0       # sign of this layer's output
-            layer.W *= t * s
-            layer.bias *= t
-            if t > 0:
-                layer.a *= sigma
-                layer.k *= sigma
+            layer.W *= -1.0
+            layer.bias *= -1.0
+            layer.h *= -1.0            # every layer's input has just changed sign
+            if i == n - 1:
+                layer.k *= -1.0        # the break: the last unit's offset carries it
             else:
-                layer.a *= -sigma
-                layer.h *= -1.0
-                layer.k *= sigma
-            s = sigma
+                layer.a *= -1.0
         self.inverted = not self.inverted
 
     def invert_literal(self) -> None:
-        """The literal reading: flip every weight, bias and amplitude.
+        """Flip *every* weight, including the first layer's - and get a no-op.
 
-        Kept to demonstrate that on a feed-forward stack with an odd
-        activation (``h = k = 0``) this is a **no-op**.  Not used by the
-        experiment.
+        This is the rule read off the graph without asking what each unit sees.
+        On a stack with an odd activation (``h = k = 0``) the first layer's
+        negated input flips its pre-activation, the odd sine turns that back
+        into the negation it already had, and the two cancel: the network comes
+        back identical.  It is the one line of :meth:`invert` that matters,
+        demonstrated by removing it.  Not used by the experiment.
         """
         for layer in self.layers:
             layer.W *= -1.0

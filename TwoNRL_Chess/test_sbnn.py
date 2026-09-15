@@ -116,25 +116,71 @@ def test_invert_exact() -> None:
         back = float(np.abs(n.forward(x, train=False) - before).max())
         check(f"inverting twice is the identity ({depth})", back == 0.0, f"error {back:.1e}")
 
-    n = net(5, (12, 9, 7, 1))
-    randomise_act(n, 6)
-    x = rng.normal(size=(16, 12))
-    hidden_before = n.layers[0].forward(x, train=False)
-    n.invert()
-    hidden_after = n.layers[0].forward(x, train=False)
-    check("the first hidden layer is untouched by the inversion",
-          float(np.abs(hidden_after - hidden_before).max()) == 0.0,
-          "the inversion re-reads what the negative phase learned, it does not erase it")
+def trace(n: SineNet, x: np.ndarray):
+    """Every layer's pre-activation and output, computed by hand."""
+    pre, out, h = [], [], x
+    for layer in n.layers:
+        z = h @ layer.W + layer.bias
+        pre.append(z.copy())
+        h = layer.a * np.sin(layer.b * (z - layer.h)) + layer.k
+        out.append(h.copy())
+    return pre, out
 
-    moved = {p: False for p in ACT_PARAMS}
+
+def test_inversion_is_a_not() -> None:
+    """The inversion negates every *unit*, which is what makes it a logical NOT.
+
+    §4.3's primitive is a statement about a unit - ``a -> -a`` with ``k -> -k``
+    negates ``a*sin(b*(x-h)) + k`` exactly - so inversion applied to a network
+    has to leave every unit looking at the evidence it looked at before and
+    returning the opposite verdict on it.  Negating only the read-out would also
+    produce ``-output`` while leaving every hidden unit untouched, and that is
+    not the same operation; :meth:`SineNet.invert_readout` is that one, and the
+    last check here is the difference.
+    """
+    print("\nthe inversion is a NOT applied to every unit")
+    rng = np.random.default_rng(31)
+    n = net(32, (12, 9, 7, 1))
+    randomise_act(n, 33)                       # h and k off zero: nothing leans on oddness
+    x = rng.normal(size=(24, 12))
+    pre0, out0 = trace(n, x)
+    y0 = n.forward(x, train=False)
+    n.invert()
+    pre1, out1 = trace(n, x)
+
+    same_pre = max(float(np.abs(a - b).max()) for a, b in zip(pre0, pre1))
+    check("every unit sees exactly the pre-activation it saw before", same_pre == 0.0,
+          f"error {same_pre:.1e} across {len(pre0)} layers - the evidence does not move")
+    neg_out = max(float(np.abs(a + b).max()) for a, b in zip(out0, out1))
+    check("every unit's output is exactly negated", neg_out == 0.0,
+          f"error {neg_out:.1e} - the verdict on that evidence is reversed throughout")
+    check("the network's output negates with them",
+          float(np.abs(n.forward(x, train=False) + y0).max()) == 0.0)
+
+    moved, held = [], []
     snapshot = {p: [getattr(l, p).copy() for l in n.layers] for p in ACT_PARAMS}
     n.invert()
     for p in ACT_PARAMS:
-        moved[p] = any(not np.allclose(getattr(l, p), snapshot[p][i])
-                       for i, l in enumerate(n.layers))
-    check("the inversion does touch the activation parameters",
-          moved["a"] and moved["h"] and moved["k"],
-          f"changed: {[p for p in ACT_PARAMS if moved[p]]}")
+        changed = any(not np.array_equal(getattr(l, p), snapshot[p][i])
+                      for i, l in enumerate(n.layers))
+        (moved if changed else held).append(p)
+    check("it moves the amplitude and the offset, and nothing else about the wave",
+          set(moved) == {"a", "k"} and set(held) == {"b", "h"},
+          f"changed {moved}, untouched {held} - §13's `a -> -a` with `k -> -k`, exactly")
+
+    # The read-out flip reaches the same function by a different route.
+    m = net(32, (12, 9, 7, 1))
+    randomise_act(m, 33)
+    before = m.forward(x, train=False)
+    inner_before = trace(m, x)[1]
+    m.invert_readout()
+    check("negating the read-out reaches the same function",
+          float(np.abs(m.forward(x, train=False) + before).max()) == 0.0)
+    inner_after = trace(m, x)[1]
+    untouched = float(np.abs(inner_after[0] - inner_before[0]).max())
+    check("...but leaves the hidden units alone, so it is not the same operation",
+          untouched == 0.0,
+          "its first hidden layer comes through unchanged; invert() negates it")
 
 
 def test_literal_is_noop() -> None:
@@ -148,8 +194,9 @@ def test_literal_is_noop() -> None:
         before = n.forward(x, train=False)
         n.invert_literal()
         err = float(np.abs(n.forward(x, train=False) - before).max())
-        check(f"flipping W, bias and a everywhere is a no-op ({depth} layers)",
-              err == 0.0, f"error {err:.1e} - every layer cancels the one before")
+        check(f"flipping the FIRST layer's weights too is a no-op ({depth} layers)",
+              err == 0.0, f"error {err:.1e} - its negated input flips z, and the odd sine "
+              "turns that straight back into the negation already applied")
 
 
 # ------------------------------------------------------------------- growth
@@ -481,6 +528,7 @@ if __name__ == "__main__":
     print("SBNN + 2NRL on chess - correctness proofs")
     test_gradients()
     test_invert_exact()
+    test_inversion_is_a_not()
     test_literal_is_noop()
     test_growth_identity()
     test_adam_resync()

@@ -197,8 +197,8 @@ def main() -> None:
     p.add_argument("--openings", type=int, default=12)
     p.add_argument("--opening-plies", type=int, default=4)
     p.add_argument("--opening-seed", type=int, default=4242)
-    p.add_argument("--opp-skill", type=int, default=0)
-    p.add_argument("--opp-depth", type=int, default=4)
+    p.add_argument("--opp-skill", type=int, default=20)
+    p.add_argument("--opp-depth", type=int, default=8)
     p.add_argument("--judge-depth", type=int, default=6)
     p.add_argument("--pairings", choices=["matched", "all"], default="matched",
                    help="matched: seed i vs seed i;  all: every seed against every seed")
