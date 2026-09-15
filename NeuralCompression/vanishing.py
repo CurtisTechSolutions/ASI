@@ -48,8 +48,18 @@ class DeepMLP:
         o = self.bo + sum(self.Wo[h]*cur[h] for h in range(self.nh))
         return zs, as_, o
 
-    def step(self, x, t, lr, sign=1.0, clip=5.0):
-        """sign=-1.0 performs gradient ASCENT (the inversion). Returns (sq_err, |g| layer 0)."""
+    def negate_layer(self, l):
+        """w -> -w for hidden layer l. With an ODD activation this is a symmetry
+        operation, not noise: -sin(b*(-z)) = -(-sin(b*z)), so the layer's output
+        negates exactly and the function computed stays structurally related."""
+        for row in self.W[l]:
+            for j in range(len(row)): row[j] = -row[j]
+        for j in range(len(self.B[l])): self.B[l][j] = -self.B[l][j]
+
+    def step(self, x, t, lr, sign=1.0, clip=5.0, signs=None):
+        """sign=-1.0 performs gradient ASCENT (the inversion). `signs` overrides it
+        per hidden layer (list of length `depth`), for rotating inversion.
+        Returns (sq_err, |g| layer 0)."""
         zs, as_, o = self.forward(x)
         d = o - t
         if d > clip: d = clip
@@ -59,6 +69,7 @@ class DeepMLP:
         self.bo -= sign*lr*d
         g0mag = 0.0
         for l in range(self.depth-1, -1, -1):
+            sgn = sign if signs is None else signs[l]
             prev = as_[l]; nz = len(g)
             if l == 0:
                 g0mag = sum(abs(gj) for gj in g)/max(1, nz)
@@ -67,9 +78,9 @@ class DeepMLP:
                 Wi = self.W[l][i]; acc = 0.0
                 for j in range(nz):
                     acc += Wi[j]*g[j]
-                    Wi[j] -= sign*lr*g[j]*xi
+                    Wi[j] -= sgn*lr*g[j]*xi
                 nxt[i] = acc
-            for j in range(nz): self.B[l][j] -= sign*lr*g[j]
+            for j in range(nz): self.B[l][j] -= sgn*lr*g[j]
             if l > 0:
                 g = [nxt[i]*self.df(zs[l-1][i], as_[l][i]) for i in range(len(prev))]
         return d*d, g0mag
@@ -131,31 +142,74 @@ class Inversion:
         return 1.0
 
 
-def task(n, rng):
+class Rotating:
+    """Method 3: invert alternating layers each cycle.
+
+    Depth 5 -> layers {0,2,4} invert, then {1,3}, then {0,2,4}, and so on
+    (0-indexed; the author's 1,3,5 / 2,4).
+
+    mode="grad"   the active parity performs gradient ASCENT for that cycle while
+                  the other parity descends. An adversarial split within one net.
+    mode="weight" the active parity has w -> -w at each cycle boundary. With an odd
+                  activation this walks the network's sign-symmetry orbit, and the
+                  parity alternation has PERIOD 4: (odd)(even)(odd)(even) returns
+                  every layer to its original sign. Escape without unlearning.
+    """
+    def __init__(self, depth, mode="weight", period=25):
+        self.depth, self.mode, self.period = depth, mode, period
+        self.parity = 0; self.cycles = 0
+    def layers(self, parity):
+        return [l for l in range(self.depth) if l % 2 == parity]
+    def on_cycle(self, net):
+        """Call at each cycle boundary. Returns the signs for the coming cycle."""
+        if self.mode == "weight":
+            for l in self.layers(self.parity): net.negate_layer(l)
+        self.cycles += 1
+        active = self.layers(self.parity)
+        self.parity ^= 1
+        if self.mode == "grad":
+            return [-1.0 if l in active else 1.0 for l in range(self.depth)]
+        return None
+
+
+def task(n, rng, kind="smooth"):
+    """smooth: one low-frequency sine -- essentially no local minima.
+    rugged: a high-frequency product -- many basins, so a symmetry hop has
+            something to escape FROM. Testing an escape mechanism on a task with
+            nothing to escape measures nothing."""
     D = []
     for _ in range(n):
         x0, x1 = rng.random(), rng.random()
-        D.append(([x0, x1], 0.5 + 0.4*math.sin(3.0*x0 + 2.0*x1 + 0.7)))
+        if kind == "smooth":
+            y = 0.5 + 0.4*math.sin(3.0*x0 + 2.0*x1 + 0.7)
+        else:
+            y = 0.5 + 0.25*math.sin(9.0*x0)*math.cos(7.0*x1) + 0.15*math.sin(5.0*x1)
+        D.append(([x0, x1], y))
     return D
 
-def run(depth, act, b, inv, epochs=300, nh=8, lr=0.05, seed=0, ntr=64, nte=64):
+def run(depth, act, b, inv, epochs=300, nh=8, lr=0.05, seed=0, ntr=64, nte=64, rot=None, kind="smooth"):
     rng = random.Random(seed)
     net = DeepMLP(2, nh, depth, rng, act, b)
-    TR, TE = task(ntr, rng), task(nte, rng)
+    TR, TE = task(ntr, rng, kind), task(nte, rng, kind)
     pol = Inversion(**inv) if inv else None
+    rotor = Rotating(depth, **rot) if rot else None
+    signs = None
     gmags = []; g0 = 1.0
-    for _ in range(epochs):
+    for ep in range(epochs):
+        if rotor and ep % rotor.period == 0:
+            signs = rotor.on_cycle(net)
         rng.shuffle(TR)
         for x, t in TR:
             # decide the sign from the PREVIOUS step's gradient, so every condition
             # takes exactly one update per sample and the comparison stays fair
             sgn = pol.sign(net, g0) if pol else 1.0
-            sq, g0 = net.step(x, t, lr, sgn)
+            sq, g0 = net.step(x, t, lr, sgn, signs=signs)
             if pol: pol.note_loss(sq)
             gmags.append(g0)
     mse = sum((net.forward(x)[2]-t)**2 for x, t in TE)/len(TE)
     tail = gmags[-len(TR):]
-    return mse, sum(tail)/len(tail), (pol.fired if pol else 0)
+    fired = pol.fired if pol else (rotor.cycles if rotor else 0)
+    return mse, sum(tail)/len(tail), fired
 
 if __name__ == "__main__":
     print("A. Is the vanishing gradient caused by b? Predicted decay = |f'(0)|^depth\n")

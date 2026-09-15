@@ -387,3 +387,101 @@ other side, and it is the price of one network holding many games.
 * **Build inversion on a plateau trigger, not a magnitude trigger** — and expect ~1.2× where a stall is genuine, nothing where it is not.
 * **Build the dual network, and transfer by replay**, with grafting where query-network compute is the constraint rather than accuracy.
 * **Do not expect consolidation to pay for compression.** The 5× gap between a specialist and a shared band is structural.
+
+---
+
+# Part 4 — rotating inversion
+
+Method 3: invert alternating layers each cycle. Depth 5 → layers {1,3,5} invert,
+then {2,4}, then {1,3,5}. Implemented as `Rotating` in `vanishing.py`, in two
+readings of "invert":
+
+* **`mode="grad"`** — the active parity performs gradient *ascent* for that cycle while the other parity descends. An adversarial split inside one network.
+* **`mode="weight"`** — the active parity has `w → -w` at each cycle boundary.
+
+## 15. Period 4, verified
+
+With an odd activation — and `-sin(bz)` is odd — negating a layer's weights is a
+structural operation rather than noise. The parity alternation has **period 4**:
+
+```
+(odd)(even)(odd)(even)  ->  every weight bit-identical to its original value
+```
+
+Verified directly: cycles 4 and 8 return the network exactly, cycles 1-3 and 5-7
+do not. This is a closed loop through the network's own sign structure, and it is
+`Research/CyclesAreAFeature.md` appearing in weight space.
+
+## 16. Safe where every ascent method is catastrophic
+
+Depth 5, 3-4 seeds. Two landscapes: *smooth* (one low-frequency sine, essentially
+no local minima) and *rugged* (a high-frequency product, many basins — the regime
+an escape mechanism is actually for).
+
+| landscape | activation | method | MSE | vs none |
+|---|---|---|---|---|
+| smooth | sine `b=1` | none | 0.00029 | — |
+| smooth | sine `b=1` | plateau inversion | 20.30 | **0.00×** |
+| smooth | sine `b=1` | rotating **grad** | 0.0599 | **0.00×** |
+| smooth | sine `b=1` | rotating **weight** | 0.00041 | **0.71×** |
+| smooth | tanh | none | 0.00054 | — |
+| smooth | tanh | rotating **grad** | 0.0920 | **0.01×** |
+| smooth | tanh | rotating **weight**, p=10 | 0.00052 | **1.04×** |
+| rugged | sine `b=1` | none | 0.01599 | — |
+| rugged | sine `b=1` | plateau inversion | 0.0295 | 0.54× |
+| rugged | sine `b=1` | rotating **weight**, p=50 | 0.01604 | **1.00×** |
+| rugged | tanh | none | 0.01587 | — |
+| rugged | tanh | plateau inversion | **22288** | 0.00× |
+| rugged | tanh | rotating **weight**, p=50 | 0.01600 | **0.99×** |
+
+**Rotating weight inversion is in a different category from everything else
+tried.** Every gradient-ascent method — plateau-triggered, magnitude-triggered,
+rotating-grad — is catastrophic on a healthy network, by 100× to a million×.
+Rotating weight inversion is 0.71-1.04×: survivable, sometimes indistinguishable
+from not doing it. Negating weights **relocates** the network; ascent **unlearns**
+it, and those are not the same operation even though both are called inversion.
+
+## 17. And exactly neutral, for a reason worth having measured
+
+It does not help. Not on the smooth task, and — the test that matters — **not on
+the rugged one either**, where there are genuinely many basins to escape: 1.00×
+and 0.99×. Longer periods are neutral; short periods (p=10) are mildly harmful.
+
+The explanation is not the one that seemed obvious. **It is not a loss-preserving
+symmetry.** Measuring the loss across four negations with no training between:
+
+| event | sine `b=1` | tanh |
+|---|---|---|
+| trained | 0.00338 | 0.00039 |
+| after negating {0,2,4} | 0.2513 | 0.1865 |
+| after negating {1,3} | 0.2697 | 0.2129 |
+| after negating {0,2,4} | 0.1405 | 0.0749 |
+| after negating {1,3} | **0.00338** | **0.00039** |
+
+The loss **jumps ~75×** on the first negation. So each hop is a large
+perturbation, not a free move along a level set. What makes the method neutral is
+the *closure*: after four cycles the weights are bit-identical, so the network has
+been kicked out, partially repaired by training, kicked again, and returned
+exactly to where it started. **A cycle that returns to its origin does no work**,
+and the training spent inside the excursion largely fits configurations that get
+negated back.
+
+That also says what would have to change for it to help: **break the closure.**
+Period 4 comes from two parities over an involution (`w → -w` twice is the
+identity). Three or more phases, an asymmetric subset each cycle, or pairing the
+negation with something non-involutive would make the excursion open, and the
+network would actually explore instead of returning. Whether an open version
+beats plain descent is untested and is the obvious next thing to try.
+
+## 18. Where this leaves the three methods
+
+| method | healthy network | genuinely stalled | verdict |
+|---|---|---|---|
+| magnitude-triggered inversion (§11) | 0.002-0.004× | no effect | **do not build** |
+| plateau-triggered inversion (§11) | 0.98× | **1.24×** | build only if a stall is real |
+| rotating **grad** (§16) | 0.00-0.01× | no effect | **do not build** |
+| rotating **weight** (§16-17) | 0.71-1.04× | 1.00× | safe, no benefit as specified |
+
+And all of it sits under §10: the stall these methods address is caused by
+`b = 1/3`, and correcting that is worth 536× where the best escape mechanism is
+worth 1.24×.
