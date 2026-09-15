@@ -68,19 +68,23 @@ and raw accuracy would flatter a model that just predicts the majority class.
 | game | legality accuracy | majority baseline | top pick legal | random pick |
 |---|---|---|---|---|
 | sudoku | **1.000** | 0.500 | **1.000** | 0.500 |
-| chess | 0.805 | 0.636 | 0.833 | 0.364 |
+| chess | 0.856 | 0.636 | 0.817 | 0.361 |
 
 **Sudoku is solved** — the network never misjudges a placement.
 
-**Chess is genuinely learned but weak**: 0.805 against a 0.636 baseline is
-+0.17, not the +0.30 the bare number suggests. Its top pick is legal 83% of the
+**Chess is genuinely learned but weak**: 0.856 against a 0.636 baseline is
++0.22, not the +0.36 the bare number suggests. Its top pick is legal 82% of the
 time against a 36% random baseline, so it has learned a great deal about which
-moves are legal, and not enough to play without occasional illegal picks. More
-training does not fix it — 400, 1200 and 3000 episodes all land near 0.80 while
-the hidden layer grows to 120 units, so this is a representation ceiling rather
-than undertraining. `information.py` measures 0.977 as reachable with these
-features under balanced sampling, so the gap is a training-distribution problem,
-not a missing-feature one.
+moves are legal, and not enough to play without occasional illegal picks.
+
+More training does not fix it — 400, 1200 and 3000 episodes all land near 0.80
+while the hidden layer grows to 120 units, so this is not undertraining.
+Balancing the training candidates does help, by **+0.037** (0.819 → 0.856), and
+is now the default: chess candidates are only 36% legal, and training on that
+distribution teaches the prior rather than the rule. But `information.py`
+measures **0.977** as reachable with these same features under fully balanced
+sampling, so roughly 0.12 of the gap remains unexplained and is the first thing
+to chase.
 
 Against the engine, the cortex loses. The `grade` head is material delta with no
 search, so that is expected at V1; the interesting number is the illegal-pick
