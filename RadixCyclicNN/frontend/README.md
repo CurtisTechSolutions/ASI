@@ -3,10 +3,29 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Converse, Score, 2NRL, Evolve, Ollama, Code, Images, Speech,
-Checkpoints, Graph.
+Panels: Train, Predict, Generate, Converse, Chat, Score, 2NRL, Negative, Evolve, Ollama, Tutor,
+Code, Agent, Images, Speech, Checkpoints, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
+
+The Converse panel (`POST /api/converse`) lets the model talk to itself in a
+chat view that reads newest first: a new turn is appended to the top and pushes
+the older ones down, so the latest reply is where the eye already is and nothing
+has to be scrolled to. The search skips the replies the conversation has already
+heard and, while "Avoid repeated words" is on, the ones that say the same words
+twice in a row - and a voice that catches itself repeating, its own words or
+the conversation's, keeps what it said once, backs up to where it would have
+said them again and explores other ways on ("Explore"), each turn saying what
+it noticed and whether it found one. With "Learn where it goes round" on (the
+default) what a rethink finds out is taught to the graph, so the model itself
+hands over there next time - which means a conversation changes the model. The
+duplicates it could not avoid come back flagged, and "Punish duplicates" marks
+them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
+
+The Chat panel (`POST /api/chat/start`) has an LLM converse with the model and
+mark every reply; its transcript reads newest first as well, it has the same
+"Avoid repeated words" and "Explore" settings, and a reply the model could only
+repeat is punished with the failures whatever the judge made of it.
 
 The Ollama panel talks to a local Ollama server through the API
 (`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`).

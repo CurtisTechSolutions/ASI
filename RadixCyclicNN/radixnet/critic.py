@@ -132,17 +132,25 @@ class Critic:
     def run_round(self) -> dict:
         """Write, review, blame - one round, returning its record."""
         from . import blame as blame_module
-        from .ollama import adversarial_review
+        from .ollama import review_texts, sample_texts, summarise_reviews
 
         cfg = self.config
         self.round_no += 1
         started = time.perf_counter()
-        with self._external():  # the reviewer thinks without the model lock
-            review = adversarial_review(
-                self.model, self.client, count=cfg.count, prefix=cfg.prefix, max_length=cfg.max_length,
-                temperature=cfg.temperature, threshold=cfg.threshold, context=cfg.context or None,
-                ollama_model=cfg.reviewer_model or None, seed=self._seed(),
+        # The model writes first, under whatever lock the caller holds: sampling
+        # walks the graph, so it must not run while another request may mutate it.
+        samples = sample_texts(
+            self.model, cfg.count, prefix=cfg.prefix, max_length=cfg.max_length,
+            temperature=cfg.temperature, seed=self._seed(),
+        )
+        with self._external():  # only the reviewer's thinking happens outside the lock
+            reviews = review_texts(
+                self.client, samples, context=cfg.context or None,
+                model=cfg.reviewer_model or None, threshold=cfg.threshold,
             )
+        review = summarise_reviews(
+            "model", cfg.reviewer_model or self.client.model, cfg.threshold, samples, reviews,
+        )
         taught = blame_module.teach_reviews(
             self.negative, review, threshold=cfg.threshold, clear_passes=cfg.clear_passes,
             source="critic", epochs=cfg.epochs,

@@ -60,11 +60,11 @@ export function SelectField({ label, value, onChange, options, disabled, hint })
   );
 }
 
-export function CheckField({ label, checked, onChange, disabled }) {
+export function CheckField({ label, checked, onChange, disabled, hint }) {
   return (
     <label className="field inline">
       <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span>{label}</span>
+      <Label label={label} hint={hint} />
     </label>
   );
 }

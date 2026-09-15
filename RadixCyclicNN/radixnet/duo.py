@@ -37,12 +37,16 @@ its own rejects.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
+from .beam import Prediction
 from .encoding import WINDOW
 from .model import GraphModel
 from .negative import NegativeNet
+from .search import PathResult
 from . import blame
 
 __all__ = ["FilterConfig", "NegativeFilter"]
@@ -110,6 +114,16 @@ class NegativeFilter:
         self.config.validate()
         self.positive = positive
         self.negative = negative
+
+    @property
+    def ready(self) -> bool:
+        """Whether the negative half has anything to say: a failure has been blamed and not fully cleared.
+
+        An empty negative network vetoes nothing, so a filter around one costs
+        the over-sampling and buys nothing - this is what the output paths ask
+        before putting the pair in the way (see :meth:`radixnet.api.ModelService.guard`).
+        """
+        return self.negative.graph.total_blame > 0.0
 
     # -- judging -------------------------------------------------------------
 
@@ -203,6 +217,31 @@ class NegativeFilter:
             "rate": len(kept) / len(items) if items else None,
         }
 
+    def rank(self, prefix: str, result: PathResult) -> tuple[PathResult, list[dict]]:
+        """A finished prediction with the vetoed continuations taken out of it, and a verdict on each.
+
+        The search has already run, so this re-ranks what it offered rather
+        than asking for more: a guarded prediction costs one judgement per
+        continuation and no second search.  A :class:`~radixnet.beam.Prediction`
+        keeps its surviving ``top`` in the search's own order and the best of
+        them becomes the prediction itself; when none survives, the prediction
+        is the prefix and nothing else (``expanded`` still reports the search
+        that was run).
+        """
+        offered = list(result.top) if isinstance(result, Prediction) else [result]
+        verdicts: list[dict] = []
+        kept: list[PathResult] = []
+        for candidate in offered:
+            verdict = self.judge(prefix + candidate.text)
+            verdicts.append(verdict)
+            if verdict["decision"] != "reject":
+                kept.append(candidate)
+        best = kept[0] if kept else PathResult(full_text=prefix)
+        carried = {f.name: getattr(best, f.name) for f in dataclasses.fields(PathResult) if f.name != "expanded"}
+        if isinstance(result, Prediction):
+            return dataclasses.replace(result, top=kept, **carried), verdicts
+        return dataclasses.replace(result, **carried), verdicts
+
     # -- output --------------------------------------------------------------
 
     def generate(
@@ -220,17 +259,20 @@ class NegativeFilter:
     ) -> dict:
         """Generate through the pair: over-sample from the positive model, keep what the negative one allows.
 
-        Returns ``{"texts", "kept", "rejected", "verdicts", "candidates",
-        "asked", "rate"}``; ``texts`` are the ``count`` surviving candidates
-        with the least blame (the cleanest first), and ``rejected`` carries
-        every dropped candidate with the reason it was dropped.  Fewer than
-        ``count`` texts come back when the filter vetoed too much - that is
-        information, not an error.
+        Returns ``{"texts", "results", "kept", "rejected", "verdicts",
+        "candidates", "asked", "rate"}``; ``texts`` are the ``count``
+        surviving candidates with the least blame (the cleanest first, and
+        among equally clean ones the positive model's own order - the veto
+        re-ranks as little as it can), ``results`` the walks behind them, and
+        ``rejected`` carries every dropped candidate with the reason it was
+        dropped.  Fewer than ``count`` texts come back when the filter vetoed
+        too much - that is information, not an error.
         """
         if count < 0:
             raise ValueError(f"count must be >= 0, got {count}")
         if count == 0:
-            return {"texts": [], "kept": [], "rejected": [], "verdicts": [], "candidates": 0, "asked": 0, "rate": None}
+            return {"texts": [], "kept": [], "rejected": [], "verdicts": [], "candidates": 0, "asked": 0,
+                    "rate": None, "results": []}
         factor = self.config.over_sample if over_sample is None else int(over_sample)
         if factor < 1:
             raise ValueError(f"over_sample must be >= 1, got {factor}")
@@ -240,15 +282,19 @@ class NegativeFilter:
             step_penalty=step_penalty, beam=beam,
         )
         candidates: list[str] = []
+        paths: dict[str, Any] = {}
         for result in results:
             text = result.text
-            if text and text not in candidates:
+            if text and text not in paths:
                 candidates.append(text)
+                paths[text] = result
         outcome = self.filter(candidates)
         keepers = [v for v in outcome["verdicts"] if v["decision"] != "reject"]
-        keepers.sort(key=lambda v: (v["risk"], v["ratio"]))
+        keepers.sort(key=lambda v: v["risk"])  # cleanest first; a stable sort keeps the model's own order among equals
+        survivors = keepers[:count]
         return {
-            "texts": [v["text"] for v in keepers[:count]],
+            "texts": [v["text"] for v in survivors],
+            "results": [paths[v["text"]] for v in survivors],  # the walks behind them: cost, probability, path
             "kept": outcome["kept"],
             "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
             "verdicts": outcome["verdicts"],
@@ -296,6 +342,50 @@ class NegativeFilter:
             "verdicts": outcome["verdicts"],
             "candidates": len(candidates),
             "warning": (prefix + warning.text) if warning.text else None,
+        }
+
+    def converse(
+        self,
+        opening: str = "",
+        turns: int = 6,
+        *,
+        partner: GraphModel | None = None,
+        **options: Any,
+    ) -> dict:
+        """Converse through the pair: every candidate reply the negative network refuses is left unsaid.
+
+        The conversation is the positive model's (:func:`radixnet.dialogue.converse`);
+        the filter only supplies the veto, so a turn whose every candidate is
+        vetoed falls back exactly as a dead end does - a shorter context, then
+        a fresh text - and the conversation stops when there is nothing left
+        that may be said.
+
+        Returns ``{"turns", "rejected", "verdicts", "vetoed"}``: the turns as
+        spoken, a verdict on every distinct candidate the voices considered,
+        and the ones the veto stopped with the reason.
+        """
+        verdicts: list[dict] = []
+        seen: dict[str, bool] = {}  # the same candidate can be offered again after a shorter context
+
+        def veto(text: str) -> bool:
+            if text not in seen:
+                verdict = self.judge(text)
+                seen[text] = verdict["decision"] == "reject"
+                verdicts.append(verdict)
+            return seen[text]
+
+        spoken = self.positive.converse(opening, turns, partner=partner, veto=veto, **options)
+        rejected = [v for v in verdicts if v["decision"] == "reject"]
+        if rejected and self.config.learn:
+            self.negative.blame(
+                [v["text"] for v in rejected if len(v["text"]) >= _W], reason=self.config.reason, source="filter",
+                note="vetoed in conversation",
+            )
+        return {
+            "turns": spoken,
+            "rejected": rejected,
+            "verdicts": verdicts,
+            "vetoed": sum(turn.vetoed for turn in spoken),
         }
 
     # -- the tutor -----------------------------------------------------------

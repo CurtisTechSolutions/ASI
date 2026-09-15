@@ -104,7 +104,7 @@ func TestCorrectMovesOnlyTheDifference(t *testing.T) {
 			blamed = e
 		}
 	}
-	if want := m.stepsOver(Encode(wrong), runeLen(wrong), []Span{{11, 11}}); len(want) != 1 || want[0] != blamed {
+	if want := m.stepsOver(Encode(wrong), runeLen(wrong), []Span{{11, 11}}); len(want) != 1 || want[0].Edge != blamed {
 		t.Fatalf("the penalty landed on edge %d, the diff blames %v", blamed, want)
 	}
 }
@@ -113,12 +113,20 @@ func TestCorrectMovesOnlyTheDifference(t *testing.T) {
 func TestCorrectKeepsAndCounts(t *testing.T) {
 	m := trained(t, 2, 1)
 	texts := m.MetaInt("trained_texts")
-	out, err := m.Correct("the cat sit on the mat", "the cat sits on the mat", DefaultCorrectOptions())
+	opts := DefaultCorrectOptions()
+	if opts.Keep != 0 {
+		t.Fatalf("a whole path is rewarded for a correct output, not for a corrected one: keep = %v", opts.Keep)
+	}
+	opts.Keep = 0.25
+	out, err := m.Correct("the cat sit on the mat", "the cat sits on the mat", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.Kept == 0 {
 		t.Fatalf("the unchanged words of the correction earn Keep: %+v", out)
+	}
+	if out.MarkedCorrect != 1 || out.MarkedIncorrect != 1 {
+		t.Fatalf("the counters follow the reward: %+v", out)
 	}
 	if out.Reward <= 0 || out.Penalty <= 0 {
 		t.Fatalf("both halves should have moved: %+v", out)
@@ -130,11 +138,11 @@ func TestCorrectKeepsAndCounts(t *testing.T) {
 		t.Fatal("a correction is a feedback pass")
 	}
 	// with nothing to correct there is nothing to blame
-	out, err = m.Correct("the cat sits on the mat", "the cat sits on the mat", DefaultCorrectOptions())
+	out, err = m.Correct("the cat sits on the mat", "the cat sits on the mat", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Edits != 0 || out.Penalised != 0 || out.Rewarded != 0 {
+	if out.Edits != 0 || out.Penalised != 0 || out.Rewarded != 0 || out.MarkedCorrect != 0 {
 		t.Fatalf("identical sentences change nothing: %+v", out)
 	}
 }
@@ -160,7 +168,7 @@ func TestCorrectBlamesAnEarlyEnd(t *testing.T) {
 	}
 	last, _ := m.G.Edge(path[len(path)-2], End)
 	blamed := m.stepsOver(grams, runeLen(wrong), []Span{{runeLen(wrong), runeLen(wrong)}})
-	if len(blamed) != 1 || blamed[0] != last {
+	if len(blamed) != 1 || blamed[0].Edge != last {
 		t.Fatalf("the blame should fall on the edge into END (%d), got %v", last, blamed)
 	}
 }

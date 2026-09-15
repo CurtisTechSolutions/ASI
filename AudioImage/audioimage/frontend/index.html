@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AudioImage — sound as a picture</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🔊</text></svg>">
+</head>
+<body>
+
+<header>
+  <h1>AudioImage</h1>
+  <p class="tagline">Time across, frequency up, loudness as ink — <b>black is 1.0, white is 0.0</b>. The picture is the sound.</p>
+  <div class="badges">
+    <span class="badge" id="badge-version">…</span>
+    <span class="badge" id="badge-backend">…</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="panel" id="panel-source">
+  <h2>1 · A sound to look at</h2>
+  <div class="row">
+    <div class="field">
+      <label for="file">Open a file</label>
+      <input type="file" id="file" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a">
+      <p class="hint">Anything the browser can decode. It is converted to mono WAV here, then sent on.</p>
+    </div>
+    <div class="field">
+      <label>Record</label>
+      <div class="buttons">
+        <button id="record" class="secondary">● Record</button>
+        <button id="record-stop" class="secondary" disabled>■ Stop</button>
+      </div>
+      <p class="hint" id="record-hint">Your microphone, straight into the plane.</p>
+    </div>
+  </div>
+
+  <details class="sub">
+    <summary>…or synthesise one</summary>
+    <div class="row">
+      <div class="field"><label for="kind">Kind</label><select id="kind"></select></div>
+      <div class="field"><label for="notes">Notes</label><input type="text" id="notes" value="C4 E4 G4 C5 G4 E4 C4"></div>
+      <div class="field"><label for="tone-duration">Seconds</label><input type="number" id="tone-duration" value="2.5" min="0.1" max="60" step="0.1"></div>
+      <div class="field"><label for="tone-rate">Rate</label><input type="number" id="tone-rate" value="22050" min="1000" max="96000" step="1"></div>
+      <div class="field"><label for="tone-freq">Hz</label><input type="number" id="tone-freq" value="440" min="1" step="1"></div>
+      <div class="field end"><button id="synth">Synthesise</button></div>
+    </div>
+  </details>
+
+  <div class="status" id="source-status">Nothing loaded yet.</div>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="panel" id="panel-settings">
+  <h2>2 · How to draw it</h2>
+  <div class="row wrap">
+    <div class="field"><label for="n_fft">Window (n_fft)</label><select id="n_fft"></select>
+      <p class="hint">Bigger: finer frequencies, blurrier timing.</p></div>
+    <div class="field"><label for="hop">Hop</label><input type="number" id="hop" value="256" min="1" step="1">
+      <p class="hint">n_fft ÷ 4 reconstructs exactly.</p></div>
+    <div class="field"><label for="window">Window shape</label><select id="window"></select></div>
+    <div class="field"><label for="scale">Amplitude</label><select id="scale"></select>
+      <p class="hint">dB shows quiet detail the way hearing does.</p></div>
+    <div class="field"><label for="top_db">Range (dB)</label><input type="number" id="top_db" value="80" min="10" max="200" step="5"></div>
+    <div class="field"><label for="freq_scale">Frequency axis</label><select id="freq_scale"></select>
+      <p class="hint">linear is the exactly invertible one.</p></div>
+    <div class="field"><label for="depth">Bits</label><select id="depth"></select></div>
+    <div class="field"><label for="phase">Phase</label><select id="phase"></select>
+      <p class="hint">Store it in the blue channel and decoding needs no guessing.</p></div>
+    <div class="field"><label for="lossless">Lossless</label>
+      <label class="check"><input type="checkbox" id="lossless"> exact</label>
+      <p class="hint">A correction channel: the decode is the original, sample for sample.</p></div>
+    <div class="field"><label for="colormap">Colours</label><select id="colormap"></select>
+      <p class="hint">gray is the format itself.</p></div>
+    <div class="field end"><button id="encode">Encode →</button></div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="panel" id="panel-plane">
+  <h2>3 · The plane</h2>
+
+  <div class="toolbar">
+    <div class="transport">
+      <button id="play" disabled>▶ Play</button>
+      <button id="stop" class="secondary" disabled>■</button>
+      <span class="time"><span id="time-now">0:00</span> / <span id="time-total">0:00</span></span>
+      <label class="check"><input type="checkbox" id="loop"> loop</label>
+    </div>
+    <div class="spacer"></div>
+    <div class="which">
+      <label class="check"><input type="radio" name="which" value="original" id="which-original" checked> original</label>
+      <label class="check"><input type="radio" name="which" value="decoded" id="which-decoded" disabled> decoded</label>
+    </div>
+    <div class="spacer"></div>
+    <div class="paint">
+      <label class="check"><input type="checkbox" id="paint-on"> paint</label>
+      <input type="range" id="brush" min="1" max="40" value="8" title="brush size">
+      <select id="brush-mode" title="what the brush does">
+        <option value="ink">ink (loud)</option>
+        <option value="erase">erase (silent)</option>
+      </select>
+      <button id="clear" class="secondary" title="a blank, silent plane">clear</button>
+      <button id="revert" class="secondary" disabled>revert</button>
+    </div>
+  </div>
+
+  <div class="plane-wrap">
+    <canvas id="axis-y" class="axis" width="60" height="420"></canvas>
+    <div class="plane-stage">
+      <canvas id="plane" width="800" height="420"></canvas>
+      <canvas id="overlay" width="800" height="420"></canvas>
+      <div class="empty" id="plane-empty">Load a sound, or paint straight onto the plane and hear what you drew.</div>
+    </div>
+  </div>
+  <canvas id="axis-x" class="axis" width="860" height="26"></canvas>
+  <div class="readout" id="readout">&nbsp;</div>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="panel" id="panel-decode">
+  <h2>4 · Back to sound</h2>
+  <p class="hint block">
+    The picture keeps how loud every frequency was; it cannot keep the phase — a point has one number, and phase is the second.
+    Decoding guesses the phase back with Griffin-Lim. More passes, closer guess.
+  </p>
+  <div class="row wrap">
+    <div class="field"><label for="iters">Passes <span class="value" id="iters-value">64</span></label>
+      <input type="range" id="iters" min="1" max="256" value="64"></div>
+    <div class="field"><label for="rate-override">Sample rate</label><input type="number" id="rate-override" placeholder="from the picture" min="1000" max="96000" step="1">
+      <p class="hint">Only needed for a picture that carries no settings.</p></div>
+    <div class="field end"><button id="decode" disabled>Decode ♪</button></div>
+    <div class="field end"><button id="measure" class="secondary" disabled>Measure round trip</button></div>
+  </div>
+  <div class="status" id="decode-status">Encode something first.</div>
+  <div class="metrics" id="metrics" hidden></div>
+  <div class="downloads" id="downloads" hidden>
+    <a id="dl-png" download="plane.png">↓ the picture (.png)</a>
+    <a id="dl-wav" download="decoded.wav">↓ the decoded sound (.wav)</a>
+    <a id="dl-src" download="source.wav">↓ the source (.wav)</a>
+    <a id="dl-view" download="view.png">↓ a labelled chart (.png)</a>
+  </div>
+</section>
+
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

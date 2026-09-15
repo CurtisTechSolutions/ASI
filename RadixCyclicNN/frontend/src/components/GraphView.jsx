@@ -63,6 +63,84 @@ function truncate(text) {
   return text.length > LABEL_CHARS ? `${text.slice(0, LABEL_CHARS - 1)}…` : text;
 }
 
+function pct(ratio) {
+  return ratio === null || ratio === undefined || !Number.isFinite(ratio) ? "-" : `${Math.round(ratio * 100)}%`;
+}
+
+/** One side of a picked node: a row per neighbour with its share of the traffic and of the reward. */
+function SideRows({ side, rows }) {
+  if (!rows.length) return null;
+  return (
+    <>
+      {rows.map((r, i) => (
+        <tr key={`${side}-${r.edge}`}>
+          {i === 0 ? <th rowSpan={rows.length} scope="rowgroup">{side}</th> : null}
+          <td className="text">
+            <code>{showWhitespace(r.label)}</code>
+          </td>
+          <td className="num">{fmtInt(r.seen)}</td>
+          <td className="num">{pct(r.seen_ratio)}</td>
+          <td className={`num${r.reward > 0 ? " ok" : r.reward < 0 ? " bad" : ""}`}>{fmtNum(r.reward, 2)}</td>
+          <td className={`num${r.reward_ratio > 0 ? " ok" : r.reward_ratio < 0 ? " bad" : ""}`}>{pct(r.reward_ratio)}</td>
+          <td className="num">{fmtInt(r.path_seen)}</td>
+          <td className="num">{pct(r.path_ratio)}</td>
+          <td className="num">
+            {r.correct || r.incorrect ? (
+              <>
+                <b className="ok">{fmtInt(r.correct)}</b> / <b className="bad">{fmtInt(r.incorrect)}</b>
+              </>
+            ) : (
+              "-"
+            )}
+          </td>
+          <td className="num">{pct(r.correct_ratio)}</td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+/** The picked node against its neighbours, or why there is nothing to show. */
+function NodeRatios({ picked }) {
+  if (!picked) return null;
+  if (picked.error) return <p className="muted">{picked.error}</p>;
+  const node = picked.node;
+  if (!node) return <p className="muted">Loading…</p>;
+  const from = asArray(node.from);
+  const to = asArray(node.to);
+  return (
+    <div className="node-ratios">
+      <p className="muted">
+        <code>{showWhitespace(node.label)}</code> was visited {fmtCounter(node.visits, node.visit_resets)} times, and is
+        reached from {fmtInt(from.length)} node(s) and left for {fmtInt(to.length)}. Each share is of that side, not of
+        the node, and the reward share is signed - so a penalty reads as a negative share of the pressure here.
+      </p>
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th />
+              <th className="text">node</th>
+              <th className="num">seen</th>
+              <th className="num">seen %</th>
+              <th className="num">reward</th>
+              <th className="num">reward %</th>
+              <th className="num">judged</th>
+              <th className="num">of edge</th>
+              <th className="num">right / wrong</th>
+              <th className="num">correct %</th>
+            </tr>
+          </thead>
+          <tbody>
+            <SideRows side="from" rows={from} />
+            <SideRows side="to" rows={to} />
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /** SVG view of the top-N nodes of the graph: circular layout, hover tooltips, edge highlighting. */
 export default function GraphView() {
   const [limit, setLimit] = useState(String(DEFAULT_LIMIT));
@@ -70,7 +148,20 @@ export default function GraphView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [hover, setHover] = useState(null);
+  const [picked, setPicked] = useState(null);
   const wrapRef = useRef(null);
+
+  /** Ask the server what one node looks like from where it stands. */
+  const pick = useCallback(async (id, label) => {
+    setPicked({ id, label, node: null, error: null });
+    try {
+      const data = await api.nodeRatios(label);
+      const node = asArray(data && data.nodes)[0] || null;
+      setPicked({ id, label, node, error: node ? null : "that node is not in the model any more" });
+    } catch (err) {
+      setPicked({ id, label, node: null, error: err.message });
+    }
+  }, []);
 
   const load = useCallback(async (n) => {
     setLoading(true);
@@ -161,7 +252,7 @@ export default function GraphView() {
       <p className="muted">
         {fmtInt(nodeList.length)} nodes, {fmtInt(edges.length)} edges shown · node radius ∝ visit count · edge opacity ∝
         transition probability · red edges carry negative weights · gold nodes are START / END · hover a node for its
-        activation parameters.
+        activation parameters, click it for what it looks like from where it stands.
       </p>
       <div className="graph-wrap" ref={wrapRef}>
         <svg className="graph-svg" viewBox={`0 0 ${SIZE} ${SIZE}`} role="img" aria-label="Model graph">
@@ -247,6 +338,7 @@ export default function GraphView() {
                     onMouseEnter={(e) => setHover(pointer(e, id))}
                     onMouseMove={(e) => setHover(pointer(e, id))}
                     onMouseLeave={() => setHover(null)}
+                    onClick={() => pick(id, p.node.label ?? "")}
                   />
                   {showLabel ? (
                     <text
@@ -290,6 +382,17 @@ export default function GraphView() {
           </div>
         ) : null}
       </div>
+      {picked ? (
+        <div className="toolbar">
+          <h3>
+            Node <code>{showWhitespace(picked.label)}</code>
+          </h3>
+          <button type="button" onClick={() => setPicked(null)}>
+            Close
+          </button>
+        </div>
+      ) : null}
+      <NodeRatios picked={picked} />
     </div>
   );
 }

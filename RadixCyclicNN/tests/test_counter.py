@@ -149,7 +149,7 @@ class TestGraphCounters(unittest.TestCase):
         doc = json.loads(json.dumps(model.to_dict()))
         self.assertIn("count_resets", doc["graph"]["nodes"])
         self.assertIn("count_resets", doc["graph"]["edges"])
-        self.assertEqual(doc["graph"]["format_version"], 2)
+        self.assertEqual(doc["graph"]["format_version"], 3)
 
         loaded = CountRewardNet.from_dict(doc)
         # dead nodes are compacted away by the save, so the documents are what must match
