@@ -16,7 +16,8 @@ python3 -m gren.cli policies    # failure rate and rule coverage by probe policy
 python3 -m gren.cli tree        # the radix tree over discovered signatures
 python3 -m gren.cli package     # the GamePackage handed to the player network
 python3 -m gren.cli grow        # one growing network across all four games
-python3 -m tests.test_gren      # 20 tests
+python3 -m gren.cli regress     # goal regression: backwards from the goal
+python3 -m tests.test_gren      # 27 tests
 
 # hand the packages to CyclicCortex, which then builds its map from them
 python3 -m gren.cli package --out ../CyclicCortex/data/gren_packages.json
@@ -211,9 +212,81 @@ arguments — enough to place a game, not enough to share a weight. The numbers 
 in `CyclicCortex/README.md`; the derived vocabulary is opt-in behind
 `--discovered-vocab`.
 
+## Goal regression — backwards from the goal to subgoals
+
+Forward search asks "where can I get from here?". Regression asks "what would
+have to be true for the goal to hold?", and keeps asking until the answer is
+already true. It is how endgame tablebases are built — backwards from mate.
+
+Its usual cost is writing every operator's preconditions by hand, and that hand
+is where domain knowledge smuggles itself in. GREN does not need them written:
+
+> **A refusal code is a precondition violation.**
+
+`BLOCKED_PATH` means `move(from,to)` requires a clear path. `CONSTRAINT_ROW`
+means `place(x,y,v)` requires `v` absent from row `y`. `why()` already answers
+"what blocks this action?" — which is exactly the question regression asks at
+every step. The preconditions are **measured, not authored**, and `DESIGN.md`
+§8.3's STRIPS operators finally have a source.
+
+### Sudoku: constraint propagation, derived
+
+Asking what blocks every conceivable move on one puzzle:
+
+```
+OCCUPIED_TARGET   270      <- discovered by probing, not written down
+CONSTRAINT_ROW    158
+CONSTRAINT_COL     89
+CONSTRAINT_BOX     25
+APPLICABLE        187
+```
+
+Rank the empty cells by how few values clear all four, and a cell with exactly
+one clearing value is a forced move. Nobody coded "naked single" — that
+heuristic **is** constraint propagation, and regression produces it from what the
+game refuses.
+
+| clues | guided nodes | control nodes | | guided `candidates()` calls | control | |
+|---|---|---|---|---|---|---|
+| 30 | 53 | 1 436 | **27×** | 1 356 | 1 435 | 1.1× |
+| 26 | 63 | 9 032 | **143×** | 1 745 | 9 031 | 5.2× |
+| 22 | 81 | 100 129 | **1 240×** | 2 450 | 100 123 | 41× |
+
+By **nodes** — the thing regression reduces — guidance wins everywhere. By raw
+work it barely wins on easy puzzles, because scanning 51 cells to save a handful
+of nodes is not worth it when almost any order solves them.
+
+### Chess: a subgoal prunes exactly what it excludes
+
+`mate ⟸ check ∧ no-escape`. The expensive conjunct enumerates every opponent
+reply; the cheap one is a single `attacked()` call. Regress to the cheap one
+first and only pay for the expensive one on moves that clear it:
+
+| positions | % of moves giving check | expensive tests avoided | speedup |
+|---|---|---|---|
+| pieces scattered at random | 59.5% | 48.7% | 2.2× |
+| **from actual play** | **4.3%** | **95.7%** | **7.7×** |
+
+That is the whole law: **regression pays in proportion to how selective the cheap
+subgoal is.** A subgoal that 96% of actions fail removes 96% of the expensive
+work; one that 60% pass removes almost nothing.
+
+### The measurement that came out at 1.0×, and why
+
+The first attempt scored **exactly 1.0×** against its control. The control had
+regressed all along: `is_mate()` is `in_check() and not legal_moves()`, and
+Python's `and` short-circuits.
+
+Goal regression over a conjunctive goal *is* a short-circuiting `and` with the
+cheap, selective conjunct written first — which is why it is easy to have done
+already without noticing, and why a baseline has to be checked for it before any
+speedup is believed. `conjunctive()` and `expected_work()` make the ordering
+explicit rather than incidental.
+
 ## What is not here yet
 
 `sandbox.py` (no oracle currently executes generated code), `features.py` and
-the operator→mechanic lifting of §8.4 — GREN discovers refusal *codes*, not
-STRIPS operators, so minimality (§8.3) is unimplemented. No forest (§20), no
-`similarity.py` MDS projection, no API or frontend.
+the operator→mechanic lifting of §8.4. §8.3's minimality criterion — keep
+splitting a part while its halves are seen independently — is still unimplemented,
+though the STRIPS operators it was for now have a source in `regress.py`. No
+forest (§20), no `similarity.py` MDS projection, no API or frontend.

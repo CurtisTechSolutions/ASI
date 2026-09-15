@@ -26,7 +26,7 @@ HANDOFF ?= ../CyclicCortex/data/gren_packages.json
 
 COMMON  = --budget $(BUDGET) --policy $(POLICY) --seed $(SEED)
 
-.PHONY: help check test explore similar policies tree grow package all clean
+.PHONY: help check test explore similar policies tree grow package regress all clean
 
 help: ## Show this help
 	@echo "GREN make targets  (override variables like: make explore BUDGET=3000)"
@@ -58,12 +58,15 @@ tree: ## The radix tree over discovered signatures — trie mechanics, path comp
 grow: ## One Self-Building network growing its inputs and outputs across all four games
 	$(CLI) grow $(COMMON) --hidden $(HIDDEN)
 
+regress: ## Goal regression -- backwards from the goal to subgoals
+	$(CLI) regress --trials 6
+
 ##@ The handoff
 package: ## Build a GamePackage per game and write the handoff to HANDOFF
 	$(CLI) package $(COMMON) --out $(HANDOFF)
 
 ##@ Everything
-all: check test explore similar tree package ## Check, test, then every report and the handoff
+all: check test explore similar tree regress package ## Check, test, then every report and the handoff
 
 clean: ## Remove byte-code caches (the handoff lives in CyclicCortex/data/ and is untouched)
 	rm -rf __pycache__ gren/__pycache__ tests/__pycache__

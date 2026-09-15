@@ -351,6 +351,103 @@ def test_goal_first_identifies_a_game_sooner():
     assert depth(goal_first) < depth(sorted), (depth(goal_first), depth(sorted))
 
 
+# --------------------------------------------------------- goal regression
+def test_a_refusal_code_is_a_precondition_violation():
+    """The whole reason regression is implementable here without hand-writing
+    operators: `why()` already answers 'what blocks this action?'."""
+    from gren.regress import blocker
+    from gren.oracle import build_all
+    from cortex import sudoku as sud
+    o = build_all()["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    x, y = next((x, y) for y in range(9) for x in range(9) if s.at(x, y))
+    b = blocker(o, s, (x, y, 5))
+    assert b is not None and b.code == "OCCUPIED_TARGET", b
+    ex, ey = next((x, y) for y in range(9) for x in range(9) if not s.at(x, y))
+    good = s.candidates(ex, ey)
+    assert good, "test fixture has no playable cell"
+    assert blocker(o, s, (ex, ey, good[0])) is None, "an applicable move has no blocker"
+    bad = [v for v in range(1, 10) if v not in good]
+    if bad:
+        b2 = blocker(o, s, (ex, ey, bad[0]))
+        assert b2 is not None and b2.code.startswith("CONSTRAINT"), b2
+
+
+def test_blocker_histogram_is_regression_as_a_measurement():
+    from gren.regress import blocker_histogram
+    from gren.oracle import build_all
+    from cortex import sudoku as sud
+    o = build_all()["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    allm = [(x, y, v) for y in range(9) for x in range(9) for v in range(1, 10)]
+    h = blocker_histogram(o, s, allm)
+    assert sum(h.values()) == len(allm)
+    assert "APPLICABLE" in h and h["APPLICABLE"] > 0
+    assert "OCCUPIED_TARGET" in h
+    assert any(k.startswith("CONSTRAINT") for k in h), h
+
+
+def test_most_constrained_finds_the_forced_move():
+    """A cell with exactly one clearing value is forced. Nobody coded 'naked
+    single'; it falls out of asking what blocks each action."""
+    from gren.regress import most_constrained
+    from gren.oracle import build_all
+    from cortex import sudoku as sud
+    o = build_all()["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    allm = [(x, y, v) for y in range(9) for x in range(9) for v in range(1, 10)]
+    groups = most_constrained(o, s, allm, key=lambda m: (m[0], m[1]))
+    assert groups, "no cell is playable"
+    counts = [len(v) for _, v in groups]
+    assert counts == sorted(counts), "must be ordered fewest-achievers first"
+    (x, y), moves = groups[0]
+    assert len(moves) == len(s.candidates(x, y)), "disagrees with the game itself"
+
+
+def test_regression_pays_in_proportion_to_selectivity():
+    """A subgoal prunes exactly what it excludes -- that is the whole law.
+
+    On chess mate-in-1, `gives check` clears ~4% of moves in positions from real
+    play and ~60% with pieces scattered at random, and the work avoided tracks
+    it. This asserts the RELATIONSHIP, not the speedup, because a timing is not
+    a property of the design."""
+    import random as _r
+    from gren.regress import selectivity
+    from gren.oracle import build_all
+    from cortex.board_games import random_chess
+    from cortex import engine
+    o = build_all()["chess"]
+    rng = _r.Random(7)
+    scattered = []
+    while len(scattered) < 8:
+        st = random_chess(rng)
+        if engine.legal_moves(st): scattered.append(st)
+    played = []
+    while len(played) < 8:
+        st = engine.start_position()
+        for _ in range(rng.randrange(10, 40)):
+            ms = engine.legal_moves(st)
+            if not ms: break
+            st = engine.apply_move(st, rng.choice(ms))
+        if engine.legal_moves(st): played.append(st)
+    gives_check = lambda st, mv: engine.apply_move(st, mv).in_check()
+    s_scatter = selectivity(o, scattered, engine.legal_moves, gives_check)
+    s_played = selectivity(o, played, engine.legal_moves, gives_check)
+    assert s_played < s_scatter, (s_played, s_scatter)
+    assert s_played < 0.25, f"checks should be rare in real positions, got {s_played}"
+
+
+def test_conjunctive_goals_order_the_cheap_selective_part_first():
+    """Regression over a conjunctive goal IS a short-circuiting `and` with the
+    cheap conjunct first. Measuring against a baseline that already does this
+    scores 1.0x -- which is how the first attempt here went."""
+    from gren.regress import conjunctive, expected_work
+    parts = [(100.0, 0.9, "no_escape"), (1.0, 0.04, "gives_check")]
+    best = conjunctive(parts)
+    assert best[0][2] == "gives_check", best
+    assert expected_work(best) < expected_work(list(reversed(best)))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:
