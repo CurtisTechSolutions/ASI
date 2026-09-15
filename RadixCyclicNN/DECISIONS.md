@@ -70,7 +70,7 @@ D-055 chat with an LLM
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
 **Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
-D-064 the BACK sentinel: where it goes round, learned
+D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -124,7 +124,7 @@ time, not at *structure* time.
   loop backs up to the point the loop started and re-plans from there, under a
   *different* procedure than the one that got stuck — and what it finds out is
   taught to the graph, so the *search* hands over there from then on. See D-061
-  to D-064.
+  to D-063 and D-068.
 
 **Lives in** `Research/CyclesAreAFeature.md`, `radixnet/search.py`,
 `radixnet/beam.py`, `go/radixnet/search.go`, `go/radixnet/beam.go`
@@ -2166,7 +2166,7 @@ inside those words is recorded and left alone.
 
 ---
 
-### D-064 — Where it goes round is **learned into the graph**, like where texts end
+### D-068 — Where it goes round is **learned into the graph**, like where texts end
 
 **Status** Research claim · 2026-09-14 · **Layer** structure
 
@@ -2407,13 +2407,13 @@ Kept because the reversal is information.
 Numbered for reference. These are genuinely open — each would change something
 in the system, and none can be settled from the code as it stands.
 
-**Q-1 — ~~The metacognition half of D-001~~ — ANSWERED (D-061 to D-064).** The
+**Q-1 — ~~The metacognition half of D-001~~ — ANSWERED (D-061 to D-063, D-068).** The
 claim was that on hitting a cycle the brain hands over to metacognition rather
 than looping. The hand-over now exists: a voice that detects a stutter backs up
 to where the loop began and re-plans from there under a different procedure,
 widening its search the further back it goes, once per turn, and records what it
 did. The remaining question was **scope** — metacognition was a property of
-*conversation* only — and D-064 answers it: what a rethink finds out is taught to
+*conversation* only — and D-068 answers it: what a rethink finds out is taught to
 the graph as an edge into a third sentinel, and the search consults it in every
 walk, so `predict`, `generate` and the agent's loop hand over too. What is open
 now is the *rate*: how fast a node should learn to hand over, whether it should
