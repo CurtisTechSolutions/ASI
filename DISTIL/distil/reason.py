@@ -218,6 +218,16 @@ class Reasoner:
         depth = self.policy.max_depth if depth is None else depth
         tree = GoalTree(task)
         self._expand(tree, "root", task, depth, chain)
+        if len(tree.goals) == 1:
+            # Every proposal was filtered as a restatement of the parent, which is
+            # the common case for a single-clause task -- and the threshold that
+            # decides it moves with the vocabulary, so the same task can decompose
+            # one day and not the next. Returning an empty tree made `solve`
+            # report "nothing on the frontier to act on", which is false: a task
+            # that resists decomposition is not unworkable, it is already atomic.
+            prior = checkability(task)
+            tree.add(task, verifier=self._verifier_for(task) if prior >= 0.6 else None,
+                     cost=1.0, p_success=prior)
         if chain:
             chain.add(Step.DISTILL,
                       f"{len(tree.goals) - 1} goals, {len(tree.atoms())} verifiable, "

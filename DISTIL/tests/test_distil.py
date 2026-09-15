@@ -13,6 +13,7 @@ still does what it did.
 """
 from __future__ import annotations
 
+import json
 import random
 import shutil
 import sys
@@ -25,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from distil import game
 from distil.agent import Distil
 from distil.casebook import Case, Casebook
+from distil.clarify import (Clarification, Clarifier, Gap, first_step_actionable,
+                            gaps as frame_gaps)
 from distil.challenge import (Attack, Ground, Persistence, challenge, classify,
                               interrogate, premises)
 from distil.compress import PRESERVE, Compressor
@@ -33,15 +36,18 @@ from distil.explore import Explorer, Idea, Origin
 from distil.frame import (Framer, GameFrame, Horizon, Information, Payoff, Players,
                           PRIMITIVES, Solution, agenda, capabilities, classify as classify_game)
 from distil.goals import GoalTree, Status, Verifier, checkability
+from distil.mcp import McpRegistry, McpServer, McpTool
 from distil.grade import grade_check, grade_python, gradeable
 from distil.memory import Kind, Memory, Source, Trace
 from distil.policy import BOUNDS, Policy
 from distil.provider import LocalProvider, Message, auto, catalogue
 from distil.reason import Reasoner, Role, State, role_of
 from distil.sandbox import run_source, screen
+from distil.seed import SEEDS, plant
 from distil.selfedit import SelfEditor, _lost_names, count_tests
 from distil.store import InProcessStore, TieredStore
-from distil.toolsmith import Toolbox, Toolsmith, parse_reply, signature_of, synthesise
+from distil.toolsmith import (Toolbox, ToolSpec, Toolsmith, parse_reply, signature_of,
+                              synthesise)
 from distil.vector import centroid, cosine, normalise, spread
 from distil.workspace import Workspace
 
@@ -930,6 +936,386 @@ def test_exploration_records_a_journal():
     assert d.workspace.journal.exists()
 
 
+
+
+FIXTURE = str(Path(__file__).resolve().parent / "fixtures" / "echo_mcp_server.py")
+
+
+def echo_server(name: str = "echo") -> McpServer:
+    return McpServer(name, [sys.executable, FIXTURE])
+
+
+# --------------------------------------------------------------------------- #
+# asking when the objective is not understood
+# --------------------------------------------------------------------------- #
+
+def _clarifier(d=None):
+    d = d or fresh()
+    return d, Clarifier(d.memory, d.framer, d.toolbox)
+
+
+def test_a_vague_task_yields_questions_rather_than_a_guess():
+    """With nobody to ask, the system returns the questions. It does not invent
+    an objective and proceed, which is the failure this whole module exists to
+    prevent."""
+    _, c = _clarifier()
+    out = c.clarify("make the thing better")
+    assert not out.actionable
+    assert out.questions, "an ununderstood task must produce questions"
+    assert out.questions[0].gap == Gap.OBJECTIVE, "objective is asked first, always"
+
+
+def test_questions_are_ordered_by_what_they_unblock():
+    _, c = _clarifier()
+    out = c.clarify("make the thing better")
+    order = [q.gap for q in out.questions]
+    assert order == sorted(order, key=Gap.ORDER.index)
+    assert out.questions[0].value > out.questions[-1].value
+
+
+def test_an_echoed_task_is_not_treated_as_an_objective():
+    """The Framer falls back to the task text when it cannot read an objective.
+    Accepting that as an answer is how a system convinces itself it understands
+    a request it has only repeated back."""
+    d, c = _clarifier()
+    frame = d.framer.frame("make the thing better")
+    assert frame.objective.strip() == frame.task.strip()
+    assert Gap.OBJECTIVE in frame_gaps(frame, None)
+
+
+def test_answers_make_the_first_step_actionable():
+    _, c = _clarifier()
+    answers = {"objective": "p99 latency under 200ms on the import path",
+               "referee": "the benchmark suite",
+               "actions": "profile, cache, rewrite the hot loop"}
+    out = c.clarify("make the thing better", ask=lambda qs: answers)
+    assert out.actionable, out.reason
+    assert out.frame.objective.startswith("p99")
+    assert out.frame.referee == "the benchmark suite"
+    assert len(out.frame.actions) == 3
+
+
+def test_a_gap_answered_in_a_later_round_leaves_the_contested_list():
+    """Otherwise the report says a question is still open that the person
+    already answered."""
+    _, c = _clarifier()
+    rounds = iter([{"referee": "the benchmark suite"},
+                   {"objective": "p99 latency under 200ms on the import path"}])
+    out = c.clarify("make the thing better", ask=lambda qs: next(rounds, {}))
+    assert out.actionable, out.reason
+    assert "objective" not in out.contested, "answered in round 2; must leave the list"
+    assert "objective" in out.resolved
+
+
+def test_incidental_questions_are_asked_once_but_blockers_come_back():
+    """The refined rule. Re-asking "what are your inputs?" is pestering; letting
+    the objective go unasked because it was raised once and ignored is how the
+    loop gives up on the only thing preventing progress."""
+    seen = []
+
+    def ask(questions):
+        seen.extend(q.gap for q in questions)
+        return {}                       # answer nothing, forcing more rounds
+
+    _, c = _clarifier()
+    c.clarify("make the thing better", ask=ask, max_rounds=3)
+    incidental = [g for g in seen if g not in Gap.BLOCKING]
+    assert len(incidental) == len(set(incidental)), f"repeated incidentals: {incidental}"
+    assert seen.count(Gap.OBJECTIVE) > 1, "a blocking gap must be asked again"
+
+
+def test_a_blocking_gap_answered_late_still_unblocks():
+    _, c = _clarifier()
+    rounds = iter([{"referee": "the benchmark suite"},
+                   {"objective": "p99 latency under 200ms on the import path"}])
+    out = c.clarify("make the thing better", ask=lambda qs: next(rounds, {}))
+    assert out.actionable, out.reason
+    assert out.rounds >= 2
+
+
+def test_clarification_terminates_when_nothing_is_ever_answered():
+    _, c = _clarifier()
+    out = c.clarify("improve the design", ask=lambda qs: {}, max_rounds=2)
+    assert not out.actionable
+    assert out.rounds <= 2
+
+
+def test_an_answer_given_once_is_not_asked_for_again():
+    """The realistic path: a previous round's answer was absorbed, which records
+    it with its gap and task, and a later clarification finds it exactly."""
+    d, c = _clarifier()
+    frame = d.framer.frame("make the importer better")
+    c.absorb(frame, {Gap.OBJECTIVE: "p99 under 200ms on the import path"})
+    again = d.framer.frame("make the importer better")
+    answered = [q for q in c.questions(again, None) if q.answered_by_memory]
+    assert answered, "an answer already on record must pre-empt its question"
+    assert answered[0].gap == Gap.OBJECTIVE
+
+
+def test_pre_emption_requires_an_exact_gap_match():
+    """A fact about one gap must never be used to skip a question about another.
+    An earlier version matched by similarity and silently answered every question
+    from whatever it recalled about the task."""
+    d, c = _clarifier()
+    frame = d.framer.frame("make the importer better")
+    c.absorb(frame, {Gap.OBJECTIVE: "p99 under 200ms"})
+    other = c.questions(d.framer.frame("make the importer better"), None)
+    for q in other:
+        if q.gap != Gap.OBJECTIVE:
+            assert not q.answered_by_memory, f"{q.gap} was answered by an objective fact"
+
+
+def test_a_capability_gap_does_not_block_the_first_step():
+    """Forging is itself a primitive, so 'write the tool you are missing' is a
+    step the system can take. Only an item needing a human blocks."""
+    from distil.frame import GameFrame, agenda, capabilities
+    d = fresh()
+    f = GameFrame(task="t", objective="a specific finished state", actions=["negotiate"],
+                  referee="a reviewer")
+    plan = agenda(f, capabilities(f, d.memory, d.toolbox))
+    ok, reason = first_step_actionable(f, plan)
+    assert ok, reason
+
+
+def test_a_missing_objective_blocks_the_first_step():
+    from distil.frame import GameFrame, agenda, capabilities
+    d = fresh()
+    f = GameFrame(task="t", objective="", actions=["build"])
+    plan = agenda(f, capabilities(f, d.memory, d.toolbox))
+    ok, reason = first_step_actionable(f, plan)
+    assert not ok and "objective" in reason
+
+
+def test_agenda_marks_which_items_need_a_person():
+    from distil.frame import GameFrame, agenda, capabilities
+    d = fresh()
+    f = GameFrame(task="t", objective="", actions=[])
+    plan = agenda(f, capabilities(f, d.memory, d.toolbox))
+    assert plan.needs_person, "items nobody can discharge must be marked"
+    assert plan.items[0] in plan.needs_person
+    assert all(i not in plan.needs_person for i in plan.actionable_items)
+
+
+# --------------------------------------------------------------------------- #
+# MCP: tools that live in another process
+# --------------------------------------------------------------------------- #
+
+def test_the_handshake_completes_and_lists_tools():
+    with echo_server() as s:
+        assert s.started
+        names = [t.name for t in s.list_tools()]
+        assert {"echo", "add", "explode"} <= set(names)
+
+
+def test_a_tool_call_returns_its_text_content():
+    with echo_server() as s:
+        assert s.call("echo", {"text": "over jsonrpc"}).content == "over jsonrpc"
+        assert s.call("add", {"a": 2, "b": 40}).content == "42"
+
+
+def test_stray_output_and_notifications_do_not_break_the_client():
+    """The fixture emits a non-JSON line and an unsolicited notification before
+    replying to tools/list. A client that trips over either works against
+    exactly one server."""
+    with echo_server() as s:
+        assert len(s.list_tools()) == 3
+
+
+def test_listing_tools_is_not_flaky():
+    """Regression: select() polled the file descriptor while readline() read from
+    Python's text buffer, so a buffered-but-unread response looked like a
+    timeout. tools/list came back empty about a third of the time."""
+    with echo_server() as s:
+        for _ in range(6):
+            assert len(s.list_tools()) == 3
+
+
+def test_a_tool_reporting_failure_is_not_a_successful_call():
+    with echo_server() as s:
+        out = s.call("explode")
+        assert not out.ok and "deliberate failure" in out.error
+
+
+def test_an_unknown_tool_surfaces_the_jsonrpc_error():
+    with echo_server() as s:
+        out = s.call("does_not_exist")
+        assert not out.ok and "unknown tool" in out.error
+
+
+def test_a_server_that_cannot_start_degrades_rather_than_raising():
+    s = McpServer("broken", [sys.executable, "/nonexistent/server.py"])
+    out = s.start()
+    assert not out.ok and out.error
+    s.close()
+
+
+def test_mcp_tools_are_embedded_and_recalled_like_any_other_tool():
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    report = d.mcp.discover()
+    assert report["tools"] == 3 and not report["failed"]
+    hits = d.memory.recall("add two numbers together", k=3, kinds=(Kind.TOOL,))
+    assert any(h.trace.meta.get("tool") == "echo.add" for h in hits)
+    d.mcp.close()
+
+
+def test_mcp_tools_enter_ungraded():
+    """There are no contract tests to run against someone else's server, so
+    registering them as verified would be manufacturing evidence."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    tools = [t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("transport") == "mcp"]
+    assert tools and all(not t.graded for t in tools)
+    d.mcp.close()
+
+
+def test_one_toolbox_invokes_both_transports():
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    d.toolsmith.register(d.toolsmith.forge("compute the median of a list"))
+    assert "median" in d.toolbox.names() and "echo.add" in d.toolbox.names()
+    assert d.toolbox.invoke("median", [[5, 3, 1, 4]])["value"] == 3.5
+    assert d.toolbox.invoke("echo.add", kwargs={"a": 2, "b": 40})["value"] == "42"
+    d.mcp.close()
+
+
+def test_mcp_tool_names_are_namespaced_by_server():
+    a = McpTool("alpha", "search", "", {})
+    b = McpTool("beta", "search", "", {})
+    assert a.qualified != b.qualified
+
+
+def test_an_mcp_config_file_is_loaded():
+    d = fresh()
+    path = tmpdir() / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"echo": {"command": sys.executable,
+                                                        "args": [FIXTURE]}}}))
+    assert d.mcp.load_config(path) == ["echo"]
+    assert "echo" in d.mcp.names()
+
+
+def test_a_missing_or_corrupt_config_is_not_an_error():
+    d = fresh()
+    bad = tmpdir() / "mcp.json"
+    bad.write_text("{not json")
+    assert d.mcp.load_config(bad) == []
+    assert d.mcp.load_config(tmpdir() / "absent.json") == []
+
+
+# --------------------------------------------------------------------------- #
+# composition and serialisation
+# --------------------------------------------------------------------------- #
+
+def test_every_toolspec_field_survives_the_disk_round_trip():
+    """Regression for a real bug: to_json() omitted built_by, transport and deps
+    while from_json() read all three, so a composite tool loaded from disk had
+    silently lost its dependencies. Every test passed, because they all inspected
+    freshly built specs."""
+    import dataclasses
+    spec = ToolSpec(name="n", purpose="p", source="s", tests="t", signature="sig",
+                    solved=["x"], trace_id="tid", built_by="template",
+                    transport="mcp", deps=["a", "b"])
+    back = ToolSpec.from_json(spec.to_json())
+    lost = [f.name for f in dataclasses.fields(ToolSpec)
+            if f.name != "grade" and getattr(back, f.name) != getattr(spec, f.name)]
+    assert not lost, f"fields lost in serialisation: {lost}"
+
+
+def test_a_composite_tool_runs_with_its_dependencies_inlined():
+    d = fresh()
+    d.toolsmith.register(d.toolsmith.forge("compute the median of a list"))
+    d.toolsmith.register(d.toolsmith.forge("parse a csv file"))
+    spec = ToolSpec(
+        name="median_of_column", purpose="median of a csv column",
+        source="def median_of_column(text, col=0):\n"
+               "    return median([float(r[col]) for r in parse_csv(text)])\n",
+        tests='assert median_of_column("1\\n3\\n2") == 2.0',
+        signature="median_of_column(text, col=0)", deps=["median", "parse_csv"])
+    assert d.toolsmith.validate(spec, d.toolbox).score == 1.0
+    assert d.toolsmith.register(spec)
+    assert d.toolbox.invoke("median_of_column", ["10\n30\n20"])["value"] == 20.0
+
+
+def test_a_dependency_appears_before_its_dependent_in_the_bundle():
+    d = fresh()
+    d.toolsmith.register(d.toolsmith.forge("compute the median of a list"))
+    spec = ToolSpec(name="wrapper", purpose="p",
+                    source="def wrapper(xs):\n    return median(xs)\n",
+                    tests="assert wrapper([1,2,3]) == 2", signature="wrapper(xs)",
+                    deps=["median"])
+    bundled = d.toolbox.bundle(spec)
+    assert bundled.index("def median") < bundled.index("def wrapper")
+
+
+def test_a_dependency_cycle_does_not_hang_the_bundler():
+    d = fresh()
+    for name, dep in (("a", "b"), ("b", "a")):
+        spec = ToolSpec(name=name, purpose="p", source=f"def {name}():\n    return 1\n",
+                        tests="assert True", signature=f"{name}()", deps=[dep])
+        d.toolsmith.register(spec, threshold=-2.0)
+    out = d.toolbox.bundle(d.toolbox.load("a"))
+    assert out.count("def a(") == 1 and out.count("def b(") == 1
+
+
+# --------------------------------------------------------------------------- #
+# the starter toolkit
+# --------------------------------------------------------------------------- #
+
+def test_every_seed_tool_passes_its_own_contract_tests():
+    """Seeds are not trusted for shipping with the package -- they go through the
+    same grader as anything the system writes for itself."""
+    d = fresh()
+    report = plant(d.toolsmith, d.toolbox)
+    assert not report["rejected"], report["rejected"]
+    assert not report["skipped"], report["skipped"]
+    assert len(report["planted"]) == len(SEEDS), "the kit must stand on its own"
+    assert all(score == 1.0 for _, score in report["planted"])
+
+
+def test_a_seed_with_an_unmet_dependency_is_skipped_not_registered():
+    """A composite whose dependency is absent passes nothing and fails at call
+    time. Reporting it beats registering a tool that cannot run."""
+    from distil.seed import MEDIAN_OF_COLUMN
+    d = fresh()
+    report = plant(d.toolsmith, d.toolbox, seeds=(MEDIAN_OF_COLUMN,))
+    assert report["skipped"] and "missing dependencies" in report["skipped"][0][1]
+    assert "median_of_column" not in d.toolbox.names()
+
+
+def test_planting_twice_does_not_duplicate():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    second = plant(d.toolsmith, d.toolbox)
+    assert not second["planted"] and len(second["already"]) == len(SEEDS)
+
+
+def test_seed_tools_are_callable_through_the_toolbox():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    assert d.toolbox.invoke("chunk", [[1, 2, 3, 4, 5], 2])["value"] == [[1, 2], [3, 4], [5]]
+    assert d.toolbox.invoke("percentile", [[1, 2, 3, 4], 50])["value"] == 2.5
+    assert d.toolbox.invoke("median_of_column", ["10,1\n30,2\n20,3"])["value"] == 20.0
+
+
+def test_the_schema_tool_reports_every_problem_at_once():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    schema = {"type": "object", "required": ["age"],
+              "properties": {"name": {"type": "string"}}}
+    out = d.toolbox.invoke("assert_schema", [{"name": 1}, schema])
+    assert len(out["value"]) == 2, "one assert per run turns ten mismatches into ten runs"
+
+
+def test_error_normalisation_gives_two_instances_one_signature():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    a = d.toolbox.invoke("normalise_error", ["IndexError: index 5 is out of range"])["value"]
+    b = d.toolbox.invoke("normalise_error", ["IndexError: index 9 is out of range"])["value"]
+    assert a["kind"] == "IndexError"
+    assert a["signature"] == b["signature"], "the same rule violation is one class"
+
 # --------------------------------------------------------------------------- #
 # understanding the game, first
 # --------------------------------------------------------------------------- #
@@ -1075,7 +1461,7 @@ def test_a_solved_task_is_filed_as_a_case():
 
 def test_a_failed_task_is_also_filed_as_a_case():
     d = fresh(seed=3)
-    d.solve("design an elegant architecture for the thing", interrogate=False)
+    d.solve("parse a quantum waveform capture file", interrogate=False)
     assert any(c.grade < 0 for c in d.casebook.all()), "failures are results too"
 
 
@@ -1257,6 +1643,49 @@ def test_rollback_with_no_history_is_not_an_error():
 # the assembled agent
 # --------------------------------------------------------------------------- #
 
+def test_solve_refuses_to_guess_at_an_unclear_objective():
+    """The requirement in one test: do not distil a task nobody can state the
+    objective of. A well-organised plan for the wrong problem is the most
+    expensive thing this system can produce."""
+    d = fresh(seed=1)
+    r = d.solve("make the thing better")
+    assert r.get("needs_clarification")
+    assert r["questions"] and r["questions"][0].gap == Gap.OBJECTIVE
+    assert r["session"] is None, "nothing should have been reasoned about yet"
+
+
+def test_a_clear_task_is_not_gated():
+    d = fresh(seed=1)
+    r = d.solve("build a csv parser that passes the test suite")
+    assert not r.get("needs_clarification", False)
+    assert r["solved"]
+
+
+def test_answers_unblock_a_previously_gated_task():
+    d = fresh(seed=1)
+    answers = {"objective": "p99 latency under 200ms on the import path",
+               "referee": "the benchmark suite",
+               "actions": "parse a csv file, compute the median"}
+    r = d.solve("make the thing better", ask=lambda qs: answers)
+    assert not r.get("needs_clarification", False), r.get("reason")
+    assert r["session"] is not None
+
+
+def test_a_missing_referee_does_not_block_the_first_step():
+    """It says the work cannot be self-graded, not that it cannot be started.
+    Gating on it refused plain instructions like 'dedupe the records'."""
+    d = fresh(seed=1)
+    r = d.solve("dedupe the records")
+    assert not r.get("needs_clarification", False)
+    assert not r["frame"].referee
+
+
+def test_an_unrecognised_verb_still_yields_a_move_set():
+    d = fresh(seed=1)
+    frame, _ = d.understand("dedupe the records")
+    assert frame.actions == ["dedupe"], "the leading word is the action by construction"
+
+
 def test_solve_closes_the_loop_offline():
     d = fresh(seed=1)
     r = d.solve("build a csv cleaner and compute the median of each column")
@@ -1274,7 +1703,7 @@ def test_solve_reuses_a_tool_on_the_second_encounter():
 
 def test_an_impossible_task_returns_a_mapped_boundary_not_a_crash():
     d = fresh(seed=3)
-    r = d.solve("design an elegant architecture for the thing", interrogate=False)
+    r = d.solve("parse a quantum waveform capture file", interrogate=False)
     assert not r["solved"]
     assert r["refusals"] and r["boundary"]
 

@@ -46,6 +46,9 @@ answers and the loop that learns are the same loop.
 | Compress by summarisation, keep details, track access | `compress.py` (§13) |
 | Two-step memory: Redis short-term, Postgres long-term | `store.py` (§4.3) |
 | Self-editing and self-upgrading | `selfedit.py`, `policy.py` (§14) |
+| Ask clarifying questions when the objective is not understood | `clarify.py` (§2.6) |
+| Embed tools, MCPs, and its own tooling in one layer | `mcp.py`, `toolsmith.py` (§11.1–11.3) |
+| A starter toolkit worth building first | `seed.py` (§11.4) |
 
 ---
 
@@ -128,6 +131,39 @@ because a move you cannot make is not a plan. The ordering is:
 2. Close the capability gaps — by forging a tool, which is how this system
    acquires a move it did not have.
 3. Then play, in the order the solution concept chooses.
+
+**2.6 If the objective is not understood, ask.** `clarify.py` is what happens
+below the play threshold. It does not guess, and it does not distil: a
+well-organised plan for the wrong problem is the most expensive thing this system
+can produce, and §7.2 prices it at −0.80.
+
+Three rules keep the asking useful rather than tedious.
+
+*Ask about what is missing, in blocking order.* The questions come from the axes
+the frame could not fill, not from generic premise attacks (that is `challenge.py`,
+and it is for a task that **is** understood). Objective before referee before
+actions before everything else. A system that cannot say what winning means
+should not be asking about input formats.
+
+*Stop when the first step is actionable, not when the frame is complete.* Only
+two things genuinely block: not being able to state what done means, and having
+no move to make. A missing referee is a real limitation — nothing there can be
+self-graded — but it is not a reason to refuse to start, and gating on it refused
+plain instructions like *dedupe the records*. Everything else is cheaper to
+discover by attempting the step than by asking about it.
+
+*Incidentals are asked once; blockers come back.* Re-asking "what are your
+inputs?" is pestering. Letting the objective go unasked because it was raised
+once and ignored is the loop giving up on the only thing preventing progress.
+
+The distinction between *understood* and *merely restated* is drawn by
+`goals.checkability`, not by comparing the objective to the task. `Framer` falls
+back to the task text whenever no explicit purpose clause is present, and for an
+imperative like *build a csv parser that passes the test suite* that fallback is
+correct — the task states its own objective. What separates it from *make the
+thing better* is whether the verb admits a check, which is the same line
+distillation already uses to decide where it may stop (§8). One definition of
+"checkable" in the system, not two that drift.
 
 **2.5 Games are retrieved by structure, not subject.** A frame embeds its
 players/information/horizon, so two tasks with nothing topical in common cluster
@@ -436,6 +472,65 @@ get a green result would have been the worse fix: it is exactly the fabrication
 
 ---
 
+**11.1 One registry, two transports.** A tool exposed by an MCP server and a tool
+this system forged in Python are both `Kind.TOOL` traces in one embedding layer,
+found by one graded recall, invoked through one `Toolbox.invoke` that dispatches
+on `transport`. At the moment of recall the question is *what can act on this?*,
+and which process the answer lives in is an implementation detail. Two registries
+would just be one more place every caller has to remember to look — and the one
+they forget is the one that had the answer.
+
+MCP tools enter **ungraded**. There are no contract tests to run against someone
+else's server and its behaviour is not this system's to check, so they sit at the
+credibility prior and earn or lose standing through use like anything else.
+Registering them as verified would be manufacturing evidence, which is the same
+rule §10.5 applies to experiments.
+
+**11.2 The transport is stdio JSON-RPC**, and the handshake is not optional:
+`initialize`, await the result, send `notifications/initialized`, and only then
+`tools/list`. A server is entitled to ignore `tools/list` before the
+notification, and that hang reads as a broken server rather than a missing
+message. Everything degrades to a result object instead of raising — an agent
+whose memory layer crashes because one of a dozen configured servers is down is
+worse than one that records the outage as a fact and carries on.
+
+One implementation note worth keeping, because it cost real debugging time: the
+reader must not mix `select()` with buffered reads. `select` polls the file
+descriptor while `readline()` reads from Python's text-mode buffer, so when one
+read pulls several lines into that buffer — exactly what happens when a server
+emits a log line, a notification and a response together — the next `select` sees
+an idle descriptor and reports a timeout with a complete response already in
+memory. `tools/list` returned empty about a third of the time. A daemon thread
+doing blocking reads into a queue has no such split.
+
+**11.3 Tools compose.** A `ToolSpec` may declare `deps`, and `Toolbox.bundle`
+inlines them depth-first with a visited set (cycles terminate, diamonds get one
+copy). The sandbox runs a single file with no import path back into the workshop,
+so composition is by concatenation — crude, and correct: the dependency source
+that runs is exactly the source that passed its own contract tests. Validation
+bundles too, because grading `spec.source` alone would pass a composite whose
+dependency is missing at call time.
+
+**11.4 The starter toolkit.** `seed.py` is what is worth building before anything
+has been asked, and the selection criteria come from the design rather than from
+taste: it must be decidable (§8), it must be routed through often, and — the one
+that matters most — **it should make more things gradeable**.
+
+That last criterion is the highest-leverage one. §16 states the real ceiling:
+prose is never self-graded, so the system improves fastest at what a computer can
+check. A tool that *creates a referee* therefore buys more than a tool that does
+work, because it moves a whole class of goals from `UNCHECKABLE` to `CHECKABLE`
+in `goals.checkability`, which is what decides where distillation is allowed to
+stop. `assert_schema` turns "the output is well-formed" from an opinion into an
+assert. `normalise_error` and `extract_identifiers` turn a wall of diagnostic
+text into a stable class label — `GREN/DESIGN.md` §15's point that a structured
+code *is* the class.
+
+Seeds are planted through the ordinary validate/register path. Nothing is trusted
+for shipping with the package, and a seed that fails its own contract tests is
+rejected exactly like a tool the system wrote for itself. That is the only way
+the grade on the others means anything.
+
 ## 12. The casebook: problems, and what solved them
 
 The tool registry answers "what can I do?". The casebook answers the question that
@@ -566,3 +661,10 @@ Stated because a specification that only lists strengths is marketing.
   to be read; the promotion *rule* is tested with in-process stand-ins.
 - **Self-editing is guarded, not safe.** The invariants stop the failure modes
   that were anticipated. They are not a proof.
+- **MCP is stdio only.** HTTP/SSE servers would be a second transport class, not
+  a change to this one. No MCP server is exercised by the suite beyond a local
+  fixture written for it.
+- **Action extraction is a verb list with a leading-word fallback.** It will
+  never be complete, and a task whose verb it misses gets its first content word
+  taken as the move. That is a guess, and the frame's confidence does not count
+  it as a settled axis.

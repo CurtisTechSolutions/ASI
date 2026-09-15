@@ -32,7 +32,18 @@ def cmd_providers(args) -> int:
 def cmd_ask(args) -> int:
     d = _agent(args)
     result = d.solve(" ".join(args.task), persist=not args.no_persist,
-                     interrogate=not args.no_questions)
+                     interrogate=not args.no_questions,
+                     ask=None if args.no_ask else _prompt)
+    if result.get("needs_clarification"):
+        # The point of the gate: nothing was distilled, because distilling a task
+        # nobody can state the objective of produces a tidy plan for the wrong
+        # problem.
+        print(result["frame"].render())
+        print(f"\n  stopped before reasoning: {result['reason']}")
+        print("\n  answer these and try again (or run without --no-ask):")
+        for q in result["questions"]:
+            print(q.render())
+        return 1
     print(result["session"].chain.render())
     print()
     print(result["session"].tree.render())
@@ -67,6 +78,85 @@ def cmd_why(args) -> int:
     print("\n  premise attacks, ranked by bits:")
     for q in challenge(subject, d.memory, limit=6):
         print(f"    {q.value:.3f}  {q}")
+    return 0
+
+
+def _prompt(questions) -> dict:
+    """Put the questions to whoever is at the terminal. Blank skips one."""
+    answers = {}
+    print("\n  I cannot state the objective yet. A few questions:\n")
+    for q in questions:
+        print(f"  [{q.gap}] {q.text}")
+        print(f"      ({q.unblocks})")
+        try:
+            reply = input("      > ").strip()
+        except EOFError:
+            reply = ""
+        if reply:
+            answers[q.gap] = reply
+        print()
+    return answers
+
+
+def cmd_clarify(args) -> int:
+    d = _agent(args)
+    ask = None if args.no_ask else _prompt
+    out = d.clarifier.clarify(" ".join(args.task), ask=ask, max_rounds=args.rounds)
+    print(out.render())
+    d.save()
+    return 0 if out.actionable else 1
+
+
+def cmd_mcp(args) -> int:
+    d = _agent(args)
+    if args.add:
+        name, *command = args.add
+        if not command:
+            print("  usage: --add <name> <command> [args...]", file=sys.stderr)
+            return 1
+        d.mcp.add(name, command)
+        path = d.workspace.home / "mcp.json"
+        config = {}
+        if path.exists():
+            try:
+                config = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                config = {}
+        config.setdefault("mcpServers", {})[name] = {"command": command[0],
+                                                     "args": command[1:]}
+        path.write_text(json.dumps(config, indent=2))
+        print(f"  added {name} -> {' '.join(command)}  (saved to {path})")
+    if not d.mcp.names():
+        print("  no mcp servers configured")
+        print(f"  add one:  distil mcp --add fs npx -y @modelcontextprotocol/server-filesystem /tmp")
+        print(f"  or write {d.workspace.home / 'mcp.json'} in the usual mcpServers format")
+        return 0
+    report = d.mcp.discover()
+    for server, tools in report["servers"].items():
+        print(f"  {server}: {len(tools)} tool(s)")
+        for t in tools:
+            print(f"      {server}.{t}")
+    for failure in report["failed"]:
+        print(f"  {failure['server']}: UNAVAILABLE -- {failure['error'][:90]}")
+    print(f"\n  {report['tools']} tool(s) embedded; they are now recalled alongside "
+          f"locally forged ones, ungraded until used")
+    d.save()
+    d.mcp.close()
+    return 0
+
+
+def cmd_seed(args) -> int:
+    from .seed import plant
+    d = _agent(args)
+    report = plant(d.toolsmith, d.toolbox)
+    for name, score in report["planted"]:
+        print(f"  planted  {name:<22} grade {score:+.2f}")
+    for name, why in report["rejected"]:
+        print(f"  REJECTED {name:<22} {why}")
+    if report["already"]:
+        print(f"  already present: {', '.join(report['already'])}")
+    print(f"\n  toolbox: {', '.join(d.toolbox.names())}")
+    d.save()
     return 0
 
 
@@ -256,6 +346,7 @@ def cmd_stats(args) -> int:
 def cmd_demo(args) -> int:
     """The whole system, offline, in one command."""
     import tempfile
+    from pathlib import Path
     d = Distil(auto("local"), home=args.home or tempfile.mkdtemp(), seed=7)
     print("=" * 74)
     print("0. understand the game first -- everything is a game")
@@ -306,10 +397,24 @@ def cmd_demo(args) -> int:
 
     print()
     print("=" * 74)
+    print("3b. it asks instead of guessing when it cannot state the objective")
+    print("=" * 74)
+    for task in ("build a csv parser that passes the test suite", "make the thing better"):
+        gated = d.solve(task, interrogate=False)
+        if gated.get("needs_clarification"):
+            print(f"  {task!r}\n      GATED -- {gated['reason']}")
+            print(f"      asks: {gated['questions'][0].text[:66]}")
+        else:
+            print(f"  {task!r}\n      proceeds -- the task states its own objective")
+
+    print()
+    print("=" * 74)
     print("4. never take no for an answer: reframe until the noes repeat")
     print("=" * 74)
-    r2 = d.solve("design an elegant architecture for the thing", interrogate=False)
-    print(f"  attempts: {[a['reframe'] or 'direct' for a in r2['attempts']]}")
+    # Clear enough to proceed, impossible to satisfy: the persistence loop runs
+    # and returns the boundary rather than a shrug.
+    r2 = d.solve("parse a quantum waveform capture file", interrogate=False)
+    print(f"  attempts: {[a['reframe'] or 'direct' for a in r2.get('attempts', [])]}")
     print(f"  stopped because: {r2['reason']}")
     print("  " + (r2.get("boundary") or "").replace("\n", "\n  "))
 
@@ -353,10 +458,22 @@ def cmd_demo(args) -> int:
 
     print()
     print("=" * 74)
-    print("8. tools written, verified and kept")
+    print("8. one embedding layer over local tools and MCP tools alike")
     print("=" * 74)
-    for spec in d.toolbox.all():
-        print(f"  {spec.name:<14} {spec.signature}")
+    from .seed import plant
+    planted = plant(d.toolsmith, d.toolbox)
+    print(f"  starter toolkit: {len(planted['planted'])} planted, "
+          f"{len(planted['rejected'])} rejected, all graded before entry")
+    import sys as _sys
+    fixture = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "echo_mcp_server.py"
+    if fixture.exists():
+        d.mcp.add("echo", [_sys.executable, str(fixture)])
+        report = d.mcp.discover()
+        print(f"  mcp server 'echo': {report['tools']} tool(s) embedded (ungraded)")
+        print(f"  invoke local  median   -> {d.toolbox.invoke('median', [[5, 3, 1, 4]]).get('value')}")
+        print(f"  invoke remote echo.add -> {d.toolbox.invoke('echo.add', kwargs={'a': 2, 'b': 40}).get('value')!r}")
+        d.mcp.close()
+    print(f"\n  toolbox: {', '.join(d.toolbox.names())}")
     print(f"\n  memory: {json.dumps(d.memory.stats())}")
     print(f"  cases:  {len(d.casebook.all())}")
     return 0
@@ -374,7 +491,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task", nargs="+")
     s.add_argument("--no-persist", action="store_true", help="stop at the first refusal")
     s.add_argument("--no-questions", action="store_true", help="skip the interrogation")
+    s.add_argument("--no-ask", action="store_true",
+                   help="do not prompt; print the clarifying questions and stop")
     s.set_defaults(fn=cmd_ask)
+
+    s = sub.add_parser("clarify", help="ask until the first step is actionable")
+    s.add_argument("task", nargs="+")
+    s.add_argument("--rounds", type=int, default=3)
+    s.add_argument("--no-ask", action="store_true", help="print the questions and stop")
+    s.set_defaults(fn=cmd_clarify)
+
+    s = sub.add_parser("mcp", help="mcp servers and their tools")
+    s.add_argument("--add", nargs="+", metavar="ARG",
+                   help="add a server: --add <name> <command> [args...]")
+    s.set_defaults(fn=cmd_mcp)
+
+    sub.add_parser("seed", help="plant the starter toolkit").set_defaults(fn=cmd_seed)
 
     s = sub.add_parser("why", help="interrogate a claim and attack its premises")
     s.add_argument("subject", nargs="+")

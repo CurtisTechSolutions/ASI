@@ -297,8 +297,8 @@ class Framer:
         f.objective = (obj.group(1).strip() if obj else task.strip())[:120]
         f.actions = self._actions(task)
         f.inputs, f.outputs = self._io(task)
-        if f.actions:
-            settled += 1
+        if f.actions and _VERB.search(task):
+            settled += 1          # a recognised verb is evidence; a fallback is not
 
         asked = self._ask_provider(task, f)
         if asked:
@@ -309,8 +309,29 @@ class Framer:
         f.evidence = evidence
         return f
 
+    _LEADING_STOP = {"the", "a", "an", "my", "our", "this", "that", "please", "we", "i"}
+
     def _actions(self, task: str) -> list[str]:
-        return sorted({m.group(0).lower() for m in _VERB.finditer(task)})
+        """The move set, from the verbs in the task.
+
+        `_VERB` is a fixed list and will never be complete, so a task whose verb
+        is missing from it -- *dedupe the records*, *tune the importer* -- used to
+        come back with no actions at all, and an empty move set blocks the
+        clarification loop with "no moves available". That gated a large share of
+        perfectly clear instructions on a vocabulary gap.
+
+        So when no known verb matches, the task's own leading word is taken as
+        the action. A task is an imperative; its first content word is the verb
+        by construction. This is a guess and it is labelled as one -- the frame's
+        confidence does not count a fallback action as a settled axis.
+        """
+        found = sorted({m.group(0).lower() for m in _VERB.finditer(task)})
+        if found:
+            return found
+        for word in re.findall(r"[A-Za-z][\w'-]*", task.lower()):
+            if word not in self._LEADING_STOP:
+                return [word]
+        return []
 
     def _io(self, task: str) -> tuple[list[str], list[str]]:
         """Inputs and outputs, read off prepositions.
@@ -418,10 +439,19 @@ class Agenda:
     frame: GameFrame
     capabilities: list[Capability]
     items: list[str]
+    #: Items that no primitive and no tool can discharge -- they need a person to
+    #: answer something. Tracked explicitly rather than recovered by matching on
+    #: the item text, because "is this step actionable?" is the termination
+    #: condition of the clarification loop and it must not depend on wording.
+    needs_person: list[str] = field(default_factory=list)
 
     @property
     def gaps(self) -> list[Capability]:
         return [c for c in self.capabilities if c.gap]
+
+    @property
+    def actionable_items(self) -> list[str]:
+        return [i for i in self.items if i not in self.needs_person]
 
     def render(self) -> str:
         lines = ["  what the game needs, and whether this system can do it:"]
@@ -492,10 +522,21 @@ def agenda(frame: GameFrame, caps: list[Capability]) -> Agenda:
     how this system acquires a move it did not have.
     """
     items: list[str] = []
+    blocking: list[str] = []
     if not frame.objective:
-        items.append("establish what winning means -- no objective could be read from the task")
+        item = "establish what winning means -- no objective could be read from the task"
+        items.append(item)
+        blocking.append(item)
     if not frame.actions:
-        items.append("establish the move set -- no actions could be identified")
+        item = "establish the move set -- no actions could be identified"
+        items.append(item)
+        blocking.append(item)
+    # A missing referee and unknown payoffs are listed but are NOT blocking.
+    # They say the work cannot be *self-graded*, not that it cannot be *started*
+    # -- and gating on them refused perfectly clear instructions like "dedupe the
+    # records" because no verifier could be named for them in advance. What
+    # blocks a first step is narrower: not being able to state what done means,
+    # or having no move to make.
     if not frame.referee:
         items.append("find the referee: what would say no, and how fast? "
                      "(without one, nothing here can be self-graded)")
@@ -509,4 +550,4 @@ def agenda(frame: GameFrame, caps: list[Capability]) -> Agenda:
             items.append(f"{cap.action} (via {cap.covered_by})")
     if frame.horizon == Horizon.REPEATED:
         items.append("this game repeats: prefer a move that survives being played again")
-    return Agenda(frame, caps, items)
+    return Agenda(frame, caps, items, blocking)

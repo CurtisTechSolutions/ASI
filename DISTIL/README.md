@@ -13,8 +13,11 @@ it then has to prove work.
 ```bash
 cd DISTIL
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 148 tests, ~3s
+python3 -m tests.test_distil                # 189 tests, ~8s
 
+python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
+python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
+python3 -m distil.cli mcp --add fs npx -y @modelcontextprotocol/server-filesystem /tmp
 python3 -m distil.cli frame "negotiate a raise with my manager every review cycle"
 python3 -m distil.cli ask   "build a csv cleaner and compute the median of each column"
 python3 -m distil.cli why   "we must rewrite the parser in Rust because Python is too slow"
@@ -116,7 +119,53 @@ grades: mean -0.8 over 4 graded member(s)
 `5432` and `OperationalError` survive because rare terms are kept by IDF rank.
 Originals are archived first, so `restore()` brings all four back exactly.
 
-**7. Invention by analogy finds transfers a nearest-neighbour query cannot.**
+**7. It asks rather than guessing when it cannot state the objective.** The gate
+is not "is this vague?" but "can the first step be taken?", and only two things
+block it:
+
+| task | gated? | why |
+|---|---|---|
+| build a csv parser that passes the test suite | no | the task states its own objective; referee is the test suite |
+| dedupe the records | no | no referee, but a missing referee is a grading limit, not a reason not to start |
+| compute the median of a column | no | checkable verb, move set identified |
+| make the thing better | **yes** | no statement of done exists, and none can be inferred |
+| improve the design | **yes** | same |
+
+Gated tasks return the questions and nothing is distilled — no goal tree, no
+plan. Answer them and the same call proceeds. Incidental questions are asked
+once; a *blocking* one comes back until answered, because giving up on the only
+thing preventing progress is not politeness.
+
+**8. MCP tools and local tools live in one embedding layer.** A goal reaches both
+through the same graded recall, and `Toolbox.invoke` dispatches on transport:
+
+```
+toolbox: assert_schema, chunk, diff_lines, echo.add, echo.echo, extract_identifiers,
+         jaccard, median, median_of_column, normalise_error, parse_csv, percentile, ...
+invoke("median",   [[5,3,1,4]])          -> 3.5     (sandboxed subprocess)
+invoke("echo.add", {"a":2,"b":40})       -> "42"    (JSON-RPC to another process)
+```
+
+MCP tools enter **ungraded** — there are no contract tests to run against someone
+else's server, and registering them as verified would be manufacturing evidence.
+
+**9. The starter toolkit, all twelve verified before entry.** `distil seed`
+plants them through the ordinary grader; a seed that fails its own contract tests
+is rejected like anything else. The selection rule is the interesting part: the
+highest-leverage tools are the ones that **make more things gradeable**, because
+that is what moves goals from uncheckable to checkable and decides where
+distillation may stop.
+
+```
+median  parse_csv  chunk  percentile  jaccard  diff_lines  topological_sort
+normalise_error  extract_identifiers  assert_schema  summarise_counts  median_of_column
+```
+
+`median_of_column` is composed from `median` and `parse_csv` — dependencies are
+inlined at validation and at call time, so the source that runs is exactly the
+source that passed its tests.
+
+**10. Invention by analogy finds transfers a nearest-neighbour query cannot.**
 Pairs are drawn from a similarity *band* (0.22–0.60) — close enough to map, far
 enough to be new:
 
@@ -139,12 +188,15 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 
 | module | lines | what it does |
 |---|---|---|
-| `frame.py` | 512 | understand the game first: players, actions, payoff, horizon, referee → solution concept, capability gaps, agenda |
+| `clarify.py` | 379 | ask when the objective is not understood; stop when the first step is actionable |
+| `mcp.py` | 404 | MCP servers over stdio JSON-RPC, embedded as ordinary tools |
+| `seed.py` | 413 | the starter toolkit, planted through the grader |
+| `frame.py` | 553 | understand the game first: players, actions, payoff, horizon, referee → solution concept, capability gaps, agenda |
 | `memory.py` | 420 | the embedding layer that *is* the memory; graded recall, credit propagation |
 | `reason.py` | 417 | typed chain-of-thought; the game against Nature |
 | `store.py` | 472 | in-process exact search, pgvector, Redis, and tiered short/long-term |
 | `explore.py` | 508 | curiosity, bad ideas, analogy, inversion, policy self-upgrade |
-| `toolsmith.py` | 363 | write a tool, verify it, register what it solved |
+| `toolsmith.py` | 439 | write a tool, verify it, register what it solved |
 | `selfedit.py` | 338 | rewrite its own source behind invariants and the test suite |
 | `game.py` | 290 | maximin, minimax regret, fictitious play, regret matching, Shapley |
 | `challenge.py` | 354 | why-chains, premise attack, persistence past refusal |
@@ -189,6 +241,10 @@ Every result above came from `LocalProvider`, and it has real limits:
   an unrelated check is worse than an untested one — it manufactures evidence.
 - The lexical embedder does not know "compile" and "build" are related.
 - Prose is never self-graded, so most non-code work accumulates as `ungraded`.
+- MCP is stdio only, and no real server is exercised by the suite — only a local
+  fixture written to speak the protocol (including stray output and unsolicited
+  notifications, because a client that only works against a well-behaved server
+  works against exactly one).
 
 `DESIGN.md` §16 lists the rest.
 

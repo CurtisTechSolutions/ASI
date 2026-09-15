@@ -4,6 +4,7 @@ Nine modules with one object in front of them. The composition is the design, so
 it is worth stating in one place what happens on a call to `solve`:
 
     understand the game      frame.Framer -- players, actions, payoff, referee
+    ask if it is unclear     clarify.Clarifier -- questions, not guesses
     map it to what we can do frame.capabilities + frame.agenda
     check for precedent      casebook.adapt -- and what did NOT work
     question the task        challenge.interrogate + challenge.challenge
@@ -29,12 +30,14 @@ from pathlib import Path
 
 from .casebook import Casebook
 from .challenge import Persistence
+from .clarify import Clarifier
 from .compress import Compressor
 from .embed import HashEmbedder, ProviderEmbedder
 from .explore import Explorer
 from .frame import Framer, agenda, capabilities
 from .goals import Status
 from .grade import grade_user
+from .mcp import McpRegistry
 from .memory import Kind, Memory, Source
 from .policy import Policy
 from .provider import Provider, auto
@@ -60,10 +63,13 @@ class Distil:
         self.embedder = ProviderEmbedder(self.provider, base) if want and self.provider.can_embed else base
         self.memory = Memory(self.embedder, self.policy, store=store)
         self.memory.load(self.workspace.memory)
-        self.toolbox = Toolbox(self.memory, self.workspace.workshop)
+        self.mcp = McpRegistry(self.memory, self.workspace)
+        self.mcp.load_config(self.workspace.home / "mcp.json")
+        self.toolbox = Toolbox(self.memory, self.workspace.workshop, self.mcp)
         self.toolsmith = Toolsmith(self.memory, self.provider, self.workspace.workshop)
         self.reasoner = Reasoner(self.memory, self.provider, self.policy, self.toolbox)
         self.framer = Framer(self.memory, self.provider)
+        self.clarifier = Clarifier(self.memory, self.framer, self.toolbox)
         self.casebook = Casebook(self.memory)
         self.compressor = Compressor(self.memory, self.provider,
                                      archive=self.workspace.home / "archive.jsonl")
@@ -90,10 +96,30 @@ class Distil:
         return frame, plan
 
     def solve(self, task: str, persist: bool = True, interrogate: bool = True,
-              understand_first: bool = True) -> dict:
+              understand_first: bool = True, ask=None) -> dict:
         """Understand the game, then reason about it, then refuse to stop at the
-        first refusal."""
-        frame, plan = (self.understand(task) if understand_first else (None, None))
+        first refusal.
+
+        If the game is not understood well enough for the first step to be
+        actionable, this **stops and asks** rather than proceeding on a guess.
+        With an `ask` callback it runs the clarification loop; without one it
+        returns `needs_clarification` and the questions, for the caller to put to
+        whoever knows. Distilling a task whose objective nobody can state
+        produces a well-organised plan for the wrong problem, and that is the
+        most expensive thing this system can do (DESIGN 7.2: BUILD pays -0.80 in
+        a wrong frame).
+        """
+        if understand_first:
+            clarified = self.clarifier.clarify(task, ask=ask)
+            frame, plan = clarified.frame, clarified.plan
+            if not clarified.actionable:
+                self.save()
+                return {"task": task, "solved": False, "session": None,
+                        "needs_clarification": True, "questions": clarified.questions,
+                        "clarification": clarified, "frame": frame, "agenda": plan,
+                        "reason": clarified.reason}
+        else:
+            frame, plan = (None, None)
         precedent = self.casebook.adapt(task)
         session = self.reasoner.run(task, interrogate_first=interrogate)
         if frame is not None:

@@ -50,6 +50,8 @@ class ToolSpec:
     solved: list[str] = field(default_factory=list)   # problems this tool has handled
     trace_id: str | None = None
     built_by: str = "provider"      # "template" or "provider" -- see Idea.claim
+    transport: str = "python"       # "python" (runs in the sandbox) or "mcp" (another process)
+    deps: list[str] = field(default_factory=list)   # other registered tools this one calls
 
     def embed_text(self) -> str:
         """What the embedding layer actually indexes. Deliberately not the source:
@@ -59,9 +61,15 @@ class ToolSpec:
         return "\n".join(p for p in parts if p)
 
     def to_json(self) -> dict:
+        # Every field `from_json` reads must be written here. An earlier version
+        # dropped `built_by`, `transport` and `deps`, and nothing caught it: the
+        # tests all inspected freshly forged specs, where the in-memory value was
+        # still correct. The bug only appeared once a composite tool was loaded
+        # back from disk and its dependencies had silently become `[]`.
         return {"name": self.name, "purpose": self.purpose, "source": self.source,
                 "tests": self.tests, "signature": self.signature, "solved": self.solved,
-                "trace_id": self.trace_id,
+                "trace_id": self.trace_id, "built_by": self.built_by,
+                "transport": self.transport, "deps": self.deps,
                 "grade": self.grade.score if self.grade else None}
 
     @classmethod
@@ -69,7 +77,8 @@ class ToolSpec:
         return cls(name=d["name"], purpose=d["purpose"], source=d["source"],
                    tests=d.get("tests", ""), signature=d.get("signature", ""),
                    solved=d.get("solved", []), trace_id=d.get("trace_id"),
-                   built_by=d.get("built_by", "provider"))
+                   built_by=d.get("built_by", "provider"),
+                   transport=d.get("transport", "python"), deps=d.get("deps", []))
 
 
 _FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.S)
@@ -233,8 +242,15 @@ class Toolsmith:
         return ToolSpec(name=fname or name, purpose=goal, source=source, tests=tests,
                         signature=sig, built_by=origin)
 
-    def validate(self, spec: ToolSpec) -> Grade:
-        spec.grade = grade_python(spec.source, spec.tests)
+    def validate(self, spec: ToolSpec, toolbox=None) -> Grade:
+        """Grade the tool as it will actually run -- dependencies included.
+
+        Validating `spec.source` alone would pass a composite tool whose
+        dependency is missing at call time, which is the one failure the grading
+        layer exists to catch before it reaches the toolbox.
+        """
+        source = toolbox.bundle(spec) if (toolbox and spec.deps) else spec.source
+        spec.grade = grade_python(source, spec.tests)
         return spec.grade
 
     def register(self, spec: ToolSpec, goal_trace_id: str | None = None,
@@ -271,26 +287,52 @@ class Toolsmith:
 
 
 class Toolbox:
-    """The registered tools, and the way a goal finds one.
+    """Every capability, whatever process it runs in.
 
     `find` is a memory query restricted to `Kind.TOOL`, so it inherits graded
     recall: a tool that has failed since being registered sinks, without anyone
-    having to remember to delete it.
+    having to remember to delete it. Locally forged Python tools and tools
+    exposed by MCP servers are both `Kind.TOOL` traces in that one query, which
+    is the point -- at the moment of recall "what can act on this?" does not care
+    which process the answer lives in, and a second registry would just be one
+    more place every caller has to remember to look.
+
+    Dispatch happens at `invoke`, on `ToolSpec.transport`.
     """
 
-    def __init__(self, memory, workshop: Path) -> None:
+    def __init__(self, memory, workshop: Path, mcp=None) -> None:
         self.memory = memory
         self.workshop = Path(workshop)
         self.workshop.mkdir(parents=True, exist_ok=True)
+        self.mcp = mcp                    # an McpRegistry, or None
 
     def names(self) -> list[str]:
-        return sorted(p.stem for p in self.workshop.glob("*.json"))
+        """Local tools on disk plus every MCP tool in memory, as one sorted list."""
+        local = {p.stem for p in self.workshop.glob("*.json")}
+        remote = {t.meta.get("tool") for t in self.memory.of_kind(Kind.TOOL)
+                  if t.meta.get("transport") == "mcp" and t.meta.get("tool")}
+        return sorted(local | remote)
 
     def load(self, name: str) -> ToolSpec | None:
+        """A spec for either transport.
+
+        MCP tools have no file on disk -- the source lives in someone else's
+        process -- so their spec is reconstructed from the memory trace that
+        registered them. Returning one `ToolSpec` for both keeps every caller
+        downstream (`find`, `invoke`, `record_use`, `agent.solve`) on a single
+        type instead of branching on transport in five places.
+        """
         path = self.workshop / f"{name}.json"
-        if not path.exists():
-            return None
-        return ToolSpec.from_json(json.loads(path.read_text()))
+        if path.exists():
+            return ToolSpec.from_json(json.loads(path.read_text()))
+        for trace in self.memory.of_kind(Kind.TOOL):
+            if trace.meta.get("tool") == name and trace.meta.get("transport") == "mcp":
+                return ToolSpec(
+                    name=name, purpose=trace.meta.get("purpose", ""), source="",
+                    signature=trace.meta.get("signature", ""), transport="mcp",
+                    built_by="mcp", solved=trace.meta.get("solved", []),
+                    trace_id=trace.id)
+        return None
 
     def all(self) -> list[ToolSpec]:
         return [s for s in (self.load(n) for n in self.names()) if s]
@@ -313,6 +355,32 @@ class Toolbox:
                 out.append((spec, hit.score, hit.similarity))
         return out
 
+    def bundle(self, spec: ToolSpec, seen: set | None = None) -> str:
+        """A tool's source with its dependencies prepended, depth-first.
+
+        This is how a forged tool builds on tools already proven to work, which
+        is the difference between a growing toolbox and a pile of one-offs. The
+        sandbox runs one file with no import path back into the workshop, so
+        composition is by concatenation -- crude, and correct: the dependency
+        source that runs is exactly the source that was verified.
+
+        `seen` breaks cycles and de-duplicates a diamond, so a tool depending on
+        two tools that share a dependency gets one copy of it rather than a
+        redefinition.
+        """
+        seen = seen if seen is not None else set()
+        if spec.name in seen:
+            return ""
+        seen.add(spec.name)
+        parts = []
+        for dep_name in spec.deps:
+            dep = self.load(dep_name)
+            if dep is None or dep.transport != "python":
+                continue          # an MCP dependency cannot be inlined; see invoke
+            parts.append(self.bundle(dep, seen))
+        parts.append(spec.source)
+        return "\n\n".join(p for p in parts if p.strip())
+
     def invoke(self, name: str, args: list | None = None, kwargs: dict | None = None,
                timeout: float = 10.0):
         """Call a registered tool in the sandbox and bring back the result.
@@ -325,8 +393,16 @@ class Toolbox:
         spec = self.load(name)
         if spec is None:
             return {"ok": False, "error": f"no such tool: {name}"}
+        if spec.transport == "mcp":
+            # Another process owns this one. Arguments go as a dict, because MCP
+            # tools are keyword-only by schema -- there is no positional form.
+            if self.mcp is None:
+                return {"ok": False, "error": f"{name} is an mcp tool but no registry is attached"}
+            out = self.mcp.call(name, kwargs or {})
+            return {"ok": out.ok, "value": out.content, "json_ok": False,
+                    **({} if out.ok else {"error": out.error})}
         driver = (
-            f"{spec.source}\n\n"
+            f"{self.bundle(spec)}\n\n"
             "import json as _json\n"
             f"_args = _json.loads({json.dumps(json.dumps(args or []))})\n"
             f"_kwargs = _json.loads({json.dumps(json.dumps(kwargs or {}))})\n"
