@@ -33,10 +33,13 @@ echo "### 5/7  ablation: negate only the read-out instead of every unit"
 python3 experiment.py $COMMON --arms 2nrl --invert-mode readout \
     --weights weights_readout --out results/invert_readout.json
 
-echo "### 6/7  ablation (§12 item 4): how deep should phase 1 go?"
-python3 experiment.py $COMMON --arms 2nrl --neg-fraction 0.15 \
+echo "### 6/7  ablation (§12 item 4): a fixed date for phase 1 instead of the trigger"
+# --neg-fraction only means anything under the `schedule` trigger; with the
+# default `plateau` trigger it is ignored, and passing it alone silently
+# reproduces the headline run.
+python3 experiment.py $COMMON --arms 2nrl --invert-trigger schedule --neg-fraction 0.15 \
     --weights weights_depth15 --out results/phase_depth_15.json
-python3 experiment.py $COMMON --arms 2nrl --neg-fraction 0.50 \
+python3 experiment.py $COMMON --arms 2nrl --invert-trigger schedule --neg-fraction 0.50 \
     --weights weights_depth50 --out results/phase_depth_50.json
 
 echo "### 7/7  the benchmark: head to head, common opponent, and the floor"

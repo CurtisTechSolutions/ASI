@@ -35,9 +35,12 @@ def label_of(run: dict) -> str:
         return f"{label} (per-round)"
     if cfg.get("invert_mode", "unit") != "unit":
         return f"{label} (read-out flip)"
-    fraction = cfg.get("neg_fraction", DEFAULT_NEG_FRACTION)
-    if abs(fraction - DEFAULT_NEG_FRACTION) > 1e-9:
-        return f"{label} (phase 1 = {fraction:.0%})"
+    # neg_fraction only means anything under the `schedule` trigger; under the
+    # default it is inert, and labelling by it alone would name two identical runs
+    # as if they were different arms.
+    if cfg.get("invert_trigger", "plateau") == "schedule":
+        fraction = cfg.get("neg_fraction", DEFAULT_NEG_FRACTION)
+        return f"{label} (fixed date, phase 1 = {fraction:.0%})"
     return label
 
 

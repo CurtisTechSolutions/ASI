@@ -183,6 +183,58 @@ def test_inversion_is_a_not() -> None:
           "its first hidden layer comes through unchanged; invert() negates it")
 
 
+def test_the_two_operators_are_equivalent() -> None:
+    """...and yet the two land on the same network, provably, and stay there.
+
+    This is the result that stops the choice of operator mattering, and it is
+    worth stating precisely because it is easy to assume otherwise.
+
+    Flipping the signs of one unit's incoming weights, its bias, its phase and
+    its amplitude together is a **symmetry of the network**: ``z`` changes sign,
+    and the sine's oddness about ``h`` changes it straight back, so the function
+    is untouched.  The read-out flip differs from the unit flip by exactly those
+    per-unit symmetries.  Adam is coordinate-wise and sign-equivariant - flip a
+    parameter and its gradient flips with it, so the moments and the step mirror
+    - and therefore the two trajectories mirror too, and realise the *same
+    function* at every step, not merely at the flip.
+
+    So the corrected operator is the paper's, and it is the right one to ship on
+    §4.3's terms - it negates every unit, and it leaves ``h`` and ``b`` where
+    §13 leaves them.  What it does not do is change what the network learns.
+    ``results/invert_readout.json`` is that prediction run for real: an arm that
+    differs only in this reproduces the headline run to every digit.
+    """
+    rng = np.random.default_rng(41)
+    a_net = net(42, (10, 8, 6, 1))
+    randomise_act(a_net, 43)
+    b_net = a_net.copy()
+    a_net.invert()
+    b_net.invert_readout()
+
+    x = rng.normal(size=(32, 10))
+    check("the two operators start from the same function",
+          float(np.abs(a_net.forward(x, train=False) - b_net.forward(x, train=False)).max()) == 0.0)
+    same_mag = all(
+        np.allclose(np.abs(getattr(la, p)), np.abs(getattr(lb, p)))
+        for la, lb in zip(a_net.layers, b_net.layers) for p in la.params)
+    check("...reached by flipping signs, so every magnitude matches", same_mag,
+          "the difference between them is a sign symmetry, not a different point")
+
+    # Train both from their own parameterisation on the same data.
+    opt_a, opt_b = Adam(a_net, lr=0.05, act_lr=0.005), Adam(b_net, lr=0.05, act_lr=0.005)
+    target = rng.normal(size=(32, 1))
+    worst = 0.0
+    for _ in range(40):
+        for n_, o_ in ((a_net, opt_a), (b_net, opt_b)):
+            o_.step(n_.backward(2.0 * (n_.forward(x) - target)))
+        worst = max(worst, float(np.abs(
+            a_net.forward(x, train=False) - b_net.forward(x, train=False)).max()))
+    check("and they compute the same function at every step of training after it",
+          worst == 0.0,
+          f"error {worst:.1e} over 40 Adam steps - Adam is sign-equivariant, so the "
+          "symmetry is preserved and the choice of operator cannot change what is learned")
+
+
 def test_literal_is_noop() -> None:
     """The literal 'flip everything' rule cancels itself on a feed-forward stack."""
     print("\nthe parity finding")
@@ -529,6 +581,7 @@ if __name__ == "__main__":
     test_gradients()
     test_invert_exact()
     test_inversion_is_a_not()
+    test_the_two_operators_are_equivalent()
     test_literal_is_noop()
     test_growth_identity()
     test_adam_resync()

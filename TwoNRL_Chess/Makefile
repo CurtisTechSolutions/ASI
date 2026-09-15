@@ -79,11 +79,11 @@ per-round: ## Ablation: §9.3's perpetual loop - invert inside every round
 	@mkdir -p $(RESULTS)
 	$(EXPERIMENT) $(COMMON) --arms 2nrl positive --schedule per-round --out $(RESULTS)/per_round.json
 
-phase-depth: ## Ablation (§12 item 4): how long should phase 1 be?
+phase-depth: ## Ablation (§12 item 4): a fixed date for phase 1, against the trigger
 	@mkdir -p $(RESULTS)
-	$(EXPERIMENT) $(COMMON) --arms 2nrl --neg-fraction 0.15 \
+	$(EXPERIMENT) $(COMMON) --arms 2nrl --invert-trigger schedule --neg-fraction 0.15 \
 		--out $(RESULTS)/phase_depth_15.json
-	$(EXPERIMENT) $(COMMON) --arms 2nrl --neg-fraction 0.50 \
+	$(EXPERIMENT) $(COMMON) --arms 2nrl --invert-trigger schedule --neg-fraction 0.50 \
 		--out $(RESULTS)/phase_depth_50.json
 
 no-growth: ## Ablation: freeze the architecture, so nothing self-builds
