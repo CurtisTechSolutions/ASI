@@ -699,6 +699,68 @@ become a third trie.
 
 *Where:* `Memory/README.md` · **held**
 
+### 37. Index a game by its END GOAL, and work backwards
+> The Radix Tree for game solving should be about the end goal. We focus on the
+> end goal of the game, and work backwards. For chess, it's to topple the king,
+> for a conversation at work, it's determined by the conversation itself and can
+> be a bit more ambiguous, however, we usually have an end goal in mind for the
+> conversation (to learn more, get a promotion, etc...). If the goal is unclear,
+> go up a level.
+
+This corrects a proposal of mine. Asked how to make the trie more specific, I
+offered more game-theoretic structure — information, horizon, dominance,
+supermodularity. Every one of those is a real axis and every one is **the wrong
+kind**: they require already knowing the game. You cannot state a conversation's
+horizon or potential function before having it. Measured, that is exactly what
+went wrong — a conversation with *every* structural fact supplied still stalled
+at depth 1 of 9, because no branch existed for it.
+
+The goal is the one thing you can state about an unfamiliar game **before you can
+play it**. Same conversation, indexed by goal instead: depth 3 of 3, fully
+placed, sitting next to the other conversations rather than nowhere.
+
+**Going up a level is the semantics, not a fallback.** Each level is a usable
+answer in its own right:
+
+| what I know | depth | who it sits with |
+|---|---|---|
+| "get a promotion" | 3 | the 1:1 with my manager |
+| "change how they see me" | 2 | every conversation with that shape |
+| "talk to my manager" | 1 | everything |
+
+"Change how they see me" is a real goal with real strategies even when "get a
+promotion" is not yet committed to. That is the same trie mechanic as GREN's
+terminal-on-internal-node rule, arrived at from the other direction: a general
+class is a strict prefix of a specific one and is answerable on its own.
+
+Two arguments for the ordering, and the second is the load-bearing one:
+
+* **Compression.** `gren/cli.py` inserted `sorted(signature())`, so the tree's
+  root discriminated on `adversarial=` for no better reason than that "a" sorts
+  first — which separates nothing among four board-ish games. Goal-first
+  identifies a game from **one** token against alphabetical's **2.5**, and the
+  root branches four ways instead of two. *Small N*: four games and one
+  perfectly-discriminating axis makes this nearly free, and `goal_type` would not
+  stay a unique key at four hundred games.
+* **Knowability.** Putting the goal at the root means the questions the tree asks
+  first are the ones a new game can actually answer. This does not depend on the
+  corpus size, and it is why the first argument is the weaker one.
+
+"Work backwards" is also the traversal, not just the layout: from the goal, to
+what must be true for it, to what must be true for *that*. Chess endgame
+tablebases are built exactly this way, backwards from mate. It is goal regression,
+and it is the natural home for `GREN/DESIGN.md` §8.3's STRIPS operators, still
+unimplemented.
+
+One honest limit: chess and checkers still share 2 of 3 goal axes
+(`against=opponent`, `decided_by=terminal-state`) and diverge only at the leaf —
+`reach-target` against `outlast`. The goal axis separates them where mechanic
+similarity does not separate them at all, which is the right direction given that
+chess→checkers transfer has measured at approximately nothing three ways
+(29, 30, 32), but it is a modest separation rather than a dramatic one.
+
+*Where:* `GREN/gren/radix.py` (`goal_first`), `GREN/gren/cli.py` · **confirmed**
+
 ---
 
 ## What to test next
@@ -707,10 +769,11 @@ Ordered by how much they would change, per unit of effort:
 
 0. ~~**Does transfer survive ACROSS regions, or only within them?**~~ (29) **Answered: the graph is doing routing.** Cross-region transfer is +0.025 in one case of four; the within-region shared vocabulary is +0.023 against its proper baseline. Regions earn their place by *placing* games correctly — the wrong region is measurably worse, per the negative Shapley values — not by teaching each other.
 1. ~~**Does validity transfer?**~~ (19) **Answered, and it is the same +0.023.** `p_valid` trained on chess alone leaves checkers at its majority class. The interesting follow-up is 29's refinement: build a region whose vocabulary is *mostly* shared, as `common_denominator.py` did with three inputs, and see whether 0.646 survives inside a cortex.
-2. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `Memory/` needs building.
-3. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
-4. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
-5. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
-6. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
-7. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
-8. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
+2. **Does goal-first ordering still pay at scale?** (37) The compression half of the result is small-N: four games and one perfectly-discriminating axis. Generate or gather thirty-odd games with overlapping goals and re-measure tokens-to-identification against alphabetical and against a highest-entropy-axis-first ordering. The knowability argument does not need this; the compression claim does.
+3. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `Memory/` needs building.
+4. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
+5. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
+6. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
+7. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
+8. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
+9. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.

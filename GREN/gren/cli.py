@@ -11,7 +11,7 @@ from gren.oracle import build_all
 from gren.explorer import Explorer
 from gren.axis import distance
 from gren.probe import POLICIES
-from gren.radix import RadixGameTree
+from gren.radix import RadixGameTree, goal_first
 from gren import package as pkg
 
 def _explore(budget, policy="eig", seed=0):
@@ -56,7 +56,7 @@ def cmd_policies(a):
 def cmd_tree(a):
     ev = _explore(a.budget, a.policy, a.seed)
     t = RadixGameTree()
-    for n, (e, _) in ev.items(): t.insert(sorted(e.signature()), n)
+    for n, (e, _) in ev.items(): t.insert(goal_first(e.signature()), n)
     merged = t.compress()
     print(f"\n  radix tree over discovered signatures: {len(t.terminals())} terminals, "
           f"{merged} unary chains compressed\n")

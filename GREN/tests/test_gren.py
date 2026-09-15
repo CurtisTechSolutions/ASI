@@ -310,6 +310,47 @@ def test_export_round_trips_the_vocabulary():
         for b, i, sg in dims:
             assert isinstance(b, str) and isinstance(i, int) and sg in (1, -1)
 
+def test_the_tree_asks_about_the_goal_first():
+    """The insertion order IS the order the tree asks about tokens, so it decides
+    what sits at the root. Alphabetical put `adversarial=` there because "a"
+    sorts first, which discriminates nothing among four board-ish games."""
+    from gren.radix import goal_first
+    sig = ["refuses=OFF_BOARD", "adversarial=competitive", "players=2",
+           "goal_type=reach-target", "category=board"]
+    got = goal_first(sig)
+    assert got[0] == "goal_type=reach-target", got
+    assert got[-1] == "refuses=OFF_BOARD", "refusal codes come after the declared axes"
+    assert sorted(got) == sorted(sig), "reordering must not add or drop a token"
+    assert goal_first(sig) == goal_first(list(reversed(sig))), "must be deterministic"
+
+
+def test_goal_first_identifies_a_game_sooner():
+    """Measured over the handoff corpus: one token against alphabetical's 2.5.
+
+    Small N -- four games and one perfectly-discriminating axis makes this nearly
+    free, and goal_type would not stay a unique key at four hundred games. The
+    argument that does not depend on N is knowability: the goal is the one thing
+    you can state about an unfamiliar game before you can play it."""
+    import json, os
+    from gren.radix import goal_first
+    h = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "CyclicCortex", "data", "gren_packages.json")
+    if not os.path.exists(h): return
+    sigs = {n: p["signature"] for n, p in json.load(open(h))["packages"].items()}
+
+    def depth(order):
+        tot = 0
+        for name in sigs:
+            toks = order(sigs[name])
+            for k in range(len(toks) + 1):
+                if len([m for m in sigs if set(toks[:k]) <= set(sigs[m])]) == 1:
+                    tot += k; break
+            else: tot += len(toks)
+        return tot / len(sigs)
+
+    assert depth(goal_first) < depth(sorted), (depth(goal_first), depth(sorted))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

@@ -98,6 +98,23 @@ never learns the rare rules, and that is what a probe policy is for.
 
 ## A radix tree with the mechanics of a trie
 
+**Ordered by the end goal, working backwards.** The order tokens are inserted in
+is the order the tree asks about them, so it decides what sits at the root — and
+`sorted()` put `adversarial=` there because "a" sorts first, which separates
+nothing among four board-ish games. `goal_first()` asks the goal first:
+`goal_type=reach-target` for chess, `outlast` for checkers, `maximise-score` for
+go, `produce-artifact` for sudoku. Measured, that identifies a game from **one**
+token against alphabetical's **2.5** (small N — four games and one
+perfectly-discriminating axis makes it nearly free).
+
+The argument that does not depend on N is **knowability**: the goal is the one
+thing you can state about an unfamiliar game before you can play it. You know a
+conversation is meant to get you a promotion; you do not know its payoff matrix.
+Goal-first means the questions the tree asks first are the ones a new game can
+answer — and when the goal is unclear, going *up* a level is the semantics rather
+than a fallback, because "change how they see me" is a real goal with real
+strategies even when "get a promotion" is not yet committed to.
+
 Both halves are load-bearing, and their interaction is one rule:
 **a terminal node is never merged away.**
 
