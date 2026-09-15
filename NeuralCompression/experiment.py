@@ -47,17 +47,26 @@ def data(G,n,rng):
     return D
 
 class MLP:
-    def __init__(self,ni,nh,rng,act="tanh",b=1.0/3.0):
+    def __init__(self,ni,nh,rng,act="tanh",b=1.0/3.0,a=-1.0,h=0.0,k=0.0):
         self.ni,self.nh,self.act,self.b=ni,nh,act,b
+        self.a,self.h,self.k=a,h,k
         s=1.0/math.sqrt(ni)
         self.W1=[[rng.uniform(-s,s) for _ in range(nh)] for _ in range(ni)]
         self.b1=[0.0]*nh
         self.W2=[rng.uniform(-1,1)/math.sqrt(nh) for _ in range(nh)]
         self.b2=0.0
     def f(self,z):
-        return math.tanh(z) if self.act=="tanh" else -math.sin(self.b*z)
-    def df(self,z,a):
-        return 1.0-a*a if self.act=="tanh" else -math.cos(self.b*z)*self.b
+        """f(z) = a*sin(b*(z-h)) + k -- Research/SineWaveActivationFunction.md 4.
+
+        The author's formula in full. At the defaults a=-1, h=0, k=0 it is
+        -sin(b*z), which is what every number in FINDINGS.md was measured on;
+        b is the one this file sweeps."""
+        if self.act=="tanh": return math.tanh(z)
+        return self.a*math.sin(self.b*(z-self.h))+self.k
+    def df(self,z,fz):
+        """df/dz = a*b*cos(b*(z-h)); fz is f(z), which only tanh reuses."""
+        if self.act=="tanh": return 1.0-fz*fz
+        return self.a*self.b*math.cos(self.b*(z-self.h))
     def forward(self,x):
         zh=[0.0]*self.nh; ah=[0.0]*self.nh
         for h in range(self.nh):

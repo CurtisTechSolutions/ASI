@@ -440,7 +440,7 @@ Each one says something:
 In RadixCyclicNN every node owns its own `(a, b, h, k)` and all four are updated
 by the local rule, alongside the node state `z` and the outgoing weights.
 `SBNN_RNN_ActivationFunction/main.py` is the same principle in a conventional
-RNN: a learnable-parameter activation whose `α` and `β` are updated by their own
+RNN: the same `(a, b, h, k)`, one wave per hidden unit, updated by their own
 gradients at a tenth of the weight learning rate. The tenth matters — the
 activation is the *shape of the space* the weights are searching in, and moving
 the space as fast as you move the search makes both diverge.
@@ -537,7 +537,7 @@ To turn this from an indication into a result:
 | `RadixCyclicNN/radixnet/activation.py` | the reference implementation: `sine_activation`, `sine_derivative`, `sine_partials`, `SineActivation.inverted()` |
 | `RadixCyclicNN/radixnet/graph.py` | per-node `a, b, h, k`; `Z_RANGE = 4.5` matched to the quarter period |
 | `RadixCyclicNN/radixnet/backend.py` | the same formulas inlined for the hot loop, CPU and GPU, asserted to produce identical numbers |
-| `SBNN_RNN_ActivationFunction/main.py` | the "learnable activation" principle in a conventional RNN with BPTT |
+| `SBNN_RNN_ActivationFunction/main.py` | per-unit `a, b, h, k` in a conventional RNN with BPTT, at `lr/10`; grown units are born at the defaults |
 | `ActivationFunctionTest/self_building_sinewave.py` | the four learnable parameters inside a self-building network, standard library only - five arms, five seeds, and the section 6 dead fraction measured on the pre-activations a trained network actually produces |
 
 The edge signal in RadixCyclicNN is `w · f_p(z_p) · f_c(z_c)` — weight times the

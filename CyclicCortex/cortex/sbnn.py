@@ -16,9 +16,10 @@ Two output heads per GREN/DESIGN.md 22.6:
 import math, random
 
 class SBNN:
-    def __init__(self, ni, nh=24, seed=0, act="tanh", b=1.0):
+    def __init__(self, ni, nh=24, seed=0, act="tanh", b=1.0, a=-1.0, h=0.0, k=0.0):
         self.rng = random.Random(seed)
         self.ni, self.nh, self.act, self.b = ni, nh, act, b
+        self.a, self.h, self.k = a, h, k
         s = 1.0 / math.sqrt(max(1, ni))
         self.W1 = [[self.rng.uniform(-s, s) for _ in range(nh)] for _ in range(ni)]
         self.b1 = [0.0] * nh
@@ -33,9 +34,20 @@ class SBNN:
 
     # ---------------------------------------------------------------- forward
     def f(self, z):
-        return math.tanh(z) if self.act == "tanh" else -math.sin(self.b * z)
-    def df(self, z, a):
-        return 1.0 - a * a if self.act == "tanh" else -math.cos(self.b * z) * self.b
+        """``f(z) = a*sin(b*(z-h)) + k`` -- Research/SineWaveActivationFunction.md 4.
+
+        The author's formula written out in full, so all four knobs of the wave
+        are present rather than folded into a constant. At the defaults
+        ``a=-1, h=0, k=0`` this is ``-sin(b*z)``, which is exactly what this net
+        computed before; only ``b`` diverges from the paper's 1/3, deliberately
+        and for a measured reason (DESIGN.md 8, NeuralCompression/FINDINGS.md 5).
+        """
+        if self.act == "tanh": return math.tanh(z)
+        return self.a * math.sin(self.b * (z - self.h)) + self.k
+    def df(self, z, fz):
+        """``df/dz = a*b*cos(b*(z-h))``; ``fz`` is ``f(z)``, which only tanh reuses."""
+        if self.act == "tanh": return 1.0 - fz * fz
+        return self.a * self.b * math.cos(self.b * (z - self.h))
 
     def forward(self, x):
         zh = list(self.b1)
@@ -124,7 +136,8 @@ class SBNN:
 
     # ---------------------------------------------------------- serialisation
     def to_dict(self):
-        return {"ni": self.ni, "nh": self.nh, "act": self.act, "b": self.b,
+        return {"ni": self.ni, "nh": self.nh, "act": self.act,
+                "a": self.a, "b": self.b, "h": self.h, "k": self.k,
                 "W1": self.W1, "b1": self.b1, "Wv": self.Wv, "bv": self.bv,
                 "Wg": self.Wg, "bg": self.bg,
                 "loss": self.loss, "best": self.best, "since": self.since,
@@ -135,7 +148,10 @@ class SBNN:
 
     @classmethod
     def from_dict(cls, d):
-        n = cls(d["ni"], d["nh"], act=d["act"], b=d["b"])
+        # a/h/k default to the paper's values so checkpoints written before the
+        # formula was spelled out still load to the same function.
+        n = cls(d["ni"], d["nh"], act=d["act"], b=d["b"],
+                a=d.get("a", -1.0), h=d.get("h", 0.0), k=d.get("k", 0.0))
         for k in ("W1","b1","Wv","bv","Wg","bg","loss","best","since","seen","log",
                   "warmup","patience","min_improve","max_hidden","growth"):
             setattr(n, k, d[k])
