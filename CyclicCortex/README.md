@@ -15,7 +15,7 @@ python3 -m cortex.cli demo          # build, train, play chess, add sudoku
 python3 -m cortex.cli map           # the similarity graph and its regions
 python3 -m cortex.cli play          # chess against the engine
 python3 -m cortex.cli sudoku        # solve puzzles by the network's own ranking
-python3 -m tests.test_v1            # 11 tests
+python3 -m tests.test_v1            # 14 tests
 ```
 
 Pure standard library, no dependencies.
@@ -31,7 +31,7 @@ Pure standard library, no dependencies.
 | `cortex/vocabulary.py` | mechanic → input slots; extension only appends, slot indices are permanent |
 | `cortex/sbnn.py` | the growing network, two heads (`p_valid`, `grade`), growth on a loss plateau |
 | `cortex/graph.py` | Jaccard distance over mechanics, triangle-inequality check |
-| `cortex/cortex.py` | regions, routing, training, evaluation |
+| `cortex/cortex.py` | regions, routing, supervised training, **self-play with outcome credit**, evaluation |
 
 ## What it does
 
@@ -65,12 +65,12 @@ consistent geometry.
 Always reported against a baseline, because the candidate sets are not balanced
 and raw accuracy would flatter a model that just predicts the majority class.
 
-| game | legality accuracy | majority baseline | top pick legal | random pick | illegal rate in play |
-|---|---|---|---|---|---|
-| **go** | **1.000** | 0.564 | **1.000** | 0.564 | **0.000** |
-| sudoku | **1.000** | 0.500 | **1.000** | 0.500 | — (solitaire) |
-| chess | 0.921 | 0.651 | 0.975 | 0.349 | 0.10 – 0.69 |
-| checkers | 0.906 | 0.702 | 0.725 | 0.298 | 0.59 – 0.75 |
+| game | legality | majority baseline | top pick legal | random pick | illegal in play | vs engine (4 games) |
+|---|---|---|---|---|---|---|
+| **go** | **1.000** | 0.564 | **1.000** | 0.564 | **0.000** | **1 win** (55–26); losses 35–46, 39–42 |
+| **checkers** | **0.975** | 0.702 | **0.900** | 0.298 | 0.05 – 0.11 | **2 wins** (8–0, 4–0) |
+| sudoku | **1.000** | 0.500 | **1.000** | 0.500 | — (solitaire) | — |
+| chess | 0.864 | 0.651 | 0.925 | 0.349 | **0.000 – 0.013** | 0 wins, −3700 to −5000 material |
 
 **Go and sudoku are solved for legality** — the go region plays 125-ply games
 against the engine without a single illegal move, and sudoku never misjudges a
@@ -117,19 +117,46 @@ measures **0.977** as reachable with these same features under fully balanced
 sampling, so roughly 0.12 of the gap remains unexplained and is the first thing
 to chase.
 
-**Against the engines, the cortex loses every game it does not win by
-attrition,** and the honest reason is that `grade` is a one-line heuristic with
-no search: material delta in chess, real captures in checkers, enabled captures
-in go. The go region is the clearest case — it plays 125 plies without one
-illegal move and still loses 0–81, because legal and *good* are different
-questions and only the first has been trained properly.
+## Grade, learned from outcomes
 
-**The illegal rate in play is worse than evaluation suggests, and that gap is
-real.** Evaluation samples positions from engine games; play reaches positions
-the cortex's own weak moves lead to, which is a distribution it never trained on.
-Mixing self-play positions into training cut chess from 0.70 to 0.06 in one game
-but the variance across games remains large. Closing it properly needs training
-on the cortex's own games, not the engine's.
+V1's `grade` was a hand-written heuristic, which is why go could play 125 legal
+plies and lose 0–81: *legal* and *good* are different questions and only the
+first was trained. `Cortex.selfplay` now plays games, waits for the result, and
+credits every move the cortex made with the discounted outcome.
+
+**Three things were each necessary, and none sufficient alone.** Measured on go
+against the engine, 6 games:
+
+| features | grade | γ | W–L | mean score gap |
+|---|---|---|---|---|
+| liberty only | heuristic | 0.95 | 0–6 | −80.2 |
+| + influence, connection | heuristic | 0.95 | 0–6 | −80.2 |
+| + influence, connection | outcome | 0.95 | 0–6 | −81.0 |
+| **+ influence, connection** | **outcome** | **0.995** | **3–3** | **−14.3** |
+
+*The vocabulary sets the ceiling.* Go's features were `x, y, empty, liberties,
+captures, group size` — sufficient for legality (1.000) and structurally
+incapable of expressing territory. `INFLUENCE` and `CONNECTION` (stone density
+and distance by radius, edge proximity, whether the move joins two friendly
+groups) are what a placement game needs to be *played*. This is the checkers
+midpoint lesson one level up.
+
+*The discount must match the game's length.* At γ=0.95 a 125-ply go game gives
+its opening move `0.95¹²⁵ ≈ 0.0017` of the outcome — credit that has vanished.
+The discount is now derived per game, `γ = 0.5^(1/plies)`, so the first move
+keeps half the credit of the last. No constant can serve games of different
+lengths.
+
+*Unfinished games need a value.* Fifty self-play chess games once produced fifty
+draws and therefore zero gradient, because they all hit the ply cap. Each game
+now supplies a bounded, zero-sum `value(state, side)` used when no winner exists.
+
+**Where it stands.** Checkers and go are real players — checkers wins 2 of 4
+against a depth-1 engine and reaches 0.975 legality; go wins 1 of 4 and its
+losses are close (35–46) where they were 0–81. Chess has excellent legality
+(**0.0–0.013 illegal in play**, from 0.10–0.69) and still loses material
+consistently: it is the hardest of the three and has no search, so the engine
+takes free pieces the cortex cannot see coming.
 
 ## What is not here yet
 

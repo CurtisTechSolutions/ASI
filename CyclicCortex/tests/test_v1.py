@@ -118,6 +118,40 @@ def test_engines_beat_random():
         wins += 1 if s.winner() == "w" else 0
     assert wins >= 5, f"depth-2 checkers should dominate random, won {wins}/6"
 
+def test_discount_matches_game_length():
+    """The discount must come from the game, not a constant: at gamma=0.95 a
+    125-ply game gives its opening move 0.0017 of the outcome."""
+    for plies, lo, hi in ((20, 0.95, 0.98), (125, 0.99, 0.999)):
+        g = 0.5 ** (1.0 / plies)
+        assert lo < g < hi, (plies, g)
+        assert abs(g ** plies - 0.5) < 1e-9, "first move keeps half the last move's credit"
+
+def test_position_value_is_bounded_and_signed():
+    """Unfinished games need a value or the grade head learns nothing -- 40
+    self-play chess games once produced 40 draws and zero signal."""
+    from cortex import engine
+    from cortex.board_games import checkers_start, go_start
+    for name, st in (("chess", engine.start_position()),
+                     ("checkers", checkers_start()), ("go", go_start())):
+        g = ALL[name]
+        for me in ("w", "b"):
+            v = g.value(st, me)
+            assert -1.0 <= v <= 1.0, (name, me, v)
+        assert abs(g.value(st, "w") + g.value(st, "b")) < 1e-9, f"{name}: zero-sum at start"
+
+def test_selfplay_trains_grade_and_keeps_legality():
+    c = Cortex(); c.add_game(ALL["checkers"])
+    from cortex.cli import OPPONENT
+    rng = random.Random(0)
+    c.train(ALL["checkers"], episodes=200, rng=rng, k=10, opponent=OPPONENT["checkers"])
+    before = c.evaluate(ALL["checkers"], n=25, rng=random.Random(4), k=10)
+    r = c.selfplay(ALL["checkers"], rounds=12, rng=rng, opponent=OPPONENT["checkers"],
+                   max_plies=80)
+    after = c.evaluate(ALL["checkers"], n=25, rng=random.Random(4), k=10)
+    assert r["win"] + r["loss"] + r["draw"] == 12
+    assert 0.0 < r["gamma"] < 1.0
+    assert after["legality_acc"] >= before["legality_acc"] - 0.15, (before, after)
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

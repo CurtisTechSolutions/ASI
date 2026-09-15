@@ -168,6 +168,84 @@ class Cortex:
             if acc > best: best, bestname = acc, name
         return bestname
 
+    # --------------------------------------------------------- outcome credit
+    def selfplay(self, game, rounds=40, rng=None, opponent=None, side=None,
+                 gamma=None, lr=0.05, eps=0.25, max_plies=200, k=16,
+                 opponent_depth=1, train_valid=True):
+        """Train the GRADE head from what actually happened.
+
+        V1's grade was a hand-written heuristic -- material delta, real captures,
+        enabled captures -- which is why the go region could play 125 legal plies
+        and still lose 0-81: legal and GOOD are different questions and only the
+        first was trained. Here the cortex plays, the game ends, and every move it
+        made is credited with the discounted outcome.
+
+        This also closes the distribution gap V1 measured. Evaluation sampled
+        positions from ENGINE games while play reached positions the cortex's own
+        weak moves lead to; self-play trains on exactly the latter.
+
+        Moves are chosen from LEGAL moves only: grade is a question about legal
+        moves, and letting the cortex play illegally would produce trajectories
+        no real game could reach. Validity keeps training from the candidate sets
+        alongside, where the labels are free.
+
+        `gamma=None` sets the discount FROM THE GAME'S OWN LENGTH, so the first
+        move of a game retains half the credit of the last:
+
+            gamma = 0.5 ** (1 / plies)
+
+        A fixed discount cannot serve games of different lengths. At gamma=0.95 a
+        125-ply go game gives its opening move 0.0017 of the outcome -- credit
+        that has effectively vanished -- and go stayed at 0 wins and -80 points.
+        Setting it from the length took the same network to 3 wins in 6 and -14.
+        Checkers and chess run to different lengths again, so the discount is
+        measured per game rather than chosen.
+        """
+        rng = rng or random.Random(0)
+        r = self.region_for(game)
+        me = side or ("b" if game.name == "go" else "w")
+        results = {"win": 0, "loss": 0, "draw": 0}
+        for _ in range(rounds):
+            s = game.new(seed=rng.randrange(10**6))
+            traj = []
+            for _ply in range(max_plies):
+                if game.terminal(s): break
+                legal = game.legal_moves(s)
+                if not legal: break
+                turn = getattr(s, "turn", me)
+                if turn == me:
+                    if rng.random() < eps:
+                        mv = rng.choice(legal)
+                    else:
+                        scored = [(*r.net.predict(self.encode(r, game, s, m)), m)
+                                  for m in legal]
+                        mv = max(scored, key=lambda t: t[1])[2]   # best grade among legal
+                    traj.append((s, mv))
+                    if train_valid:
+                        for c in game.candidates(s, rng, k):
+                            r.net.step(self.encode(r, game, s, c),
+                                       valid=1.0 if game.is_legal(s, c) else 0.0, lr=lr)
+                else:
+                    mv = opponent(s, opponent_depth, rng) if opponent else rng.choice(legal)
+                    if mv is None or not game.is_legal(s, mv): mv = rng.choice(legal)
+                s = game.apply(s, mv)
+            w = game.winner(s) if hasattr(game, "winner") else None
+            if w is not None:
+                z = 1.0 if w == me else -1.0
+            elif hasattr(game, "value"):
+                z = game.value(s, me)      # unfinished: bootstrap from the position
+            else:
+                z = 0.0
+            results["win" if z > 0.05 else ("loss" if z < -0.05 else "draw")] += 1
+            g = gamma if gamma is not None else 0.5 ** (1.0 / max(1, len(traj)))
+            for i, (st, mv) in enumerate(reversed(traj)):
+                r.net.step(self.encode(r, game, st, mv), grade=z * (g ** i), lr=lr)
+        r.plays += rounds; r.hits += results["win"]
+        return {"game": game.name, "rounds": rounds, **results,
+                "gamma": round(gamma if gamma is not None
+                               else 0.5 ** (1.0 / max(1, len(traj))), 4),
+                "shape": r.net.shape()}
+
     def evaluate(self, game, n=60, rng=None, k=12, opponent=None, selfplay=0.5):
         """Evaluated on the SAME mixture it will face in play, not on random
         positions only -- otherwise the metric flatters the model."""

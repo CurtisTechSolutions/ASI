@@ -77,6 +77,13 @@ class ChessGame:
             "SIDE":        [1.0 if s.turn=="w" else 0.0],
         }
 
+    def value(self, s, me):
+        """Position value in [-1,1] when a game did not finish. Without it a
+        160-ply chess game that reaches the cap is scored a draw, every move gets
+        zero credit, and the grade head learns NOTHING -- which is exactly what
+        40 self-play games of 40 draws produced."""
+        return max(-1.0, min(1.0, engine.material(s, me) / 4000.0))
+
     def reward(self, s, mv):
         """Grade signal: material swing from the mover's point of view."""
         before = engine.material(s, s.turn)
@@ -176,6 +183,11 @@ class CheckersGame:
                 "FORCED_CAPTURE":[1.0 if s.jumps() else 0.0],
                 "PROMOTE_ON_RANK":[1.0 if p.isupper() else 0.0, reaches_back],
                 "SIDE":[1.0 if s.turn=="w" else 0.0]}
+    def value(self, s, me):
+        opp = "b" if me == "w" else "w"
+        n, m = s.count(me), s.count(opp)
+        return 0.0 if n + m == 0 else max(-1.0, min(1.0, (n - m) / 12.0))
+
     def reward(self, s, mv):
         """Only a REAL capture is worth anything. Rewarding jump SHAPE taught the
         grade head that any two-square move is good, which is precisely what the
@@ -191,7 +203,8 @@ class GoGame:
     mechanics = frozenset({"ALTERNATE_TURNS","GRID_BOARD","PERFECT_INFO","ZERO_SUM",
         "TWO_PLAYER","PIECE_OWNERSHIP","PLACEMENT_MOVE","GROUP_LIBERTY",
         "SURROUND_CAPTURE","KO_REPETITION","NO_MOVEMENT","PASS_ALLOWED"})
-    spec = {"GRID_PLACE":3, "GROUP_LIBERTY":3, "PASS_ALLOWED":1, "SIDE":1}
+    spec = {"GRID_PLACE":3, "GROUP_LIBERTY":3, "INFLUENCE":5, "CONNECTION":3,
+            "PASS_ALLOWED":1, "SIDE":1}
     def new(self, seed=0): return go_start()
     def random_state(self, rng):
         from cortex.board_games import random_go
@@ -209,6 +222,7 @@ class GoGame:
     def generalise(self, s, mv):
         if mv == PASS:
             return {"GRID_PLACE":[0.0,0.0,0.0], "GROUP_LIBERTY":[0.0,0.0,0.0],
+                    "INFLUENCE":[0.0]*5, "CONNECTION":[0.0,0.0,0.0],
                     "PASS_ALLOWED":[1.0], "SIDE":[1.0 if s.turn=="b" else 0.0]}
         x,y=mv
         if s.at(x,y): libs,caps,own = 0.0,0.0,0.0
@@ -222,10 +236,44 @@ class GoGame:
                     if not l: caps+=len(g)
             grp,lb=s.group(x,y,b2)
             libs,own=min(len(lb),4)/4.0, min(len(grp),6)/6.0; caps=min(caps,4)/4.0
+        # INFLUENCE and CONNECTION: the board CONTEXT of the placement. Without
+        # them the vocabulary can express legality and nothing about territory,
+        # which is why the go region played 125 legal plies and lost 0-81. The
+        # feature vocabulary sets the ceiling -- the same lesson as the checkers
+        # midpoint, one level up.
+        opp = "w" if s.turn == "b" else "b"
+        near_own = near_opp = 0.0; d_own = d_opp = 1.0
+        for dy in range(-3, 4):
+            for dx in range(-3, 4):
+                nx, ny = x+dx, y+dy
+                if not (0 <= nx < GN and 0 <= ny < GN) or (dx == 0 and dy == 0): continue
+                v = s.at(nx, ny)
+                if not v: continue
+                d = max(abs(dx), abs(dy)); wgt = 1.0/(d*d)
+                if v == s.turn: near_own += wgt; d_own = min(d_own, d/3.0)
+                else:           near_opp += wgt; d_opp = min(d_opp, d/3.0)
+        edge = min(x, y, GN-1-x, GN-1-y)/4.0
+        # does it join two distinct friendly groups?
+        roots = set()
+        for dx,dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx,ny = x+dx, y+dy
+            if 0<=nx<GN and 0<=ny<GN and s.at(nx,ny) == s.turn:
+                grp,_ = s.group(nx,ny); roots.add(min(grp))
+        adj_opp = sum(1 for dx,dy in ((1,0),(-1,0),(0,1),(0,-1))
+                      if 0<=x+dx<GN and 0<=y+dy<GN and s.at(x+dx,y+dy) == opp)
         return {"GRID_PLACE":[x/(GN-1), y/(GN-1), 0.0 if s.at(x,y) else 1.0],
                 "GROUP_LIBERTY":[libs, caps, own],
+                "INFLUENCE":[min(near_own,4.0)/4.0, min(near_opp,4.0)/4.0,
+                             d_own, d_opp, edge],
+                "CONNECTION":[min(len(roots),3)/3.0, adj_opp/4.0,
+                              1.0 if len(roots) >= 2 else 0.0],
                 "PASS_ALLOWED":[0.0],
                 "SIDE":[1.0 if s.turn=="b" else 0.0]}
+    def value(self, s, me):
+        bs, ws = s.score()
+        d = (bs - ws) if me == "b" else (ws - bs)
+        return max(-1.0, min(1.0, d / (GN*GN/2.0)))
+
     def reward(self, s, mv):
         if mv == PASS: return -0.5           # passing is rarely the best move
         return self.generalise(s, mv)["GROUP_LIBERTY"][1]

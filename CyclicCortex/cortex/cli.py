@@ -107,6 +107,9 @@ def cmd_play(a):
         opp = OPPONENT[n]
         print("    train   ", c.train(ALL[n], episodes=a.episodes, rng=rng, k=12,
                                       opponent=opp))
+        print("    selfplay", c.selfplay(ALL[n], rounds=a.rounds, rng=rng,
+                                         opponent=opp, opponent_depth=1,
+                                         max_plies=a.plies))
         print("    eval    ", c.evaluate(ALL[n], n=40, rng=random.Random(7), k=12,
                                          opponent=opp))
         for i in range(a.games_n):
@@ -169,6 +172,7 @@ def main(argv=None):
         q.add_argument("--games-n", type=int, default=3)
         q.add_argument("--depth", type=int, default=1)
         q.add_argument("--plies", type=int, default=60)
+        q.add_argument("--rounds", type=int, default=40)
         q.add_argument("--games", nargs="*", default=["chess","checkers","go","sudoku"])
     a = p.parse_args(argv); a.fn(a)
 
