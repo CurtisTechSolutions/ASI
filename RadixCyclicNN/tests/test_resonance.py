@@ -18,6 +18,7 @@ from radixnet.beam import Prediction  # noqa: E402
 from radixnet.encoding import Encoder  # noqa: E402
 from radixnet.graph import BACK, FIRST, START  # noqa: E402
 from radixnet.metacog import ABORT, ACTIONS, ESCAPE, RIDE, MetaLayer, cycle_signature  # noqa: E402
+from radixnet.phasesearch import phase_dijkstra, phase_kbest  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 from radixnet.resonance import (  # noqa: E402
     RESONANT_MODEL_FORMAT,
@@ -308,8 +309,81 @@ class TestResonantNet(unittest.TestCase):
         records = model.train(["ab", "hello there"], epochs=1)
         self.assertEqual(records[0]["skipped_short"], 1)
 
+    def test_k_best_with_one_label_per_state_is_dijkstra(self):
+        """``k = 1`` must settle the same states, expand the same number of times and give the same walk."""
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=3)
+        graph = model.graph
+        for prefix in ("the ", "a ", ""):
+            with self.subTest(prefix=prefix):
+                node, offset, _lead = model._prefix_start(prefix)
+                bucket = graph.text_bucket(prefix) if prefix else 0
+                one = phase_dijkstra(graph, node, offset, bucket, min_chars=0, max_chars=60, to_end=True)
+                (best,), expanded = phase_kbest(
+                    graph, None, node, offset, bucket, min_chars=0, k=1, max_chars=60, to_end=True
+                )
+                self.assertEqual(best.text, one.text)
+                self.assertAlmostEqual(best.cost, one.cost, places=12)
+                self.assertEqual(expanded, one.expanded)
+
+    def test_k_best_is_cost_ordered_and_distinct(self):
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=3)
+        found = model.predict("the ", length=0, mode="kbest", k=4, to_end=True, max_length=60)
+        self.assertGreater(len(found.top), 1)
+        costs = [r.cost for r in found.top]
+        self.assertEqual(costs, sorted(costs))
+        self.assertEqual(len(found.top), len({r.text for r in found.top}))
+        self.assertEqual(found.bottom, [], "a k-best search has no bounded worst walk; the beam has that")
+
+    def test_k_best_costs_less_than_a_beam_of_the_same_k(self):
+        """It stops at the k-th finished walk instead of carrying a frontier to the end."""
+        model = ResonantNet(seed=0)
+        model.train(TEXTS * 3, epochs=3)
+        kbest = model.predict("the ", length=0, mode="kbest", k=5, to_end=True, max_length=60)
+        beam = model.predict("the ", length=0, mode="beam", k=5, to_end=True, max_length=60)
+        self.assertLess(kbest.expanded, beam.expanded)
+        self.assertLessEqual(kbest.top[0].cost, beam.top[0].cost + 1e-12)
+
+    def test_the_layer_runs_in_the_k_best_search_but_not_in_dijkstra(self):
+        """One label per state cannot say which walk reached it; k labels can, so the layer sees the cycle."""
+        model = ResonantNet(seed=0)
+        model.train(["lol lol lol lol lol"], epochs=3)
+        self.assertIn("lol:4", model.metacog.scores)
+        before = {
+            "dijkstra": [r.text for r in model.predict("lol ", length=12, mode="dijkstra").top],
+            "kbest": [r.text for r in model.predict("lol ", length=12, mode="kbest", k=3).top],
+        }
+        for signature in list(model.metacog.scores):
+            model.metacog.punish(signature, RIDE, 50)
+        after = {
+            "dijkstra": [r.text for r in model.predict("lol ", length=12, mode="dijkstra").top],
+            "kbest": [r.text for r in model.predict("lol ", length=12, mode="kbest", k=3).top],
+        }
+        self.assertEqual(after["dijkstra"], before["dijkstra"], "the exact single-label search is cycle-blind")
+        self.assertNotEqual(after["kbest"], before["kbest"], "k labels per state make the cycle visible")
+
+        def loopiest(texts):
+            """Where in the ranking the walk that rides the cycle hardest sits."""
+            return max(range(len(texts)), key=lambda i: texts[i].count("lol"))
+
+        self.assertGreater(loopiest(after["kbest"]), loopiest(before["kbest"]),
+                           "refusing to ride must push the loopiest walk down the ranking")
+
+    def test_generation_defaults_to_the_k_best_search(self):
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=3)
+        texts = [r.text for r in model.generate(count=3, max_length=40)]
+        self.assertEqual(len(texts), len(set(texts)))
+        self.assertEqual(texts[0], model.generate(count=1, max_length=40, mode="dijkstra")[0].text)
+        for mode in ("beam", "sample", "dijkstra"):
+            with self.subTest(mode=mode):
+                self.assertTrue(model.generate(count=1, max_length=40, mode=mode))
+        with self.assertRaises(ValueError):
+            model.generate(count=1, mode="nope")
+
     def test_prediction_modes(self):
-        for mode in ("beam", "dijkstra", "sample"):
+        for mode in ("kbest", "beam", "dijkstra", "sample"):
             with self.subTest(mode=mode):
                 result = self.model.predict("the sun", length=10, mode=mode)
                 self.assertIsInstance(result, Prediction)

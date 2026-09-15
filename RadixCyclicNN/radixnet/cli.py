@@ -50,7 +50,7 @@ DEFAULT_CHECKPOINT_DIR = "checkpoints"
 DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
-PREDICT_MODES = ("dijkstra", "beam", "sample")
+PREDICT_MODES = ("dijkstra", "kbest", "beam", "sample")
 KINDS = ("radix", "count", "negative", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
 DEFAULT_NEGATIVE_MODEL = "model.negative.json"
@@ -3678,7 +3678,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--count", type=nonneg_int, default=1, help="texts to generate (beam: the K most likely)")
     p.add_argument("--max-length", type=nonneg_int, default=60, help="maximum characters per text")
-    p.add_argument("--mode", choices=("beam", "sample", "dijkstra"), default="sample", help="generation strategy")
+    p.add_argument("--mode", choices=("beam", "sample", "dijkstra", "kbest"), default="sample",
+                   help="generation strategy (kbest: resonant model only - the exact K cheapest complete texts)")
     p.add_argument("--prefix", default="", metavar="TEXT", help="start every text with this (default: from START)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")

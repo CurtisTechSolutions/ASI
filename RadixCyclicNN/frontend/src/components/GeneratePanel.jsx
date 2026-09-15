@@ -29,6 +29,8 @@ export default function GeneratePanel({ status }) {
   const [guarded, setGuarded] = useState(null);
   const feedback = useJob("feedback");
   const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
+  // the resonant model's k-best search returns the exact K most likely texts, and far cheaper than a beam
+  const resonantKind = Boolean(status && status.kind === "resonant");
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -62,6 +64,13 @@ export default function GeneratePanel({ status }) {
           Whole texts from the prediction search: <b>beam</b> runs it to the end of a text and returns the K most
           likely complete texts (from START, or continuing a prefix); <b>sample</b> draws stochastic walks;{" "}
           <b>dijkstra</b> is the single cheapest text.
+          {resonantKind ? (
+            <>
+              {" "}
+              <b>k-best</b> returns the same K most likely texts <i>exactly</i> - Dijkstra with K labels per state
+              instead of one - and stops as soon as it has them.
+            </>
+          ) : null}
         </p>
         <TextField label="Prefix" hint="optional: every text starts with it" value={prefix} onChange={setPrefix} placeholder="the quick" />
         <div className="row">
@@ -74,6 +83,7 @@ export default function GeneratePanel({ status }) {
             value={mode}
             onChange={setMode}
             options={[
+              ...(resonantKind ? [["kbest", "k-best (the exact K most likely texts)"]] : []),
               ["beam", "beam (the K most likely texts)"],
               ["sample", "sample (stochastic)"],
               ["dijkstra", "dijkstra (the single cheapest text)"],

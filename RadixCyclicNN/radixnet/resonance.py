@@ -104,8 +104,9 @@ from .model import (
     _resolve_config,
     _utc_now,
     _weight_groups,
+    _whole_text,
 )
-from .phasesearch import phase_beam, phase_dijkstra, phase_walk
+from .phasesearch import phase_beam, phase_dijkstra, phase_kbest, phase_walk
 from .search import PathResult
 
 __all__ = ["RESONANT_MODEL_FORMAT", "TAU", "ResonantGraph", "ResonantNet", "trigram_phase"]
@@ -955,14 +956,14 @@ class ResonantNet(GraphModel):
         """
         return self.predict(
             prefix, length=length, mode=mode, step_penalty=step_penalty, temperature=temperature,
-            to_end=to_end, max_length=max_length, k=k, beam=beam, rng=rng,
+            to_end=to_end, max_length=max_length, k=max(1, k), beam=beam, rng=rng,
         )
 
     def predict(
         self,
         prefix: str,
         length: int = 20,
-        mode: str = "beam",
+        mode: str = "kbest",
         step_penalty: float = 0.0,
         temperature: float = 1.0,
         to_end: bool = False,
@@ -973,15 +974,23 @@ class ResonantNet(GraphModel):
     ) -> Prediction:
         """Continue ``prefix`` over the phase-unrolled graph.
 
-        ``"beam"`` (the default) returns the ``k`` most and least likely
-        continuations and runs the metacognitive layer on every phase-locked
-        cycle it meets; ``"dijkstra"`` is the exact cheapest path over
-        ``(node, chars, phase)`` and runs without the layer; ``"sample"`` is one
-        stochastic walk, layer included.
+        * ``"kbest"`` (the default) is Dijkstra with ``k`` labels per state
+          instead of one: the ``k`` cheapest walks, *exactly*, and - because
+          every label is a distinct walk that can be read back to its own path -
+          with the metacognitive layer running on the cycles it meets.  ``k = 1``
+          is ``"dijkstra"`` to the expansion.
+        * ``"dijkstra"`` is the single cheapest walk, one label per state.  One
+          label cannot say which walk reached it, so the layer does not run.
+        * ``"beam"`` keeps the ``beam`` cheapest partial walks per step and is
+          the only mode that also returns the ``k`` *least* likely
+          continuations, which a k-best search cannot: in a cyclic graph the
+          worst walk is unboundedly bad, so "worst" needs a frontier's bound
+          rather than a goal count.
+        * ``"sample"`` is one stochastic walk, layer included.
         """
-        mode = (mode or "beam").lower()
-        if mode not in ("beam", "dijkstra", "sample"):
-            raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
+        mode = (mode or "kbest").lower()
+        if mode not in ("kbest", "beam", "dijkstra", "sample"):
+            raise ValueError(f"unknown mode {mode!r}; expected 'kbest', 'beam', 'dijkstra' or 'sample'")
         self._check_predict_args(prefix, length, max_length, k, beam)
         graph = self.graph
         node, offset, lead = self._prefix_start(prefix)
@@ -999,7 +1008,14 @@ class ResonantNet(GraphModel):
             cap = max(length, max_length)
             max_chars = max(want, cap - len(lead))
         width = 0
-        if mode == "dijkstra":
+        if mode == "kbest":
+            found, expanded = phase_kbest(
+                graph, self.metacog, node, offset, bucket, min_chars=want, k=k, max_chars=max_chars,
+                step_penalty=step_penalty, to_end=to_end,
+            )
+            top, bottom = found, []
+            best = top[0] if top else None
+        elif mode == "dijkstra":
             best = phase_dijkstra(
                 graph, node, offset, bucket, min_chars=want, max_chars=max_chars,
                 step_penalty=step_penalty, to_end=to_end,
@@ -1047,6 +1063,45 @@ class ResonantNet(GraphModel):
             if child == c:
                 return -cost
         return None
+
+    def generate(
+        self,
+        max_length: int = 60,
+        mode: str = "kbest",
+        temperature: float = 1.0,
+        count: int = 1,
+        seed: int | None = None,
+        prefix: str = "",
+        step_penalty: float = 0.0,
+        beam: int | None = None,
+    ) -> list[PathResult]:
+        """Whole texts from the prediction search; ``"kbest"`` (the default) returns the exact ``count`` cheapest.
+
+        Generation asks the search for the ``count`` most likely *complete*
+        texts, which is precisely what :func:`~radixnet.phasesearch.phase_kbest`
+        answers exactly - and for a fraction of what a beam of the same ``k``
+        costs, because it stops as soon as it has ``count`` finished walks.  The
+        other modes are :meth:`GraphModel.generate`'s.
+        """
+        mode = (mode or "kbest").lower()
+        if mode != "kbest":
+            return super().generate(
+                max_length=max_length, mode=mode, temperature=temperature, count=count, seed=seed,
+                prefix=prefix, step_penalty=step_penalty, beam=beam,
+            )
+        if max_length < 0:
+            raise ValueError(f"max_length must be >= 0, got {max_length}")
+        if count < 0:
+            raise ValueError(f"count must be >= 0, got {count}")
+        if not isinstance(prefix, str):
+            raise TypeError("prefix must be a string")
+        if count == 0:
+            return []
+        found = self.predict(
+            prefix, length=0, mode="kbest", k=count, to_end=True, max_length=max_length,
+            step_penalty=step_penalty,
+        )
+        return [_whole_text(result, prefix) for result in found.top]
 
     def score(self, text: str) -> dict:
         """Log-probability of ``text`` under the model, phase included.

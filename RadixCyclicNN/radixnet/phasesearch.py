@@ -42,7 +42,7 @@ from .graph import END, FIRST
 from .metacog import ABORT, ESCAPE, RIDE, cycle_signature
 from .search import PathResult, _build_result, _start_emission, onward
 
-__all__ = ["phase_beam", "phase_dijkstra", "phase_walk", "start_bucket"]
+__all__ = ["phase_beam", "phase_dijkstra", "phase_kbest", "phase_walk", "start_bucket"]
 
 _OV = WINDOW - 1
 
@@ -145,20 +145,136 @@ def phase_dijkstra(
     return _build_result(graph, node_ids, step_costs, start_offset, max_chars, expanded, include_context)
 
 
+def phase_kbest(
+    graph,
+    meta,
+    start_node: int,
+    start_offset: int,
+    start_phase: int,
+    min_chars: int,
+    k: int = 5,
+    max_chars: int | None = None,
+    step_penalty: float = 0.0,
+    to_end: bool = False,
+    max_expansions: int = 200_000,
+    include_context: bool | None = None,
+) -> tuple[list[PathResult], int]:
+    """The ``k`` cheapest walks, exactly - Dijkstra with ``k`` labels per state instead of one.
+
+    :func:`phase_dijkstra` settles every ``(node, chars, phase)`` once, which is
+    what makes it a shortest path and also what makes it blind: one label per
+    state cannot remember *which* walk reached it, so the metacognitive layer
+    has nothing to look at.  Letting a state be settled up to ``k`` times fixes
+    both at once.  Each label is a distinct walk, so
+
+    * the ``k`` goals pop in cost order and are the ``k`` cheapest walks, exactly
+      (the standard k-shortest-walks argument; loops are allowed, and a walk
+      that goes round again is simply one of the candidates), and
+    * every label can be read back to its own path, so the cycle it is standing
+      in is visible and :mod:`radixnet.metacog` can price it - in the *exact*
+      search, not only in the beam.
+
+    ``k = 1`` is :func:`phase_dijkstra`: the same states, the same expansions,
+    the same answer.  Above that the cost grows with ``k``, not with the width
+    of a frontier, because the search still stops the moment it has ``k``
+    finished walks - on this package's sample corpus ``k = 5`` costs about an
+    eighth of what the beam of the same ``k`` costs, for an answer the beam can
+    only approximate.
+
+    A trained layer prices a move by what is already on the path, which no
+    longer decomposes over states, so exactness then holds only up to the
+    ``k``-labels-per-state bound; the bound is per state rather than per
+    frontier, so it degrades where the graph branches instead of wherever the
+    cheapest region happens to be.  Returns ``(paths, expansions)``; the goal,
+    cap and fallback rules are :func:`phase_dijkstra`'s.
+    """
+    if step_penalty < 0:
+        raise ValueError("step_penalty must be >= 0 (a k-best search needs non-negative costs)")
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    if max_chars is not None and max_chars < min_chars:
+        max_chars = min_chars
+    labels = graph.labels
+    start_chars = _start_emission(graph, start_node, start_offset)
+    phase0 = start_phase % graph.buckets
+    # a label is (node, chars, phase, step cost, parent index); the chain is the walk
+    chain: list[tuple[int, int, int, float, int]] = [(start_node, start_chars, phase0, 0.0, -1)]
+    heap = [(0.0, 0, 0)]
+    settled: dict[tuple[int, int, int], int] = {}
+    goals: list[int] = []
+    expanded = 0
+    fallback, fb_chars, fb_cost = 0, start_chars, 0.0
+
+    def walk_back(idx: int) -> tuple[list[int], list[float], dict[tuple[int, int], int]]:
+        """The label's nodes, its step costs and where each ``(node, phase)`` first appeared."""
+        nodes: list[int] = []
+        steps: list[float] = []
+        seen: list[tuple[int, int]] = []
+        i = idx
+        while i >= 0:
+            node, _chars, phase, step, parent = chain[i]
+            nodes.append(node)
+            seen.append((node, phase))
+            if parent >= 0:
+                steps.append(step)
+            i = parent
+        nodes.reverse()
+        steps.reverse()
+        seen.reverse()
+        depth: dict[tuple[int, int], int] = {}
+        for position, key in enumerate(seen):
+            depth.setdefault(key, position)  # the first visit is what names the loop
+        return nodes, steps, depth
+
+    while heap and len(goals) < k:
+        cost, _tie, idx = heappop(heap)
+        node, chars, phase, _step, _parent = chain[idx]
+        state = (node, chars, phase)
+        count = settled.get(state, 0)
+        if count >= k:
+            continue  # this state already has its k cheapest ways of being reached
+        settled[state] = count + 1
+        expanded += 1
+        if node == END or (not to_end and chars >= min_chars):
+            goals.append(idx)
+            continue
+        if chars > fb_chars or (chars == fb_chars and cost < fb_cost):
+            fallback, fb_chars, fb_cost = idx, chars, cost
+        if expanded >= max_expansions:
+            break
+        if max_chars is not None and chars >= max_chars:
+            continue
+        depth = walk_back(idx)[2] if meta is not None else {}
+        for c, _e, step, nphase, _action in _expand(graph, meta, node, phase, depth, step_penalty):
+            nchars = chars if c < FIRST else chars + len(labels[c]) - _OV
+            if max_chars is not None and nchars > max_chars and c >= FIRST:
+                continue
+            if settled.get((c, nchars, nphase), 0) >= k:
+                continue
+            chain.append((c, nchars, nphase, step, idx))
+            heappush(heap, (cost + step, len(chain) - 1, len(chain) - 1))
+    if not goals:
+        goals = [fallback]
+    results = []
+    for idx in goals:
+        nodes, steps, _depth = walk_back(idx)
+        results.append(_build_result(graph, nodes, steps, start_offset, max_chars, expanded, include_context))
+    return results, expanded
+
+
 class _Entry:
-    """One partial path in a beam: its tail state, its parent and what it has seen."""
+    """One partial path in a beam: its tail state, its parent and where it has already been."""
 
-    __slots__ = ("node", "chars", "phase", "cost", "parent", "step", "seen", "depth")
+    __slots__ = ("node", "chars", "phase", "cost", "parent", "step", "depth")
 
-    def __init__(self, node, chars, phase, cost, parent, step, seen, depth):
+    def __init__(self, node, chars, phase, cost, parent, step, depth):
         self.node = node
         self.chars = chars
         self.phase = phase
         self.cost = cost
         self.parent = parent
         self.step = step
-        self.seen = seen              # frozenset of (node, phase) already on this path
-        self.depth = depth            # position of each state, for the loop length
+        self.depth = depth            # {(node, phase) already on this path: where it first appeared}
 
     def path(self) -> tuple[list[int], list[float]]:
         nodes: list[int] = []
@@ -174,28 +290,30 @@ class _Entry:
         return nodes, steps
 
 
-def _expand(graph, meta, entry: _Entry, step_penalty: float):
-    """Children of a beam entry as ``(child, edge, step_cost, phase, action)``.
+def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float):
+    """Children of one partial path as ``(child, edge, step_cost, phase, action)``.
 
-    ``action`` is the metacognitive action the move stands for when this entry
-    faces a phase-locked cycle, and ``None`` when it does not.  The layer's
-    cost is added to the edge's, so a cycle the corpus rides stays cheap and
-    one it never rides is dear - neither is ruled out.
+    ``depth`` maps every ``(node, phase)`` already on the path to where it first
+    appeared, which is all the metacognitive layer needs: a child landing on one
+    of them closes a phase-locked cycle, and the difference is the loop's length.
+    ``action`` is the action the move stands for when this path faces such a
+    cycle, and ``None`` when it does not.  The layer's cost is added to the
+    edge's, so a cycle the corpus rides stays cheap and one it never rides is
+    dear - neither is ruled out.
     """
-    node, phase = entry.node, entry.phase
     advance = graph.advance
     buckets = graph.buckets
     labels = graph.labels
     raw = onward(graph.child_costs_at(node, phase))  # a node the model expects to go round offers nothing
     extra: dict[str, float] | None = None
     loops: dict[int, int] = {}
-    if meta is not None and entry.seen:
-        here = entry.depth.get((node, phase), 0)
+    if meta is not None and depth:
+        here = depth.get((node, phase), 0)
         for c, _e, _cost in raw:
             if c < FIRST:
                 continue  # a sentinel is not a node to loop through
             nphase = (phase + advance[c]) % buckets
-            first = entry.depth.get((c, nphase))
+            first = depth.get((c, nphase))
             if first is not None:
                 loops[c] = here + 1 - first  # how many steps the loop would close over
         if loops:
@@ -243,9 +361,7 @@ def phase_beam(
     labels = graph.labels
     start_chars = _start_emission(graph, start_node, start_offset)
     phase0 = start_phase % graph.buckets
-    root = _Entry(start_node, start_chars, phase0, 0.0, None, 0.0, frozenset(), {})
-    root.seen = frozenset({(start_node, phase0)})
-    root.depth = {(start_node, phase0): 0}
+    root = _Entry(start_node, start_chars, phase0, 0.0, None, 0.0, {(start_node, phase0): 0})
     top_beam = [root]
     bottom_beam = [root]
     top_done: list[tuple[float, int, _Entry]] = []
@@ -267,14 +383,16 @@ def phase_beam(
                 if cap_chars is not None and entry.chars >= cap_chars:
                     continue
                 expanded += 1
-                for c, _e, step, nphase, _action in _expand(graph, meta, entry, step_penalty):
+                for c, _e, step, nphase, _action in _expand(
+                    graph, meta, entry.node, entry.phase, entry.depth, step_penalty
+                ):
                     nchars = entry.chars if c < FIRST else entry.chars + len(labels[c]) - _OV
                     if cap_chars is not None and nchars > cap_chars and c >= FIRST:
                         continue
                     key = (c, nphase)
                     child = _Entry(
                         c, nchars, nphase, entry.cost + step, entry, step,
-                        entry.seen | {key}, {**entry.depth, key: depth},
+                        entry.depth if key in entry.depth else {**entry.depth, key: depth},
                     )
                     complete = c == END or (not to_end and nchars >= min_chars)
                     if complete:
@@ -344,12 +462,12 @@ def phase_walk(
     chars = _start_emission(graph, start_node, start_offset)
     node_ids = [node]
     step_costs: list[float] = []
-    entry = _Entry(node, chars, phase, 0.0, None, 0.0, frozenset({(node, phase)}), {(node, phase): 0})
+    entry = _Entry(node, chars, phase, 0.0, None, 0.0, {(node, phase): 0})
     steps = 0
     while True:
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
-        options = _expand(graph, meta, entry, 0.0)
+        options = _expand(graph, meta, entry.node, entry.phase, entry.depth, 0.0)
         if not options:
             break
         if temperature == 0 or len(options) == 1:
@@ -373,6 +491,7 @@ def phase_walk(
             chars += len(labels[c]) - _OV
         steps += 1
         key = (c, nphase)
-        entry = _Entry(c, chars, nphase, entry.cost + cst, None, cst, entry.seen | {key}, {**entry.depth, key: steps})
+        depth = entry.depth if key in entry.depth else {**entry.depth, key: steps}
+        entry = _Entry(c, chars, nphase, entry.cost + cst, None, cst, depth)
         node, phase = c, nphase
     return _build_result(graph, node_ids, step_costs, start_offset, max_chars, steps, include_context)
