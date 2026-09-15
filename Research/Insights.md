@@ -27,16 +27,52 @@ refuses to play one below a confidence floor.
 > A population of micro neural networks that play a game against each other. The
 > answer is the equilibrium of that game.
 
-*Where:* `GTMNN/DESIGN.md` · **held**
+*Implemented and measured.* The machinery all works and every game-theoretic
+claim it rests on is asserted numerically (`GTMNN/tests/`, 36 tests). What does
+not hold is the part the whole design is for: **the population barely learns to
+predict.** Belief loss after the full auction / equilibrium / Shapley / REINFORCE
+path is 2.84 against a uniform baseline of 2.71 — still worse than guessing —
+while the *identical* micros given a direct supervised signal reach **1.50**. The
+architecture has ample capacity; the credit path is what fails to deliver a
+signal that sharpens the population.
+
+More training does not close it (6 900 steps per micro moved belief loss 3.226 →
+3.204, and 150 epochs did worse than 20), so it is not a signal shortage. Two
+candidate causes were tested and **both were wrong**: the `B`/`λ` ratio (swept
+2 → ∞; abstention falls 56% → 0% and the loss never improves) and the
+null-player axiom forbidding a reward for correct silence (deliberately breaking
+it made things *worse*, 2.838 → 3.050).
+
+The population does specialise, which was the other thing in doubt: `gini` rises
+to 0.54 when every micro is seated against 0.05 when 24 of 256 are. That makes
+seat count the first thing to look at.
+
+*Where:* `GTMNN/DESIGN.md`, `GTMNN/README.md` · **contradicted** (as a route to
+prediction; the mechanism is sound and the credit is exact)
 
 ### 3. Credit belongs to game theory, not the chain rule
 Backpropagation answers "who is responsible" with the derivative. Shapley (1953)
 answered the same question in 1953 and proved the answer unique under four
 axioms. No gradient crosses a micro boundary anywhere in GTMNN.
 
-*Where:* `GTMNN/DESIGN.md` §12 · **held** — efficiency (`Σφ = v(N) − v(∅)`) is
-exact per sampled permutation because marginal contributions telescope, which is
-the suite's strongest assertion.
+*Confirmed, and more exactly than stated.* Efficiency `Σφ = v(N) − v(∅)` holds to
+**3e-15** over 200 games at 1, 2, 7 and 32 permutations — it is exact *per
+sample*, not in expectation, because the marginal contributions telescope along a
+single permutation. The null player gets **exactly** `0.0` and takes exactly no
+step; two interchangeable seats get identical credit to `1e-12` when enumerated;
+and over all `M!` permutations the incremental estimator equals the closed-form
+subset-weighted sum to `4e-16`, so any gap at finite samples is variance falling
+as `1/√n` rather than bias.
+
+Also confirmed: no gradient crosses a micro (checksummed around every `learn`),
+and all 45 parameters of a micro — weights, biases and the four sine parameters —
+match finite differences to `1e-10`.
+
+The credit is therefore not the reason 2 fails. It is exactly what it claims to
+be, and the population still does not learn to predict — which makes the failure
+more interesting, not less.
+
+*Where:* `GTMNN/DESIGN.md` §12, `GTMNN/gtmnn/shapley.py` · **confirmed**
 
 ### 4. Everything can be gamified
 *Refined.* The **encoding** is general — anything with a refusal oracle can be
@@ -483,6 +519,63 @@ of them, and the integration is what exposed which.
 *Where:* `GREN/gren/package.py` (`placeable`), `GREN/gren/axis.py` (`settled`),
 `CyclicCortex/cortex/discovered.py` · **refined**
 
+### 32. A game modifier is a game-IDENTITY signal, and identity is the opposite of transfer
+`GREN/DESIGN.md` §22.5 argues that hashing a game's *mechanic set* into the micro's
+input makes transfer automatic: hashing a set preserves overlap, so two similar
+games land at nearby points and "a micro that learned 'a piece cannot move through
+an occupant' generalises to every game with a similar modifier without being told
+to".
+
+**The first half is confirmed exactly.** Modifier cosine tracks the Ochiai
+similarity of the mechanic sets with mean absolute error 0.102 at 64 dimensions,
+**0.031 at 128** and 0.017 at 256 — matching the spec's own sizing table, and
+putting chess nearest checkers and sudoku furthest, which is the same ordering
+GREN found by probing and CyclicCortex uses to build its regions. Three projects
+now agree on what a game *is*, through one JSON file rather than three
+hand-written frozensets.
+
+**The second half is contradicted.** Train on chess, evaluate checkers cold, six
+seeds: with the modifier on, 0.503; with the modifier block zeroed, **0.566**.
+The modifier is worth **−0.062**, negative in 5 of 6 seeds. One seed had shown
++0.117 and that was noise.
+
+The reading that fits: the modifier tells the population *which game this is*, and
+game identity is precisely what lets a population specialise per game — the
+opposite of carrying a response across. Similarity in modifier space is real; it
+is just dominated by the identity signal sitting in the same bits.
+
+This is the third independent measurement in this repository putting
+chess→checkers transfer at approximately nothing: CyclicCortex's shared
+vocabulary (+0.023 against its proper baseline), its cross-region ensemble
+(+0.025), and now this. Three different mechanisms, three different codebases,
+one answer.
+
+*Where:* `GTMNN/gtmnn/games.py`, `GTMNN/README.md`, `GREN/DESIGN.md` §22.5 ·
+**refined** (the hash works; the transfer claim does not)
+
+### 33. A training signal that contains the answer is not a loss
+Not an insight of Curtis's — a mistake I made and had to measure my way out of,
+recorded so it is not repeated.
+
+GTMNN's epoch record reports `loss` as mean `−log P(y)`, per `DESIGN.md` §16.2,
+where `P` is the aggregate of the training-game equilibrium. But that game is
+`CorrectnessCongestion`, and **its payoff function contains `y`** — every seated
+micro is paid `B/n_a` for naming the answer it was just shown. The resulting
+number looks excellent and measures almost nothing: `loss` **0.59** while the
+population's actual predictive loss was **4.2**, against a uniform baseline of
+**2.77**. I read the first as the second for several rounds.
+
+It is not a useless quantity — it is the right partner for `shapley_total`, since
+the two are views of `v(N) − v(∅)`. It is just not a prediction. The fix is to
+report both, side by side, so the contaminated one can never be mistaken for the
+honest one again.
+
+The general form: **when a metric is computed from a mechanism that was given the
+label, it measures the mechanism's compliance, not the model's knowledge.** The
+control that catches it is cheap — withhold the label and recompute.
+
+*Where:* `GTMNN/gtmnn/model.py` (`belief_loss`), `GTMNN/README.md` · **confirmed**
+
 ---
 
 ## What to test next
@@ -492,7 +585,8 @@ Ordered by how much they would change, per unit of effort:
 0. ~~**Does transfer survive ACROSS regions, or only within them?**~~ (29) **Answered: the graph is doing routing.** Cross-region transfer is +0.025 in one case of four; the within-region shared vocabulary is +0.023 against its proper baseline. Regions earn their place by *placing* games correctly — the wrong region is measurably worse, per the negative Shapley values — not by teaching each other.
 1. ~~**Does validity transfer?**~~ (19) **Answered, and it is the same +0.023.** `p_valid` trained on chess alone leaves checkers at its majority class. The interesting follow-up is 29's refinement: build a region whose vocabulary is *mostly* shared, as `common_denominator.py` did with three inputs, and see whether 0.646 survives inside a cortex.
 2. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
-3. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
-4. **Does the population actually specialise?** (2) GTMNN rests on the congestion game doing what it claims; `gini` and `diversity` are instrumented from the first commit so it can be falsified early.
-5. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
-6. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
+3. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
+4. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
+5. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
+6. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
+7. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.

@@ -17,11 +17,11 @@ SHELL := /bin/bash
 
 PY ?= python3
 
-PROJECTS := GREN CyclicCortex NeuralCompression AudioImage RadixCyclicNN TwoNRL_CartPole
+PROJECTS := GREN GTMNN CyclicCortex NeuralCompression AudioImage RadixCyclicNN TwoNRL_CartPole
 
 .PHONY: help deps check test test-quick test-gren test-cortex test-audioimage \
-        test-radixcyclic test-cartpole handoff package discovered demo map \
-        depth-normalisation activation gren cortex compression audioimage \
+        test-radixcyclic test-cartpole test-gtmnn handoff package discovered demo map \
+        depth-normalisation activation gren gtmnn cortex compression audioimage \
         radixcyclic cartpole all clean
 
 help: ## Show this help
@@ -48,17 +48,21 @@ deps: ## Report what the optional dependencies are, and whether they are here
 
 check: ## Byte-compile every pure-python project (a syntax check, no tools needed)
 	@$(MAKE) --no-print-directory -C GREN check
+	@$(MAKE) --no-print-directory -C GTMNN check
 	@$(MAKE) --no-print-directory -C CyclicCortex check
 	@$(MAKE) --no-print-directory -C NeuralCompression check
 	@$(PY) -m compileall -q Research/experiments utils && echo "ok"
 
 ##@ Tests
-test: test-gren test-cortex test-audioimage test-radixcyclic ## Every suite that needs nothing installed (minutes: RadixCyclicNN trains models)
+test: test-gren test-gtmnn test-cortex test-audioimage test-radixcyclic ## Every suite that needs nothing installed (minutes: RadixCyclicNN trains models)
 
-test-quick: test-gren test-cortex ## Just GREN and CyclicCortex (~40s) — the fast loop
+test-quick: test-gren test-gtmnn test-cortex ## GREN, GTMNN and CyclicCortex — the fast loop
 
 test-gren: ## GREN: verdicts, the radix tree, growth identities, the derived vocabulary
 	@$(MAKE) --no-print-directory -C GREN test
+
+test-gtmnn: ## GTMNN: the Shapley axioms, the cycle detector, the auction, the modifier
+	@$(MAKE) --no-print-directory -C GTMNN test
 
 test-cortex: ## CyclicCortex: regions, SBNN growth, Shapley, and the GREN handoff
 	@$(MAKE) --no-print-directory -C CyclicCortex test
@@ -100,6 +104,9 @@ activation: ## A self-building network measured on its activation function  (min
 ##@ Projects  (each lists its own targets)
 gren: ## GREN — learn a game's identity from what it refuses
 	@$(MAKE) --no-print-directory -C GREN help
+
+gtmnn: ## GTMNN — a population of micros playing a game; credit is the Shapley value
+	@$(MAKE) --no-print-directory -C GTMNN help
 
 cortex: ## CyclicCortex — one network per region of a cyclic similarity graph
 	@$(MAKE) --no-print-directory -C CyclicCortex help

@@ -24,7 +24,7 @@ Every project carries its own Makefile, and one at the root ties them together.
 ```bash
 make help          # every root target
 make deps          # what the optional dependencies are, and whether they are here
-make test-quick    # GREN + CyclicCortex, ~40s
+make test-quick    # GREN + GTMNN + CyclicCortex
 make test          # every suite that needs nothing installed
 make handoff       # GREN probes every game, then CyclicCortex rebuilds its map from it
 make demo          # the CyclicCortex tour: train, play chess, add sudoku
@@ -39,6 +39,7 @@ has a single home. To see what a project offers, ask it:
 
 ```bash
 make gren          # GREN's targets — explore, similar, policies, tree, grow, package
+make gtmnn         # GTMNN's — demo, shapley, cycles, auction, modifier, transfer
 make cortex        # CyclicCortex's — demo, map, play, sudoku, transfer, credit
 make compression   # NeuralCompression's four experiments
 make audioimage    # AudioImage's
