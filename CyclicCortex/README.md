@@ -11,11 +11,13 @@ every game in that region.
 
 ```bash
 cd CyclicCortex
+python3 -m cortex.cli serve --train 300   # the browser front end: train it, then play it
 python3 -m cortex.cli demo          # build, train, play chess, add sudoku
 python3 -m cortex.cli map           # the similarity graph and its regions
 python3 -m cortex.cli play          # chess against the engine
 python3 -m cortex.cli sudoku        # solve puzzles by the network's own ranking
 python3 -m tests.test_v1            # 20 tests
+python3 -m tests.test_server        # 19 more, for the arena, the jobs and the API
 ```
 
 Pure standard library, no dependencies. **Stockfish is optional** — install it
@@ -38,6 +40,10 @@ a real engine; everything degrades to the built-in opponents without it.
 | `cortex/routing.py` | the region-level **auction** (uniform price, so truthful bidding is dominant) and **congestion** settlement |
 | `cortex/cortex.py` | regions, routing, supervised training, **self-play with outcome credit**, **distillation from a teacher**, evaluation |
 | `cortex/stockfish.py` | Stockfish as opponent *and* teacher — persistent UCI process, FEN/UCI conversion, `evaluate`, and `score_moves` (MultiPV: every legal move scored in one search). Optional |
+| `cortex/arena.py` | one match, any two players, any of the four games. `human`, `cortex`, `bot` and `stockfish`, every pairing legal; boards and moves as JSON; `analyse`, which scores **every** legal move in a position |
+| `cortex/trainer.py` | training you can watch and stop — the same calls, in a loop over chunks, with a measurement after each one. `train`, `selfplay`, `rehearse`, `distill`, `evaluate`, `benchmark`, `credit`, `transfer` |
+| `cortex/server.py` | the HTTP API and the static page. `http.server`, because the package has no dependencies and this is not the place to acquire one |
+| `cortex/frontend/` | the page itself: the graph drawn, the curve while it is learning, and a board you can sit down at |
 
 ## What it does
 
@@ -282,10 +288,43 @@ losses are close (35–46) where they were 0–81. Chess has excellent legality
 consistently: it is the hardest of the three and has no search, so the engine
 takes free pieces the cortex cannot see coming.
 
+## The front end
+
+`python3 -m cortex.cli serve --train 300` puts all of the above behind a page:
+the similarity graph drawn instead of printed, training as a curve you can watch
+and stop, the credit and transfer tables recomputed on the model that is loaded
+rather than quoted, and **a board you can sit down at**. Four kinds of player —
+human, cortex, the built-in engine, and Stockfish where it is installed — in
+every pairing, in all four games, so *human vs model*, *model vs model* and *bot
+vs model* are three rows of one table rather than three features. `cortex/arena.py`
+is that table and holds no HTTP; `cortex/trainer.py` runs the jobs; `cortex/server.py`
+is `http.server` and the static files. Details in `cortex/frontend/README.md`.
+
+Nothing there is a new capability. What the browser adds is the part that only
+works live: **`p_valid` and `grade` for every legal move while it is your turn.**
+The cortex's pick is still not filtered to legal ones — it ranks its own
+candidate set as `cli.play` does, an illegal pick is counted and the best legal
+alternative substituted — so the illegal rate under the board is the same
+honest number, and the scores beside it say *why* it lost rather than only that
+it did.
+
 ## What is not here yet
 
-Grade is a hand-supplied heuristic rather than a learned value, there is no
-search, no replay when a game joins a region, no region-level auction or Shapley
-credit (`DESIGN.md` §9.2), and no frontend. Regions do not yet transfer anything
-between each other — which is `DESIGN.md` §15.1, the open question that decides
-whether the graph is doing real work or only routing.
+**There is no search.** Chess is the clearest case: its legality is excellent
+(0.0–0.013 illegal in play) and it still loses material consistently, because
+the engine takes free pieces a one-ply ranking cannot see coming, and no amount
+of training on move legality fixes that.
+
+**Chess has an unexplained gap.** `information.py` measures 0.977 as reachable
+with these features under balanced sampling; the network reaches 0.856. Roughly
+0.12 is unaccounted for and is the first thing to chase.
+
+**Distillation does not work**, and the diagnostic above says why: the function
+is not in the student's hypothesis class. A teacher cannot teach what the
+vocabulary cannot express.
+
+**Cross-region transfer is real but tiny** — one case out of four gains 0.025,
+and the rest are flat. `DESIGN.md` §15.1 asks whether the graph is doing real
+work or only routing, and the honest answer so far is that it earns its place by
+*placing* games correctly (the wrong region is measurably worse, per the
+negative Shapley values) rather than by regions teaching each other.
