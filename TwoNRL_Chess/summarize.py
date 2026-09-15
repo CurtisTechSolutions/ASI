@@ -30,7 +30,13 @@ def load_runs(paths: list[str]) -> dict[str, list[dict]]:
 
 
 def negative_entropy(runs: list[dict]) -> list[float]:
-    """H(q) is only defined on the rounds that actually ran a negative block."""
+    """H(q) over the rounds that actually trained on a negative set.
+
+    The positive-only control has no negative set, so it gets no H(q) rather
+    than a misleading zero.
+    """
+    if runs and runs[0]["arm"] == "positive":
+        return []
     return [h["train"]["negative_entropy"] for r in runs for h in r["history"][1:]
             if h["train"].get("phase") in ("negative", "both") and h["train"].get("n")]
 
@@ -74,7 +80,9 @@ def table_headline(arms: dict[str, list[dict]]) -> None:
         refus = stat(runs, ("heldout", "refusals"))
         cpl = stat(runs, ("heldout", "cp_loss"))
         agree = stat(runs, ("heldout", "agreement"))
-        print(f"| `{arm}` | {np.mean(ent) if ent else 0:.2f} | {fmt(*legal, 3)} | "
+        # H(q) is a property of a negative set, so the positive-only arm has none.
+        hq = f"{np.mean(ent):.2f}" if ent else "—"
+        print(f"| `{arm}` | {hq} | {fmt(*legal, 3)} | "
               f"{fmt(*refus, 1)} | {fmt(*cpl, 1)} | {fmt(*agree, 3)} |")
 
 
@@ -99,10 +107,14 @@ def table_inversion(arms: dict[str, list[dict]]) -> None:
     print("| arm | metric | before the flip | after the flip | change |")
     print("|---|---|---|---|---|")
     for arm, label, bm, bs, am, asd, places, n, _ in rows:
-        if label == "legal first try":
-            change = f"×{am / bm:.1f}" if bm > 0 else "—"
+        if label == "legal first try":          # higher is better, and starts at zero
+            change = f"{am - bm:+.3f}"
+        elif am <= 0 or bm <= 0:
+            change = "—"
+        elif bm > am:
+            change = f"×{bm / am:.1f} better"
         else:
-            change = f"×{bm / am:.1f} better" if am > 0 and bm > am else f"×{am / bm:.1f} worse"
+            change = f"×{am / bm:.1f} worse"
         print(f"| `{arm}` | {label} | {fmt(bm, bs, places)} | {fmt(am, asd, places)} | {change} |")
     worst = max(r[8] for r in rows)
     print(f"\nMeasured negation error over every flip: **{worst:.1e}**.")
