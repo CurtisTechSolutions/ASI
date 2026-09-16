@@ -3,7 +3,7 @@
 A record of the ideas driving this repository, each with where it is specified,
 whether it has been tested, and what the evidence says. Kept as an index rather
 than an argument: the arguments live in the design documents, the numbers live in
-`NeuralCompression/FINDINGS.md`.
+`AGI/NeuralCompression/FINDINGS.md`.
 
 Status is one of **held** (stated, not yet tested), **confirmed** (tested, holds),
 **refined** (tested, holds with a correction), or **contradicted** (tested, does
@@ -21,14 +21,14 @@ The whole multi-network architecture follows from this ordering. It is enforced
 mechanically rather than assumed: `GREN` produces a rule package and `GTMNN`
 refuses to play one below a confidence floor.
 
-*Where:* `GREN/DESIGN.md` §1, §22.1 · **held**
+*Where:* `AGI/GREN/DESIGN.md` §1, §22.1 · **held**
 
 ### 2. Game theory, not one big network — GTMNN
 > A population of micro neural networks that play a game against each other. The
 > answer is the equilibrium of that game.
 
 *Implemented and measured.* The machinery all works and every game-theoretic
-claim it rests on is asserted numerically (`GTMNN/tests/`, 36 tests). What does
+claim it rests on is asserted numerically (`AGI/GTMNN/tests/`, 36 tests). What does
 not hold is the part the whole design is for: **the population barely learns to
 predict.** Belief loss after the full auction / equilibrium / Shapley / REINFORCE
 path is 2.84 against a uniform baseline of 2.71 — still worse than guessing —
@@ -47,7 +47,7 @@ The population does specialise, which was the other thing in doubt: `gini` rises
 to 0.54 when every micro is seated against 0.05 when 24 of 256 are. That makes
 seat count the first thing to look at.
 
-*Where:* `GTMNN/DESIGN.md`, `GTMNN/README.md` · **contradicted** (as a route to
+*Where:* `AGI/GTMNN/DESIGN.md`, `AGI/GTMNN/README.md` · **contradicted** (as a route to
 prediction; the mechanism is sound and the credit is exact)
 
 ### 3. Credit belongs to game theory, not the chain rule
@@ -72,7 +72,7 @@ The credit is therefore not the reason 2 fails. It is exactly what it claims to
 be, and the population still does not learn to predict — which makes the failure
 more interesting, not less.
 
-*Where:* `GTMNN/DESIGN.md` §12, `GTMNN/gtmnn/shapley.py` · **confirmed**
+*Where:* `AGI/GTMNN/DESIGN.md` §12, `AGI/GTMNN/gtmnn/shapley.py` · **confirmed**
 
 ### 4. Everything can be gamified
 *Refined.* The **encoding** is general — anything with a refusal oracle can be
@@ -83,7 +83,7 @@ says a conversation would take 150 years. But *identification* needs only
 to minutes. So everything can be *placed*; not everything can be *learned* by
 probing.
 
-*Where:* `GREN/DESIGN.md` §5 · **refined**
+*Where:* `AGI/GREN/DESIGN.md` §5 · **refined**
 
 ---
 
@@ -97,7 +97,7 @@ This became the central claim of GREN: **a game's identity is its refusal
 boundary**, and two games are similar exactly to the degree they refuse the same
 things.
 
-*Where:* `GREN/DESIGN.md` §2 · **held**
+*Where:* `AGI/GREN/DESIGN.md` §2 · **held**
 
 ### 6. The failure rate should be about 50%
 Not a setting — a consequence. Choosing probes by expected information gain is
@@ -106,7 +106,7 @@ informative probe is the one half the surviving candidates call legal. The
 system reports its observed failure rate as a diagnostic: a run at 5% is
 confirming what it already believes; at 95% it is thrashing outside the boundary.
 
-*Where:* `GREN/DESIGN.md` §4 · **held** (derivation, not yet measured on a real oracle)
+*Where:* `AGI/GREN/DESIGN.md` §4 · **held** (derivation, not yet measured on a real oracle)
 
 ### 7. Programming is the game worth optimising for
 > The compiler will tell you: this ain't working, bro.
@@ -118,7 +118,7 @@ diagnostic text is the highest-bandwidth channel in the system — `expected i32
 found &str` localises a type rule in one probe where a bare rejection would take
 hundreds.
 
-*Where:* `GREN/DESIGN.md` §5, §11.2 · **confirmed**
+*Where:* `AGI/GREN/DESIGN.md` §5, §11.2 · **confirmed**
 
 ---
 
@@ -134,7 +134,7 @@ of 1000 is ~10 bits — ten probes. The neighbour's rules are then inherited and
 probing is spent only where the surviving candidates disagree. Most of a game's
 rules are never probed at all.
 
-*Where:* `GREN/DESIGN.md` §3 · **confirmed** (by derivation and by the
+*Where:* `AGI/GREN/DESIGN.md` §3 · **confirmed** (by derivation and by the
 similarity numbers in §11 below)
 
 ### 9. Information clustering — chess and checkers are closer than chess and a difficult conversation
@@ -142,7 +142,7 @@ similarity numbers in §11 below)
 chess/go **0.23**, chess/rust **0.03**, chess/boss-conversation **0.07**.
 Correct ordering, reproduced from the axes rather than asserted.
 
-*Where:* `GREN/DESIGN.md` §8.6 · **confirmed**
+*Where:* `AGI/GREN/DESIGN.md` §8.6 · **confirmed**
 
 ### 10. Use what we know about the game: inputs, outputs, category, goal
 These four generalise better than the purely game-theoretic axes they replaced,
@@ -151,7 +151,7 @@ and they split into **declared** (free — you read the box before you play) and
 thousand-game corpus to a handful, which is the single largest efficiency in the
 system.
 
-*Where:* `GREN/DESIGN.md` §9 · **held**
+*Where:* `AGI/GREN/DESIGN.md` §9 · **held**
 
 ### 11. Break each game into its smallest possible parts first
 *Confirmed, and it dissolved a defect rather than patching one.* Decomposing to
@@ -166,7 +166,7 @@ corpus.** `CHAIN_CAPTURE` and `FORCED_CAPTURE` split, because draughts variants
 exist with one and not the other. `CASTLING` does not, despite looking compound,
 because it never varies in halves.
 
-*Where:* `GREN/DESIGN.md` §8 · **confirmed**
+*Where:* `AGI/GREN/DESIGN.md` §8 · **confirmed**
 
 ### 12. An n-dimensional trie, with the game encoded into each path
 ### 13. A radix tree with the mechanics of a trie
@@ -177,7 +177,7 @@ one is still open" is a real answer whose shared rules can be played. **Radix
 compression** means only the mechanics that actually discriminate cost a node.
 Their interaction is one rule: *a terminal node is never merged away.*
 
-*Where:* `GREN/DESIGN.md` §19 · **held**
+*Where:* `AGI/GREN/DESIGN.md` §19 · **held**
 
 ### 14. Or invert the problem — a random forest
 *Contradicted, honestly.* The forest existed to patch the chess/go ordering
@@ -186,7 +186,7 @@ original justification is gone. What survives is a weaker hedge against
 frequency-ordering fragmentation; `T` dropped 64 → 16 and an open question asks
 whether it should be 1 and the module deleted.
 
-*Where:* `GREN/DESIGN.md` §20, §32.7 · **contradicted** (superseded by 11)
+*Where:* `AGI/GREN/DESIGN.md` §20, §32.7 · **contradicted** (superseded by 11)
 
 ---
 
@@ -213,7 +213,7 @@ So the value is not compression. It is that **a continuous game coordinate lets
 you play a game you have never played, by placing it between games you have.**
 For an AGI architecture that is the more important of the two.
 
-*Where:* `NeuralCompression/FINDINGS.md` §1–4 · **refined**
+*Where:* `AGI/NeuralCompression/FINDINGS.md` §1–4 · **refined**
 
 ### 16. Order the partition by similarity
 *Confirmed, and it is mandatory rather than a nicety.* Absent at N=2, 2.5× at
@@ -222,7 +222,7 @@ diverging** (9.7× with sine). Ordered, the target is a smooth function of the
 selector coordinate; shuffled, it is a high-frequency sawtooth a small network
 cannot fit.
 
-*Where:* `NeuralCompression/FINDINGS.md` §3 · **confirmed**
+*Where:* `AGI/NeuralCompression/FINDINGS.md` §3 · **confirmed**
 
 ### 17. Avoid dust — binary doesn't work because of 16 and 32
 *Confirmed, and the mechanism is worse than waste.* **Dust is error
@@ -237,7 +237,7 @@ indistinguishable, because the selector is continuous and rescaling it is a
 smooth reparameterisation rather than a permutation. **3.1× against 1.37×, both
 pointing the same way: take the relayout, refuse the dust.**
 
-*Where:* `NeuralCompression/FINDINGS.md` §6–7 · **confirmed**
+*Where:* `AGI/NeuralCompression/FINDINGS.md` §6–7 · **confirmed**
 
 ### 18. Same input and output size for every game, plus a game modifier
 *Held, with a concrete design.* Score **one candidate at a time**, and action
@@ -248,7 +248,7 @@ points automatically. **Transfer is a consequence of the encoding rather than a
 mechanism added on top.** Width chosen by measurement: 0.177 mean error at 32
 dimensions, 0.061 at 128.
 
-*Where:* `GTMNN/DESIGN.md` via `GREN/DESIGN.md` §22.4–22.5 · **held**
+*Where:* `AGI/GTMNN/DESIGN.md` via `AGI/GREN/DESIGN.md` §22.4–22.5 · **held**
 
 ### 19. Train validity first, then grade the move separately
 > Focus on training on valid/invalid moves, then a separate grade/reward for the
@@ -261,7 +261,7 @@ jointly would let the noisy signal contaminate the exact one. It also makes
 "understand the game, then play it" true *inside a single micro's weights*, not
 only at the system level.
 
-*Where:* `GREN/DESIGN.md` §22.6 · **held** (the decisive test is stated: train
+*Where:* `AGI/GREN/DESIGN.md` §22.6 · **held** (the decisive test is stated: train
 `p_valid` on chess only, measure it on checkers with the checkers modifier and
 no further training)
 
@@ -281,7 +281,7 @@ The general case for designing around vanishing gradients may hold elsewhere.
 Here the gradient vanishes because every neuron was initialised into the linear
 region of its activation, and it stops when that is corrected. See 24.
 
-*Where:* `NeuralCompression/FINDINGS.md` §10 · **contradicted** (as a property to
+*Where:* `AGI/NeuralCompression/FINDINGS.md` §10 · **contradicted** (as a property to
 accept; the observation that it occurs was correct)
 
 ### 21. Invert the gradient when the vanishing threshold is reached
@@ -299,7 +299,7 @@ The stated form — *all weights below X* — is the better of the two magnitude
 conditions, because a weight that never moved off its initialisation is
 unambiguous in a way a small gradient is not.
 
-*Where:* `NeuralCompression/vanishing.py`, FINDINGS §11 · **refined**
+*Where:* `AGI/NeuralCompression/vanishing.py`, FINDINGS §11 · **refined**
 
 ### 22. Dual network: train in one, query the other — the REM analogy
 *Confirmed, and the analogy predicted the better implementation before either was
@@ -320,7 +320,7 @@ parallel; the shared network, the contended resource, only fine-tunes.
 What neither fixes: specialists alone reach 0.0081 where the best shared network
 reaches 0.0398. **Compression costs about 5× and no consolidation recovers it.**
 
-*Where:* `NeuralCompression/consolidate.py`, FINDINGS §12 · **confirmed**
+*Where:* `AGI/NeuralCompression/consolidate.py`, FINDINGS §12 · **confirmed**
 
 ### 23. Rotating inversion — invert alternating layers each cycle
 *Safe, and for the same reason useless — tested.* With an odd activation
@@ -348,7 +348,7 @@ subset per cycle, or pairing the negation with something non-involutive would
 make the excursion open, and the network would explore instead of returning.
 Untested, and the obvious next thing to try.
 
-*Where:* `NeuralCompression/vanishing.py`, FINDINGS §15 · **refined**
+*Where:* `AGI/NeuralCompression/vanishing.py`, FINDINGS §15 · **refined**
 
 ---
 
@@ -386,7 +386,7 @@ have a pure equilibrium but best-response paths may cycle. So the cycle is not t
 solver failing — it is a property of the game, iterating harder does not help, and
 the correct response is to leave and escalate to metacognition.
 
-*Where:* `Research/CyclesAreAFeature.md`, `GTMNN/DESIGN.md` §2.1, §14 · **held**
+*Where:* `Research/CyclesAreAFeature.md`, `AGI/GTMNN/DESIGN.md` §2.1, §14 · **held**
 
 ---
 
@@ -403,7 +403,7 @@ instant after growth and only changes as the new capacity learns. Growth on a
 does and which insight 21 independently confirmed is the only trigger that
 separates *stuck* from *converged* from *still starting*.
 
-*Where:* `CyclicCortex/DESIGN.md` §8 · **held**
+*Where:* `AGI/CyclicCortex/DESIGN.md` §8 · **held**
 
 ### 27. Similar games in similar regions — brain structure
 The similarity graph partitions into regions by modularity; each region owns one
@@ -412,7 +412,7 @@ nothing is close enough. This changes what carries game identity: **it moves out
 of the input vector and into the graph position**, which is why the region's
 network does not need to be told which game it is playing.
 
-*Where:* `CyclicCortex/DESIGN.md` §6, §9 · **held**
+*Where:* `AGI/CyclicCortex/DESIGN.md` §6, §9 · **held**
 
 ### 28. A cyclic graph where distance is similarity
 *Confirmed.* Jaccard distance over mechanic sets is a **proper metric** — checked
@@ -427,7 +427,7 @@ projection of this graph, not a rival to it** — the tree makes retrieval
 sublinear, the graph is what is actually true, and where they disagree the graph
 is right.
 
-*Where:* `CyclicCortex/DESIGN.md` §5 · **confirmed**
+*Where:* `AGI/CyclicCortex/DESIGN.md` §5 · **confirmed**
 
 ### 29. Common denominators — generalised, minified inputs
 > For chess, a piece moving one space would count here. This allows us to train
@@ -461,8 +461,8 @@ vocabulary that is 25/33 game-specific transfers about as well as its private
 part allows. The way to get the 0.646 result inside a region is to make the
 shared vocabulary *most* of the vocabulary, not to add more of it.
 
-*Where:* `CyclicCortex/common_denominator.py`, `CyclicCortex/README.md`,
-`CyclicCortex/DESIGN.md` §4 · **refined**
+*Where:* `AGI/CyclicCortex/common_denominator.py`, `AGI/CyclicCortex/README.md`,
+`AGI/CyclicCortex/DESIGN.md` §4 · **refined**
 
 ### 30. A shared refusal code is not a shared rule
 Not an insight of Curtis's but one the architecture forced, and the sharpest
@@ -494,8 +494,8 @@ escapes this only by *diluting* those three slots with five harmless ones:
 a game on the map and not enough to share a weight — which is why the mechanics
 swap is the default and the derived vocabulary is opt-in.
 
-*Where:* `GREN/gren/vocabulary.py`, `CyclicCortex/cortex/discovered.py`,
-`CyclicCortex/README.md` · **contradicted** (as a route to transfer;
+*Where:* `AGI/GREN/gren/vocabulary.py`, `AGI/CyclicCortex/cortex/discovered.py`,
+`AGI/CyclicCortex/README.md` · **contradicted** (as a route to transfer;
 the alignment itself is confirmed)
 
 ### 31. Identification and characterisation are different questions
@@ -516,11 +516,11 @@ gate for placement. Sudoku: 0.350 and 0.977.
 A confidence measure that answers two questions at once will be wrong about one
 of them, and the integration is what exposed which.
 
-*Where:* `GREN/gren/package.py` (`placeable`), `GREN/gren/axis.py` (`settled`),
-`CyclicCortex/cortex/discovered.py` · **refined**
+*Where:* `AGI/GREN/gren/package.py` (`placeable`), `AGI/GREN/gren/axis.py` (`settled`),
+`AGI/CyclicCortex/cortex/discovered.py` · **refined**
 
 ### 32. A game modifier is a game-IDENTITY signal, and identity is the opposite of transfer
-`GREN/DESIGN.md` §22.5 argues that hashing a game's *mechanic set* into the micro's
+`AGI/GREN/DESIGN.md` §22.5 argues that hashing a game's *mechanic set* into the micro's
 input makes transfer automatic: hashing a set preserves overlap, so two similar
 games land at nearby points and "a micro that learned 'a piece cannot move through
 an occupant' generalises to every game with a similar modifier without being told
@@ -550,7 +550,7 @@ vocabulary (+0.023 against its proper baseline), its cross-region ensemble
 (+0.025), and now this. Three different mechanisms, three different codebases,
 one answer.
 
-*Where:* `GTMNN/gtmnn/games.py`, `GTMNN/README.md`, `GREN/DESIGN.md` §22.5 ·
+*Where:* `AGI/GTMNN/gtmnn/games.py`, `AGI/GTMNN/README.md`, `AGI/GREN/DESIGN.md` §22.5 ·
 **refined** (the hash works; the transfer claim does not)
 
 ### 33. A training signal that contains the answer is not a loss
@@ -574,7 +574,7 @@ The general form: **when a metric is computed from a mechanism that was given th
 label, it measures the mechanism's compliance, not the model's knowledge.** The
 control that catches it is cheap — withhold the label and recompute.
 
-*Where:* `GTMNN/gtmnn/model.py` (`belief_loss`), `GTMNN/README.md` · **confirmed**
+*Where:* `AGI/GTMNN/gtmnn/model.py` (`belief_loss`), `AGI/GTMNN/README.md` · **confirmed**
 
 ### 34. A trie over what is PROVABLE, not over what a thing is
 The radix tree in GREN indexes games by what they *refuse*. The same mechanic one
@@ -627,7 +627,7 @@ by what a game refuses, this one by its structure. Neither carries activations o
 stands in for a network. The moment one does, it stops being an index and the
 guarantees stop meaning anything.
 
-*Where:* `GTMNN/gtmnn/trie.py`, `GTMNN/gtmnn/tournament.py`, `GTMNN/README.md` ·
+*Where:* `AGI/GTMNN/gtmnn/trie.py`, `AGI/GTMNN/gtmnn/tournament.py`, `AGI/GTMNN/README.md` ·
 **confirmed** (the index and the solver derivation; the backoff benefit is not
 yet measurable)
 
@@ -647,7 +647,7 @@ The tell was a column of identical bad numbers. A metric that cannot separate
 five methods on the one game built specifically to separate them is measuring
 the wrong object.
 
-*Where:* `GTMNN/gtmnn/equilibrium.py` (`mixed_exploitability`) · **confirmed**
+*Where:* `AGI/GTMNN/gtmnn/equilibrium.py` (`mixed_exploitability`) · **confirmed**
 
 ### 36. Memory is the trajectory, not the answer
 > Solve memory by keeping track of the trajectory through the model, input and
@@ -697,7 +697,7 @@ here is for game theory and game classification only. Either this uses a
 different structure or that rule needs a stated exception; it should not quietly
 become a third trie.
 
-*Where:* `Memory/README.md` · **held**
+*Where:* `AGI/Memory/README.md` · **held**
 
 ### 37. Index a game by its END GOAL, and work backwards
 > The Radix Tree for game solving should be about the end goal. We focus on the
@@ -749,7 +749,7 @@ Two arguments for the ordering, and the second is the load-bearing one:
 "Work backwards" is also the traversal, not just the layout: from the goal, to
 what must be true for it, to what must be true for *that*. Chess endgame
 tablebases are built exactly this way, backwards from mate. It is goal regression,
-and it is the natural home for `GREN/DESIGN.md` §8.3's STRIPS operators, still
+and it is the natural home for `AGI/GREN/DESIGN.md` §8.3's STRIPS operators, still
 unimplemented.
 
 One honest limit: chess and checkers still share 2 of 3 goal axes
@@ -759,7 +759,7 @@ similarity does not separate them at all, which is the right direction given tha
 chess→checkers transfer has measured at approximately nothing three ways
 (29, 30, 32), but it is a modest separation rather than a dramatic one.
 
-*Where:* `GREN/gren/radix.py` (`goal_first`), `GREN/gren/cli.py` · **confirmed**
+*Where:* `AGI/GREN/gren/radix.py` (`goal_first`), `AGI/GREN/gren/cli.py` · **confirmed**
 
 ### 38. A refusal code is a precondition violation
 The follow-through on 37. If the tree is organised by the end goal, the way to
@@ -790,7 +790,7 @@ and it runs 7.7× faster. With pieces scattered at random 59.5% give check, 48.7
 is avoided, and it runs 2.2× faster. Regression pays in proportion to how
 selective the cheap subgoal is, and nothing else.
 
-*Where:* `GREN/gren/regress.py`, `GREN/README.md` · **confirmed**
+*Where:* `AGI/GREN/gren/regress.py`, `AGI/GREN/README.md` · **confirmed**
 
 ### 39. Check whether the baseline already does it
 The first measurement of 38 came out at **exactly 1.0×**, which is the number
@@ -814,7 +814,7 @@ argmax exploitability that scored five solvers identically (35), and now this. I
 all three the mistake was in the comparison rather than in the thing being
 compared.
 
-*Where:* `GREN/gren/regress.py` (`conjunctive`, `expected_work`) · **confirmed**
+*Where:* `AGI/GREN/gren/regress.py` (`conjunctive`, `expected_work`) · **confirmed**
 
 ---
 
@@ -826,7 +826,7 @@ Ordered by how much they would change, per unit of effort:
 1. ~~**Does validity transfer?**~~ (19) **Answered, and it is the same +0.023.** `p_valid` trained on chess alone leaves checkers at its majority class. The interesting follow-up is 29's refinement: build a region whose vocabulary is *mostly* shared, as `common_denominator.py` did with three inputs, and see whether 0.646 survives inside a cortex.
 2. **Can the minimality criterion split a mechanic?** (38, and §8.3) Regression now has operators, but their preconditions are whole refusal codes. §8.3's rule — keep splitting a part while its halves are seen independently — would say whether `SELF_CHECK` is one precondition or two (king attacked, and no interposition). That changes what regression can plan through, and it is decidable from the corpus rather than argued about.
 3. **Does goal-first ordering still pay at scale?** (37) The compression half of the result is small-N: four games and one perfectly-discriminating axis. Generate or gather thirty-odd games with overlapping goals and re-measure tokens-to-identification against alphabetical and against a highest-entropy-axis-first ordering. The knowability argument does not need this; the compression claim does.
-4. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `Memory/` needs building.
+4. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `AGI/Memory/` needs building.
 5. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
 6. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
 7. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.

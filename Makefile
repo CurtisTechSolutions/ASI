@@ -2,7 +2,10 @@
 #
 # Each project owns its own Makefile and its own defaults; this one delegates
 # with `make -C` rather than repeating them, so every command has exactly one
-# home.  `make gren`, `make cortex`, `make compression`, `make audioimage`,
+# home. AGI/ holds the five that COMPOSE -- GREN identifies a game, CyclicCortex
+# routes it, GTMNN plays it, Memory is specified against all three, and
+# NeuralCompression is the substrate they share. The rest are independent lines
+# of work that import nothing from each other.  `make gren`, `make cortex`, `make compression`, `make audioimage`,
 # `make radixcyclic` and `make cartpole` list what each project offers.
 #
 # Variables set on the COMMAND LINE flow down into the project Makefiles, so
@@ -17,7 +20,8 @@ SHELL := /bin/bash
 
 PY ?= python3
 
-PROJECTS := GREN GTMNN CyclicCortex NeuralCompression AudioImage RadixCyclicNN TwoNRL_CartPole
+PROJECTS := AGI/GREN AGI/GTMNN AGI/CyclicCortex AGI/NeuralCompression \
+            AudioImage RadixCyclicNN TwoNRL_CartPole
 
 .PHONY: help deps check test test-quick test-gren test-cortex test-audioimage \
         test-radixcyclic test-cartpole test-gtmnn handoff package discovered demo map \
@@ -47,10 +51,10 @@ deps: ## Report what the optional dependencies are, and whether they are here
 		|| echo "    go           MISSING  -> make -C RadixCyclicNN go-build"
 
 check: ## Byte-compile every pure-python project (a syntax check, no tools needed)
-	@$(MAKE) --no-print-directory -C GREN check
-	@$(MAKE) --no-print-directory -C GTMNN check
-	@$(MAKE) --no-print-directory -C CyclicCortex check
-	@$(MAKE) --no-print-directory -C NeuralCompression check
+	@$(MAKE) --no-print-directory -C AGI/GREN check
+	@$(MAKE) --no-print-directory -C AGI/GTMNN check
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex check
+	@$(MAKE) --no-print-directory -C AGI/NeuralCompression check
 	@$(PY) -m compileall -q Research/experiments utils && echo "ok"
 
 ##@ Tests
@@ -59,13 +63,13 @@ test: test-gren test-gtmnn test-cortex test-audioimage test-radixcyclic ## Every
 test-quick: test-gren test-gtmnn test-cortex ## GREN, GTMNN and CyclicCortex — the fast loop
 
 test-gren: ## GREN: verdicts, the radix tree, growth identities, the derived vocabulary
-	@$(MAKE) --no-print-directory -C GREN test
+	@$(MAKE) --no-print-directory -C AGI/GREN test
 
 test-gtmnn: ## GTMNN: the Shapley axioms, the cycle detector, the auction, the modifier
-	@$(MAKE) --no-print-directory -C GTMNN test
+	@$(MAKE) --no-print-directory -C AGI/GTMNN test
 
 test-cortex: ## CyclicCortex: regions, SBNN growth, Shapley, and the GREN handoff
-	@$(MAKE) --no-print-directory -C CyclicCortex test
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex test
 
 test-audioimage: ## AudioImage's own suite
 	@$(MAKE) --no-print-directory -C AudioImage test
@@ -78,21 +82,21 @@ test-cartpole: ## TwoNRL_CartPole's 14 proofs (needs numpy + gymnasium)
 
 ##@ The GREN -> CyclicCortex handoff  (the one pipeline that spans two projects)
 handoff: ## Probe every game, then rebuild the cortex's map from what was measured
-	@$(MAKE) --no-print-directory -C GREN package
-	@$(MAKE) --no-print-directory -C CyclicCortex discovered
+	@$(MAKE) --no-print-directory -C AGI/GREN package
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex discovered
 
 package: ## Just the GREN half: probe every game and write the handoff
-	@$(MAKE) --no-print-directory -C GREN package
+	@$(MAKE) --no-print-directory -C AGI/GREN package
 
 discovered: ## Just the CyclicCortex half: the discovered map against the hand-written one
-	@$(MAKE) --no-print-directory -C CyclicCortex discovered
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex discovered
 
 ##@ Shortcuts  (the two you land on; each project's Makefile has the rest)
 demo: ## The CyclicCortex tour: train, play chess, add sudoku, show every region
-	@$(MAKE) --no-print-directory -C CyclicCortex demo
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex demo
 
 map: ## The similarity graph, its regions, and the routing log
-	@$(MAKE) --no-print-directory -C CyclicCortex map
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex map
 
 ##@ Experiments with no project Makefile of their own
 depth-normalisation: ## Is the vanishing gradient a measurement problem?  (minutes)
@@ -103,16 +107,16 @@ activation: ## A self-building network measured on its activation function  (min
 
 ##@ Projects  (each lists its own targets)
 gren: ## GREN — learn a game's identity from what it refuses
-	@$(MAKE) --no-print-directory -C GREN help
+	@$(MAKE) --no-print-directory -C AGI/GREN help
 
 gtmnn: ## GTMNN — a population of micros playing a game; credit is the Shapley value
-	@$(MAKE) --no-print-directory -C GTMNN help
+	@$(MAKE) --no-print-directory -C AGI/GTMNN help
 
 cortex: ## CyclicCortex — one network per region of a cyclic similarity graph
-	@$(MAKE) --no-print-directory -C CyclicCortex help
+	@$(MAKE) --no-print-directory -C AGI/CyclicCortex help
 
 compression: ## NeuralCompression — can one network hold many games?
-	@$(MAKE) --no-print-directory -C NeuralCompression help
+	@$(MAKE) --no-print-directory -C AGI/NeuralCompression help
 
 audioimage: ## AudioImage — audio encoded into a 2D plane, and decoded back
 	@$(MAKE) --no-print-directory -C AudioImage help

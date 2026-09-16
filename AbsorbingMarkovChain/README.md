@@ -3,7 +3,7 @@
 An absorbing Markov chain with a custom transition-matrix training algorithm.
 
 One of the early variations, predating the architectures in `RadixCyclicNN/`,
-`GREN/` and `GTMNN/`. As the note describes it, the thing being learned *is* the
+`AGI/GREN/` and `AGI/GTMNN/`. As the note describes it, the thing being learned *is* the
 transition matrix rather than a set of weights reached by back-propagation, and
 the absorbing states are where the chain is allowed to stop.
 

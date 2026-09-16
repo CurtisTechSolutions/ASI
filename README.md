@@ -34,6 +34,13 @@ Most of the repository is pure standard-library `python3` and runs with nothing
 installed. `make deps` says which of the remaining pieces need `numpy`,
 `gymnasium`, `torch`, Stockfish or Go, and which targets those are.
 
+`AGI/` holds the five networks that **compose into one system** — GREN identifies
+a game by what it refuses, CyclicCortex routes it to a region, GTMNN plays it as
+a game-theoretic population, Memory is specified against all three, and
+NeuralCompression is the substrate research they share. They cross-import and
+pass one another a handoff file. Everything beside `AGI/` is an independent line
+of work that imports nothing from the others.
+
 The root delegates with `make -C` rather than repeating commands, so each one
 has a single home. To see what a project offers, ask it:
 
@@ -47,9 +54,9 @@ make radixcyclic   # RadixCyclicNN's
 make cartpole      # TwoNRL_CartPole's
 ```
 
-Or work inside one directly — `cd GREN && make test` does what you would expect.
+Or work inside one directly — `cd AGI/GREN && make test` does what you would expect.
 
-`Memory/` carries no code yet: it is a specified, unbuilt design (insight 36),
+`AGI/Memory/` carries no code yet: it is a specified, unbuilt design (insight 36),
 with the experiment that would falsify its premise written down first.
 
 Variables set on the command line flow down into the project Makefiles, and
@@ -58,5 +65,5 @@ their defaults live with them rather than at the root:
 ```bash
 make handoff BUDGET=3000              # more probes per game, reaches GREN
 make demo EPISODES=1200 SEED=7        # reaches CyclicCortex
-make -C CyclicCortex map DISCOVERED=1 # route on GREN's measurement, not the hand-written sets
+make -C AGI/CyclicCortex map DISCOVERED=1   # route on GREN's measurement
 ```
