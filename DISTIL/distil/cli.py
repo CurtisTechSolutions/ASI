@@ -284,10 +284,10 @@ def cmd_tools(args) -> int:
 def cmd_explore(args) -> int:
     d = _agent(args)
     print("  ideas on the table, ranked by bits per unit cost:")
-    for i in d.explorer.brainstorm(args.seed, n=6):
+    for i in d.explorer.brainstorm(args.seed_idea, n=6):
         print(f"    {i.value(d.policy):.3f}  p={i.p_success:.2f} nov={i.novelty:.2f}  {i}")
     print(f"\n  running {args.steps} experiment(s):")
-    for e in d.explore(steps=args.steps, seed=args.seed):
+    for e in d.explore(steps=args.steps, seed=args.seed_idea):
         print(f"    {e.summary()}")
     strat = dict(zip(d.explorer.regret.actions,
                      [round(x, 3) for x in d.explorer.regret.average_strategy()]))
@@ -474,8 +474,12 @@ def cmd_demo(args) -> int:
         print(f"  invoke remote echo.add -> {d.toolbox.invoke('echo.add', kwargs={'a': 2, 'b': 40}).get('value')!r}")
         d.mcp.close()
     print(f"\n  toolbox: {', '.join(d.toolbox.names())}")
+    # Persist. The demo printed a memory report it never wrote, so a --home it
+    # had filled with twelve verified tools came back empty on the next command.
+    d.save()
     print(f"\n  memory: {json.dumps(d.memory.stats())}")
     print(f"  cases:  {len(d.casebook.all())}")
+    print(f"  saved to {d.workspace}")
     return 0
 
 
@@ -551,7 +555,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("explore", help="brainstorm and run experiments")
     s.add_argument("--steps", type=int, default=3)
-    s.add_argument("--seed-idea", dest="seed")
+    # dest="seed" collided with the global --seed, so --seed-idea silently became
+    # the RNG seed and the global --seed was silently discarded by this command.
+    s.add_argument("--seed-idea", dest="seed_idea", help="a phrase to brainstorm around")
     s.set_defaults(fn=cmd_explore)
 
     s = sub.add_parser("upgrade", help="tune the policy against measured outcomes")

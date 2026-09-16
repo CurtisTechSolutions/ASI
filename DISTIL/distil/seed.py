@@ -76,6 +76,12 @@ def _midpoint(lo, hi):
     if isinstance(lo, int) and isinstance(hi, int):
         total = lo + hi
         return total // 2 if total % 2 == 0 else total / 2
+    # Opposite signs: the SUM is safe and the DIFFERENCE overflows
+    # (1.7e308 - -1.7e308 -> inf). Same sign: the reverse. The previous form
+    # fixed one overflow and reintroduced the other, which is exactly the bug
+    # the docstring claims to have fixed.
+    if (lo < 0) != (hi < 0):
+        return (lo + hi) / 2
     return lo + (hi - lo) / 2
 ''',
 '''assert median([3, 1, 2]) == 2
@@ -588,6 +594,12 @@ def assert_schema(value, schema, path="$"):
         problems.append(f"{path}: enum must be a list")
 
     expected = schema.get("type")
+    if "type" in schema and expected is None:
+        # `schema.get("type")` is None both when the key is ABSENT (no
+        # constraint, correct) and when it is present and null (a malformed
+        # schema). Treating them alike let {"type": null} enforce nothing and
+        # report [] -- the referee passing something it never looked at.
+        return problems + [f"{path}: type must not be null"]
     if expected is not None:
         names = expected if isinstance(expected, list) else [expected]
         # `n not in _TYPES` raises TypeError: unhashable for a dict or list type
@@ -637,6 +649,13 @@ def assert_schema(value, schema, path="$"):
                             f"got {type(required).__name__}")
             required = []
         for key in required:
+            if not isinstance(key, str):
+                # `key not in value` is fine for a dict, but the f-string below
+                # and any caller reading the path expect a name; a list element
+                # is not one, and unhashable elements raise outright.
+                problems.append(f"{path}: required names must be strings, "
+                                f"got {type(key).__name__}")
+                continue
             if key not in value:
                 problems.append(f"{path}.{key}: required but missing")
         props = schema.get("properties") or {}

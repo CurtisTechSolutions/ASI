@@ -200,6 +200,11 @@ class Compressor:
                                       "heat": cluster.heat, "terms": digest.kept_terms[:6],
                                       "text": digest.text})
             if dry_run:
+                # Count what WOULD happen. Reporting 0/0 for a dry run made the
+                # preview say "would compress 0, folding 0" however much it was
+                # about to fold -- the one number anyone runs --dry-run to see.
+                report["compressed"] += 1
+                report["freed"] += cluster.size
                 continue
             self._archive(cluster.members)
             links = sorted({lid for m in cluster.members for lid in m.links})
@@ -208,7 +213,28 @@ class Compressor:
                 meta={"members": digest.members, "size": cluster.size,
                       "cohesion": cluster.cohesion, "terms": digest.kept_terms,
                       "mean_grade": digest.mean_grade, "archived": True},
-                links=links)
+                links=links,
+                # Digests of related clusters read alike, so cosine dedupe merged
+                # a new one into an earlier one: the new summary text was dropped
+                # and the old digest's member list stood for traces it never
+                # covered -- which `restore` would then fail to bring back.
+                identity="digest:" + ",".join(sorted(digest.members)))
+            # Rewire inbound links. Compression carried each member's OUTBOUND
+            # links onto the digest but left everything pointing AT the members
+            # pointing at ids that no longer exist, so credit propagation
+            # (memory._propagate) stopped dead at the boundary.
+            gone = set(digest.members)
+            for other in self.memory.store.all():
+                if other.id == trace.id or not gone.intersection(other.links):
+                    continue
+                other.links = [trace.id if lid in gone else lid for lid in other.links]
+                seen_once, deduped = set(), []
+                for lid in other.links:
+                    if lid not in seen_once:
+                        seen_once.add(lid)
+                        deduped.append(lid)
+                other.links = deduped
+                self.memory.store.touch(other)
             if digest.mean_grade is not None:
                 # The digest inherits the cluster's standing, so compression does
                 # not quietly reset how much the system trusts what it learned.

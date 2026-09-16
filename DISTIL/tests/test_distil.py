@@ -37,7 +37,7 @@ from distil.frame import (Framer, GameFrame, Horizon, Information, Payoff, Playe
                           PRIMITIVES, Solution, agenda, capabilities, classify as classify_game)
 from distil.goals import GoalTree, Status, Verifier, checkability
 from distil.mcp import McpRegistry, McpServer, McpTool
-from distil.grade import grade_check, grade_python, gradeable
+from distil.grade import grade_check, grade_python, grade_user, gradeable
 from distil.memory import Kind, Memory, Source, Trace
 from distil.policy import BOUNDS, Policy
 from distil.provider import LocalProvider, Message, auto, catalogue
@@ -1071,6 +1071,80 @@ CLARITY_CASES = [
     ("make the importer better", True),
     ("clean up the csv file", True),                        # names a subject, but "clean" how?
 ]
+
+
+def test_the_determinism_stage_actually_exercises_the_function():
+    """It re-ran the MODULE and compared stdout -- but the tool contract mandates
+    no I/O outside the function, so a conforming module prints nothing and the
+    stage compared '' to '' and passed unconditionally. It never called the
+    function it claimed to check."""
+    rng = "import random\n\ndef roll():\n    return random.randrange(10**9)\n"
+    g = grade_python(rng, "assert isinstance(roll(), int)")
+    assert not g.clean, "an unseeded RNG is not repeatable"
+    assert any(st.name == "determinism" and not st.passed for st in g.stages)
+    seeded = ("import random\n\ndef roll():\n"
+              "    return random.Random(7).randrange(10**9)\n")
+    assert grade_python(seeded, "assert roll() == roll()").clean, "seeded is fine"
+    assert grade_python("def add(a, b):\n    return a + b\n", "assert add(1, 2) == 3").clean
+
+
+def test_a_tool_that_is_not_repeatable_does_not_register():
+    """A failed determinism stage scores 0.70, which cleared the 0.5 threshold --
+    so the check ran, said FAIL, and the tool registered anyway."""
+    d = fresh()
+    rng = "import random\n\ndef roll():\n    return random.randrange(10**9)\n"
+    spec = ToolSpec(name="roll", purpose="roll", source=rng,
+                    tests="assert isinstance(roll(), int)", signature="roll()")
+    d.toolsmith.validate(spec, d.toolbox)
+    assert not d.toolsmith.register(spec)
+    assert "roll" not in d.toolbox.names()
+
+
+def test_failing_tests_still_rank_below_having_none():
+    good = "def add(a, b):\n    return a + b\n"
+    wrong = grade_python(good, "assert add(1, 2) == 99")
+    absent = grade_python(good, "")
+    assert wrong.score < absent.score < 1.0, (wrong.score, absent.score)
+
+
+def test_a_nan_grade_is_refused():
+    """max(-1, min(1, nan)) is nan, and nan compares False against every
+    threshold, so it was recorded as a maximum positive endorsement."""
+    try:
+        grade_user(float("nan"))
+        raise AssertionError("should have raised")
+    except ValueError:
+        pass
+
+
+def test_the_gate_is_not_sensitive_to_which_synonym_was_used():
+    """"clean up the csv file" was gated and "tidy up the csv file" was not,
+    because the judgement vocabulary was borrowed from goals._UNCHECKABLE, which
+    lists only the forms distillation happens to care about."""
+    d = fresh()
+    for a, b in (("clean up the csv file", "tidy up the csv file"),
+                 ("improve the report", "enhance the report")):
+        ga = objective_unclear(d.clarifier.framer.frame(a))
+        gb = objective_unclear(d.clarifier.framer.frame(b))
+        assert ga == gb, f"{a!r} -> {ga} but {b!r} -> {gb}"
+
+
+def test_a_stated_bound_counts_as_a_finished_state():
+    d = fresh()
+    for task in ("improve the importer so it finishes in under a minute",
+                 "make the report load in under 2 seconds",
+                 "get p99 latency under 200ms"):
+        assert not objective_unclear(d.clarifier.framer.frame(task)), task
+
+
+def test_a_hedge_in_front_of_an_answer_is_still_an_answer():
+    """Discarding it threw away exactly the content that was asked for."""
+    from distil.clarify import _denies_knowledge
+    assert _denies_knowledge("I don't really know")
+    assert _denies_knowledge("not entirely sure")
+    assert _denies_knowledge("the answer is not known to me")
+    assert not _denies_knowledge("not sure, but done means the importer finishes in a minute")
+    assert not _denies_knowledge("don't know yet, but it must finish under a minute")
 
 
 def test_the_clarity_gate_does_not_invert_in_either_direction():
@@ -2379,6 +2453,112 @@ def test_tuning_the_policy_is_not_undone_by_the_save_that_follows_it():
     d.upgrade(["compute the median of a column"], trials=6)
     assert d.policy is d.explorer.policy
     assert Policy.load(d.workspace.policy).to_json() == d.policy.to_json()
+
+
+def test_a_verified_tool_name_can_still_be_improved():
+    """A strictly-greater grade wedged the toolbox shut: a verified tool scores
+    1.00, nothing scores above 1.00, so no verified name could ever be improved
+    again -- not by a bug fix, not by anything."""
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    incumbent = d.toolbox.load("median")
+    stronger = ToolSpec(name="median", purpose="median", source=incumbent.source,
+                        tests=incumbent.tests + "\nassert median([2, 1]) == 1.5\n",
+                        signature=incumbent.signature)
+    d.toolsmith.validate(stronger, d.toolbox)
+    assert d.toolsmith.register(stronger), "a stronger contract must be able to land"
+    weaker = d.toolsmith.forge("compute the median of a list")
+    assert not d.toolsmith.register(weaker), "a weaker one still must not"
+
+
+def test_re_registering_keeps_the_problems_the_tool_has_solved():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    d.toolbox.record_use("median", "found the midpoint of a latency sample", True)
+    incumbent = d.toolbox.load("median")
+    stronger = ToolSpec(name="median", purpose="median", source=incumbent.source,
+                        tests=incumbent.tests + "\nassert median([4, 2]) == 3\n",
+                        signature=incumbent.signature)
+    d.toolsmith.validate(stronger, d.toolbox)
+    assert d.toolsmith.register(stronger)
+    assert any("latency sample" in p for p in d.toolbox.load("median").solved)
+
+
+def test_an_existing_better_tool_is_not_reported_as_a_failure():
+    """register() also returns False when it KEPT a better incumbent. That was
+    reported as "failed verification: verified" and filed as a -1.0 case against
+    a capability that exists and works."""
+    d = fresh(seed=1)
+    plant(d.toolsmith, d.toolbox)
+    r = d.solve("compute the median of a list", interrogate=False)
+    assert all("failed verification: verified" not in a.get("via", "") for a in r["attempts"])
+    assert not any(c.grade < 0 and "median" in c.solution for c in d.casebook.all())
+
+
+def test_malformed_jsonrpc_degrades_instead_of_raising():
+    from distil.mcp import McpServer, McpResult
+    s = echo_server()
+    try:
+        s.start()
+        out = s._await.__self__  # keep a reference; exercise the parse path below
+        s._lines.put('{"jsonrpc":"2.0","id":9999,"error":"not an object"}\n')
+        res = s._await(9999, 2.0)
+        assert isinstance(res, McpResult) and not res.ok
+        assert "malformed" in res.error
+    finally:
+        s.close()
+
+
+def test_a_server_name_containing_a_dot_is_still_callable():
+    d = fresh()
+    d.mcp.add("acme.tools", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    assert d.mcp.call("acme.tools.add", {"a": 2, "b": 40}).content == "42"
+    d.mcp.close()
+
+
+def test_a_dry_run_reports_what_it_would_compress():
+    m, _ = _cold_store()
+    report = Compressor(m).compress(dry_run=True)
+    assert report["compressed"] >= 1 and report["freed"] >= 3, report
+
+
+def test_compression_rewires_inbound_links():
+    """Members' outbound links were carried onto the digest; everything pointing
+    AT the members kept pointing at ids that no longer exist, so credit
+    propagation stopped dead at the boundary."""
+    m, _ = _cold_store()
+    cold = [t for t in Compressor(m).cold()]
+    pointer = m.remember(Kind.GOAL, "a goal that depends on those failures",
+                         links=[cold[0].id])
+    c = Compressor(m, archive=tmpdir() / "a.jsonl")
+    c.compress()
+    again = m.get(pointer.id)
+    assert all(m.get(lid) is not None for lid in again.links), "links must not dangle"
+
+
+def test_exploring_n_times_does_not_run_one_idea_n_times():
+    d = fresh(seed=5)
+    for task in ("compute the median of a column", "dedupe the records", "parse a csv file"):
+        d.solve(task, interrogate=False)
+    runs = d.explore(steps=4)
+    assert len({e.idea.text for e in runs}) == len(runs), "each step must try something new"
+
+
+def test_a_confirmed_experiment_is_never_filed_as_a_refuted_failure():
+    for trace in fresh(seed=5).memory.of_kind(Kind.FAILURE):
+        assert (trace.mean_grade or 0) <= 0, "a failure must not carry a positive grade"
+
+
+def test_the_demo_persists_what_it_did():
+    """It printed a memory report it never wrote, so a --home it had filled with
+    twelve verified tools came back empty on the next command."""
+    from distil.cli import main
+    home = tmpdir()
+    assert main(["--home", str(home), "demo"]) == 0
+    back = Distil(LocalProvider(), home=home, seed=1)
+    assert back.toolbox.names(), "the demo's tools must survive it"
+    assert back.memory.stats()["traces"] > 0
 
 
 def test_re_forging_a_tool_does_not_create_a_second_trace():

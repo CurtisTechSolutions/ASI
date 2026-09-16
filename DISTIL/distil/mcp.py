@@ -323,10 +323,17 @@ class McpServer:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue          # servers do print stray text to stdout; skip it
+            if not isinstance(msg, dict):
+                continue          # a bare JSON scalar or list is not a frame
             if msg.get("id") != want_id:
                 continue          # a notification or another request; not ours
             if "error" in msg:
                 err = msg["error"]
+                if not isinstance(err, dict):
+                    # `err.get` on a string raised AttributeError straight out of
+                    # call() -- from an API whose entire contract is to degrade
+                    # into an McpResult rather than raise.
+                    return McpResult(False, raw=msg, error=f"malformed error frame: {err!r}"[:200])
                 return McpResult(False, raw=msg,
                                  error=f"{err.get('code', '?')}: {err.get('message', 'unknown')}")
             return McpResult(True, raw=msg)
@@ -409,7 +416,13 @@ class McpServer:
                 truncated = pages > 0
                 break
             result = out.raw.get("result", {}) or {}
-            for t in (result.get("tools") or []):
+            if not isinstance(result, dict):
+                truncated = True
+                break
+            tools = result.get("tools")
+            for t in (tools if isinstance(tools, list) else []):
+                if not isinstance(t, dict):
+                    continue
                 name = t.get("name")
                 # Dedupe by name while collecting. Cursor-repeat detection can
                 # only fire after a page has been read, so without this a server
@@ -542,8 +555,15 @@ class McpRegistry:
         """`qualified` is "server.tool". `tool_name` overrides the split, which
         matters because a server name may itself contain a dot and `partition`
         would then hand the server half a tool it does not have."""
-        server_name, _, split = qualified.partition(".")
-        tool_name = tool_name or split
+        # Longest configured server name that prefixes this qualified name.
+        # `partition(".")` took everything before the FIRST dot, so a server
+        # called "acme.tools" had every one of its tools permanently uncallable:
+        # the lookup asked for a server named "acme".
+        server_name = next((n for n in sorted(self.servers, key=len, reverse=True)
+                            if qualified == n or qualified.startswith(n + ".")), None)
+        if server_name is None:
+            server_name, _, _rest = qualified.partition(".")
+        tool_name = tool_name or qualified[len(server_name) + 1:]
         server = self.servers.get(server_name)
         if server is None:
             return McpResult(False, error=f"no such mcp server: {server_name}")

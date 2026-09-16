@@ -157,7 +157,8 @@ def _child_env() -> dict:
 
 def run_source(source: str, argv: list[str] | None = None, timeout: float = 10.0,
                memory_mb: int = 512, apply_screen: bool = True,
-               files: dict[str, str] | None = None) -> Execution:
+               files: dict[str, str] | None = None,
+               extra_env: dict | None = None) -> Execution:
     """Write `source` to a fresh temp tree and run it. Always cleans up."""
     scr = screen(source) if apply_screen else Screening(True, [])
     if not scr.ok:
@@ -171,7 +172,7 @@ def run_source(source: str, argv: list[str] | None = None, timeout: float = 10.0
             target.write_text(body)
         script = workdir / "_main.py"
         script.write_text(source)
-        return run_file(script, argv, timeout, memory_mb, cwd=workdir)
+        return run_file(script, argv, timeout, memory_mb, cwd=workdir, extra_env=extra_env)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

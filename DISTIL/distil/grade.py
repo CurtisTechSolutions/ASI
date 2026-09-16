@@ -75,6 +75,44 @@ class Grade:
         return "\n".join([f"grade {self.score:+.3f} ({self.source})"] + [f"  {s}" for s in self.stages])
 
 
+#: Modules whose output changes between runs unless explicitly pinned.
+_NONDETERMINISTIC = {"random": "random", "secrets": "secrets", "uuid": "uuid",
+                     "time": "the clock", "datetime": "the clock"}
+#: Calls that pin one of them.
+_SEEDING = {"seed", "Random", "setstate"}
+
+
+def nondeterministic_sources(source: str) -> list[str]:
+    """Which unseeded sources of variation this code draws on.
+
+    A heuristic, and the honest kind: it names the usual causes rather than
+    proving their absence. `random.seed(...)` or `random.Random(n)` counts as
+    pinning, so a deliberately seeded tool passes. `id()` and unseeded `hash()`
+    are not listed -- the two-hash-seed run above catches those.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    used, seeded = set(), False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _NONDETERMINISTIC:
+                    used.add(_NONDETERMINISTIC[root])
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in _NONDETERMINISTIC:
+                used.add(_NONDETERMINISTIC[root])
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name in _SEEDING:
+                seeded = True
+    return [] if seeded else sorted(used)
+
+
 def _score(stages: list[Stage]) -> float:
     earned = sum(WEIGHTS.get(s.name, 0.0) for s in stages if s.passed)
     total = sum(WEIGHTS.get(s.name, 0.0) for s in stages) or 1.0
@@ -129,10 +167,48 @@ def grade_python(source: str, tests: str = "", timeout: float = 10.0,
         stages.append(Stage("test", False, "no contract tests supplied"))
 
     if check_determinism:
-        again = run_source(source, timeout=timeout)
-        same = again.ok and again.stdout == run.stdout
-        stages.append(Stage("determinism", same,
-                            "stable across two runs" if same else "output differs between runs"))
+        # Re-run the TEST HARNESS, not the bare module.
+        #
+        # This used to execute `source` twice and compare stdout -- but the tool
+        # contract mandates "one primary function, no I/O outside the function",
+        # so a conforming module prints nothing at import. The stage compared ''
+        # to '' and passed unconditionally, never once calling the function it
+        # claimed to be checking. A tool returning a different answer on every
+        # call graded +1.000 "verified", and all twelve seeds collected the 0.15
+        # as a gift.
+        #
+        # Running the contract tests again exercises the function, so a tool
+        # whose behaviour moves between runs fails them (or produces different
+        # output) and is caught.
+        if tests.strip():
+            probe = f"{source}\n\n{tests}\n"
+            # Two runs under DIFFERENT hash seeds. The sandbox pins
+            # PYTHONHASHSEED=0 for reproducibility, which also hides every
+            # set- and dict-ordering dependence -- so comparing two runs at the
+            # same seed can never surface one.
+            first = run_source(probe, timeout=timeout, extra_env={"PYTHONHASHSEED": "0"})
+            second = run_source(probe, timeout=timeout, extra_env={"PYTHONHASHSEED": "1"})
+            stable = (first.ok == second.ok and first.stdout == second.stdout
+                      and first.returncode == second.returncode)
+            # Observing output cannot catch a function whose *return value*
+            # varies, because a conforming tool and its contract tests are both
+            # silent -- '' == '' every time. The cause is detectable where the
+            # symptom is not: an unseeded clock, RNG or uuid in the source.
+            sources = nondeterministic_sources(source)
+            same = stable and not sources
+            if not stable:
+                detail = "behaviour differs between runs"
+            elif sources:
+                detail = "depends on " + ", ".join(sources) + " with no seed"
+            else:
+                detail = "stable across two runs of the contract tests"
+            stages.append(Stage("determinism", same, detail))
+        # With no contract tests nothing exercises the function, so repeatability
+        # is not measurable -- and the stage is OMITTED rather than failed.
+        # `_score` divides by the weights of the stages actually present, so an
+        # unmeasurable property neither rewards nor punishes. Failing it made
+        # "no tests" score exactly the same as "tests that fail", and
+        # known-wrong must always rank below merely unverified.
 
     g = Grade(_score(stages), Source.SELF, stages)
     g.diagnostic = "verified" if g.clean else next((s.detail for s in stages if not s.passed), "")
@@ -159,7 +235,13 @@ def grade_check(check_source: str, timeout: float = 5.0) -> Grade:
 
 
 def grade_user(score: float, comment: str = "") -> Grade:
-    score = max(-1.0, min(1.0, float(score)))
+    score = float(score)
+    if score != score:          # NaN
+        # max(-1, min(1, nan)) returns nan, and nan compares False against every
+        # threshold -- so `distil grade <id> nan` was recorded as a maximum
+        # positive endorsement by the credibility sum that followed.
+        raise ValueError("a grade must be a number; got NaN")
+    score = max(-1.0, min(1.0, score))
     return Grade(score, Source.USER, [Stage("user", score > 0, comment or "user judgement")],
                  comment or "user grade")
 

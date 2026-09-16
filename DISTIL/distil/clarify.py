@@ -41,6 +41,7 @@ Three things keep the asking honest:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .frame import Framer, GameFrame, Information, agenda, capabilities
@@ -155,6 +156,31 @@ _FILLERS = {
 }
 
 
+#: Verbs whose result is a judgement rather than an observation. Kept here
+#: rather than borrowed from `goals._UNCHECKABLE`, which lists only the forms
+#: distillation happens to care about -- so "clean up the csv file" was gated and
+#: "tidy up the csv file" was not. The gate is supposed to turn on what a task
+#: means, not on which synonym someone reached for.
+_JUDGEMENT = re.compile(
+    r"\b(improv\w*|optimi[sz]\w*|better|best|clean\w*|tidy\w*|neat\w*|nice[rst]?|"
+    r"eleg\w*|simplif\w*|streamlin\w*|polish\w*|refactor\w*|moderni[sz]\w*|"
+    r"enhanc\w*|revamp\w*|overhaul\w*|sort out|spruce\w*|beautif\w*|"
+    r"reasonable|sensible|proper\w*|proper|proud|proud of|understand\w*|consider\w*)\b", re.I)
+
+#: A stated quantity or bound is a finished state, whatever the verb. "improve
+#: the importer so it finishes in under a minute" says exactly what done means.
+_UNITS = (r"ms|s|secs?|seconds?|mins?|minutes?|h|hours?|days?|%|percent|"
+          r"[kmg]b|bytes?|rows?|items?|calls?|requests?|x")
+_MEASURED = re.compile(
+    # a bound, then a number OR an article and a unit: "under 200ms",
+    # "in under a minute", "at most one hour"
+    r"\b(?:under|below|above|over|within|beneath|at least|at most|no more than|"
+    r"no fewer than|less than|greater than|faster than|fewer than)\s+"
+    r"(?:\d[\d.,]*\s*(?:" + _UNITS + r")?|(?:a|an|one|two|three)\s+(?:" + _UNITS + r"))\b"
+    # or a bare quantity with a unit anywhere: "200ms", "3 rows"
+    r"|\b\d[\d.,]*\s*(?:" + _UNITS + r")\b", re.I)
+
+
 def _content_words(task: str) -> set[str]:
     """What the task is actually about, after removing verbs and filler.
 
@@ -207,11 +233,23 @@ def objective_unclear(frame: GameFrame) -> bool:
     if not frame.objective:
         return True
     if frame.objective.strip() != frame.task.strip():
-        return False           # an objective was stated separately; take it
+        # A separately stated objective is taken -- but it has to clear the same
+        # bar. With a provider attached, `Framer._ask_provider` sets an OBJECTIVE
+        # line on nearly every task, so this branch short-circuited the gate and
+        # the two-signal rule below never ran at all. A model answering "make it
+        # better" is no more an objective than a user doing so.
+        stated = frame.objective.strip()
+        if not _content_words(stated):
+            return True        # an objective that names nothing is not one
+        if _MEASURED.search(stated):
+            return False       # a bound is a finished state
+        return bool(_JUDGEMENT.search(stated)) and not bool(_CHECKABLE.search(stated))
     task = frame.task
     if not _content_words(task):
         return True            # nothing is named, only pointed at
-    judgement = bool(_UNCHECKABLE.search(task))
+    if _MEASURED.search(task):
+        return False           # a bound IS a finished state
+    judgement = bool(_JUDGEMENT.search(task))
     observable = bool(_CHECKABLE.search(task))
     return judgement and not observable
 
@@ -294,20 +332,47 @@ _DENIAL_WORDS = ("unknown", "unclear", "unsure", "n/a", "na", "tbd",
                  "none", "nothing", "no", "?", "-")
 
 
-def _denies_knowledge(answer: str) -> bool:
-    """Does this answer say "I don't know" rather than answer the question?
+#: A hedge may carry an adverb: "don't really know", "not entirely sure".
+_HEDGE = re.compile(
+    r"\b(?:do\s?n[o']?t|cannot|can[o']?t|am\s+not|is\s+not|not|nobody|no\s?one)\b"
+    r"(?:\s+\w+){0,2}?\s+\b(?:know|known|sure|certain|clear|decided|established)\b", re.I)
 
-    Two classes, because one rule cannot serve both. Multi-word phrases are
-    unambiguous and match anywhere, which is what catches "I don't know" -- the
-    phrasing an earlier anchored version missed. Bare words are matched only as
-    the whole answer, because they are also ordinary content.
+
+def _denies_knowledge(answer: str) -> bool:
+    """Does this answer say "I don't know" INSTEAD OF answering?
+
+    Three classes, because two did not cover it. Fixed phrases match anywhere.
+    A hedge pattern allows an adverb between the negation and the verb, so
+    "I don't really know" and "not entirely sure" are caught where a literal
+    phrase list missed them.
+
+    And a hedge only counts when it is the WHOLE answer. "not sure, but done
+    means the importer finishes under a minute" is an answer with a hedge in
+    front of it, and discarding it threw away exactly the content that was
+    asked for. Anything substantive after the hedge means the question was
+    answered.
     """
     low = " ".join((answer or "").lower().split())
     if not low:
         return True
-    if any(phrase in low for phrase in _DENIAL_PHRASES):
+    if low.strip(" .!") in _DENIAL_WORDS:
         return True
-    return low.strip(" .!") in _DENIAL_WORDS
+    hedged = _HEDGE.search(low) or any(phrase in low for phrase in _DENIAL_PHRASES)
+    if not hedged:
+        return False
+    # Strip the hedge and its connective; if real content remains, it is an
+    # answer. Counting raw words was too generous -- "the answer is not known to
+    # me" left "the answer to me", four words of which none says anything -- so
+    # the residual is filtered the same way the clarity gate filters a task.
+    rest = _HEDGE.sub(" ", low)
+    for phrase in _DENIAL_PHRASES:
+        rest = rest.replace(phrase, " ")
+    rest = re.sub(r"\b(?:but|though|however|really|quite|entirely|yet|still|"
+                  r"maybe|perhaps|and)\b", " ", rest)
+    _PRONOUNS = {"i", "me", "you", "us", "we", "them", "him", "her", "myself", "it"}
+    content = [w for w in re.findall(r"[a-z][a-z'-]*", rest)
+               if w not in _FILLERS and w not in _PLACEHOLDERS and w not in _PRONOUNS]
+    return len(content) < 3
 
 
 class Clarifier:

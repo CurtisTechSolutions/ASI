@@ -196,12 +196,19 @@ class Distil:
             if spec is None:
                 attempts.append({"goal": goal_text, "reframe": reframe, "via": "none", "ok": False})
                 return False, "no tool could be written for this goal"
-            grade = self.toolsmith.validate(spec)
+            grade = self.toolsmith.validate(spec, self.toolbox)
             kept = self.toolsmith.register(spec, goal.trace_id)
             attempts.append({"goal": goal_text, "reframe": reframe, "via": f"new tool {spec.name}",
-                             "ok": bool(kept), "grade": grade.score})
+                             "ok": bool(kept) or grade.passed, "grade": grade.score})
             if kept:
                 return True, f"wrote and verified {spec.name} ({grade.summary()})"
+            if grade.passed:
+                # `register` also returns False when it KEPT a better incumbent
+                # of the same name. Reporting that as "failed verification:
+                # verified" was self-contradicting on its face, and it filed a
+                # -1.0 case against a capability that exists and works.
+                return True, (f"{spec.name} already exists in a form that grades at least "
+                              f"as well ({grade.summary()})")
             return False, f"{spec.name} failed verification: {grade.diagnostic}"
 
         if persist:

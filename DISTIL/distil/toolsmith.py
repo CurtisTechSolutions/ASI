@@ -286,10 +286,26 @@ class Toolsmith:
         those failures into the next round of experiments.
         """
         grade = spec.grade or self.validate(spec, self.toolbox)
+        shaky = next((st for st in grade.stages
+                      if st.name == "determinism" and not st.passed), None)
+        if shaky is not None:
+            # A failed determinism stage scores 0.70, which cleared the 0.5
+            # threshold -- so the check ran, reported FAIL, and the tool
+            # registered regardless. "A tool that is right intermittently is
+            # worse than one that is wrong consistently" is this module's own
+            # argument; it has to be a gate for that to mean anything.
+            self.memory.remember(
+                Kind.FAILURE,
+                f"tool {spec.name!r} rejected as not repeatable: {shaky.detail}",
+                meta={"tool": spec.name, "grade": grade.score, "stages": ["determinism"]},
+                links=[goal_trace_id] if goal_trace_id else None,
+                grade=grade.score, source=Source.SELF)
+            return False
         incumbent = self.toolbox.load(spec.name) if self.toolbox else None
         if (incumbent is not None and incumbent.transport == "python"
                 and incumbent.source.strip() != spec.source.strip()
-                and incumbent.grade is not None and incumbent.grade.score >= grade.score):
+                and incumbent.grade is not None
+                and not _is_stronger(spec, grade, incumbent)):
             # A tool is keyed by its function name, so forging "median" writes
             # over whatever `median` was already there -- including a seed tool
             # with a far stronger contract test suite, and (via the identity
@@ -298,10 +314,19 @@ class Toolsmith:
             # A replacement has to be strictly better to land.
             self.memory.remember(
                 Kind.FAILURE,
-                f"kept the existing {spec.name!r} ({incumbent.grade.score:+.2f}) over a "
-                f"replacement grading {grade.score:+.2f}",
+                f"kept the existing {spec.name!r} ({incumbent.grade.score:+.2f}, "
+                f"{_assertions(incumbent.tests)} assertions) over a replacement grading "
+                f"{grade.score:+.2f} with {_assertions(spec.tests)}",
                 meta={"tool": spec.name, "kept": True, "grade": grade.score})
             return False
+        if incumbent is not None and incumbent.solved:
+            # Carry the history forward. A re-registration wrote a fresh spec
+            # with an empty `solved`, so every problem the tool had been shown to
+            # handle vanished from the text that makes it findable -- the tool
+            # survived and its reason for being retrievable did not.
+            for problem in incumbent.solved:
+                if problem not in spec.solved:
+                    spec.solved.append(problem)
         if grade.score < threshold:
             self.memory.remember(
                 Kind.FAILURE,
@@ -350,6 +375,29 @@ def _schema_problems(spec, kwargs: dict, memory) -> list[str]:
         problems += [f"{spec.name}: {k!r} is not an argument this tool declares"
                      for k in kwargs if k not in props]
     return problems
+
+
+def _assertions(tests: str) -> int:
+    """How much contract a test block actually states."""
+    return sum(1 for line in (tests or "").splitlines() if line.strip().startswith("assert"))
+
+
+def _is_stronger(spec, grade, incumbent) -> bool:
+    """May this replace the tool already registered under that name?
+
+    A strictly-greater grade was the first rule and it wedged the toolbox shut:
+    a fully verified tool scores 1.00, nothing can score above 1.00, so no
+    verified name could ever be improved again -- not by a bug fix, not by a
+    better implementation, never.
+
+    Grade first, then the strength of the contract. Two tools that both pass
+    everything are distinguished by how much their tests actually pin down,
+    which is the real difference between a template and a seed: both graded
+    1.00, and only one of them asserted anything about the edge cases.
+    """
+    if grade.score != incumbent.grade.score:
+        return grade.score > incumbent.grade.score
+    return _assertions(spec.tests) > _assertions(incumbent.tests)
 
 
 class Toolbox:
@@ -563,7 +611,12 @@ class Toolbox:
             existing = self.memory.remember(
                 Kind.TOOL, spec.embed_text(),
                 meta={"tool": name, "signature": spec.signature, "purpose": spec.purpose,
-                      "transport": spec.transport, "solved": list(spec.solved)})
+                      "transport": spec.transport, "solved": list(spec.solved)},
+                # Identity-keyed, like every other write for this tool. Without
+                # it this fallback created a second Kind.TOOL trace for a name
+                # that already had one -- the exact forking the identity key was
+                # introduced to stop.
+                identity=(f"mcp:{name}" if spec.transport == "mcp" else f"tool:{name}"))
         else:
             existing.meta["solved"] = list(spec.solved)
             # Re-embed by EXTENDING the description, not replacing it. An MCP

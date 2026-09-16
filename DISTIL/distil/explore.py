@@ -123,6 +123,7 @@ class Explorer:
         self.rng = rng or random.Random()
         self.regret = self._load_regret()
         self._observed: list[list[float]] = [[] for _ in _ORIGINS]
+        self._tried: set[str] = set()
 
     # -- idea generation -------------------------------------------------------
 
@@ -350,13 +351,27 @@ class Explorer:
         kept = self.toolsmith.register(spec)
         passed = grade.passed and kept
         kind = Kind.FACT if passed else Kind.FAILURE
-        text = (f"experiment ({idea.origin}) {'held' if passed else 'refuted'}: {idea.text} "
-                f"-- {grade.diagnostic}")
+        # The verdict, the kind and the grade have to agree. `passed` folds in
+        # whether the tool was KEPT, so a tool that graded +1.0 and was rejected
+        # for another reason produced a positively-graded Kind.FAILURE reading
+        # "experiment refuted: ... -- verified", which is three claims and two
+        # of them wrong.
+        if passed:
+            verdict, note = "held", grade.diagnostic
+        elif grade.passed:
+            verdict, note = "not adopted", f"{grade.diagnostic}, but the tool was not kept"
+        else:
+            verdict, note = "refuted", grade.diagnostic
+        text = f"experiment ({idea.origin}) {verdict}: {idea.text} -- {note}"
         trace = self.memory.remember(
             kind, text,
             meta={"origin": idea.origin, "p_prior": idea.p_success, "grade": grade.score,
-                  "tool": spec.name, "bits": round(information_gain(idea.p_success), 3)},
-            links=idea.source_ids, grade=grade.score, source=Source.SELF)
+                  "tool": spec.name, "verdict": verdict,
+                  "bits": round(information_gain(idea.p_success), 3)},
+            links=idea.source_ids,
+            # A FAILURE trace must not carry a positive grade: recall ranks by it,
+            # and a well-graded failure promotes the approach it refuted.
+            grade=grade.score if passed else -abs(grade.score), source=Source.SELF)
         return Experiment(idea, True, passed, grade.diagnostic, grade.score,
                           time.monotonic() - started, trace.id)
 
@@ -372,10 +387,16 @@ class Explorer:
         return cosine(a, b) >= floor
 
     def step(self, seed: str | None = None) -> Experiment | None:
-        ideas = self.brainstorm(seed, n=self.policy.branch_factor)
+        ideas = [i for i in self.brainstorm(seed, n=self.policy.branch_factor * 2)
+                 if i.text not in self._tried]
         if not ideas:
             return None
         chosen = ideas[0]
+        # Remember it. `brainstorm` is deterministic given the store, and an
+        # untestable idea leaves the store unchanged -- so `--steps 5` ranked the
+        # same idea first five times, ran it five times, reported five
+        # experiments and learned nothing.
+        self._tried.add(chosen.text)
         result = self.test(chosen)
         self._journal(result)
         self.regret.observe(self._utilities(ideas, chosen, result),

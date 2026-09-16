@@ -161,8 +161,13 @@ class Recollection:
     score: float
 
     def explain(self) -> str:
-        return (f"{self.score:.3f} = sim {self.similarity:.3f} x cred {self.credibility:.3f} "
-                f"x rec {self.recency:.3f}  [{self.trace.kind}] {self.trace.text[:60]!r}")
+        # The parts are reported without an "=", because each is raised to its
+        # own policy weight before multiplication -- printing "score = sim x cred
+        # x rec" stated an equation the numbers do not satisfy, and anyone
+        # checking it by hand would conclude the ranking was broken.
+        return (f"{self.score:.3f}  from sim {self.similarity:.3f}, "
+                f"cred {self.credibility:.3f}, rec {self.recency:.3f} "
+                f"(each weighted)  [{self.trace.kind}] {self.trace.text[:60]!r}")
 
 
 class Memory:
@@ -214,7 +219,7 @@ class Memory:
         backend = getattr(self.embedder, "last_backend", None) or \
             getattr(self.embedder, "name", "unknown")
         twin = (self._by_identity(kind, identity) if identity
-                else self._duplicate(kind, vector))
+                else self._duplicate(kind, vector, backend))
         if identity:
             meta = {**(meta or {}), "_identity": identity}
         now = self.clock()
@@ -229,6 +234,11 @@ class Memory:
                 # description of the version it replaced.
                 twin.text = text
                 twin.vector = vector
+                # And the backend tag with it. Swapping the vector while leaving
+                # the old tag put a lexical vector under a provider label (or the
+                # reverse), which is the one thing recall cannot detect: it would
+                # then compare two geometries as though they were one.
+                twin.embedder = backend
             for lid in (links or []):
                 if lid not in twin.links:
                     twin.links.append(lid)
@@ -253,11 +263,18 @@ class Memory:
                 return t
         return None
 
-    def _duplicate(self, kind: str, vector: Vector) -> Trace | None:
-        """The nearest same-kind trace, if it is near enough to be the same thing."""
+    def _duplicate(self, kind: str, vector: Vector, backend: str) -> Trace | None:
+        """The nearest same-kind trace, if it is near enough to be the same thing.
+
+        `backend` is the tag the incoming write will carry, not the embedder's
+        name. Those differ whenever a provider embedder falls back to lexical,
+        and filtering on the name meant dedupe searched a space nothing had been
+        written to -- so it silently stopped finding duplicates for the whole
+        duration of an outage.
+        """
         hits = self.store.search(vector, k=1, kinds=(kind,),
                                  min_similarity=self.policy.dedupe_threshold,
-                                 embedder=getattr(self.embedder, "name", "unknown"))
+                                 embedder=backend)
         return hits[0][0] if hits else None
 
     # -- grading ----------------------------------------------------------------

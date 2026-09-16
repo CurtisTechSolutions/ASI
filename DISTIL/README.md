@@ -13,7 +13,7 @@ it then has to prove work.
 ```bash
 cd DISTIL
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 246 tests, ~17s
+python3 -m tests.test_distil                # 263 tests, ~25s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -188,23 +188,23 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 
 | module | lines | what it does |
 |---|---|---|
-| `clarify.py` | 507 | ask when the objective is not understood; stop when the first step is actionable |
-| `mcp.py` | 561 | MCP servers over stdio JSON-RPC, embedded as ordinary tools |
-| `seed.py` | 823 | the starter toolkit, planted through the grader |
-| `frame.py` | 570 | understand the game first: players, actions, payoff, horizon, referee → solution concept, capability gaps, agenda |
-| `memory.py` | 446 | the embedding layer that *is* the memory; graded recall, credit propagation |
+| `clarify.py` | 618 | ask when the objective is not understood; stop when the first step is actionable |
+| `mcp.py` | 581 | MCP servers over stdio JSON-RPC, embedded as ordinary tools |
+| `seed.py` | 842 | the starter toolkit, planted through the grader |
+| `frame.py` | 575 | understand the game first: players, actions, payoff, horizon, referee → solution concept, capability gaps, agenda |
+| `memory.py` | 463 | the embedding layer that *is* the memory; graded recall, credit propagation |
 | `reason.py` | 440 | typed chain-of-thought; the game against Nature |
 | `store.py` | 477 | in-process exact search, pgvector, Redis, and tiered short/long-term |
-| `explore.py` | 508 | curiosity, bad ideas, analogy, inversion, policy self-upgrade |
-| `toolsmith.py` | 585 | write a tool, verify it, register what it solved |
+| `explore.py` | 529 | curiosity, bad ideas, analogy, inversion, policy self-upgrade |
+| `toolsmith.py` | 638 | write a tool, verify it, register what it solved |
 | `selfedit.py` | 338 | rewrite its own source behind invariants and the test suite |
 | `game.py` | 290 | maximin, minimax regret, fictitious play, regret matching, Shapley |
 | `challenge.py` | 354 | why-chains, premise attack, persistence past refusal |
-| `compress.py` | 253 | consolidate cold memory into detail-preserving digests |
+| `compress.py` | 279 | consolidate cold memory into detail-preserving digests |
 | `casebook.py` | 195 | problems and what actually solved them, both directions |
 | `goals.py` | 220 | goal tree; distillation stops at verifiability |
-| `sandbox.py` | 199 | AST screen, subprocess, timeout, stripped environment |
-| `grade.py` | 170 | parse → screen → run → tests → determinism |
+| `sandbox.py` | 200 | AST screen, subprocess, timeout, stripped environment |
+| `grade.py` | 252 | parse → screen → run → tests → determinism |
 | `embed.py` | 201 | signed hashing trick, online IDF, blake2b |
 
 ## Storage
@@ -233,7 +233,7 @@ wrong, is tested with in-process stand-ins.
 ## What four rounds of adversarial review found
 
 The code was reviewed by parallel agents across five dimensions, each finding
-verified by an independent skeptic, five times. **88 defects were confirmed and
+verified by an independent skeptic, six times. **115 defects were confirmed and
 fixed.** The distribution is the interesting part:
 
 | round | found | of which introduced by the previous round's fixes |
@@ -243,6 +243,15 @@ fixed.** The distribution is the interesting part:
 | 3 | 13 | 4 |
 | 4 | 13 | 7 |
 | 5 | 2 | 1 |
+| 6 — frozen tree | 27 | 5 |
+
+Rounds 1–5 ran against a tree that was being edited underneath them, so their
+*verifiers* were worthless — 16 of 16 refutations in round 4 read "the code no
+longer exists in the working tree", because the bug had been fixed while they
+checked. Only the reviewers' findings were usable. Round 6 froze the tree at a
+commit and left it alone: **27 of 28 findings survived adversarial
+verification.** A green suite and five rounds of review had not made the code
+clean, and the only round that could prove it was the one that stopped moving.
 
 Fixing introduces bugs at roughly the rate you would fear, which is the argument
 for re-reviewing the *fixed* tree rather than stopping at a green suite. Every
@@ -256,6 +265,12 @@ Three worth naming, because they are the kind a test suite does not catch:
   failed *open* — an unknown type name skipped the check, so a typo accepted
   every value. A referee that reports success for constraints it never checked is
   worse than no referee.
+- **The determinism stage never fired.** It re-ran the *module* and compared
+  stdout, but the tool contract mandates no I/O outside the function — so a
+  conforming module prints nothing, the stage compared `''` to `''`, and it
+  passed unconditionally without ever calling the function. A tool returning a
+  different answer on every call graded `+1.000 verified`, and all twelve seed
+  tools collected the weight as a gift.
 - **Two seed tools had their regex escapes destroyed at import.** The Seed source
   literals are not raw strings, so `\b` became a backspace character and every
   word-boundary anchor silently stopped anchoring. `\w` and `\d` are not valid
