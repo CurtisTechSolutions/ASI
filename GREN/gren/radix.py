@@ -13,6 +13,43 @@ Their interaction is one rule, and it is the single bug this structure is prone
 to: A TERMINAL NODE IS NEVER MERGED AWAY. Without that clause, compression
 silently deletes the general classes that are the reason for using a trie.
 """
+# Work BACKWARDS from the end goal. The order tokens are inserted in IS the
+# order the tree asks about them, so it decides what sits at the root -- and
+# sorting alphabetically put `adversarial=` there, for no better reason than
+# that "a" sorts first.
+#
+# Two arguments for goal-first, and the second is the load-bearing one:
+#
+#   compression   the goal is what games actually differ on. Measured over the
+#                 four-game corpus, goal-first identifies a game from ONE token
+#                 against alphabetical's 2.5. (Small N: with four games and one
+#                 perfectly-discriminating axis this is nearly free, and it would
+#                 not stay a unique key at four hundred.)
+#
+#   knowability   the goal is the one thing you can state about an UNFAMILIAR
+#                 game before you can play it. You know a conversation is meant
+#                 to get you a promotion; you do not know its payoff matrix, its
+#                 horizon, or whether it has a potential function. Putting goal
+#                 at the root means the questions the tree asks first are the
+#                 ones a new game can actually answer, and this does not depend
+#                 on the corpus size.
+#
+# And when the goal is unclear, going UP a level is the right move rather than a
+# fallback: "change how they see me" is a real goal with real strategies even
+# when "get a promotion" is not yet committed to.
+GOAL_FIRST = ("goal_type", "adversarial", "category", "players", "turn_structure",
+              "information", "legality", "reason_entropy", "reason_kinds")
+
+
+def goal_first(signature, priority=GOAL_FIRST):
+    """Order a signature's tokens goal-first, then by declared axis, then the
+    refusal codes. Ties break on the token so the order stays deterministic."""
+    def key(t):
+        ax = t.split("=", 1)[0]
+        return (priority.index(ax) if ax in priority else len(priority), t)
+    return sorted(signature, key=key)
+
+
 class RadixGameTree:
     def __init__(self):
         self.segment = [()]            # node -> compressed run of tokens

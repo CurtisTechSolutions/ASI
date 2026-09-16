@@ -1,7 +1,7 @@
 """TwoSine: Adam, but the two moments are read as two sine waves that interfere.
 
 Standard library only - no numpy, no torch - so it runs anywhere with nothing
-installed, the same rule `Research/experiments/` and `RadixCyclicNN/` follow.
+installed, the same rule the rest of `Experiments/` and `RadixCyclicNN/` follow.
 
     python3 two_sine_optimizer.py            # self-checks on the algebra
     python3 test_two_sine_optimizer.py       # the benchmark

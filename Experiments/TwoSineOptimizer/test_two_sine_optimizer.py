@@ -1,7 +1,7 @@
 """Does reading Adam's moments as two interfering sine waves buy anything?
 
 Standard library only - no numpy, no torch - so it runs anywhere with nothing
-installed, the same rule `Research/experiments/` follows.
+installed, the same rule the rest of `Experiments/` follows.
 
     python3 test_two_sine_optimizer.py            # full run (~1 min 40 s)
     python3 test_two_sine_optimizer.py --quick    # ~10 s
@@ -253,7 +253,7 @@ class SineMLP:
 
 def make_task(n: int, seed: int):
     """A smooth two-input regression target - the same one the depth experiment
-    in `Research/experiments/` uses, so the two are comparable.
+    in `../DepthCountedNormalisation/` uses, so the two are comparable.
 
     Predicting the mean scores about 0.18; anything near that has not learned.
     """

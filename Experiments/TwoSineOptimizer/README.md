@@ -1,9 +1,9 @@
 # TwoSine — Adam, with the two moments read as two interfering sine waves
 
 **Standard library only** — no numpy, no torch, no gym — so everything here runs
-anywhere with nothing installed, the same rule `RadixCyclicNN/` and
-`Research/experiments/` follow. Everything is seeded and deterministic: the same
-command twice gives the same table.
+anywhere with nothing installed, the same rule `RadixCyclicNN/` and the rest of
+`Experiments/` follow. Everything is seeded and deterministic: the same command
+twice gives the same table.
 
 | file | what it is |
 |---|---|
@@ -201,4 +201,4 @@ beyond the `+50%` state count. Nothing here says TwoSine scales.
 |---|---|
 | the sine activation beats sigmoid and ReLU | `../ActivationFunctionTest/` |
 | a learnable activation inside a conventional RNN | `../SBNN_RNN_ActivationFunction/main.py` |
-| the vanishing gradient is a measurement | `../../Research/experiments/` |
+| the vanishing gradient is a measurement | `../DepthCountedNormalisation/` |

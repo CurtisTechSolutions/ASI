@@ -1,0 +1,675 @@
+{
+ "format": 1,
+ "packages": {
+  "chess": {
+   "name": "chess",
+   "signature": [
+    "adversarial=competitive",
+    "category=board",
+    "goal_type=reach-target",
+    "information=perfect",
+    "legality=50-90%",
+    "players=2",
+    "reason_entropy=high",
+    "reason_kinds=5-16",
+    "refuses=BLOCKED_PATH",
+    "refuses=EMPTY_SOURCE",
+    "refuses=NOT_YOURS",
+    "refuses=OCCUPIED_TARGET",
+    "refuses=OFF_BOARD",
+    "refuses=SELF_CHECK",
+    "refuses=WRONG_PATTERN",
+    "turn_structure=alternating"
+   ],
+   "mechanics": [
+    "BLOCKED_PATH",
+    "EMPTY_SOURCE",
+    "NOT_YOURS",
+    "OCCUPIED_TARGET",
+    "OFF_BOARD",
+    "SELF_CHECK",
+    "WRONG_PATTERN"
+   ],
+   "probes": 1500,
+   "candidates": [
+    [
+     0.368,
+     "checkers"
+    ],
+    [
+     0.579,
+     "go"
+    ],
+    [
+     0.84,
+     "sudoku"
+    ]
+   ],
+   "legality_density": 0.525,
+   "reason_entropy": 2.24,
+   "confidence": 0.842,
+   "characterisation": 0.958
+  },
+  "checkers": {
+   "name": "checkers",
+   "signature": [
+    "adversarial=competitive",
+    "category=board",
+    "goal_type=outlast",
+    "information=perfect",
+    "legality=10-50%",
+    "players=2",
+    "reason_entropy=high",
+    "reason_kinds=5-16",
+    "refuses=EMPTY_SOURCE",
+    "refuses=NOT_YOURS",
+    "refuses=NO_CAPTURE_TARGET",
+    "refuses=OCCUPIED_TARGET",
+    "refuses=OFF_BOARD",
+    "refuses=WRONG_PATTERN",
+    "turn_structure=alternating"
+   ],
+   "mechanics": [
+    "EMPTY_SOURCE",
+    "NOT_YOURS",
+    "NO_CAPTURE_TARGET",
+    "OCCUPIED_TARGET",
+    "OFF_BOARD",
+    "WRONG_DIRECTION",
+    "WRONG_PATTERN"
+   ],
+   "probes": 1500,
+   "candidates": [
+    [
+     0.368,
+     "chess"
+    ],
+    [
+     0.632,
+     "go"
+    ],
+    [
+     0.88,
+     "sudoku"
+    ]
+   ],
+   "legality_density": 0.445,
+   "reason_entropy": 2.05,
+   "confidence": 1.0,
+   "characterisation": 0.922
+  },
+  "go": {
+   "name": "go",
+   "signature": [
+    "adversarial=competitive",
+    "category=board",
+    "goal_type=maximise-score",
+    "information=perfect",
+    "legality=50-90%",
+    "players=2",
+    "reason_entropy=low",
+    "reason_kinds=2-4",
+    "refuses=OCCUPIED_TARGET",
+    "refuses=OFF_BOARD",
+    "turn_structure=alternating"
+   ],
+   "mechanics": [
+    "OCCUPIED_TARGET",
+    "OFF_BOARD"
+   ],
+   "probes": 1500,
+   "candidates": [
+    [
+     0.579,
+     "chess"
+    ],
+    [
+     0.632,
+     "checkers"
+    ],
+    [
+     0.8,
+     "sudoku"
+    ]
+   ],
+   "legality_density": 0.849,
+   "reason_entropy": 0.4,
+   "confidence": 0.421,
+   "characterisation": 0.968
+  },
+  "sudoku": {
+   "name": "sudoku",
+   "signature": [
+    "adversarial=solitaire",
+    "category=puzzle",
+    "goal_type=produce-artifact",
+    "information=perfect",
+    "legality=50-90%",
+    "players=1",
+    "reason_entropy=high",
+    "reason_kinds=2-4",
+    "refuses=CONSTRAINT_BOX",
+    "refuses=CONSTRAINT_COL",
+    "refuses=CONSTRAINT_ROW",
+    "refuses=OCCUPIED_TARGET",
+    "turn_structure=free"
+   ],
+   "mechanics": [
+    "CONSTRAINT_BOX",
+    "CONSTRAINT_COL",
+    "CONSTRAINT_ROW",
+    "OCCUPIED_TARGET"
+   ],
+   "probes": 1500,
+   "candidates": [
+    [
+     0.8,
+     "go"
+    ],
+    [
+     0.84,
+     "chess"
+    ],
+    [
+     0.88,
+     "checkers"
+    ]
+   ],
+   "legality_density": 0.71,
+   "reason_entropy": 1.82,
+   "confidence": 0.35,
+   "characterisation": 0.977
+  }
+ },
+ "features": {
+  "chess": [
+   "ch_adx",
+   "ch_ady",
+   "ch_blockers",
+   "ch_diag",
+   "ch_dx",
+   "ch_dy",
+   "ch_is_B",
+   "ch_is_K",
+   "ch_is_N",
+   "ch_is_P",
+   "ch_is_Q",
+   "ch_is_R",
+   "ch_mine",
+   "ch_src_empty",
+   "ch_straight",
+   "ch_tgt_enemy",
+   "ch_tgt_own"
+  ],
+  "checkers": [
+   "ck_adx",
+   "ck_crowned",
+   "ck_diag",
+   "ck_dx",
+   "ck_dy",
+   "ck_forward",
+   "ck_jump",
+   "ck_jumps_exist",
+   "ck_mid_enemy",
+   "ck_mine",
+   "ck_src_empty",
+   "ck_tgt_occupied"
+  ],
+  "go": [
+   "go_adj_enemy",
+   "go_caps",
+   "go_edge",
+   "go_libs",
+   "go_occupied",
+   "go_pass",
+   "go_x",
+   "go_y"
+  ],
+  "sudoku": [
+   "su_cands",
+   "su_filled",
+   "su_in_box",
+   "su_in_col",
+   "su_in_row",
+   "su_v",
+   "su_x",
+   "su_y"
+  ]
+ },
+ "vocabulary": {
+  "chess": {
+   "OCCUPIED_TARGET/0": [
+    [
+     "OCCUPANCY",
+     0,
+     1
+    ]
+   ],
+   "OCCUPIED_TARGET/1": [
+    [
+     "OCCUPANCY",
+     1,
+     1
+    ]
+   ],
+   "OCCUPIED_TARGET/2": [
+    [
+     "EXCHANGE",
+     0,
+     1
+    ]
+   ],
+   "_chess": [
+    [
+     "EXCHANGE",
+     1,
+     1
+    ],
+    [
+     "EXCHANGE",
+     2,
+     1
+    ],
+    [
+     "EXCHANGE",
+     3,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     0,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     1,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     2,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     3,
+     1
+    ],
+    [
+     "OCCUPANCY",
+     2,
+     1
+    ],
+    [
+     "PIECE_TYPES",
+     0,
+     1
+    ],
+    [
+     "PIECE_TYPES",
+     1,
+     1
+    ],
+    [
+     "PIECE_TYPES",
+     2,
+     1
+    ],
+    [
+     "PIECE_TYPES",
+     3,
+     1
+    ],
+    [
+     "PIECE_TYPES",
+     4,
+     1
+    ],
+    [
+     "PIECE_TYPES",
+     5,
+     1
+    ],
+    [
+     "POSITION",
+     0,
+     1
+    ],
+    [
+     "POSITION",
+     1,
+     1
+    ],
+    [
+     "POSITION",
+     2,
+     1
+    ],
+    [
+     "POSITION",
+     3,
+     1
+    ],
+    [
+     "ROYAL_PIECE",
+     0,
+     1
+    ],
+    [
+     "ROYAL_PIECE",
+     1,
+     1
+    ],
+    [
+     "SIDE",
+     0,
+     1
+    ],
+    [
+     "SLIDING_MOVE",
+     0,
+     1
+    ],
+    [
+     "SLIDING_MOVE",
+     1,
+     1
+    ],
+    [
+     "SLIDING_MOVE",
+     2,
+     1
+    ]
+   ]
+  },
+  "go": {
+   "OCCUPIED_TARGET/0": [
+    [
+     "GROUP_LIBERTY",
+     0,
+     1
+    ]
+   ],
+   "OCCUPIED_TARGET/1": [
+    [
+     "GRID_PLACE",
+     2,
+     -1
+    ]
+   ],
+   "OCCUPIED_TARGET/2": [
+    [
+     "GROUP_LIBERTY",
+     2,
+     -1
+    ]
+   ],
+   "_go": [
+    [
+     "CONNECTION",
+     0,
+     1
+    ],
+    [
+     "CONNECTION",
+     1,
+     1
+    ],
+    [
+     "CONNECTION",
+     2,
+     1
+    ],
+    [
+     "GRID_PLACE",
+     0,
+     1
+    ],
+    [
+     "GRID_PLACE",
+     1,
+     1
+    ],
+    [
+     "GROUP_LIBERTY",
+     1,
+     1
+    ],
+    [
+     "INFLUENCE",
+     0,
+     1
+    ],
+    [
+     "INFLUENCE",
+     1,
+     1
+    ],
+    [
+     "INFLUENCE",
+     2,
+     1
+    ],
+    [
+     "INFLUENCE",
+     3,
+     1
+    ],
+    [
+     "INFLUENCE",
+     4,
+     1
+    ],
+    [
+     "PASS_ALLOWED",
+     0,
+     1
+    ],
+    [
+     "SIDE",
+     0,
+     1
+    ]
+   ]
+  },
+  "checkers": {
+   "OCCUPIED_TARGET/0": [
+    [
+     "OCCUPANCY",
+     0,
+     1
+    ]
+   ],
+   "OCCUPIED_TARGET/1": [
+    [
+     "OCCUPANCY",
+     2,
+     1
+    ]
+   ],
+   "OCCUPIED_TARGET/2": [
+    [
+     "OCCUPANCY",
+     1,
+     1
+    ]
+   ],
+   "_checkers": [
+    [
+     "FORCED_CAPTURE",
+     0,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     0,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     1,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     2,
+     1
+    ],
+    [
+     "GRID_MOVE",
+     3,
+     1
+    ],
+    [
+     "JUMP_CAPTURE",
+     0,
+     1
+    ],
+    [
+     "JUMP_CAPTURE",
+     1,
+     1
+    ],
+    [
+     "JUMP_CAPTURE",
+     2,
+     1
+    ],
+    [
+     "PROMOTE_ON_RANK",
+     0,
+     1
+    ],
+    [
+     "PROMOTE_ON_RANK",
+     1,
+     1
+    ],
+    [
+     "SIDE",
+     0,
+     1
+    ]
+   ]
+  },
+  "sudoku": {
+   "OCCUPIED_TARGET/1": [
+    [
+     "GRID_PLACE",
+     2,
+     -1
+    ]
+   ],
+   "_sudoku": [
+    [
+     "CONSTRAINT_UNIQUE",
+     0,
+     1
+    ],
+    [
+     "CONSTRAINT_UNIQUE",
+     1,
+     1
+    ],
+    [
+     "CONSTRAINT_UNIQUE",
+     2,
+     1
+    ],
+    [
+     "FILL_TO_COMPLETE",
+     0,
+     1
+    ],
+    [
+     "GRID_PLACE",
+     0,
+     1
+    ],
+    [
+     "GRID_PLACE",
+     1,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     0,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     1,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     2,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     3,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     4,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     5,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     6,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     7,
+     1
+    ],
+    [
+     "SYMBOL_SET",
+     8,
+     1
+    ]
+   ]
+  }
+ },
+ "slots": [
+  {
+   "name": "OCCUPIED_TARGET/0",
+   "code": "OCCUPIED_TARGET",
+   "strength": 0.953,
+   "games": [
+    "checkers",
+    "chess",
+    "go"
+   ]
+  },
+  {
+   "name": "OCCUPIED_TARGET/1",
+   "code": "OCCUPIED_TARGET",
+   "strength": 0.943,
+   "games": [
+    "checkers",
+    "chess",
+    "go",
+    "sudoku"
+   ]
+  },
+  {
+   "name": "OCCUPIED_TARGET/2",
+   "code": "OCCUPIED_TARGET",
+   "strength": 0.889,
+   "games": [
+    "checkers",
+    "chess",
+    "go"
+   ]
+  }
+ ]
+}
