@@ -158,6 +158,12 @@ class ProviderEmbedder:
         self.fallback = fallback or HashEmbedder(dims)
         self.dims = dims
         self.failures = 0
+        #: The backend that produced the most recent vector. `Memory` reads this
+        #: rather than `name`, because a degraded call returns a LEXICAL vector
+        #: and tagging it as a provider vector puts the two geometries in one
+        #: space -- exactly what DESIGN 4.4 refuses, and undetectably, since the
+        #: store would then happily compare them.
+        self.last_backend = self.name
 
     @property
     def name(self) -> str:
@@ -169,7 +175,9 @@ class ProviderEmbedder:
             raw = self.provider.embed([text])[0]
         except Exception:
             self.failures += 1
+            self.last_backend = self.fallback.name
             return self.fallback.embed(text, learn=False)
+        self.last_backend = self.name
         return normalise(_fit(raw, self.dims))
 
     def embed_batch(self, texts: list[str], learn: bool = True) -> list[Vector]:

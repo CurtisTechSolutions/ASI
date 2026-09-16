@@ -521,15 +521,21 @@ class McpRegistry:
                           "mcp_name": tool.name, "schema": tool.schema,
                           "signature": f"{tool.qualified}({', '.join(tool.arguments())})",
                           "purpose": tool.description or tool.name,
-                          # Written so `Toolbox.load` has something to read: it
-                          # looks for meta["solved"] and discovery never set it,
-                          # so every MCP tool loaded with solved=[] forever and
-                          # the reuse path could never be satisfied.
-                          "solved": []},
+                          # Seeded so `Toolbox.load` has something to read, but
+                          # only once. `remember` merges meta on an identity hit,
+                          # so re-writing [] on every discovery pass erased
+                          # everything `record_use` had taught the store about
+                          # this tool -- and discovery runs on every startup.
+                          **({} if self._known(tool.qualified) else {"solved": []})},
                     identity=f"mcp:{tool.qualified}")
             report["servers"][server.name] = [t.name for t in tools]
             report["tools"] += len(tools)
         return report
+
+    def _known(self, qualified: str) -> bool:
+        """Is this tool already in the store, with a history worth keeping?"""
+        from .memory import Kind
+        return any(t.meta.get("tool") == qualified for t in self.memory.of_kind(Kind.TOOL))
 
     def call(self, qualified: str, arguments: dict | None = None,
              tool_name: str | None = None) -> McpResult:

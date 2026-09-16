@@ -286,6 +286,22 @@ class Toolsmith:
         those failures into the next round of experiments.
         """
         grade = spec.grade or self.validate(spec, self.toolbox)
+        incumbent = self.toolbox.load(spec.name) if self.toolbox else None
+        if (incumbent is not None and incumbent.transport == "python"
+                and incumbent.source.strip() != spec.source.strip()
+                and incumbent.grade is not None and incumbent.grade.score >= grade.score):
+            # A tool is keyed by its function name, so forging "median" writes
+            # over whatever `median` was already there -- including a seed tool
+            # with a far stronger contract test suite, and (via the identity
+            # merge) its single trace and grade history with it. Every composite
+            # depending on it silently inherited the weaker implementation.
+            # A replacement has to be strictly better to land.
+            self.memory.remember(
+                Kind.FAILURE,
+                f"kept the existing {spec.name!r} ({incumbent.grade.score:+.2f}) over a "
+                f"replacement grading {grade.score:+.2f}",
+                meta={"tool": spec.name, "kept": True, "grade": grade.score})
+            return False
         if grade.score < threshold:
             self.memory.remember(
                 Kind.FAILURE,
@@ -555,7 +571,13 @@ class Toolbox:
             # argument names and required list; overwriting it with the generic
             # ToolSpec text destroyed that provenance, so the tool that had
             # proved itself became the hardest one to find.
-            base = existing.meta.setdefault("base_text", existing.text)
+            # Re-forging replaces the trace text, so a cached base_text from the
+            # previous version would quietly restore the old description on the
+            # next use. Refresh it whenever the trace no longer starts with it.
+            base = existing.meta.get("base_text")
+            if not base or not existing.text.startswith(base):
+                base = existing.text.split("\nsolved: ")[0]
+                existing.meta["base_text"] = base
             solved = [f"solved: {p}" for p in spec.solved]
             existing.text = "\n".join([base] + solved)
             existing.vector = self.memory.embedder.embed(existing.text)

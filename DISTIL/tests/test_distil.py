@@ -31,7 +31,7 @@ from distil.clarify import (Clarification, Clarifier, Gap, first_step_actionable
 from distil.challenge import (Attack, Ground, Persistence, challenge, classify,
                               interrogate, premises)
 from distil.compress import PRESERVE, Compressor
-from distil.embed import HashEmbedder, Vocabulary
+from distil.embed import HashEmbedder, ProviderEmbedder, Vocabulary
 from distil.explore import Explorer, Idea, Origin
 from distil.frame import (Framer, GameFrame, Horizon, Information, Payoff, Players,
                           PRIMITIVES, Solution, agenda, capabilities, classify as classify_game)
@@ -2242,6 +2242,83 @@ def test_using_a_tool_puts_the_problem_into_its_searchable_text():
     d.toolbox.record_use("parse_csv", "collapse a ragged telemetry export", True)
     found = d.toolbox.find("collapse a ragged telemetry export", k=1)
     assert found and found[0][0].name == "parse_csv" and found[0][2] > 0.3
+
+
+def test_clarification_answers_reach_the_work_not_just_the_frame():
+    """They went into the frame and no further: run() was called on the raw task
+    string, so someone who patiently explained what done means got the same goal
+    tree as someone who said nothing."""
+    d = fresh(seed=1)
+    r = d.solve("make the thing better",
+                ask=lambda qs: {Gap.OBJECTIVE: "compute the median of each column",
+                                Gap.REFEREE: "the test suite",
+                                Gap.ACTIONS: "compute, parse"})
+    goals = [g.text for g in r["session"].tree.goals.values() if g.id != "root"]
+    assert any("median" in g for g in goals), f"the objective must be distilled: {goals}"
+    assert r["session"].chain.task == "make the thing better", "the chain keeps the ask"
+
+
+def test_a_weaker_tool_cannot_overwrite_a_stronger_one_of_the_same_name():
+    """A tool is keyed by its function name, so forging "median" wrote over
+    whatever median was already there -- including a seed with a far stronger
+    contract suite, and every composite depending on it inherited the downgrade."""
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    before = d.toolbox.load("median")
+    spec = d.toolsmith.forge("compute the median of a list")
+    assert not d.toolsmith.register(spec), "a replacement must be strictly better to land"
+    assert d.toolbox.load("median").tests == before.tests
+
+
+def test_a_fallback_vector_is_tagged_as_lexical_and_stays_recallable():
+    """A degraded provider embedder returns a LEXICAL vector. Tagging it as a
+    provider vector puts two geometries in one space -- which DESIGN 4.4 refuses,
+    and undetectably, because the store would then compare them happily."""
+    class Down:
+        name, can_embed = "down", True
+
+        def embed(self, texts):
+            raise RuntimeError("provider unavailable")
+
+    m = Memory(ProviderEmbedder(Down(), HashEmbedder()))
+    t = m.remember(Kind.FACT, "a fact written while the provider was unavailable")
+    assert t.embedder == "hash-v1", t.embedder
+    hits = m.recall("a fact written while the provider was unavailable", k=1)
+    assert len(hits) == 1, "a query embedded lexically must reach lexically embedded traces"
+
+
+def test_rediscovery_does_not_erase_what_use_taught_the_store():
+    """discover() runs on every startup and re-wrote solved=[] into the merged
+    meta, wiping everything record_use had recorded."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    d.toolbox.record_use("echo.add", "totalled two figures", True)
+    d.mcp.discover()                       # as a restart would
+    assert "totalled two figures" in d.toolbox.load("echo.add").solved
+    d.mcp.close()
+
+
+def test_an_mcp_tool_whose_server_is_gone_is_not_counted_as_covering_a_goal():
+    """Grades say a tool worked once; they say nothing about whether its server
+    is still configured."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    d.toolbox.record_use("echo.add", "added two numbers", True)
+    spec = d.toolbox.load("echo.add")
+    assert d._runnable(spec)
+    d.mcp.servers.clear()                  # the server is no longer configured
+    assert not d._runnable(spec)
+    d.mcp.close()
+
+
+def test_tuning_the_policy_is_not_undone_by_the_save_that_follows_it():
+    d = fresh(seed=3)
+    d.solve("compute the median of a column", interrogate=False)
+    d.upgrade(["compute the median of a column"], trials=6)
+    assert d.policy is d.explorer.policy
+    assert Policy.load(d.workspace.policy).to_json() == d.policy.to_json()
 
 
 def test_re_forging_a_tool_does_not_create_a_second_trace():

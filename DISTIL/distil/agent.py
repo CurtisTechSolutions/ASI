@@ -121,8 +121,11 @@ class Distil:
                         "reason": clarified.reason}
         else:
             frame, plan = (None, None)
-        precedent = self.casebook.adapt(task)
-        session = self.reasoner.run(task, interrogate_first=interrogate)
+        objective = frame.objective if frame is not None else None
+        lookup = objective if (objective and objective.strip() != task.strip()) else task
+        precedent = self.casebook.adapt(lookup)
+        session = self.reasoner.run(task, interrogate_first=interrogate,
+                                    objective=objective)
         if frame is not None:
             session.chain.steps.insert(0, _thought(
                 Step.FRAME,
@@ -172,7 +175,7 @@ class Distil:
             found = self.toolbox.find(goal_text, k=1)
             if found and found[0][2] >= 0.35:            # threshold on similarity
                 spec, _, similarity = found[0]
-                if _reusable(spec, self.memory):
+                if _reusable(spec, self.memory) and self._runnable(spec):
                     # NOT record_use. That records a Source.SELF success, and
                     # this branch deliberately does not run the tool -- so it was
                     # manufacturing verifier evidence for something that never
@@ -266,6 +269,13 @@ class Distil:
     def upgrade(self, tasks: list[str] | None = None, trials: int = 8) -> dict:
         tasks = tasks or [t.text for t in self.memory.of_kind(Kind.QUERY)[-8:]] or ["a task"]
         result = self.explorer.upgrade(tasks, trials)
+        # Adopt the winner. `Explorer.upgrade` rebinds its own policy and saves
+        # it; `self.save()` below then wrote THIS object back over the file, so
+        # every tuning run was undone by the save that was supposed to persist
+        # it -- and the process was left holding three divergent Policy objects.
+        self.policy = self.explorer.policy
+        self.memory.policy = self.policy
+        self.reasoner.policy = self.policy
         self.save()
         return result
 
@@ -273,6 +283,19 @@ class Distil:
         result = self.editor.attempt(target, instruction)
         self.save()
         return result
+
+    def _runnable(self, spec) -> bool:
+        """Could this tool actually be executed right now?
+
+        Grades say a tool worked once; they say nothing about whether its server
+        is still configured. MCP traces outlive the registry that discovered
+        them, so a goal was being reported solved -- and a +1 case filed -- by a
+        tool nothing could have called.
+        """
+        if spec.transport != "mcp":
+            return True
+        server = spec.name.split(".")[0]
+        return self.mcp is not None and server in self.mcp.servers
 
     def compress(self, dry_run: bool = False) -> dict:
         """Consolidate cold, redundant memory into digests. Reversible."""

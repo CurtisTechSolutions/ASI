@@ -207,6 +207,12 @@ class Memory:
         have a natural key should pass it.
         """
         vector = self.embedder.embed(text)
+        # The backend that actually produced THIS vector, which is not always the
+        # one the embedder is named after: a provider embedder falls back to the
+        # lexical one on a failed call, and tagging that vector as a provider
+        # vector silently mixes two geometries in one space.
+        backend = getattr(self.embedder, "last_backend", None) or \
+            getattr(self.embedder, "name", "unknown")
         twin = (self._by_identity(kind, identity) if identity
                 else self._duplicate(kind, vector))
         if identity:
@@ -231,7 +237,7 @@ class Memory:
                 self.grade(twin.id, grade, source)
             return twin
         trace = Trace(id=uuid.uuid4().hex[:12], kind=kind, text=text, vector=vector,
-                      embedder=getattr(self.embedder, "name", "unknown"), created=now,
+                      embedder=backend, created=now,
                       meta=dict(meta or {}), links=list(links or []))
         self.store.put(trace)
         if grade is not None:
@@ -313,7 +319,13 @@ class Memory:
         as it grows. Exact backends fetch exactly what is asked for.
         """
         p, now = self.policy, self.clock()
-        mine = getattr(self.embedder, "name", "unknown")
+        # The backend that produced the QUERY vector, for the same reason writes
+        # are tagged that way: a degraded provider embedder returns a lexical
+        # vector, and a query embedded lexically must be compared against
+        # lexically embedded traces. Reading `name` here made every trace written
+        # during an outage invisible to every query made during the same outage.
+        mine = getattr(self.embedder, "last_backend", None) or \
+            getattr(self.embedder, "name", "unknown")
         fetch = k * OVERFETCH if self.store.approximate else 0
         candidates = self.store.search(qv, k=fetch, kinds=kinds,
                                        min_similarity=min_similarity,

@@ -401,24 +401,37 @@ class Reasoner:
 
     # -- the whole thing ----------------------------------------------------
 
-    def run(self, task: str, interrogate_first: bool = True) -> Session:
+    def run(self, task: str, interrogate_first: bool = True,
+            objective: str | None = None) -> Session:
+        """`objective`, when the clarification loop established one, is what the
+        work is actually distilled and recalled against.
+
+        Without it the answers went into the frame and no further: `run` was
+        called on the raw task string, so a user who patiently explained what
+        done means got the same goal tree as one who said nothing. The whole
+        point of asking is that the answer changes what happens next.
+        """
+        # The objective IS what done means, so it is what gets distilled.
+        # Concatenating it onto the task produced goals carrying both, which read
+        # as neither.
+        subject = (objective or "").strip() or task
         chain = Chain(task)
-        query = self.memory.remember(Kind.QUERY, task)
+        query = self.memory.remember(Kind.QUERY, subject)
         why, questions = (None, [])
         if interrogate_first:
             why, questions = self.interrogate_task(task, chain)
-        hits = self.memory.recall(task, k=5)
+        hits = self.memory.recall(subject, k=5)
         chain.add(Step.RETRIEVE, f"{len(hits)} recollection(s)"
                   + (f"; best: {hits[0].trace.text[:60]!r} ({hits[0].score:.3f})" if hits else ""),
                   hits=[h.trace.id for h in hits])
-        tree = self.distill(task, chain)
+        tree = self.distill(subject, chain)
         for g in tree.goals.values():
             if g.id != "root":
                 t = self.memory.remember(Kind.GOAL, g.text, links=[query.id],
                                          meta={"task": task, "role": role_of(g.text),
                                                "verifiable": g.atomic})
                 g.trace_id = t.id
-        belief = self.beliefs(task, why, questions)
+        belief = self.beliefs(subject, why, questions)
         goal, decision = self.select(tree, belief, chain)
         trace = self.memory.remember(Kind.CHAIN, chain.to_text(), links=[query.id],
                                      meta={"task": task, "selected": goal.text if goal else None,
