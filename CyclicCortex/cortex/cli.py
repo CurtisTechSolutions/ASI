@@ -4,8 +4,10 @@
   python3 -m cortex.cli map         the similarity graph and its regions
   python3 -m cortex.cli play        play chess against the engine
   python3 -m cortex.cli sudoku      solve a puzzle with the sudoku region
+  python3 -m cortex.cli serve       the browser front end: the graph drawn, training
+                                    watched, and a board you can sit down at
 """
-import argparse, random, sys
+import argparse, os, random, sys
 from cortex import checkpoint
 from cortex.cortex import Cortex
 from cortex.games import ALL
@@ -149,7 +151,7 @@ def cmd_sudoku(a):
                 if not legal: break
                 r = c.region_for(g)
                 mv = max(legal, key=lambda m: r.net.predict(c.encode(r, g, s, m))[1])
-            s = g.apply(mv); placed += 1
+            s = g.apply(s, mv); placed += 1
         print(f"    puzzle {i}: filled {placed}/{start}, solved={s.solved()}, "
               f"illegal picks {bad}")
 
@@ -227,12 +229,44 @@ def cmd_credit(a):
               f"eff.err={out['efficiency_error']:.1e}  {out['method']}")
         print(f"  {'':>9}  auction: {routing.allocate(c, game, m=2).to_dict()}")
 
+def cmd_serve(a):
+    """Put the whole of V1 behind a page.
+
+    Nothing here is a new capability -- the routes call `Cortex.train`,
+    `Cortex.selfplay` and `cortex/arena.py`, which is what the other
+    subcommands call. What the browser adds is watching it happen.
+
+    `--train` gives the models something to be before the first game: a page
+    whose first match is against an untrained region shows a network ranking
+    moves from its random initialisation, which is honest and useless."""
+    from cortex import server
+    app = server.App(checkpoint_dir=a.checkpoints, games=a.games, seed=a.seed,
+                     nh=a.nh, tau_new=a.tau_new)
+    if a.load:
+        from cortex import trainer
+        trainer.load(app.reg, "main", os.path.abspath(a.load))
+        print(f"  loaded {a.load} into 'main'")
+    if a.train:
+        rng = random.Random(a.seed)
+        c = app.reg.require("main")
+        for n in a.games:
+            opp = OPPONENT.get(n)
+            print(f"  training {n} for {a.train} episodes...", end=" ", flush=True)
+            r = c.train(ALL[n], episodes=a.train, rng=rng, k=12, opponent=opp)
+            e = c.evaluate(ALL[n], n=30, rng=random.Random(7), k=12, opponent=opp)
+            print(f"legality {e['legality_acc']} (baseline {e['majority_baseline']}), "
+                  f"top pick legal {e['top_choice_legal']}, rule {r['rule']}")
+    server.run_server(a.host, a.port, app=app, frontend=a.frontend,
+                      quiet=a.quiet, open_browser=a.open)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cortex")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("demo", cmd_demo), ("map", cmd_map),
                      ("play", cmd_play), ("sudoku", cmd_sudoku),
-                     ("transfer", cmd_transfer), ("credit", cmd_credit)):
+                     ("transfer", cmd_transfer), ("credit", cmd_credit),
+                     ("serve", cmd_serve)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--episodes", type=int, default=400)
         q.add_argument("--seed", type=int, default=0)
@@ -243,6 +277,20 @@ def main(argv=None):
         q.add_argument("--save", default=None, help="write a checkpoint here")
         q.add_argument("--load", default=None, help="resume from a checkpoint")
         q.add_argument("--games", nargs="*", default=["chess","checkers","go","sudoku"])
+        if name != "serve": continue
+        from cortex.server import DEFAULT_HOST, DEFAULT_PORT
+        q.add_argument("--host", default=DEFAULT_HOST,
+                       help="127.0.0.1 by default; anything else serves training "
+                            "on demand to whoever can reach the port")
+        q.add_argument("--port", type=int, default=DEFAULT_PORT)
+        q.add_argument("--train", type=int, default=0,
+                       help="episodes to train each game for before serving")
+        q.add_argument("--nh", type=int, default=24)
+        q.add_argument("--tau-new", type=float, default=0.60)
+        q.add_argument("--checkpoints", default=None)
+        q.add_argument("--frontend", default=None)
+        q.add_argument("--open", action="store_true", help="open a browser")
+        q.add_argument("--quiet", action="store_true", help="no request log")
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__": main()
