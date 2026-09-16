@@ -161,11 +161,13 @@ def fit_elo(games: list[tuple[int, int, float]], n: int, anchor: int = 0,
             prior: float = 2.0, tol: float = 1e-4, max_iters: int = 2000) -> np.ndarray:
     """Maximum-likelihood Elo under the logistic model, anchored at ``anchor``.
 
-    Newton steps on the diagonal of the Hessian, iterated to convergence rather
-    than for a fixed count.  Plain gradient ascent needs thousands of passes to
-    settle when the field spans a thousand Elo, and a fixed budget that is
-    generous for the point estimate but not for the bootstrap produces intervals
-    that do not contain it - which is exactly the bug this replaces.
+    Newton steps on the diagonal of the Hessian, iterated to convergence.  Two
+    things had to be right for that word to mean anything.  The steps are
+    Newton's because plain gradient ascent needs thousands of passes to settle
+    when the field spans a thousand Elo, and a budget generous for the point
+    estimate but not for the bootstrap gives intervals that do not contain it.
+    And the anchoring happens once, at the end, because doing it every iteration
+    fights the prior and the iteration never settles at all.
 
     ``prior`` adds that many virtual draws against a 0-rated phantom for every
     player, which keeps an undefeated or winless player's rating finite instead
@@ -178,6 +180,12 @@ def fit_elo(games: list[tuple[int, int, float]], n: int, anchor: int = 0,
     s = np.array([g[2] for g in games], dtype=float)
     r = np.zeros(n)
     scale = np.log(10.0) / 400.0
+    # The prior is what pins the absolute scale, so the fit is done free and the
+    # anchor is subtracted once at the end.  Re-anchoring *inside* the loop
+    # fights the prior - the anchor's own step is non-zero, subtracting it shifts
+    # everyone, and the next iteration undoes it - so the step size stalls at a
+    # constant instead of going to zero and the tolerance never fires.  That is
+    # a limit cycle, not a maximum, and it inflated every rating by ~17 Elo.
     for _ in range(max_iters):
         p = 1.0 / (1.0 + np.power(10.0, -(r[i] - r[j]) / 400.0))
         resid, curve = s - p, p * (1.0 - p)
@@ -192,10 +200,9 @@ def fit_elo(games: list[tuple[int, int, float]], n: int, anchor: int = 0,
         step = (grad / scale) / np.maximum(hess, 1e-9)
         step = np.clip(step, -400.0, 400.0)          # no wild first move
         r += step
-        r -= r[anchor]
         if np.abs(step).max() < tol:
             break
-    return r
+    return r - r[anchor]                             # anchored for reporting only
 
 
 def bootstrap_elo(games, n, anchor=0, rounds=200, seed=7) -> np.ndarray:
@@ -207,6 +214,53 @@ def bootstrap_elo(games, n, anchor=0, rounds=200, seed=7) -> np.ndarray:
         pick = rng.choice(idx, size=len(games), replace=True)
         out[b] = fit_elo([games[k] for k in pick], n, anchor)
     return out
+
+
+def report(names, ratings, lo, hi, cross, counts, players=None):
+    order = np.argsort(-ratings)
+    print(f"{'player':<16}{'Elo':>8}{'95% CI':>18}{'score':>9}{'games':>7}{'refusals':>10}")
+    rows = []
+    for k in order:
+        played, scored = counts[k].sum(), cross[k].sum()
+        ref = 0.0
+        if players is not None and getattr(players[k], "refusals", None):
+            ref = float(np.mean(players[k].refusals))
+        print(f"{names[k]:<16}{ratings[k]:8.0f}"
+              f"{f'[{lo[k]:.0f}, {hi[k]:.0f}]':>18}"
+              f"{scored / max(played, 1):9.3f}{int(played):7d}{ref:10.1f}")
+        rows.append({"player": names[k], "elo": round(float(ratings[k]), 1),
+                     "ci95": [round(float(lo[k]), 1), round(float(hi[k]), 1)],
+                     "score": round(float(scored / max(played, 1)), 4),
+                     "games": int(played), "refusals": round(ref, 2)})
+    return rows
+
+
+def refit(path: str, rounds: int, out: str) -> None:
+    """Re-fit ratings from a saved ladder, without replaying a single game."""
+    with open(path) as fh:
+        blob = json.load(fh)
+    if "results" not in blob:
+        raise SystemExit(f"{path} has no raw results to refit - re-run the ladder")
+    games = [(int(a), int(b), float(s)) for a, b, s in blob["results"]]
+    names = blob["players"]
+    anchor = names.index(blob.get("anchor", "random"))
+    cross = np.array(blob["cross_table"])
+    counts = np.array(blob["counts"])
+    ratings = fit_elo(games, len(names), anchor)
+    boot = bootstrap_elo(games, len(names), anchor, rounds=rounds)
+    lo, hi = np.percentile(boot, 2.5, axis=0), np.percentile(boot, 97.5, axis=0)
+    print(f"=== refitted from {len(games)} saved games ===\n")
+    old = {r["player"]: r["elo"] for r in blob.get("ratings", [])}
+    rows = report(names, ratings, lo, hi, cross, counts)
+    for r in rows:
+        r["refusals"] = next((q["refusals"] for q in blob.get("ratings", [])
+                              if q["player"] == r["player"]), 0.0)
+        if r["player"] in old:
+            r["previous_elo"] = old[r["player"]]
+    blob["ratings"] = rows
+    with open(out, "w") as fh:
+        json.dump(blob, fh, indent=2)
+    print(f"\nwrote {out}")
 
 
 # ------------------------------------------------------------------- run it
@@ -225,7 +279,13 @@ def main() -> None:
     p.add_argument("--bootstrap", type=int, default=200)
     p.add_argument("--stockfish", default=None)
     p.add_argument("--out", default=None)
+    p.add_argument("--refit", default=None,
+                   help="refit the ratings from a saved elo.json instead of "
+                        "replaying the ladder; the raw results are in the file")
     args = p.parse_args()
+
+    if args.refit:
+        return refit(args.refit, args.bootstrap, args.out or args.refit)
 
     path = find_stockfish(args.stockfish)
     judge = Judge(path, depth=args.judge_depth)
