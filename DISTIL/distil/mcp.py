@@ -122,6 +122,8 @@ class McpServer:
         self._id = 0
         self.server_info: dict = {}
         self.started = False
+        #: True when `list_tools` could not read the catalogue to the end.
+        self.catalogue_truncated = False
         self._lines: queue.Queue = queue.Queue()
         self._reader: threading.Thread | None = None
         # stderr must be drained continuously. A server that logs to stderr --
@@ -135,12 +137,36 @@ class McpServer:
         # the same queue, so each consumed the other's reply, discarded it as
         # "not mine", and both timed out.
         self._lock = threading.Lock()
+        # Separate from the request lock, and guarding the process itself.
+        # Without it two threads calling start() each spawned a child: the
+        # second won `self.proc`, the first was orphaned, survived close(), and
+        # its EOF sentinel later aborted a live request on the queue.
+        self._lifecycle = threading.RLock()
 
     # -- lifecycle ------------------------------------------------------------
 
+    @property
+    def alive(self) -> bool:
+        proc = self.proc
+        return proc is not None and proc.poll() is None
+
     def start(self) -> McpResult:
-        if self.started:
+        with self._lifecycle:
+            return self._start_locked()
+
+    def _start_locked(self) -> McpResult:
+        if self.started and self.alive:
             return McpResult(True, "already started")
+        if self.proc is not None:
+            # A previous child died. Tear it down before replacing it, or its
+            # reader thread and its queued output outlive it -- including the
+            # EOF sentinel, which the next session would read as a dead pipe.
+            self._close_locked()
+        # Fresh sinks for a fresh process. Reusing them meant a crashed
+        # process's buffered stdout was still queued when the replacement
+        # started, and the first reply read was the dead server's.
+        self._lines = queue.Queue()
+        self._errors = collections.deque(maxlen=200)
         env = {**os.environ, **self.env}
         try:
             self.proc = subprocess.Popen(
@@ -176,6 +202,10 @@ class McpServer:
                                f"{self.server_info.get('serverInfo', {}).get('name', 'unknown')}")
 
     def close(self) -> None:
+        with self._lifecycle:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
         if self.proc is None:
             return
         proc, self.proc = self.proc, None
@@ -212,13 +242,24 @@ class McpServer:
     # -- the wire -------------------------------------------------------------
 
     def _send(self, payload: dict) -> bool:
-        if self.proc is None or self.proc.stdin is None:
+        # Bound to a local. `close()` may run on another thread and set
+        # `self.proc` to None between the guard and the write, which surfaced as
+        # an AttributeError escaping call() rather than a clean failure.
+        proc = self.proc
+        if proc is None or proc.stdin is None:
+            return False
+        if proc.poll() is not None:
+            # The child died while idle. Nothing clears `started` on this path,
+            # so without this the server stayed "started" forever and every
+            # later call failed against a corpse.
+            self.started = False
             return False
         try:
-            self.proc.stdin.write(json.dumps(payload) + "\n")
-            self.proc.stdin.flush()
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
             return True
         except (BrokenPipeError, ValueError, OSError):
+            self.started = False
             return False
 
     def _notify(self, method: str, params: dict | None = None) -> None:
@@ -228,13 +269,28 @@ class McpServer:
                  timeout: float | None = None) -> McpResult:
         if self.proc is None:
             return McpResult(False, error="server is not running")
-        with self._lock:
+        budget = timeout if timeout is not None else self.timeout
+        deadline = time.monotonic() + budget
+        # The lock is held across _await, so a queued caller would otherwise wait
+        # its predecessor's timeout AND then its own -- the per-call timeout
+        # bounded the wire, not the call. Waiting against the same deadline makes
+        # the budget mean what it says.
+        if not self._lock.acquire(timeout=budget):
+            return McpResult(False, error=f"{self.name} busy; timed out after {budget:.0f}s")
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return McpResult(False, error=f"{self.name} busy; timed out after {budget:.0f}s")
             self._id += 1
             want = self._id
             if not self._send({"jsonrpc": "2.0", "id": want, "method": method,
                                "params": params or {}}):
+                if not self.alive:
+                    return McpResult(False, error=f"{self.name} is not running: {self._stderr()}")
                 return McpResult(False, error=f"could not write to {self.name}")
-            return self._await(want, timeout if timeout is not None else self.timeout)
+            return self._await(want, remaining)
+        finally:
+            self._lock.release()
 
     def _await(self, want_id: int, timeout: float) -> McpResult:
         """Read until the response with our id arrives, or the budget runs out.
@@ -342,21 +398,40 @@ class McpServer:
             if not started.ok:
                 return []
         found: list[McpTool] = []
-        cursor, pages = None, 0
+        cursor, pages, seen_cursors = None, 0, set()
+        truncated = False
         while pages < page_limit:
             out = self._request("tools/list", {"cursor": cursor} if cursor else {})
             if not out.ok:
+                # Stopping quietly here returns a partial catalogue that is
+                # indistinguishable from a complete one. Record that it is
+                # partial so a caller can tell.
+                truncated = pages > 0
                 break
             result = out.raw.get("result", {}) or {}
             for t in (result.get("tools") or []):
-                if t.get("name"):
-                    found.append(McpTool(server=self.name, name=t["name"],
+                name = t.get("name")
+                # Dedupe by name while collecting. Cursor-repeat detection can
+                # only fire after a page has been read, so without this a server
+                # that repeats a cursor still contributes one duplicate page --
+                # and a server may legitimately repeat a tool across pages.
+                if name and name not in {f.name for f in found}:
+                    found.append(McpTool(server=self.name, name=name,
                                          description=t.get("description", "") or "",
                                          schema=t.get("inputSchema", {}) or {}))
             cursor = result.get("nextCursor")
             pages += 1
             if not cursor:
                 break
+            if not isinstance(cursor, str) or cursor in seen_cursors:
+                # A server that repeats a cursor would otherwise be paged until
+                # `page_limit`, re-adding the same tools each time.
+                truncated = True
+                break
+            seen_cursors.add(cursor)
+        else:
+            truncated = True
+        self.catalogue_truncated = truncated
         return found
 
     def call(self, tool: str, arguments: dict | None = None,

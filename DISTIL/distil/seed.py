@@ -171,7 +171,14 @@ PERCENTILE = Seed("percentile", "the p-th percentile of a sequence by linear int
         # integers large enough that a float round trip loses the unit.
         total = s[low] + s[high]
         return total // 2 if total % 2 == 0 else total / 2
-    return s[low] + (s[high] - s[low]) * frac
+    span = s[high] - s[low]
+    try:
+        return s[low] + span * frac
+    except TypeError:
+        # Decimal (and anything else that refuses to multiply by a float) --
+        # `median` handles these fine, so percentile refusing them made the two
+        # disagree on a type rather than on a value.
+        return s[low] + span * type(span)(str(frac))
 ''',
 '''assert percentile([1,2,3,4], 50) == 2.5
 assert percentile([1,2,3,4], 0) == 1
@@ -201,6 +208,9 @@ try:
     percentile([1], 101); raise SystemExit("should have raised")
 except ValueError:
     pass
+from decimal import Decimal as _D
+assert percentile([_D("1"), _D("2")], 50) == _D("1.5"), "Decimal works in median; it must here"
+assert percentile([_D("0"), _D("1"), _D("2"), _D("3")], 25) == _D("0.75")
 ''')
 
 JACCARD = Seed("jaccard", "token-overlap similarity between two texts, no embedder needed",
@@ -248,7 +258,12 @@ DIFF_LINES = Seed("diff_lines", "which lines were added and removed between two 
     # that itself began with "+++" or "---" was silently dropped -- and a change
     # consisting only of such lines was reported as no change at all. Diffing C
     # preprocessor output or a diff-of-a-diff hit it immediately.
-    for tag, i1, i2, j1, j2 in _difflib.SequenceMatcher(None, a, b).get_opcodes():
+    # autojunk=False: difflib's heuristic treats any line appearing in more than
+    # 1% of a >=200-line input as junk, which makes identical blank or boilerplate
+    # lines show up as both added and removed. A diff tool that invents changes
+    # in a large file is worse than no diff tool.
+    for tag, i1, i2, j1, j2 in _difflib.SequenceMatcher(
+            None, a, b, autojunk=False).get_opcodes():
         if tag in ("replace", "delete"):
             removed.extend(a[i1:i2])
         if tag in ("replace", "insert"):
@@ -265,6 +280,11 @@ assert d["removed"] == ["--- old"] and d["added"] == ["+++ new"]
 d = diff_lines("@@ -1 +1 @@", "@@ -2 +2 @@")
 assert d["removed"] and d["added"], "a change must never report as no change"
 assert diff_lines("a\\na", "a")["removed"] == ["a"], "duplicates are respected"
+# a large identical input must report no change (autojunk used to invent some)
+big = "\\n".join(["x"] * 300)
+assert diff_lines(big, big) == {"added": [], "removed": []}
+big2 = "\\n".join(["x"] * 300 + ["tail"])
+assert diff_lines(big, big2) == {"added": ["tail"], "removed": []}
 ''')
 
 TOPO_SORT = Seed("topological_sort", "order items so every dependency comes first",
@@ -357,17 +377,33 @@ NORMALISE_ERROR = Seed("normalise_error", "collapse a traceback to a stable clas
     # Either a module-qualified name of any case (socket.timeout is a real
     # exception type and is lowercase) or a single capitalised name.
     head = _re.compile(r"^((?:[a-zA-Z_]\w*\.)+[a-zA-Z_]\w*|[A-Z]\w*)\s*:\s*(.*)$")
+    shapes = ("Error", "Exception", "Warning", "Interrupt", "Exit",
+              "Iteration", "Timeout", "Fault", "Overflow")
 
-    # Search backwards for the last line that looks like an exception. Taking the
-    # last non-blank line unconditionally meant a multi-line message -- common
-    # for SyntaxError and assertion output -- produced an empty kind and a
-    # signature that moved with the body text.
+    def exception_shaped(name):
+        # `in` rather than `endswith`: ExceptionGroup ends with "Group", and a
+        # traceback whose top frame is an ExceptionGroup is precisely the case
+        # where the fallback misfires.
+        return any(sh in name for sh in shapes) or "." in name
+
+    # Search backwards for the last line that looks like an exception -- and
+    # "looks like" has to mean more than "Capitalised word, colon". A trailing
+    # "Note: see the docs" matched that shape, was later in the text, and so
+    # became the kind, collapsing two genuinely different errors onto one
+    # signature. Prefer a name shaped like an exception type; fall back to the
+    # final line only, never to some note in the middle.
     kind, message, idx = "", lines[-1], len(lines) - 1
-    for i in range(len(lines) - 1, -1, -1):
-        m = head.match(lines[i])
+    # Nested exception displays prefix their lines with "| " or "+-", which
+    # stops the head pattern matching the exception inside a group.
+    candidates = [(i, head.match(l.lstrip("|+- "))) for i, l in enumerate(lines)]
+    strong = [(i, m) for i, m in candidates if m and exception_shaped(m.group(1))]
+    if strong:
+        i, m = strong[-1]
+        kind, message, idx = m.group(1), m.group(2).strip(), i
+    else:
+        m = head.match(lines[-1])
         if m:
-            kind, message, idx = m.group(1), m.group(2).strip(), i
-            break
+            kind, message, idx = m.group(1), m.group(2).strip(), len(lines) - 1
     if kind and idx + 1 < len(lines):
         message = " ".join([message] + lines[idx + 1:]).strip()
 
@@ -404,6 +440,14 @@ p2 = normalise_error("OSError: cannot open /var/run/b.sock")["signature"]
 assert p1 == p2 and "<path>" in p1
 assert (normalise_error("IndexError: index -5 out of range")["signature"] ==
         normalise_error("IndexError: index -9 out of range")["signature"])
+# a trailing note is not the exception
+a = normalise_error("ValueError: bad input\\nNote: see the docs")
+b = normalise_error("KeyError: missing\\nNote: see the docs")
+assert a["kind"] == "ValueError" and b["kind"] == "KeyError", (a, b)
+assert a["signature"] != b["signature"], "different errors must not collapse"
+# a separator line is not an exception either
+g = normalise_error("ExceptionGroup: two failed\\n  +-+---------------\\n  | ValueError: x")
+assert g["kind"] in ("ExceptionGroup", "ValueError"), g
 ''')
 
 EXTRACT_IDENTIFIERS = Seed("extract_identifiers", "pull the specifics out of a wall of text",
@@ -432,8 +476,11 @@ EXTRACT_IDENTIFIERS = Seed("extract_identifiers", "pull the specifics out of a w
         # A backreference, so a quote must be closed by the SAME kind of quote.
         # The old character class let an apostrophe open a span that a double
         # quote closed, swallowing everything between them.
+        # The opening quote must not follow a word character, or the apostrophe
+        # in "don't" opens a span that the next real quote closes -- swallowing
+        # the genuine quoted identifier and inventing a bogus one in its place.
         "quoted": sorted({m[1] for m in
-                          _re.findall(r"(['\\"])([^'\\"\\n]{1,60})\\1", text)}),
+                          _re.findall(r"(?<!\\w)(['\\"])([^'\\"\\n]{1,60})\\1", text)}),
         "dotted": sorted(set(
             _re.findall(r"\\b[a-zA-Z_]\w*(?:\.\w+){1,}\\b", text))),
     }
@@ -450,6 +497,9 @@ assert "-5" in extract_identifiers("index -5 is out of range")["numbers"]
 q = extract_identifiers("mixing 'single' and \\"double\\" quotes")["quoted"]
 assert "single" in q and "double" in q, q
 assert extract_identifiers("see /etc/nginx/nginx.conf.")["paths"] == ["/etc/nginx/nginx.conf"]
+# an apostrophe in prose must not open a quoted span
+q = extract_identifiers("don't touch 'config_key' please")["quoted"]
+assert q == ["config_key"], q
 ''')
 
 # --- tier 3: tools that create referees -- the highest-leverage kind ---------
@@ -489,7 +539,10 @@ def assert_schema(value, schema, path="$"):
     expected = schema.get("type")
     if expected is not None:
         names = expected if isinstance(expected, list) else [expected]
-        bad = [n for n in names if n not in _TYPES]
+        # `n not in _TYPES` raises TypeError: unhashable for a dict or list type
+        # name, so a malformed schema crashed the validator instead of being
+        # reported as malformed.
+        bad = [n for n in names if not isinstance(n, str) or n not in _TYPES]
         if bad:
             # Previously an unknown type name meant `want` was None and the
             # check was skipped, so a typo like "interger" accepted every value
@@ -507,13 +560,22 @@ def assert_schema(value, schema, path="$"):
         elif not any(_same(value, a) for a in allowed):
             problems.append(f"{path}: {value!r} is not one of {allowed}")
 
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        for key, op, word in (("minimum", float.__lt__, "below"),
-                              ("maximum", float.__gt__, "above")):
-            bound = schema.get(key)
-            if isinstance(bound, (int, float)) and not isinstance(bound, bool):
-                if op(float(value), float(bound)):
-                    problems.append(f"{path}: {value} is {word} {key} {bound}")
+    for key, word in (("minimum", "below"), ("maximum", "above")):
+        if key not in schema:
+            continue
+        bound = schema[key]
+        if not isinstance(bound, (int, float)) or isinstance(bound, bool):
+            # Dropping it silently meant the bound was never checked and the
+            # caller was told the value conformed.
+            problems.append(f"{path}: {key} must be a number, got {type(bound).__name__}")
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        # Compared natively. Routing through float() made the referee fail open
+        # on integers past 2**53 -- 10**17 and 10**17+1 compare equal as floats
+        # -- and raise OverflowError outright on integers too large to convert.
+        if (value < bound) if key == "minimum" else (value > bound):
+            problems.append(f"{path}: {value} is {word} {key} {bound}")
 
     if isinstance(value, dict):
         required = schema.get("required") or []
@@ -557,14 +619,19 @@ def _is_type(value, name):
 
 
 def _same(a, b):
-    """Equality that does not let True satisfy an enum of 1.
+    """Equality that does not let True satisfy an enum of 1, at any depth.
 
     Python says True == 1, so a plain `in` check accepted a boolean wherever a
     numeric literal was allowed -- contradicting the bool-is-not-an-integer rule
-    this same validator enforces two lines earlier.
+    this validator enforces a few lines earlier. The guard has to recurse, or
+    [True] still satisfies an enum option of [1] one level down.
     """
     if isinstance(a, bool) != isinstance(b, bool):
         return False
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
     return a == b
 ''',
 '''S = {"type": "object", "required": ["name", "age"],
@@ -595,6 +662,18 @@ assert assert_schema({}, "not a schema") != []
 assert assert_schema({"a": 1}, {"required": "a"}) != []
 assert assert_schema([1, "x"], {"items": [{"type": "integer"}, {"type": "string"}]}) == []
 assert assert_schema(5, {"type": ["integer", "string"]}) == []
+# a bound must be enforced exactly, not through a float round trip
+assert assert_schema(10**17, {"minimum": 10**17 + 1}) != [], "large ints must compare exactly"
+assert assert_schema(10**17 + 2, {"minimum": 10**17 + 1}) == []
+assert assert_schema(1, {"maximum": 10**400}) == [], "a huge bound must not overflow"
+# a malformed bound is reported, never dropped
+assert assert_schema(5, {"minimum": "3"}) != []
+# a malformed type name is reported, never raised
+assert assert_schema(5, {"type": {"a": 1}}) != []
+assert assert_schema(5, {"type": ["integer", {"a": 1}]}) != []
+# the bool guard holds at depth
+assert assert_schema([True], {"enum": [[1]]}) != []
+assert assert_schema([1], {"enum": [[1]]}) == []
 ''')
 
 SUMMARISE_COUNTS = Seed("summarise_counts", "the shape of a column: counts, distinct, missing",

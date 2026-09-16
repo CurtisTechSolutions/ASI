@@ -1266,6 +1266,134 @@ def test_a_crashed_server_is_restarted_on_the_next_call():
         s.close()
 
 
+def test_a_restart_does_not_serve_the_dead_process_output():
+    """Sinks were reused across processes, so a crashed server's buffered stdout
+    was still queued when its replacement started and the first reply read came
+    from the corpse."""
+    s = McpServer("crash", [sys.executable, FIXTURE, "crash"])
+    try:
+        s.start()
+        s.call("echo", {"text": "x"})          # the fixture exits here
+        assert not s.started
+        assert s.start().ok
+        # a fresh child answers its own tools/list, not the dead one's leftovers
+        assert len(s.list_tools()) == 3
+    finally:
+        s.close()
+
+
+def test_concurrent_starts_spawn_exactly_one_child():
+    """Two threads each spawned a process; the loser was orphaned, survived
+    close(), and its EOF sentinel later aborted a live request."""
+    import threading
+    s = echo_server()
+    try:
+        seen = []
+        barrier = threading.Barrier(4)
+
+        def go():
+            barrier.wait()
+            s.start()
+            seen.append(s.proc)
+
+        threads = [threading.Thread(target=go) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert len({id(p) for p in seen}) == 1, "exactly one child must exist"
+        assert s.call("add", {"a": 1, "b": 1}).content == "2"
+    finally:
+        s.close()
+
+
+def test_a_server_that_dies_while_idle_is_noticed():
+    """Nothing cleared `started` on the write path, so a child that died between
+    calls left the server 'started' forever and every later call failed."""
+    s = echo_server()
+    try:
+        s.start()
+        s.proc.kill()
+        s.proc.wait(timeout=5)
+        out = s.call("echo", {"text": "x"})
+        assert not out.ok
+        assert not s.started, "a dead child must not still count as started"
+        assert s.start().ok, "and the next start must bring up a fresh one"
+    finally:
+        s.close()
+
+
+def test_closing_while_a_call_is_in_flight_fails_cleanly():
+    """close() sets proc to None on another thread; _send read it between the
+    guard and the write and raised AttributeError out of call()."""
+    import threading
+    s = echo_server()
+    s.start()
+    errors = []
+
+    def hammer():
+        for _ in range(40):
+            try:
+                s.call("echo", {"text": "x"})
+            except Exception as exc:               # must degrade, never raise
+                errors.append(exc)
+
+    t = threading.Thread(target=hammer)
+    t.start()
+    s.close()
+    t.join(timeout=30)
+    assert not errors, errors
+
+
+def test_a_repeated_pagination_cursor_does_not_loop():
+    """A server repeating a cursor would be paged to the limit, re-adding the
+    same tools on every pass."""
+    s = echo_server()
+    try:
+        s.start()
+        calls = {"n": 0}
+        real = s._request
+
+        def stuck(method, params=None, timeout=None):
+            if method == "tools/list":
+                calls["n"] += 1
+                out = real(method, params, timeout)
+                if out.ok:
+                    out.raw.setdefault("result", {})["nextCursor"] = "same"
+                return out
+            return real(method, params, timeout)
+
+        s._request = stuck
+        tools = s.list_tools()
+        assert calls["n"] <= 2, f"stopped after {calls['n']} pages"
+        assert s.catalogue_truncated, "a partial catalogue must say so"
+        assert len(tools) == len({t.name for t in tools}), "no duplicates"
+    finally:
+        s.close()
+
+
+def test_a_busy_server_bounds_the_whole_call_not_just_the_wire():
+    """The request lock was held across the wait, so a queued caller waited its
+    predecessor's timeout and then its own."""
+    import threading
+    import time as _time
+    s = echo_server()
+    try:
+        s.start()
+        s._lock.acquire()                       # simulate a long in-flight call
+        started = _time.monotonic()
+        out = s.call("echo", {"text": "x"}, timeout=1.0)
+        elapsed = _time.monotonic() - started
+        assert not out.ok and "busy" in out.error
+        assert elapsed < 3.0, f"the call took {elapsed:.1f}s against a 1s budget"
+    finally:
+        try:
+            s._lock.release()
+        except RuntimeError:
+            pass
+        s.close()
+
+
 def test_closing_twice_is_safe_and_reaps_the_child():
     s = echo_server()
     s.start()
@@ -2028,6 +2156,46 @@ def test_state_survives_a_restart():
     b = Distil(LocalProvider(), home=home, seed=1)
     assert b.memory.stats()["traces"] == before
     assert b.toolbox.names() == a.toolbox.names()
+
+
+def test_the_whole_state_survives_a_restart_with_both_transports():
+    """The end-to-end guard for the serialisation bug class. Everything the
+    system accumulated -- traces, cases with their ids, tool grades, an MCP
+    tool's use history -- must be there after the process goes away."""
+    home = tmpdir()
+    a = Distil(LocalProvider(), home=home, seed=1)
+    plant(a.toolsmith, a.toolbox)
+    a.mcp.add("echo", [sys.executable, FIXTURE])
+    a.mcp.discover()
+    a.toolbox.record_use("echo.add", "added two numbers", True)
+    a.solve("compute the median of a column", interrogate=False)
+    a.solve("parse a quantum waveform capture file", interrogate=False)
+    a.save()
+    a.mcp.close()
+    before = a.stats()
+
+    b = Distil(LocalProvider(), home=home, seed=1)
+    after = b.stats()
+    assert after["traces"] == before["traces"]
+    assert after["cases"] == before["cases"]
+    assert sorted(after["tools"]) == sorted(before["tools"])
+
+    spec = b.toolbox.load("echo.add")
+    assert spec.transport == "mcp" and "added two numbers" in spec.solved
+    traces = [t for t in b.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "echo.add"]
+    assert len(traces) == 1 and (traces[0].mean_grade or 0) > 0
+    assert b.toolbox.load("median").grade.score == 1.0
+    assert all(c.trace_id for c in b.casebook.all()), "a case with no id cannot be re-graded"
+
+
+def test_compression_never_eats_a_tool():
+    home = tmpdir()
+    d = Distil(LocalProvider(), home=home, seed=1)
+    plant(d.toolsmith, d.toolbox)
+    d.solve("compute the median of a column", interrogate=False)
+    names = sorted(d.toolbox.names())
+    d.compress()
+    assert sorted(Distil(LocalProvider(), home=home, seed=1).toolbox.names()) == names
 
 
 def test_user_grading_moves_credibility():
