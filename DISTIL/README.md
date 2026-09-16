@@ -12,6 +12,17 @@ it then has to prove work.
 
 ```bash
 cd DISTIL
+make help                                   # every target, with its defaults
+make demo                                   # the whole system, offline, no key
+make test                                   # 288 tests, ~25s
+```
+
+There is a `Makefile` for all of it — `make ask TASK="..."`, `make recall
+QUERY="..."`, `make ui` — with every task, goal and query overridable on the
+command line. State goes to `./state` rather than `~/.distil`, so experimenting
+here cannot quietly rewrite a real memory. The commands it wraps:
+
+```bash
 python3 -m distil.cli demo                  # the whole system, offline, no key
 python3 -m tests.test_distil                # 288 tests, ~25s
 
