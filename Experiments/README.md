@@ -19,6 +19,7 @@ produced them.
 | [`NeuralCompression/`](NeuralCompression/) | one network can hold many games; inversion as an escape from a stall | **mixed** — compression holds, but the output partition is *not* what does it |
 | [`SBNN_RNN_ActivationFunction/`](SBNN_RNN_ActivationFunction/) | a learnable activation inside a conventional RNN that grows on a stall | the idea in its smallest form, gradient-checked to 4.8e-09 |
 | [`DepthCountedNormalisation/`](DepthCountedNormalisation/) | the vanishing gradient is a measurement, not a loss | fit `log‖g_n‖ = a + b·n` and divide the decay back out |
+| [`TwoSineOptimizer/`](TwoSineOptimizer/) | Adam's two moments read as two interfering sine waves beat Adam | **mixed** — beats Adam (p = 0.038) and its own linear ablation, but `beta1 = 0.99` plain Adam beats it 5× on the network |
 
 ## What each one needs
 
@@ -28,6 +29,7 @@ Most of this runs with nothing installed. The exceptions are called out below.
 |---|---|
 | `NeuralCompression/` | **none** — standard library, deterministic |
 | `DepthCountedNormalisation/` | **none** — standard library |
+| `TwoSineOptimizer/` | **none** — standard library, deterministic |
 | `ActivationFunctionTest/self_building_sinewave.py` | **none** — standard library |
 | `ActivationFunctionTest/` (the other five scripts) | `gymnasium`, plus `tensorflow` or `torch` depending on the script |
 | `SBNN_RNN_ActivationFunction/` | `numpy` |
@@ -40,6 +42,7 @@ From this directory — each runs in a subshell, so the order does not matter:
 ```bash
 (cd NeuralCompression && python3 experiment.py)
 (cd DepthCountedNormalisation && python3 depth_counted_normalisation.py --quick)
+(cd TwoSineOptimizer && python3 test_two_sine_optimizer.py --quick)
 (cd ActivationFunctionTest && python3 self_building_sinewave.py --quick)
 (cd SBNN_RNN_ActivationFunction && python3 main.py)
 (cd TwoNRL_CartPole && make quick)
