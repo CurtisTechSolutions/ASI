@@ -203,11 +203,11 @@ COMPOSE ?= docker compose
 up: ## Start the agent on 127.0.0.1:$(PORT) with a Chrome container beside it
 	$(COMPOSE) up -d
 
-up-ollama: ## Also start a local model (then: make pull MODEL=llama3.2)
+up-ollama: ## Also start a local model (then: make pull MODEL=gemma4)
 	$(COMPOSE) --profile ollama up -d
 
 pull: ## Pull MODEL into the ollama container
-	@test -n "$(MODEL)" || { echo 'usage: make pull MODEL=llama3.2'; exit 1; }
+	@test -n "$(MODEL)" || { echo 'usage: make pull MODEL=gemma4'; exit 1; }
 	$(COMPOSE) exec ollama ollama pull $(MODEL)
 
 down: ## Stop the stack; the state volume is kept

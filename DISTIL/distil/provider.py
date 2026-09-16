@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 # Overridable per provider; these are defaults, not pins.
-OLLAMA_MODEL = os.environ.get("DISTIL_OLLAMA_MODEL", "llama3.2")
+OLLAMA_MODEL = os.environ.get("DISTIL_OLLAMA_MODEL", "gemma4")
 OLLAMA_EMBED = os.environ.get("DISTIL_OLLAMA_EMBED", "nomic-embed-text")
 OPENAI_MODEL = os.environ.get("DISTIL_OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBED = os.environ.get("DISTIL_OPENAI_EMBED", "text-embedding-3-small")

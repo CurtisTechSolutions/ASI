@@ -49,7 +49,7 @@ services:
 
   # Optional: a local model, so nothing leaves the machine.
   #   docker compose --profile ollama up -d
-  #   docker compose exec ollama ollama pull llama3.2
+  #   docker compose exec ollama ollama pull gemma4
   ollama:
     image: ollama/ollama:latest
     profiles: ["ollama"]
