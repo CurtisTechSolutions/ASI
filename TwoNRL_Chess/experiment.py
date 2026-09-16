@@ -43,6 +43,12 @@ The loop, one round at a time
 4. **Grow.**  If the training loss has stalled the hidden layer gains units -
    the self-building half, identical in every arm so it cannot explain a
    difference between them.
+5. **Keep the best one.**  Every arm here peaks and then decays - ``positive``
+   reaches 6.3 refusals a move at round 9 and is back to 151 by round 200,
+   overfitting the sliding buffer of its own failures - so the run keeps the
+   network that scored best on a **validation** split and reports on a
+   **disjoint test** split.  Without that, "the result" is wherever the run
+   happened to stop, which is not a property of the method.
 
 The arms
 --------
@@ -150,7 +156,8 @@ class Config:
     growth_min_delta: float = 1e-3
     max_hidden: int = 256
     eval_games: int = 10             # games against Stockfish at the end of the run
-    track_positions: int = 120       # held-out positions scored every round
+    track_positions: int = 120       # positions used to SELECT (the validation split)
+    select_on: str = "refusals"      # the validation metric; "" keeps the last round
     heldout: str = dataset.DEFAULT_PATH
     checkpoints: str | None = None   # save the network at every phase boundary
     seed: int = 0
@@ -593,7 +600,11 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
     nprng = np.random.default_rng(cfg.seed + 977)
     agent = Agent.build(list(cfg.hidden), seed=cfg.seed + 1000, tau=cfg.tau)
     positions = dataset.load(cfg.heldout)
+    # Selecting on the same positions the result is reported on would be
+    # cheating, so the exam is split: the first `track_positions` choose the
+    # network, the rest grade it, and the two never overlap.
     tracked = positions[:cfg.track_positions]
+    test = positions[cfg.track_positions:] or tracked
 
     def checkpoint(name: str) -> None:
         """Keep the network as it was at a phase boundary.
@@ -618,6 +629,7 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
 
     trigger = FlipTrigger(cfg)
     phase1_over = False
+    best_val, best_net, best_round = float("inf"), None, 0
     best_seen, stalled, growth_events = float("inf"), 0, []
     last_phase = ""
     # A short replay of the last few rounds' failures. A block of updates on the
@@ -657,6 +669,14 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
                                       "hidden": list(agent.net.hidden_sizes)})
             stalled, best_seen = 0, score
 
+        # Keep the best network by the validation metric. Copies are cheap next
+        # to a round of play, and the alternative is reporting whichever round
+        # the run stopped on.
+        if cfg.select_on and phase1_over:
+            score_now = ev[cfg.select_on]
+            if score_now < best_val:
+                best_val, best_net, best_round = score_now, agent.net.copy(), r
+
         history.append({"round": r, **ev, "hidden": list(agent.net.hidden_sizes),
                         "train": train, "play": play})
         if verbose:
@@ -671,11 +691,17 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
                   f"{grew}")
 
     checkpoint("final")
+    last_test = evaluate_heldout(agent, test)
+    if best_net is not None:
+        agent.net = best_net                   # play and report with the pick
+    checkpoint("selected")
     final = play_round(agent, judge, opponent, cfg, rng, nprng, cfg.eval_games,
                        collect=False, temperature=0.0)[1]
     out = {"arm": cfg.arm, "seed": cfg.seed, "config": asdict(cfg),
-           "heldout": evaluate_heldout(agent, positions),
-           "heldout_tracked": evaluate_heldout(agent, tracked),
+           "heldout": evaluate_heldout(agent, test),
+           "heldout_last_round": last_test,
+           "selected_round": best_round, "selected_value": None if best_net is None else best_val,
+           "heldout_validation": evaluate_heldout(agent, tracked),
            "vs_stockfish": final, "opponent": opponent.describe(),
            "hidden": list(agent.net.hidden_sizes), "parameters": agent.net.n_params(),
            "growth": growth_events, "activation": agent.net.act_report(),
@@ -686,7 +712,9 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
     opponent.close()
     if verbose:
         hv, sv = out["heldout"], out["vs_stockfish"]
-        print(f"  [{cfg.arm:12s} seed {cfg.seed}] DONE  legal@1 {hv['top1_legal']:.3f}  "
+        print(f"  [{cfg.arm:12s} seed {cfg.seed}] DONE  kept round {best_round} of {cfg.rounds}"
+              f" (last round would have been {last_test['refusals']:.1f})\n"
+              f"  [{cfg.arm:12s} seed {cfg.seed}]       legal@1 {hv['top1_legal']:.3f}  "
               f"refusals {hv['refusals']:.1f}  cp loss {hv['cp_loss']:.1f}  |  "
               f"vs Stockfish: score {sv['score']:.2f} acpl {sv['acpl']:.0f} "
               f"refusals {sv['refusals']:.1f}  ({out['seconds']}s)")
@@ -742,7 +770,12 @@ def main() -> None:
     p.add_argument("--judge-depth", type=int, default=Config.judge_depth)
     p.add_argument("--eval-games", type=int, default=Config.eval_games)
     p.add_argument("--buffer-rounds", type=int, default=Config.buffer_rounds)
-    p.add_argument("--track-positions", type=int, default=Config.track_positions)
+    p.add_argument("--track-positions", type=int, default=Config.track_positions,
+                   help="how many held-out positions form the validation split")
+    p.add_argument("--select-on", default=Config.select_on,
+                   choices=["refusals", "cp_loss", "top1_legal", ""],
+                   help="validation metric used to keep the best network; "
+                        "empty keeps the last round instead")
     p.add_argument("--invert-mode", choices=["unit", "readout"], default=Config.invert_mode,
                    help="unit: negate every unit, §4.3's primitive (default).  "
                         "readout: negate only the network's output, leaving the "
@@ -784,6 +817,7 @@ def main() -> None:
                          judge_depth=args.judge_depth, eval_games=args.eval_games,
                          buffer_rounds=args.buffer_rounds, width=args.width,
                          track_positions=args.track_positions,
+                         select_on=args.select_on,
                          schedule=args.schedule, neg_fraction=args.neg_fraction,
                          invert_mode=args.invert_mode,
                          invert_trigger=args.invert_trigger,
