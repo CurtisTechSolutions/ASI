@@ -135,6 +135,7 @@ class Config:
                                      # "schedule" = flip at neg_fraction of the run
     invert_patience: int = 3         # rounds without improvement before the flip
     invert_min_delta: float = 0.01   # one probability point counts as improvement
+    trigger_window: int = 5          # rounds averaged before the trigger will act
     reproduce_at: float = 0.90       # §3: phase 1 runs "until the model reproduces it"
     plateau_floor: float = 0.50      # §12 item 4: a half-learned failure may not plateau
     schedule: str = "phased"         # "phased" = §3's three phases across the run;
@@ -369,20 +370,34 @@ class FlipTrigger:
     So the flip is an **event, not a date**, and it fires on the first of three,
     each of which is an observation rather than an estimate (§6.4):
 
+    Every test is applied to an **average over ``trigger_window`` rounds**, never
+    to a single round, because a single round is far too noisy to decide
+    anything: measured on the recorded traces, the round-to-round step in
+    ``p`` averages 0.042 while the improvement the test is looking for is 0.01.
+    The noise is four times the signal, so an instantaneous test fires on noise -
+    and it did.  Two of three seeds ended phase 1 on ``plateau`` while ``p`` was
+    still climbing at 0.03 a round, one at p = 0.60 and one at 0.81.
+
+    A *cumulative* average over all rounds is the obvious smoother and it is the
+    wrong one.  It never forgets the early rounds, so on the seed that genuinely
+    reached p = 0.94 it read 0.66 - a threshold test on it would never fire at
+    all.  A trailing window reads 0.89 there: the same number with the noise
+    taken out.
+
     ``reproduced``
-        The network now puts at least ``reproduce_at`` of its probability on the
-        failure it is being trained toward.  This is §3 read literally - phase 1
-        is *"ordinary training on the wrong answer, at full learning rate, until
-        the model reproduces it"* - and it is the condition that should normally
-        fire.
+        The **windowed mean** of ``p`` is at least ``reproduce_at``.  This is §3
+        read literally - phase 1 is *"ordinary training on the wrong answer, at
+        full learning rate, until the model reproduces it"* - and asking it of an
+        average rather than of one round is what makes it "consistently".
     ``plateau``
-        It has stopped getting better at that for ``invert_patience`` rounds in a
-        row, having already got past ``plateau_floor`` - there is nothing left in
-        the failure to represent.  The floor is there because §12 item 4 warns
-        that *"a half-learned failure inverts into a half-useful signal"*: a
-        network still reproducing its failure less than half the time has not
-        finished phase 1, it has merely stopped improving for a moment, and
-        without the floor two noisy rounds end phase 1 at p = 0.43.
+        The windowed mean has stopped improving on **the window before it** for
+        ``invert_patience`` rounds running, having already got past
+        ``plateau_floor``: one average against the average before it, rather than
+        one round against the best round so far.  Comparing to a best-so-far is
+        the specific thing that broke - it is a maximum over a noisy series, so
+        the bar ratchets up by luck and never comes down.  The floor is there
+        because §12 item 4 warns that *"a half-learned failure inverts into a
+        half-useful signal"*.
     ``deadline``
         Round ``rounds - 1``, and this is the reason for the ``n - 1``.  Phase 1
         may run as long as it likes but no longer than that, so **there is always
@@ -404,7 +419,9 @@ class FlipTrigger:
         self.min_delta = cfg.invert_min_delta
         self.reproduce_at = cfg.reproduce_at
         self.floor = cfg.plateau_floor
-        self.best_p = 0.0
+        self.window = max(1, cfg.trigger_window)
+        self.history: list[float] = []
+        self.value: float | None = None
         self.deadline = max(1, cfg.rounds - 1)
         self.scheduled = max(1, int(round(cfg.rounds * cfg.neg_fraction)))
         self.best, self.stalled = float("inf"), 0
@@ -425,21 +442,28 @@ class FlipTrigger:
             # the failure it is being trained toward - literally how well it
             # reproduces it, and comparable from round to round in a way the raw
             # loss is not, because the failure buffer keeps growing underneath it.
-            p = math.exp(-nll)
-            if p >= self.reproduce_at:
+            self.history.append(math.exp(-nll))
+        w, h = self.window, self.history
+        if len(h) >= w:
+            recent = sum(h[-w:]) / w
+            self.value = recent
+            if recent >= self.reproduce_at:
                 self.fired_at, self.reason = round_index, "reproduced"
                 return True
-            if p > self.best_p + self.min_delta:
-                self.best_p, self.stalled = p, 0
-            else:
-                self.stalled += 1
-        # A plateau below the floor is not a finished phase 1, it is a phase 1
-        # that has not started working yet - §12 item 4's half-learned failure,
-        # which "inverts into a half-useful signal". Only a network that already
-        # reproduces its failure more often than not is allowed to stop here.
-        if self.stalled >= self.patience and self.best_p >= self.floor:
-            self.fired_at, self.reason = round_index, "plateau"
-            return True
+            if len(h) >= 2 * w:
+                previous = sum(h[-2 * w:-w]) / w
+                # Consistent change: one average against the average before it.
+                # Not this round against the best round so far.
+                if recent - previous < self.min_delta:
+                    self.stalled += 1
+                else:
+                    self.stalled = 0
+            # A plateau below the floor is not a finished phase 1, it is a phase 1
+            # that has not started working yet - §12 item 4's half-learned failure,
+            # which "inverts into a half-useful signal".
+            if self.stalled >= self.patience and recent >= self.floor:
+                self.fired_at, self.reason = round_index, "plateau"
+                return True
         if round_index >= self.deadline:                 # the n - 1 guarantee
             self.fired_at, self.reason = round_index, "deadline"
             return True
@@ -706,6 +730,7 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
            "hidden": list(agent.net.hidden_sizes), "parameters": agent.net.n_params(),
            "growth": growth_events, "activation": agent.net.act_report(),
            "negative_rounds": trigger.fired_at, "flip_reason": trigger.reason,
+           "flip_value": trigger.value, "trigger_window": cfg.trigger_window,
            "engine_calls": judge.calls, "engine_cache_hits": judge.hits,
            "history": history, "seconds": round(time.time() - started, 1)}
     judge.close()
@@ -786,6 +811,9 @@ def main() -> None:
                         "and by round n-1 at the latest (default).  "
                         "schedule: flip at --neg-fraction of the run, as a fixed date")
     p.add_argument("--invert-patience", type=int, default=Config.invert_patience)
+    p.add_argument("--trigger-window", type=int, default=Config.trigger_window,
+                   help="rounds averaged before the trigger acts; 1 compares "
+                        "single rounds, which fires on noise")
     p.add_argument("--plateau-floor", type=float, default=Config.plateau_floor)
     p.add_argument("--reproduce-at", type=float, default=Config.reproduce_at,
                    help="how much of its probability the network must put on the "
@@ -822,6 +850,7 @@ def main() -> None:
                          invert_mode=args.invert_mode,
                          invert_trigger=args.invert_trigger,
                          invert_patience=args.invert_patience,
+                         trigger_window=args.trigger_window,
                          reproduce_at=args.reproduce_at,
                          plateau_floor=args.plateau_floor,
                          growth=0 if args.no_growth else Config.growth,
