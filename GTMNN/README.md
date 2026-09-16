@@ -65,5 +65,5 @@ frontend stay recognisable siblings of `RadixCyclicNN/`.
 * `Research/2NRL.md` — `two_nrl(bad, good)`: train on garbage, invert the
   population (`a → -a` on every sine *and* a sign flip of the payoff function,
   so the population plays the anti-game for one pass), then fine-tune.
-* `NeuralCompression/FINDINGS.md` §5 — measured evidence that this spec's
-  `b = 1/3` initialisation is the wrong value.
+* `Experiments/NeuralCompression/FINDINGS.md` §5 — measured evidence that this
+  spec's `b = 1/3` initialisation is the wrong value.

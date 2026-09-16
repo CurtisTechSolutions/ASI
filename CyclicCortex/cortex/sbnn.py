@@ -40,7 +40,7 @@ class SBNN:
         are present rather than folded into a constant. At the defaults
         ``a=-1, h=0, k=0`` this is ``-sin(b*z)``, which is exactly what this net
         computed before; only ``b`` diverges from the paper's 1/3, deliberately
-        and for a measured reason (DESIGN.md 8, NeuralCompression/FINDINGS.md 5).
+        and for a measured reason (DESIGN.md 8, Experiments/NeuralCompression/FINDINGS.md 5).
         """
         if self.act == "tanh": return math.tanh(z)
         return self.a * math.sin(self.b * (z - self.h)) + self.k
@@ -103,7 +103,7 @@ class SBNN:
 
     def plateaued(self):
         """Past warmup and the running loss has stopped improving. NOT a
-        gradient-magnitude test: NeuralCompression/FINDINGS.md 11 measured that
+        gradient-magnitude test: Experiments/NeuralCompression/FINDINGS.md 11 measured that
         magnitude cannot separate stuck from converged from still starting."""
         return self.seen > self.warmup and self.since > self.patience
 

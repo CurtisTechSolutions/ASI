@@ -1,17 +1,17 @@
-# experiments
+# DepthCountedNormalisation
 
-The code that tests the claims in the papers one directory up. A paper here is
-not allowed to rest on an argument alone — where a claim is testable, the test
-lives in this directory and the paper cites the numbers it produced.
+The experiment behind `Research/VanishingGradientIsAFeature.md`. A paper in
+`Research/` is not allowed to rest on an argument alone — where a claim is
+testable, the test lives here and the paper cites the numbers it produced.
 
-**Standard library only** — no numpy, no torch — so each script runs anywhere
+**Standard library only** — no numpy, no torch — so the script runs anywhere
 with nothing installed, the same rule `RadixCyclicNN/` follows.
 
 ## Contents
 
 | file | tests |
 |---|---|
-| `depth_counted_normalisation.py` | `../VanishingGradientIsAFeature.md` — *is the vanishing gradient a measurement?* |
+| `depth_counted_normalisation.py` | `Research/VanishingGradientIsAFeature.md` — *is the vanishing gradient a measurement?* |
 
 ### `depth_counted_normalisation.py`
 
@@ -38,14 +38,5 @@ python3 depth_counted_normalisation.py --quick    # ~1 min
 
 ## Related
 
-Not every experiment behind these papers lives here — several predate the
-directory and sit with the code they belong to:
-
-| claim | where it is tested |
-|---|---|
-| the sine activation beats sigmoid and ReLU | `ActivationFunctionTest/` |
-| 2NRL works on a real control task | `TwoNRL_CartPole/` |
-| one network can hold many games; inversion as an escape | `NeuralCompression/` |
-| a learnable activation inside a conventional RNN | `SBNN_RNN_ActivationFunction/main.py` |
-
-`../README.md` maps every idea to the code that implements it.
+`../README.md` lists every experiment in this directory and the claim it tests.
+`Research/README.md` maps every idea to the code that implements it.

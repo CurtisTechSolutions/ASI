@@ -41,10 +41,14 @@ it. Read any one first; each says where it depends on the others.
 | the sine activation and its partial derivatives | `RadixCyclicNN/radixnet/activation.py` |
 | conversing with itself; stutter detection and backtracking | `RadixCyclicNN/radixnet/dialogue.py` |
 | 2NRL, inversion, the self-upgrade loop | `RadixCyclicNN/radixnet/gan.py`, `model.py` |
-| the activation comparison on CartPole | `ActivationFunctionTest/` |
-| depth-counted gradient normalisation | `Research/experiments/depth_counted_normalisation.py` |
-| a learnable activation inside a conventional RNN | `SBNN_RNN_ActivationFunction/main.py` |
+| the activation comparison on CartPole | `Experiments/ActivationFunctionTest/` |
+| depth-counted gradient normalisation | `Experiments/DepthCountedNormalisation/depth_counted_normalisation.py` |
+| a learnable activation inside a conventional RNN | `Experiments/SBNN_RNN_ActivationFunction/main.py` |
 
 `RadixCyclicNN/DESIGN.md` is the full specification of the implementation and
 `RadixCyclicNN/DECISIONS.md` the record of why it is that way. These papers are
 the reasoning behind both.
+
+Every experiment that tests a claim made in these papers lives in
+`Experiments/`, one directory per experiment. The experiment that used to
+sit in this directory is now `Experiments/DepthCountedNormalisation/`.

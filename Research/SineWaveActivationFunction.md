@@ -439,8 +439,8 @@ Each one says something:
 
 In RadixCyclicNN every node owns its own `(a, b, h, k)` and all four are updated
 by the local rule, alongside the node state `z` and the outgoing weights.
-`SBNN_RNN_ActivationFunction/main.py` is the same principle in a conventional
-RNN: the same `(a, b, h, k)`, one wave per hidden unit, updated by their own
+`Experiments/SBNN_RNN_ActivationFunction/main.py` is the same principle in a
+conventional RNN: the same `(a, b, h, k)`, one wave per hidden unit, updated by their own
 gradients at a tenth of the weight learning rate. The tenth matters — the
 activation is the *shape of the space* the weights are searching in, and moving
 the space as fast as you move the search makes both diverge.
@@ -449,8 +449,8 @@ the space as fast as you move the search makes both diverge.
 
 ## 9. Evidence: the CartPole experiment
 
-`ActivationFunctionTest/` holds three scripts — `sigmoid.py`, `relu.py`,
-`sinewave.py` — that are byte-for-byte identical except for the activation
+`Experiments/ActivationFunctionTest/` holds three scripts — `sigmoid.py`,
+`relu.py`, `sinewave.py` — that are byte-for-byte identical except for the activation
 function. Same environment (`CartPole-v1`), same architecture (Dense 24 → Dense
 `n_actions`), same optimiser (Adam), same loss (MSE), same `γ = 0.95`, same
 ε-greedy schedule, same 250 episodes, same greedy evaluation episode at the end.
@@ -532,13 +532,13 @@ To turn this from an indication into a result:
 
 | Location | How the activation appears |
 |---|---|
-| `ActivationFunctionTest/sinewave.py` | the original comparison, TensorFlow |
-| `ActivationFunctionTest/reinforcement_q_learning_sinewave.py` | DQN with a linear head, PyTorch — the controlled version |
+| `Experiments/ActivationFunctionTest/sinewave.py` | the original comparison, TensorFlow |
+| `Experiments/ActivationFunctionTest/reinforcement_q_learning_sinewave.py` | DQN with a linear head, PyTorch — the controlled version |
 | `RadixCyclicNN/radixnet/activation.py` | the reference implementation: `sine_activation`, `sine_derivative`, `sine_partials`, `SineActivation.inverted()` |
 | `RadixCyclicNN/radixnet/graph.py` | per-node `a, b, h, k`; `Z_RANGE = 4.5` matched to the quarter period |
 | `RadixCyclicNN/radixnet/backend.py` | the same formulas inlined for the hot loop, CPU and GPU, asserted to produce identical numbers |
-| `SBNN_RNN_ActivationFunction/main.py` | per-unit `a, b, h, k` in a conventional RNN with BPTT, at `lr/10`; grown units are born at the defaults |
-| `ActivationFunctionTest/self_building_sinewave.py` | the four learnable parameters inside a self-building network, standard library only - five arms, five seeds, and the section 6 dead fraction measured on the pre-activations a trained network actually produces |
+| `Experiments/SBNN_RNN_ActivationFunction/main.py` | per-unit `a, b, h, k` in a conventional RNN with BPTT, at `lr/10`; grown units are born at the defaults |
+| `Experiments/ActivationFunctionTest/self_building_sinewave.py` | the four learnable parameters inside a self-building network, standard library only - five arms, five seeds, and the section 6 dead fraction measured on the pre-activations a trained network actually produces |
 
 The edge signal in RadixCyclicNN is `w · f_p(z_p) · f_c(z_c)` — weight times the
 activation of the parent times the activation of the child. The consequence of a

@@ -5,7 +5,7 @@ vocabularies are discovered by probing, so both layers grow.
 
   inputs   a new FEATURE NAME appears (a new oracle's feature language, §14)
   outputs  a new REFUSAL CODE is seen for the first time
-  hidden   the running loss plateaus (NeuralCompression/FINDINGS.md §11 measured
+  hidden   the running loss plateaus (Experiments/NeuralCompression/FINDINGS.md §11 measured
            that gradient magnitude cannot separate stuck from converged from
            still-starting; a plateau can)
 
@@ -129,7 +129,7 @@ class GrowingSBNN:
         The author's formula in full: amplitude, frequency, phase, offset. At the
         defaults ``a=-1, h=0, k=0`` this is ``-sin(b*z)``, the same function this
         net has always computed; ``b`` is 1.0 rather than the paper's 1/3 for the
-        measured reason in NeuralCompression/FINDINGS.md 5.
+        measured reason in Experiments/NeuralCompression/FINDINGS.md 5.
         """
         if self.act == "tanh": return math.tanh(z)
         return self.a * math.sin(self.b * (z - self.h)) + self.k

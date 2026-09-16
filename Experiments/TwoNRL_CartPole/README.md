@@ -20,7 +20,7 @@ trained to fail   9.2  steps
 
 Fine-tuning was not needed - the inversion had already taken it to the ceiling,
 and the positive phase only had 0.6 points left to recover. For reference, the
-earlier sinewave test in `ActivationFunctionTest/README.md` reaches 28-48 on the
+earlier sinewave test in `Experiments/ActivationFunctionTest/README.md` reaches 28-48 on the
 same task.
 
 ## The three phases
