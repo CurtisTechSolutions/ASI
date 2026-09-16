@@ -23,11 +23,13 @@ RESULTS     ?= results
 WEIGHTS     ?= weights
 POSITIONS   ?= 400
 VIZ_SEED    ?= 0
+ELO_OPENINGS?= 14
+LONG_ROUNDS ?= 200
 
 COMMON = --seeds $(SEEDS) --rounds $(ROUNDS) --games $(GAMES) \
          --eval-games $(EVAL_GAMES) --jobs $(JOBS) --weights $(WEIGHTS)
 
-.PHONY: help install check test data run entropy repulsion all-arms per-round phase-depth no-growth viz viz-data bench bench-all quick all summary clean
+.PHONY: help install check test data run entropy repulsion all-arms per-round phase-depth no-growth viz viz-data bench bench-all elo long quick all summary clean
 
 help: ## Show this help
 	@echo "2NRL on chess make targets  (override variables like: make run SEEDS=\"0 1\")"
@@ -113,6 +115,14 @@ bench: ## Play the trained arms against each other and a common opponent
 	@mkdir -p $(RESULTS)
 	$(PY) benchmark.py --weights $(WEIGHTS) --seeds $(SEEDS) --openings $(OPENINGS) \
 		--arms 2nrl positive --out $(RESULTS)/benchmark.json
+
+elo: ## Rate the arms on a ladder - Stockfish alone gives every one of them 0.000
+	@mkdir -p $(RESULTS)
+	$(PY) elo.py --weights $(WEIGHTS) --seeds $(SEEDS) --openings $(ELO_OPENINGS) \
+		--out $(RESULTS)/elo.json
+
+long: ## The long run: LONG_ROUNDS rounds instead of $(ROUNDS), into results_long/
+	ROUNDS=$(LONG_ROUNDS) GAMES=$(GAMES) SEEDS="$(SEEDS)" JOBS=$(JOBS) ./run_long.sh
 
 bench-all: ## The same, over every arm that has trained weights
 	@mkdir -p $(RESULTS)
