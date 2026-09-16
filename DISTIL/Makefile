@@ -29,6 +29,7 @@ QUERY     ?= merge two dicts
 GOAL      ?= count how often each word appears in a text
 LIKE      ?= the csv has ragged rows
 IDEA      ?=
+MODEL     ?=
 MODULE    ?= reason.py
 CHANGE    ?= cache the payoff matrix between calls
 TRACE     ?=
@@ -52,9 +53,10 @@ NAME      ?=
 CMD       ?=
 
 .PHONY: help check test lint demo home \
+        up up-ollama pull down logs docker-test \
         seed tools forge \
         ask clarify frame distill why cases recall grade \
-        explore upgrade compress compress-now restore \
+        explore upgrade compress compress-now restore auto \
         selfedit lineage rollback \
         mcp mcp-add providers stats \
         ui ui-install ui-build ui-dev ui-clean \
@@ -73,7 +75,7 @@ check: ## Byte-compile the package and report which providers are reachable
 	$(PY) -m compileall -q distil tests
 	$(DISTIL) providers
 
-test: ## Run the suite (288 tests, ~25s, no network, no key)
+test: ## Run the suite (319 tests, ~60s, no network, no key)
 	$(PY) -m tests.test_distil
 
 lint: ## Byte-compile everything (a syntax check without extra tools)
@@ -140,6 +142,15 @@ restore: | home ## Bring archived traces back out of the archive
 stats: | home ## Memory and tool counts
 	$(DISTIL) stats
 
+##@ Running by itself
+CYCLES ?= 0
+
+auto: | home ## Run the autonomous loop for CYCLES cycles (0 = until Ctrl-C)
+	@# Six moves, regret-matched and rewarded for information rather than success.
+	@# It cannot reach selfedit: an unattended optimiser with write access to its
+	@# own grader will edit its own grader.
+	$(DISTIL) auto --cycles $(CYCLES)
+
 ##@ Exploration — bad ideas are ranked, not avoided
 explore: | home ## Brainstorm and run STEPS experiments (IDEA="..." seeds the brainstorm)
 	$(DISTIL) explore --steps $(STEPS) $(if $(IDEA),--seed-idea "$(IDEA)",)
@@ -185,6 +196,28 @@ ui-build: ## Rebuild web/ from ui/ — the committed output `make ui` serves
 
 ui-dev: ## Vite dev server with hot reload, proxying /api to a running `make ui`
 	cd ui && $(NPM) run dev
+
+##@ Containers — the agent, plus a browser it is allowed to drive
+COMPOSE ?= docker compose
+
+up: ## Start the agent on 127.0.0.1:$(PORT) with a Chrome container beside it
+	$(COMPOSE) up -d
+
+up-ollama: ## Also start a local model (then: make pull MODEL=llama3.2)
+	$(COMPOSE) --profile ollama up -d
+
+pull: ## Pull MODEL into the ollama container
+	@test -n "$(MODEL)" || { echo 'usage: make pull MODEL=llama3.2'; exit 1; }
+	$(COMPOSE) exec ollama ollama pull $(MODEL)
+
+down: ## Stop the stack; the state volume is kept
+	$(COMPOSE) --profile ollama down
+
+logs: ## Follow the agent's logs
+	$(COMPOSE) logs -f agent
+
+docker-test: ## Run the suite inside the image
+	$(COMPOSE) --profile test run --rm test
 
 ##@ Housekeeping
 ui-clean: ## Remove the frontend's node_modules (web/ is committed and kept)

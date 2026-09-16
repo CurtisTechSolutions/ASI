@@ -51,7 +51,10 @@ from distil.store import InProcessStore, TieredStore
 from distil.toolsmith import (Toolbox, ToolSpec, Toolsmith, parse_reply, signature_of,
                               synthesise)
 from distil.project import orient, project
+from distil.auto import Auto, Move
+from distil.browser import ACTIONS, Browser, BrowserError
 from distil.serve import Api, _plain, trace_json
+from distil import speech
 from distil.vector import centroid, cosine, normalise, spread
 from distil.workspace import Workspace
 
@@ -3106,6 +3109,361 @@ def test_a_malformed_body_is_a_400_not_a_traceback():
             assert status == 400, body
     finally:
         httpd.shutdown()
+
+
+
+# --------------------------------------------------------------------------- #
+# the autonomous loop
+# --------------------------------------------------------------------------- #
+
+def _auto(seed: int = 3):
+    d = fresh(seed)
+    plant(d.toolsmith, d.toolbox)
+    return Auto(d)
+
+
+def test_the_loop_never_questions_its_own_output():
+    """Each QUESTION writes a trace beginning "why <subject>".
+
+    That trace was then eligible as the next subject, so the loop asked why about
+    why about why -- escaping accumulating every turn -- and curiosity
+    degenerated into self-reference. Nothing the loop wrote may be a subject.
+    """
+    auto = _auto()
+    subjects = [c.detail.get("subject", "") for c in auto.run(cycles=22)
+                if c.move == Move.QUESTION and c.detail.get("subject")]
+    assert subjects, "no questions were asked at all"
+    assert not [s for s in subjects if s.startswith("why ")], subjects[:3]
+
+
+def test_a_repeated_finding_pays_less_than_the_first():
+    """The tenth circular belief is a pattern you already know.
+
+    Without the decay the offline provider -- which cannot really answer why, so
+    every chain comes back circular -- made QUESTION score identically forever
+    and starved the other four moves.
+    """
+    auto = _auto()
+    scores = [c.learned for c in auto.run(cycles=20) if c.move == Move.QUESTION]
+    assert len(scores) >= 3, scores
+    assert scores[0] > scores[-1], f"no decay: {scores}"
+
+
+def test_the_loop_does_not_retry_the_same_gap_forever():
+    """`covered` held tool NAMES and the gap is a verb, so the check never fired
+    and the same goal was re-forged and re-rejected every cycle."""
+    auto = _auto()
+    auto.agent.solve("build a csv cleaner and compute the median of each column",
+                     ask=lambda q: {})
+    goals = [c.detail.get("goal") for c in auto.run(cycles=20)
+             if c.move == Move.BUILD and c.detail.get("goal")]
+    assert len(goals) == len(set(goals)), f"repeated a gap: {goals}"
+
+
+def test_a_move_that_throws_does_not_end_the_loop():
+    """Losing everything learned so far over one bad move is the wrong trade."""
+    auto = _auto()
+    auto._tune = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    cycles = auto.run(cycles=10)
+    assert len(cycles) == 10
+    broken = [c for c in cycles if "failed" in c.note]
+    assert all(c.learned == 0.0 for c in broken)
+
+
+def test_an_untried_move_is_not_starved_by_one_lucky_cycle():
+    """Untried moves are worth the best average seen, not zero.
+
+    With zero, a single high-scoring first cycle drove the regret matcher to
+    never sample the other four again.
+    """
+    auto = _auto()
+    auto.paid[0], auto.tried[0] = 5.0, 1
+    assert auto._average(1) == 5.0, "an untried move should be optimistic"
+
+
+def test_the_loop_reports_what_it_learned_not_whether_it_worked():
+    """Rewarding correctness teaches it to stop running the experiments worth
+    running, which is the failure mode the whole design is arranged against."""
+    auto = _auto()
+    for cycle in auto.run(cycles=12):
+        assert cycle.learned >= 0.0
+        json.dumps(cycle.to_json())
+    # `strategy` rounds each of six shares to 4dp for display, so the sum drifts
+    # by up to ~3e-4. Asserting exact unity was testing the rounding, not the mix.
+    assert abs(sum(auto.strategy().values()) - 1.0) < 1e-3
+
+
+def test_the_loop_stops_when_asked():
+    stop = {"now": False}
+    auto = _auto()
+    auto.stop = lambda: stop["now"]
+    auto.run(cycles=3)
+    stop["now"] = True
+    assert auto.run(cycles=100) == []
+
+
+def test_the_loop_never_runs_out_of_direction():
+    """A loop with nothing to do must change what it is doing.
+
+    All five consuming moves draw from pools that empty -- a last unquestioned
+    belief, a last known gap, a last cold cluster -- and when they did, every
+    cycle returned "nothing to do" and the loop spun without stopping: neither
+    working nor finished. It may stall for PATIENCE cycles, never longer.
+    """
+    # Two seeds at 30 cycles is enough: the pools empty well before then, and
+    # PATIENCE is 2, so a loop that cannot recover shows it within a few turns.
+    for seed in (5, 23):
+        auto = _auto(seed)
+        longest = streak = 0
+        for cycle in auto.run(cycles=30):
+            streak = streak + 1 if cycle.barren else 0
+            longest = max(longest, streak)
+        assert longest <= Auto.PATIENCE, f"seed {seed} stalled for {longest} cycles"
+
+
+def test_running_dry_forces_a_new_direction():
+    auto = _auto()
+    auto.barren = Auto.PATIENCE
+    cycle = auto.once()
+    assert cycle.move == Move.PURSUE, cycle.move
+
+
+def test_directions_are_drawn_from_more_than_one_source():
+    """Taking the sources in order meant the first supplied every direction until
+    it ran out -- and since it draws on memory, which this loop is busy filling,
+    it never did."""
+    auto = _auto(5)
+    auto.run(cycles=30)
+    lead_ins = {d.split()[0] for d in auto.directions}
+    assert len(lead_ins) >= 3, auto.directions[:6]
+
+
+def test_a_direction_is_never_taken_twice():
+    auto = _auto(11)
+    auto.run(cycles=30)
+    assert len(auto.directions) == len(set(auto.directions))
+
+
+def test_pursuing_does_not_re_propose_its_own_descendants():
+    """Pursuing a direction runs the full solve loop, which writes goals and
+    failures whose text CONTAINS that direction -- and those carry no `auto`
+    marker, because the solver wrote them. Proposing one back produced "work out
+    what is true about work out what is true about"."""
+    auto = _auto(5)
+    auto.run(cycles=30)
+    repeated = [d for d in auto.directions
+                if d.count("work out what is actually true") > 1]
+    assert not repeated, repeated
+
+
+def test_an_empty_store_bootstraps_itself():
+    """Every direction source reads memory, so an empty store suggests nothing
+    and a fresh instance would sit still -- waiting to be told to do the one
+    thing it can always do."""
+    d = fresh()
+    assert not d.toolbox.names()
+    auto = Auto(d)
+    auto.run(cycles=6)
+    assert d.toolbox.names(), "it never planted anything to reason from"
+
+
+def test_the_last_resort_source_cannot_exhaust():
+    """Four of the five sources have a last element. Pairs do not: there are
+    O(n^2) of them and every cycle adds to n."""
+    auto = _auto()
+    pairs = auto._far_pairs()
+    assert len([next(pairs) for _ in range(12)]) == 12
+
+
+def test_a_vague_self_set_direction_is_gated_not_guessed_at():
+    """The gate firing on a question it set ITSELF is the system saying the
+    direction was vague, not a failure."""
+    auto = _auto()
+    gated = [c for c in auto.run(cycles=20)
+             if c.move == Move.PURSUE and c.detail.get("gated")]
+    for cycle in gated:
+        assert cycle.learned > 0, "finding a direction unstatable is worth something"
+
+
+
+# --------------------------------------------------------------------------- #
+# the browser
+# --------------------------------------------------------------------------- #
+
+def test_the_browser_refuses_a_non_http_url():
+    """`file:///etc/passwd` through a driver is a file read."""
+    try:
+        Browser(url="http://127.0.0.1:1").open("file:///etc/passwd")
+        raise AssertionError("should have refused")
+    except BrowserError as exc:
+        assert "http" in str(exc)
+
+
+def test_a_missing_driver_says_how_to_start_one():
+    try:
+        Browser(url="http://127.0.0.1:1").open("https://example.com")
+        raise AssertionError("should have raised")
+    except BrowserError as exc:
+        assert "docker compose" in str(exc) or "DISTIL_WEBDRIVER" in str(exc)
+
+
+def test_browser_actions_are_embedded_as_ordinary_tools():
+    """One embedding layer over every capability: a browser action has to be
+    findable by the same query that finds a forged function."""
+    from distil.browser import register
+    d = fresh()
+    names = register(d.memory)
+    assert set(names) == {n for n, _, _ in ACTIONS}
+    found = d.toolbox.find("read the text of a web page", k=3)
+    assert any(spec.name == "browser.read" for spec, _, _ in found), \
+        [spec.name for spec, _, _ in found]
+    spec = d.toolbox.load("browser.read")
+    assert spec is not None and spec.transport == "browser"
+
+
+def test_a_browser_tool_without_a_browser_fails_loudly():
+    from distil.browser import register
+    d = fresh()
+    register(d.memory)
+    out = d.toolbox.invoke("browser.open", ["https://example.com"])
+    assert out["ok"] is False and "browser" in out["error"]
+
+
+# --------------------------------------------------------------------------- #
+# speech
+# --------------------------------------------------------------------------- #
+
+def test_transcription_says_why_it_cannot_rather_than_failing_silently():
+    state = speech.available()
+    assert isinstance(state["local"], bool) and state["why"]
+    if not state["local"]:
+        try:
+            speech.transcribe(b"RIFF....WAVE")
+            raise AssertionError("should have raised")
+        except speech.SpeechError as exc:
+            assert str(exc) == state["why"]
+
+
+def test_audio_is_validated_before_it_reaches_a_subprocess():
+    """Handing an unvalidated upload to whisper makes this endpoint a file-format
+    parser with someone else's bugs."""
+    for raw, expect in [(b"", "no audio"), (b"not a wav at all", "wav")]:
+        try:
+            speech.check_wav(raw)
+            raise AssertionError(f"should have refused {raw!r}")
+        except speech.SpeechError as exc:
+            assert expect in str(exc).lower()
+
+
+def test_a_real_wav_is_accepted_and_measured():
+    import struct, wave
+    path = tmpdir() / "tone.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(b"".join(struct.pack("<h", 0) for _ in range(16000)))
+    assert abs(speech.check_wav(path.read_bytes()) - 1.0) < 0.01
+
+
+def test_oversized_audio_is_refused_by_length_not_by_trying_it():
+    import struct, wave
+    path = tmpdir() / "long.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+        w.writeframes(b"\x00\x00" * int(8000 * (speech.MAX_SECONDS + 5)))
+    try:
+        speech.check_wav(path.read_bytes())
+        raise AssertionError("should have refused")
+    except speech.SpeechError as exc:
+        assert "limit" in str(exc)
+
+
+# --------------------------------------------------------------------------- #
+# what the new endpoints promise
+# --------------------------------------------------------------------------- #
+
+def test_every_reply_carries_what_memory_already_knew():
+    """A gated question used to return questions and nothing else -- the one case
+    where "what do I already know about this?" is most useful answered it least.
+    """
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    gated = d.solve("make the thing better", ask=None)
+    assert gated["needs_clarification"] and gated["recall"]["hits"], \
+        "a gated question returned no recall"
+    answered = d.solve("compute the median of a list of numbers", ask=lambda q: {})
+    assert "recall" in answered
+
+
+def test_a_composite_tool_links_to_what_it_was_built_from():
+    """Credit propagates along links. Until tool traces carried their deps, a
+    well-graded composite earned its parts nothing."""
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    api = Api(d)
+    spec = d.toolbox.load("median_of_column")
+    assert spec and spec.deps, "the fixture no longer has a composite tool"
+    out = api.trace({"id": [spec.trace_id]})
+    linked = {e["text"].split(":")[0].replace("tool ", "") for e in out["links"]}
+    assert set(spec.deps) <= linked, f"{spec.deps} not in {linked}"
+
+
+def test_the_trace_view_shows_who_uses_a_thing_not_just_what_it_uses():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    api = Api(d)
+    median = d.toolbox.load("median")
+    out = api.trace({"id": [median.trace_id]})
+    assert any("median_of_column" in b["text"] for b in out["backlinks"]), \
+        "backlinks are the direction a person reads in"
+
+
+def test_the_reasoning_chain_can_be_watched_as_it_is_thought():
+    seen = []
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    d.solve("compute the median of a list of numbers", ask=lambda q: {},
+            observer=seen.append)
+    kinds = [s.kind for s in seen]
+    assert kinds[:2] == ["FRAME", "AGENDA"], kinds
+    assert "VERIFY" in kinds and len(kinds) >= 8
+
+
+def test_a_broken_watcher_never_takes_down_the_run():
+    """A browser that closed mid-run must not stop the reasoning it was watching."""
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    def explode(step):
+        raise RuntimeError("the tab closed")
+    out = d.solve("compute the median of a list of numbers", ask=lambda q: {},
+                  observer=explode)
+    assert out["session"] is not None
+
+
+def test_attaching_a_server_persists_it_across_restarts():
+    """A server added at runtime and lost on restart is worse than one never
+    added: its tools stay in the embedding layer, recalled and uncallable."""
+    d = fresh()
+    d.mcp.attach("echo", ["python3", "-c", "pass"])
+    assert d.mcp.config_path.exists()
+    config = json.loads(d.mcp.config_path.read_text())
+    assert config["mcpServers"]["echo"]["command"] == "python3"
+    assert d.mcp.detach("echo") is True
+    assert "echo" not in json.loads(d.mcp.config_path.read_text())["mcpServers"]
+    assert d.mcp.detach("echo") is False          # already gone
+
+
+def test_a_corrupt_mcp_config_is_replaced_not_inherited():
+    d = fresh()
+    d.mcp.config_path.write_text("{ not json at all")
+    d.mcp.attach("fs", ["echo", "hi"])
+    assert json.loads(d.mcp.config_path.read_text())["mcpServers"]["fs"]
+
+
+def test_clarify_alone_does_not_commit_to_solving():
+    api = Api(fresh())
+    out = api.clarify({"task": "make the thing better"})
+    assert out["actionable"] is False and out["questions"]
+    assert "recall" in out and "frame" in out
 
 
 def test_workspace_creates_its_directories():

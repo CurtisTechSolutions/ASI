@@ -7581,47 +7581,368 @@ var KIND_COLOUR = {
 };
 var colourOf = (kind) => KIND_COLOUR[kind] || "#9aa5ce";
 //#endregion
-//#region src/useAsync.js
-function useAsync(fn, deps, { immediate = true } = {}) {
-	const [state, setState] = (0, import_react.useState)({
-		data: null,
-		error: null,
-		busy: immediate
-	});
-	const run = (0, import_react.useCallback)(async (...args) => {
-		setState((s) => ({
-			...s,
-			busy: true,
-			error: null
-		}));
-		try {
-			const data = await fn(...args);
-			setState({
-				data,
-				error: null,
-				busy: false
-			});
-			return data;
-		} catch (error) {
-			setState({
-				data: null,
-				error: error.message,
-				busy: false
-			});
-			return null;
+//#region src/commands.js
+var COMMANDS = [
+	{
+		name: "tools",
+		args: "",
+		blurb: "what it can do, and what each capability solved",
+		run: async () => ({
+			kind: "tools",
+			data: await get("tools")
+		})
+	},
+	{
+		name: "forge",
+		args: "<what the tool should do>",
+		blurb: "write, verify and register a new capability",
+		needs: "say what the tool should do, e.g. /forge count words in a string",
+		run: async (rest) => ({
+			kind: "forge",
+			data: await post("forge", { goal: rest })
+		})
+	},
+	{
+		name: "memory",
+		args: "",
+		blurb: "every trace, projected onto a plane",
+		run: async () => ({
+			kind: "memory",
+			data: await get("memory")
+		})
+	},
+	{
+		name: "recall",
+		args: "<query>",
+		blurb: "search memory and show why each hit ranked where it did",
+		needs: "say what to search for, e.g. /recall merging dictionaries",
+		run: async (rest) => ({
+			kind: "recall",
+			data: await get("recall", {
+				q: rest,
+				k: 8
+			})
+		})
+	},
+	{
+		name: "explore",
+		args: "[n]",
+		blurb: "brainstorm and run experiments, ranked by what they would teach",
+		run: async (rest) => ({
+			kind: "explore",
+			data: await post("explore", { steps: Math.min(20, Math.max(1, parseInt(rest, 10) || 3)) })
+		})
+	},
+	{
+		name: "cases",
+		args: "[like what]",
+		blurb: "problems, and what actually solved them",
+		run: async (rest) => ({
+			kind: "cases",
+			data: await get("cases", rest ? { like: rest } : {})
+		})
+	},
+	{
+		name: "clarify",
+		args: "<task>",
+		blurb: "sharpen a task without committing to solving it",
+		needs: "give a task to sharpen, e.g. /clarify make the thing better",
+		run: async (rest) => ({
+			kind: "clarify",
+			data: await post("clarify", { task: rest })
+		})
+	},
+	{
+		name: "trace",
+		args: "<id>",
+		blurb: "one memory, and everything it is linked to",
+		needs: "give a trace id -- every answer and every recall hit shows one",
+		run: async (rest) => ({
+			kind: "trace",
+			data: await get("trace", { id: rest })
+		})
+	},
+	{
+		name: "mcp",
+		args: "[add <name> <command…> | remove <name>]",
+		blurb: "remote tool servers, in the same embedding layer as local ones",
+		run: async (rest) => {
+			const [verb, name, ...command] = rest.split(/\s+/).filter(Boolean);
+			if (verb === "add") {
+				if (!name || !command.length) throw new Error("usage: /mcp add <name> <command> [args…]");
+				return {
+					kind: "mcp",
+					data: await post("mcp_attach", {
+						action: "add",
+						name,
+						command
+					})
+				};
+			}
+			if (verb === "remove") {
+				if (!name) throw new Error("usage: /mcp remove <name>");
+				return {
+					kind: "mcp",
+					data: await post("mcp_attach", {
+						action: "remove",
+						name
+					})
+				};
+			}
+			return {
+				kind: "mcp",
+				data: await get("mcp")
+			};
 		}
-	}, deps);
-	(0, import_react.useEffect)(() => {
-		if (immediate) run();
-	}, [run, immediate]);
+	},
+	{
+		name: "seed",
+		args: "",
+		blurb: "plant the starter toolkit (runs by itself on an empty memory)",
+		run: async () => ({
+			kind: "seed",
+			data: await post("seed", {})
+		})
+	},
+	{
+		name: "compress",
+		args: "[now]",
+		blurb: "consolidate cold memory into digests; previews unless you say now",
+		run: async (rest) => ({
+			kind: "compress",
+			data: await post("compress", { dry_run: rest.trim() !== "now" })
+		})
+	},
+	{
+		name: "tune",
+		args: "",
+		blurb: "tune its own policy against measured outcomes",
+		run: async () => ({
+			kind: "tune",
+			data: await post("upgrade", { trials: 6 })
+		})
+	},
+	{
+		name: "system",
+		args: "",
+		blurb: "providers, policy, and every number it may change about itself",
+		run: async () => ({
+			kind: "system",
+			data: await get("state")
+		})
+	},
+	{
+		name: "help",
+		args: "",
+		blurb: "this list",
+		run: async () => ({
+			kind: "help",
+			data: { commands: COMMANDS }
+		})
+	}
+];
+var BY_NAME = new Map(COMMANDS.map((c) => [c.name, c]));
+function parse(input) {
+	const text = input.trim();
+	if (!text.startsWith("/")) return null;
+	const [word, ...rest] = text.slice(1).split(/\s+/);
+	const command = BY_NAME.get(word.toLowerCase());
+	if (!command) return { unknown: word };
 	return {
-		...state,
-		run,
-		setData: (data) => setState((s) => ({
-			...s,
-			data
-		}))
+		command,
+		rest: rest.join(" ").trim()
 	};
+}
+function suggest(input) {
+	const text = input.trim();
+	if (!text.startsWith("/") || text.includes(" ")) return [];
+	const typed = text.slice(1).toLowerCase();
+	return COMMANDS.filter((c) => c.name.startsWith(typed));
+}
+//#endregion
+//#region src/stream.js
+function streamAsk(task, answers, handlers) {
+	const params = new URLSearchParams({ task });
+	if (answers && Object.keys(answers).length) params.set("answers", JSON.stringify(answers));
+	const source = new EventSource(`/api/ask/stream?${params}`);
+	let finished = false;
+	const close = () => {
+		finished = true;
+		source.close();
+	};
+	source.addEventListener("step", (e) => handlers.onStep(JSON.parse(e.data)));
+	source.addEventListener("result", (e) => {
+		handlers.onResult(JSON.parse(e.data));
+	});
+	source.addEventListener("error", (e) => {
+		if (e.data) {
+			close();
+			handlers.onError(new Error(JSON.parse(e.data).error));
+		}
+	});
+	source.addEventListener("done", () => {
+		close();
+		handlers.onDone();
+	});
+	source.onerror = () => {
+		if (finished) return;
+		close();
+		handlers.onError(/* @__PURE__ */ new Error("the connection to the server dropped mid-answer"));
+	};
+	return close;
+}
+function streamAuto(cycles, handlers) {
+	const source = new EventSource(`/api/auto/stream?cycles=${cycles || 0}`);
+	let finished = false;
+	const close = () => {
+		finished = true;
+		source.close();
+	};
+	source.addEventListener("cycle", (e) => handlers.onCycle(JSON.parse(e.data)));
+	source.addEventListener("error", (e) => {
+		if (e.data) {
+			close();
+			handlers.onError(new Error(JSON.parse(e.data).error));
+		}
+	});
+	source.addEventListener("done", () => {
+		close();
+		handlers.onDone();
+	});
+	source.onerror = () => {
+		if (finished) return;
+		close();
+		handlers.onError(/* @__PURE__ */ new Error("the connection to the autonomous loop dropped"));
+	};
+	return close;
+}
+//#endregion
+//#region src/speech.js
+var SpeechKind = {
+	LOCAL: "local",
+	BROWSER: "browser",
+	NONE: "none"
+};
+var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+function browserAvailable() {
+	return Boolean(Recognition);
+}
+function route(serverSpeech) {
+	if (serverSpeech && serverSpeech.local) return SpeechKind.LOCAL;
+	if (browserAvailable()) return SpeechKind.BROWSER;
+	return SpeechKind.NONE;
+}
+function warning(kind, serverSpeech) {
+	if (kind === SpeechKind.LOCAL) return {
+		level: "ok",
+		text: `transcribed on this machine by ${serverSpeech.backend}`
+	};
+	if (kind === SpeechKind.BROWSER) return {
+		level: "warn",
+		text: "your browser transcribes this — in Chrome that sends the audio to Google. Install whisper.cpp and set DISTIL_WHISPER_MODEL to keep it on this machine."
+	};
+	return {
+		level: "off",
+		text: serverSpeech ? serverSpeech.why : "no speech recognition available"
+	};
+}
+function listenInBrowser({ onPartial, onFinal, onError }) {
+	if (!Recognition) {
+		onError(/* @__PURE__ */ new Error("this browser has no speech recognition"));
+		return () => {};
+	}
+	const rec = new Recognition();
+	rec.continuous = true;
+	rec.interimResults = true;
+	rec.lang = navigator.language || "en-US";
+	let settled = "";
+	rec.onresult = (event) => {
+		let pending = "";
+		for (let i = event.resultIndex; i < event.results.length; i += 1) {
+			const chunk = event.results[i][0].transcript;
+			if (event.results[i].isFinal) settled += chunk;
+			else pending += chunk;
+		}
+		onPartial((settled + pending).trim());
+	};
+	rec.onerror = (event) => {
+		if (event.error === "no-speech" || event.error === "aborted") return;
+		onError(/* @__PURE__ */ new Error(event.error === "not-allowed" ? "microphone permission was refused" : `speech recognition failed: ${event.error}`));
+	};
+	rec.onend = () => onFinal(settled.trim());
+	try {
+		rec.start();
+	} catch (err) {
+		onError(err);
+		return () => {};
+	}
+	return () => {
+		try {
+			rec.stop();
+		} catch {}
+	};
+}
+async function recordForServer({ onError }) {
+	let stream;
+	try {
+		stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+	} catch (err) {
+		onError(/* @__PURE__ */ new Error("microphone permission was refused"));
+		return null;
+	}
+	const chunks = [];
+	const recorder = new MediaRecorder(stream);
+	recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+	recorder.start();
+	return { async stop() {
+		const done = new Promise((resolve) => {
+			recorder.onstop = resolve;
+		});
+		recorder.stop();
+		await done;
+		stream.getTracks().forEach((t) => t.stop());
+		if (!chunks.length) return null;
+		return encodeWav(await decode(new Blob(chunks)));
+	} };
+}
+async function decode(blob) {
+	const ctx = new (window.AudioContext || window.webkitAudioContext)();
+	try {
+		return await resample(await ctx.decodeAudioData(await blob.arrayBuffer()), 16e3);
+	} finally {
+		ctx.close();
+	}
+}
+async function resample(buffer, rate) {
+	const frames = Math.ceil(buffer.duration * rate);
+	const off = new OfflineAudioContext(1, frames, rate);
+	const src = off.createBufferSource();
+	src.buffer = buffer;
+	src.connect(off.destination);
+	src.start();
+	return off.startRendering();
+}
+function encodeWav(buffer) {
+	const samples = buffer.getChannelData(0);
+	const out = /* @__PURE__ */ new DataView(/* @__PURE__ */ new ArrayBuffer(44 + samples.length * 2));
+	const ascii = (at, text) => [...text].forEach((c, i) => out.setUint8(at + i, c.charCodeAt(0)));
+	ascii(0, "RIFF");
+	out.setUint32(4, 36 + samples.length * 2, true);
+	ascii(8, "WAVEfmt ");
+	out.setUint32(16, 16, true);
+	out.setUint16(20, 1, true);
+	out.setUint16(22, 1, true);
+	out.setUint32(24, buffer.sampleRate, true);
+	out.setUint32(28, buffer.sampleRate * 2, true);
+	out.setUint16(32, 2, true);
+	out.setUint16(34, 16, true);
+	ascii(36, "data");
+	out.setUint32(40, samples.length * 2, true);
+	for (let i = 0; i < samples.length; i += 1) {
+		const clamped = Math.max(-1, Math.min(1, samples[i]));
+		out.setInt16(44 + i * 2, clamped < 0 ? clamped * 32768 : clamped * 32767, true);
+	}
+	return new Blob([out], { type: "audio/wav" });
 }
 //#endregion
 //#region node_modules/react/cjs/react-jsx-runtime.production.min.js
@@ -7667,56 +7988,314 @@ var require_react_jsx_runtime_production_min = /* @__PURE__ */ __commonJSMin(((e
 	exports.jsxs = q;
 }));
 //#endregion
-//#region src/viz/ChainFlow.jsx
+//#region src/chat/Composer.jsx
 var import_jsx_runtime = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 	module.exports = require_react_jsx_runtime_production_min();
 })))();
-var COLOUR = {
-	FRAME: "#c0caf5",
-	AGENDA: "#7dcfff",
-	PRECEDENT: "#41a6b5",
-	WHY: "#bb9af7",
-	CHALLENGE: "#ff9e64",
-	RETRIEVE: "#7aa2f7",
-	DISTILL: "#e0af68",
-	PAYOFF: "#2ac3de",
-	SELECT: "#9ece6a",
-	ACT: "#73daca",
-	VERIFY: "#f7768e",
-	CREDIT: "#a9b1d6",
-	NOTE: "#565f89"
-};
-function ChainFlow({ chain }) {
-	const [open, setOpen] = (0, import_react.useState)(null);
-	if (!chain || !chain.length) return null;
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ol", {
-		className: "chain",
-		children: chain.map((step, i) => {
-			const hasPayload = step.payload && Object.keys(step.payload).length > 0;
-			return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
-				className: "chain-step",
+function Composer({ onSend, busy, speech }) {
+	const [text, setText] = (0, import_react.useState)("");
+	const [listening, setListening] = (0, import_react.useState)(false);
+	const [error, setError] = (0, import_react.useState)(null);
+	const [transcribing, setTranscribing] = (0, import_react.useState)(false);
+	const [picked, setPicked] = (0, import_react.useState)(0);
+	const box = (0, import_react.useRef)(null);
+	const stopper = (0, import_react.useRef)(null);
+	const kind = route(speech);
+	const note = warning(kind, speech);
+	const options = suggest(text);
+	(0, import_react.useEffect)(() => {
+		setPicked(0);
+	}, [text]);
+	(0, import_react.useEffect)(() => () => {
+		stopper.current?.();
+	}, []);
+	const submit = (value) => {
+		const out = (value ?? text).trim();
+		if (!out || busy) return;
+		setText("");
+		setError(null);
+		onSend(out);
+	};
+	const complete = (command) => {
+		setText(`/${command.name} `);
+		box.current?.focus();
+	};
+	const onKeyDown = (e) => {
+		if (options.length) {
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				setPicked((p) => (p + 1) % options.length);
+				return;
+			}
+			if (e.key === "ArrowUp") {
+				e.preventDefault();
+				setPicked((p) => (p - 1 + options.length) % options.length);
+				return;
+			}
+			if (e.key === "Tab" || e.key === "Enter" && options.length > 1) {
+				e.preventDefault();
+				complete(options[picked]);
+				return;
+			}
+		}
+		if (e.key === "Enter" && !e.shiftKey) {
+			e.preventDefault();
+			submit();
+		}
+	};
+	const startListening = async () => {
+		setError(null);
+		if (kind === SpeechKind.BROWSER) {
+			setListening(true);
+			stopper.current = listenInBrowser({
+				onPartial: setText,
+				onFinal: (final) => {
+					setListening(false);
+					if (final) setText(final);
+				},
+				onError: (err) => {
+					setListening(false);
+					setError(err.message);
+				}
+			});
+			return;
+		}
+		const recorder = await recordForServer({ onError: (err) => setError(err.message) });
+		if (!recorder) return;
+		setListening(true);
+		stopper.current = async () => {
+			setListening(false);
+			const wav = await recorder.stop();
+			if (!wav) return;
+			setTranscribing(true);
+			try {
+				const payload = await (await fetch("/api/transcribe", {
+					method: "POST",
+					headers: { "Content-Type": "audio/wav" },
+					body: wav
+				})).json();
+				if (payload.ok === false) throw new Error(payload.error);
+				setText((prior) => prior ? `${prior} ${payload.text}` : payload.text);
+			} catch (err) {
+				setError(err.message);
+			} finally {
+				setTranscribing(false);
+			}
+		};
+	};
+	const toggleMic = () => {
+		if (listening) {
+			stopper.current?.();
+			stopper.current = null;
+			setListening(false);
+		} else startListening();
+	};
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "composer",
+		children: [
+			options.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+				className: "slash-menu",
+				children: options.map((c, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+					className: i === picked ? "on" : "",
+					onMouseDown: (e) => {
+						e.preventDefault();
+						complete(c);
+					},
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("code", { children: ["/", c.name] }),
+						c.args && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: c.args }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: c.blurb })
+					]
+				}, c.name))
+			}),
+			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+				className: "composer-error",
+				children: error
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				className: `composer-box ${listening ? "listening" : ""}`,
 				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "chain-kind",
-						style: { color: COLOUR[step.kind] || "#9aa5ce" },
-						children: step.kind
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("textarea", {
+						ref: box,
+						rows: 1,
+						value: text,
+						placeholder: listening ? "listening…" : "ask anything, or / for commands",
+						onChange: (e) => setText(e.target.value),
+						onKeyDown,
+						disabled: busy
 					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "chain-text",
-						children: step.text
+					kind !== SpeechKind.NONE && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+						className: `mic ${listening ? "on" : ""}`,
+						onClick: toggleMic,
+						disabled: busy || transcribing,
+						title: note.text,
+						"aria-label": listening ? "stop listening" : "speak your question",
+						children: transcribing ? "…" : listening ? "■" : "●"
 					}),
-					hasPayload && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						className: "chain-toggle",
-						onClick: () => setOpen(open === i ? null : i),
-						children: open === i ? "hide" : "payload"
-					}),
-					open === i && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
-						className: "chain-payload",
-						children: JSON.stringify(step.payload, null, 2)
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+						className: "send",
+						onClick: () => submit(),
+						disabled: busy || !text.trim(),
+						children: busy ? "thinking…" : "send"
 					})
 				]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+				className: `composer-note ${note.level}`,
+				children: kind === SpeechKind.NONE ? `${COMMANDS.length} commands — type / to see them. ${note.text}` : `${COMMANDS.length} commands — type / to see them. Microphone: ${note.text}`
+			})
+		]
+	});
+}
+//#endregion
+//#region src/chat/Detail.jsx
+function Detail({ title, summary, children, open = false, tone }) {
+	const [shown, setShown] = (0, import_react.useState)(open);
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: `detail ${shown ? "open" : ""} ${tone || ""}`,
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+			className: "detail-head",
+			onClick: () => setShown(!shown),
+			"aria-expanded": shown,
+			children: [
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "chevron",
+					"aria-hidden": "true",
+					children: shown ? "▾" : "▸"
+				}),
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: title }),
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "detail-summary",
+					children: summary
+				})
+			]
+		}), shown && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			className: "detail-body",
+			children
+		})]
+	});
+}
+//#endregion
+//#region src/chat/Recalled.jsx
+function Recalled({ recall, onTrace }) {
+	if (!recall || !recall.hits || !recall.hits.length) return null;
+	const w = recall.weights || {};
+	const reordered = recall.hits.length > 1 && recall.hits.slice(1).some((h) => h.similarity > recall.hits[0].similarity);
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "recalled",
+		children: [
+			recall.asked && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "recall-note",
+				children: [
+					"searched for ",
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: recall.query }),
+					", not “",
+					recall.asked,
+					"” — that is what the clarifying questions established you meant."
+				]
+			}),
+			reordered && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "recall-note insight",
+				children: [
+					"the top hit is ",
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "not" }),
+					" the most similar one — credibility outranked similarity, which is the difference between this and a vector store."
+				]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+				className: "hits",
+				children: recall.hits.map((h) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+					className: "hit-line",
+					onClick: () => onTrace && onTrace(h.id),
+					title: "open this memory and everything linked to it",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "pill",
+							style: { borderColor: colourOf(h.kind) },
+							children: h.kind
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "hit-text",
+							children: h.text
+						}),
+						h.verified && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "verified",
+							children: "verified"
+						}),
+						h.grade !== null && h.grade !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+							className: `hit-grade ${h.grade > 0 ? "good" : "bad"}`,
+							children: [h.grade > 0 ? "+" : "", h.grade.toFixed(2)]
+						})
+					]
+				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "factors",
+					title: `similarity^${w.similarity} × credibility^${w.credibility} × recency^${w.recency}`,
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: ["sim ", h.similarity.toFixed(3)] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: ["cred ", h.credibility.toFixed(3)] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: ["rec ", h.recency.toFixed(3)] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: h.score.toFixed(4) })
+					]
+				})] }, h.id))
+			})
+		]
+	});
+}
+//#endregion
+//#region src/viz/PayoffMatrix.jsx
+function PayoffMatrix({ payoff, select }) {
+	if (!payoff || !payoff.matrix || !payoff.matrix.length) return null;
+	const { matrix, states, goals } = payoff;
+	const belief = select && select.belief || {};
+	const chosenText = select && select.goal;
+	const likeliest = Object.entries(belief).sort((a, b) => b[1] - a[1])[0];
+	const cell = (v) => {
+		const t = Math.max(-1, Math.min(1, v));
+		return `hsl(${t >= 0 ? 145 : 353} 60% ${18 + Math.abs(t) * 34}%)`;
+	};
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "payoff",
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("table", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("tr", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("th", {
+			className: "corner",
+			children: "goal ╲ state of the world"
+		}), states.map((s) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("th", {
+			className: likeliest && likeliest[0] === s ? "likely" : "",
+			children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: s }), belief[s] !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", { children: ["p ", belief[s].toFixed(2)] })]
+		}, s))] }) }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("tbody", { children: matrix.map((row, i) => {
+			const label = goals[i] || `row ${i + 1}`;
+			const role = payoff.roles && payoff.roles[i];
+			const chosen = chosenText && label === chosenText;
+			return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("tr", {
+				className: chosen ? "chosen" : "",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("th", {
+					className: "goal-label",
+					title: label,
+					children: [
+						chosen && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "chosen-mark",
+							children: "▸"
+						}),
+						label,
+						role && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", {
+							className: "role",
+							children: role
+						})
+					]
+				}), row.map((v, j) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("td", {
+					style: { background: cell(v) },
+					children: v >= 0 ? v.toFixed(2) : v.toFixed(2)
+				}, j))]
 			}, i);
-		})
+		}) })] }), select && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+			className: "payoff-note",
+			children: [
+				"chose ",
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: select.goal }),
+				" by ",
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: select.rule }),
+				likeliest && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [" · world most likely ", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: likeliest[0] })] })
+			]
+		})]
 	});
 }
 //#endregion
@@ -7783,316 +8362,282 @@ function GoalTree({ tree, chosen }) {
 	});
 }
 //#endregion
-//#region src/viz/PayoffMatrix.jsx
-function PayoffMatrix({ payoff, select }) {
-	if (!payoff || !payoff.matrix || !payoff.matrix.length) return null;
-	const { matrix, states, goals } = payoff;
-	const belief = select && select.belief || {};
-	const chosenText = select && select.goal;
-	const likeliest = Object.entries(belief).sort((a, b) => b[1] - a[1])[0];
-	const cell = (v) => {
-		const t = Math.max(-1, Math.min(1, v));
-		return `hsl(${t >= 0 ? 145 : 353} 60% ${18 + Math.abs(t) * 34}%)`;
-	};
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "payoff",
-		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("table", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("tr", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("th", {
-			className: "corner",
-			children: "goal ╲ state of the world"
-		}), states.map((s) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("th", {
-			className: likeliest && likeliest[0] === s ? "likely" : "",
-			children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: s }), belief[s] !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", { children: ["p ", belief[s].toFixed(2)] })]
-		}, s))] }) }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("tbody", { children: matrix.map((row, i) => {
-			const label = goals[i] || `row ${i + 1}`;
-			const role = payoff.roles && payoff.roles[i];
-			const chosen = chosenText && label === chosenText;
-			return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("tr", {
-				className: chosen ? "chosen" : "",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("th", {
-					className: "goal-label",
-					title: label,
-					children: [
-						chosen && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "chosen-mark",
-							children: "▸"
-						}),
-						label,
-						role && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", {
-							className: "role",
-							children: role
-						})
-					]
-				}), row.map((v, j) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("td", {
-					style: { background: cell(v) },
-					children: v >= 0 ? v.toFixed(2) : v.toFixed(2)
-				}, j))]
+//#region src/viz/ChainFlow.jsx
+var COLOUR = {
+	FRAME: "#c0caf5",
+	AGENDA: "#7dcfff",
+	PRECEDENT: "#41a6b5",
+	WHY: "#bb9af7",
+	CHALLENGE: "#ff9e64",
+	RETRIEVE: "#7aa2f7",
+	DISTILL: "#e0af68",
+	PAYOFF: "#2ac3de",
+	SELECT: "#9ece6a",
+	ACT: "#73daca",
+	VERIFY: "#f7768e",
+	CREDIT: "#a9b1d6",
+	NOTE: "#565f89"
+};
+function ChainFlow({ chain }) {
+	const [open, setOpen] = (0, import_react.useState)(null);
+	if (!chain || !chain.length) return null;
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ol", {
+		className: "chain",
+		children: chain.map((step, i) => {
+			const hasPayload = step.payload && Object.keys(step.payload).length > 0;
+			return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+				className: "chain-step",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+						className: "chain-kind",
+						style: { color: COLOUR[step.kind] || "#9aa5ce" },
+						children: step.kind
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+						className: "chain-text",
+						children: step.text
+					}),
+					hasPayload && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+						className: "chain-toggle",
+						onClick: () => setOpen(open === i ? null : i),
+						children: open === i ? "hide" : "payload"
+					}),
+					open === i && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
+						className: "chain-payload",
+						children: JSON.stringify(step.payload, null, 2)
+					})
+				]
 			}, i);
-		}) })] }), select && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-			className: "payoff-note",
-			children: [
-				"chose ",
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: select.goal }),
-				" by ",
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: select.rule }),
-				likeliest && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [" · world most likely ", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: likeliest[0] })] })
-			]
-		})]
+		})
 	});
 }
 //#endregion
-//#region src/panels/Ask.jsx
-var fromHash = () => {
-	const q = window.location.hash.split("?")[1];
-	return q ? new URLSearchParams(q) : new URLSearchParams();
-};
-function Ask() {
-	const [task, setTask] = (0, import_react.useState)(fromHash().get("task") || "build a csv parser that passes the test suite");
+//#region src/chat/Answer.jsx
+function Answer({ message, onGrade, onAnswer, onTrace }) {
+	const { data, steps, streaming, task, error } = message;
+	if (error) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+		className: "error",
+		children: error
+	});
+	if (streaming && !data) return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "thinking",
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+			className: "thinking-head",
+			children: ["thinking about ", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: task })]
+		}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ol", {
+			className: "live-steps",
+			children: [steps.map((s, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+				className: "kind",
+				children: s.kind
+			}), s.text] }, i)), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", {
+				className: "pending",
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "kind",
+					children: "…"
+				})
+			})]
+		})]
+	});
+	if (!data) return null;
+	if (data.needs_clarification) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Clarify, {
+		data,
+		onAnswer,
+		onTrace
+	});
+	const frame = data.frame;
+	const chainLength = (data.chain || []).length;
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "answer",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: `verdict ${data.solved ? "ok" : "no"}`,
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.solved ? "Solved" : "Not solved" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: data.reason })]
+			}),
+			data.attempts && data.attempts.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+				className: "attempts",
+				children: data.attempts.map((a, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+					className: a.ok ? "ok" : "no",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "reframe",
+							children: a.reframe || "direct"
+						}),
+						a.via,
+						a.grade !== void 0 && a.grade !== null && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", { children: [a.grade > 0 ? "+" : "", a.grade] })
+					]
+				}, i))
+			}),
+			data.boundary && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
+				className: "boundary",
+				children: data.boundary
+			}),
+			data.trace_id && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(GradeBar, {
+				traceId: data.trace_id,
+				onGrade
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "what I already knew",
+				summary: `${data.recall.hits.length} from memory, ranked`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Recalled, {
+					recall: data.recall,
+					onTrace
+				})
+			}),
+			frame && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Detail, {
+				title: "the game",
+				summary: `${frame.players}, ${frame.payoff}, ${frame.horizon} · confidence ${frame.confidence.toFixed(2)}`,
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", {
+					className: "frame",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "players" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.players })] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "payoff" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.payoff })] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "horizon" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.horizon })] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "information" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.information })] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "referee" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.referee || "none — nothing here can be self-graded" })] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "solution concept" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.solution })] }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "wide",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "objective" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.objective })]
+						})
+					]
+				}), frame.agenda && frame.agenda.items.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+					className: "agenda",
+					children: frame.agenda.items.map((item, i) => {
+						const needsPerson = frame.agenda.needs_person.includes(item);
+						return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+							className: needsPerson ? "person" : "doable",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: "tag",
+								children: needsPerson ? "needs a person" : "executable"
+							}), item]
+						}, i);
+					})
+				})]
+			}),
+			data.payoff && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "the choice",
+				summary: `${data.payoff.matrix.length}×${data.payoff.states.length} against Nature · chose “${data.chosen}”`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PayoffMatrix, {
+					payoff: data.payoff,
+					select: data.select
+				})
+			}),
+			data.tree && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "goals",
+				summary: `${data.tree.goals.length - 1} distilled, stopping where each becomes checkable`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(GoalTree, {
+					tree: data.tree,
+					chosen: data.chosen
+				})
+			}),
+			chainLength > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "reasoning",
+				summary: `${chainLength} typed steps, each with its inputs`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChainFlow, { chain: data.chain })
+			})
+		]
+	});
+}
+function Clarify({ data, onAnswer, onTrace }) {
 	const [answers, setAnswers] = (0, import_react.useState)({});
-	const [result, setResult] = (0, import_react.useState)(null);
-	const [busy, setBusy] = (0, import_react.useState)(false);
-	const [error, setError] = (0, import_react.useState)(null);
-	const autoRan = (0, import_react.useRef)(false);
-	const run = async (withAnswers) => {
-		setBusy(true);
-		setError(null);
+	const filled = Object.values(answers).filter((v) => v && v.trim()).length;
+	const submit = () => {
+		const given = Object.fromEntries(Object.entries(answers).filter(([, v]) => v && v.trim()));
+		const summary = data.questions.filter((q) => given[q.gap]).map((q) => given[q.gap]).join(" · ");
+		onAnswer(data.task, given, summary || "(skipped)");
+	};
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "clarify",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "clarify-lead",
+				children: ["I will not guess at this one. ", data.reason]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+				className: "questions",
+				children: data.questions.map((q) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", {
+						htmlFor: `q-${q.gap}`,
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "gap",
+							children: q.gap
+						}), q.text]
+					}),
+					q.known ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+						className: "known",
+						children: ["memory already says: ", q.known]
+					}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+						className: "unblocks",
+						children: q.unblocks
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
+						id: `q-${q.gap}`,
+						value: answers[q.gap] || "",
+						placeholder: q.known || "your answer",
+						onChange: (e) => setAnswers({
+							...answers,
+							[q.gap]: e.target.value
+						}),
+						onKeyDown: (e) => e.key === "Enter" && submit()
+					})
+				] }, q.gap))
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+				className: "primary",
+				onClick: submit,
+				children: filled ? `answer ${filled} and continue` : "continue without answering"
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "what I already knew",
+				summary: `${data.recall.hits.length} from memory — I searched before asking`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Recalled, {
+					recall: data.recall,
+					onTrace
+				})
+			})
+		]
+	});
+}
+function GradeBar({ traceId, onGrade }) {
+	const [given, setGiven] = (0, import_react.useState)(null);
+	const [failed, setFailed] = (0, import_react.useState)(null);
+	const send = async (score) => {
 		try {
-			const data = await post("ask", {
-				task,
-				answers: withAnswers || void 0
-			});
-			setResult(data);
-			if (!data.needs_clarification) setAnswers({});
-		} catch (e) {
-			setError(e.message);
-			setResult(null);
-		} finally {
-			setBusy(false);
+			await onGrade(traceId, score);
+			setGiven(score);
+		} catch (err) {
+			setFailed(err.message);
 		}
 	};
-	(0, import_react.useEffect)(() => {
-		if (autoRan.current || fromHash().get("run") !== "1") return;
-		autoRan.current = true;
-		run();
-	}, []);
-	const frame = result && result.frame;
-	const agenda = frame && frame.agenda;
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "panel ask",
+	if (failed) return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: "error",
+		children: ["could not record that: ", failed]
+	});
+	if (given !== null) return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: "graded",
 		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("form", {
-				className: "ask-form",
-				onSubmit: (e) => {
-					e.preventDefault();
-					run();
-				},
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
-					value: task,
-					onChange: (e) => setTask(e.target.value),
-					placeholder: "give it a task",
-					"aria-label": "task"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					type: "submit",
-					disabled: busy || !task.trim(),
-					children: busy ? "thinking…" : "ask"
-				})]
+			"recorded ",
+			given > 0 ? "+1" : given < 0 ? "−1" : "0",
+			" — this changes what gets recalled next time, and a user grade counts double."
+		]
+	});
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "grade-bar",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "was this right?" }),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+				className: "good",
+				onClick: () => send(1),
+				children: "+1 right"
 			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-				className: "hint",
-				children: [
-					"try ",
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						className: "link",
-						onClick: () => setTask("make the thing better"),
-						children: "make the thing better"
-					}),
-					" to see it refuse to guess, or",
-					" ",
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						className: "link",
-						onClick: () => setTask("win a chess endgame against a stronger opponent"),
-						children: "win a chess endgame"
-					}),
-					" to see the game framed differently."
-				]
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+				onClick: () => send(0),
+				children: "0 unsure"
 			}),
-			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "error",
-				children: error
-			}),
-			frame && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["the game", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "understood before anything is planned"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", {
-						className: "frame-grid",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "players" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.players })] }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "payoff" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.payoff })] }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "horizon" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.horizon })] }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "information" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.information })] }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "referee" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", {
-								className: frame.referee ? "" : "absent",
-								children: frame.referee || "none — nothing here can be self-graded"
-							})] }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "wide",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "solution concept" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.solution })]
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "wide",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "objective" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: frame.objective || "—" })]
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: "confidence",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "bar-track",
-								children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "bar-fill",
-									style: { width: `${frame.confidence * 100}%` }
-								})
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: ["confidence ", frame.confidence.toFixed(2)] }),
-							!frame.understood && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "warn",
-								children: "below the play threshold"
-							})
-						]
-					})
-				]
-			}),
-			result && result.needs_clarification && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card clarify",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["it will not guess", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: result.reason
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-						className: "clarify-note",
-						children: "Nothing was distilled. A well-organised plan for the wrong problem is the most expensive thing this system can produce, so it stops here."
-					}),
-					(result.questions || []).map((q) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", {
-						className: "question",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "q-gap",
-								children: q.gap
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "q-text",
-								children: q.text
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "q-unblocks",
-								children: q.unblocks
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
-								value: answers[q.gap] || "",
-								onChange: (e) => setAnswers({
-									...answers,
-									[q.gap]: e.target.value
-								}),
-								placeholder: q.known ? `on record: ${q.known}` : "your answer"
-							})
-						]
-					}, q.gap)),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						className: "primary",
-						disabled: busy || !Object.values(answers).some((v) => v && v.trim()),
-						onClick: () => run(answers),
-						children: "answer and continue"
-					})
-				]
-			}),
-			agenda && agenda.items.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["agenda", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "what the game needs vs what this system can do"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
-						className: "agenda",
-						children: agenda.items.map((item, i) => {
-							const blocking = agenda.needs_person.includes(item);
-							const advisory = agenda.advisories.includes(item);
-							return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
-								className: blocking ? "blocking" : advisory ? "advisory" : "doable",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "agenda-tag",
-									children: blocking ? "needs a person" : advisory ? "note" : "executable"
-								}), item]
-							}, i);
-						})
-					}),
-					agenda.capabilities.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "caps",
-						children: agenda.capabilities.map((c, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-							className: `cap ${c.gap ? "gap" : "covered"}`,
-							children: [c.action, /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: c.covered_by || "nothing covers this" })]
-						}, i))
-					})
-				]
-			}),
-			result && result.payoff && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["the choice", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "sub",
-					children: "a normal-form game against Nature"
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PayoffMatrix, {
-					payoff: result.payoff,
-					select: result.select
-				})]
-			}),
-			result && result.tree && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["goals", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "sub",
-					children: "distilled until each one is checkable"
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)(GoalTree, {
-					tree: result.tree,
-					chosen: result.chosen
-				})]
-			}),
-			result && result.chain && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["reasoning", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "sub",
-					children: "typed steps, replayable, each with its inputs"
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChainFlow, { chain: result.chain })]
-			}),
-			result && !result.needs_clarification && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: `card verdict ${result.solved ? "ok" : "no"}`,
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: [result.solved ? "solved" : "not solved", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: result.reason
-					})] }),
-					result.attempts && result.attempts.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
-						className: "attempts",
-						children: result.attempts.map((a, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
-							className: a.ok ? "ok" : "no",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "reframe",
-									children: a.reframe || "direct"
-								}),
-								a.via,
-								a.grade !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", { children: [a.grade > 0 ? "+" : "", a.grade] })
-							]
-						}, i))
-					}),
-					result.boundary && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
-						className: "boundary",
-						children: result.boundary
-					})
-				]
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+				className: "bad",
+				onClick: () => send(-1),
+				children: "−1 wrong"
 			})
 		]
 	});
@@ -8195,276 +8740,6 @@ function Scatter({ traces, selected, onSelect, size = 560 }) {
 	});
 }
 //#endregion
-//#region src/panels/Memory.jsx
-function Memory({ onGrade }) {
-	const [kinds, setKinds] = (0, import_react.useState)([]);
-	const [selected, setSelected] = (0, import_react.useState)(null);
-	const { data, error, busy, run } = useAsync(() => get("memory"), []);
-	const traces = (0, import_react.useMemo)(() => {
-		if (!data) return [];
-		return kinds.length ? data.traces.filter((t) => kinds.includes(t.kind)) : data.traces;
-	}, [data, kinds]);
-	const present = (0, import_react.useMemo)(() => [...new Set((data ? data.traces : []).map((t) => t.kind))].sort(), [data]);
-	const toggle = (k) => setKinds((ks) => ks.includes(k) ? ks.filter((x) => x !== k) : [...ks, k]);
-	const grade = async (score) => {
-		if (!selected) return;
-		await onGrade(selected.id, score);
-		await run();
-		setSelected(null);
-	};
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "panel memory",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "toolbar",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: "filters",
-					children: [present.map((k) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						className: `chip${kinds.includes(k) ? " on" : ""}`,
-						style: { "--chip": colourOf(k) },
-						onClick: () => toggle(k),
-						children: k
-					}, k)), kinds.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						className: "chip clear",
-						onClick: () => setKinds([]),
-						children: "clear"
-					})]
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					onClick: run,
-					disabled: busy,
-					children: busy ? "loading…" : "refresh"
-				})]
-			}),
-			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "error",
-				children: error
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "memory-body",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [traces.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Scatter, {
-					traces,
-					selected,
-					onSelect: setSelected
-				}) : !busy && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-					className: "empty",
-					children: "nothing in memory yet — ask it something."
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-					className: "axis-note",
-					children: ["Two principal components of the stored vectors. The axes have no meaning; only distance does.", data && data.backends.length > 1 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-						" Projected per embedding backend (",
-						data.backends.join(", "),
-						") — vectors from different backends share no plane."
-					] })]
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("aside", {
-					className: "detail",
-					children: selected ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "pill",
-							style: { borderColor: colourOf(selected.kind) },
-							children: selected.kind
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-							className: "detail-text",
-							children: selected.text
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", {
-							className: "detail-grid",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "grade" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: selected.grade === null ? "ungraded" : selected.grade.toFixed(3) })] }),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "credibility" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: selected.credibility.toFixed(3) })] }),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "recalled" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dd", { children: [selected.hits, "×"] })] }),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "written" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dd", { children: [selected.seen, "×"] })] }),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "verified" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: selected.verified ? "yes" : "no" })] }),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "links" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: selected.links.length })] })
-							]
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "grade-buttons",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "grade it:" }),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									className: "good",
-									onClick: () => grade(1),
-									children: "+1 right"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									onClick: () => grade(0),
-									children: "0 unsure"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									className: "bad",
-									onClick: () => grade(-1),
-									children: "−1 wrong"
-								})
-							]
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-							className: "grade-note",
-							children: "A user grade counts double — a person bothering to grade is a stronger and rarer signal than a check firing."
-						})
-					] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-						className: "empty",
-						children: "click a point."
-					})
-				})]
-			})
-		]
-	});
-}
-//#endregion
-//#region src/viz/ScoreBars.jsx
-function ScoreBars({ hit, weights }) {
-	const parts = [
-		{
-			key: "similarity",
-			label: "similarity",
-			value: hit.similarity,
-			weight: weights.similarity
-		},
-		{
-			key: "credibility",
-			label: "credibility",
-			value: hit.credibility,
-			weight: weights.credibility
-		},
-		{
-			key: "recency",
-			label: "recency",
-			value: hit.recency,
-			weight: weights.recency
-		}
-	];
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-		className: "score-bars",
-		children: parts.map((p) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-			className: `bar-row bar-${p.key}`,
-			children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "bar-label",
-					children: p.label
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "bar-track",
-					children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "bar-fill",
-						style: { width: `${Math.max(0, p.value) * 100}%` }
-					})
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "bar-value",
-					children: p.value.toFixed(3)
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-					className: "bar-weight",
-					title: "policy exponent",
-					children: ["^", p.weight]
-				})
-			]
-		}, p.key))
-	});
-}
-//#endregion
-//#region src/panels/Recall.jsx
-function Recall() {
-	const [q, setQ] = (0, import_react.useState)("merge two dicts");
-	const [data, setData] = (0, import_react.useState)(null);
-	const [error, setError] = (0, import_react.useState)(null);
-	const [busy, setBusy] = (0, import_react.useState)(false);
-	const run = async (e) => {
-		if (e) e.preventDefault();
-		setBusy(true);
-		setError(null);
-		try {
-			setData(await get("recall", {
-				q,
-				k: 8
-			}));
-		} catch (err) {
-			setError(err.message);
-			setData(null);
-		} finally {
-			setBusy(false);
-		}
-	};
-	const first = (0, import_react.useRef)(true);
-	(0, import_react.useEffect)(() => {
-		if (!first.current) return;
-		first.current = false;
-		run();
-	}, []);
-	const reordered = data && data.hits.length > 1 && data.hits.slice(1).some((h) => h.similarity > data.hits[0].similarity);
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "panel recall",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("form", {
-				className: "ask-form",
-				onSubmit: run,
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
-					value: q,
-					onChange: (e) => setQ(e.target.value),
-					placeholder: "query the memory"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					type: "submit",
-					disabled: busy,
-					children: busy ? "searching…" : "recall"
-				})]
-			}),
-			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "error",
-				children: error
-			}),
-			reordered && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "insight",
-				children: [
-					"The top hit is ",
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "not" }),
-					" the most similar one. Credibility outranked similarity here — which is what separates this from a vector store."
-				]
-			}),
-			data && data.hits.map((h, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("article", {
-				className: "hit",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("header", { children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "rank",
-							children: i + 1
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "pill",
-							style: { borderColor: colourOf(h.trace.kind) },
-							children: h.trace.kind
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "hit-score",
-							children: h.score.toFixed(4)
-						}),
-						h.trace.verified && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "verified",
-							children: "verified"
-						}),
-						h.trace.grade !== null && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-							className: `hit-grade ${h.trace.grade > 0 ? "good" : "bad"}`,
-							children: [h.trace.grade > 0 ? "+" : "", h.trace.grade.toFixed(2)]
-						})
-					] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-						className: "hit-text",
-						children: h.trace.text
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ScoreBars, {
-						hit: h,
-						weights: data.weights
-					})
-				]
-			}, h.trace.id)),
-			data && data.hits.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-				className: "empty",
-				children: "nothing recalled for that."
-			})
-		]
-	});
-}
-//#endregion
 //#region src/viz/GradeStages.jsx
 function GradeStages({ grade, compact = false }) {
 	if (!grade) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
@@ -8487,796 +8762,1008 @@ function GradeStages({ grade, compact = false }) {
 	});
 }
 //#endregion
-//#region src/panels/Tools.jsx
-function Tools() {
-	const { data, error, busy, run } = useAsync(() => get("tools"), []);
-	const [open, setOpen] = (0, import_react.useState)(null);
-	const [goal, setGoal] = (0, import_react.useState)("compute the median of a list");
-	const [forged, setForged] = (0, import_react.useState)(null);
-	const [invoked, setInvoked] = (0, import_react.useState)({});
-	const [working, setWorking] = (0, import_react.useState)(false);
-	const forge = async () => {
-		setWorking(true);
-		setForged(null);
-		try {
-			setForged(await post("forge", { goal }));
-			await run();
-		} catch (e) {
-			setForged({ error: e.message });
-		} finally {
-			setWorking(false);
-		}
-	};
-	const plant = async () => {
-		setWorking(true);
-		try {
-			await post("seed", {});
-			await run();
-		} finally {
-			setWorking(false);
-		}
-	};
-	const invoke = async (name, raw) => {
-		try {
-			const args = raw.trim() ? JSON.parse(raw) : [];
-			const out = await post("invoke", Array.isArray(args) ? {
-				name,
-				args
-			} : {
-				name,
-				kwargs: args
-			});
-			setInvoked({
-				...invoked,
-				[name]: out.result
-			});
-		} catch (e) {
-			setInvoked({
-				...invoked,
-				[name]: {
-					ok: false,
-					error: e.message
-				}
-			});
-		}
-	};
-	const tools = data && data.tools || [];
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "panel tools",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "toolbar",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("form", {
-						className: "ask-form grow",
-						onSubmit: (e) => {
-							e.preventDefault();
-							forge();
-						},
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
-							value: goal,
-							onChange: (e) => setGoal(e.target.value),
-							placeholder: "a goal to write a tool for"
-						}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-							type: "submit",
-							disabled: working,
-							children: "forge"
-						})]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						onClick: plant,
-						disabled: working,
-						children: "plant the starter kit"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						onClick: run,
-						disabled: busy,
-						children: "refresh"
-					})
-				]
-			}),
-			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "error",
-				children: error
-			}),
-			forged && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: forged.error ? "error" : forged.registered ? "insight" : "warn-box",
-				children: forged.error ? forged.error : forged.registered ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-					"forged and verified ",
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: forged.name }),
-					" — ",
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(GradeStages, {
-						grade: forged.grade,
-						compact: true
-					})
-				] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-					"wrote ",
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: forged.name }),
-					" but it was not kept: ",
-					forged.grade.diagnostic
-				] })
-			}),
-			tools.length === 0 && !busy && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-				className: "empty",
-				children: "no tools yet — plant the starter kit, or forge one."
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "tool-grid",
-				children: tools.map((t) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("article", {
-					className: `tool ${t.transport}`,
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("header", {
-							onClick: () => setOpen(open === t.name ? null : t.name),
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: t.name }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: `transport ${t.transport}`,
-								children: t.transport
-							})]
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", {
-							className: "sig",
-							children: t.signature || "—"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-							className: "purpose",
-							children: t.purpose
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)(GradeStages, {
-							grade: t.grade,
-							compact: true
-						}),
-						t.deps.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-							className: "deps",
-							children: ["builds on ", t.deps.join(", ")]
-						}),
-						t.solved.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
-							className: "solved",
-							children: t.solved.slice(0, 3).map((p, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: p }, i))
-						}),
-						open === t.name && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "tool-open",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", {
-									className: "invoke",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "arguments (JSON array, or object for named)" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
-										placeholder: "[[5, 3, 1, 4]]",
-										onKeyDown: (e) => {
-											if (e.key === "Enter") invoke(t.name, e.target.value);
-										}
-									})]
-								}),
-								invoked[t.name] && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
-									className: invoked[t.name].ok ? "result ok" : "result no",
-									children: JSON.stringify(invoked[t.name], null, 2)
-								}),
-								t.source && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
-									className: "source",
-									children: t.source
-								}),
-								t.tests && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
-									className: "source tests",
-									children: t.tests
-								})
-							]
-						})
-					]
-				}, t.name))
-			})
-		]
-	});
-}
-//#endregion
-//#region src/viz/EntropyCurve.jsx
-function EntropyCurve({ ideas, target = .5, width = 560, height = 220 }) {
-	const pad = {
-		l: 40,
-		r: 16,
-		t: 16,
-		b: 34
-	};
-	const w = width - pad.l - pad.r;
-	const h = height - pad.t - pad.b;
-	const x = (p) => pad.l + p * w;
-	const y = (bits) => pad.t + (1 - bits) * h;
-	const H = (p) => p <= 0 || p >= 1 ? 0 : -(p * Math.log2(p) + (1 - p) * Math.log2(1 - p));
-	const curve = Array.from({ length: 101 }, (_, i) => {
-		const p = i / 100;
-		return `${i ? "L" : "M"}${x(p).toFixed(1)},${y(H(p)).toFixed(1)}`;
-	}).join(" ");
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
-		viewBox: `0 0 ${width} ${height}`,
-		className: "entropy",
-		role: "img",
-		"aria-label": "information gain against predicted success",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("line", {
-				x1: pad.l,
-				y1: y(0),
-				x2: x(1),
-				y2: y(0),
-				className: "axis"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("line", {
-				x1: pad.l,
-				y1: pad.t,
-				x2: pad.l,
-				y2: y(0),
-				className: "axis"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("line", {
-				x1: x(target),
-				y1: pad.t,
-				x2: x(target),
-				y2: y(0),
-				className: "target"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("text", {
-				x: x(target),
-				y: pad.t - 4,
-				className: "target-label",
-				textAnchor: "middle",
-				children: ["target ", target]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-				d: curve,
-				className: "curve"
-			}),
-			(ideas || []).map((idea, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "idea-point",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("line", {
-					x1: x(idea.p),
-					y1: y(0),
-					x2: x(idea.p),
-					y2: y(idea.bits)
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: x(idea.p),
-					cy: y(idea.bits),
-					r: "5",
-					fill: colourOf(idea.origin),
-					children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("title", { children: `${idea.origin} · p=${idea.p} · ${idea.bits.toFixed(2)} bits\n${idea.text}` })
-				})]
-			}, i)),
-			[
-				0,
-				.25,
-				.5,
-				.75,
-				1
-			].map((p) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("text", {
-				x: x(p),
-				y: height - 12,
-				className: "tick",
-				textAnchor: "middle",
-				children: p
-			}, p)),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("text", {
-				x: pad.l - 6,
-				y: pad.t + 4,
-				className: "tick",
-				textAnchor: "end",
-				children: "1 bit"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("text", {
-				x: width / 2,
-				y: height - 1,
-				className: "axis-label",
-				textAnchor: "middle",
-				children: "predicted chance of success"
-			})
-		]
-	});
-}
-//#endregion
-//#region src/panels/Explore.jsx
-function Explore() {
-	const { data, error, busy, run } = useAsync(() => get("ideas", { n: 10 }), []);
-	const [runs, setRuns] = (0, import_react.useState)(null);
-	const [strategy, setStrategy] = (0, import_react.useState)(null);
-	const [working, setWorking] = (0, import_react.useState)(false);
-	const experiment = async (steps) => {
-		setWorking(true);
-		try {
-			const out = await post("explore", { steps });
-			setRuns(out.experiments);
-			setStrategy(out.strategy);
-			await run();
-		} catch (e) {
-			setRuns([{
-				idea: e.message,
-				ran: false,
-				passed: false,
-				detail: "request failed"
-			}]);
-		} finally {
-			setWorking(false);
-		}
-	};
-	const ideas = data && data.ideas || [];
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "panel explore",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "toolbar",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					onClick: () => experiment(3),
-					disabled: working,
-					children: working ? "running…" : "run 3 experiments"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					onClick: run,
-					disabled: busy,
-					children: "re-brainstorm"
-				})]
-			}),
-			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "error",
-				children: error
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["information gain", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "H(p) = −p·log₂p − (1−p)·log₂(1−p), peaking where you cannot call it"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(EntropyCurve, {
-						ideas,
-						target: data && data.target || .5
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-						className: "axis-note",
-						children: [
-							"An idea you are certain will work teaches nothing. An idea you are certain will ",
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: "fail" }),
-							" teaches nothing either — that is the half that gets skipped, and why bad ideas are ranked, not avoided."
-						]
-					})
-				]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["candidates", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "sub",
-					children: "ranked by bits per unit cost × novelty"
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ol", {
-					className: "ideas",
-					children: [ideas.map((i, n) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "origin",
-							style: { background: colourOf(i.origin) },
-							children: i.origin
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "idea-text",
-							children: i.text
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-							className: "idea-nums",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", {
-									title: "predicted chance of success",
-									children: ["p ", i.p.toFixed(2)]
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", {
-									title: "information gain in bits",
-									children: [i.bits.toFixed(2), " bits"]
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", {
-									title: "ranking value",
-									children: ["v ", i.value.toFixed(3)]
-								})
-							]
-						})
-					] }, n)), ideas.length === 0 && !busy && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", {
-						className: "empty",
-						children: "nothing to explore yet — the store needs some history first."
-					})]
-				})]
-			}),
-			runs && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["results", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "sub",
-					children: "a refuted experiment is a stored result, not a wasted cycle"
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
-					className: "experiments",
-					children: runs.map((e, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
-						className: e.passed ? "held" : e.ran ? "refuted" : "not-run",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "verdict",
-								children: e.passed ? "held" : e.ran ? "refuted" : "not run"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "idea-text",
-								children: e.idea
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "detail",
-								children: e.detail
-							})
-						]
-					}, i))
-				})]
-			}),
-			strategy && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["which generator earns its keep", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "regret-matched mix over idea sources"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "strategy",
-						children: Object.entries(strategy).map(([name, p]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "strategy-row",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "strategy-name",
-									children: name
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "bar-track",
-									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-										className: "bar-fill",
-										style: {
-											width: `${p * 100}%`,
-											background: colourOf(name)
-										}
-									})
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-									className: "bar-value",
-									children: [(p * 100).toFixed(0), "%"]
-								})
-							]
-						}, name))
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-						className: "axis-note",
-						children: [
-							"Rewarded for ",
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: "information" }),
-							", not success — a generator rewarded for being right would stop proposing the ideas worth running."
-						]
-					})
-				]
-			})
-		]
-	});
-}
-//#endregion
-//#region src/panels/System.jsx
-function System({ state, refreshState }) {
-	const cases = useAsync(() => get("cases"), []);
-	const [compressed, setCompressed] = (0, import_react.useState)(null);
-	const [tuned, setTuned] = (0, import_react.useState)(null);
-	const [working, setWorking] = (0, import_react.useState)(false);
-	const act = async (fn) => {
-		setWorking(true);
-		try {
-			await fn();
-		} finally {
-			setWorking(false);
-			refreshState();
-		}
-	};
-	if (!state) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-		className: "panel",
-		children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-			className: "empty",
-			children: "loading…"
+//#region src/chat/Message.jsx
+function Message({ message, onGrade, onAnswer, onTrace }) {
+	if (message.role === "user") return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+		className: "turn user",
+		children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			className: "bubble",
+			children: message.text
 		})
 	});
-	const { stats, policy, providers } = state;
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+		className: "turn agent",
+		children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+			className: "bubble",
+			children: [message.text && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+				className: "say",
+				children: message.text
+			}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Body, {
+				message,
+				onGrade,
+				onAnswer,
+				onTrace
+			})]
+		})
+	});
+}
+function Body({ message, onGrade, onAnswer, onTrace }) {
+	const { kind, data, streaming } = message;
+	if (kind === "ask") return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Answer, {
+		message,
+		onGrade,
+		onAnswer,
+		onTrace
+	});
+	if (kind === "auto") return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Auto, { message });
+	if (streaming) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+		className: "working",
+		children: "working…"
+	});
+	if (kind === "error") return null;
+	if (!data) return null;
+	switch (kind) {
+		case "welcome": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Welcome, {});
+		case "help": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Help, {});
+		case "tools": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tools, { data });
+		case "seed": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Seeded, { data });
+		case "forge": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Forged, { data });
+		case "recall": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Recalled, {
+			recall: normaliseRecall(data),
+			onTrace
+		});
+		case "memory": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MemoryPlot, {
+			data,
+			onTrace
+		});
+		case "explore": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Explored, { data });
+		case "cases": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Cases, { data });
+		case "clarify": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Clarified, {
+			data,
+			onTrace
+		});
+		case "trace": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(TraceGraph, {
+			data,
+			onTrace
+		});
+		case "mcp": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mcp, { data });
+		case "compress": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Compressed, { data });
+		case "tune": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tuned, { data });
+		case "system": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(SystemCard, { data });
+		default: return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
+			className: "raw",
+			children: JSON.stringify(data, null, 2)
+		});
+	}
+}
+var normaliseRecall = (data) => ({
+	query: data.query,
+	weights: data.weights,
+	hits: (data.hits || []).map((h) => ({
+		id: h.trace.id,
+		kind: h.trace.kind,
+		text: h.trace.text,
+		grade: h.trace.grade,
+		verified: h.trace.verified,
+		score: h.score,
+		similarity: h.similarity,
+		credibility: h.credibility,
+		recency: h.recency
+	}))
+});
+function Auto({ message }) {
+	const { cycles, strategy, streaming, error } = message;
+	const current = cycles.length ? cycles[cycles.length - 1] : null;
+	const tally = summarise(cycles);
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "panel system",
+		className: "auto",
 		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "auto-head",
 				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["memory", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: state.home
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: "stat-row",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stat, {
-								label: "traces",
-								value: stats.traces
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stat, {
-								label: "graded",
-								value: stats.graded
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stat, {
-								label: "verified",
-								value: stats.verified
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stat, {
-								label: "cases",
-								value: stats.cases
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stat, {
-								label: "tools",
-								value: stats.tools.length
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Stat, {
-								label: "mean grade",
-								value: stats.mean_grade === null ? "—" : stats.mean_grade.toFixed(3)
-							})
-						]
+					streaming ? "running by itself" : "stopped",
+					streaming && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+						className: "pulse",
+						"aria-hidden": "true"
 					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "kind-bars",
-						children: Object.entries(stats.by_kind).sort((a, b) => b[1] - a[1]).map(([k, n]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "kind-bar",
-							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "kind-name",
-									children: k
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "bar-track",
-									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-										className: "bar-fill",
-										style: { width: `${n / stats.traces * 100}%` }
-									})
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "bar-value",
-									children: n
-								})
-							]
-						}, k))
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+						className: "auto-sub",
+						children: [
+							cycles.length,
+							" cycle",
+							cycles.length === 1 ? "" : "s",
+							" · ",
+							tally.bits.toFixed(1),
+							" bits"
+						]
 					})
 				]
 			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["providers", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: "sub",
-					children: "first reachable wins; local-model-first by default"
-				})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+			error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+				className: "error",
+				children: error
+			}),
+			streaming && current && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "auto-now",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: `move ${current.move}`,
+					children: current.move
+				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: current.note })]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ul", {
+				className: "tallies",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tally, {
+						n: tally.pursued,
+						one: "direction taken",
+						label: "directions taken",
+						hint: "problems it set itself when it had nothing left to do",
+						good: true
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tally, {
+						n: tally.built,
+						one: "tool built",
+						label: "tools built",
+						hint: "written, verified and registered — the only move that adds a capability"
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tally, {
+						n: tally.shaky,
+						one: "belief resting on nothing",
+						label: "beliefs resting on nothing",
+						hint: "why-chains that bottomed out in an assumption or a circle",
+						good: true
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tally, {
+						n: tally.refuted,
+						one: "idea refuted",
+						label: "ideas refuted",
+						hint: "a refuted experiment is a stored result, not a wasted cycle",
+						good: true
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tally, {
+						n: tally.grounded,
+						one: "belief it could justify",
+						label: "beliefs it could justify",
+						hint: "why-chains that reached ground"
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tally, {
+						n: tally.folded,
+						one: "memory folded",
+						label: "memories folded",
+						hint: "cold traces consolidated into digests that keep the detail"
+					})
+				]
+			}),
+			tally.stats && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "auto-growth",
+				children: [
+					"memory is at ",
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: tally.stats.traces }),
+					" traces and",
+					" ",
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: tally.stats.tools.length }),
+					" tools",
+					tally.grew > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+						" — ",
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("strong", { children: ["+", tally.grew] }),
+						" since this run began"
+					] })
+				]
+			}),
+			strategy && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				className: "auto-strategy",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "what it has learned to spend time on" }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+						className: "strategy",
+						children: Object.entries(strategy).sort((a, b) => b[1] - a[1]).map(([name, share]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: `move ${name}`,
+								title: MOVES[name],
+								children: name
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "bar",
+								children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("i", { style: { width: `${share * 100}%` } })
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("strong", { children: [Math.round(share * 100), "%"] })
+						] }, name))
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+						className: "axis-note",
+						children: [
+							"Regret-matched over its six moves, and rewarded for ",
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: "information" }),
+							", not success — a move that confirms what it already believed scores near zero however cleanly it ran."
+						]
+					})
+				]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Detail, {
+				title: "everything it did",
+				summary: `${cycles.length} cycles, newest last`,
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ol", {
+					className: "cycles",
+					children: cycles.slice(-60).map((c) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+						className: c.move,
+						children: [
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: "n",
+								children: c.n
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: "move",
+								children: c.move
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: "note",
+								children: c.note
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: `bits ${c.learned > .5 ? "high" : c.learned > 0 ? "some" : "none"}`,
+								title: "information, not success",
+								children: c.learned.toFixed(2)
+							})
+						]
+					}, c.n))
+				}), cycles.length > 60 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+					className: "elided",
+					children: [
+						"…",
+						cycles.length - 60,
+						" earlier cycles not shown"
+					]
+				})]
+			})
+		]
+	});
+}
+var MOVES = {
+	question: "asked why about something it believed, then attacked the premise",
+	experiment: "ran an experiment it could not call in advance",
+	build: "tried to build a capability it lacked",
+	consolidate: "folded cold memory into digests",
+	tune: "re-fitted its own policy against measured outcomes"
+};
+function Tally({ n, label, one, hint, good }) {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+		className: n > 0 && good ? "good" : n > 0 ? "" : "zero",
+		title: hint,
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: n }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: n === 1 && one ? one : label })]
+	});
+}
+function summarise(cycles) {
+	const out = {
+		bits: 0,
+		built: 0,
+		shaky: 0,
+		grounded: 0,
+		refuted: 0,
+		folded: 0,
+		tuned: 0,
+		pursued: 0,
+		stats: null,
+		grew: 0
+	};
+	let first = null;
+	for (const c of cycles) {
+		out.bits += c.learned;
+		const d = c.detail || {};
+		if (c.move === "build" && d.registered) out.built += 1;
+		if (c.move === "question") {
+			if (d.terminal === "assumed" || d.terminal === "circular") out.shaky += 1;
+			else if (d.terminal === "grounded") out.grounded += 1;
+		}
+		if (c.move === "experiment" && d.ran && d.passed === false) out.refuted += 1;
+		if (c.move === "consolidate") out.folded += d.freed || 0;
+		if (c.move === "tune" && Object.keys(d.changed || {}).length) out.tuned += 1;
+		if (c.move === "pursue" && d.direction) out.pursued += 1;
+		if (c.stats) {
+			if (first === null) first = c.stats.traces;
+			out.stats = c.stats;
+		}
+	}
+	if (out.stats && first !== null) out.grew = out.stats.traces - first;
+	return out;
+}
+function Welcome() {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ul", {
+		className: "examples",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: ["try ", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: "build a csv cleaner and compute the median of each column" })] }),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+				"try ",
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: "make the thing better" }),
+				" to watch it refuse to guess"
+			] }),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+				"type ",
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "/" }),
+				" for everything else it can do"
+			] })
+		]
+	});
+}
+function Help() {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+		className: "help",
+		children: COMMANDS.map((c) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("code", { children: [
+			"/",
+			c.name,
+			c.args ? ` ${c.args}` : ""
+		] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: c.blurb })] }, c.name))
+	});
+}
+function Tools({ data }) {
+	const tools = data.tools || [];
+	if (!tools.length) return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: "empty",
+		children: [
+			"no tools yet — ",
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "/forge" }),
+			" writes one, or ",
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "/seed" }),
+			" plants the starter kit."
+		]
+	});
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+		className: "tool-list",
+		children: tools.map((t) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: t.signature || t.name }),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+				className: "purpose",
+				children: t.purpose
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+				className: "meta",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+						className: `transport ${t.transport}`,
+						children: t.transport
+					}),
+					t.deps && t.deps.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", { children: ["builds on ", t.deps.join(", ")] }),
+					t.grade && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+						className: t.grade.score > 0 ? "good" : "bad",
+						children: [t.grade.score > 0 ? "+" : "", t.grade.score.toFixed(2)]
+					})
+				]
+			})
+		] }, t.name))
+	});
+}
+function Seeded({ data }) {
+	const planted = data.planted || [];
+	const already = data.already || [];
+	if (!planted.length && !already.length) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+		className: "empty",
+		children: "nothing to plant."
+	});
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ul", {
+		className: "tool-list",
+		children: [
+			planted.map(([name, score]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: name }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+				className: "meta",
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+					className: "good",
+					children: ["verified ", score.toFixed(2)]
+				})
+			})] }, name)),
+			already.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+				className: "purpose",
+				children: ["already present: ", already.join(", ")]
+			}) }),
+			(data.rejected || []).map(([name, why]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: name }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+				className: "meta",
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+					className: "bad",
+					children: ["rejected — ", why]
+				})
+			})] }, name))
+		]
+	});
+}
+function Forged({ data }) {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "forged",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: data.registered ? "verdict ok" : "verdict no",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.registered ? `registered ${data.name}` : `rejected ${data.name}` }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: data.registered ? "it passed every stage, so it is callable and recallable now" : "not stronger than what is already registered — recorded so it is not re-derived" })]
+			}),
+			data.grade && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(GradeStages, { grade: data.grade }),
+			data.source && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "the source it wrote",
+				summary: `${data.source.split("\n").length} lines`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
+					className: "source",
+					children: data.source
+				})
+			}),
+			data.tests && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "the contract it had to pass",
+				summary: "run in the sandbox, twice, under different hash seeds",
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
+					className: "source",
+					children: data.tests
+				})
+			})
+		]
+	});
+}
+function MemoryPlot({ data, onTrace }) {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "memory-plot",
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+			className: "say",
+			children: [data.traces.length, " memories, projected onto a plane. Distance means something; the directions do not."]
+		}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Scatter, {
+			traces: data.traces,
+			onPick: (t) => onTrace && onTrace(t.id)
+		})]
+	});
+}
+function Explored({ data }) {
+	const ran = data.experiments.filter((e) => e.ran);
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "explored",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "say",
+				children: [
+					data.experiments.length,
+					" experiments, ",
+					ran.length,
+					" actually runnable,",
+					" ",
+					ran.filter((e) => e.passed).length,
+					" of those passed. A refuted one is a stored result, not a wasted cycle."
+				]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+				className: "experiments",
+				children: data.experiments.map((e, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+					className: !e.ran ? "skipped" : e.passed ? "ok" : "no",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "origin",
+							children: e.origin
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "idea",
+							children: e.idea
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+							className: "outcome",
+							children: !e.ran ? "not run" : e.passed ? "held" : "refuted"
+						}),
+						e.detail && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: e.detail })
+					]
+				}, i))
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "which generator earns its keep",
+				summary: "regret-matched mix over idea sources",
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+					className: "strategy",
+					children: Object.entries(data.strategy).map(([name, share]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: name }),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "bar",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("i", { style: { width: `${share * 100}%` } })
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("strong", { children: [Math.round(share * 100), "%"] })
+					] }, name))
+				})
+			})
+		]
+	});
+}
+function Cases({ data }) {
+	if (data.cases) {
+		if (!data.cases.length) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+			className: "empty",
+			children: "no cases on record yet."
+		});
+		return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+			className: "cases",
+			children: data.cases.map((c, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+				className: c.grade > 0 ? "worked" : "failed",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+						className: "mark",
+						children: c.grade > 0 ? "worked" : "failed"
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: c.problem }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: c.solution })
+				]
+			}, i))
+		});
+	}
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "precedent",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+				className: "say",
+				children: data.note
+			}),
+			data.precedent && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "worked",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.precedent.problem }),
+					" → ",
+					data.precedent.solution
+				]
+			}),
+			data.avoid.map((a, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "failed",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "avoid:" }),
+					" ",
+					a.solution
+				]
+			}, i))
+		]
+	});
+}
+function Clarified({ data, onTrace }) {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "clarified",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: `verdict ${data.actionable ? "ok" : "no"}`,
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.actionable ? "clear enough to start" : "not clear enough yet" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: data.reason })]
+			}),
+			data.questions.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+				className: "questions flat",
+				children: data.questions.map((q) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+						className: "gap",
+						children: q.gap
+					}),
+					q.text,
+					q.known && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", { children: ["memory already says: ", q.known] })
+				] }, q.gap))
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "what I already knew",
+				summary: `${data.recall.hits.length} from memory`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Recalled, {
+					recall: data.recall,
+					onTrace
+				})
+			})
+		]
+	});
+}
+function TraceGraph({ data, onTrace }) {
+	const t = data.trace;
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "trace-graph",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "trace-head",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "pill",
+					style: { borderColor: colourOf(t.kind) },
+					children: t.kind
+				}), t.text]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", {
+				className: "trace-facts",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "credibility" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: t.credibility })] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "recalled" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dd", { children: [t.hits, " times"] })] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "grades" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: t.grades.length ? t.grades.map((g) => `${g.score > 0 ? "+" : ""}${g.score} (${g.source})`).join(", ") : "none yet" })] })
+				]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Edges, {
+				title: "built on",
+				edges: data.links,
+				onTrace,
+				empty: "nothing — this is a root"
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Edges, {
+				title: "used by",
+				edges: data.backlinks,
+				onTrace,
+				empty: "nothing yet — a grade here stays here"
+			}),
+			data.missing.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+				className: "missing",
+				children: [data.missing.length, " linked trace(s) no longer in the store"]
+			})
+		]
+	});
+}
+function Edges({ title, edges, onTrace, empty }) {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "edges",
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: title }), edges.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+			className: "empty",
+			children: empty
+		}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { children: edges.map((e) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+			onClick: () => onTrace && onTrace(e.id),
+			children: [
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "pill",
+					style: { borderColor: colourOf(e.kind) },
+					children: e.kind
+				}),
+				e.text,
+				e.grade !== null && e.grade !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", {
+					className: e.grade > 0 ? "good" : "bad",
+					children: [e.grade > 0 ? "+" : "", e.grade.toFixed(2)]
+				})
+			]
+		}) }, e.id)) })]
+	});
+}
+function Mcp({ data }) {
+	if (data.attached) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: data.failed.length ? "verdict no" : "verdict ok",
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.attached }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: data.failed.length ? data.failed[0].error : `${data.tools.length} tool(s) embedded — recalled alongside local ones, ungraded until used` })]
+	}) });
+	if (data.removed !== void 0) return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: "say",
+		children: [
+			data.removed ? "detached" : "no such server",
+			" — ",
+			data.servers.length,
+			" remaining."
+		]
+	});
+	if (!data.servers.length) return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: "empty",
+		children: ["no servers attached. ", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "/mcp add fs npx -y @modelcontextprotocol/server-filesystem /tmp" })]
+	});
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+		className: "servers",
+		children: data.servers.map((s) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: s.name }),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: s.command.join(" ") }),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+				className: s.alive ? "good" : "dim",
+				children: s.alive ? "running" : "idle"
+			})
+		] }, s.name))
+	});
+}
+function Compressed({ data }) {
+	const r = data.report;
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+		className: "say",
+		children: [
+			r.clusters,
+			" cold cluster(s); ",
+			r.compressed ? `compressed ${r.compressed}` : "nothing compressed",
+			", folding ",
+			r.freed,
+			" trace(s). Originals are archived first, so this is reversible."
+		]
+	});
+}
+function Tuned({ data }) {
+	const changes = Object.entries(data.result.changed || {});
+	if (!changes.length) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+		className: "say",
+		children: "nothing moved — the current policy is already the best of the trials."
+	});
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+		className: "tuned",
+		children: changes.map(([name, [from, to]]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: name }),
+			" ",
+			from,
+			" → ",
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: to })
+		] }, name))
+	});
+}
+function SystemCard({ data }) {
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "system-card",
+		children: [
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", {
+				className: "trace-facts",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "provider" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: data.provider })] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "embedder" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: data.stats.embedder })] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "remembered" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: data.stats.traces })] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "verified" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: data.stats.verified })] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "home" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: data.home })] })
+				]
+			}),
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "providers",
+				summary: `${data.providers.filter((p) => p.available).length} reachable`,
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
 					className: "providers",
-					children: providers.map((p) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
+					children: data.providers.map((p) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
 						className: p.available ? "on" : "off",
 						children: [
 							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: p.name }),
-							p.name === state.provider && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "active",
-								children: "in use"
-							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: p.available ? "available" : "not configured" }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "dim",
-								children: p.embeds ? "embeddings" : "no embeddings — lexical fallback"
-							})
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { children: p.embeds ? "embeddings" : "no embeddings — lexical fallback" })
 						]
 					}, p.name))
-				})]
+				})
 			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["policy", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "every number the system may change about itself"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "policy-grid",
-						children: Object.entries(policy).map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: k.replace(/_/g, " ") }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: typeof v === "number" ? v.toFixed(3) : String(v) })] }, k))
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "toolbar",
-						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-							disabled: working,
-							onClick: () => act(async () => setTuned(await post("upgrade", { trials: 6 }))),
-							children: "tune against measured outcomes"
-						})
-					}),
-					tuned && tuned.result && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-						className: "axis-note",
-						children: [
-							"objective ",
-							tuned.result.score_before,
-							" → ",
-							tuned.result.score_after,
-							Object.keys(tuned.result.changed).length === 0 ? " · no mutation beat the incumbent" : ` · changed ${Object.keys(tuned.result.changed).join(", ")}`
-						]
-					})
-				]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["maintenance", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "compression is reversible: originals are archived first"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: "toolbar",
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-							disabled: working,
-							onClick: () => act(async () => setCompressed(await post("compress", { dry_run: true }))),
-							children: "preview compression"
-						}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-							disabled: working,
-							className: "danger",
-							onClick: () => act(async () => setCompressed(await post("compress", { dry_run: false }))),
-							children: "compress now"
-						})]
-					}),
-					compressed && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
-						className: "axis-note",
-						children: [
-							compressed.report.dry_run ? "would compress" : "compressed",
-							" ",
-							compressed.report.compressed,
-							" cluster(s), folding ",
-							compressed.report.freed,
-							" trace(s)"
-						]
-					}), compressed.digests.map((d, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", {
-						className: "digest",
-						children: d.text
-					}, i))] })
-				]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-				className: "card",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: ["cases", /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "sub",
-						children: "problems, and what actually solved them"
-					})] }),
-					cases.error && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "error",
-						children: cases.error
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ul", {
-						className: "cases",
-						children: [(cases.data && cases.data.cases || []).map((c, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", {
-							className: c.grade > 0 ? "worked" : "failed",
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "case-mark",
-								children: c.grade > 0 ? "worked" : "did not"
-							}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: c.problem }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: c.solution })] })]
-						}, i)), cases.data && cases.data.cases.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", {
-							className: "empty",
-							children: "no cases on record yet."
-						})]
-					})
-				]
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Detail, {
+				title: "policy",
+				summary: "every number it may change about itself",
+				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
+					className: "policy",
+					children: Object.entries(data.policy).map(([name, value]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: name.replace(/_/g, " ") }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: value })] }, name))
+				})
 			})
 		]
 	});
 }
-var Stat = ({ label, value }) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-	className: "stat",
-	children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-		className: "stat-value",
-		children: value
-	}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-		className: "stat-label",
-		children: label
-	})]
-});
 //#endregion
 //#region src/App.jsx
-var TABS = [
-	[
-		"ask",
-		"Ask",
-		"frame the game, distil it, act"
-	],
-	[
-		"memory",
-		"Memory",
-		"the embedding layer, projected"
-	],
-	[
-		"recall",
-		"Recall",
-		"why a memory ranked where it did"
-	],
-	[
-		"tools",
-		"Tools",
-		"capabilities, local and remote"
-	],
-	[
-		"explore",
-		"Explore",
-		"curiosity, ranked in bits"
-	],
-	[
-		"system",
-		"System",
-		"stats, policy, cases, maintenance"
-	]
-];
-var tabFromHash = () => {
-	const key = window.location.hash.replace(/^#\/?/, "").split("?")[0];
-	return TABS.some(([k]) => k === key) ? key : "ask";
+var counter = 0;
+var nextId = () => `m${counter++}`;
+var GREETING = {
+	id: nextId(),
+	role: "agent",
+	kind: "welcome",
+	text: "Ask me something, or speak it. Every question searches my memory first."
 };
 function App() {
-	const [tab, setTab] = (0, import_react.useState)(tabFromHash);
-	const state = useAsync(() => get("state"), []);
-	(0, import_react.useEffect)(() => {
-		const sync = () => setTab(tabFromHash());
-		window.addEventListener("hashchange", sync);
-		return () => window.removeEventListener("hashchange", sync);
+	const [messages, setMessages] = (0, import_react.useState)([GREETING]);
+	const [busy, setBusy] = (0, import_react.useState)(false);
+	const [state, setState] = (0, import_react.useState)(null);
+	const [speech, setSpeech] = (0, import_react.useState)(null);
+	const bottom = (0, import_react.useRef)(null);
+	const refreshState = (0, import_react.useCallback)(async () => {
+		try {
+			setState(await get("state"));
+		} catch {}
 	}, []);
-	const go = (key) => {
-		window.location.hash = `/${key}`;
-		setTab(key);
+	(0, import_react.useEffect)(() => {
+		refreshState();
+		get("speech").then(setSpeech).catch(() => setSpeech(null));
+	}, [refreshState]);
+	const toolCount = state ? state.stats.tools.length : null;
+	(0, import_react.useEffect)(() => {
+		if (toolCount !== 0) return;
+		let cancelled = false;
+		post("seed", {}).then((out) => {
+			if (cancelled || !out.planted.length) return;
+			add({
+				role: "agent",
+				kind: "seed",
+				data: out,
+				text: `I had no tools, so I planted ${out.planted.length} and verified each one.`
+			});
+			refreshState();
+		}).catch(() => {});
+		return () => {
+			cancelled = true;
+		};
+	}, [toolCount]);
+	(0, import_react.useEffect)(() => {
+		bottom.current?.scrollIntoView({
+			behavior: "smooth",
+			block: "end"
+		});
+	}, [messages]);
+	const add = (message) => {
+		const full = {
+			id: nextId(),
+			...message
+		};
+		setMessages((prior) => [...prior, full]);
+		return full.id;
 	};
-	const grade = (0, import_react.useCallback)(async (id, score) => post("grade", {
-		id,
-		score
-	}), []);
+	const patch = (id, change) => setMessages((prior) => prior.map((m) => m.id === id ? {
+		...m,
+		...change
+	} : m));
+	const ask = async (task, answers) => {
+		const id = add({
+			role: "agent",
+			kind: "ask",
+			task,
+			steps: [],
+			streaming: true
+		});
+		setBusy(true);
+		streamAsk(task, answers, {
+			onStep: (step) => setMessages((prior) => prior.map((m) => m.id === id ? {
+				...m,
+				steps: [...m.steps, step]
+			} : m)),
+			onResult: (data) => patch(id, { data }),
+			onDone: () => {
+				patch(id, { streaming: false });
+				setBusy(false);
+				refreshState();
+			},
+			onError: (err) => {
+				patch(id, {
+					streaming: false,
+					error: err.message
+				});
+				setBusy(false);
+			}
+		});
+	};
+	const runCommand = async (parsed, raw) => {
+		if (parsed.unknown) {
+			add({
+				role: "agent",
+				kind: "error",
+				text: `no command called /${parsed.unknown} — type /help to see them all`
+			});
+			return;
+		}
+		const { command, rest } = parsed;
+		if (command.needs && !rest) {
+			add({
+				role: "agent",
+				kind: "error",
+				text: command.needs
+			});
+			return;
+		}
+		const id = add({
+			role: "agent",
+			kind: command.name,
+			streaming: true
+		});
+		setBusy(true);
+		try {
+			const out = await command.run(rest);
+			patch(id, {
+				...out,
+				streaming: false
+			});
+		} catch (err) {
+			patch(id, {
+				kind: "error",
+				text: err.message,
+				streaming: false
+			});
+		} finally {
+			setBusy(false);
+			refreshState();
+		}
+	};
+	const send = async (text, answers) => {
+		if (!text.trim() || busy) return;
+		add({
+			role: "user",
+			kind: "text",
+			text
+		});
+		const parsed = parse(text);
+		if (parsed) await runCommand(parsed, text);
+		else await ask(text.trim(), answers);
+	};
+	const answer = async (task, answers, summary) => {
+		add({
+			role: "user",
+			kind: "text",
+			text: summary
+		});
+		await ask(task, answers);
+	};
+	const stopAuto = (0, import_react.useRef)(null);
+	const [auto, setAuto] = (0, import_react.useState)(false);
+	const toggleAuto = () => {
+		if (auto) {
+			stopAuto.current?.();
+			stopAuto.current = null;
+			setAuto(false);
+			add({
+				role: "agent",
+				kind: "text",
+				text: "stopped — it finishes the cycle it is in first."
+			});
+			refreshState();
+			return;
+		}
+		const id = add({
+			role: "agent",
+			kind: "auto",
+			cycles: [],
+			strategy: null,
+			streaming: true
+		});
+		setAuto(true);
+		stopAuto.current = streamAuto(0, {
+			onCycle: (cycle) => setMessages((prior) => prior.map((m) => m.id === id ? {
+				...m,
+				cycles: [...m.cycles, cycle],
+				strategy: cycle.strategy
+			} : m)),
+			onDone: () => {
+				patch(id, { streaming: false });
+				setAuto(false);
+				refreshState();
+			},
+			onError: (err) => {
+				patch(id, {
+					streaming: false,
+					error: err.message
+				});
+				setAuto(false);
+			}
+		});
+	};
+	(0, import_react.useEffect)(() => () => stopAuto.current?.(), []);
+	const grade = (0, import_react.useCallback)(async (id, score) => {
+		await post("grade", {
+			id,
+			score
+		});
+		refreshState();
+	}, [refreshState]);
+	const look = (0, import_react.useCallback)(async (traceId) => {
+		const id = add({
+			role: "agent",
+			kind: "trace",
+			streaming: true
+		});
+		try {
+			patch(id, {
+				data: await get("trace", { id: traceId }),
+				streaming: false
+			});
+		} catch (err) {
+			patch(id, {
+				kind: "error",
+				text: err.message,
+				streaming: false
+			});
+		}
+	}, []);
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 		className: "app",
 		children: [
 			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("header", {
 				className: "masthead",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: "brand",
-					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { children: "DISTIL" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "an agent whose memory is an embedding layer that grades itself, and whose reasoning is a game played against Nature" })]
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { children: "DISTIL" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 					className: "status",
-					children: state.error ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-						className: "offline",
-						title: state.error,
-						children: "server unreachable"
-					}) : state.data ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+					children: [state ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
 						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 							className: "badge",
-							children: state.data.provider
+							children: state.provider
 						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
 							className: "badge dim",
-							children: [state.data.stats.traces, " traces"]
+							children: [state.stats.traces, " remembered"]
 						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
 							className: "badge dim",
-							children: [state.data.stats.tools.length, " tools"]
+							children: [state.stats.tools.length, " tools"]
 						})
 					] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 						className: "badge dim",
 						children: "connecting…"
-					})
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+						className: `auto-toggle ${auto ? "on" : ""}`,
+						onClick: toggleAuto,
+						title: "question, experiment, build, consolidate and tune, choosing its own next move",
+						children: auto ? "■ stop" : "▸ run by itself"
+					})]
 				})]
 			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("nav", {
-				className: "tabs",
-				children: TABS.map(([key, label, hint]) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					className: tab === key ? "on" : "",
-					onClick: () => go(key),
-					title: hint,
-					children: label
-				}, key))
+			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("main", {
+				className: "transcript",
+				children: [messages.map((m) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Message, {
+					message: m,
+					onGrade: grade,
+					onAnswer: answer,
+					onTrace: look
+				}, m.id)), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { ref: bottom })]
 			}),
-			state.error && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "error global",
-				children: [state.error, /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-					className: "link",
-					onClick: state.run,
-					children: "retry"
-				})]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("main", { children: [
-				tab === "ask" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Ask, {}),
-				tab === "memory" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Memory, { onGrade: grade }),
-				tab === "recall" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Recall, {}),
-				tab === "tools" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tools, {}),
-				tab === "explore" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Explore, {}),
-				tab === "system" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(System, {
-					state: state.data,
-					refreshState: state.run
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("footer", { children: "local tool — it writes files and executes generated code in a sandbox. Not hardened, not authenticated, bound to loopback." })
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Composer, {
+				onSend: send,
+				busy,
+				speech
+			})
 		]
 	});
 }

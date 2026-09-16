@@ -276,6 +276,13 @@ class Toolsmith:
         spec.grade = grade_python(source, spec.tests)
         return spec.grade
 
+    def _edges(self, spec: ToolSpec, goal_trace_id: str | None) -> list[str]:
+        """What this tool is connected to: the goal that asked for it, and the
+        tools it was built out of."""
+        edges = [goal_trace_id] if goal_trace_id else []
+        edges += [i for i in _dep_traces(self.memory, spec.deps) if i not in edges]
+        return edges or None
+
     def register(self, spec: ToolSpec, goal_trace_id: str | None = None,
                  threshold: float = 0.5) -> bool:
         """Keep it only if it earned its place; remember the failure either way.
@@ -343,8 +350,9 @@ class Toolsmith:
             Kind.TOOL, spec.embed_text(),
             meta={"tool": spec.name, "path": str(path), "signature": spec.signature,
                   "grade": grade.score, "purpose": spec.purpose,
-                  "transport": spec.transport, "solved": list(spec.solved)},
-            links=[goal_trace_id] if goal_trace_id else None,
+                  "transport": spec.transport, "solved": list(spec.solved),
+                  "deps": list(spec.deps)},
+            links=self._edges(spec, goal_trace_id),
             grade=grade.score, source=Source.SELF,
             # One trace per tool name, for the life of the store. Re-forging a
             # tool used to create a SECOND Kind.TOOL trace, and every consumer
@@ -355,6 +363,21 @@ class Toolsmith:
         spec.trace_id = trace.id
         (self.workshop / f"{spec.name}.json").write_text(json.dumps(spec.to_json(), indent=2))
         return True
+
+
+def _dep_traces(memory, deps) -> list[str]:
+    """Resolve dependency names to the tool traces they refer to.
+
+    `ToolSpec.deps` records that `median_of_column` is built out of `median` and
+    `parse_csv`, and until now that stayed on disk: the tool's trace linked only
+    to the goal it came from, so the composition was invisible to the one
+    mechanism that should care about it. Credit propagates along links, which
+    means a well-graded composite was earning its parts nothing.
+    """
+    if not deps:
+        return []
+    wanted = set(deps)
+    return [t.id for t in memory.of_kind(Kind.TOOL) if t.meta.get("tool") in wanted]
 
 
 def _schema_problems(spec, kwargs: dict, memory) -> list[str]:
@@ -414,17 +437,18 @@ class Toolbox:
     Dispatch happens at `invoke`, on `ToolSpec.transport`.
     """
 
-    def __init__(self, memory, workshop: Path, mcp=None) -> None:
+    def __init__(self, memory, workshop: Path, mcp=None, browser=None) -> None:
         self.memory = memory
         self.workshop = Path(workshop)
         self.workshop.mkdir(parents=True, exist_ok=True)
         self.mcp = mcp                    # an McpRegistry, or None
+        self.browser = browser            # a browser.Browser, or None
 
     def names(self) -> list[str]:
-        """Local tools on disk plus every MCP tool in memory, as one sorted list."""
+        """Local tools on disk plus every remote tool in memory, as one sorted list."""
         local = {p.stem for p in self.workshop.glob("*.json")}
         remote = {t.meta.get("tool") for t in self.memory.of_kind(Kind.TOOL)
-                  if t.meta.get("transport") == "mcp" and t.meta.get("tool")}
+                  if t.meta.get("transport") in ("mcp", "browser") and t.meta.get("tool")}
         return sorted(local | remote)
 
     def load(self, name: str) -> ToolSpec | None:
@@ -447,11 +471,12 @@ class Toolbox:
         # file read away -- cost a full scan.
         if "." in name:
             for trace in self.memory.of_kind(Kind.TOOL):
-                if trace.meta.get("tool") == name and trace.meta.get("transport") == "mcp":
+                transport = trace.meta.get("transport")
+                if trace.meta.get("tool") == name and transport in ("mcp", "browser"):
                     return ToolSpec(
                         name=name, purpose=trace.meta.get("purpose", ""), source="",
-                        signature=trace.meta.get("signature", ""), transport="mcp",
-                        built_by="mcp", solved=list(trace.meta.get("solved", [])),
+                        signature=trace.meta.get("signature", ""), transport=transport,
+                        built_by=transport, solved=list(trace.meta.get("solved", [])),
                         trace_id=trace.id)
         path = self.workshop / f"{name}.json"
         if path.exists():
@@ -525,6 +550,17 @@ class Toolbox:
         spec = self.load(name)
         if spec is None:
             return {"ok": False, "error": f"no such tool: {name}"}
+        if spec.transport == "browser":
+            # A driven browser runs whatever the page contains, in a process this
+            # package does not control. It is not sandboxed and is not claimed to
+            # be; the compose file is where that gets contained.
+            from .browser import BrowserError, invoke as drive
+            if self.browser is None:
+                return {"ok": False, "error": f"{name} needs a browser; none is attached"}
+            try:
+                return {"ok": True, "result": drive(self.browser, name, args or [], kwargs or {})}
+            except BrowserError as exc:
+                return {"ok": False, "error": str(exc)}
         if spec.transport == "mcp":
             # MCP tools are keyword-only by schema: there is no positional form,
             # so positional arguments cannot be delivered. They used to be

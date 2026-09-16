@@ -517,7 +517,7 @@ has been asked, and the selection criteria come from the design rather than from
 taste: it must be decidable (§8), it must be routed through often, and — the one
 that matters most — **it should make more things gradeable**.
 
-That last criterion is the highest-leverage one. §17 states the real ceiling:
+That last criterion is the highest-leverage one. §19 states the real ceiling:
 prose is never self-graded, so the system improves fastest at what a computer can
 check. A tool that *creates a referee* therefore buys more than a tool that does
 work, because it moves a whole class of goals from `UNCHECKABLE` to `CHECKABLE`
@@ -648,18 +648,21 @@ has to be *looked at* to be believed, and a terminal renders a matrix badly. The
 frontend (`serve.py`, `project.py`, `ui/`) exists to make each of this document's
 claims checkable against a running instance rather than against prose.
 
-### 16.1 What each panel has to prove
+### 16.1 What each view has to prove
 
-The panels are not a tour of the API. Each one is the visible form of one claim.
+These are not a tour of the API. Each is the visible form of one claim, and
+§16.4 explains why they are turns in a conversation rather than tabs.
 
 | claim | §  | where you see it |
 |---|---|---|
-| ranking is not similarity | 4 | Recall decomposes every hit into similarity, credibility and recency, with the weights the server actually used, and says so outright when the top hit is not the most similar one |
-| the game is understood before it is played | 2 | Ask leads with the frame — players, payoff, horizon, information, referee — and its confidence, above anything that was planned |
+| ranking is not similarity | 4 | every reply carries the hits it recalled, decomposed into similarity, credibility and recency with the weights the server used, and says so outright when the top hit is not the most similar one |
+| the game is understood before it is played | 2 | the frame — players, payoff, horizon, information, referee — and its confidence, above anything that was planned |
 | the choice is a decision under uncertainty | 7 | the payoff matrix, with Nature's states as columns and the belief over them printed on the headers |
 | distillation stops at verifiability | 8 | the goal tree badges each leaf verifiable or needing a check |
+| a grade is the one input it cannot re-derive | 5 | +1 / 0 / −1 on the answer itself, where the opinion is formed |
+| it can work without being asked | 17 | the autonomous loop narrates into the same transcript |
 | a bad idea is worth running | 10 | H(p) drawn, with each candidate experiment plotted on it |
-| capability is earned | 11 | every tool shown with the grade it passed and the problem it solved |
+| capability is earned | 11 | every tool shown with the grade it passed and the problem it solved, local, MCP and browser alike |
 | the system may change its own numbers | 14 | the policy, every bound, and the button that tunes it |
 
 ### 16.2 Projection
@@ -710,7 +713,55 @@ Three defences are cheap enough to have anyway:
 None of the three is authentication. They close the attacks a browser can be
 made to carry out, which is the threat a localhost tool actually faces.
 
-### 16.4 The one dependency
+### 16.4 One conversation, not six tabs
+
+The first version of this interface was a row of tabs: Ask, Memory, Recall,
+Tools, Explore, System. That is a dashboard, and a dashboard makes you navigate
+*to* a system and hold the correlation between its views in your own head. You
+could not get from a recall hit to its neighbourhood in the plot, or from a tool
+to the case it solved; the link graph was in the data and in no view at all.
+
+Everything is a message now. A question, a tool listing, an experiment run and an
+autonomous cycle all land in one transcript in the order they happened, so the
+record of what you did and the result of doing it are the same list. The
+capabilities that were tabs are slash commands, which is a pattern nobody has to
+be taught, and asking a question — the common case — costs no syntax.
+
+Three consequences worth stating, because each was a defect before it was a
+design:
+
+1. **The verdict comes first.** Six expanded cards for one question put the
+   answer at the bottom, underneath everything that produced it. The reasoning
+   still has to be *there* — a chain nobody can inspect is an assertion — but it
+   does not have to be in the way, so each section collapses behind a summary
+   carrying the number that says whether to open it.
+2. **Grading is on the answer.** The mechanism this system rests on is the user
+   grade, weighted double. It used to live in a different tab, reachable by
+   copying a trace id and finding a point in a scatter plot. A feedback loop with
+   four steps of friction is one nobody closes.
+3. **Recall rides on every reply.** §4's claim is that ranking is not similarity,
+   and it was checkable only if you went looking. Worse, a question stopped at
+   the clarification gate returned questions and nothing else — the case where
+   "what do I already know about this?" is most valuable answered it least.
+
+### 16.5 Speech
+
+Two routes, and which one runs decides where the audio goes, so the interface
+says which before it listens rather than putting a microphone icon on it and
+leaving the question open.
+
+A Whisper binary on `PATH` means the recording is converted to 16kHz mono wav in
+the browser, POSTed to `/api/transcribe`, and never leaves the machine. Otherwise
+the Web Speech API does it — free, instant, and in Chrome *not local*: the audio
+goes to Google. For a system whose premise is that it runs on your machine with
+no key and no network, that is a contradiction, and hiding it in a tooltip would
+be lying by omission.
+
+Ollama is deliberately not in that list. It serves language and embedding models
+and does not transcribe audio; pointing this at an Ollama server would fail at
+runtime with a confusing error instead of at startup with a clear one.
+
+### 16.6 The one dependency
 
 `ui/` is React built with Vite — the only third-party code anywhere in this
 repository, and it is a *build*-time dependency. `web/`, what it compiles to, is
@@ -719,7 +770,126 @@ committed, so `distil.cli ui` runs on a machine with no node and no
 
 ---
 
-## 17. What this does not do
+---
+
+## 17. Running by itself
+
+Every other entry point waits to be asked. `auto.py` does not: it picks its own
+next move, does it, grades the result and folds it back into the same memory
+everything else reads from. Nothing in it is a new capability — it is the
+existing ones, sequenced by something with an opinion about what is worth doing.
+
+### 17.1 What makes it curious rather than busy
+
+A loop that does the same thing every cycle is a cron job. Six moves compete and
+the choice is regret-matched (§7), so the mix is learned from what each actually
+returned — and because the system changes underneath it, no-regret learning is
+right where a stationary bandit would be wrong.
+
+| move | what it does | what it costs when it is wrong |
+|---|---|---|
+| QUESTION | why-chain a belief, then attack its premises | cheap; the payoff is finding something resting on nothing |
+| EXPERIMENT | run one, ranked by information gain | cheap; a refutation is a stored result |
+| BUILD | forge a tool for a capability gap | moderate; a rejected tool is still recorded |
+| CONSOLIDATE | fold cold memory into digests | reversible — originals are archived first |
+| TUNE | re-fit its own policy | bounded by `policy.BOUNDS` |
+| PURSUE | set itself a problem and solve it | the only move that *produces* rather than consumes |
+
+### 17.2 Rewarded for information, not success
+
+A move that confirms what was already believed scores near zero however cleanly
+it ran; one that refutes something scores highly. This is the same argument as
+§10: rewarding correctness teaches a system to stop proposing the experiments
+worth running, which is the failure mode the whole design is arranged against.
+
+Two consequences that only showed up when it was run:
+
+- **A repeated finding pays less than the first.** Offline the provider cannot
+  really answer "why", so every chain returns circular — and QUESTION scored
+  identically forever, starving the other five. Payoff now decays with how many
+  times that terminal has already been seen, which is itself the honest measure:
+  the first circular belief is a discovery, the tenth is a pattern you know.
+- **An untried move is worth the best average seen, not zero.** With zero, one
+  lucky first cycle drove the matcher to never sample the others again.
+
+### 17.3 Running dry
+
+The first five moves all consume pools that empty: there is a last unquestioned
+belief, a last known gap, a last cold cluster. When they were gone every cycle
+returned "nothing to do" and the loop spun — neither working nor finished, which
+is the worst of both.
+
+PURSUE is the answer. It invents a direction and runs the full solve loop on it,
+which writes a frame, an agenda, goals, a chain, usually a tool and a case — the
+things the other five had run out of. It is a normal competing move *and* it is
+forced after two barren cycles, because a loop with nothing to do should change
+what it is doing rather than wait to be told.
+
+Directions come from five sources, round-robin so no one of them supplies all of
+them, in descending order of how grounded they are in what the system actually
+ran into: a disagreement between memories; a tool that has never solved anything;
+a composition of two it has; something it failed at before; and — the floor — two
+credible memories filed far apart. **That last source cannot exhaust**, which is
+the property that matters: pairs are quadratic and every cycle adds to *n*.
+
+On an empty store there is nothing to derive a direction *from*, and a fresh
+instance would sit still waiting to be told to do the one thing it can always do.
+So PURSUE bootstraps: it plants the starter toolkit (§11.4), twelve tools each
+through the grader, which is enough for the disagreement, unused-tool and
+composition sources to start producing. That is useful exactly once.
+
+It runs with no `ask` callback, so a direction it cannot state the objective of
+comes back gated rather than guessed at. That is not a failure. The gate firing
+on a question it set *itself* is the system reporting that the direction was
+vague, and the next cycle picks a different one.
+
+**Self-reference is the recurring bug here, and it recurred twice.** QUESTION
+writes a trace beginning "why <subject>", which was then eligible as the next
+subject — so it asked why about why about why, escaping accumulating each turn.
+PURSUE then hit the same shape from a different direction: solving a self-set
+task writes goals and failures *containing* that task, and those carry no marker
+saying the loop caused them, because the solver wrote them. Anything a loop
+writes is input to that loop, and both fixes are the same idea: exclude your own
+output, by marker where you wrote it and by subject where something downstream
+did.
+
+### 17.4 What it may not do
+
+It cannot edit its own source. `selfedit` is reachable only from the command
+line, deliberately: an unattended optimiser with write access to its own grader
+will edit its own grader, and every grade in the store becomes meaningless. This
+is the same invariant as §14, enforced by not building the door.
+
+---
+
+## 18. A browser it can drive
+
+`auto.py` is rewarded for information, and the largest source of information it
+does not already hold is the web. Without a browser every question it cannot
+answer from memory terminates as an assumption.
+
+`browser.py` speaks W3C WebDriver over `urllib`. That protocol is HTTP and JSON,
+so Selenium buys nothing here and costs the claim that this package runs
+anywhere. The actions are registered as ordinary `Kind.TOOL` traces with
+`transport="browser"`, so `browser.read` is recalled by the same query that finds
+a forged function or an MCP tool — the one embedding layer over every capability
+that §11 is about.
+
+They are registered **only when `DISTIL_WEBDRIVER` is set**. A capability that is
+recalled and then fails is worse than one that was never offered.
+
+### 18.1 It is not a sandbox
+
+A driven browser fetches whatever it is pointed at and runs whatever that page
+contains, in a process this package does not control. There is no URL allowlist
+because a convincing one cannot be written — what it may reach is the network's
+decision, not this module's.
+
+That is the argument for `docker-compose.yml`: chromedriver runs in its own
+container, its port is never published to the host, and the agent addresses it by
+service name. The containment is the port mapping, not anything in this code.
+
+## 19. What this does not do
 
 Stated because a specification that only lists strengths is marketing.
 

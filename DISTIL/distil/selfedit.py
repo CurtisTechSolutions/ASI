@@ -212,11 +212,17 @@ class SelfEditor:
 
     # -- evaluating ---------------------------------------------------------
 
-    def evaluate(self, edit: Edit, timeout: float = 180.0) -> Report:
+    def evaluate(self, edit: Edit, timeout: float = 420.0) -> Report:
         """Apply to a throwaway copy, check invariants, run the real test suite.
 
         The suite that runs is the one on disk, not one the edit supplied. That
         distinction is the entire value of the step.
+
+        The timeout is generous because a suite that times out looks exactly like
+        a suite that failed, and the consequence is a correct edit rejected for a
+        reason nobody can see. The suite runs in about a minute unsandboxed and
+        the sandbox adds rlimits on top; 420s leaves room for a slow machine
+        without letting a genuinely hung edit sit forever.
         """
         shadow = Path(self.home) / "shadow" / uuid.uuid4().hex[:8]
         if shadow.exists():

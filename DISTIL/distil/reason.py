@@ -71,11 +71,32 @@ class Thought:
 class Chain:
     task: str
     steps: list[Thought] = field(default_factory=list)
+    #: Called with each step as it is appended. The frontend streams the chain
+    #: this way rather than waiting for the whole run: reasoning that arrives all
+    #: at once, minutes later, reads as a result rather than as thinking, and the
+    #: one thing this chain is for is being watched. It is deliberately the only
+    #: hook -- `add` is the single point every step passes through, so nothing
+    #: has to be restructured to be observable.
+    observer: object = field(default=None, repr=False, compare=False)
 
     def add(self, kind: str, text: str, **payload) -> Thought:
         t = Thought(kind, text, payload)
         self.steps.append(t)
+        self.watch(t)
         return t
+
+    def watch(self, step: Thought) -> None:
+        """Notify the observer, if any, and never let it break the run.
+
+        A watcher is a view. A browser that closed mid-run, or a queue nobody is
+        draining, must not take down the reasoning it was watching.
+        """
+        if self.observer is None:
+            return
+        try:
+            self.observer(step)
+        except Exception:
+            self.observer = None
 
     def of(self, kind: str) -> list[Thought]:
         return [s for s in self.steps if s.kind == kind]
@@ -409,7 +430,7 @@ class Reasoner:
     # -- the whole thing ----------------------------------------------------
 
     def run(self, task: str, interrogate_first: bool = True,
-            objective: str | None = None) -> Session:
+            objective: str | None = None, observer=None) -> Session:
         """`objective`, when the clarification loop established one, is what the
         work is actually distilled and recalled against.
 
@@ -422,7 +443,7 @@ class Reasoner:
         # Concatenating it onto the task produced goals carrying both, which read
         # as neither.
         subject = (objective or "").strip() or task
-        chain = Chain(task)
+        chain = Chain(task, observer=observer)
         query = self.memory.remember(Kind.QUERY, subject)
         why, questions = (None, [])
         if interrogate_first:

@@ -25,6 +25,7 @@ learns are the same loop.
 """
 from __future__ import annotations
 
+import os
 import random
 from pathlib import Path
 
@@ -65,7 +66,16 @@ class Distil:
         self.memory.load(self.workspace.memory)
         self.mcp = McpRegistry(self.memory, self.workspace)
         self.mcp.load_config(self.workspace.home / "mcp.json")
-        self.toolbox = Toolbox(self.memory, self.workspace.workshop, self.mcp)
+        # A browser is attached only when one is configured. Registering the
+        # actions unconditionally would fill recall with capabilities that cannot
+        # run, and a tool that is recalled and then fails is worse than one that
+        # was never offered.
+        self.browser = None
+        if os.environ.get("DISTIL_WEBDRIVER"):
+            from .browser import Browser, register as register_browser
+            self.browser = Browser()
+            register_browser(self.memory)
+        self.toolbox = Toolbox(self.memory, self.workspace.workshop, self.mcp, self.browser)
         self.toolsmith = Toolsmith(self.memory, self.provider, self.workspace.workshop,
                                    toolbox=self.toolbox)
         self.reasoner = Reasoner(self.memory, self.provider, self.policy, self.toolbox)
@@ -97,7 +107,7 @@ class Distil:
         return frame, plan
 
     def solve(self, task: str, persist: bool = True, interrogate: bool = True,
-              understand_first: bool = True, ask=None) -> dict:
+              understand_first: bool = True, ask=None, observer=None) -> dict:
         """Understand the game, then reason about it, then refuse to stop at the
         first refusal.
 
@@ -109,7 +119,30 @@ class Distil:
         produces a well-organised plan for the wrong problem, and that is the
         most expensive thing this system can do (DESIGN 7.2: BUILD pays -0.80 in
         a wrong frame).
+
+        `observer`, when given, is called with each reasoning step at the moment
+        it is known. FRAME, AGENDA and PRECEDENT are computed before the reasoner
+        runs but inserted at the head of the chain afterwards, so they are emitted
+        here rather than through `Chain.add` -- which makes the stream order, the
+        display order and the order things actually happened the same order.
         """
+        def emit(step):
+            if observer is not None:
+                try:
+                    observer(step)
+                except Exception:
+                    pass
+            return step
+
+        # Every question searches memory, before anything decides what to do with
+        # it. The RETRIEVE step inside the reasoner is not enough: it runs only
+        # once the clarification gate has passed, so a question that got gated
+        # came back as a list of questions and nothing else -- while the store
+        # might already have held the answer. Recall is the cheapest thing this
+        # system does and the only one that is always applicable, so it is
+        # unconditional and its results ride on every reply.
+        recalled = self.recall_for(task)
+
         if understand_first:
             clarified = self.clarifier.clarify(task, ask=ask)
             frame, plan = clarified.frame, clarified.plan
@@ -118,41 +151,51 @@ class Distil:
                 return {"task": task, "solved": False, "session": None,
                         "needs_clarification": True, "questions": clarified.questions,
                         "clarification": clarified, "frame": frame, "agenda": plan,
-                        "reason": clarified.reason}
+                        "recall": recalled, "reason": clarified.reason}
         else:
             frame, plan = (None, None)
         objective = frame.objective if frame is not None else None
         lookup = objective if (objective and objective.strip() != task.strip()) else task
+        if lookup != task:
+            # Clarification established what the question actually was, so ask the
+            # store that instead. Recalling on the raw task and stopping there
+            # would throw away exactly what the asking bought.
+            recalled = self.recall_for(lookup, asked=task)
         precedent = self.casebook.adapt(lookup)
-        session = self.reasoner.run(task, interrogate_first=interrogate,
-                                    objective=objective)
+
+        head = []
         if frame is not None:
-            session.chain.steps.insert(0, _thought(
+            head.append(emit(_thought(
                 Step.FRAME,
                 f"{frame.players}, {frame.payoff}, {frame.horizon}; referee: "
                 f"{frame.referee or 'none'}; solution concept: {frame.solution} "
                 f"(confidence {frame.confidence:.2f})",
-                frame=frame.to_json()))
-            session.chain.steps.insert(1, _thought(
+                frame=frame.to_json())))
+            head.append(emit(_thought(
                 Step.AGENDA,
                 f"{len(plan.gaps)} capability gap(s) of {len(plan.capabilities)}; "
                 f"first item: {plan.items[0][:70] if plan.items else 'none'}",
-                items=plan.items, gaps=[c.action for c in plan.gaps]))
+                items=plan.items, gaps=[c.action for c in plan.gaps])))
         if precedent.get("precedent") or precedent.get("avoid"):
             best = precedent.get("precedent")
-            session.chain.steps.insert(2 if frame is not None else 0, _thought(
+            head.append(emit(_thought(
                 Step.PRECEDENT,
                 (f"closest working case: {best.case.solution[:60]!r}" if best
                  else "no case on record worked")
                 + f"; {len(precedent['avoid'])} known-bad approach(es) to avoid",
                 note=precedent["note"],
-                avoid=[p.case.solution for p in precedent["avoid"]]))
+                avoid=[p.case.solution for p in precedent["avoid"]])))
+
+        session = self.reasoner.run(task, interrogate_first=interrogate,
+                                    objective=objective, observer=observer)
+        session.chain.steps[:0] = head
         session.frame = frame
         session.agenda = plan
         session.precedent = precedent
         if session.chosen is None:
             return {"task": task, "session": session, "solved": False,
                     "frame": frame, "agenda": plan, "precedent": precedent,
+                    "recall": recalled,
                     "reason": "nothing on the frontier to act on"}
 
         goal = session.chosen
@@ -256,7 +299,34 @@ class Distil:
                 "reason": outcome["reason"], "goal": goal.text, "attempts": attempts,
                 "refusals": outcome.get("refusals", []), "credit": shares,
                 "boundary": outcome.get("boundary"), "frame": frame,
-                "agenda": plan, "precedent": precedent}
+                "agenda": plan, "precedent": precedent, "recall": recalled}
+
+    def recall_for(self, query: str, k: int = 6, asked: str | None = None) -> dict:
+        """What the store already knows about this, with the ranking shown.
+
+        Every reply carries one of these, so it answers "why did it say that?"
+        without a separate search: the same hits the reasoning saw, ranked the
+        same way, with the three factors kept apart rather than collapsed into
+        one number. `asked` records the original wording when clarification
+        changed the query, because a hit list against a question the user did not
+        type is confusing without it.
+        """
+        query = (query or "").strip()
+        if not query:
+            return {"query": query, "hits": []}
+        hits = self.memory.recall(query, k=k)
+        return {
+            "query": query,
+            "asked": asked,
+            "weights": {"similarity": self.policy.recall_similarity_weight,
+                        "credibility": self.policy.recall_credibility_weight,
+                        "recency": self.policy.recall_recency_weight},
+            "hits": [{"id": h.trace.id, "kind": h.trace.kind, "text": h.trace.text,
+                      "score": round(h.score, 5), "similarity": round(h.similarity, 5),
+                      "credibility": round(h.credibility, 5), "recency": round(h.recency, 5),
+                      "grade": h.trace.mean_grade, "verified": h.trace.verified}
+                     for h in hits],
+        }
 
     # -- the other entry points --------------------------------------------------
 

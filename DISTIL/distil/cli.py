@@ -124,18 +124,8 @@ def cmd_mcp(args) -> int:
         if not command:
             print("  usage: --add <name> <command> [args...]", file=sys.stderr)
             return 1
-        d.mcp.add(name, command)
-        path = d.workspace.home / "mcp.json"
-        config = {}
-        if path.exists():
-            try:
-                config = json.loads(path.read_text())
-            except json.JSONDecodeError:
-                config = {}
-        config.setdefault("mcpServers", {})[name] = {"command": command[0],
-                                                     "args": command[1:]}
-        path.write_text(json.dumps(config, indent=2))
-        print(f"  added {name} -> {' '.join(command)}  (saved to {path})")
+        d.mcp.attach(name, command)
+        print(f"  added {name} -> {' '.join(command)}  (saved to {d.mcp.config_path})")
     if not d.mcp.names():
         print("  no mcp servers configured")
         print(f"  add one:  distil mcp --add fs npx -y @modelcontextprotocol/server-filesystem /tmp")
@@ -152,6 +142,40 @@ def cmd_mcp(args) -> int:
           f"locally forged ones, ungraded until used")
     d.save()
     d.mcp.close()
+    return 0
+
+
+def cmd_auto(args) -> int:
+    """The autonomous loop, at the terminal.
+
+    Ctrl-C finishes the cycle in flight rather than killing it mid-forge, so
+    memory is never left half-written -- the same contract the web UI gets when
+    the tab closes.
+    """
+    from .auto import Auto
+    d = _agent(args)
+    stopping = {"now": False}
+    loop = Auto(d, stop=lambda: stopping["now"])
+
+    def report(cycle) -> None:
+        mark = "" if cycle.learned else "  (nothing to do)"
+        print(f"  {cycle.n:>4}  {cycle.move:<12} {cycle.learned:5.2f}  {cycle.note}{mark}")
+
+    try:
+        loop.run(cycles=args.cycles, on_cycle=report)
+    except KeyboardInterrupt:
+        stopping["now"] = True
+        print("\n  stopping after this cycle")
+    finally:
+        d.save()
+        d.mcp.close()
+    print(f"\n  {loop.n} cycle(s); it chose: "
+          + ", ".join(f"{k} {v:.0%}" for k, v in sorted(
+              loop.strategy().items(), key=lambda kv: -kv[1])))
+    if loop.directions:
+        print(f"  {len(loop.directions)} direction(s) it set itself, most recently:")
+        for text in loop.directions[-3:]:
+            print(f"    {text[:96]}")
     return 0
 
 
@@ -562,6 +586,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("tools", help="list registered tools")
     s.set_defaults(fn=cmd_tools)
+
+    s = sub.add_parser("auto", help="run by itself: question, experiment, build, pursue")
+    s.add_argument("--cycles", type=int, default=0,
+                   help="0 runs until Ctrl-C")
+    s.set_defaults(fn=cmd_auto)
 
     s = sub.add_parser("explore", help="brainstorm and run experiments")
     s.add_argument("--steps", type=int, default=3)

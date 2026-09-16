@@ -14,7 +14,7 @@ it then has to prove work.
 cd DISTIL
 make help                                   # every target, with its defaults
 make demo                                   # the whole system, offline, no key
-make test                                   # 288 tests, ~25s
+make test                                   # 319 tests, ~60s
 ```
 
 There is a `Makefile` for all of it — `make ask TASK="..."`, `make recall
@@ -24,7 +24,7 @@ here cannot quietly rewrite a real memory. The commands it wraps:
 
 ```bash
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 288 tests, ~25s
+python3 -m tests.test_distil                # 319 tests, ~60s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -34,11 +34,13 @@ python3 -m distil.cli ask   "build a csv cleaner and compute the median of each 
 python3 -m distil.cli why   "we must rewrite the parser in Rust because Python is too slow"
 python3 -m distil.cli forge "compute the median of a list"
 python3 -m distil.cli explore --steps 3
+python3 -m distil.cli auto --cycles 20     # it picks its own next move, and keeps going
 python3 -m distil.cli cases --like "the csv has ragged rows"
 python3 -m distil.cli compress --dry-run
 python3 -m distil.cli selfedit reason.py "cache the payoff matrix between calls"
 
-python3 -m distil.cli ui                    # the React frontend on 127.0.0.1:8765
+python3 -m distil.cli ui                    # the chat frontend on 127.0.0.1:8765
+docker compose up -d                        # ... plus a Chrome container it may drive
 ```
 
 **Zero third-party dependencies at runtime.** Standard library only, like the
@@ -221,7 +223,10 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 | `sandbox.py` | 200 | AST screen, subprocess, timeout, stripped environment |
 | `grade.py` | 252 | parse → screen → run → tests → determinism |
 | `embed.py` | 201 | signed hashing trick, online IDF, blake2b |
-| `serve.py` | 519 | the local HTTP API the frontend drives |
+| `serve.py` | 700 | the local HTTP API the frontend drives, including two SSE streams |
+| `auto.py` | 380 | the loop that runs itself: six moves, regret-matched, rewarded for information |
+| `browser.py` | 200 | a Chrome it can drive, over W3C WebDriver, as tools in the same embedding layer |
+| `speech.py` | 175 | local transcription when a Whisper binary exists, and honesty when it does not |
 | `project.py` | 139 | PCA by power iteration: 512 dims down to a plane you can look at |
 
 ## The frontend
@@ -231,22 +236,94 @@ python3 -m distil.cli ui                    # http://127.0.0.1:8765
 cd ui && npm install && npm run build       # only if you change the React source
 ```
 
-Six panels, each built around the one claim its part of the system makes.
+**One conversation, not a dashboard.** This was six tabs. Tabs make you navigate
+to a system and hold the correlation between views in your head; everything here
+is a message instead, so the transcript is the record of what happened, in order,
+and the thing you asked four questions ago is still on the page underneath its
+answer.
 
-| panel | what it shows | why it is there |
-|---|---|---|
-| **Ask** | the frame, the agenda, the payoff matrix, the goal tree, all twelve typed steps, the verdict | the reasoning is legible or it is not reasoning |
-| **Memory** | every trace projected onto a plane, coloured by kind | you can see whether the space has structure |
-| **Recall** | each hit decomposed into similarity, credibility and recency | the ranking's claim, checkable |
-| **Tools** | what it has written, what each one solved, its grade | capability, with its evidence |
-| **Explore** | H(p) with the candidate experiments plotted on it | why a bad idea is worth running |
-| **System** | policy, providers, compression, the casebook | every number it may change about itself |
+Ask a question in plain language. Everything else is a slash command, with an
+autocomplete menu — `/tools`, `/recall`, `/explore`, `/trace`, `/mcp add …` — and
+each one renders its result as a turn in the same transcript.
 
-The Recall panel flags the case the design exists for: when the top hit is *not*
-the most similar one, credibility did the work, and the banner says so rather
-than leaving it to be noticed. The Explore curve puts each candidate on H(p),
-where the ideas nearest the peak are the ones the system cannot call — which is
-the whole argument for testing bad ideas.
+An answer leads with the verdict. The frame, the payoff matrix, the goal tree and
+all twelve reasoning steps sit underneath it, collapsed, each with a summary
+saying whether it is worth opening. The previous version rendered six expanded
+cards — about two thousand pixels for one question, with the answer at the
+bottom, under everything that led to it.
+
+**Grading is where the opinion is.** The verdict carries +1 / 0 / −1 buttons. It
+used to require copying a trace id, switching tabs, finding the point in a
+scatter plot and clicking it — and a feedback loop with four steps of friction is
+one nobody closes. User grades count double, so this is the single highest-value
+interaction in the product.
+
+**Every question searches memory**, and the result rides on every reply, gated or
+not. A question that got stopped for clarification used to return questions and
+nothing else — the one case where "what do I already know about this?" is most
+useful was the case that answered it least.
+
+**Speech.** The microphone says where your voice is going *before* it listens. If
+a Whisper binary is on `PATH`, audio is recorded, POSTed to `/api/transcribe` and
+never leaves the machine. Otherwise the browser's Web Speech API does it — which
+in Chrome means the audio goes to Google, and a local-first tool that hid that
+would be lying by omission. Ollama is not an option here: it serves language and
+embedding models and does not transcribe audio.
+
+## Running by itself
+
+`▸ run by itself` starts an autonomous loop (`distil/auto.py`) that narrates into
+the same transcript. Six moves compete for each cycle, regret-matched, so the mix
+is *learned* from what each returned rather than fixed:
+
+| move | what it does |
+|---|---|
+| **question** | takes something it believes and asks why until the chain terminates, then attacks the premises |
+| **experiment** | brainstorms and runs one, ranked by information gain |
+| **build** | finds a capability gap and forges a tool through the grader |
+| **consolidate** | folds cold memory into digests that keep the detail |
+| **tune** | re-fits its own policy against measured outcomes |
+| **pursue** | sets itself a new problem and runs the full solve loop on it |
+
+It is rewarded for **information, not success**. A move that confirms what it
+already believed scores near zero however cleanly it ran; one that refutes
+something scores highly. Rewarding correctness would teach it to stop proposing
+the experiments worth running.
+
+**It never runs out of direction.** The first five moves all consume pools that
+empty — a last unquestioned belief, a last known gap, a last cold cluster — and
+when they did, every cycle returned "nothing to do" and the loop spun: neither
+working nor finished. `pursue` is the answer, and it is forced after two barren
+cycles. It draws directions from five sources, round-robin, the last of which
+cannot exhaust (pairs of distant memories are quadratic, and every cycle adds to
+*n*). Started against an empty store it plants the starter toolkit first, because
+there is otherwise nothing to derive a direction from.
+
+The dashboard above the log reports outcomes rather than activity: "63 cycles"
+says how long it ran, "2 tools built, 9 beliefs found resting on nothing, 4 ideas
+refuted" says whether that was worth it.
+
+It **cannot edit its own source**. `selfedit` is reachable only from the command
+line, deliberately: an unattended loop with write access to its own grader makes
+every grade in the store meaningless.
+
+## Driving a browser
+
+`distil/browser.py` speaks W3C WebDriver over `urllib` — no Selenium, no
+dependency. The actions are embedded as ordinary `Kind.TOOL` traces, so
+`browser.read` is recalled by the same query that finds a locally forged function
+or an MCP tool: one embedding layer over every capability.
+
+```bash
+docker compose up -d           # the agent, plus a Chrome container it may drive
+```
+
+A driven browser runs whatever the pages it visits contain, in a process this
+package does not control. That is the argument for the compose file: chromedriver
+belongs in a container, its port is never published, and the agent reaches it by
+service name. Set `DISTIL_WEBDRIVER` to attach one; without it the browser tools
+are not registered at all, because a capability that is recalled and then fails
+is worse than one that was never offered.
 
 The projection is PCA by power iteration from a *fixed* start vector, so the same
 store always draws the same picture and a moved point means the memory moved.

@@ -478,6 +478,71 @@ class McpRegistry:
         self.servers[name] = server
         return server
 
+    @property
+    def config_path(self):
+        """Where attachments are persisted, or None with no workspace.
+
+        A server added at runtime and lost on restart would be worse than one
+        that was never added: the tools stay in the embedding layer, recalled and
+        uncallable.
+        """
+        from pathlib import Path
+        if self.workspace is None:
+            return None
+        home = getattr(self.workspace, "home", self.workspace)
+        return Path(home) / "mcp.json"
+
+    def _rewrite_config(self, mutate) -> None:
+        path = self.config_path
+        if path is None:
+            return
+        config = {}
+        if path.exists():
+            try:
+                config = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                config = {}          # a corrupt file is replaced, not inherited
+        if not isinstance(config, dict):
+            config = {}
+        servers = config.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            servers = config["mcpServers"] = {}
+        mutate(servers)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2))
+
+    def attach(self, name: str, command: list[str], env: dict | None = None,
+               cwd: str | None = None) -> McpServer:
+        """`add`, and remember it across restarts.
+
+        The CLI and the HTTP API both attach servers, and writing the config in
+        two places is how they drift.
+        """
+        server = self.add(name, command, env, cwd)
+        entry = {"command": command[0], "args": list(command[1:])}
+        if env:
+            entry["env"] = dict(env)
+        if cwd:
+            entry["cwd"] = cwd
+        self._rewrite_config(lambda servers: servers.__setitem__(name, entry))
+        return server
+
+    def detach(self, name: str) -> bool:
+        """Stop a server, forget it, and take it out of the config.
+
+        Its tools stay in memory as traces -- they were recalled and may have
+        been used, and deleting that history would be rewriting the record. They
+        simply stop being callable, which `Toolbox.invoke` already reports.
+        """
+        server = self.servers.pop(name, None)
+        if server is not None:
+            try:
+                server.close()
+            except Exception:
+                pass
+        self._rewrite_config(lambda servers: servers.pop(name, None))
+        return server is not None
+
     def load_config(self, path) -> list[str]:
         """Read an `mcpServers` config -- the same shape Claude Desktop and
         Claude Code use, so an existing file works unchanged:

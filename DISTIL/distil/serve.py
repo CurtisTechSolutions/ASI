@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import queue
 import threading
 import traceback
 from dataclasses import asdict, is_dataclass
@@ -143,6 +144,7 @@ class Api:
     def __init__(self, agent: Distil) -> None:
         self.agent = agent
         self.lock = threading.Lock()
+        self.auto = None                 # the running autonomous loop, if any
 
     # -- reads ---------------------------------------------------------------
 
@@ -244,6 +246,47 @@ class Api:
                            "bits": round(entropy(i.p_success), 4),
                            "value": round(i.value(policy), 4)} for i in found]}
 
+    def trace(self, q) -> dict:
+        """One trace, with the graph around it resolved.
+
+        `links` is stored on every trace and was never rendered, which meant
+        credit propagation -- the mechanism that moves a grade from an answer back
+        to what it was built on -- ran entirely out of sight. Backlinks are
+        computed by scanning the store because links are one-directional: a tool
+        does not know which solutions used it, and that is the direction a person
+        reads in.
+        """
+        trace_id = (q.get("id") or [""])[0].strip()
+        if not trace_id:
+            return {"error": "a trace id is required"}
+        trace = self.agent.memory.store.get(trace_id)
+        if trace is None:
+            return {"error": f"no such trace: {trace_id}"}
+        policy = self.agent.policy
+        linked = [self.agent.memory.store.get(i) for i in trace.links]
+        backlinks = [t for t in self.agent.memory.store.all()
+                     if trace_id in t.links and t.id != trace_id]
+        return {"trace": trace_json(trace, policy),
+                "links": [_edge(t, policy) for t in linked if t is not None],
+                "missing": [i for i, t in zip(trace.links, linked) if t is None],
+                "backlinks": [_edge(t, policy) for t in backlinks]}
+
+    def speech(self, _q) -> dict:
+        """What this machine can transcribe, and where the audio would go."""
+        from .speech import available
+        return available()
+
+    def mcp(self, _q) -> dict:
+        servers = []
+        for name in self.agent.mcp.names():
+            server = self.agent.mcp.servers[name]
+            servers.append({"name": name, "command": list(server.command),
+                            "alive": server.alive()})
+        return {"servers": servers,
+                "config": str(self.agent.mcp.config_path or ""),
+                "tools": [t.name for t in self.agent.toolbox.all()
+                          if t.transport == "mcp"]}
+
     def journal(self, _q) -> dict:
         path = self.agent.workspace.journal
         if not path.exists():
@@ -267,9 +310,10 @@ class Api:
         if not task:
             return {"error": "a task is required"}
         answers = body.get("answers") or {}
-        ask_fn = (lambda questions: dict(answers)) if answers else None
+        ask_fn = body.get("_ask") or ((lambda questions: dict(answers)) if answers else None)
         result = self.agent.solve(task, ask=ask_fn,
-                                  interrogate=bool(body.get("interrogate", True)))
+                                  interrogate=bool(body.get("interrogate", True)),
+                                  observer=body.get("_observer"))
         out = {"task": task, "solved": result.get("solved"),
                "reason": result.get("reason"),
                "frame": frame_json(result.get("frame"), result.get("agenda")),
@@ -277,6 +321,8 @@ class Api:
                "attempts": result.get("attempts", []),
                "refusals": result.get("refusals", []),
                "boundary": result.get("boundary"),
+               # Every reply carries what the store already knew, gated or not.
+               "recall": result.get("recall") or {"hits": []},
                "credit": result.get("credit", {})}
         if result.get("questions"):
             out["questions"] = [{"gap": q.gap, "text": q.text, "unblocks": q.unblocks,
@@ -305,6 +351,62 @@ class Api:
         if precedent.get("precedent"):
             out["precedent"] = _case(precedent["precedent"])
         return out
+
+    def clarify(self, body: dict) -> dict:
+        """Questions until the first step is actionable -- without committing.
+
+        `ask` runs this too, but only as a gate it then passes through. Exposing
+        it alone means a task can be sharpened before anything is distilled, which
+        is the cheap half of the loop.
+        """
+        task = (body.get("task") or "").strip()
+        if not task:
+            return {"error": "a task is required"}
+        answers = body.get("answers") or {}
+        ask_fn = (lambda questions: dict(answers)) if answers else None
+        out = self.agent.clarifier.clarify(task, ask=ask_fn,
+                                           max_rounds=int(body.get("rounds", 2)))
+        self.agent.save()
+        return {"task": task, "actionable": out.actionable, "reason": out.reason,
+                "rounds": out.rounds, "frame": frame_json(out.frame, out.plan),
+                "recall": self.agent.recall_for(task),
+                "questions": [{"gap": q.gap, "text": q.text, "unblocks": q.unblocks,
+                               "value": q.value, "known": q.answered_by_memory}
+                              for q in out.questions]}
+
+    def mcp_attach(self, body: dict) -> dict:
+        """Attach or detach an MCP server.
+
+        This starts a subprocess of the caller's choosing, which is the most
+        powerful thing any endpoint here does -- so it is the clearest case for
+        the cross-site refusal in `Handler`: a page you merely visited must never
+        reach it.
+        """
+        action = (body.get("action") or "add").strip()
+        name = (body.get("name") or "").strip()
+        if not name:
+            return {"error": "a server name is required"}
+        if action == "remove":
+            return {"removed": self.agent.mcp.detach(name), "servers": self.agent.mcp.names()}
+        command = body.get("command") or []
+        if isinstance(command, str):
+            command = command.split()
+        command = [str(part) for part in command if str(part).strip()]
+        if not command:
+            return {"error": "a command is required, e.g. [\"npx\", \"-y\", \"@mcp/fs\", \"/tmp\"]"}
+        self.agent.mcp.attach(name, command)
+        report = self.agent.mcp.discover(name)
+        self.agent.save()
+        failed = [f for f in report["failed"] if f["server"] == name]
+        return {"attached": name, "tools": report["servers"].get(name, []),
+                "failed": failed, "servers": self.agent.mcp.names()}
+
+    def transcribe_audio(self, raw: bytes) -> dict:
+        from .speech import SpeechError, transcribe
+        try:
+            return transcribe(raw)
+        except SpeechError as exc:
+            return {"error": str(exc)}
 
     def grade(self, body: dict) -> dict:
         try:
@@ -358,6 +460,12 @@ class Api:
         return {"result": self.agent.upgrade(trials=int(body.get("trials", 6)))}
 
 
+def _edge(t, policy) -> dict:
+    """A neighbour in the link graph: enough to render and click, no more."""
+    return {"id": t.id, "kind": t.kind, "text": t.text, "grade": t.mean_grade,
+            "verified": t.verified, "credibility": round(t.credibility(policy), 4)}
+
+
 def _case(p) -> dict:
     return {"problem": p.case.problem, "solution": p.case.solution, "grade": p.case.grade,
             "via": p.case.via, "similarity": round(p.similarity, 4),
@@ -365,8 +473,16 @@ def _case(p) -> dict:
 
 
 GET_ROUTES = {"state", "memory", "recall", "frame", "tools", "cases", "ideas",
-              "journal", "lineage"}
-POST_ROUTES = {"ask", "grade", "forge", "invoke", "explore", "seed", "compress", "upgrade"}
+              "journal", "lineage", "trace", "speech", "mcp"}
+POST_ROUTES = {"ask", "grade", "forge", "invoke", "explore", "seed", "compress",
+               "upgrade", "clarify", "mcp_attach"}
+#: Routes that stream rather than answering once. Handled apart from the JSON
+#: table because the response shape, the content type and the lifetime all differ.
+STREAM_ROUTES = {"ask/stream", "auto/stream"}
+#: Content types a POST may carry, per route. Everything else must be JSON: a
+#: type outside this set is not a CORS "simple request", so a cross-origin POST
+#: has to be preflighted, and the preflight finds no CORS headers here.
+POST_CONTENT = {"transcribe": ("audio/wav", "audio/wave", "audio/x-wav", "audio/webm")}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -414,7 +530,7 @@ class Handler(BaseHTTPRequestHandler):
         site = self.headers.get("Sec-Fetch-Site")
         return site is None or site in ("same-origin", "same-site", "none")
 
-    def _unforgeable_post(self) -> str | None:
+    def _unforgeable_post(self, route: str = "") -> str | None:
         """Why this POST should be refused, or None if it should not be.
 
         Two conditions, both about browsers. An `Origin` that is not loopback
@@ -430,9 +546,10 @@ class Handler(BaseHTTPRequestHandler):
             host = urlparse(origin).hostname
             if host not in LOOPBACK:
                 return "cross-origin request refused"
+        allowed = POST_CONTENT.get(route, ("application/json",))
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype != "application/json":
-            return "Content-Type must be application/json"
+        if ctype not in allowed:
+            return f"Content-Type must be one of: {', '.join(allowed)}"
         return None
 
     # -- routing -------------------------------------------------------------
@@ -446,6 +563,10 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(url.path)
         if path.startswith("/api/"):
             name = path[5:].strip("/")
+            if name == "auto/stream":
+                return self._stream_auto(parse_qs(url.query))
+            if name in STREAM_ROUTES:
+                return self._stream_ask(parse_qs(url.query))
             if name not in GET_ROUTES:
                 return self._json({"ok": False, "error": f"no such endpoint: {name}"}, 404)
             return self._run(lambda: getattr(self.api, name)(parse_qs(url.query)))
@@ -456,18 +577,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "non-loopback Host refused"}, 403)
         if not self._same_site():
             return self._json({"ok": False, "error": "cross-site request refused"}, 403)
-        refusal = self._unforgeable_post()
-        if refusal:
-            return self._json({"ok": False, "error": refusal}, 403)
         path = unquote(urlparse(self.path).path)
         if not path.startswith("/api/"):
             return self._json({"ok": False, "error": "not found"}, 404)
         name = path[5:].strip("/")
-        if name not in POST_ROUTES:
+        if name not in POST_ROUTES and name != "transcribe":
             return self._json({"ok": False, "error": f"no such endpoint: {name}"}, 404)
+        refusal = self._unforgeable_post(name)
+        if refusal:
+            return self._json({"ok": False, "error": refusal}, 403)
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            raw = self.rfile.read(length) if length else b""
+        except ValueError as exc:
+            return self._json({"ok": False, "error": f"bad Content-Length: {exc}"}, 400)
+        if name == "transcribe":
+            # Audio, not JSON. Read whole -- speech.check_wav bounds the size
+            # before anything is written to disk or handed to a subprocess.
+            return self._run(lambda: self.api.transcribe_audio(raw))
+        try:
+            body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
         except (ValueError, json.JSONDecodeError) as exc:
@@ -484,6 +613,160 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(payload, dict) and payload.get("error"):
             return self._json({"ok": False, **payload}, 400)
         self._json({"ok": True, **payload})
+
+    def _stream_ask(self, q) -> None:
+        """`GET /api/ask/stream?task=...` -- the chain as it is thought.
+
+        Reasoning that arrives all at once, a minute later, reads as a result.
+        The whole point of a typed chain is that it can be watched, so each step
+        is sent the moment it exists.
+
+        The agent runs on a worker thread and the request thread drains a queue.
+        That split is what lets a closed browser be noticed: writing to a dead
+        socket raises here, the queue stops being drained, and `Chain.watch`
+        drops the observer on its next failure rather than the run continuing to
+        push into a queue nobody reads.
+
+        The agent lock is held for the whole run, as everywhere else -- `Distil`
+        holds mutable memory and a workshop directory, so exactly one call runs at
+        a time. A long ask therefore blocks other endpoints; for a single-user
+        local tool that is the right trade against making the agent re-entrant.
+        """
+        task = (q.get("task") or [""])[0].strip()
+        if not task:
+            return self._json({"ok": False, "error": "a task is required"}, 400)
+        try:
+            answers = json.loads((q.get("answers") or ["{}"])[0])
+            if not isinstance(answers, dict):
+                answers = {}
+        except json.JSONDecodeError:
+            answers = {}
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        steps: "queue.Queue" = queue.Queue()
+        DONE = object()
+
+        def work():
+            try:
+                with self.api.lock:
+                    ask_fn = (lambda questions: dict(answers)) if answers else None
+                    result = self.api.ask({"task": task, "answers": answers,
+                                           "_observer": steps.put,
+                                           "_ask": ask_fn})
+                steps.put(("result", result))
+            except Exception as exc:
+                traceback.print_exc()
+                steps.put(("error", {"error": f"{type(exc).__name__}: {exc}"}))
+            finally:
+                steps.put(DONE)
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        self._send_event("open", {"task": task})
+        try:
+            while True:
+                try:
+                    item = steps.get(timeout=15.0)
+                except queue.Empty:
+                    # A comment frame: proves the connection is alive through a
+                    # long step without inventing a step that did not happen.
+                    self.wfile.write(b": still thinking\n\n")
+                    self.wfile.flush()
+                    continue
+                if item is DONE:
+                    break
+                if isinstance(item, tuple):
+                    self._send_event(item[0], item[1])
+                else:
+                    self._send_event("step", {"kind": item.kind, "text": item.text,
+                                              "payload": _plain(item.payload)})
+        except (BrokenPipeError, ConnectionResetError):
+            return                     # the browser left; the run finishes anyway
+        try:
+            self._send_event("done", {})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _stream_auto(self, q) -> None:
+        """`GET /api/auto/stream?cycles=N` -- the system running itself.
+
+        Same shape as the ask stream and for the same reason: an autonomous loop
+        you cannot watch is one you have to trust. Every cycle is reported with
+        what it chose, what it found and what that was worth in bits.
+
+        Stopping is by disconnection. The browser closes the EventSource, the
+        next write fails, and the stop flag is set -- which is the only signal
+        that survives the server being a plain `http.server` with no session of
+        its own. The loop finishes the cycle it is in rather than being killed
+        mid-forge, so memory is never left half-written.
+        """
+        try:
+            cycles = max(0, min(10000, int((q.get("cycles") or ["0"])[0])))
+        except ValueError:
+            cycles = 0
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        from .auto import Auto
+        done: "queue.Queue" = queue.Queue()
+        stopping = threading.Event()
+        DONE = object()
+
+        def work():
+            try:
+                with self.api.lock:
+                    loop = Auto(self.api.agent, stop=stopping.is_set)
+                    self.api.auto = loop
+                    loop.run(cycles=cycles, on_cycle=lambda c: done.put((loop, c)))
+            except Exception as exc:
+                traceback.print_exc()
+                done.put(("error", {"error": f"{type(exc).__name__}: {exc}"}))
+            finally:
+                done.put(DONE)
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        try:
+            self._send_event("open", {"cycles": cycles})
+            while True:
+                try:
+                    item = done.get(timeout=15.0)
+                except queue.Empty:
+                    self.wfile.write(b": still running\n\n")
+                    self.wfile.flush()
+                    continue
+                if item is DONE:
+                    break
+                if isinstance(item, tuple) and item[0] == "error":
+                    self._send_event("error", item[1])
+                    continue
+                loop, cycle = item
+                self._send_event("cycle", {**cycle.to_json(),
+                                           "strategy": loop.strategy(),
+                                           "stats": self.api.agent.stats()})
+        except (BrokenPipeError, ConnectionResetError):
+            stopping.set()               # the tab closed: finish this cycle, then stop
+            return
+        try:
+            self._send_event("done", {})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_event(self, name: str, data: dict) -> None:
+        body = json.dumps(data)
+        self.wfile.write(f"event: {name}\ndata: {body}\n\n".encode("utf-8"))
+        self.wfile.flush()
 
     def _static(self, path: str) -> None:
         target = (WEB / (path.lstrip("/") or "index.html")).resolve()
