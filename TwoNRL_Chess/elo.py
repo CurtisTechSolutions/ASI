@@ -158,12 +158,18 @@ class ArmPlayer:
 
 
 def fit_elo(games: list[tuple[int, int, float]], n: int, anchor: int = 0,
-            prior: float = 2.0, iters: int = 4000, lr: float = 3000.0) -> np.ndarray:
+            prior: float = 2.0, tol: float = 1e-4, max_iters: int = 2000) -> np.ndarray:
     """Maximum-likelihood Elo under the logistic model, anchored at ``anchor``.
 
+    Newton steps on the diagonal of the Hessian, iterated to convergence rather
+    than for a fixed count.  Plain gradient ascent needs thousands of passes to
+    settle when the field spans a thousand Elo, and a fixed budget that is
+    generous for the point estimate but not for the bootstrap produces intervals
+    that do not contain it - which is exactly the bug this replaces.
+
     ``prior`` adds that many virtual draws against a 0-rated phantom for every
-    player, which is what keeps an undefeated (or winless) player's rating
-    finite instead of running off to infinity.
+    player, which keeps an undefeated or winless player's rating finite instead
+    of running off to infinity.
     """
     if not games:
         return np.zeros(n)
@@ -172,25 +178,34 @@ def fit_elo(games: list[tuple[int, int, float]], n: int, anchor: int = 0,
     s = np.array([g[2] for g in games], dtype=float)
     r = np.zeros(n)
     scale = np.log(10.0) / 400.0
-    for _ in range(iters):
+    for _ in range(max_iters):
         p = 1.0 / (1.0 + np.power(10.0, -(r[i] - r[j]) / 400.0))
-        resid = s - p
-        g = np.zeros(n)
-        np.add.at(g, i, resid)
-        np.add.at(g, j, -resid)
-        g += prior * (0.5 - 1.0 / (1.0 + np.power(10.0, -r / 400.0)))
-        r += lr * scale * g / (len(games) + prior)
+        resid, curve = s - p, p * (1.0 - p)
+        grad, hess = np.zeros(n), np.zeros(n)
+        np.add.at(grad, i, resid)
+        np.add.at(grad, j, -resid)
+        np.add.at(hess, i, curve)
+        np.add.at(hess, j, curve)
+        pp = 1.0 / (1.0 + np.power(10.0, -r / 400.0))
+        grad += prior * (0.5 - pp)
+        hess += prior * pp * (1.0 - pp)
+        step = (grad / scale) / np.maximum(hess, 1e-9)
+        step = np.clip(step, -400.0, 400.0)          # no wild first move
+        r += step
         r -= r[anchor]
+        if np.abs(step).max() < tol:
+            break
     return r
 
 
 def bootstrap_elo(games, n, anchor=0, rounds=200, seed=7) -> np.ndarray:
+    """Resample games with replacement and refit - to the same tolerance."""
     rng = np.random.default_rng(seed)
     out = np.zeros((rounds, n))
     idx = np.arange(len(games))
     for b in range(rounds):
         pick = rng.choice(idx, size=len(games), replace=True)
-        out[b] = fit_elo([games[k] for k in pick], n, anchor, iters=1200)
+        out[b] = fit_elo([games[k] for k in pick], n, anchor)
     return out
 
 
@@ -293,7 +308,11 @@ def main() -> None:
             json.dump({"players": names, "ratings": rows,
                        "anchor": "random", "games": len(games),
                        "cross_table": cross.tolist(), "counts": counts.tolist(),
-                       "openings": len(fens)}, fh, indent=2)
+                       "openings": len(fens),
+                       # the raw results, so ratings can be refitted without
+                       # replaying five hundred games
+                       "results": [[int(a), int(b), float(sc)] for a, b, sc in games]},
+                      fh, indent=2)
         print(f"\nwrote {args.out}")
 
 
