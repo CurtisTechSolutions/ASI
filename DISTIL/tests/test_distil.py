@@ -999,7 +999,7 @@ def test_a_gap_answered_in_a_later_round_leaves_the_contested_list():
     """Otherwise the report says a question is still open that the person
     already answered."""
     _, c = _clarifier()
-    rounds = iter([{"referee": "the benchmark suite"},
+    rounds = iter([{"inputs": "a csv export"},
                    {"objective": "p99 latency under 200ms on the import path"}])
     out = c.clarify("make the thing better", ask=lambda qs: next(rounds, {}))
     assert out.actionable, out.reason
@@ -1012,8 +1012,9 @@ def test_incidental_questions_are_asked_once_but_blockers_come_back():
     the objective go unasked because it was raised once and ignored is how the
     loop gives up on the only thing preventing progress."""
     seen = []
-    answers = iter([{"referee": "the bench suite"}, {"inputs": "a csv export"},
-                    {"outputs": "a report"}])
+    # Deliberately never the referee: naming one makes the objective checkable
+    # by it, which ends the loop and would hide what this test is about.
+    answers = iter([{"inputs": "a csv export"}, {"outputs": "a report"}, {}])
 
     def ask(questions):
         seen.extend(q.gap for q in questions)
@@ -1046,9 +1047,37 @@ def test_answering_nothing_stops_early_but_still_surfaces_the_blocker():
     assert Gap.OBJECTIVE in [q.gap for q in out.questions]
 
 
+def test_naming_a_referee_makes_a_vague_objective_checkable():
+    """A judgement verb is only a problem when nothing can settle the judgement.
+    Gating "clean the export so the tests pass" on the word "clean" ignores the
+    referee standing right next to it."""
+    _, c = _clarifier()
+    assert not c.clarify("make the thing better").actionable
+    out = c.clarify("make the thing better", ask=lambda qs: {Gap.REFEREE: "the benchmark suite"})
+    assert out.actionable, out.reason
+
+
+def test_an_objective_of_i_do_not_know_is_not_an_objective():
+    """Only PAYOFF was guarded, so "I don't know" was written into the objective
+    and -- being different from the task -- then read as understood."""
+    _, c = _clarifier()
+    out = c.clarify("make the thing better", ask=lambda qs: {Gap.OBJECTIVE: "I don't know"})
+    assert not out.actionable, out.reason
+
+
+def test_an_answer_already_on_record_is_applied_even_with_nobody_to_ask():
+    """The early return ran before memory answers were absorbed, so solve() --
+    which passes ask=None -- re-gated a task on its own recorded answer."""
+    d, c = _clarifier()
+    frame = d.framer.frame("make the importer better")
+    c.absorb(frame, {Gap.OBJECTIVE: "p99 under 200ms on the import path",
+                     Gap.REFEREE: "the benchmark suite"})
+    assert c.clarify("make the importer better").actionable      # ask=None
+
+
 def test_a_gap_is_never_both_resolved_and_contested():
     _, c = _clarifier()
-    rounds = iter([{"referee": "a bench"}, {"objective": "p99 under 200ms"}])
+    rounds = iter([{"inputs": "a csv export"}, {"objective": "p99 under 200ms"}])
     out = c.clarify("make the thing better", ask=lambda qs: next(rounds, {}))
     assert not (set(out.resolved) & set(out.contested))
 
@@ -1087,7 +1116,7 @@ def test_saying_you_do_not_know_the_payoffs_is_not_knowing_them():
 
 def test_a_blocking_gap_answered_late_still_unblocks():
     _, c = _clarifier()
-    rounds = iter([{"referee": "the benchmark suite"},
+    rounds = iter([{"inputs": "a csv export"},
                    {"objective": "p99 latency under 200ms on the import path"}])
     out = c.clarify("make the thing better", ask=lambda qs: next(rounds, {}))
     assert out.actionable, out.reason
@@ -2139,6 +2168,55 @@ def test_solve_reuses_a_tool_on_the_second_encounter():
     d.solve("compute the median of a column", interrogate=False)
     r = d.solve("compute the median of a column", interrogate=False)
     assert any("existing tool" in a["via"] for a in r["attempts"])
+
+
+def test_reuse_does_not_manufacture_a_verifier_grade():
+    """Reuse deliberately does not run the tool, so it must not record a
+    Source.SELF success for it. Each reuse used to push a +1 that could outvote
+    the real negative grades a failing tool had earned."""
+    d = fresh(seed=1)
+    d.solve("compute the median of a column", interrogate=False)
+    trace = next(t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "median")
+    before = list(trace.grades)
+    r = d.solve("compute the median of a column", interrogate=False)
+    assert any("existing tool" in a["via"] for a in r["attempts"]), "this must be the reuse path"
+    after = next(t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "median")
+    assert len(after.grades) == len(before), "a tool that never ran earned no grade"
+
+
+def test_a_tool_the_store_has_graded_negative_is_not_reused():
+    """The gate read the score frozen into the tool's JSON at registration, so
+    everything that happened since was invisible to it."""
+    from distil.agent import _reusable
+    d = fresh(seed=1)
+    d.solve("compute the median of a column", interrogate=False)
+    spec = d.toolbox.load("median")
+    assert _reusable(spec, d.memory)
+    for _ in range(4):
+        d.toolbox.record_use("median", "a problem it got wrong", False)
+    assert not _reusable(d.toolbox.load("median"), d.memory)
+
+
+def test_using_a_tool_puts_the_problem_into_its_searchable_text():
+    """record_use updated meta but never re-embedded, so the solved problem
+    never joined the vector it is documented to join."""
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    assert not d.toolbox.find("collapse a ragged telemetry export", k=1) or \
+        d.toolbox.find("collapse a ragged telemetry export", k=1)[0][2] < 0.3
+    d.toolbox.record_use("parse_csv", "collapse a ragged telemetry export", True)
+    found = d.toolbox.find("collapse a ragged telemetry export", k=1)
+    assert found and found[0][0].name == "parse_csv" and found[0][2] > 0.3
+
+
+def test_invoking_a_tool_with_a_missing_dependency_returns_an_error():
+    """bundle() raises; invoke()'s whole contract is to return a result dict."""
+    d = fresh()
+    spec = ToolSpec(name="orphan", purpose="p", source="def orphan():\n    return 1\n",
+                    tests="assert orphan() == 1", signature="orphan()", deps=["gone"])
+    d.toolsmith.register(spec, threshold=-2.0)
+    out = d.toolbox.invoke("orphan")
+    assert not out["ok"] and "not registered" in out["error"]
 
 
 def test_an_impossible_task_returns_a_mapped_boundary_not_a_crash():

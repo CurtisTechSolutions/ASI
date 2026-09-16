@@ -448,6 +448,11 @@ class Agenda:
     #: the item text, because "is this step actionable?" is the termination
     #: condition of the clarification loop and it must not depend on wording.
     needs_person: list[str] = field(default_factory=list)
+    #: Items that are neither work nor blockers -- observations worth printing
+    #: ("nothing here can be self-graded"). They lead the list because they
+    #: change how the work should be read, which is exactly why "is the first
+    #: item executable?" must not be answered by looking at items[0].
+    advisories: list[str] = field(default_factory=list)
 
     @property
     def gaps(self) -> list[Capability]:
@@ -455,7 +460,8 @@ class Agenda:
 
     @property
     def actionable_items(self) -> list[str]:
-        return [i for i in self.items if i not in self.needs_person]
+        return [i for i in self.items
+                if i not in self.needs_person and i not in self.advisories]
 
     def render(self) -> str:
         lines = ["  what the game needs, and whether this system can do it:"]
@@ -541,11 +547,16 @@ def agenda(frame: GameFrame, caps: list[Capability]) -> Agenda:
     # records" because no verifier could be named for them in advance. What
     # blocks a first step is narrower: not being able to state what done means,
     # or having no move to make.
+    advisories: list[str] = []
     if not frame.referee:
-        items.append("find the referee: what would say no, and how fast? "
-                     "(without one, nothing here can be self-graded)")
+        item = ("find the referee: what would say no, and how fast? "
+                "(without one, nothing here can be self-graded)")
+        items.append(item)
+        advisories.append(item)
     if frame.information == Information.INCOMPLETE:
-        items.append("the payoffs are unknown: form beliefs before optimising")
+        item = "the payoffs are unknown: form beliefs before optimising"
+        items.append(item)
+        advisories.append(item)
     for cap in caps:
         if cap.gap:
             items.append(f"forge a capability for {cap.action!r} -- nothing covers it yet")
@@ -553,5 +564,7 @@ def agenda(frame: GameFrame, caps: list[Capability]) -> Agenda:
         if not cap.gap:
             items.append(f"{cap.action} (via {cap.covered_by})")
     if frame.horizon == Horizon.REPEATED:
-        items.append("this game repeats: prefer a move that survives being played again")
-    return Agenda(frame, caps, items, blocking)
+        item = "this game repeats: prefer a move that survives being played again"
+        items.append(item)
+        advisories.append(item)
+    return Agenda(frame, caps, items, blocking, advisories)

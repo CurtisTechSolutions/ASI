@@ -172,8 +172,18 @@ class Distil:
             found = self.toolbox.find(goal_text, k=1)
             if found and found[0][2] >= 0.35:            # threshold on similarity
                 spec, _, similarity = found[0]
-                if (spec.grade is None or spec.grade.score > 0) and _proven(spec, self.memory):
-                    self.toolbox.record_use(spec.name, goal_text, True)
+                if _reusable(spec, self.memory):
+                    # NOT record_use. That records a Source.SELF success, and
+                    # this branch deliberately does not run the tool -- so it was
+                    # manufacturing verifier evidence for something that never
+                    # executed, and each reuse pushed a +1 that could outvote the
+                    # real negative grades a failing tool had earned. The reuse
+                    # is noted as a fact; only an actual run may grade.
+                    self.memory.remember(
+                        Kind.FACT,
+                        f"{spec.name} already covers {goal_text!r} (similarity {similarity:.2f})",
+                        meta={"tool": spec.name, "goal": goal_text, "ran": False},
+                        links=[goal.trace_id] if goal.trace_id else None)
                     attempts.append({"goal": goal_text, "reframe": reframe,
                                      "via": f"existing tool {spec.name}", "ok": True,
                                      "similarity": round(similarity, 3)})
@@ -288,6 +298,21 @@ def _thought(kind: str, text: str, **payload):
     return Thought(kind, text, payload)
 
 
+def _live_grade(spec, memory):
+    """What the STORE currently thinks of this tool, not what it thought once.
+
+    `spec.grade` for a local tool is the score frozen into its JSON at
+    registration. Everything that happened since -- every `record_use`, every
+    failure -- lands on the memory trace instead, so gating on the frozen value
+    reused a tool the store had already graded negative and reported it as
+    verified.
+    """
+    for trace in memory.of_kind(Kind.TOOL):
+        if trace.meta.get("tool") == spec.name:
+            return trace.mean_grade
+    return spec.grade.score if spec.grade else None
+
+
 def _proven(spec, memory) -> bool:
     """Has this tool actually carried a problem before?
 
@@ -297,8 +322,8 @@ def _proven(spec, memory) -> bool:
     `solve` -- the condition could not be satisfied by any sequence of events.
 
     So an MCP tool counts as proven once it has been used successfully at least
-    once and carries a positive grade. That keeps the rule honest in both
-    directions: nothing is reused on faith, and nothing is unreachable forever.
+    once and carries a positive grade. Nothing is reused on faith, and nothing
+    is unreachable forever.
     """
     if spec.solved:
         return True
@@ -306,3 +331,11 @@ def _proven(spec, memory) -> bool:
         return False
     trace = memory.get(spec.trace_id)
     return bool(trace and trace.verified and (trace.mean_grade or 0) > 0)
+
+
+def _reusable(spec, memory) -> bool:
+    """Proven, and not since disgraced."""
+    grade = _live_grade(spec, memory)
+    if grade is not None and grade <= 0:
+        return False
+    return _proven(spec, memory)

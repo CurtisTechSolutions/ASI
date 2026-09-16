@@ -156,6 +156,11 @@ def objective_unclear(frame: GameFrame) -> bool:
         return True
     if frame.objective.strip() != frame.task.strip():
         return False           # an objective was stated separately; take it
+    if frame.referee:
+        # Something will say no. A judgement verb is only a problem when nothing
+        # can settle the judgement, and gating "clean the export so the tests
+        # pass" on the word "clean" ignored the referee sitting right next to it.
+        return False
     return checkability(frame.task) < 0.5
 
 
@@ -195,14 +200,23 @@ def first_step_actionable(frame: GameFrame, plan) -> tuple[bool, str]:
         return False, "no move set: nothing to choose between"
     if plan is None or not plan.items:
         return False, "no agenda: nothing to attempt"
-    first = plan.items[0]
-    if first in plan.needs_person:
-        return False, f"first agenda item needs a person: {first}"
+    blocking = [i for i in plan.items if i in plan.needs_person]
+    if blocking:
+        return False, f"an agenda item needs a person: {blocking[0]}"
     if not plan.capabilities:
         return False, "no capability was evaluated: nothing is known to be playable"
-    # A capability gap is not a blocker -- forging is itself a primitive, and
-    # "write the tool you are missing" is exactly the step to take. What blocks
-    # is an item nothing can discharge without an answer from someone.
+    # The first item that is actual work. Advisories ("nothing here can be
+    # self-graded") lead the list because they change how the work should be
+    # read, so answering "is the first step executable?" from items[0] asked
+    # about a sentence rather than about a step. A capability gap is not a
+    # blocker either -- forging is itself a primitive, and "write the tool you
+    # are missing" is exactly the step to take.
+    doable = plan.actionable_items
+    if not doable:
+        return False, "the agenda holds no executable step"
+    first = doable[0]
+    if not (first.startswith("forge a capability") or "(via " in first):
+        return False, f"first agenda item is not something this system can execute: {first}"
     return True, f"first agenda item is executable: {first}"
 
 
@@ -216,13 +230,23 @@ def _skippable(asked: set[str]) -> set[str]:
     return {g for g in asked if g not in Gap.BLOCKING}
 
 
-_DENIALS = ("don't know", "dont know", "do not know", "no idea", "unknown",
-            "unclear", "not sure", "unsure", "n/a", "tbd", "none")
+_DENIALS = ("don't know", "dont know", "do not know", "no idea", "not known",
+            "unknown", "unclear", "not sure", "unsure", "no clue",
+            "n/a", "tbd", "none", "nothing")
 
 
 def _denies_knowledge(answer: str) -> bool:
-    low = (answer or "").strip().lower()
-    return any(low == d or low.startswith(d) for d in _DENIALS)
+    """Does this answer say "I don't know" rather than answer the question?
+
+    Anchored matching was the bug: the list holds bare fragments like
+    "don't know", so the guard fired on "don't know" and missed "I don't know"
+    -- the phrasing it exists for and by far the more common one. Matching
+    anywhere in the text, on word boundaries. Bare "no" is deliberately not on
+    the list: it fires inside "no one knows", which is a sentence, not a
+    refusal to answer.
+    """
+    low = " " + " ".join((answer or "").lower().split()) + " "
+    return any(f" {d} " in low or low.strip() == d for d in _DENIALS)
 
 
 class Clarifier:
@@ -298,6 +322,14 @@ class Clarifier:
             answer = (answer or "").strip()
             if not answer:
                 continue
+            if _denies_knowledge(answer):
+                # Only PAYOFF was guarded. "I don't know" supplied for the
+                # objective was written straight into `frame.objective`, and
+                # because it then differed from the task, `objective_unclear`
+                # returned False and solve() proceeded on an objective that
+                # says nobody has one.
+                frame.evidence.append(f"{gap}: asked, and the answer was that it is not known")
+                continue
             if gap == Gap.OBJECTIVE:
                 frame.objective = answer[:120]
             elif gap == Gap.REFEREE:
@@ -367,6 +399,29 @@ class Clarifier:
                 return Clarification(frame, plan, [], round_no, sorted(asked),
                                      contested, resolved, True, reason)
             pending = self.questions(frame, plan, skip=_skippable(asked))
+
+            # Apply anything memory already answers BEFORE deciding to stop.
+            # This used to run after the early return, so on the `ask=None` path
+            # -- which is how `solve` calls it -- a question the store had
+            # already answered was reported as outstanding and the task was
+            # gated again on its own recorded answer.
+            known = {q.gap: q.answered_by_memory for q in pending if q.answered_by_memory}
+            if known:
+                frame = self.absorb(frame, known)
+                caps = capabilities(frame, self.memory, self.toolbox)
+                plan = agenda(frame, caps)
+                for gap in known:
+                    if gap not in resolved:
+                        resolved.append(gap)
+                    if gap in contested:
+                        contested.remove(gap)
+                ok, reason = first_step_actionable(frame, plan)
+                if ok:
+                    self.framer.remember(frame)
+                    return Clarification(frame, plan, [], round_no, sorted(asked),
+                                         contested, resolved, True, reason)
+                pending = self.questions(frame, plan, skip=_skippable(asked))
+
             if not pending or ask is None or round_no == max_rounds:
                 self.framer.remember(frame)
                 why = (reason if not pending else
@@ -375,12 +430,8 @@ class Clarifier:
                 return Clarification(frame, plan, pending, round_no, sorted(asked),
                                      contested, resolved, False, why)
 
-            # Anything memory already answers is applied without asking.
-            free = {q.gap: q.answered_by_memory for q in pending if q.answered_by_memory}
             to_ask = [q for q in pending if not q.answered_by_memory]
-            answers = dict(free)
-            if to_ask:
-                answers.update(ask(to_ask) or {})
+            answers = dict(ask(to_ask) or {}) if to_ask else {}
             asked.update(q.gap for q in pending)
 
             before = set(gaps(frame, plan))
@@ -405,6 +456,9 @@ class Clarifier:
                     target.append(gap)
 
             if still_open == before and not answers:
+                # `answers` now holds only what `ask` returned; memory-supplied
+                # answers are applied above and can no longer disguise a round in
+                # which nobody told us anything.
                 # No answers and no movement. Comparing confidence here was
                 # wrong: `absorb` rescales it to a different denominator than
                 # `Framer` uses, so the first pass through always "improved" by

@@ -369,13 +369,19 @@ class Toolbox:
         # server says today; a JSON file from an earlier discovery is a snapshot
         # that can disagree with it. Checking disk first also let a local tool
         # whose name contains a dot shadow a real MCP tool of that qualified name.
-        for trace in self.memory.of_kind(Kind.TOOL):
-            if trace.meta.get("tool") == name and trace.meta.get("transport") == "mcp":
-                return ToolSpec(
-                    name=name, purpose=trace.meta.get("purpose", ""), source="",
-                    signature=trace.meta.get("signature", ""), transport="mcp",
-                    built_by="mcp", solved=list(trace.meta.get("solved", [])),
-                    trace_id=trace.id)
+        #
+        # Only qualified names take that path. MCP tools are always
+        # "server.tool", so a bare name cannot be one, and scanning every trace
+        # in the store on every lookup made the common case -- a local tool one
+        # file read away -- cost a full scan.
+        if "." in name:
+            for trace in self.memory.of_kind(Kind.TOOL):
+                if trace.meta.get("tool") == name and trace.meta.get("transport") == "mcp":
+                    return ToolSpec(
+                        name=name, purpose=trace.meta.get("purpose", ""), source="",
+                        signature=trace.meta.get("signature", ""), transport="mcp",
+                        built_by="mcp", solved=list(trace.meta.get("solved", [])),
+                        trace_id=trace.id)
         path = self.workshop / f"{name}.json"
         if path.exists():
             return ToolSpec.from_json(json.loads(path.read_text()))
@@ -470,8 +476,15 @@ class Toolbox:
             out = self.mcp.call(name, kwargs or {}, tool_name=mcp_name)
             return {"ok": out.ok, "value": out.content, "json_ok": False,
                     **({} if out.ok else {"error": out.error})}
+        try:
+            bundled = self.bundle(spec)
+        except ValueError as exc:
+            # bundle() raises for a missing or out-of-process dependency. Every
+            # other caller handles it; this one let the exception out of a
+            # function whose whole contract is to return a result dict.
+            return {"ok": False, "error": str(exc)}
         driver = (
-            f"{self.bundle(spec)}\n\n"
+            f"{bundled}\n\n"
             "import json as _json\n"
             f"_args = _json.loads({json.dumps(json.dumps(args or []))})\n"
             f"_kwargs = _json.loads({json.dumps(json.dumps(kwargs or {}))})\n"
@@ -509,8 +522,14 @@ class Toolbox:
         # what discovery wrote -- so grades piled up on a duplicate while the
         # trace `load` and `names` actually read never moved. The same tool got
         # better and worse at once, in two places.
-        existing = next((t for t in self.memory.of_kind(Kind.TOOL)
-                         if t.meta.get("tool") == name), None)
+        # Prefer the trace this spec actually points at. Picking the first
+        # match by name grades a stale duplicate whenever two traces share a
+        # meta["tool"] -- which is exactly the situation record_use was fixed to
+        # stop creating, so it must not depend on that never happening.
+        existing = self.memory.get(spec.trace_id) if spec.trace_id else None
+        if existing is None or existing.kind != Kind.TOOL:
+            existing = next((t for t in self.memory.of_kind(Kind.TOOL)
+                             if t.meta.get("tool") == name), None)
         if existing is None:
             existing = self.memory.remember(
                 Kind.TOOL, spec.embed_text(),
@@ -518,5 +537,11 @@ class Toolbox:
                       "transport": spec.transport, "solved": list(spec.solved)})
         else:
             existing.meta["solved"] = list(spec.solved)
+            # Re-embed. The whole documented point is that the solved problem
+            # joins the tool's searchable text so the next query shaped like it
+            # finds the tool -- updating meta alone left the vector describing a
+            # tool that had solved nothing.
+            existing.text = spec.embed_text()
+            existing.vector = self.memory.embedder.embed(existing.text)
             self.memory.store.touch(existing)
         self.memory.grade(existing.id, 1.0 if worked else -1.0, Source.SELF)
