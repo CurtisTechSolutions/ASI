@@ -216,6 +216,13 @@ class Memory:
             twin.seen += 1
             twin.last_used = now
             twin.meta.update(meta or {})
+            if identity and twin.text != text:
+                # An identity-keyed record is THE record for that key, so a
+                # changed description replaces the old one. Keeping the first
+                # text meant a re-forged tool stayed indexed under the
+                # description of the version it replaced.
+                twin.text = text
+                twin.vector = vector
             for lid in (links or []):
                 if lid not in twin.links:
                     twin.links.append(lid)

@@ -230,23 +230,32 @@ def _skippable(asked: set[str]) -> set[str]:
     return {g for g in asked if g not in Gap.BLOCKING}
 
 
-_DENIALS = ("don't know", "dont know", "do not know", "no idea", "not known",
-            "unknown", "unclear", "not sure", "unsure", "no clue",
-            "n/a", "tbd", "none", "nothing")
+#: Phrases that mean "I have no answer" wherever they appear. Each is several
+#: words and unambiguous.
+_DENIAL_PHRASES = ("don't know", "dont know", "do not know", "no idea",
+                   "not known", "not sure", "no clue", "who knows")
+#: Single words that mean it ONLY when they are the entire answer. "none",
+#: "nothing" and "unknown" are ordinary vocabulary -- "return none when the list
+#: is empty" is a perfectly good objective, and matching them anywhere threw it
+#: away and reported the question as still open.
+_DENIAL_WORDS = ("unknown", "unclear", "unsure", "n/a", "na", "tbd",
+                 "none", "nothing", "no", "?", "-")
 
 
 def _denies_knowledge(answer: str) -> bool:
     """Does this answer say "I don't know" rather than answer the question?
 
-    Anchored matching was the bug: the list holds bare fragments like
-    "don't know", so the guard fired on "don't know" and missed "I don't know"
-    -- the phrasing it exists for and by far the more common one. Matching
-    anywhere in the text, on word boundaries. Bare "no" is deliberately not on
-    the list: it fires inside "no one knows", which is a sentence, not a
-    refusal to answer.
+    Two classes, because one rule cannot serve both. Multi-word phrases are
+    unambiguous and match anywhere, which is what catches "I don't know" -- the
+    phrasing an earlier anchored version missed. Bare words are matched only as
+    the whole answer, because they are also ordinary content.
     """
-    low = " " + " ".join((answer or "").lower().split()) + " "
-    return any(f" {d} " in low or low.strip() == d for d in _DENIALS)
+    low = " ".join((answer or "").lower().split())
+    if not low:
+        return True
+    if any(phrase in low for phrase in _DENIAL_PHRASES):
+        return True
+    return low.strip(" .!") in _DENIAL_WORDS
 
 
 class Clarifier:

@@ -301,9 +301,16 @@ class Toolsmith:
         trace = self.memory.remember(
             Kind.TOOL, spec.embed_text(),
             meta={"tool": spec.name, "path": str(path), "signature": spec.signature,
-                  "grade": grade.score, "purpose": spec.purpose},
+                  "grade": grade.score, "purpose": spec.purpose,
+                  "transport": spec.transport, "solved": list(spec.solved)},
             links=[goal_trace_id] if goal_trace_id else None,
-            grade=grade.score, source=Source.SELF)
+            grade=grade.score, source=Source.SELF,
+            # One trace per tool name, for the life of the store. Re-forging a
+            # tool used to create a SECOND Kind.TOOL trace, and every consumer
+            # that looks a tool up by name takes the first match -- so the old,
+            # negatively graded trace kept answering for the new tool and it
+            # could never be reused again.
+            identity=f"tool:{spec.name}")
         spec.trace_id = trace.id
         (self.workshop / f"{spec.name}.json").write_text(json.dumps(spec.to_json(), indent=2))
         return True
@@ -527,7 +534,13 @@ class Toolbox:
         # meta["tool"] -- which is exactly the situation record_use was fixed to
         # stop creating, so it must not depend on that never happening.
         existing = self.memory.get(spec.trace_id) if spec.trace_id else None
-        if existing is None or existing.kind != Kind.TOOL:
+        # A trace_id read off disk can be stale, and after compression or a
+        # rebuild the id may now belong to something else entirely. Following it
+        # blindly graded and re-embedded a different tool's trace.
+        if existing is not None and (existing.kind != Kind.TOOL
+                                     or existing.meta.get("tool") != name):
+            existing = None
+        if existing is None:
             existing = next((t for t in self.memory.of_kind(Kind.TOOL)
                              if t.meta.get("tool") == name), None)
         if existing is None:
@@ -537,11 +550,14 @@ class Toolbox:
                       "transport": spec.transport, "solved": list(spec.solved)})
         else:
             existing.meta["solved"] = list(spec.solved)
-            # Re-embed. The whole documented point is that the solved problem
-            # joins the tool's searchable text so the next query shaped like it
-            # finds the tool -- updating meta alone left the vector describing a
-            # tool that had solved nothing.
-            existing.text = spec.embed_text()
+            # Re-embed by EXTENDING the description, not replacing it. An MCP
+            # tool's text is written at discovery and carries its server,
+            # argument names and required list; overwriting it with the generic
+            # ToolSpec text destroyed that provenance, so the tool that had
+            # proved itself became the hardest one to find.
+            base = existing.meta.setdefault("base_text", existing.text)
+            solved = [f"solved: {p}" for p in spec.solved]
+            existing.text = "\n".join([base] + solved)
             existing.vector = self.memory.embedder.embed(existing.text)
             self.memory.store.touch(existing)
         self.memory.grade(existing.id, 1.0 if worked else -1.0, Source.SELF)

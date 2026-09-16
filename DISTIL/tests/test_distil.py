@@ -2209,6 +2209,117 @@ def test_using_a_tool_puts_the_problem_into_its_searchable_text():
     assert found and found[0][0].name == "parse_csv" and found[0][2] > 0.3
 
 
+def test_re_forging_a_tool_does_not_create_a_second_trace():
+    """Every consumer looks a tool up by name and takes the first match, so a
+    second Kind.TOOL trace meant the old, negatively graded one kept answering
+    for the new tool and it could never be reused again."""
+    from distil.agent import _reusable
+    d = fresh(seed=1)
+    d.solve("compute the median of a column", interrogate=False)
+    for _ in range(6):
+        d.toolbox.record_use("median", "got it wrong", False)
+    assert not _reusable(d.toolbox.load("median"), d.memory)
+    d.solve("compute the median of a column", interrogate=False)   # re-forges
+    traces = [t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "median"]
+    assert len(traces) == 1, "one trace per tool name, for the life of the store"
+
+
+def test_re_embedding_keeps_an_mcp_tools_provenance():
+    """Its text is written at discovery and carries server, arguments and the
+    required list. Overwriting it with the generic ToolSpec text made the tool
+    that had proved itself the hardest one to find."""
+    d = fresh()
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    d.toolbox.record_use("echo.add", "totalled two figures", True)
+    trace = next(t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "echo.add")
+    assert "mcp server" in trace.text, "the server provenance must survive"
+    assert "arguments:" in trace.text
+    assert "totalled two figures" in trace.text, "and the solved problem must join it"
+    d.mcp.close()
+
+
+def test_a_trace_id_pointing_at_another_tool_is_ignored():
+    d = fresh()
+    plant(d.toolsmith, d.toolbox)
+    other = next(t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "chunk")
+    path = d.workspace.workshop / "median.json"
+    spec = json.loads(path.read_text())
+    spec["trace_id"] = other.id                  # now points at a different tool
+    path.write_text(json.dumps(spec))
+    before = list(other.grades)
+    d.toolbox.record_use("median", "a problem", True)
+    assert len(other.grades) == len(before), "another tool's trace must not be graded"
+
+
+def test_a_legitimate_answer_containing_none_is_not_a_denial():
+    """Matching bare words anywhere threw away real objectives: "return none
+    when the list is empty" is an objective, not a refusal to give one."""
+    from distil.clarify import _denies_knowledge
+    assert _denies_knowledge("I don't know")
+    assert _denies_knowledge("none")
+    assert _denies_knowledge("n/a")
+    assert not _denies_knowledge("return none when the list is empty")
+    assert not _denies_knowledge("nothing should be logged at info level")
+    assert not _denies_knowledge("the unknown fields must be rejected")
+    assert not _denies_knowledge("no one knows the answer")
+
+
+def test_re_embedding_a_trace_survives_the_disk_round_trip():
+    """record_use mutates trace.text and trace.vector in place. The stored
+    vector must still describe the stored text after a save and reload, or
+    recall silently ranks against a description the trace no longer has."""
+    home = tmpdir()
+    d = Distil(LocalProvider(), home=home, seed=1)
+    plant(d.toolsmith, d.toolbox)
+    d.toolbox.record_use("parse_csv", "collapse a ragged telemetry export", True)
+    trace = next(t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "parse_csv")
+    assert trace.vector == d.memory.embedder.embed(trace.text, learn=False)
+    d.save()
+
+    back = Distil(LocalProvider(), home=home, seed=1)
+    again = next(t for t in back.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "parse_csv")
+    assert again.vector == trace.vector and again.text == trace.text
+    found = back.toolbox.find("collapse a ragged telemetry export", k=1)
+    assert found and found[0][0].name == "parse_csv"
+
+
+def test_a_stale_trace_id_does_not_fork_the_tool():
+    d = fresh(seed=1)
+    d.solve("compute the median of a column", interrogate=False)
+    path = d.workspace.workshop / "median.json"
+    spec = json.loads(path.read_text())
+    spec["trace_id"] = "deadbeefdead"          # points at nothing
+    path.write_text(json.dumps(spec))
+    d.toolbox.record_use("median", "a new problem", True)
+    traces = [t for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool") == "median"]
+    assert len(traces) == 1, "a stale id must fall back, not create a second trace"
+
+
+def test_a_disgraced_tool_is_reforged_rather_than_reused():
+    from distil.agent import _reusable
+    d = fresh(seed=1)
+    d.solve("compute the median of a column", interrogate=False)
+    for _ in range(6):
+        d.toolbox.record_use("median", "got it wrong", False)
+    assert not _reusable(d.toolbox.load("median"), d.memory)
+    r = d.solve("compute the median of a column", interrogate=False)
+    assert not any("existing tool" in a["via"] for a in r["attempts"])
+
+
+def test_every_tool_trace_has_a_matching_toolbox_entry():
+    """A Kind.TOOL trace with no entry in names() is a tool recall can surface
+    and invoke cannot run."""
+    d = fresh(seed=1)
+    plant(d.toolsmith, d.toolbox)
+    d.mcp.add("echo", [sys.executable, FIXTURE])
+    d.mcp.discover()
+    named = set(d.toolbox.names())
+    traced = {t.meta.get("tool") for t in d.memory.of_kind(Kind.TOOL) if t.meta.get("tool")}
+    assert traced == named, f"only in traces: {traced - named}; only in names: {named - traced}"
+    d.mcp.close()
+
+
 def test_invoking_a_tool_with_a_missing_dependency_returns_an_error():
     """bundle() raises; invoke()'s whole contract is to return a result dict."""
     d = fresh()

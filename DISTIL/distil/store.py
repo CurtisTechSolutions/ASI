@@ -190,7 +190,12 @@ class PostgresStore(TraceStore):
                     ON CONFLICT (id) DO UPDATE SET
                       last_used=EXCLUDED.last_used, hits=EXCLUDED.hits, seen=EXCLUDED.seen,
                       meta=EXCLUDED.meta, links=EXCLUDED.links, grades=EXCLUDED.grades,
-                      grade_n=EXCLUDED.grade_n, grade_sum=EXCLUDED.grade_sum""",
+                      grade_n=EXCLUDED.grade_n, grade_sum=EXCLUDED.grade_sum,
+                      -- text and embedding too: a trace can be re-embedded in
+                      -- place (Toolbox.record_use does exactly that), and an
+                      -- upsert that skips them would persist the counters while
+                      -- silently keeping the stale description and vector.
+                      text=EXCLUDED.text, embedding=EXCLUDED.embedding""",
                 (trace.id, trace.kind, trace.text, trace.embedder, trace.created,
                  trace.last_used, trace.hits, trace.seen, json.dumps(trace.meta),
                  json.dumps(trace.links), json.dumps([list(x) for x in g]),

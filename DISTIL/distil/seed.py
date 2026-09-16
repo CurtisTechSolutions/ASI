@@ -258,16 +258,30 @@ DIFF_LINES = Seed("diff_lines", "which lines were added and removed between two 
     # that itself began with "+++" or "---" was silently dropped -- and a change
     # consisting only of such lines was reported as no change at all. Diffing C
     # preprocessor output or a diff-of-a-diff hit it immediately.
-    # autojunk=False: difflib's heuristic treats any line appearing in more than
-    # 1% of a >=200-line input as junk, which makes identical blank or boilerplate
-    # lines show up as both added and removed. A diff tool that invents changes
-    # in a large file is worse than no diff tool.
-    for tag, i1, i2, j1, j2 in _difflib.SequenceMatcher(
-            None, a, b, autojunk=False).get_opcodes():
-        if tag in ("replace", "delete"):
-            removed.extend(a[i1:i2])
-        if tag in ("replace", "insert"):
-            added.extend(b[j1:j2])
+    # autojunk=False because difflib's heuristic treats any line appearing in
+    # more than 1% of a >=200-line input as junk, which makes identical
+    # boilerplate show up as both added and removed -- a diff tool that invents
+    # changes is worse than none. But turning it off is what the heuristic
+    # exists to avoid: matching becomes quadratic on repetitive input, and on a
+    # few thousand near-identical lines that exceeds the sandbox timeout.
+    #
+    # So: exact opcode diff while it is affordable, and a linear multiset
+    # difference beyond that. The large-input answer is still exactly right
+    # about WHICH lines appeared and disappeared; it just stops tracking where.
+    if len(a) + len(b) <= 3000:
+        for tag, i1, i2, j1, j2 in _difflib.SequenceMatcher(
+                None, a, b, autojunk=False).get_opcodes():
+            if tag in ("replace", "delete"):
+                removed.extend(a[i1:i2])
+            if tag in ("replace", "insert"):
+                added.extend(b[j1:j2])
+        return {"added": added, "removed": removed}
+
+    from collections import Counter as _Counter
+    ca, cb = _Counter(a), _Counter(b)
+    gone, came = ca - cb, cb - ca
+    removed = [l for l in a if gone.get(l, 0) > 0 and not gone.subtract([l])]
+    added = [l for l in b if came.get(l, 0) > 0 and not came.subtract([l])]
     return {"added": added, "removed": removed}
 ''',
 '''d = diff_lines("a\\nb", "a\\nc")
@@ -285,6 +299,12 @@ big = "\\n".join(["x"] * 300)
 assert diff_lines(big, big) == {"added": [], "removed": []}
 big2 = "\\n".join(["x"] * 300 + ["tail"])
 assert diff_lines(big, big2) == {"added": ["tail"], "removed": []}
+# a large repetitive input must stay affordable and still be exact about
+# which lines changed
+huge = "\\n".join(["x"] * 4000)
+assert diff_lines(huge, huge) == {"added": [], "removed": []}
+assert diff_lines(huge, huge + "\\ntail") == {"added": ["tail"], "removed": []}
+assert diff_lines(huge + "\\ngone", huge) == {"added": [], "removed": ["gone"]}
 ''')
 
 TOPO_SORT = Seed("topological_sort", "order items so every dependency comes first",
@@ -401,9 +421,15 @@ NORMALISE_ERROR = Seed("normalise_error", "collapse a traceback to a stable clas
         i, m = strong[-1]
         kind, message, idx = m.group(1), m.group(2).strip(), i
     else:
-        m = head.match(lines[-1])
-        if m:
-            kind, message, idx = m.group(1), m.group(2).strip(), len(lines) - 1
+        # No name matched the known shapes -- a custom exception type like
+        # MyCustomFailure. The last head match anywhere still beats giving up:
+        # dropping the kind entirely collapsed every such error onto a signature
+        # made of its message alone, so two different custom exceptions with
+        # similar wording became one class.
+        any_match = [(i, m) for i, m in candidates if m]
+        if any_match:
+            i, m = any_match[-1]
+            kind, message, idx = m.group(1), m.group(2).strip(), i
     if kind and idx + 1 < len(lines):
         message = " ".join([message] + lines[idx + 1:]).strip()
 
@@ -448,6 +474,11 @@ assert a["signature"] != b["signature"], "different errors must not collapse"
 # a separator line is not an exception either
 g = normalise_error("ExceptionGroup: two failed\\n  +-+---------------\\n  | ValueError: x")
 assert g["kind"] in ("ExceptionGroup", "ValueError"), g
+# a custom exception type keeps its kind even mid-traceback
+c = normalise_error("MyCustomFailure: boom\\n  at frame 2")
+assert c["kind"] == "MyCustomFailure", c
+assert (normalise_error("MyCustomFailure: boom 1")["signature"] !=
+        normalise_error("OtherFailure: boom 1")["signature"])
 ''')
 
 EXTRACT_IDENTIFIERS = Seed("extract_identifiers", "pull the specifics out of a wall of text",
@@ -479,8 +510,12 @@ EXTRACT_IDENTIFIERS = Seed("extract_identifiers", "pull the specifics out of a w
         # The opening quote must not follow a word character, or the apostrophe
         # in "don't" opens a span that the next real quote closes -- swallowing
         # the genuine quoted identifier and inventing a bogus one in its place.
+        # The optional prefix is matched rather than excluded: a bare
+        # (?<!\\w) lookbehind rejected b'...', r'...' and f'...' outright,
+        # dropping exactly the literals that carry meaning in Python source.
         "quoted": sorted({m[1] for m in
-                          _re.findall(r"(?<!\\w)(['\\"])([^'\\"\\n]{1,60})\\1", text)}),
+                          _re.findall(r"(?<!\\w)[bBrRfFuU]{0,2}(['\\"])([^'\\"\\n]{1,60})\\1",
+                                      text)}),
         "dotted": sorted(set(
             _re.findall(r"\\b[a-zA-Z_]\w*(?:\.\w+){1,}\\b", text))),
     }
@@ -500,6 +535,9 @@ assert extract_identifiers("see /etc/nginx/nginx.conf.")["paths"] == ["/etc/ngin
 # an apostrophe in prose must not open a quoted span
 q = extract_identifiers("don't touch 'config_key' please")["quoted"]
 assert q == ["config_key"], q
+# prefixed literals are literals
+q2 = extract_identifiers("use b'payload' and r'raw' and f'fmt' here")["quoted"]
+assert set(q2) == {"payload", "raw", "fmt"}, q2
 ''')
 
 # --- tier 3: tools that create referees -- the highest-leverage kind ---------
@@ -536,6 +574,19 @@ def assert_schema(value, schema, path="$"):
     for key in sorted(unknown):
         problems.append(f"{path}: keyword {key!r} is not enforced by this validator")
 
+    # Shape checks on the SCHEMA, before anything about the value. A malformed
+    # schema is malformed whatever it is applied to, and checking `items` only
+    # when the value happened to be a list meant `{"items": 5}` passed silently
+    # against every non-list -- the validator reporting conformance to a rule it
+    # could not have applied.
+    if "items" in schema and not isinstance(schema["items"], (dict, list)):
+        problems.append(f"{path}: items must be a schema or a list of schemas, "
+                        f"got {type(schema['items']).__name__}")
+    if "properties" in schema and not isinstance(schema["properties"], dict):
+        problems.append(f"{path}: properties must be an object")
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        problems.append(f"{path}: enum must be a list")
+
     expected = schema.get("type")
     if expected is not None:
         names = expected if isinstance(expected, list) else [expected]
@@ -555,9 +606,7 @@ def assert_schema(value, schema, path="$"):
 
     if "enum" in schema:
         allowed = schema["enum"]
-        if not isinstance(allowed, list):
-            problems.append(f"{path}: enum must be a list")
-        elif not any(_same(value, a) for a in allowed):
+        if isinstance(allowed, list) and not any(_same(value, a) for a in allowed):
             problems.append(f"{path}: {value!r} is not one of {allowed}")
 
     for key, word in (("minimum", "below"), ("maximum", "above")):
@@ -579,26 +628,32 @@ def assert_schema(value, schema, path="$"):
 
     if isinstance(value, dict):
         required = schema.get("required") or []
-        if isinstance(required, (str, bytes)):
-            problems.append(f"{path}: required must be a list of names")
+        if isinstance(required, (str, bytes)) or not isinstance(required, (list, tuple, set)):
+            # `for key in 5` raises TypeError. Every other malformed shape here
+            # is reported; this one crashed the validator instead, which is the
+            # same fail-open class the rest of this function was hardened
+            # against.
+            problems.append(f"{path}: required must be a list of names, "
+                            f"got {type(required).__name__}")
             required = []
         for key in required:
             if key not in value:
                 problems.append(f"{path}.{key}: required but missing")
         props = schema.get("properties") or {}
         if not isinstance(props, dict):
-            problems.append(f"{path}: properties must be an object")
-            props = {}
+            props = {}                      # already reported by the shape check
         for key, sub in props.items():
             if key in value:
                 problems.extend(assert_schema(value[key], sub, f"{path}.{key}"))
 
     if isinstance(value, list) and schema.get("items") is not None:
         items = schema["items"]
-        if isinstance(items, list):
+        if not isinstance(items, (dict, list)):
+            items = None                    # already reported by the shape check
+        elif isinstance(items, list):
             for i, (item, sub) in enumerate(zip(value, items)):
                 problems.extend(assert_schema(item, sub, f"{path}[{i}]"))
-        else:
+        elif items is not None:
             for i, item in enumerate(value):
                 problems.extend(assert_schema(item, items, f"{path}[{i}]"))
     return problems
@@ -660,6 +715,10 @@ assert assert_schema(1.5, {"type": "integer"}) != []
 assert assert_schema({}, {"properties": "nope"}) != []
 assert assert_schema({}, "not a schema") != []
 assert assert_schema({"a": 1}, {"required": "a"}) != []
+for malformed in ({"required": 5}, {"items": 5}, {"enum": 5}, {"properties": [1]},
+                  {"minimum": "3"}, {"type": {"a": 1}}, {"required": {"a": 1}}):
+    out = assert_schema({"a": 1}, malformed)          # must report, never raise
+    assert out and isinstance(out, list), malformed
 assert assert_schema([1, "x"], {"items": [{"type": "integer"}, {"type": "string"}]}) == []
 assert assert_schema(5, {"type": ["integer", "string"]}) == []
 # a bound must be enforced exactly, not through a float round trip
