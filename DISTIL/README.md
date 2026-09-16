@@ -13,7 +13,7 @@ it then has to prove work.
 ```bash
 cd DISTIL
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 243 tests, ~17s
+python3 -m tests.test_distil                # 246 tests, ~17s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -233,7 +233,7 @@ wrong, is tested with in-process stand-ins.
 ## What four rounds of adversarial review found
 
 The code was reviewed by parallel agents across five dimensions, each finding
-verified by an independent skeptic, four times. **86 defects were confirmed and
+verified by an independent skeptic, five times. **88 defects were confirmed and
 fixed.** The distribution is the interesting part:
 
 | round | found | of which introduced by the previous round's fixes |
@@ -242,6 +242,7 @@ fixed.** The distribution is the interesting part:
 | 2 | 15 | 6 |
 | 3 | 13 | 4 |
 | 4 | 13 | 7 |
+| 5 | 2 | 1 |
 
 Fixing introduces bugs at roughly the rate you would fear, which is the argument
 for re-reviewing the *fixed* tree rather than stopping at a green suite. Every
@@ -265,10 +266,18 @@ Three worth naming, because they are the kind a test suite does not catch:
   branch deliberately does not run. Every recognition pushed a `+1` that could
   outvote the real negative grades a failing tool had earned.
 
-And one that made a feature pointless rather than wrong: clarification answers
-reached the `GameFrame` and stopped there, because `solve()` ran the reasoner on
-the raw task string. Someone who patiently explained what done means got the same
-goal tree as someone who said nothing.
+And two that were wrong in a way a passing suite cannot show:
+
+- **Clarification was cosmetic.** The answers reached the `GameFrame` and stopped
+  there, because `solve()` ran the reasoner on the raw task string. Someone who
+  patiently explained what done means got the same goal tree as someone who said
+  nothing.
+- **The clarity gate inverted in both directions at once.** `handle it somehow
+  please` proceeded while `write a parser that produces clean output` was
+  refused, and `fix everything` was gated where `fix everything now` was not —
+  one filler word decided it. The cause was using `goals.checkability` as a
+  boundary when its own docstring calls it *a prior that only has to be right on
+  average*. Sixteen tasks are now pinned as a discrimination table.
 
 ## Honesty about the offline mode
 
