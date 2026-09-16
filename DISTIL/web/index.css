@@ -49,6 +49,7 @@ body {
   border-radius: 999px; color: var(--accent);
 }
 .badge.dim { border-color: var(--line); color: var(--dim); }
+.badge.bad { border-color: var(--bad); color: var(--bad); }
 
 .auto-toggle { font-size: 12px; padding: 4px 11px; }
 .auto-toggle.on { border-color: var(--good); color: var(--good); }

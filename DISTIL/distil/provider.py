@@ -66,13 +66,45 @@ def _post(url: str, payload: dict, headers: dict, timeout: float = TIMEOUT) -> d
 
 
 class Provider:
-    """Interface. `complete` returns text; `embed` returns one vector per input."""
+    """Interface. `complete` returns text; `embed` returns one vector per input.
+
+    Every call is counted, and so is every failure. Callers all over this package
+    wrap provider calls in `except Exception` and degrade -- correctly, because a
+    reasoning step that cannot reach a model should fall back to a heuristic
+    rather than take down the run. But that made a completely dead provider
+    indistinguishable from a working one: the agent reported `ollama`, ran
+    entirely on offline rules, and said nothing. The counters are what turn that
+    from a mystery into a number, and `health` is what the UI shows.
+    """
 
     name = "abstract"
     can_embed = False
 
+    #: Bumped by `record`. Class-level defaults so a subclass that forgets to
+    #: call super().__init__() still has them.
+    calls = 0
+    failures = 0
+    last_error: str | None = None
+
     def available(self) -> bool:
         raise NotImplementedError
+
+    def why_unavailable(self) -> str:
+        """One line a person can act on. Overridden where there is a real answer."""
+        return "" if self.available() else f"{self.name} is not reachable or not configured"
+
+    def record(self, error: Exception | None = None) -> None:
+        self.calls += 1
+        if error is not None:
+            self.failures += 1
+            self.last_error = str(error)[:300]
+
+    def health(self) -> dict:
+        return {"name": self.name, "calls": self.calls, "failures": self.failures,
+                "last_error": self.last_error,
+                # The number that matters. A provider answering nothing while the
+                # agent claims to be using it is the failure this exists to show.
+                "failing": bool(self.calls and self.failures == self.calls)}
 
     def complete(self, messages: list[Message], temperature: float = 0.7, max_tokens: int = 1024) -> str:
         raise NotImplementedError
@@ -90,26 +122,82 @@ class OllamaProvider(Provider):
         self.model = model
         self.embed_model = embed_model
 
-    def available(self) -> bool:
+    def installed(self) -> list[str]:
+        """Model tags the daemon actually has, or [] if it cannot be asked."""
         try:
-            with urllib.request.urlopen(f"{self.host}/api/tags", timeout=2) as r:
-                return r.status == 200
+            with urllib.request.urlopen(f"{self.host}/api/tags", timeout=3) as r:
+                if r.status != 200:
+                    return []
+                return [m.get("name", "") for m in
+                        (json.loads(r.read().decode("utf-8")).get("models") or [])]
         except Exception:
+            return []
+
+    @staticmethod
+    def _matches(wanted: str, tags: list[str]) -> bool:
+        """`gemma4` matches `gemma4:latest`; `gemma4:27b` matches only itself.
+
+        Ollama reports fully-qualified tags and people type the short form, so a
+        literal comparison called a present model missing.
+        """
+        if wanted in tags:
+            return True
+        if ":" in wanted:
             return False
+        return any(t.split(":", 1)[0] == wanted for t in tags)
+
+    def available(self) -> bool:
+        """Reachable AND holding the model it is configured to use.
+
+        Checking only that the daemon answers was the bug behind "auto mode is
+        not querying ollama": /api/tags returns 200 whatever is installed, so an
+        un-pulled model meant ollama was selected, every /api/chat 404ed, every
+        caller swallowed the error and degraded, and the agent reported `ollama`
+        while running on offline rules. A provider that cannot answer is not
+        available, and saying so here is what makes `auto()` skip it and
+        `--provider ollama` fail loudly.
+        """
+        tags = self.installed()
+        return bool(tags) and self._matches(self.model, tags)
+
+    def why_unavailable(self) -> str:
+        tags = self.installed()
+        if not tags:
+            return (f"no ollama at {self.host} -- start it with `ollama serve`, "
+                    f"or set OLLAMA_HOST")
+        if not self._matches(self.model, tags):
+            return (f"ollama is running but has no {self.model!r}: pull it with "
+                    f"`ollama pull {self.model}`, or set DISTIL_OLLAMA_MODEL to one of "
+                    f"{', '.join(sorted(tags)[:6])}")
+        if self.can_embed and not self._matches(self.embed_model, tags):
+            return (f"chat model is present but the embedder is not: "
+                    f"`ollama pull {self.embed_model}`")
+        return ""
 
     def complete(self, messages, temperature=0.7, max_tokens=1024) -> str:
-        out = _post(f"{self.host}/api/chat", {
-            "model": self.model,
-            "messages": [m.to_json() for m in messages],
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }, {})
+        try:
+            out = _post(f"{self.host}/api/chat", {
+                "model": self.model,
+                "messages": [m.to_json() for m in messages],
+                "stream": False,
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            }, {})
+        except Exception as exc:
+            self.record(exc)
+            raise
+        self.record()
         return out.get("message", {}).get("content", "")
 
     def embed(self, texts):
         vectors = []
         for t in texts:                       # /api/embeddings is one text per call
-            out = _post(f"{self.host}/api/embeddings", {"model": self.embed_model, "prompt": t}, {})
+            try:
+                out = _post(f"{self.host}/api/embeddings",
+                            {"model": self.embed_model, "prompt": t}, {})
+            except Exception as exc:
+                self.record(exc)
+                raise
+            self.record()
             vectors.append(out["embedding"])
         return vectors
 
@@ -130,16 +218,24 @@ class OpenAIProvider(Provider):
     def available(self) -> bool:
         return bool(self.key)
 
+    def why_unavailable(self) -> str:
+        return "" if self.key else "OPENAI_API_KEY is not set"
+
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.key}"}
 
     def complete(self, messages, temperature=0.7, max_tokens=1024) -> str:
-        out = _post(f"{self.base}/chat/completions", {
-            "model": self.model,
-            "messages": [m.to_json() for m in messages],
-            "temperature": temperature,
-            "max_completion_tokens": max_tokens,
-        }, self._headers())
+        try:
+            out = _post(f"{self.base}/chat/completions", {
+                "model": self.model,
+                "messages": [m.to_json() for m in messages],
+                "temperature": temperature,
+                "max_completion_tokens": max_tokens,
+            }, self._headers())
+        except Exception as exc:
+            self.record(exc)
+            raise
+        self.record()
         return out["choices"][0]["message"]["content"] or ""
 
     def embed(self, texts):
@@ -164,6 +260,9 @@ class AnthropicProvider(Provider):
     def available(self) -> bool:
         return bool(self.key)
 
+    def why_unavailable(self) -> str:
+        return "" if self.key else "ANTHROPIC_API_KEY is not set"
+
     def complete(self, messages, temperature=0.7, max_tokens=1024) -> str:
         system = " ".join(m.content for m in messages if m.role == "system")
         turns = [m.to_json() for m in messages if m.role != "system"]
@@ -171,8 +270,13 @@ class AnthropicProvider(Provider):
                    "temperature": temperature}
         if system:
             payload["system"] = system            # a top-level field, not a turn
-        out = _post(f"{self.base}/messages", payload,
-                    {"x-api-key": self.key, "anthropic-version": "2023-06-01"})
+        try:
+            out = _post(f"{self.base}/messages", payload,
+                        {"x-api-key": self.key, "anthropic-version": "2023-06-01"})
+        except Exception as exc:
+            self.record(exc)
+            raise
+        self.record()
         return "".join(b.get("text", "") for b in out.get("content", []) if b.get("type") == "text")
 
 
@@ -202,6 +306,7 @@ class LocalProvider(Provider):
     def complete(self, messages, temperature=0.7, max_tokens=1024) -> str:
         prompt = messages[-1].content if messages else ""
         self.seen.append(prompt)
+        self.record()
         if "DECOMPOSE" in prompt:
             return "\n".join(_decompose(_payload(prompt)))
         if "EXPERIMENT" in prompt:
@@ -292,7 +397,11 @@ def auto(prefer: str | None = None) -> Provider:
         if chosen is None:
             raise ProviderError(f"unknown provider {prefer!r}; have {[p.name for p in providers]}")
         if not chosen.available():
-            raise ProviderError(f"provider {prefer!r} is not available (key set? daemon running?)")
+            # `why_unavailable` knows the actual reason -- not pulled, wrong host,
+            # no key. "key set? daemon running?" made the reader guess at what the
+            # code could simply say.
+            raise ProviderError(f"provider {prefer!r} is not available: "
+                                f"{chosen.why_unavailable()}")
         return chosen
     for p in providers:
         if p.available():

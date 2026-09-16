@@ -3466,6 +3466,83 @@ def test_clarify_alone_does_not_commit_to_solving():
     assert "recall" in out and "frame" in out
 
 
+def test_ollama_is_unavailable_when_its_model_is_not_pulled():
+    """Checking only that the daemon answers was the bug behind "auto mode is not
+    querying ollama".
+
+    /api/tags returns 200 whatever is installed, so an un-pulled model meant
+    ollama was selected, every /api/chat 404ed, every caller swallowed the error
+    and degraded, and the agent reported `ollama` while running on offline rules.
+    """
+    from distil.provider import OllamaProvider
+    p = OllamaProvider(model="gemma4")
+    p.installed = lambda: []
+    assert not p.available() and "ollama serve" in p.why_unavailable()
+    p.installed = lambda: ["llama3.2:latest", "nomic-embed-text:latest"]
+    assert not p.available()
+    assert "ollama pull gemma4" in p.why_unavailable()
+    p.installed = lambda: ["gemma4:latest", "nomic-embed-text:latest"]
+    assert p.available() and p.why_unavailable() == ""
+
+
+def test_a_short_model_tag_matches_the_qualified_one():
+    """Ollama reports `gemma4:latest` and people type `gemma4`, so a literal
+    comparison called a present model missing. An explicit tag stays exact."""
+    from distil.provider import OllamaProvider
+    m = OllamaProvider._matches
+    assert m("gemma4", ["gemma4:latest"])
+    assert m("gemma4:27b", ["gemma4:27b"])
+    assert not m("gemma4:27b", ["gemma4:latest"]), "an explicit tag must be exact"
+    assert not m("gemma4", ["gemma5:latest"])
+
+
+def test_pinning_an_unavailable_provider_says_what_is_actually_wrong():
+    """"key set? daemon running?" made the reader guess at what the code knows."""
+    from distil.provider import ProviderError, auto
+    try:
+        auto("ollama")
+        return                      # a real ollama is running here; nothing to assert
+    except ProviderError as exc:
+        assert "ollama serve" in str(exc) or "ollama pull" in str(exc), str(exc)
+
+
+def test_a_provider_answering_nothing_is_distinguishable_from_a_working_one():
+    """Every caller degrades on provider failure, correctly -- so a dead provider
+    and a live one look identical from outside. The counters are the difference.
+    """
+    from distil.provider import LocalProvider, ProviderError
+
+    class Dead(LocalProvider):
+        name = "dead"
+        def complete(self, messages, temperature=0.7, max_tokens=1024):
+            exc = ProviderError("connection refused")
+            self.record(exc)
+            raise exc
+
+    dead = Dead()
+    assert dead.health()["failing"] is False, "nothing has been tried yet"
+    for _ in range(3):
+        try: dead.complete([])
+        except ProviderError: pass
+    health = dead.health()
+    assert health["failing"] and health["calls"] == 3 and health["failures"] == 3
+    assert "connection refused" in health["last_error"]
+
+
+def test_a_healthy_provider_is_not_reported_as_failing():
+    d = fresh()
+    d.solve("compute the median of a list", ask=lambda q: {})
+    health = d.provider.health()
+    assert health["calls"] > 0 and not health["failing"]
+
+
+def test_state_reports_why_each_provider_is_unavailable():
+    st = Api(fresh()).state({})
+    assert "provider_health" in st
+    for entry in st["providers"]:
+        assert ("why" in entry) and (entry["available"] or entry["why"]), entry
+
+
 def test_workspace_creates_its_directories():
     w = Workspace(tmpdir() / "nested" / "home")
     assert w.home.exists() and w.workshop.exists()

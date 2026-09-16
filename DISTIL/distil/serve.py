@@ -154,8 +154,14 @@ class Api:
             "stats": d.stats(),
             "policy": d.policy.to_json(),
             "providers": [{"name": p.name, "available": p.available(),
-                           "embeds": p.can_embed} for p in catalogue()],
+                           "embeds": p.can_embed, "why": p.why_unavailable()}
+                          for p in catalogue()],
             "provider": d.provider.name,
+            # How the attached provider is actually doing. A provider that is
+            # selected but answering nothing looks identical to a working one
+            # from the outside -- every caller degrades on failure, correctly --
+            # so the counters are the only way to see it.
+            "provider_health": d.provider.health(),
             "home": str(d.workspace),
             "mcp": d.mcp.names(),
             "kinds": list(Kind.ALL),

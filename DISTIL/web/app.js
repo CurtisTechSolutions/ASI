@@ -9524,6 +9524,27 @@ function App() {
 		refreshState();
 		get("speech").then(setSpeech).catch(() => setSpeech(null));
 	}, [refreshState]);
+	const warned = (0, import_react.useRef)(false);
+	(0, import_react.useEffect)(() => {
+		if (!state || warned.current) return;
+		const health = state.provider_health;
+		const wanted = state.providers.find((p) => p.name === "ollama");
+		if (health.failing) {
+			warned.current = true;
+			add({
+				role: "agent",
+				kind: "error",
+				text: `I am configured to use ${state.provider}, but all ${health.calls} call(s) to it have failed — so I am falling back to offline rules for everything. ${health.last_error || ""}`
+			});
+		} else if (state.provider === "local" && wanted && !wanted.available && wanted.why) {
+			warned.current = true;
+			add({
+				role: "agent",
+				kind: "error",
+				text: `Running on offline rules, not a model. ${wanted.why} Then restart me — the provider is chosen once, at startup.`
+			});
+		}
+	}, [state]);
 	const toolCount = state ? state.stats.tools.length : null;
 	(0, import_react.useEffect)(() => {
 		if (toolCount !== 0) return;
@@ -9727,9 +9748,10 @@ function App() {
 				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { children: "DISTIL" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 					className: "status",
 					children: [state ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "badge",
-							children: state.provider
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+							className: `badge ${state.provider_health.failing ? "bad" : ""}`,
+							title: state.provider_health.failing ? `${state.provider_health.failures} of ${state.provider_health.calls} calls failed — ${state.provider_health.last_error}` : `${state.provider_health.calls} call(s), ${state.provider_health.failures} failed`,
+							children: [state.provider, state.provider_health.failing && " — not answering"]
 						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
 							className: "badge dim",

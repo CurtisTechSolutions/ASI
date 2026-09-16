@@ -42,6 +42,27 @@ export default function App() {
     get('speech').then(setSpeech).catch(() => setSpeech(null))
   }, [refreshState])
 
+  // Say it once, in the transcript, rather than only in a badge nobody is
+  // looking at. "Why isn't it using my model?" is the question this answers.
+  const warned = useRef(false)
+  useEffect(() => {
+    if (!state || warned.current) return
+    const health = state.provider_health
+    const wanted = state.providers.find((p) => p.name === 'ollama')
+    if (health.failing) {
+      warned.current = true
+      add({ role: 'agent', kind: 'error',
+            text: `I am configured to use ${state.provider}, but all ${health.calls} `
+                + `call(s) to it have failed — so I am falling back to offline rules for `
+                + `everything. ${health.last_error || ''}` })
+    } else if (state.provider === 'local' && wanted && !wanted.available && wanted.why) {
+      warned.current = true
+      add({ role: 'agent', kind: 'error',
+            text: `Running on offline rules, not a model. ${wanted.why}`
+                + ` Then restart me — the provider is chosen once, at startup.` })
+    }
+  }, [state])
+
   // Plant the starter toolkit on an empty memory rather than making someone
   // discover that they had to. A system that can bootstrap itself and waits to
   // be told to is just a system with a hidden first step.
@@ -176,7 +197,17 @@ export default function App() {
         <div className="status">
           {state ? (
             <>
-              <span className="badge">{state.provider}</span>
+              {/* A provider that is selected but answering nothing is the one
+                  failure this header has to show: every caller degrades to a
+                  heuristic on error, so the agent keeps working and the only
+                  symptom is that the answers got worse. */}
+              <span className={`badge ${state.provider_health.failing ? 'bad' : ''}`}
+                    title={state.provider_health.failing
+                      ? `${state.provider_health.failures} of ${state.provider_health.calls} calls failed — ${state.provider_health.last_error}`
+                      : `${state.provider_health.calls} call(s), ${state.provider_health.failures} failed`}>
+                {state.provider}
+                {state.provider_health.failing && ' — not answering'}
+              </span>
               <span className="badge dim">{state.stats.traces} remembered</span>
               <span className="badge dim">{state.stats.tools.length} tools</span>
             </>

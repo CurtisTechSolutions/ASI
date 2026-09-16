@@ -340,6 +340,35 @@ visited page could POST `/api/forge` and have this agent write and run code.
 `--bind` exists because someone will want it in a container; the warning it
 prints exists because they should know what they are opening.
 
+## When it is not using your model
+
+The provider is chosen **once, at startup**, so starting Ollama after the server
+is already running changes nothing — restart it.
+
+```bash
+make providers          # says what is reachable and why the rest is not
+#   ollama  not available  ollama is running but has no 'gemma4':
+#                          pull it with `ollama pull gemma4`
+```
+
+`available()` requires that the daemon is reachable **and** holding the model it
+is configured to use. That is deliberate, and it is the fix for a defect worth
+knowing about: `/api/tags` returns 200 whatever is installed, so an un-pulled
+model used to mean Ollama was selected, every `/api/chat` 404ed, every caller
+swallowed the error and fell back to a heuristic — correctly, since a reasoning
+step that cannot reach a model should degrade rather than crash — and the agent
+reported `ollama` while running entirely on offline rules, silently.
+
+Every provider now counts its calls and its failures. `GET /api/state` carries
+`provider_health`, the header badge turns red and reads **"not answering"** when
+every call has failed, and the transcript says so once in plain language. A
+provider that is attached but answering nothing is no longer indistinguishable
+from one that works.
+
+```bash
+curl -s localhost:8765/api/state | python3 -m json.tool | grep -A4 provider_health
+```
+
 ## Storage
 
 The default is exact search in-process — 512 dims over ~100k traces, no index, no
