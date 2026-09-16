@@ -71,12 +71,18 @@ class MetaLayer:
     floats rather than counts so that feedback can push them negative.
     """
 
-    __slots__ = ("scores", "prior", "smoothing", "observed")
+    __slots__ = ("scores", "prior", "smoothing", "back_scale", "prior_weight", "observed")
 
-    def __init__(self, smoothing: float = 1.0) -> None:
+    def __init__(self, smoothing: float = 1.0, back_scale: float = 2.0, prior_weight: float = 2.0) -> None:
         self.smoothing = float(smoothing)
         if self.smoothing < 0:
             raise ValueError(f"smoothing must be >= 0, got {smoothing}")
+        self.back_scale = float(back_scale)
+        if self.back_scale < 0:
+            raise ValueError(f"back_scale must be >= 0, got {back_scale}")
+        self.prior_weight = float(prior_weight)
+        if self.prior_weight < 0:
+            raise ValueError(f"prior_weight must be >= 0, got {prior_weight}")
         self.scores: dict[str, list[float]] = {}
         self.prior: list[float] = [0.0, 0.0, 0.0]
         self.observed = 0
@@ -109,7 +115,59 @@ class MetaLayer:
 
     # -- the policy ----------------------------------------------------------
 
-    def log_policy(self, signature: str) -> list[float]:
+    def _prior_row(self) -> list[float]:
+        """The global prior, rescaled to ``prior_weight`` observations.
+
+        The prior is the sum over every cycle the model has ever met, so left
+        raw it judges a cycle it has *never* met with the confidence of all of
+        them at once - a hundred observations' worth of certainty about
+        something unseen.  That is wrong on its own terms, and it also drowns
+        out anything else with an opinion: the ``back`` evidence below is a
+        couple of observations, which against a raw prior of a hundred is
+        nothing.  Rescaling keeps the prior's *direction* - what cycles tend to
+        look like - and gives it the weight it has actually earned about this
+        one, which is about one signature's worth.
+        """
+        total = sum(abs(v) for v in self.prior)
+        if not total or not self.prior_weight:
+            return list(self.prior)
+        f = self.prior_weight / total
+        return [v * f for v in self.prior]
+
+    def about(self, label: str) -> list[float]:
+        """What the layer knows about cycles at one node, summed over every loop length it has seen there.
+
+        A signature names the node a cycle re-enters and how long the loop is,
+        so every signature for one node shares a prefix.  This is the answer to
+        a question a single signature cannot take: *the graph says walks through
+        here go round - do I remember anything about that?*  A walk meeting a
+        ``BACK`` hand-over has not closed a cycle yet and so has no signature to
+        look up, but it is standing exactly where the loops it has seen happen.
+        """
+        key = label[:3] + ":"
+        row = [0.0, 0.0, 0.0]
+        for signature, scores in self.scores.items():
+            if signature.startswith(key):
+                row = [a + b for a, b in zip(row, scores)]
+        return row
+
+    def rides(self, label: str) -> bool:
+        """Whether the layer has seen cycles at this node and, on balance, rode them."""
+        row = self.about(label)
+        if not any(row):
+            return False
+        return ACTIONS[max(range(len(ACTIONS)), key=row.__getitem__)] == RIDE
+
+    def knows(self, signature: str) -> bool:
+        """Whether this exact cycle has been observed (rather than judged by the prior)."""
+        return bool(self.evidence(signature))
+
+    def evidence(self, signature: str) -> float:
+        """How much has been observed about this exact cycle, in units of observations."""
+        row = self.scores.get(signature)
+        return sum(abs(v) for v in row) if row else 0.0
+
+    def log_policy(self, signature: str, back: float = 0.0) -> list[float]:
         """``[log P(ride), log P(escape), log P(abort)]`` for a signature.
 
         The signature's scores when it has been seen, the global prior
@@ -124,27 +182,42 @@ class MetaLayer:
         an opinion.  Negative scores (a punished or inverted action) push the
         other way by the same amount, and an untrained layer is uniform, which
         costs ``log 3`` whatever the walk does and so changes no ranking.
+
+        ``back`` is the graph's own probability of handing over at the node the
+        cycle would re-enter - its ``BACK`` edge's share
+        (:meth:`~radixnet.graph.RadixCyclicGraph.back_cost`).  The two are the
+        same knowledge at different resolutions: ``BACK`` says *this node* goes
+        round, learned from walks that had to back out of it; a signature says
+        what to do about *this cycle*, learned from what the corpus did.  So
+        ``back`` enters as ``back_scale * back`` observations **against**
+        riding, on the same evidence scale as everything else - which means a
+        cycle the corpus has actually been seen to ride still wins over it, and
+        that is the ordering worth having: the specific memory outranks the
+        node's reflex.
         """
         row = self.scores.get(signature)
         if row is None:
-            row = self.prior
+            row = self._prior_row()
+        if back and self.back_scale:
+            row = list(row)
+            row[0] -= self.back_scale * back
         s = self.smoothing or 1.0
         logits = [math.copysign(math.log1p(abs(v) / s), v) for v in row]
         m = max(logits)
         log_total = m + math.log(math.fsum(math.exp(v - m) for v in logits))
         return [v - log_total for v in logits]
 
-    def cost(self, signature: str, action: str) -> float:
+    def cost(self, signature: str, action: str, back: float = 0.0) -> float:
         """``-log P(action | signature)`` - what the layer adds to a move's cost."""
-        return -self.log_policy(signature)[self._index(action)]
+        return -self.log_policy(signature, back)[self._index(action)]
 
-    def costs(self, signature: str) -> dict[str, float]:
+    def costs(self, signature: str, back: float = 0.0) -> dict[str, float]:
         """``{action: -log P}`` for all three actions."""
-        return {a: -lp for a, lp in zip(ACTIONS, self.log_policy(signature))}
+        return {a: -lp for a, lp in zip(ACTIONS, self.log_policy(signature, back))}
 
-    def decide(self, signature: str) -> str:
+    def decide(self, signature: str, back: float = 0.0) -> str:
         """The action the layer would take on its own (the cheapest one)."""
-        lp = self.log_policy(signature)
+        lp = self.log_policy(signature, back)
         return ACTIONS[max(range(len(ACTIONS)), key=lp.__getitem__)]
 
     # -- reporting -----------------------------------------------------------
@@ -184,6 +257,8 @@ class MetaLayer:
         """JSON-serialisable snapshot (signatures with an all-zero row are dropped)."""
         return {
             "smoothing": self.smoothing,
+            "back_scale": self.back_scale,
+            "prior_weight": self.prior_weight,
             "observed": self.observed,
             "actions": list(ACTIONS),
             "prior": list(self.prior),
@@ -193,7 +268,11 @@ class MetaLayer:
     @classmethod
     def from_dict(cls, d: dict | None) -> "MetaLayer":
         """Rebuild a layer; ``None`` or a missing document gives a fresh one."""
-        layer = cls(smoothing=float((d or {}).get("smoothing", 1.0)))
+        layer = cls(
+            smoothing=float((d or {}).get("smoothing", 1.0)),
+            back_scale=float((d or {}).get("back_scale", 2.0)),
+            prior_weight=float((d or {}).get("prior_weight", 2.0)),
+        )
         if not d:
             return layer
         layer.observed = int(d.get("observed", 0))

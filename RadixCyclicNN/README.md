@@ -1137,7 +1137,36 @@ re-entered node's first trigram and how long the loop is, e.g. `lol:4`):
 
 Those are learned by counting what the corpus did at that exact cycle, so a
 cycle the corpus rides stays cheap to ride and one it never rides becomes
-expensive.  Nothing is forbidden.  `info` reports the signatures learned, the
+expensive.  Nothing is forbidden.
+
+**The reflex and the memory.**  The `BACK` sentinel and this layer are the same
+knowledge at two grains.  `BACK` is the reflex — an edge competing for a node's
+probability, taught by voices that caught themselves repeating and backed out,
+and when it wins, the branch is handed over and offers nothing.  The layer is
+the memory of one particular cycle.  They are wired both ways:
+
+* the node's hand-over probability enters the layer's policy as evidence
+  **against** riding, on the same scale as everything else, so:
+
+  ```
+  nothing known                              ride   (weakly)
+  6 hand-overs at the node, P(BACK) = 0.95   escape (the reflex speaks)
+    + 1 observed ride at this exact cycle    escape (one observation is not enough)
+    + 3 observed rides                       ride   (the memory outranks the reflex)
+  ```
+
+* and when `BACK` has handed a branch over, the search asks the layer what it
+  remembers about cycles at *that node* — it has to be the node-level question,
+  because a walk meeting the hand-over is on its first visit and has no cycle to
+  name yet — and restores the branch when the answer is that it rode them.  With
+  no memory, the hand-over stands.
+
+Metacognition supervising the reflex is what the research note describes, and
+that is the line where it happens.  (Going the other way — letting the corpus's
+declines teach `BACK` — is a dial, `teach_back`, and it is **off**: a corpus
+declines cycles constantly, `BACK` only ever rises, and its veto is per *node*
+while the corpus's knowledge is per *child*. Measurements in `DESIGN.md`
+§30.3.1.)  `info` reports the signatures learned, the
 status bar shows coherence and cycles, and `invert` flips the layer with the
 graph so 2NRL covers it too.
 
