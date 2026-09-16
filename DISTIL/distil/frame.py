@@ -212,7 +212,12 @@ _SIGNALS = {
         r"referee|validator|schema|assertion|benchmark|interpreter)\b", re.I),
 }
 
-_OBJECTIVE = re.compile(r"\b(?:so that|in order to|to|goal is to|aim(?:ing)? to)\s+(.{6,80})", re.I)
+#: Explicit purpose markers only. A bare "to" is a preposition far more often
+#: than a purpose marker -- "give the report to accounting" yielded the objective
+#: "accounting" -- and because any objective differing from the task short-
+#: circuits the clarity gate, every task containing the word "to" bypassed it.
+_OBJECTIVE = re.compile(
+    r"\b(?:so that|in order to|goal is to|aim(?:ing)? to|such that)\s+(.{6,80})", re.I)
 _VERB = re.compile(r"\b(build|write|parse|compute|sort|find|count|check|convert|read|"
                    r"fetch|clean|merge|validate|render|negotiate|persuade|decide|"
                    r"choose|plan|design|ship|fix|test|measure)\b", re.I)

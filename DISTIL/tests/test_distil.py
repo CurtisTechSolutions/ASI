@@ -27,7 +27,7 @@ from distil import game
 from distil.agent import Distil
 from distil.casebook import Case, Casebook
 from distil.clarify import (Clarification, Clarifier, Gap, first_step_actionable,
-                            gaps as frame_gaps)
+                            gaps as frame_gaps, objective_unclear)
 from distil.challenge import (Attack, Ground, Persistence, challenge, classify,
                               interrogate, premises)
 from distil.compress import PRESERVE, Compressor
@@ -1045,6 +1045,66 @@ def test_answering_nothing_stops_early_but_still_surfaces_the_blocker():
     assert out.rounds == 1, "the reported round count must match what happened"
     assert not out.actionable
     assert Gap.OBJECTIVE in [q.gap for q in out.questions]
+
+
+#: The gate, pinned as a table. It inverted in BOTH directions when it was a
+#: bare threshold on `goals.checkability`: "handle it somehow please" scored 0.85
+#: and sailed through, "write a parser that produces clean output" scored 0.15
+#: and was refused for containing the word "clean", and one filler word decided
+#: it -- "fix everything" was gated, "fix everything now" was not.
+CLARITY_CASES = [
+    # (task, must_be_gated)
+    ("write a parser that produces clean output", False),   # judgement word, but says write/produce
+    ("build a csv parser that passes the test suite", False),
+    ("compute the median of a column", False),
+    ("parse a quantum waveform capture file", False),
+    ("dedupe the records", False),
+    ("remove duplicate rows from the csv file", False),
+    ("write a script to clean up the csv", False),          # "to" must not bypass the gate
+    ("make the thing better", True),                        # nothing named
+    ("do the thing with the stuff", True),
+    ("just make it work", True),
+    ("handle it somehow please", True),                     # observable verb, no subject
+    ("fix everything", True),
+    ("fix everything now", True),                           # a filler word must not flip it
+    ("improve the design", True),                           # judgement only
+    ("make the importer better", True),
+    ("clean up the csv file", True),                        # names a subject, but "clean" how?
+]
+
+
+def test_the_clarity_gate_does_not_invert_in_either_direction():
+    d = fresh()
+    wrong = []
+    for task, should_gate in CLARITY_CASES:
+        got = objective_unclear(d.clarifier.framer.frame(task))
+        if got != should_gate:
+            wrong.append((task, should_gate, got))
+    assert not wrong, "\n".join(f"{t!r}: expected gated={w}, got {g}" for t, w, g in wrong)
+
+
+def test_one_filler_word_does_not_flip_the_gate():
+    """The sharpest symptom of using a prior as a boundary: checkability's
+    no-signal answer is exactly 0.5 and the test was `< 0.5`, so adding any
+    third word moved a task from "unknown" to "clear"."""
+    d = fresh()
+    for short, padded in (("fix everything", "fix everything now"),
+                          ("make it work", "just make it work please")):
+        a = objective_unclear(d.clarifier.framer.frame(short))
+        b = objective_unclear(d.clarifier.framer.frame(padded))
+        assert a == b, f"{short!r} -> {a} but {padded!r} -> {b}"
+
+
+def test_a_bare_to_is_not_a_purpose_marker():
+    """`_OBJECTIVE` matched a bare "to", so "give the report to accounting"
+    yielded the objective "accounting" -- and any objective differing from the
+    task short-circuits the clarity gate, so every task containing "to" bypassed
+    it."""
+    from distil.frame import _OBJECTIVE
+    assert _OBJECTIVE.search("give the report to accounting") is None
+    assert _OBJECTIVE.search("talk to the team about design") is None
+    found = _OBJECTIVE.search("rewrite the parser so that the suite passes")
+    assert found and "suite passes" in found.group(1)
 
 
 def test_a_referee_does_not_substitute_for_an_objective():

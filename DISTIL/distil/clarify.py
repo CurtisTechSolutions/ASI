@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 
 from .frame import Framer, GameFrame, Information, agenda, capabilities
 from .game import entropy
-from .goals import checkability
+from .goals import _CHECKABLE, _UNCHECKABLE, checkability
 from .memory import Kind, Source
 
 
@@ -139,35 +139,81 @@ class Clarification:
         return "\n".join(lines)
 
 
+#: Words that stand in for a subject instead of naming one.
+_PLACEHOLDERS = {
+    "thing", "things", "stuff", "it", "this", "that", "these", "those",
+    "everything", "something", "anything", "nothing", "all", "them",
+    "work", "item", "items", "issue", "issues", "problem", "problems",
+    "bit", "bits", "part", "parts", "code", "system", "everything",
+}
+#: Words that add urgency or politeness and no content.
+_FILLERS = {
+    "now", "please", "somehow", "just", "really", "very", "quickly", "asap",
+    "soon", "properly", "again", "up", "out", "better", "more", "less",
+    "a", "an", "the", "some", "any", "with", "for", "of", "in", "on", "to",
+    "and", "or", "my", "our", "its", "their", "is", "be", "should", "must",
+}
+
+
+def _content_words(task: str) -> set[str]:
+    """What the task is actually about, after removing verbs and filler.
+
+    Known verbs are stripped because the verb is a separate signal; what remains
+    should be the artefact. If nothing remains, the task named no subject.
+    """
+    import re as _re
+    words = [w for w in _re.findall(r"[a-z][a-z'-]*", task.lower())]
+    verbs = set(_CHECKABLE.findall(task.lower())) | set(_UNCHECKABLE.findall(task.lower()))
+    # Generic verbs neither pattern lists. Without them "fix everything" kept
+    # "fix" as its content word and read as naming a subject, so it passed while
+    # the identical "fix the thing" did not.
+    verbs |= {"make", "do", "get", "have", "give", "take", "handle", "deal",
+              "fix", "sort", "tidy", "update", "change", "ensure", "help",
+              "try", "keep", "put", "set", "run", "use", "add", "remove"}
+    return {w for w in words
+            if w not in _FILLERS and w not in _PLACEHOLDERS and w not in verbs}
+
+
 def objective_unclear(frame: GameFrame) -> bool:
     """Is the objective genuinely not understood?
 
-    The tempting test -- "the objective is just the task restated" -- is wrong,
-    and gating on it broke eight working tasks. `Framer` falls back to the task
-    text whenever no explicit purpose clause is present, which is most of the
-    time, and for an imperative like *build a csv parser that passes the test
-    suite* that fallback is **correct**: the task states its own objective.
+    Two signals, and both are needed. `goals.checkability` is used by
+    distillation and its own docstring calls it "a prior that only has to be
+    right on average" -- so using it directly as a boundary was the mistake, not
+    the number it returns. As a gate its errors became refusals and false green
+    lights in both directions at once: its no-signal answer is exactly 0.5 and
+    the test was `< 0.5`, so "unknown" resolved to "clear" and *handle it
+    somehow please* sailed through while *write a parser that produces clean
+    output* was refused for containing the word "clean". One filler word decided
+    it -- *fix everything* was gated and *fix everything now* was not.
 
-    What separates that from *make the thing better* is not whether the objective
-    was restated but whether the verb admits a check. `goals.checkability`
-    already draws that line -- observable verbs (compute, parse, build) score
-    high, judgement verbs (improve, optimise, clean, better) score low -- and it
-    is the same line distillation uses to decide where it may stop. Reusing it
-    keeps one definition of "checkable" in the system instead of two that drift.
+    The two signals:
+
+    **Does the task name something?** A task whose content words are all
+    placeholders -- *the thing*, *everything*, *it*, *the stuff* -- has no
+    subject, whatever its verb. This is what separates *handle it somehow* from
+    *dedupe the records*.
+
+    **Is the verb's result observable?** A judgement verb with no observable verb
+    anywhere is a preference, not an outcome. *Improve the design* names a
+    subject and still does not say what done looks like; *write a parser that
+    produces clean output* contains a judgement word but also says write and
+    produce, so it does.
+
+    A referee deliberately does not rescue either. This function is reached only
+    when `Framer` could read no objective at all, so letting a judge stand in for
+    knowing what winning is confuses two different axes.
     """
     if not frame.objective:
         return True
     if frame.objective.strip() != frame.task.strip():
         return False           # an objective was stated separately; take it
-    # A referee deliberately does NOT rescue this. It was tried, to avoid gating
-    # "clean the export so the tests pass" on the word "clean", and it was
-    # wrong: this line is reached only when `Framer` could read no objective and
-    # fell back to the task text, so letting a referee pass it made having a
-    # judge substitute for knowing what winning is. Those are different axes --
-    # a benchmark suite can tell you a number moved, not which number you meant.
-    # DESIGN 7.2 prices building in a wrong frame at -0.80, so the extra
-    # question is the cheaper mistake.
-    return checkability(frame.task) < 0.5
+    task = frame.task
+    if not _content_words(task):
+        return True            # nothing is named, only pointed at
+    judgement = bool(_UNCHECKABLE.search(task))
+    observable = bool(_CHECKABLE.search(task))
+    return judgement and not observable
 
 
 def gaps(frame: GameFrame, plan) -> list[str]:
