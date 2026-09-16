@@ -124,8 +124,11 @@ class Clarification:
         lines = [self.frame.render(), ""]
         if self.actionable:
             lines.append(f"  ready: {self.reason}")
-            if self.plan and self.plan.items:
-                lines.append(f"  first step: {self.plan.items[0]}")
+            # The item the gate actually judged. Advisories lead `items`, so
+            # printing items[0] named a sentence as the first step.
+            doable = self.plan.actionable_items if self.plan else []
+            if doable:
+                lines.append(f"  first step: {doable[0]}")
         else:
             lines.append(f"  not ready: {self.reason}")
         if self.questions:
@@ -156,11 +159,14 @@ def objective_unclear(frame: GameFrame) -> bool:
         return True
     if frame.objective.strip() != frame.task.strip():
         return False           # an objective was stated separately; take it
-    if frame.referee:
-        # Something will say no. A judgement verb is only a problem when nothing
-        # can settle the judgement, and gating "clean the export so the tests
-        # pass" on the word "clean" ignored the referee sitting right next to it.
-        return False
+    # A referee deliberately does NOT rescue this. It was tried, to avoid gating
+    # "clean the export so the tests pass" on the word "clean", and it was
+    # wrong: this line is reached only when `Framer` could read no objective and
+    # fell back to the task text, so letting a referee pass it made having a
+    # judge substitute for knowing what winning is. Those are different axes --
+    # a benchmark suite can tell you a number moved, not which number you meant.
+    # DESIGN 7.2 prices building in a wrong frame at -0.80, so the extra
+    # question is the cheaper mistake.
     return checkability(frame.task) < 0.5
 
 
@@ -419,11 +425,18 @@ class Clarifier:
                 frame = self.absorb(frame, known)
                 caps = capabilities(frame, self.memory, self.toolbox)
                 plan = agenda(frame, caps)
+                # Resolved means the gap is GONE, not that a string arrived --
+                # the invariant the ask path enforces. Filing them
+                # unconditionally let one Clarification report a gap resolved
+                # and ask about it in the same breath.
+                open_now = set(gaps(frame, plan))
                 for gap in known:
-                    if gap not in resolved:
-                        resolved.append(gap)
-                    if gap in contested:
-                        contested.remove(gap)
+                    target, other = ((contested, resolved) if gap in open_now
+                                     else (resolved, contested))
+                    if gap in other:
+                        other.remove(gap)
+                    if gap not in target:
+                        target.append(gap)
                 ok, reason = first_step_actionable(frame, plan)
                 if ok:
                     self.framer.remember(frame)
@@ -439,7 +452,12 @@ class Clarifier:
                 return Clarification(frame, plan, pending, round_no, sorted(asked),
                                      contested, resolved, False, why)
 
-            to_ask = [q for q in pending if not q.answered_by_memory]
+            # Skip a question only when memory's answer actually closed the gap.
+            # `answered_by_memory` alone dropped it from `to_ask` every round, so
+            # a blocking gap whose stored answer the frame could not use was
+            # never asked again -- silently undoing the rule that blockers repeat.
+            to_ask = [q for q in pending
+                      if not q.answered_by_memory or q.gap in Gap.BLOCKING]
             answers = dict(ask(to_ask) or {}) if to_ask else {}
             asked.update(q.gap for q in pending)
 

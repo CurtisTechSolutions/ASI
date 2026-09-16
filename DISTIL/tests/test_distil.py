@@ -1047,14 +1047,49 @@ def test_answering_nothing_stops_early_but_still_surfaces_the_blocker():
     assert Gap.OBJECTIVE in [q.gap for q in out.questions]
 
 
-def test_naming_a_referee_makes_a_vague_objective_checkable():
-    """A judgement verb is only a problem when nothing can settle the judgement.
-    Gating "clean the export so the tests pass" on the word "clean" ignores the
-    referee standing right next to it."""
+def test_a_referee_does_not_substitute_for_an_objective():
+    """Tried and reverted. `objective_unclear` reaches that point only when no
+    objective could be read at all, so letting a referee pass it made having a
+    judge stand in for knowing what winning is. A benchmark suite can tell you a
+    number moved; it cannot tell you which number you meant."""
     _, c = _clarifier()
-    assert not c.clarify("make the thing better").actionable
-    out = c.clarify("make the thing better", ask=lambda qs: {Gap.REFEREE: "the benchmark suite"})
+    out = c.clarify("make the thing better",
+                    ask=lambda qs: {Gap.REFEREE: "the benchmark suite"})
+    assert not out.actionable, out.reason
+    assert Gap.OBJECTIVE in [q.gap for q in out.questions]
+    # and the objective, once given, does unblock it
+    answers = {Gap.OBJECTIVE: "p99 latency under 200ms on the import path",
+               Gap.REFEREE: "the benchmark suite"}
+    assert c.clarify("make the thing better", ask=lambda qs: answers).actionable
+
+
+def test_the_reported_first_step_is_the_step_that_was_judged():
+    """Advisories lead the agenda, so printing items[0] named a sentence as the
+    first step while the gate had judged a different item entirely."""
+    _, c = _clarifier()
+    out = c.clarify("compute the median of a column")
     assert out.actionable, out.reason
+    rendered = out.render()
+    if "first step:" in rendered:
+        step = rendered.split("first step:")[1].splitlines()[0].strip()
+        assert step in out.plan.actionable_items
+        assert step not in out.plan.advisories
+
+
+def test_a_memory_answer_that_does_not_close_a_blocker_is_still_asked():
+    """`answered_by_memory` alone dropped the question every round, so a
+    blocking gap whose stored answer the frame could not use was never raised
+    again -- undoing the rule that blockers repeat."""
+    d, c = _clarifier()
+    frame = d.framer.frame("make the thing better")
+    # an answer on record that absorb cannot turn into an objective
+    d.memory.remember(Kind.FACT, "about the game 'make the thing better': objective is none",
+                      meta={"task": "make the thing better", "gap": Gap.OBJECTIVE,
+                            "answer": "none"}, grade=1.0, source=Source.USER)
+    asked = []
+    c.clarify("make the thing better",
+              ask=lambda qs: (asked.extend(q.gap for q in qs), {})[1], max_rounds=2)
+    assert Gap.OBJECTIVE in asked, "an unusable stored answer must not silence the question"
 
 
 def test_an_objective_of_i_do_not_know_is_not_an_objective():
