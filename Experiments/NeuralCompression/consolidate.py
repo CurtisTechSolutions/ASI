@@ -75,13 +75,14 @@ def run(route, N=4, hs=4, epochs=400, ft=200, lr=0.05, seed=0, act="tanh", b=1/3
     items = [(k, x0, x1, y) for k in range(N) for x0, x1, y in TR[k]]
     if route == "joint":
         band_train(q, items, N, epochs + ft, lr, rng)
-        return ev(q, N, TE)
+        return ev(q, N, TE), None, (epochs + ft)*len(items)
     specs = [train_specialist(G[k], hs, epochs, lr, rng, act, b) for k in range(N)]
     solo = sum(sum((s.forward([x0,x1])[2]-y)**2 for x0,x1,y in TE[k])/len(TE[k])
                for k, s in enumerate(specs))/N
     if route == "graft":
         for k, s in enumerate(specs): graft(s, q, k, N, hs)
         band_train(q, items, N, ft, lr, rng)                     # fine-tune only
+        updates = ft*len(items)
     elif route == "replay":
         gen = []
         for k, s in enumerate(specs):                             # the specialist dreams
@@ -90,16 +91,29 @@ def run(route, N=4, hs=4, epochs=400, ft=200, lr=0.05, seed=0, act="tanh", b=1/3
                 gen.append((k, x0, x1, max(0.0, min(1.0, s.forward([x0, x1])[2]))))
         band_train(q, gen, N, epochs, lr, rng)                    # learn from the replay
         band_train(q, items, N, ft, lr, rng)                      # then fine-tune on real data
-    return ev(q, N, TE), solo
+        updates = epochs*len(gen) + ft*len(items)
+    return ev(q, N, TE), solo, updates
 
 if __name__ == "__main__":
     print("Dual network: specialists learn alone, then consolidate into the query net.\n")
-    print(f"  {'activation':>12} {'route':>10} {'query MSE':>10} {'specialist MSE':>15} {'vs joint':>9}")
+    print("  'updates' counts SGD steps on the SHARED query network -- the contended")
+    print("  resource, and the thing the three routes really differ on. Replay takes 1.67x")
+    print("  more of them than joint, so 'joint +budget' repeats the baseline with replay's")
+    print("  budget: that column, not 'vs joint', is what replay has to beat.\n")
+    print(f"  {'activation':>10} {'route':>13} {'query MSE':>10} {'specialist':>11} "
+          f"{'updates':>9} {'vs joint':>9} {'vs +budget':>11}")
     for act, b, lbl in (("tanh", 1/3, "tanh"), ("sine", 1.0, "sine b=1")):
-        base = sum(run("joint", act=act, b=b, seed=s) for s in range(3))/3
-        print(f"  {lbl:>12} {'joint':>10} {base:>10.5f} {'—':>15} {'—':>9}")
+        def avg(route, **kw):
+            vals = [run(route, act=act, b=b, seed=s, **kw) for s in range(3)]
+            solo = None if vals[0][1] is None else sum(v[1] for v in vals)/len(vals)
+            return sum(v[0] for v in vals)/len(vals), solo, vals[0][2]
+        base, _, ub = avg("joint")
+        matched, _, um = avg("joint", epochs=800, ft=200)   # 1000 x 192 = replay's 192,000
+        print(f"  {lbl:>10} {'joint':>13} {base:>10.5f} {'—':>11} {ub:>9,} {'—':>9} {'—':>11}")
+        print(f"  {lbl:>10} {'joint +budget':>13} {matched:>10.5f} {'—':>11} {um:>9,} "
+              f"{base/matched:>8.2f}x {'—':>11}")
         for route in ("graft", "replay"):
-            vals = [run(route, act=act, b=b, seed=s) for s in range(3)]
-            m = sum(v[0] for v in vals)/3; solo = sum(v[1] for v in vals)/3
-            print(f"  {lbl:>12} {route:>10} {m:>10.5f} {solo:>15.5f} {base/m:>8.2f}x")
+            m, solo, u = avg(route)
+            print(f"  {lbl:>10} {route:>13} {m:>10.5f} {solo:>11.5f} {u:>9,} "
+                  f"{base/m:>8.2f}x {matched/m:>10.2f}x")
         print()
