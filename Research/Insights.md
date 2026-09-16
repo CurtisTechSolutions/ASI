@@ -27,27 +27,39 @@ refuses to play one below a confidence floor.
 > A population of micro neural networks that play a game against each other. The
 > answer is the equilibrium of that game.
 
-*Implemented and measured.* The machinery all works and every game-theoretic
-claim it rests on is asserted numerically (`AGI/GTMNN/tests/`, 36 tests). What does
-not hold is the part the whole design is for: **the population barely learns to
-predict.** Belief loss after the full auction / equilibrium / Shapley / REINFORCE
-path is 2.84 against a uniform baseline of 2.71 — still worse than guessing —
-while the *identical* micros given a direct supervised signal reach **1.50**. The
-architecture has ample capacity; the credit path is what fails to deliver a
-signal that sharpens the population.
+*Implemented and measured, then re-measured.* The machinery works and every
+game-theoretic claim it rests on is asserted numerically (`GTMNN/tests/`, 49
+tests). The first measurement said the population barely learns to predict. That
+was wrong, and wrong for a reason the repository had already met twice: the
+comparison, not the thing compared.
 
-More training does not close it (6 900 steps per micro moved belief loss 3.226 →
-3.204, and 150 epochs did worse than 20), so it is not a signal shortage. Two
-candidate causes were tested and **both were wrong**: the `B`/`λ` ratio (swept
-2 → ∞; abstention falls 56% → 0% and the loss never improves) and the
-null-player axiom forbidding a reward for correct silence (deliberately breaking
-it made things *worse*, 2.838 → 3.050).
+**It learns.** Real inference loss — `y` withheld, `BeliefCongestion`, solver,
+aggregate — is **2.353** against a uniform 2.708 at 60 epochs, below uniform at
+every budget and improving monotonically. The credit path was never broken; its
+coefficient was mis-scaled. `φ` is a marginal contribution with a mean `|φ|` of
+about 0.15 per seat, so at `lr = 0.05` the population learned ~7× slower than
+the same micros under a unit supervised signal, and "does not learn" was "learns
+slowly, measured against a control given 10× the epochs". Three of my claims
+fell: the supervised-vs-credit gap (mismatched budgets; at matched 6 epochs it is
+0.07), "more training does not help" (old code), and "the abstain trap is not
+real" (it is — it just needs a signal that raises `q_abstain` to fire).
 
-The population does specialise, which was the other thing in doubt: `gini` rises
-to 0.54 when every micro is seated against 0.05 when 24 of 256 are. That makes
-seat count the first thing to look at.
+**The gap that remains is structural.** Supervised reaches 0.905. Only seats
+holding `y` ever receive non-zero credit — about 23% of seat-games — and a
+correct abstention is a null player, so a micro is never taught to be quiet;
+`q_abstain` *falls* over training. Supplying that signal the principled way
+(counterfactual regret with Shapley as payoff) teaches silence perfectly and
+collapses the inference game to uniform, `2.708 ± 0.00`: abstainers are 77% of
+seats, their bids fall under the reserve, nobody is seated, the aggregate is the
+ε-smoothing. The abstain trap, closed. The sharper open question: how do you
+teach a micro to be quiet without it going silent for good?
 
-*Where:* `AGI/GTMNN/DESIGN.md`, `AGI/GTMNN/README.md` · **contradicted** (as a route to
+The population does specialise: `gini` rises to 0.54 when every micro is seated
+against 0.05 when 24 of 256 are.
+
+*Where:* `AGI/GTMNN/DESIGN.md`, `AGI/GTMNN/README.md` · **refined** (it learns;
+the coefficient was wrong, not the mechanism; the gap to supervised is real and
+its cause is named)
 prediction; the mechanism is sound and the credit is exact)
 
 ### 3. Credit belongs to game theory, not the chain rule
@@ -828,7 +840,7 @@ Ordered by how much they would change, per unit of effort:
 3. **Does goal-first ordering still pay at scale?** (37) The compression half of the result is small-N: four games and one perfectly-discriminating axis. Generate or gather thirty-odd games with overlapping goals and re-measure tokens-to-identification against alphabetical and against a highest-entropy-axis-first ordering. The knowability argument does not need this; the compression claim does.
 4. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `AGI/Memory/` needs building.
 5. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.
-6. **Why does the credit path learn so weakly?** (2, 3) The sharpest open question in the repository. Credit is exact, the gradient is exact, the architecture has capacity — and the population still lands above the uniform baseline where a direct supervised signal on the same micros lands far below. Seats-per-game is the first suspect (`gini` 0.05 at 24/256 seated against 0.54 at 64/64), so sweep `M` against `N` before anything else. `B`/`λ` and the null-player/silence conflict are both already ruled out.
+6. ~~**Why does the credit path learn so weakly?**~~ (2, 3) **Answered: it doesn't, the learning rate was 7× too small for φ's scale, and the control had 10× the epochs.** Fixed; it now beats uniform at every budget. The successor question is sharper: **how do you teach a micro to abstain without it going silent for good?** Counterfactual-regret credit teaches silence and collapses the inference game to uniform through the abstain trap. Candidates worth one experiment each: cap the abstainer share of the gradient budget at the holder share; let the reserve price fall with the bidder count so a quiet population still seats *someone*; or seat by reputation rather than bid when bidders < M. The last is the least invasive and the auction's own `bidders` signal already flags the condition.
 7. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
 8. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
 9. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
