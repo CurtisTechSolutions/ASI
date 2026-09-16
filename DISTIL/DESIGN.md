@@ -49,6 +49,7 @@ answers and the loop that learns are the same loop.
 | Ask clarifying questions when the objective is not understood | `clarify.py` (§2.6) |
 | Embed tools, MCPs, and its own tooling in one layer | `mcp.py`, `toolsmith.py` (§11.1–11.3) |
 | A starter toolkit worth building first | `seed.py` (§11.4) |
+| A frontend, with visualisations, to use all of it | `serve.py`, `project.py`, `ui/` (§16) |
 
 ---
 
@@ -516,7 +517,7 @@ has been asked, and the selection criteria come from the design rather than from
 taste: it must be decidable (§8), it must be routed through often, and — the one
 that matters most — **it should make more things gradeable**.
 
-That last criterion is the highest-leverage one. §16 states the real ceiling:
+That last criterion is the highest-leverage one. §17 states the real ceiling:
 prose is never self-graded, so the system improves fastest at what a computer can
 check. A tool that *creates a referee* therefore buys more than a tool that does
 work, because it moves a whole class of goals from `UNCHECKABLE` to `CHECKABLE`
@@ -640,7 +641,85 @@ latency will never be run long enough to improve anything.
 
 ---
 
-## 16. What this does not do
+## 16. The interface
+
+A system that reasons in twelve typed steps and ranks by three composed factors
+has to be *looked at* to be believed, and a terminal renders a matrix badly. The
+frontend (`serve.py`, `project.py`, `ui/`) exists to make each of this document's
+claims checkable against a running instance rather than against prose.
+
+### 16.1 What each panel has to prove
+
+The panels are not a tour of the API. Each one is the visible form of one claim.
+
+| claim | §  | where you see it |
+|---|---|---|
+| ranking is not similarity | 4 | Recall decomposes every hit into similarity, credibility and recency, with the weights the server actually used, and says so outright when the top hit is not the most similar one |
+| the game is understood before it is played | 2 | Ask leads with the frame — players, payoff, horizon, information, referee — and its confidence, above anything that was planned |
+| the choice is a decision under uncertainty | 7 | the payoff matrix, with Nature's states as columns and the belief over them printed on the headers |
+| distillation stops at verifiability | 8 | the goal tree badges each leaf verifiable or needing a check |
+| a bad idea is worth running | 10 | H(p) drawn, with each candidate experiment plotted on it |
+| capability is earned | 11 | every tool shown with the grade it passed and the problem it solved |
+| the system may change its own numbers | 14 | the policy, every bound, and the button that tunes it |
+
+### 16.2 Projection
+
+512 dimensions onto a plane, by PCA — power iteration with deflation, in the
+standard library. Classical MDS on a Euclidean distance matrix *is* PCA, and PCA
+costs one pass over the vectors where MDS builds an n×n matrix first; at ten
+thousand traces that is a hundred million entries to hold for a picture.
+
+Two properties matter more than the method. The start vector is **fixed**, not
+random, so the same store always draws the same picture and a point that moved
+means a memory moved. And the sign of each component is pinned by the skew of the
+projection, because an eigenvector is only defined up to sign and a picture that
+mirrors between reloads is a picture a person cannot learn.
+
+The projection runs over the **stored** vectors, never re-embedded text: the
+lexical embedder learns its IDF online, so re-embedding an old trace gives a
+slightly different vector than the one recall compares against, and a picture of
+vectors the system does not use is a picture of nothing. For the same reason each
+embedding backend is projected separately — two geometries share no plane.
+
+The axes have no meaning. Distance is meaningful, direction is not.
+
+### 16.3 What the interface is not
+
+It is a local tool. It binds `127.0.0.1` and it drives an agent that writes files
+and executes generated code, so exposing it hands anyone who can reach it both.
+There is no authentication, and adding a token would suggest a level of hardening
+this does not have.
+
+Three defences are cheap enough to have anyway:
+
+1. **Path containment.** A static path is resolved and confirmed to sit under
+   `web/` before it is read, so `..` cannot escape into the filesystem.
+2. **Host checking.** A request whose `Host` is not a loopback name is refused.
+   This is what stops a page from resolving an attacker-controlled name to
+   `127.0.0.1` and driving this server on the user's behalf.
+3. **Cross-site refusal.** The `Host` check does *not* stop an ordinary CSRF:
+   any page may address `127.0.0.1` directly, and the `Host` header it sends is
+   then perfectly honest. So `Sec-Fetch-Site: cross-site` is refused, a non-
+   loopback `Origin` is refused, and every POST must be `application/json` —
+   which is not a "simple request", so the browser has to preflight it and the
+   preflight finds no CORS headers here. Without this a page the user merely
+   visited could POST `/api/forge` and have this agent write and execute code.
+   The attacker could not read the reply; the side effect would already have
+   happened.
+
+None of the three is authentication. They close the attacks a browser can be
+made to carry out, which is the threat a localhost tool actually faces.
+
+### 16.4 The one dependency
+
+`ui/` is React built with Vite — the only third-party code anywhere in this
+repository, and it is a *build*-time dependency. `web/`, what it compiles to, is
+committed, so `distil.cli ui` runs on a machine with no node and no
+`npm install`. The server that serves it is `http.server`.
+
+---
+
+## 17. What this does not do
 
 Stated because a specification that only lists strengths is marketing.
 
@@ -669,6 +748,10 @@ Stated because a specification that only lists strengths is marketing.
 - **MCP is stdio only.** HTTP/SSE servers would be a second transport class, not
   a change to this one. No MCP server is exercised by the suite beyond a local
   fixture written for it.
+- **The frontend has no authentication and is not hardened.** §16.3 closes the
+  browser-carried attacks. It does nothing about a process already on the machine,
+  which can reach the port like any other client. Treat it the way you would treat
+  a shell.
 - **Action extraction is a verb list with a leading-word fallback.** It will
   never be complete, and a task whose verb it misses gets its first content word
   taken as the move. That is a guess, and the frame's confidence does not count

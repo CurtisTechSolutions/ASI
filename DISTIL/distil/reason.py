@@ -343,9 +343,16 @@ class Reasoner:
             cost_penalty = 1.0 / (1.0 + 0.25 * max(g.cost - 1.0, 0.0))
             rows.append([round((u * evidence * cost_penalty) if u > 0 else u, 4) for u in base])
         if chain:
+            # The row labels belong in the payload. A reader reconstructing the
+            # matrix later has to get them from somewhere, and the frontier is
+            # the wrong place: by the time anyone looks, the chosen goal has been
+            # marked met and dropped out of it, so the rows come back unnamed.
+            # DESIGN 6 says a step carries its inputs; these are inputs.
             chain.add(Step.PAYOFF, f"{len(rows)}x{len(State.ALL)} matrix over "
                                    f"{[role_of(g.text) for g in goals]}",
-                      matrix=rows, states=list(State.ALL))
+                      matrix=rows, states=list(State.ALL),
+                      goals=[g.text for g in goals],
+                      roles=[role_of(g.text) for g in goals])
         return rows
 
     def select(self, tree: GoalTree, belief: list[float], chain: Chain | None = None):

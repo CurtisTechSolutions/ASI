@@ -20,6 +20,16 @@ def _agent(args) -> Distil:
     return Distil(provider, home=args.home, seed=args.seed)
 
 
+def cmd_ui(args) -> int:
+    from .serve import WEB, serve
+    if not (WEB / "index.html").exists():
+        print(f"  the frontend is not built ({WEB} has no index.html)", file=sys.stderr)
+        print("  build it:  cd ui && npm install && npm run build", file=sys.stderr)
+        return 1
+    serve(host=args.bind, port=args.port, agent=_agent(args))
+    return 0
+
+
 def cmd_providers(args) -> int:
     for p in catalogue():
         state = "available" if p.available() else "not configured"
@@ -575,6 +585,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("rollback", help="restore the package to before a generation")
     s.add_argument("generation", nargs="?")
     s.set_defaults(fn=cmd_rollback)
+
+    s = sub.add_parser("ui", help="serve the web frontend")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--bind", default="127.0.0.1",
+                   help="interface to bind (default loopback; anything else exposes an "
+                        "agent that executes generated code)")
+    s.set_defaults(fn=cmd_ui)
 
     sub.add_parser("providers", help="what is reachable").set_defaults(fn=cmd_providers)
     sub.add_parser("stats", help="memory and tool counts").set_defaults(fn=cmd_stats)

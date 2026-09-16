@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# The React build inputs. `web/` -- the build OUTPUT -- is committed on purpose:
+# the Python server has no build step and no package manager, so `distil.cli ui`
+# has to work on a machine with no node installed.
+ui/node_modules/
+ui/.vite/

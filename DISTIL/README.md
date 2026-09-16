@@ -13,7 +13,7 @@ it then has to prove work.
 ```bash
 cd DISTIL
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 263 tests, ~25s
+python3 -m tests.test_distil                # 288 tests, ~25s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -26,12 +26,16 @@ python3 -m distil.cli explore --steps 3
 python3 -m distil.cli cases --like "the csv has ragged rows"
 python3 -m distil.cli compress --dry-run
 python3 -m distil.cli selfedit reason.py "cache the payoff matrix between calls"
+
+python3 -m distil.cli ui                    # the React frontend on 127.0.0.1:8765
 ```
 
-**Zero third-party dependencies.** Standard library only, like the rest of this
-repository — `urllib` for the provider calls, `hashlib` for the embeddings,
+**Zero third-party dependencies at runtime.** Standard library only, like the
+rest of this repository — `urllib` for the provider calls, `hashlib` for the embeddings,
 `subprocess` for the sandbox. No numpy, no vendor SDKs, no vector database
-required.
+required. The frontend is the one exception and it is a *build*-time one: `ui/`
+is React, and `web/` — what it compiles to — is committed, so running the UI
+needs no node and no `npm install`.
 
 **Runs with no API key.** `LocalProvider` is a deterministic offline decomposer,
 not a mock, and every number below was produced by it. Attach a real model with
@@ -206,6 +210,47 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 | `sandbox.py` | 200 | AST screen, subprocess, timeout, stripped environment |
 | `grade.py` | 252 | parse → screen → run → tests → determinism |
 | `embed.py` | 201 | signed hashing trick, online IDF, blake2b |
+| `serve.py` | 519 | the local HTTP API the frontend drives |
+| `project.py` | 139 | PCA by power iteration: 512 dims down to a plane you can look at |
+
+## The frontend
+
+```bash
+python3 -m distil.cli ui                    # http://127.0.0.1:8765
+cd ui && npm install && npm run build       # only if you change the React source
+```
+
+Six panels, each built around the one claim its part of the system makes.
+
+| panel | what it shows | why it is there |
+|---|---|---|
+| **Ask** | the frame, the agenda, the payoff matrix, the goal tree, all twelve typed steps, the verdict | the reasoning is legible or it is not reasoning |
+| **Memory** | every trace projected onto a plane, coloured by kind | you can see whether the space has structure |
+| **Recall** | each hit decomposed into similarity, credibility and recency | the ranking's claim, checkable |
+| **Tools** | what it has written, what each one solved, its grade | capability, with its evidence |
+| **Explore** | H(p) with the candidate experiments plotted on it | why a bad idea is worth running |
+| **System** | policy, providers, compression, the casebook | every number it may change about itself |
+
+The Recall panel flags the case the design exists for: when the top hit is *not*
+the most similar one, credibility did the work, and the banner says so rather
+than leaving it to be noticed. The Explore curve puts each candidate on H(p),
+where the ideas nearest the peak are the ones the system cannot call — which is
+the whole argument for testing bad ideas.
+
+The projection is PCA by power iteration from a *fixed* start vector, so the same
+store always draws the same picture and a moved point means the memory moved.
+The axes have no meaning: distance is meaningful, direction is not.
+
+**It is a local tool, not a service.** It binds 127.0.0.1, and it drives an agent
+that writes files and executes generated code. There is no authentication, and
+adding a token would imply a level of hardening this does not have. What it does
+have is three cheap defences: static paths are confirmed to resolve inside
+`web/`; a non-loopback `Host` is refused (DNS rebinding); and a cross-site
+request is refused outright — because any page you visit may address `127.0.0.1`
+directly, and its `Host` header is then perfectly honest. Without the third, a
+visited page could POST `/api/forge` and have this agent write and run code.
+`--bind` exists because someone will want it in a container; the warning it
+prints exists because they should know what they are opening.
 
 ## Storage
 
@@ -310,7 +355,7 @@ Every result above came from `LocalProvider`, and it has real limits:
   notifications, because a client that only works against a well-behaved server
   works against exactly one).
 
-`DESIGN.md` §16 lists the rest.
+`DESIGN.md` §17 lists the rest.
 
 ## See also
 

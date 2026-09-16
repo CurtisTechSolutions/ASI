@@ -14,10 +14,12 @@ still does what it did.
 from __future__ import annotations
 
 import json
+import math
 import random
 import shutil
 import sys
 import tempfile
+import threading
 import traceback
 from pathlib import Path
 
@@ -48,6 +50,8 @@ from distil.selfedit import SelfEditor, _lost_names, count_tests
 from distil.store import InProcessStore, TieredStore
 from distil.toolsmith import (Toolbox, ToolSpec, Toolsmith, parse_reply, signature_of,
                               synthesise)
+from distil.project import orient, project
+from distil.serve import Api, _plain, trace_json
 from distil.vector import centroid, cosine, normalise, spread
 from distil.workspace import Workspace
 
@@ -2785,6 +2789,323 @@ def test_an_unknown_provider_is_rejected_loudly():
         raise AssertionError("should have raised")
     except ProviderError:
         pass
+
+
+
+# --------------------------------------------------------------------------- #
+# projection -- the embedding space made visible
+# --------------------------------------------------------------------------- #
+
+def test_projection_is_deterministic_across_runs():
+    """A moved point must mean the memory moved, not the renderer.
+
+    Power iteration from a random start would give a different (still correct)
+    basis each run, and the picture would shuffle between reloads for no reason.
+    """
+    vs = [normalise([math.sin(i * j * 0.31) for j in range(1, 17)]) for i in range(12)]
+    assert project(vs) == project(list(vs))
+
+
+def test_projection_separates_two_clusters():
+    """The only claim the picture makes: near in the space is near on the plane."""
+    a = [normalise([1.0, 0.0, 0.0, 0.0][:4] + [0.01 * i, 0.0]) for i in range(6)]
+    b = [normalise([0.0, 1.0, 0.0, 0.0][:4] + [0.0, 0.01 * i]) for i in range(6)]
+    pts = project(a + b)
+    left, right = pts[:6], pts[6:]
+    within = max(abs(p[0] - q[0]) + abs(p[1] - q[1]) for p in left for q in left)
+    across = min(abs(p[0] - q[0]) + abs(p[1] - q[1]) for p in left for q in right)
+    assert across > within, f"clusters overlap: {across} <= {within}"
+
+
+def test_projection_fits_inside_the_frame():
+    vs = [normalise([math.cos(i * j) for j in range(1, 9)]) for i in range(20)]
+    for x, y in project(vs):
+        assert -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0
+
+
+def test_projection_uses_one_scale_for_both_axes():
+    """Scaling each axis to fill the frame would make a tight cluster look spread.
+
+    Points on a line at 30 degrees must stay on a line at 30 degrees; if x and y
+    were normalised separately the slope would be forced to 1.
+    """
+    vs = [[t, t * 0.5, 0.0, 0.0] for t in (-3.0, -1.0, 1.0, 2.0, 5.0)]
+    pts = project(vs)
+    ys = [abs(y) for _, y in pts]
+    assert max(ys) < 0.5, f"a degenerate second component was stretched to fill: {ys}"
+
+
+def test_projection_handles_too_few_points_to_have_a_shape():
+    assert project([]) == []
+    assert project([[1.0, 2.0]]) == [(0.0, 0.0)]
+    assert len(project([[1.0, 0.0], [0.0, 1.0]])) == 2
+
+
+def test_identical_vectors_collapse_to_the_origin_rather_than_dividing_by_zero():
+    same = [[0.5, 0.5, 0.5, 0.5] for _ in range(5)]
+    assert project(same) == [(0.0, 0.0)] * 5
+
+
+def test_orientation_is_pinned_so_the_picture_does_not_mirror():
+    """An eigenvector is defined up to sign; the layout must not be.
+
+    Power iteration can converge to either sign of the same component, so the
+    identical store can come back mirrored between runs and a person who
+    remembered where something sat would find it on the other side. Orienting by
+    skew means a projection and its mirror image resolve to the same picture.
+    """
+    pts = [(-0.1, -0.1), (-0.2, -0.2), (0.9, 0.9)]
+    mirrored = [(-x, -y) for x, y in pts]
+    assert orient(mirrored) == orient(pts), "a mirrored projection must land the same way"
+    assert orient(pts) == pts, "positive skew is already the canonical side"
+
+
+# --------------------------------------------------------------------------- #
+# the http api
+# --------------------------------------------------------------------------- #
+
+def _api() -> Api:
+    return Api(fresh())
+
+
+def test_every_declared_route_exists_on_the_api():
+    """A route named in the table but missing here is a 500 the moment it is hit."""
+    from distil.serve import GET_ROUTES, POST_ROUTES
+    api = _api()
+    for name in GET_ROUTES | POST_ROUTES:
+        assert callable(getattr(api, name, None)), f"no handler for /api/{name}"
+
+
+def test_every_read_endpoint_survives_json_dumps():
+    """The agent's payloads carry dataclasses, sets and Grades.
+
+    One unserialisable object fails the whole response rather than the field, so
+    the plain-ing has to be total -- and a read endpoint must never need a
+    populated store to answer.
+    """
+    from distil.serve import GET_ROUTES
+    api = _api()
+    api.agent.memory.remember(Kind.QUERY, "a query worth recalling")
+    for name in sorted(GET_ROUTES):
+        q = {"task": ["win a chess endgame"], "q": ["recall me"], "like": ["parse csv"]}
+        json.dumps(getattr(api, name)(q))
+
+
+def test_plain_degrades_unserialisable_objects_instead_of_failing():
+    class Opaque:
+        def __repr__(self): return "<opaque>"
+    out = _plain({"s": {1, 2}, "t": (3, 4), "o": Opaque(), "n": None})
+    assert json.dumps(out)
+    assert out["o"] == "<opaque>" and sorted(out["s"]) == [1, 2] and out["t"] == [3, 4]
+
+
+def test_the_memory_view_projects_each_embedder_separately():
+    """Two geometries share no plane.
+
+    Laying vectors from different backends out together would put unrelated
+    things side by side and call it similarity.
+    """
+    api = _api()
+    for i in range(4):
+        api.agent.memory.remember(Kind.FACT, f"native trace {i}")
+    store = api.agent.memory.store
+    for t in list(store.all())[:2]:
+        t.embedder = "other-backend"
+        t.vector = normalise([float((i * 7 + 3) % 5) for i in range(len(t.vector))])
+        store.put(t)
+    out = api.memory({})
+    assert len(out["backends"]) == 2
+    assert all("x" in t and "y" in t for t in out["traces"])
+
+
+def test_the_memory_view_filters_to_known_kinds_only():
+    api = _api()
+    api.agent.memory.remember(Kind.QUERY, "a question")
+    api.agent.memory.remember(Kind.FACT, "a fact")
+    assert {t["kind"] for t in api.memory({"kind": ["query"]})["traces"]} == {"query"}
+    # An unknown kind is dropped rather than filtering everything away.
+    assert api.memory({"kind": ["nonsense"]})["traces"]
+
+
+def test_recall_reports_the_weights_it_ranked_by():
+    """The panel's whole claim is that ranking is not similarity.
+
+    It can only show that if the server sends the weights it actually used.
+    """
+    api = _api()
+    api.agent.memory.remember(Kind.FACT, "merge two dictionaries in python")
+    out = api.recall({"q": ["merge dicts"], "k": ["5"]})
+    assert out["weights"]["credibility"] == api.agent.policy.recall_credibility_weight
+    for h in out["hits"]:
+        assert set(h) >= {"trace", "score", "similarity", "credibility", "recency"}
+
+
+def test_an_empty_query_recalls_nothing_rather_than_everything():
+    assert _api().recall({"q": ["   "]})["hits"] == []
+
+
+def test_endpoints_that_need_input_say_so_instead_of_guessing():
+    api = _api()
+    assert api.ask({"task": "  "})["error"]
+    assert api.frame({"task": [""]})["error"]
+    assert api.forge({"goal": ""})["error"]
+
+
+def test_ask_labels_the_payoff_rows_from_the_step_that_built_them():
+    """The chosen goal leaves the frontier the moment it is met.
+
+    Reading the labels back off the frontier at serialisation time therefore
+    lost them, and every row came back as "goal 1".
+    """
+    api = _api()
+    out = api.ask({"task": "write a python function that returns the median of a list",
+                   "answers": {"a": "a list of numbers", "b": "the median as a float"}})
+    if not out.get("payoff"):
+        return                      # clarification gated this run; nothing to check
+    rows = out["payoff"]["matrix"]
+    goals = out["payoff"]["goals"]
+    assert len(goals) == len(rows) and all(g.strip() for g in goals)
+    assert out["payoff"]["roles"] is None or len(out["payoff"]["roles"]) == len(rows)
+
+
+def test_a_trace_serialises_with_the_evidence_behind_its_credibility():
+    """A grade shown without its source is a number the user cannot check."""
+    api = _api()
+    t = api.agent.memory.remember(Kind.FACT, "something to grade")
+    api.agent.memory.grade(t.id, 1.0, Source.USER)
+    out = trace_json(t, api.agent.policy)
+    json.dumps(out)
+    assert out["grades"] == [{"score": 1.0, "source": Source.USER}]
+    assert 0.0 <= out["credibility"] <= 1.0
+
+
+def test_grading_an_unknown_trace_reports_rather_than_raises():
+    """A user grade is the one input the system cannot re-derive.
+
+    Losing one to a traceback behind a fetch would be silent, so every bad shape
+    comes back as a message the panel can show.
+    """
+    assert "no such trace" in _api().grade({"id": "no-such-trace", "score": 1.0})["error"]
+    assert _api().grade({"score": 1.0})["error"]          # missing id
+    assert _api().grade({"id": "x", "score": "high"})["error"]   # unparseable score
+
+
+def test_explore_is_bounded_so_one_request_cannot_run_forever():
+    api = _api()
+    assert len(api.explore({"steps": 500})["experiments"]) <= 20
+
+
+# --- the browser-facing defences ------------------------------------------- #
+
+def _serve_for_test():
+    """A real server on an ephemeral port. The security checks live in Handler."""
+    import http.client
+    from http.server import ThreadingHTTPServer
+    from distil.serve import Handler
+    Handler.api = Api(fresh())
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    Handler.log_message = lambda *a, **k: None
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.server_address[1]
+
+
+def _request(port, method, path, headers=None, body=None):
+    import http.client
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    c.request(method, path, body=body, headers=headers or {})
+    r = c.getresponse()
+    payload = r.read()
+    c.close()
+    return r.status, payload
+
+
+def test_a_non_loopback_host_header_is_refused():
+    """The DNS-rebinding defence: the name resolved here, but it is not ours."""
+    httpd, port = _serve_for_test()
+    try:
+        status, _ = _request(port, "GET", "/api/state", {"Host": "evil.example.com"})
+        assert status == 403
+        status, _ = _request(port, "GET", "/api/state", {"Host": "127.0.0.1"})
+        assert status == 200
+    finally:
+        httpd.shutdown()
+
+
+def test_a_cross_site_request_is_refused_even_with_an_honest_host():
+    """Any page may address 127.0.0.1; its Host header is then perfectly true.
+
+    Without this check a visited page could POST /api/forge and have the agent
+    write and execute code -- unreadable to the attacker, but already done.
+    """
+    httpd, port = _serve_for_test()
+    try:
+        status, _ = _request(port, "GET", "/api/state",
+                             {"Host": "127.0.0.1", "Sec-Fetch-Site": "cross-site"})
+        assert status == 403
+        status, _ = _request(port, "GET", "/api/state",
+                             {"Host": "127.0.0.1", "Sec-Fetch-Site": "same-origin"})
+        assert status == 200
+    finally:
+        httpd.shutdown()
+
+
+def test_a_post_that_could_skip_the_preflight_is_refused():
+    """A form or text/plain POST is a "simple request" -- no preflight to fail.
+
+    Requiring application/json forces the browser to preflight, and the preflight
+    finds no CORS headers here.
+    """
+    httpd, port = _serve_for_test()
+    body = json.dumps({"goal": "anything"})
+    try:
+        status, _ = _request(port, "POST", "/api/forge",
+                             {"Host": "127.0.0.1", "Content-Type": "text/plain",
+                              "Content-Length": str(len(body))}, body)
+        assert status == 403
+        status, _ = _request(port, "POST", "/api/forge",
+                             {"Host": "127.0.0.1", "Content-Type": "application/json",
+                              "Origin": "http://evil.example.com",
+                              "Content-Length": str(len(body))}, body)
+        assert status == 403
+    finally:
+        httpd.shutdown()
+
+
+def test_static_files_cannot_escape_the_web_directory():
+    httpd, port = _serve_for_test()
+    try:
+        status, _ = _request(port, "GET", "/%2e%2e/%2e%2e/etc/passwd", {"Host": "127.0.0.1"})
+        assert status in (403, 404)
+        status, body = _request(port, "GET", "/../distil/serve.py", {"Host": "127.0.0.1"})
+        assert status in (403, 404) and b"class Api" not in body
+    finally:
+        httpd.shutdown()
+
+
+def test_an_unknown_endpoint_is_a_404_not_an_attribute_error():
+    httpd, port = _serve_for_test()
+    try:
+        status, _ = _request(port, "GET", "/api/lock", {"Host": "127.0.0.1"})
+        assert status == 404
+        body = b"{}"
+        status, _ = _request(port, "POST", "/api/agent",
+                             {"Host": "127.0.0.1", "Content-Type": "application/json",
+                              "Content-Length": "2"}, body)
+        assert status == 404
+    finally:
+        httpd.shutdown()
+
+
+def test_a_malformed_body_is_a_400_not_a_traceback():
+    httpd, port = _serve_for_test()
+    try:
+        for body in (b"not json", b"[1, 2, 3]"):
+            status, _ = _request(port, "POST", "/api/ask",
+                                 {"Host": "127.0.0.1", "Content-Type": "application/json",
+                                  "Content-Length": str(len(body))}, body)
+            assert status == 400, body
+    finally:
+        httpd.shutdown()
 
 
 def test_workspace_creates_its_directories():
