@@ -13,7 +13,7 @@ it then has to prove work.
 ```bash
 cd DISTIL
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 189 tests, ~8s
+python3 -m tests.test_distil                # 243 tests, ~17s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -188,24 +188,24 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 
 | module | lines | what it does |
 |---|---|---|
-| `clarify.py` | 379 | ask when the objective is not understood; stop when the first step is actionable |
-| `mcp.py` | 404 | MCP servers over stdio JSON-RPC, embedded as ordinary tools |
-| `seed.py` | 413 | the starter toolkit, planted through the grader |
-| `frame.py` | 553 | understand the game first: players, actions, payoff, horizon, referee → solution concept, capability gaps, agenda |
-| `memory.py` | 420 | the embedding layer that *is* the memory; graded recall, credit propagation |
-| `reason.py` | 417 | typed chain-of-thought; the game against Nature |
-| `store.py` | 472 | in-process exact search, pgvector, Redis, and tiered short/long-term |
+| `clarify.py` | 507 | ask when the objective is not understood; stop when the first step is actionable |
+| `mcp.py` | 561 | MCP servers over stdio JSON-RPC, embedded as ordinary tools |
+| `seed.py` | 823 | the starter toolkit, planted through the grader |
+| `frame.py` | 570 | understand the game first: players, actions, payoff, horizon, referee → solution concept, capability gaps, agenda |
+| `memory.py` | 446 | the embedding layer that *is* the memory; graded recall, credit propagation |
+| `reason.py` | 440 | typed chain-of-thought; the game against Nature |
+| `store.py` | 477 | in-process exact search, pgvector, Redis, and tiered short/long-term |
 | `explore.py` | 508 | curiosity, bad ideas, analogy, inversion, policy self-upgrade |
-| `toolsmith.py` | 439 | write a tool, verify it, register what it solved |
+| `toolsmith.py` | 585 | write a tool, verify it, register what it solved |
 | `selfedit.py` | 338 | rewrite its own source behind invariants and the test suite |
 | `game.py` | 290 | maximin, minimax regret, fictitious play, regret matching, Shapley |
 | `challenge.py` | 354 | why-chains, premise attack, persistence past refusal |
 | `compress.py` | 253 | consolidate cold memory into detail-preserving digests |
-| `casebook.py` | 190 | problems and what actually solved them, both directions |
-| `goals.py` | 211 | goal tree; distillation stops at verifiability |
+| `casebook.py` | 195 | problems and what actually solved them, both directions |
+| `goals.py` | 220 | goal tree; distillation stops at verifiability |
 | `sandbox.py` | 199 | AST screen, subprocess, timeout, stripped environment |
 | `grade.py` | 170 | parse → screen → run → tests → determinism |
-| `embed.py` | 193 | signed hashing trick, online IDF, blake2b |
+| `embed.py` | 201 | signed hashing trick, online IDF, blake2b |
 
 ## Storage
 
@@ -229,6 +229,46 @@ store smaller, and unbounded accumulation is the actual problem.
 Neither database is exercised by the test suite — there is none in the environment
 this was built in. The promotion *rule*, which is the part that is easy to get
 wrong, is tested with in-process stand-ins.
+
+## What four rounds of adversarial review found
+
+The code was reviewed by parallel agents across five dimensions, each finding
+verified by an independent skeptic, four times. **86 defects were confirmed and
+fixed.** The distribution is the interesting part:
+
+| round | found | of which introduced by the previous round's fixes |
+|---|---|---|
+| 1 | 45 | — |
+| 2 | 15 | 6 |
+| 3 | 13 | 4 |
+| 4 | 13 | 7 |
+
+Fixing introduces bugs at roughly the rate you would fear, which is the argument
+for re-reviewing the *fixed* tree rather than stopping at a green suite. Every
+round here ran against the working tree, not against `HEAD`; the first round's
+verification pass largely refuted its own findings because the code had already
+moved under it.
+
+Three worth naming, because they are the kind a test suite does not catch:
+
+- **The tools that grade other work were themselves wrong.** `assert_schema`
+  failed *open* — an unknown type name skipped the check, so a typo accepted
+  every value. A referee that reports success for constraints it never checked is
+  worse than no referee.
+- **Two seed tools had their regex escapes destroyed at import.** The Seed source
+  literals are not raw strings, so `\b` became a backspace character and every
+  word-boundary anchor silently stopped anchoring. `\w` and `\d` are not valid
+  Python escapes and passed through untouched — which is exactly why only `\b`
+  broke, and why nothing noticed.
+- **Reuse manufactured its own evidence.** The reuse path called
+  `record_use(worked=True)`, writing a verifier-grade success for a tool that
+  branch deliberately does not run. Every recognition pushed a `+1` that could
+  outvote the real negative grades a failing tool had earned.
+
+And one that made a feature pointless rather than wrong: clarification answers
+reached the `GameFrame` and stopped there, because `solve()` ran the reasoner on
+the raw task string. Someone who patiently explained what done means got the same
+goal tree as someone who said nothing.
 
 ## Honesty about the offline mode
 

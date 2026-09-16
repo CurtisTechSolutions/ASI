@@ -661,6 +661,11 @@ Stated because a specification that only lists strengths is marketing.
   to be read; the promotion *rule* is tested with in-process stand-ins.
 - **Self-editing is guarded, not safe.** The invariants stop the failure modes
   that were anticipated. They are not a proof.
+- **The Seed literals in `seed.py` are not raw strings.** A valid Python escape
+  inside one is processed before the tool source exists, which silently destroyed
+  every `\b` word boundary in two tools. `\w` and `\d` survive because they are
+  not valid escapes. A test asserts no seed contains a control character; the
+  underlying sharp edge remains.
 - **MCP is stdio only.** HTTP/SSE servers would be a second transport class, not
   a change to this one. No MCP server is exercised by the suite beyond a local
   fixture written for it.
