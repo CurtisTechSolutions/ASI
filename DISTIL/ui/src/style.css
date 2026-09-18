@@ -366,6 +366,17 @@ code { font: 12.5px var(--mono); color: var(--accent); }
 .edges em.bad { color: var(--bad); }
 .missing { color: var(--faint); font-size: 12px; margin: 0; }
 
+.concept { border-top: 1px solid var(--line); padding: 10px 0; }
+.concept:first-of-type { border-top: none; }
+.concept h4 { margin: 0 0 6px; font-size: 13px; }
+.concept pre {
+  margin: 0 0 6px; font: 11.5px/1.5 var(--mono); color: var(--dim);
+  white-space: pre-wrap; background: var(--bg); border-radius: 6px; padding: 9px 11px;
+}
+.concept-meta { margin: 0 0 4px; font: 11px var(--mono); color: var(--faint); }
+.concept .edges ul { display: flex; flex-wrap: wrap; gap: 6px; }
+.concept .edges button { font: 10px var(--mono); padding: 2px 0; }
+
 /* ---- the frame --------------------------------------------------------- */
 
 .frame { display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); gap: 12px; margin: 0 0 14px; }

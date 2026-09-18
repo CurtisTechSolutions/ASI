@@ -26,6 +26,15 @@ export const COMMANDS = [
     run: async (rest) => ({ kind: 'forge', data: await post('forge', { goal: rest }) }),
   },
   {
+    name: 'think',
+    args: '[n]',
+    blurb: 'cluster what it knows, name each cluster and compress its context',
+    run: async (rest) => ({
+      kind: 'concepts',
+      data: await get('concepts', { limit: Math.min(12, Math.max(1, parseInt(rest, 10) || 4)) }),
+    }),
+  },
+  {
     name: 'memory',
     args: '',
     blurb: 'every trace, projected onto a plane',

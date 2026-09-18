@@ -7603,6 +7603,15 @@ var COMMANDS = [
 		})
 	},
 	{
+		name: "think",
+		args: "[n]",
+		blurb: "cluster what it knows, name each cluster and compress its context",
+		run: async (rest) => ({
+			kind: "concepts",
+			data: await get("concepts", { limit: Math.min(12, Math.max(1, parseInt(rest, 10) || 4)) })
+		})
+	},
+	{
 		name: "memory",
 		args: "",
 		blurb: "every trace, projected onto a plane",
@@ -8827,6 +8836,10 @@ function Body({ message, onGrade, onAnswer, onTrace }) {
 			data,
 			onTrace
 		});
+		case "concepts": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Concepts, {
+			data,
+			onTrace
+		});
 		case "explore": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Explored, { data });
 		case "cases": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Cases, { data });
 		case "clarify": return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Clarified, {
@@ -9210,6 +9223,57 @@ function MemoryPlot({ data, onTrace }) {
 		}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Scatter, {
 			traces: data.traces,
 			onPick: (t) => onTrace && onTrace(t.id)
+		})]
+	});
+}
+function Concepts({ data, onTrace }) {
+	if (!data.concepts.length) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+		className: "empty",
+		children: "no structure worth naming yet — it needs a few related memories before a cluster forms."
+	});
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+		className: "concepts",
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+			className: "say",
+			children: [
+				data.concepts.length,
+				" cluster(s) over ",
+				data.pool,
+				" memories",
+				data.skipped > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+					" (",
+					data.skipped,
+					" beyond the pool cap not clustered)"
+				] }),
+				data.written.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_jsx_runtime.Fragment, { children: " — remembered, ungraded" })
+			]
+		}), data.concepts.map((c, i) => {
+			const [heading, ...body] = c.text.split("\n");
+			return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				className: "concept",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: heading }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", { children: body.join("\n") }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+						className: "concept-meta",
+						children: [
+							"cohesion ",
+							c.detail.cohesion,
+							" · ",
+							c.detail.size,
+							" members",
+							c.detail.mean_grade !== null && c.detail.mean_grade !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [" · mean grade ", c.detail.mean_grade] })
+						]
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+						className: "edges",
+						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { children: c.sources.slice(0, 8).map((id) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+							onClick: () => onTrace && onTrace(id),
+							children: id
+						}) }, id)) })
+					})
+				]
+			}, i);
 		})]
 	});
 }

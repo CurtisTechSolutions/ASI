@@ -136,7 +136,22 @@ class Compressor:
     # -- summarising without losing the specifics -----------------------------
 
     def summarise(self, cluster: Cluster, keep_terms: int = 12) -> Digest:
-        members = cluster.members
+        """Compress a cold cluster, on its way to replacing it."""
+        return self.summarise_members(cluster.members, keep_terms=keep_terms)
+
+    def summarise_members(self, members: list, keep_terms: int = 12,
+                          label: str | None = None) -> Digest:
+        """Compress any group of traces into one detail-preserving summary.
+
+        Split out from `summarise` so the *semantic* clusters in `think.py` can
+        be compressed by the same code that compresses *cold* ones. The two
+        callers group traces for different reasons -- structure versus access --
+        but what it means to summarise a group without losing the specifics is
+        one problem, and having two implementations of it is how they drift.
+
+        `label` names what the group is, because "digest of 6 cold traces" is the
+        wrong sentence for a concept that is not being archived.
+        """
         graded = [m for m in members if m.mean_grade is not None]
         exemplar = max(graded, key=lambda m: m.mean_grade) if graded else members[0]
 
@@ -160,8 +175,8 @@ class Compressor:
         mean_grade = round(sum(grades) / len(grades), 4) if grades else None
 
         lines = [
-            f"digest of {len(members)} cold trace(s) "
-            f"({', '.join(f'{v} {k}' for k, v in kinds.most_common())})",
+            (label or f"digest of {len(members)} cold trace(s)")
+            + f" ({', '.join(f'{v} {k}' for k, v in kinds.most_common())})",
             f"distinguishing terms: {', '.join(kept)}",
             f"exemplar (verbatim, best graded): {exemplar.text[:400]}",
         ]

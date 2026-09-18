@@ -75,7 +75,7 @@ check: ## Byte-compile the package and report which providers are reachable
 	$(PY) -m compileall -q distil tests
 	$(DISTIL) providers
 
-test: ## Run the suite (338 tests, ~60s, no network, no key)
+test: ## Run the suite (342 tests, ~60s, no network, no key)
 	$(PY) -m tests.test_distil
 
 lint: ## Byte-compile everything (a syntax check without extra tools)

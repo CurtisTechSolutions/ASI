@@ -45,6 +45,7 @@ function Body({ message, onGrade, onAnswer, onTrace }) {
     case 'forge': return <Forged data={data} />
     case 'recall': return <Recalled recall={normaliseRecall(data)} onTrace={onTrace} />
     case 'memory': return <MemoryPlot data={data} onTrace={onTrace} />
+    case 'concepts': return <Concepts data={data} onTrace={onTrace} />
     case 'explore': return <Explored data={data} />
     case 'cases': return <Cases data={data} />
     case 'clarify': return <Clarified data={data} onTrace={onTrace} />
@@ -313,6 +314,48 @@ function MemoryPlot({ data, onTrace }) {
         something; the directions do not.
       </p>
       <Scatter traces={data.traces} onPick={(t) => onTrace && onTrace(t.id)} />
+    </div>
+  )
+}
+
+// A concept is a cluster named and compressed: the heading says what the group
+// is, the body is the cluster's context kept in detail -- distinguishing terms,
+// the best-graded member verbatim, the spread of grades.
+function Concepts({ data, onTrace }) {
+  if (!data.concepts.length) {
+    return <p className="empty">no structure worth naming yet — it needs a few
+      related memories before a cluster forms.</p>
+  }
+  return (
+    <div className="concepts">
+      <p className="say">
+        {data.concepts.length} cluster(s) over {data.pool} memories
+        {data.skipped > 0 && <> ({data.skipped} beyond the pool cap not clustered)</>}
+        {data.written.length > 0 && <> — remembered, ungraded</>}
+      </p>
+      {data.concepts.map((c, i) => {
+        const [heading, ...body] = c.text.split('\n')
+        return (
+          <div key={i} className="concept">
+            <h4>{heading}</h4>
+            <pre>{body.join('\n')}</pre>
+            <p className="concept-meta">
+              cohesion {c.detail.cohesion} · {c.detail.size} members
+              {c.detail.mean_grade !== null && c.detail.mean_grade !== undefined &&
+                <> · mean grade {c.detail.mean_grade}</>}
+            </p>
+            <div className="edges">
+              <ul>
+                {c.sources.slice(0, 8).map((id) => (
+                  <li key={id}>
+                    <button onClick={() => onTrace && onTrace(id)}>{id}</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

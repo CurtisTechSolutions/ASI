@@ -12,6 +12,20 @@ gives recall a single hop to a whole neighbourhood where before it had to be
 similar to one specific member to reach any of them. The store gets denser rather
 than only longer.
 
+**And the name carries the cluster's compressed context.** A label alone --
+"these six memories share a centre, about: median, sequence" -- tells you a group
+exists and nothing about what is in it, so recalling it teaches you nothing you
+could act on. Each concept is instead summarised by `compress.Compressor`, the
+same detail-preserving compression used on cold memory (13): the terms that
+distinguish this cluster from the rest of the store, the best-graded member
+verbatim, the spread of grades across it. One recalled concept then answers
+"what does this system know about X?" without fetching the cluster.
+
+That compression *adds* a trace; it never replaces one. `compress.py` groups by
+access and folds what has gone cold; this groups by structure and leaves every
+member exactly where it was. The two are deliberately separate -- a cluster being
+coherent is not a reason to forget its members.
+
 **Real clustering, not nearest-neighbours-of-a-seed.** An earlier version picked a
 trace, took its k nearest and called that a cluster. That is seed-dependent and
 produces overlapping near-duplicate groups: two adjacent seeds give two clusters
@@ -100,10 +114,15 @@ class Thinker:
     #: rather than silently clustering a sample and calling it the store.
     POOL = 400
 
-    def __init__(self, memory, policy, rng=None) -> None:
+    def __init__(self, memory, policy, rng=None, compressor=None) -> None:
         self.memory = memory
         self.policy = policy
         self.rng = rng                    # unused: clustering here is deterministic
+        # Optional: without one, concepts fall back to a bare label. The caller
+        # usually has a Compressor already (Distil builds one), and sharing it
+        # means the concept is summarised by the same code that summarises cold
+        # memory rather than a second, quietly different implementation.
+        self.compressor = compressor
 
     # -- what may be clustered -----------------------------------------------
 
@@ -214,22 +233,31 @@ class Thinker:
         return [self._name(c) for c in self.clusters(kinds)[:limit]]
 
     def _name(self, cluster: Cluster) -> Derived:
-        """A label for what a cluster is about.
+        """Name a cluster, and compress its context into the name.
 
-        Words common to most members, which is a label rather than an
-        understanding -- a real model would do better, and this deliberately does
-        not require one. The example member is carried because the label alone is
-        rarely enough to recognise the group.
+        The heading is the label; the body is the cluster compressed -- its
+        distinguishing terms, its best-graded member verbatim, the spread of its
+        grades. A concept recalled later then carries what the cluster actually
+        *contains*, which is the difference between an index entry and an answer.
         """
-        head = _clip(cluster.members[0].text)
-        return Derived(
-            f"these {len(cluster.members)} memories share a centre"
-            + (f", about: {cluster.shared}" if cluster.shared else "")
-            + f" -- e.g. {head}",
-            cluster.centre, list(cluster.members),
-            {"cohesion": round(cluster.cohesion, 4), "size": len(cluster.members),
-             "shared": cluster.shared,
-             "kinds": sorted({t.kind for t in cluster.members})})
+        members = list(cluster.members)
+        heading = (f"concept over {len(members)} memories"
+                   + (f", about: {cluster.shared}" if cluster.shared else ""))
+        detail = {"cohesion": round(cluster.cohesion, 4), "size": len(members),
+                  "shared": cluster.shared,
+                  "kinds": sorted({t.kind for t in members})}
+
+        if self.compressor is None:
+            # No compressor: a label and one example, which is what this used to
+            # be. Honest, and much less useful.
+            return Derived(f"{heading} -- e.g. {_clip(members[0].text)}",
+                           cluster.centre, members, {**detail, "compressed": False})
+
+        digest = self.compressor.summarise_members(members, label=heading)
+        detail.update({"compressed": True, "terms": digest.kept_terms,
+                       "exemplar": digest.exemplar[:400],
+                       "mean_grade": digest.mean_grade})
+        return Derived(digest.text, cluster.centre, members, detail)
 
     def think(self, limit: int = 3) -> list[Derived]:
         return self.concepts(limit=limit)

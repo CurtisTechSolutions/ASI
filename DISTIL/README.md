@@ -14,7 +14,7 @@ it then has to prove work.
 cd DISTIL
 make help                                   # every target, with its defaults
 make demo                                   # the whole system, offline, no key
-make test                                   # 338 tests, ~60s
+make test                                   # 342 tests, ~60s
 ```
 
 There is a `Makefile` for all of it — `make ask TASK="..."`, `make recall
@@ -24,7 +24,7 @@ here cannot quietly rewrite a real memory. The commands it wraps:
 
 ```bash
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 338 tests, ~60s
+python3 -m tests.test_distil                # 342 tests, ~60s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -226,7 +226,7 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 | `serve.py` | 700 | the local HTTP API the frontend drives, including two SSE streams |
 | `auto.py` | 380 | the loop that runs itself: six moves, regret-matched, rewarded for information |
 | `browser.py` | 200 | a Chrome it can drive, over W3C WebDriver, as tools in the same embedding layer |
-| `think.py` | 250 | clustering the embedding space and naming what forms, as new memories |
+| `think.py` | 280 | clustering the embedding space; each cluster named and compressed into a new memory |
 | `speech.py` | 175 | local transcription when a Whisper binary exists, and honesty when it does not |
 | `project.py` | 139 | PCA by power iteration: 512 dims down to a plane you can look at |
 
@@ -352,6 +352,27 @@ A cluster's centroid is a point near every member and identical to none of them,
 which is what a concept *is*. Storing it gives recall one hop to a whole
 neighbourhood where before it had to be similar to one specific member to reach
 any of them. The store gets denser rather than only longer.
+
+**Each concept carries its cluster's compressed context.** A label alone — "these
+six memories share a centre, about: median, sequence" — tells you a group exists
+and nothing about what is in it. So every cluster is summarised by the same
+detail-preserving compression used on cold memory: the terms that distinguish it
+from the rest of the store, the best-graded member *verbatim*, the spread of
+grades across it. One recalled concept then answers "what does this system know
+about X?" without fetching the cluster.
+
+```
+concept over 7 memories, about: median, column, compute (2 goal, 1 query, 1 tool…)
+distinguishing terms: build, cleaner, compute, csv, median, median_of_column
+exemplar (verbatim, best graded): task: build a csv cleaner and compute the …
+grades: mean 0.808 over 5 graded member(s)
+```
+
+That compression **adds** a trace and never replaces one. `compress.py` groups by
+*access* and folds what has gone cold; this groups by *structure* and leaves every
+member where it was. A cluster being coherent is not a reason to forget it.
+
+`/think` runs it from the UI; `GET /api/concepts?dry=1` looks without writing.
 
 **Agglomerative average-linkage, not nearest-neighbours-of-a-seed.** Clusters are
 disjoint and deterministic: the same memories always produce the same concepts,

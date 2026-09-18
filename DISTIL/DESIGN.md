@@ -962,7 +962,27 @@ whole neighbourhood where before it had to be similar to one specific member to
 reach any of them. That is the difference between a store that gets *longer* and
 one that gets *denser*.
 
-### 20.2 Real clustering
+### 20.2 Cluster context compression
+
+A concept whose text is a label is an index entry: it tells you a group exists
+and nothing about what is in it, so recalling it teaches nothing actionable. Each
+cluster is therefore compressed into its own name, by
+`Compressor.summarise_members` — the same code that compresses cold memory
+(§13), producing the same three things: the IDF-ranked terms that distinguish
+this cluster from the rest of the store, the best-graded member kept
+**verbatim**, and the grade spread.
+
+Sharing that implementation is the point. Grouping by structure and grouping by
+access are different questions, but *what it means to summarise a group of traces
+without losing the specifics* is one question, and two implementations of it
+drift. The only difference is the heading, which is a parameter.
+
+**It adds; it never replaces.** §13 folds cold clusters and archives their
+members. This leaves every member exactly where it was. A cluster being coherent
+is not evidence that anything in it should be forgotten — those are unrelated
+properties, and conflating them would lose memories for being *well organised*.
+
+### 20.3 Real clustering
 
 An earlier version picked a trace, took its k nearest, and called that a cluster.
 That is seed-dependent: two adjacent seeds give two clusters that are mostly the
@@ -989,7 +1009,7 @@ little rather than by reading the code:
   structure has a tiny σ, the cut collapses toward the mean, and everything
   merges into one meaningless cluster.
 
-### 20.3 Conjecture, not observation
+### 20.4 Conjecture, not observation
 
 Nothing written is graded, and every trace carries `derived: True`. These are read
 off the shape of the store. They enter at the credibility prior exactly like an
@@ -1001,7 +1021,7 @@ derived trace entering as established would be the system manufacturing evidence
 about its own contents — the failure the grading layer exists to prevent, turned
 inward.
 
-### 20.4 It must not feed on itself
+### 20.5 It must not feed on itself
 
 A derived trace is a point in the same space the next pass reads. Without a
 guard, the centroid of a set of centroids becomes a concept — the identical
@@ -1013,7 +1033,7 @@ the similarity search, so each pass saw a slightly different neighbourhood and
 formed a slightly different cluster; the identity key is built from the members,
 so that wrote a near-duplicate instead of merging.
 
-### 20.5 Precision over recall
+### 20.6 Precision over recall
 
 On a twelve-trace fixture with three known groups it finds two, both pure, no
 mixed clusters. The third is four sentences sharing almost no vocabulary — at the
@@ -1025,7 +1045,7 @@ refused: a cluster becomes a `Kind.FACT` the system then believes about itself,
 so a wrong concept costs more than a missing one. Provider embeddings raise the
 recall; nothing here lowers the bar to chase it.
 
-### 20.6 What it does not do
+### 20.7 What it does not do
 
 It does not name concepts well. `_shared_words` takes the words common to a
 cluster, which is a label, not an understanding; a real model would do better and

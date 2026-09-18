@@ -293,6 +293,26 @@ class Api:
                 "tools": [t.name for t in self.agent.toolbox.all()
                           if t.transport == "mcp"]}
 
+    def concepts(self, q) -> dict:
+        """Cluster the store and name what forms, compressing each cluster.
+
+        A read that writes, which is unusual enough to be worth stating: the
+        point of thinking is that what it finds becomes memory. `dry=1` looks
+        without writing, for a caller that wants to see the structure first.
+        """
+        from .think import Thinker
+        thinker = Thinker(self.agent.memory, self.agent.policy,
+                          compressor=self.agent.compressor)
+        limit = max(1, min(12, int((q.get("limit") or ["4"])[0])))
+        found = thinker.think(limit=limit)
+        written = [] if (q.get("dry") or [""])[0] else thinker.absorb(found)
+        if written:
+            self.agent.save()
+        return {"concepts": [{**d.to_json(), "text": d.text} for d in found],
+                "written": [t.id for t in written],
+                "skipped": thinker.skipped(),
+                "pool": len(thinker.pool())}
+
     def journal(self, _q) -> dict:
         path = self.agent.workspace.journal
         if not path.exists():
@@ -481,7 +501,7 @@ def _case(p) -> dict:
 
 
 GET_ROUTES = {"state", "memory", "recall", "frame", "tools", "cases", "ideas",
-              "journal", "lineage", "trace", "speech", "mcp"}
+              "journal", "lineage", "trace", "speech", "mcp", "concepts"}
 POST_ROUTES = {"ask", "grade", "forge", "invoke", "explore", "seed", "compress",
                "upgrade", "clarify", "mcp_attach"}
 #: Routes that stream rather than answering once. Handled apart from the JSON

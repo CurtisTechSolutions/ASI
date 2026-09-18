@@ -289,7 +289,8 @@ class Auto:
         because it is a stronger claim that those memories belong together.
         """
         from .think import Thinker
-        thinker = Thinker(self.agent.memory, self.agent.policy, self.agent.rng)
+        thinker = Thinker(self.agent.memory, self.agent.policy, self.agent.rng,
+                          compressor=self.agent.compressor)
         found = thinker.think(limit=3)
         if not found:
             return Cycle(self.n, Move.THINK,
@@ -300,8 +301,8 @@ class Auto:
         worth = sum(d.detail["cohesion"] * min(1.0, d.detail["size"] / 8.0)
                     for d in found) / len(found)
         return Cycle(self.n, Move.THINK,
-                     f"named {len(found)} cluster(s) in what it knows -- "
-                     + _clip(found[0].text, 78),
+                     f"named and compressed {len(found)} cluster(s) -- "
+                     + _clip(found[0].text.splitlines()[0], 78),
                      learned=round(worth, 4),
                      detail={"found": [d.to_json() for d in found],
                              "skipped": thinker.skipped(),

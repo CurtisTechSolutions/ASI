@@ -3368,6 +3368,59 @@ def test_a_pair_is_not_a_concept():
     assert all(len(c.members) >= Thinker.MIN_SIZE for c in th.clusters())
 
 
+def test_a_concept_carries_the_clusters_compressed_context():
+    """A label alone tells you a group exists and nothing about what is in it.
+
+    The concept is summarised by the same detail-preserving compression used on
+    cold memory, so one recalled concept answers "what does this system know
+    about X?" without fetching the cluster.
+    """
+    d, _, _ = _grouped()
+    th = Thinker(d.memory, d.policy, compressor=d.compressor)
+    found = th.think(limit=2)
+    assert found
+    for concept in found:
+        assert concept.detail["compressed"] is True
+        assert concept.detail["terms"], "no distinguishing terms kept"
+        assert concept.detail["exemplar"], "no verbatim member kept"
+        # The exemplar must be a real member, not a paraphrase of one.
+        assert any(concept.detail["exemplar"].startswith(m.text[:40])
+                   for m in concept.sources)
+        assert "distinguishing terms:" in concept.text
+
+
+def test_compression_shares_one_implementation_with_cold_memory():
+    """Two ways to summarise a group of traces is how they drift."""
+    d, _, _ = _grouped()
+    members = [t for t in d.memory.store.all()][:4]
+    digest = d.compressor.summarise_members(members, label="concept over 4 memories")
+    assert digest.text.startswith("concept over 4 memories")
+    assert digest.exemplar and digest.kept_terms
+    # The cold path still says what it used to.
+    cold = d.compressor.summarise_members(members)
+    assert cold.text.startswith("digest of 4 cold trace(s)")
+
+
+def test_naming_a_cluster_never_removes_its_members():
+    """`compress.py` groups by access and folds what went cold; this groups by
+    structure and adds. A cluster being coherent is not a reason to forget it."""
+    d, _, _ = _grouped()
+    th = Thinker(d.memory, d.policy, compressor=d.compressor)
+    before = {t.id for t in d.memory.store.all()}
+    found = th.think(limit=2)
+    th.absorb(found)
+    after = {t.id for t in d.memory.store.all()}
+    assert before <= after, "a member went missing"
+    assert len(after) == len(before) + len(found)
+
+
+def test_a_concept_falls_back_to_a_label_without_a_compressor():
+    d, th, _ = _grouped()          # built without one
+    for concept in th.think(limit=1):
+        assert concept.detail["compressed"] is False
+        assert "e.g." in concept.text
+
+
 def test_naming_a_cluster_writes_one_new_memory_per_cluster():
     d, th, _ = _grouped()
     before = d.memory.stats()["traces"]
