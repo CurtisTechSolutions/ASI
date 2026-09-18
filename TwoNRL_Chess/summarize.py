@@ -11,6 +11,7 @@ import argparse
 import glob
 import json
 import os
+import re
 
 import numpy as np
 
@@ -250,10 +251,74 @@ def table_bench(path: str) -> None:
               f"{sf['top1_legal']:.3f} | {sf['refusals']:.1f} |")
 
 
+def table_exposure(path: str) -> None:
+    """The same weights ranked two ways - what the rating was measuring."""
+    with open(path) as fh:
+        blob = json.load(fh)
+    rows = blob.get("rows", {})
+    if not rows:
+        return
+    print("\n### The same networks, ranked two ways "
+          f"({blob.get('openings', 0) * 2} games a row, against a random legal mover)\n")
+    print("| network | ranked by | score vs random | centipawn loss | refusals per move |")
+    print("|---|---|---|---|---|")
+    for name, r in rows.items():
+        arm, _, weight = name.partition(" (rule_weight=")
+        w = weight.rstrip(")")
+        how = "quality alone" if w in ("0", "0.0") else f"quality + {w} × legal"
+        print(f"| `{arm}` | {how} | {r['score']:.3f} ± {r['stderr']:.3f} | "
+              f"{r['acpl']:.0f} | {r['refusals']:.1f} |")
+    print("\nNothing was retrained between the two rows of a pair and not one weight\n"
+          "differs. Only the ordering the moves are proposed in changes.")
+
+
+def fill_readme(readme: str, sections: dict[str, str]) -> None:
+    """Replace each ``<!--NAME-->`` placeholder with its table, in place.
+
+    The README and the runs cannot then drift apart, which is the whole reason
+    this file exists.  A section is wrapped in ``<!--NAME-->`` / ``<!--/NAME-->``
+    so a second run replaces what the first wrote instead of stacking a copy
+    underneath it, and a placeholder with no table keeps its bare marker, so a
+    partial results directory leaves the rest of the document alone.
+    """
+    with open(readme) as fh:
+        text = fh.read()
+    filled = []
+    for name, body in sections.items():
+        body = body.strip()
+        if not body:
+            continue
+        block = f"<!--{name}-->\n{body}\n<!--/{name}-->"
+        pattern = re.compile(rf"<!--{name}-->.*?<!--/{name}-->", re.S)
+        if pattern.search(text):
+            text = pattern.sub(lambda _: block, text, count=1)
+        elif f"<!--{name}-->" in text:
+            text = text.replace(f"<!--{name}-->", block, 1)
+        else:
+            continue
+        filled.append(name)
+    with open(readme, "w") as fh:
+        fh.write(text)
+    print(f"filled {len(filled)} README section(s): {', '.join(filled)}")
+
+
+def capture(fn, *args) -> str:
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*args)
+    return buf.getvalue()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--results", default=RESULTS)
     p.add_argument("--bench", default=None)
+    p.add_argument("--exposure", default=None,
+                   help="ranking_ablation.py output; fills the EXPOSURE section")
+    p.add_argument("--write-readme", default=None,
+                   help="a README to fill the <!--NAME--> placeholders in, in place")
     args = p.parse_args()
     paths = sorted(glob.glob(os.path.join(args.results, "*.json")))
     runs = [x for x in paths if "benchmark" not in os.path.basename(x)]
@@ -270,6 +335,21 @@ def main() -> None:
     bench = args.bench or os.path.join(args.results, "benchmark.json")
     if os.path.exists(bench):
         table_bench(bench)
+    exposure = args.exposure or os.path.join(args.results, "ranking_ablation.json")
+    if os.path.exists(exposure):
+        table_exposure(exposure)
+
+    if args.write_readme:
+        sections = {
+            "HEADLINE": capture(table_headline, arms),
+            "RULES": capture(table_rules, arms),
+            "CURVE": capture(table_curve, arms),
+            "ARMS": capture(table_inversion, arms),
+            "GROWTH": capture(table_growth, arms),
+            "BENCH": capture(table_bench, bench) if os.path.exists(bench) else "",
+            "EXPOSURE": capture(table_exposure, exposure) if os.path.exists(exposure) else "",
+        }
+        fill_readme(args.write_readme, sections)
 
 
 if __name__ == "__main__":

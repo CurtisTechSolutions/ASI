@@ -122,7 +122,45 @@ precision.
 <!--RULES-->
 
 `--rule-updates 0 --rule-weight 0` reproduces the single-score network exactly,
-which is the ablation in the table and also a proof in the suite.
+which is the ablation in the table and also a proof in the suite. It reproduces
+the 400-round run **bit for bit** over all 61 shared rounds and selects the same
+round in every seed, so the two configurations differ in the curriculum and in
+nothing else — and, incidentally, the 400-round run added nothing after round 44.
+
+### And then the rating fell
+
+Refusals went from 97.9 to 1.1 a move, and the networks' rating against a random
+legal mover went **down**. `2nrl` scored 0.464 against random before the heads
+and 0.143 after.
+
+The obvious reading — learning the rules made it play worse — is wrong, and
+`ranking_ablation.py` is the experiment that shows what happened. The same saved
+network can be asked to play two ways with nothing retrained and no weight
+changed: at `rule_weight = 0` it ranks on the quality head alone, needs about a
+hundred refusals to find a legal move, and therefore plays whatever legality
+allows a long way down an ordering that was never about legality — close to a
+uniform draw over the legal moves. At `rule_weight = 1` it plays the move it
+actually wants and finds it in a handful of tries.
+
+<!--EXPOSURE-->
+
+The move it chooses is **better** by Stockfish's grading — centipawn loss falls —
+and it scores **worse** against a random opponent. That is not a paradox. A
+player drawing near-uniformly from the legal moves scores about a half against
+another player drawing uniformly from the legal moves, by symmetry; it cannot do
+much worse, because it has no plan to be punished for. A player with a
+consistent bad policy can, and does.
+
+So the earlier ratings — `positive` at 112 Elo, and every number in this
+repository from before the rule heads — were not measuring what they appeared to.
+A network needing 45 to 160 refusals a move was being randomised by its own
+ignorance of the rules, and the rating was largely the rating of that
+randomisation. **Learning the rules did not make these networks worse players. It
+revealed that they were not playing.**
+
+The rules half of §6.5 is genuinely solved here — 4096-way, from scratch, with no
+legal-move list ever handed over. The payoffs half is not, and this is the
+measurement that stops the first from flattering the second.
 
 <!--HEADLINE-->
 
@@ -354,6 +392,7 @@ when the machine is busy.
 | `dataset.py` | builds the held-out exam, every legal move pre-graded |
 | `experiment.py` | the three phases, the arms, and the training loop |
 | `benchmark.py` | head to head, common opponent, and the random-mover floor |
+| `ranking_ablation.py` | the same weights ranked two ways: what the rating was actually measuring |
 | `test_sbnn.py` | the correctness proofs |
 | `summarize.py` | rebuilds the tables in this README from the run JSON |
 | `export_viz.py` | scores the action space from the phase-boundary networks, for the page |
@@ -388,6 +427,12 @@ make run SEEDS="0 1 2 3 4" ROUNDS=40 JOBS=4
 
 - **Three seeds, one task, one opponent.** The variance is reported rather than
   hidden, but three seeds is three seeds.
+- **A rating below the rule heads is not a rating of a policy.** Any number in
+  this repository produced by a network with tens of refusals a move is
+  substantially a rating of the refusal walk, not of what the network wanted to
+  play — see *And then the rating fell*. The pre-`rules.py` Elo tables are kept
+  because they are what those runs did, not because they measure what their
+  column headings say.
 - **The network is weak in absolute terms.** It is a few tens of thousands of
   NumPy parameters trained for minutes against an engine rated well above any
   human club player. The interesting quantity is not its rating, it is the
