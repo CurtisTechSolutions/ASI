@@ -31,6 +31,99 @@ is a second, different kind of failure.
 Two things to learn, in the order the paper says they come: first the **rules**,
 by being refused, then the **payoffs**, by being graded.
 
+## Forcing the rules
+
+Being refused teaches the rules, but it teaches them *two rows at a time*. Each
+decision handed the softmax one refused action and one wild one, inside a
+twelve-wide ranking whose target was move *quality* — so "this move is illegal"
+and "this move is bad" arrived on the same wire, in the same units, and the
+network had to separate them from about two bits a position. It worked, slowly:
+400 rounds got refusals from 660 down to 41.8, which is a long way from zero for
+a rule set a beginner learns in an afternoon.
+
+That was leaving the teacher on the floor. Every position answers **all 4096
+questions at once**, exactly and for free — `board.is_legal` is ground truth,
+there is no label noise, and it costs no engine call. So the rules stop being a
+by-product of the ranking and become what they are: a supervised problem with
+perfect labels. `rules.py` is that, and the output layer becomes seven heads on
+one trunk:
+
+| head | ground truth | what it forces |
+|---|---|---|
+| `quality` | the graded softmax over candidates, as before | payoffs |
+| `legal` | `board.is_legal(move)` | the rules, entire |
+| `pseudo` | `board.is_pseudo_legal(move)` | how the pieces move |
+| `capture` | `board.is_capture(move)` | what a move takes |
+| `check` | `board.gives_check(move)` | forcing moves |
+| `safe` | the to-square is unattacked afterwards | not hanging pieces |
+| `threat` | the from-square is attacked right now | which pieces are loose |
+
+`legal` and `pseudo` factor the rule set the way chess itself does:
+
+```
+legal  ==  pseudo  AND  the move does not leave our own king in check
+```
+
+`pseudo` is pure geometry and blocking — a knight's L, a bishop's diagonal, a
+rook stopped by the piece in front of it, the pawn that moves one way and
+captures another. The **gap** between the two heads is precisely the non-local
+part of the rules: pins, and the obligation to answer a check. A network with
+`pseudo` and not `legal` has learned how the pieces move and not yet that a
+pinned knight is nailed down, and keeping them apart makes that distinction
+measurable instead of a guess about what went wrong.
+
+The last four are not rules at all. They are the first things anyone learns
+*after* the rules, and the trunk that has to answer them cannot get by on
+memorising which squares are usually fine.
+
+### Which actions get asked about
+
+All 4096 per position would be 31 MB of mostly-zero features, and a terrible
+curriculum besides: about 4066 of them are illegal, so a head could answer
+"illegal" to everything and be 99.3% right. Four groups are sampled instead,
+and the second is the one that matters:
+
+| group | what it is |
+|---|---|
+| legal | every legal move in the position — the positives, and there are only about thirty |
+| **hard** | the highest-scoring **illegal** actions under the network as it stands — *literally the refusals it is about to make*, mined fresh every decision |
+| pin | pseudo-legal but illegal: moves that obey the geometry and leave the king in check |
+| wild | uniform over the 4096, so the easy majority stays represented |
+
+About ninety rows a position instead of two, with the negatives chasing the
+network's current error rather than sitting still.
+
+### Why a sigmoid head is the ideal 2NRL object
+
+This is the part worth reading twice. §4.3's inversion negates every unit, so
+every head's logit `z` becomes `−z`. For a **sigmoid** head that is not an
+approximation of anything:
+
+```
+sigma(-z)  ==  1 - sigma(z)        exactly, at every z
+```
+
+The negation of the network is **the complement of the probability**. A head
+trained in phase 1 to answer *"is this move illegal?"* answers *"is this move
+legal?"* the instant it is inverted, at the identical confidence, with no
+training whatsoever.
+
+So the inverting arms learn the complement of the truth in phase 1 — that legal
+moves are illegal, that captures do not capture, that checks are not checks —
+and flip. The controls learn the truth throughout. Same rows, same labels, same
+number of updates; only the sign differs, which is the entire comparison.
+
+It is also the one place in this experiment where the inversion is *literally* a
+logical NOT rather than an order reversal. `softmax(-z)` is not `1 - softmax(z)`,
+so the quality head can only ever show the weaker, ordinal version of the claim.
+The rule heads show the strong one, and `test_sbnn.py` asserts it to machine
+precision.
+
+<!--RULES-->
+
+`--rule-updates 0 --rule-weight 0` reproduces the single-score network exactly,
+which is the ablation in the table and also a proof in the suite.
+
 <!--HEADLINE-->
 
 ## Phase 1 ends when the failure is learned, not on a date
@@ -218,6 +311,15 @@ last two its payoffs:
 | `refusals` | how many moves the board refuses before accepting one |
 | `cp loss` | centipawns given away by the move finally played, clipped at 1000 |
 | `agreement` | how often that move is Stockfish's own choice |
+| `legal AUC` | the chance a random legal move outranks a random illegal one under the `legal` head |
+
+`legal AUC` is the honest version of "has it learned the rules". Accuracy is
+worthless here — answering "illegal" to everything scores 97% — and AUC is not
+fooled by the imbalance: 0.5 is exactly no knowledge, 1.0 is the rules, and
+because the inversion negates the logit, a network and its inverse score
+`a` and `1 − a`. The rule exam is a **fixed** set of actions per position, drawn
+once from a seed and never mined from the network being graded, so it is the
+same exam for every arm.
 
 **The benchmark** is three readings, because no single one is honest on its own:
 head to head over shared openings with the colours swapped; a common opponent
@@ -245,6 +347,7 @@ when the machine is busy.
 |---|---|
 | `sbnn.py` | the network: per-neuron learnable sine activation, backprop, Adam with a separate `act_lr`, identity-preserving growth, and `invert()` |
 | `moves.py` | the 4096-move action space, its features, and the six-gather fast path that scores all of them |
+| `rules.py` | the rule curriculum: the seven heads, their exact labels, and the mined action sets |
 | `features.py` | the board encoder, always from the mover's point of view |
 | `agent.py` | the player — propose, be refused, propose again — and the training batch |
 | `engine.py` | Stockfish in its two roles: the opponent that plays and the judge that grades |

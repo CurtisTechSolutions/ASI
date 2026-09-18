@@ -31,6 +31,11 @@ def label_of(run: dict) -> str:
     """
     cfg = run.get("config", {})
     label = run["arm"]
+    # The rule curriculum is on by default, so the ablation is what gets named:
+    # pooling it with the arm it ablates would average the two things the whole
+    # comparison is about.
+    if not cfg.get("rule_updates", 0):
+        return f"{label} (no rule heads)"
     if cfg.get("schedule", DEFAULT_SCHEDULE) != DEFAULT_SCHEDULE:
         return f"{label} (per-round)"
     if cfg.get("invert_mode", "unit") != "unit":
@@ -112,6 +117,37 @@ def table_headline(arms: dict[str, list[dict]]) -> None:
               f"{fmt(*refus, 1)} | {fmt(*cpl, 1)} | {fmt(*agree, 3)} |")
 
 
+def table_rules(arms: dict[str, list[dict]]) -> None:
+    """What the heads actually know, asked of them directly.
+
+    ``legal AUC`` is the one to read: accuracy is meaningless against a 97:3
+    class split, and this is not.
+    """
+    keys = [("legal_auc", "legal AUC", 3), ("pseudo_auc", "pseudo-legal AUC", 3),
+            ("capture_acc", "capture", 3), ("check_acc", "gives check", 3),
+            ("safe_acc", "lands safely", 3), ("threat_acc", "piece is loose", 3)]
+    present = [k for k, _, _ in keys
+               if any(k in r["heldout"] for rs in arms.values() for r in rs)]
+    if not present:
+        return
+    print("\n### What the heads know, on the held-out exam\n")
+    print("| arm | " + " | ".join(l for k, l, _ in keys if k in present)
+          + " | refusals per move |")
+    print("|---" * (len(present) + 2) + "|")
+    for arm, runs in arms.items():
+        cells = []
+        for key, _, places in keys:
+            if key not in present:
+                continue
+            vals = [r["heldout"][key] for r in runs if key in r["heldout"]]
+            cells.append(fmt(float(np.mean(vals)), float(np.std(vals)), places)
+                         if vals else "—")
+        cells.append(fmt(*stat(runs, ("heldout", "refusals")), 1))
+        print(f"| `{arm}` | " + " | ".join(cells) + " |")
+    print("\n0.5 is no knowledge of the rules and 1.0 is the rules. A network and "
+          "its\ninversion score `a` and `1 - a`, exactly.")
+
+
 def table_inversion(arms: dict[str, list[dict]]) -> None:
     """What the sign flip alone buys: no training between the two columns."""
     rows = []
@@ -121,7 +157,13 @@ def table_inversion(arms: dict[str, list[dict]]) -> None:
             continue
         for key, label, places in (("refusals", "refusals per move", 1),
                                    ("top1_legal", "legal first try", 3),
+                                   ("legal_auc", "legal AUC", 3),
+                                   ("pseudo_auc", "pseudo-legal AUC", 3),
+                                   ("capture_acc", "capture", 3),
+                                   ("check_acc", "gives check", 3),
                                    ("cp_loss", "centipawn loss", 1)):
+            if key not in flips[0]["before"]:
+                continue
             before = np.array([f["before"][key] for f in flips])
             after = np.array([f["after"][key] for f in flips])
             rows.append((arm, label, before.mean(), before.std(), after.mean(),
@@ -133,7 +175,8 @@ def table_inversion(arms: dict[str, list[dict]]) -> None:
     print("| arm | metric | before the flip | after the flip | change |")
     print("|---|---|---|---|---|")
     for arm, label, bm, bs, am, asd, places, n, _ in rows:
-        if label == "legal first try":          # higher is better, and starts at zero
+        if label in ("legal first try", "legal AUC", "pseudo-legal AUC",
+                     "capture", "gives check"):   # higher is better; these complement
             change = f"{am - bm:+.3f}"
         elif am <= 0 or bm <= 0:
             change = "—"
@@ -219,6 +262,7 @@ def main() -> None:
         raise SystemExit(f"no run JSON in {args.results}/ - run `make run` first")
     print(f"# Tables rebuilt from {len(runs)} result file(s)")
     table_headline(arms)
+    table_rules(arms)
     table_inversion(arms)
     table_games(arms)
     table_curve(arms)
