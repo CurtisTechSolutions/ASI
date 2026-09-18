@@ -23,9 +23,8 @@ bandit would be wrong:
     CONSOLIDATE compress cold memory into digests that keep the detail.
     TUNE        re-fit its own policy against measured outcomes.
     PURSUE      set itself a new problem and actually solve it.
-    THINK       compute on the embedding space itself -- centroids, vector
-                arithmetic, empty midpoints, contradictions -- and write what it
-                finds back as new memories. The only move whose input is the
+    THINK       cluster the embedding space and name what forms, writing the
+                names back as new memories. The only move whose input is the
                 *shape* of the store rather than its contents.
 
 **Running dry.** The first five moves all draw from pools that empty: there is a
@@ -277,36 +276,35 @@ class Auto:
                              "stages": [{"name": s.name, "passed": s.passed} for s in grade.stages]})
 
     def _think(self) -> Cycle:
-        """Reason in the embedding space, and write the result back into it.
+        """Cluster what it knows, name what forms, and remember the names.
 
         Every other move consumes memory or produces it from outside; this one
-        produces memory *from memory*, by computing on the geometry. It is the
-        move that makes the store grow denser rather than only longer -- a
-        centroid gives recall one hop to a whole neighbourhood, and an analogy
-        reaches a region no single trace is near.
+        produces memory *from memory*, by computing on the shape of the store. It
+        is what makes memory grow denser rather than only longer: a cluster's
+        centre is a point recall can reach a whole neighbourhood through, where
+        before it had to be similar to one specific member.
 
-        Rewarded for what it found, weighted by how well-evidenced it is: a
-        contradiction between two graded memories is worth more than a bridge
-        between two the system is unsure of.
+        Rewarded by how much structure the concept actually carries -- a tight
+        cluster of many memories is worth more than a loose cluster of three,
+        because it is a stronger claim that those memories belong together.
         """
-        from .think import Thinker, Thought
+        from .think import Thinker
         thinker = Thinker(self.agent.memory, self.agent.policy, self.agent.rng)
-        found = thinker.think(limit=4)
+        found = thinker.think(limit=3)
         if not found:
             return Cycle(self.n, Move.THINK,
-                         "nothing new in the shape of what it knows", barren=True)
+                         "no structure in what it knows worth naming yet", barren=True)
         written = thinker.absorb(found)
-        worth = {Thought.TENSION: 0.9, Thought.ANALOGY: 0.6,
-                 Thought.CONCEPT: 0.45, Thought.BRIDGE: 0.35}
-        counts: dict[str, int] = {}
-        for d in found:
-            counts[d.kind] = counts.get(d.kind, 0) + 1
+        # Cohesion says how tightly the cluster holds together; size says how
+        # much it covers. Their product, normalised, is how much was learned.
+        worth = sum(d.detail["cohesion"] * min(1.0, d.detail["size"] / 8.0)
+                    for d in found) / len(found)
         return Cycle(self.n, Move.THINK,
-                     "thought in the embedding space: "
-                     + ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
-                     + f" -- {_clip(found[0].text, 72)}",
-                     learned=sum(worth.get(d.kind, 0.3) for d in found) / len(found),
+                     f"named {len(found)} cluster(s) in what it knows -- "
+                     + _clip(found[0].text, 78),
+                     learned=round(worth, 4),
                      detail={"found": [d.to_json() for d in found],
+                             "skipped": thinker.skipped(),
                              "written": [t.id for t in written]})
 
     def _consolidate(self) -> Cycle:

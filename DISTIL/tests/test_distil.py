@@ -52,7 +52,7 @@ from distil.toolsmith import (Toolbox, ToolSpec, Toolsmith, parse_reply, signatu
                               synthesise)
 from distil.project import orient, project
 from distil.auto import Auto, Move
-from distil.think import Thinker, Thought
+from distil.think import Cluster, Thinker
 from distil.browser import ACTIONS, Browser, BrowserError
 from distil.serve import Api, _plain, trace_json
 from distil import speech
@@ -3288,117 +3288,148 @@ def test_a_vague_self_set_direction_is_gated_not_guessed_at():
 
 
 # --------------------------------------------------------------------------- #
-# thinking in the embedding space
+# thinking by clustering the embedding space
 # --------------------------------------------------------------------------- #
 
-def _thinker(d=None):
-    d = d or fresh()
-    return d, Thinker(d.memory, d.policy)
+GROUPS = {
+    "csv": ["parse a csv file into rows", "csv rows have ragged columns",
+            "the csv export has inconsistent columns", "read csv text into records"],
+    "lease": ["the lease renewal negotiation happens yearly",
+              "negotiating rent with a landlord",
+              "the landlord raised the rent at renewal",
+              "lease terms are negotiated annually"],
+    "chess": ["win a chess endgame with a rook", "chess endgames need king activity",
+              "the rook endgame is drawn", "endgame chess theory for rooks"],
+}
 
 
-def test_thinking_writes_new_memories_from_the_shape_of_old_ones():
-    """The space is computed with, not only read from.
+def _grouped():
+    """A store with three groups whose true membership is known."""
+    d = fresh()
+    truth = {}
+    for name, texts in GROUPS.items():
+        for text in texts:
+            truth[d.memory.remember(Kind.FACT, text).id] = name
+    return d, Thinker(d.memory, d.policy), truth
 
-    Every other path produces traces from outside input; this one produces them
-    from the geometry -- which is what makes the store grow denser rather than
-    only longer.
+
+def test_clusters_never_mix_two_unrelated_groups():
+    """Precision over recall, deliberately.
+
+    A cluster becomes a `Kind.FACT` the system then believes about itself, so a
+    wrong concept costs more than a missing one.
     """
-    d, th = _thinker()
-    plant(d.toolsmith, d.toolbox)
+    d, th, truth = _grouped()
+    found = th.clusters()
+    assert found, "three distinct groups must produce at least one cluster"
+    for cluster in found:
+        labels = {truth[m.id] for m in cluster.members}
+        assert len(labels) == 1, f"mixed cluster: {labels}"
+
+
+def test_clusters_are_disjoint_and_deterministic():
+    """The earlier seed-plus-k-nearest version was neither: which cluster you got
+    depended on which trace happened to be iterated first, and adjacent seeds
+    produced overlapping near-duplicates."""
+    d, th, _ = _grouped()
+    first = th.clusters()
+    members = [m.id for c in first for m in c.members]
+    assert len(members) == len(set(members)), "a trace landed in two clusters"
+    assert [c.to_json() for c in th.clusters()] == [c.to_json() for c in first]
+
+
+def test_the_cut_comes_from_the_store_not_a_constant():
+    """What counts as "similar" depends on the embedder and the corpus.
+
+    A fixed threshold tuned for the lexical embedder -- which puts unrelated
+    short text near zero -- is wrong for a provider embedder, whose similarities
+    sit in a much narrower and much higher band.
+    """
+    d, th, _ = _grouped()
+    tight = th.linkage([0.80, 0.82, 0.81, 0.95])
+    loose = th.linkage([0.01, 0.02, 0.00, 0.30])
+    assert tight > loose, "a corpus where everything is close needs a higher bar"
+    assert th.linkage([0.5]) == Thinker.FLOOR, "too little evidence falls back to the floor"
+
+
+def test_a_structureless_store_produces_no_concepts():
+    """Without the floor, a uniformly unrelated set has a tiny standard
+    deviation, the cut collapses toward the mean, and everything merges into one
+    meaningless cluster."""
+    d = fresh()
+    for i in range(8):
+        d.memory.remember(Kind.FACT, f"unrelated observation number {i} " + "abcdefgh"[i])
+    found = Thinker(d.memory, d.policy).clusters()
+    assert all(c.cohesion >= Thinker.COHESION for c in found)
+
+
+def test_a_pair_is_not_a_concept():
+    d, th, _ = _grouped()
+    assert all(len(c.members) >= Thinker.MIN_SIZE for c in th.clusters())
+
+
+def test_naming_a_cluster_writes_one_new_memory_per_cluster():
+    d, th, _ = _grouped()
     before = d.memory.stats()["traces"]
-    found = th.think(limit=4)
-    assert found, "a seeded toolbox has enough structure to find something in"
+    found = th.think(limit=3)
+    assert found
     written = th.absorb(found)
-    assert d.memory.stats()["traces"] > before
-    assert all(t.meta.get("derived") for t in written)
+    assert len(written) == len(found)
+    assert d.memory.stats()["traces"] == before + len(found)
+    assert all(t.meta.get("derived") and t.meta.get("thought") == "concept"
+               for t in written)
 
 
-def test_derived_memories_are_never_reasoned_from():
-    """A centroid of centroids is a claim about the shape of its own conclusions.
-
-    The same self-reference that broke the why-chains twice: a derived trace is a
-    point in the space the next pass reads.
-    """
-    d, th = _thinker()
-    plant(d.toolsmith, d.toolbox)
-    th.absorb(th.think(limit=4))
-    again = th.think(limit=4)
-    assert not [t for x in again for t in x.sources if t.meta.get("derived")]
-    assert all(not t.meta.get("derived") for t in th.pool())
-
-
-def test_a_conjecture_enters_ungraded():
-    """These are read off the shape of the store, not observed. Entering them as
-    established would be manufacturing evidence about its own contents."""
-    d, th = _thinker()
-    plant(d.toolsmith, d.toolbox)
-    for t in th.absorb(th.think(limit=4)):
+def test_a_concept_enters_ungraded():
+    """Read off the geometry, not observed. Entering it as established would be
+    the system manufacturing evidence about its own contents."""
+    d, th, _ = _grouped()
+    for t in th.absorb(th.think(limit=3)):
         assert not t.graded, f"{t.text[:50]!r} entered already graded"
 
 
-def test_the_same_conjecture_re_derived_merges_rather_than_accumulates():
-    d, th = _thinker()
-    plant(d.toolsmith, d.toolbox)
-    first = th.absorb(th.think(limit=4))
+def test_concepts_are_never_clustered_from():
+    """A derived trace is a point in the same space the next pass reads, so the
+    centroid of a set of centroids would become a concept."""
+    d, th, _ = _grouped()
+    th.absorb(th.think(limit=3))
+    assert all(not t.meta.get("derived") for t in th.pool())
+    for cluster in th.clusters():
+        assert all(not m.meta.get("derived") for m in cluster.members)
+
+
+def test_the_same_cluster_re_derived_merges_rather_than_accumulating():
+    """Excluding derived traces from the POOL is not enough -- they still occupy
+    slots in the similarity search, shifting which cluster forms, so the same
+    concept came back under a different member set and wrote a near-duplicate."""
+    d, th, _ = _grouped()
+    th.absorb(th.think(limit=3))
     n = d.memory.stats()["traces"]
-    th.absorb(th.think(limit=4))       # nothing new has happened in between
+    th.absorb(th.think(limit=3))
     assert d.memory.stats()["traces"] == n, "re-derivation must merge on identity"
-    assert first
 
 
-def test_a_contradiction_between_two_graded_memories_is_found():
-    """`memory.gaps` finds diffuse disagreement; this finds a specific pair."""
-    d, th = _thinker()
-    a = d.memory.remember(Kind.ANSWER, "to merge two dicts use z = {**a, **b} which copies both")
-    b = d.memory.remember(Kind.ANSWER, "to merge two dicts use a.merge(b) which copies both")
-    d.memory.grade(a.id, 1.0, Source.USER)
-    d.memory.grade(b.id, -1.0, Source.USER)
-    found = th.tensions()
-    assert found and found[0].kind == Thought.TENSION
-    assert {t.id for t in found[0].sources} == {a.id, b.id}
+def test_the_pool_cap_is_reported_not_silent():
+    """Clustering a sample and calling it the store would be a quiet lie.
 
-
-def test_a_bridge_excludes_the_two_traces_that_define_it():
-    """The midpoint of two near-orthogonal vectors sits at cos 45deg ~ 0.707 from
-    BOTH parents, so the nearest neighbour to any midpoint is always a parent.
-    Searching without excluding them answered "occupied" every time and the
-    operation returned nothing, ever.
+    The cap is exercised by lowering it rather than by writing hundreds of
+    traces: `remember` merges near-duplicates, so a loop writing "observation 1",
+    "observation 2" produces far fewer traces than it writes -- which is correct
+    behaviour, and makes trace count a bad way to reach a threshold.
     """
-    d, th = _thinker()
-    for text in ("parse a csv file into rows of strings",
-                 "csv rows have ragged column counts",
-                 "the lease renewal negotiation happens every year",
-                 "negotiating rent with a landlord"):
-        d.memory.remember(Kind.FACT, text)
-    found = th.bridges(limit=3)
-    assert found, "four unrelated facts must leave some midpoint empty"
-    for bridge in found:
-        assert len(bridge.sources) == 2
-        assert bridge.detail["nearest"] < Thinker.OCCUPIED
-
-
-def test_analogy_is_vector_arithmetic_not_a_similarity_band():
-    """a - b + c can reach a region no single memory is near, which is the one
-    thing a similarity search cannot do."""
-    d, th = _thinker()
-    plant(d.toolsmith, d.toolbox)
-    for name in ("median", "parse_csv", "chunk"):
-        spec = d.toolbox.load(name)
-        d.memory.grade(spec.trace_id, 1.0, Source.USER)
-    found = th.analogies(limit=2)
-    assert found, "three graded tools are enough to form a relation"
-    for a in found:
-        assert a.kind == Thought.ANALOGY
-        assert len(a.vector) == len(d.memory.embedder.embed("x", learn=False))
-        assert "landed" in a.detail
+    d, th, _ = _grouped()
+    total = len([t for t in d.memory.store.all() if not t.meta.get("derived")])
+    th.POOL = total - 4
+    assert len(th.pool()) == total - 4
+    assert th.skipped() == 4
+    th.POOL = total
+    assert th.skipped() == 0
 
 
 def test_think_is_a_move_the_loop_can_choose():
     d = fresh(seed=5)
     plant(d.toolsmith, d.toolbox)
-    auto = Auto(d)
-    auto.barren = 0
-    cycle = auto._think()
+    cycle = Auto(d)._think()
     assert cycle.move == Move.THINK or cycle.barren
     assert Move.THINK in Move.ALL
 

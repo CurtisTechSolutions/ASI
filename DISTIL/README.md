@@ -14,7 +14,7 @@ it then has to prove work.
 cd DISTIL
 make help                                   # every target, with its defaults
 make demo                                   # the whole system, offline, no key
-make test                                   # 335 tests, ~60s
+make test                                   # 338 tests, ~60s
 ```
 
 There is a `Makefile` for all of it — `make ask TASK="..."`, `make recall
@@ -24,7 +24,7 @@ here cannot quietly rewrite a real memory. The commands it wraps:
 
 ```bash
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 335 tests, ~60s
+python3 -m tests.test_distil                # 338 tests, ~60s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -226,7 +226,7 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 | `serve.py` | 700 | the local HTTP API the frontend drives, including two SSE streams |
 | `auto.py` | 380 | the loop that runs itself: six moves, regret-matched, rewarded for information |
 | `browser.py` | 200 | a Chrome it can drive, over W3C WebDriver, as tools in the same embedding layer |
-| `think.py` | 300 | reasoning performed *in* the embedding space: centroids, vector arithmetic, empty midpoints, contradictions |
+| `think.py` | 250 | clustering the embedding space and naming what forms, as new memories |
 | `speech.py` | 175 | local transcription when a Whisper binary exists, and honesty when it does not |
 | `project.py` | 139 | PCA by power iteration: 512 dims down to a plane you can look at |
 
@@ -341,37 +341,46 @@ visited page could POST `/api/forge` and have this agent write and run code.
 `--bind` exists because someone will want it in a container; the warning it
 prints exists because they should know what they are opening.
 
-## Thinking in the embedding space
+## Thinking by clustering
 
 Everything else treats the embedding layer as something to *read*: embed a query,
-retrieve neighbours, rank them. `think.py` treats it as something to **compute
-with**, and writes every result back — so the store grows from its own structure,
-not only from what it was asked.
+retrieve neighbours, rank them. `think.py` treats its **shape** as information —
+it clusters what the system knows, names each cluster, and writes the name back
+as a new memory.
 
-| operation | the question it asks of the geometry |
-|---|---|
-| **concept** | a dense cluster has a centre nobody has named — name it, and embed the name |
-| **analogy** | `a − b + c`: what stands to *c* as *a* stands to *b*? |
-| **bridge** | two populated regions with nothing between them — what would sit there? |
-| **tension** | two memories near-identical in the space, graded opposite: a contradiction with two named sides |
+A cluster's centroid is a point near every member and identical to none of them,
+which is what a concept *is*. Storing it gives recall one hop to a whole
+neighbourhood where before it had to be similar to one specific member to reach
+any of them. The store gets denser rather than only longer.
 
-Analogy is the one that matters most: the offset `a − b` is a *relation held as a
-direction*, and adding it to `c` reaches a point no single memory is near. A
-similarity search cannot do that by construction.
+**Agglomerative average-linkage, not nearest-neighbours-of-a-seed.** Clusters are
+disjoint and deterministic: the same memories always produce the same concepts,
+so a new one means the store changed. Average linkage rather than single, because
+single linkage chains — one trace between two unrelated groups merges them into a
+cluster whose centre means nothing.
 
-Everything written is **ungraded and marked `derived`**. These are conjectures
-read off the shape of the store, not observations — they enter at the credibility
-prior like an MCP tool nobody has run, and earn credibility only if something
-later confirms them. A derived trace asserting itself as fact would be the system
-manufacturing evidence about its own contents.
+**The cut comes from the store's own distribution** (`mean + 0.75σ` over observed
+pairs), not a constant. What counts as "similar" depends on the embedder and the
+corpus: measured here, the lexical embedder puts unrelated short text at ~0.01 and
+related text at 0.13–0.40, while a provider embedder sits in a much narrower,
+much higher band. No single number separates both; "unusually close *for this
+store*" does.
 
-Derived traces are excluded from every source pool **and from the k-nearest
-search itself**. Filtering them out of the results is not enough: they still
-occupy slots in the top-k, so each pass saw a different neighbourhood and
-re-derived the same conjecture under different sources forever. The same
-self-reference that broke the why-chains twice.
+Everything written is **ungraded and marked `derived`** — a conjecture read off
+the geometry, entering at the credibility prior like an MCP tool nobody has run.
+It earns credibility only if something later confirms it. Derived traces are
+excluded from the pool *and* from the similarity search; filtering them from the
+results is not enough, since they still occupy slots and shift which cluster
+forms.
 
 `think` is a seventh autonomous move, so this runs constantly.
+
+**It favours precision over recall.** On a 12-trace fixture with three known
+groups it finds two, both pure, with no mixed clusters. The third is four
+sentences sharing almost no vocabulary — at the lexical embedder's noise floor.
+A wrong concept is worse than a missing one, because it becomes a `Kind.FACT` the
+system then believes about itself. Provider embeddings raise the recall; nothing
+here lowers the bar to chase it.
 
 ## Choosing where memory lives
 

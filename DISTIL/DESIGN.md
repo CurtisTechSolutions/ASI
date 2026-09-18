@@ -50,7 +50,7 @@ answers and the loop that learns are the same loop.
 | Embed tools, MCPs, and its own tooling in one layer | `mcp.py`, `toolsmith.py` (§11.1–11.3) |
 | A starter toolkit worth building first | `seed.py` (§11.4) |
 | A frontend, with visualisations, to use all of it | `serve.py`, `project.py`, `ui/` (§16) |
-| Think *using* the embeddings; create new embeddings constantly | `think.py` (§20) |
+| Think by clustering the embeddings; create new embeddings constantly | `think.py` (§20) |
 
 ---
 
@@ -946,77 +946,91 @@ Stated because a specification that only lists strengths is marketing.
 
 ---
 
-## 20. Thinking in the embedding space
+## 20. Thinking by clustering the embedding space
 
 §3 says the embedding layer *is* the memory. §4 makes it rank well. Neither makes
 it a place where reasoning happens — both treat it as a store to read from, which
-leaves it a lookup table with good ordering. `think.py` closes that: it computes
-on the geometry and writes every result back, so the space grows from its own
-structure rather than only from what the system was handed.
+leaves it a lookup table with good ordering. `think.py` closes that: it clusters
+what the system knows, names what forms, and writes the names back, so the space
+grows from its own structure rather than only from what the system was handed.
 
-### 20.1 Four operations
+### 20.1 Why a name is worth storing
 
-**CONCEPT.** The centroid of a tight cluster is a point near everything in the
-cluster and identical to none of it — which is what a concept *is*. Writing it
-back gives recall one hop to the whole neighbourhood where before it needed to be
-similar to a specific member.
+The centroid of a cluster is a point near every member and identical to none of
+them, which is what a concept is. Writing it back gives recall a single hop to a
+whole neighbourhood where before it had to be similar to one specific member to
+reach any of them. That is the difference between a store that gets *longer* and
+one that gets *denser*.
 
-**ANALOGY.** `a − b + c`. The offset between two memories is a relation held as a
-direction, and applying it to a third reaches a point no single memory is near.
-This is the only operation here a similarity search cannot express: nearest
-neighbour can only return things close to something you already have, and the
-whole value of an analogy is that it does not.
+### 20.2 Real clustering
 
-Both outcomes are recorded. A near hit is a relation the store confirms; a miss
-is a region the system has a *reason* to look at and nothing in — which is the
-more interesting of the two, and exactly the shape §10 wants from an experiment.
+An earlier version picked a trace, took its k nearest, and called that a cluster.
+That is seed-dependent: two adjacent seeds give two clusters that are mostly the
+same traces, and which you get depends on iteration order. Agglomerative
+average-linkage replaces it — disjoint, deterministic, and needing no k, because
+how many concepts a store contains is not something the caller knows.
 
-**BRIDGE.** Two populated regions with nothing between them. Phrased as a
-question, because that is what it is.
+Average rather than single linkage: single linkage chains, so one trace sitting
+between two unrelated groups merges them into a cluster whose centre means
+nothing. Average asks whether two groups are alike *on the whole*.
 
-The geometry has a trap here, and it made the operation return nothing at all
-until it was found. The midpoint of two near-orthogonal vectors sits at
-cos 45° ≈ 0.707 from *each of its parents*, so the nearest neighbour to any
-midpoint is always one of the two traces that defined it. "Is anything near the
-midpoint?" therefore always answered yes. The question that means something is
-whether any **third** memory sits between them, and the parents have to be
-excluded from the search for it to be asked at all.
+Two implementation notes, both found by the clustering silently returning too
+little rather than by reading the code:
 
-**TENSION.** Two memories near-identical in the space carrying opposite grades.
-`memory.gaps` (§4.5) finds a *neighbourhood* of low mean credibility — diffuse
-uncertainty. This finds a specific pair: same subject, contradictory verdicts,
-two named sides. Not uncertainty, a contradiction, and directly actionable.
+- **The full pairwise matrix is required.** Storing only pairs above the cut
+  loses clusters, because average linkage averages over every cross-pair and a
+  missing entry has to mean "low", not "absent". With them dropped, three obvious
+  groups came back as one.
+- **The cut cannot be a constant.** What counts as similar depends on the
+  embedder and the corpus. Measured: the lexical embedder puts unrelated short
+  text at ~0.01 and related text at 0.13–0.40; a provider embedder compresses
+  into a much narrower, much higher band. The cut is `mean + 0.75σ` over this
+  store's own observed pairs, floored — without the floor, a set with no
+  structure has a tiny σ, the cut collapses toward the mean, and everything
+  merges into one meaningless cluster.
 
-### 20.2 Conjecture, not observation
+### 20.3 Conjecture, not observation
 
-Nothing written here is graded, and every trace carries `derived: True`. These
-are read off the shape of the store, not observed. They enter at the credibility
-prior exactly like an MCP tool nobody has run, and earn credibility only if
-something later confirms them.
+Nothing written is graded, and every trace carries `derived: True`. These are read
+off the shape of the store. They enter at the credibility prior exactly like an
+MCP tool nobody has run, and earn credibility only if something later confirms
+them.
 
-This is the same rule §10 applies to experiments and §11 to tools, and for the
-same reason: a derived trace entering as established would be the system
-manufacturing evidence about its own contents — the one thing the grading layer
-exists to prevent, turned inward.
+Same rule as §10 for experiments and §11 for tools, for the same reason: a
+derived trace entering as established would be the system manufacturing evidence
+about its own contents — the failure the grading layer exists to prevent, turned
+inward.
 
-### 20.3 It must not feed on itself
+### 20.4 It must not feed on itself
 
 A derived trace is a point in the same space the next pass reads. Without a
-guard, the centroid of a set of centroids becomes a concept and the analogy
-between two analogies becomes an analogy — the identical failure that broke
-`auto.py`'s why-chains twice (§17.3).
+guard, the centroid of a set of centroids becomes a concept — the identical
+failure that broke `auto.py`'s why-chains twice (§17.3).
 
 Excluding derived traces from the source *pool* is not sufficient, and the
-insufficiency is subtle enough to have shipped. They still occupy slots in the
-k-nearest search, so each pass saw a slightly different neighbourhood, produced
-the same conjecture under a different source set, and — because the identity key
-is built from the sources — wrote a near-duplicate instead of merging. The
-exclusion has to happen at search time.
+insufficiency is subtle enough to have shipped once. They still occupy slots in
+the similarity search, so each pass saw a slightly different neighbourhood and
+formed a slightly different cluster; the identity key is built from the members,
+so that wrote a near-duplicate instead of merging.
 
-### 20.4 What it does not do
+### 20.5 Precision over recall
+
+On a twelve-trace fixture with three known groups it finds two, both pure, no
+mixed clusters. The third is four sentences sharing almost no vocabulary — at the
+lexical embedder's noise floor, where within-group similarity (0.129) overlaps
+across-group similarity (max 0.158).
+
+Lowering the cut to catch it would start merging unrelated groups. That trade is
+refused: a cluster becomes a `Kind.FACT` the system then believes about itself,
+so a wrong concept costs more than a missing one. Provider embeddings raise the
+recall; nothing here lowers the bar to chase it.
+
+### 20.6 What it does not do
 
 It does not name concepts well. `_shared_words` takes the words common to a
 cluster, which is a label, not an understanding; a real model would do better and
-this deliberately does not require one. And the operations are O(n²) in the pool
-for tensions and bridges, which is fine at ten thousand traces and is not a plan
-for a million.
+this deliberately does not require one.
+
+Clustering is O(n³) worst case, which is why the pool is capped at 400 by
+credibility. `skipped()` reports what the cap left out, because clustering a
+sample and calling it the store would be a quiet lie.

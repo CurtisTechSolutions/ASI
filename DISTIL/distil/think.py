@@ -1,329 +1,268 @@
-"""Reasoning performed *in* the embedding space, producing new memories.
+"""Thinking by clustering the embedding space, and writing what it finds back.
 
 Everything else in this package treats the embedding layer as something to read:
-embed a query, retrieve neighbours, put them in front of a model. That makes the
-space a lookup table with good ranking. This module treats it as something to
-*compute with*, and every operation here writes its result back as a new trace --
-so the space grows from its own structure rather than only from what the system
-was asked.
+embed a query, retrieve neighbours, rank them. That makes the space a lookup
+table with good ordering. This module treats its *shape* as information — it
+clusters what the system knows and names each cluster, and the name goes back in
+as a new memory.
 
-Four operations, each a question about the geometry that produces an answer the
-system did not previously hold:
+**Why a name is worth storing.** The centroid of a cluster is a point near every
+member and identical to none of them, which is what a concept is. Writing it back
+gives recall a single hop to a whole neighbourhood where before it had to be
+similar to one specific member to reach any of them. The store gets denser rather
+than only longer.
 
-    CONCEPT       a dense cluster has a centre nobody has named. Name it, and
-                  embed the name. The centroid is a point the store can now
-                  retrieve *through*, one hop closer to everything under it.
-    ANALOGY       a - b + c. The classic vector-arithmetic completion, and the
-                  only operation here that can reach a region no single memory
-                  is near: the offset between two things it knows, applied to a
-                  third, lands somewhere it has never looked.
-    BRIDGE        two clusters far apart in the space, with nothing between
-                  them. The midpoint is a question: what would sit here? An
-                  empty region between two populated ones is where an invention
-                  goes, which is `explore.py`'s analogy argument done with
-                  coordinates instead of a similarity band.
-    TENSION       two memories that are near-identical in the space and carry
-                  opposite grades. Same subject, contradictory verdicts -- a
-                  real problem, and one nothing else in this system detects
-                  (`memory.gaps` finds *diffuse* disagreement; this finds a
-                  direct contradiction between two specific traces).
+**Real clustering, not nearest-neighbours-of-a-seed.** An earlier version picked a
+trace, took its k nearest and called that a cluster. That is seed-dependent and
+produces overlapping near-duplicate groups: two adjacent seeds give two clusters
+that are mostly the same traces, and which ones you get depends on which trace
+happened to be iterated first. Agglomerative average-linkage is used instead —
+deterministic, disjoint, and it needs no k, because how many concepts a store
+contains is not something the caller knows in advance.
 
-**What makes this honest rather than hallucination.** Nothing written here is
-graded, and every trace carries `derived: True`. These are *conjectures read off
-the geometry*: "these six memories share a centre", "this pair contradicts".
-They enter memory ungraded and at the credibility prior, exactly like an MCP tool
-nobody has run -- earning credibility only if something later confirms them. A
-derived trace that asserted itself as fact would be the system manufacturing
-evidence about its own contents, which is the failure `explore.py` and
-`toolsmith.py` are both arranged against.
+**What is written is a conjecture, not an observation.** Every derived trace is
+ungraded and carries `derived: True`. "These six memories share a centre" is read
+off the geometry; it earns credibility only if something later confirms it. A
+derived trace entering as established would be the system manufacturing evidence
+about its own contents — the failure `explore.py` and `toolsmith.py` are both
+arranged against, turned inward.
 
-**Why it must not feed on itself.** A derived trace is a point in the same space
-the next pass reads, so without a guard the centroid of a set of centroids
-becomes a concept, and the analogy between two analogies becomes an analogy. The
-same self-reference that broke `auto.py`'s why-chains twice. `derived` is the
-marker, and every source pool here excludes it.
+**It must not feed on itself.** A derived trace is a point in the same space the
+next pass reads, so a centroid of centroids would become a concept, and two passes
+of that is confident nonsense. Derived traces are excluded from the pool *and*
+from the similarity search — filtering them out of the results is not enough,
+because they still occupy slots and shift which cluster forms.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from .memory import Kind
-from .vector import centroid, cosine, normalise, spread
+from .vector import centroid, cosine
 
 
-class Thought:
-    CONCEPT = "concept"
-    ANALOGY = "analogy"
-    BRIDGE = "bridge"
-    TENSION = "tension"
-    ALL = (CONCEPT, ANALOGY, BRIDGE, TENSION)
+@dataclass
+class Cluster:
+    """A group of memories that sit together, and the point at the middle."""
+    members: list
+    centre: list
+    cohesion: float                       # mean similarity of members to the centre
+    shared: str = ""                      # words most of them have in common
+
+    def to_json(self) -> dict:
+        return {"size": len(self.members), "cohesion": round(self.cohesion, 4),
+                "shared": self.shared, "members": [t.id for t in self.members]}
 
 
 @dataclass
 class Derived:
-    """Something read off the geometry, and the evidence for it."""
-    kind: str
+    """A named cluster, ready to be written back."""
     text: str
     vector: list
     sources: list = field(default_factory=list)
     detail: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
-        return {"kind": self.kind, "text": self.text,
+        return {"kind": "concept", "text": self.text,
                 "sources": [t.id for t in self.sources], "detail": self.detail}
 
 
 class Thinker:
-    """Operations on the space, and the writer that puts results back into it.
+    """Cluster the space, name what forms, put the names back.
 
-    Every method returns candidates without writing; `absorb` writes. The split
-    exists so the frontend can show what the geometry suggests before any of it
-    becomes memory, and so a caller can rank across operations rather than
-    taking whatever the first one produced.
+    `clusters` and `concepts` compute without writing; `absorb` writes. The split
+    lets the frontend show what the geometry suggests before any of it becomes
+    memory.
     """
 
-    #: Below this a "cluster" is a coincidence, not a concept.
+    #: How far above the store's OWN mean pairwise similarity two groups must be
+    #: to merge, in standard deviations. A fixed cut cannot work: what counts as
+    #: "similar" depends on the embedder and the corpus, and a constant tuned for
+    #: one is wrong for the other. Measured here, the lexical embedder puts
+    #: unrelated short texts at ~0.01 and related ones at 0.13-0.40, while a
+    #: provider embedder is compressed into a much narrower, much higher band --
+    #: no single number separates both, but "well above this store's average"
+    #: does.
+    SPREAD = 0.75
+    #: The floor, for a store with no structure at all. Without it a uniformly
+    #: unrelated set has a tiny standard deviation, the cut collapses towards the
+    #: mean, and everything merges into one meaningless cluster.
+    FLOOR = 0.10
+    #: A pair is not a concept. Three is the smallest group whose centre says
+    #: something none of its members does.
+    MIN_SIZE = 3
+    #: Below this a group is a coincidence rather than a concept, even if
+    #: linkage put it together.
     COHESION = 0.30
-    #: Above this two traces are the same memory, not two that contradict.
-    SAME = 0.92
-    #: Below this two things are anti-correlated rather than merely distant, and
-    #: the midpoint of those is noise, not an invention.
-    FAR = 0.0
-    #: A third trace this close to the midpoint means the region is occupied.
-    #: Deliberately generous: the midpoint of two near-orthogonal vectors sits at
-    #: cos 45deg ~ 0.707 from BOTH parents, so anything genuinely between them
-    #: has to beat the parents to be interesting at all.
-    OCCUPIED = 0.62
+    #: Agglomerative linkage is O(n^2) in time and memory. At a few hundred
+    #: traces that is instant; at fifty thousand it is not, so the most credible
+    #: are clustered and the rest wait for a later pass. `skipped` reports it
+    #: rather than silently clustering a sample and calling it the store.
+    POOL = 400
 
     def __init__(self, memory, policy, rng=None) -> None:
         self.memory = memory
         self.policy = policy
-        self.rng = rng
+        self.rng = rng                    # unused: clustering here is deterministic
 
-    # -- the pool ------------------------------------------------------------
+    # -- what may be clustered -----------------------------------------------
 
     def pool(self, kinds: tuple[str, ...] | None = None) -> list:
         """Traces this may reason from: everything it did not itself derive.
 
-        Excluding its own output is not an optimisation. A centroid of centroids
-        is a point about the shape of its own conclusions, phrased as a claim
-        about the world, and two passes of that produces confident nonsense.
+        Excluding its own output is not an optimisation. The centroid of a set of
+        centroids is a claim about the shape of its own conclusions, phrased as a
+        claim about the world.
         """
-        return [t for t in self.memory.store.all()
-                if not t.meta.get("derived") and (not kinds or t.kind in kinds)]
+        found = [t for t in self.memory.store.all()
+                 if not t.meta.get("derived") and (not kinds or t.kind in kinds)]
+        found.sort(key=lambda t: t.credibility(self.policy), reverse=True)
+        return found[:self.POOL]
 
-    def _derived_ids(self) -> set:
-        """Every trace this module has written, to exclude from k-nearest search.
+    def skipped(self, kinds: tuple[str, ...] | None = None) -> int:
+        """How many eligible traces the pool cap left out of this pass."""
+        total = sum(1 for t in self.memory.store.all()
+                    if not t.meta.get("derived") and (not kinds or t.kind in kinds))
+        return max(0, total - self.POOL)
 
-        Filtering derived traces out of the *results* is not enough: they still
-        occupy slots in the top-k, so each pass saw a different neighbourhood
-        than the last and re-derived the same conjecture under a different set of
-        sources. The identity key is built from the sources, so that meant the
-        store accumulated near-duplicates forever instead of merging them.
+    # -- clustering ----------------------------------------------------------
+
+    def clusters(self, kinds: tuple[str, ...] | None = None) -> list[Cluster]:
+        """Agglomerative average-linkage over the pool, cut at `LINKAGE`.
+
+        Average linkage (UPGMA) rather than single: single linkage chains, so one
+        trace sitting between two unrelated groups merges them into a cluster
+        whose centre means nothing. Average asks whether the groups are alike *on
+        the whole*, which is the question a concept needs answered.
+
+        Deterministic given the store, so the same memories always produce the
+        same concepts and a new one means the store changed.
+
+        O(n^3) worst case, which is why `POOL` is small. The straightforward
+        implementation is worth more here than a fast one that is hard to check:
+        this decides what the system believes it knows about itself.
         """
-        return {t.id for t in self.memory.store.all() if t.meta.get("derived")}
+        traces = self.pool(kinds)
+        if len(traces) < self.MIN_SIZE:
+            return []
 
-    # -- 1. concepts ---------------------------------------------------------
+        # The FULL pairwise matrix. Storing only pairs above the cut was wrong in
+        # a way that silently lost clusters: average linkage averages over every
+        # cross-pair, so a missing entry has to mean "low", not "absent". With
+        # them dropped, two groups whose members were mostly-but-not-all above
+        # the cut never merged, and three obvious groups came back as one.
+        n = len(traces)
+        sim = [[0.0] * n for _ in range(n)]
+        flat = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                sim[i][j] = sim[j][i] = cosine(traces[i].vector, traces[j].vector)
+                flat.append(sim[i][j])
 
-    def concepts(self, limit: int = 2, size: int = 4) -> list[Derived]:
-        """Name the centre of a dense cluster.
+        cut = self.linkage(flat)
+        groups = {i: [i] for i in range(n)}
+        while len(groups) > 1:
+            # UPGMA: merge the closest pair by average linkage, which is the mean
+            # similarity over all cross-pairs -- held here as group sizes and a
+            # running average rather than by revisiting the members.
+            best, pair = cut, None
+            keys = sorted(groups)
+            for x_i, x in enumerate(keys):
+                for y in keys[x_i + 1:]:
+                    total = sum(sim[i][j] for i in groups[x] for j in groups[y])
+                    avg = total / (len(groups[x]) * len(groups[y]))
+                    if avg > best:
+                        best, pair = avg, (x, y)
+            if pair is None:
+                break                     # nothing left above the cut
+            x, y = pair
+            groups[x] = groups[x] + groups[y]
+            del groups[y]
 
-        The centroid of a tight group is a point that is *near everything in the
-        group and identical to none of it* -- which is what a concept is. Writing
-        it back gives recall a single hop to the whole neighbourhood, where
-        before it had to be similar to one specific member to find any of them.
-        """
-        out, taken = [], []
-        skip = self._derived_ids()
-        for seed in self.pool():
-            near = self.memory.recall_vector(seed.vector, k=size, exclude=skip)
-            if len(near) < size:
-                continue
-            traces = [h.trace for h in near if not h.trace.meta.get("derived")]
-            if len(traces) < size:
-                continue
-            vectors = [t.vector for t in traces]
+        groups = {k: [traces[i] for i in v] for k, v in groups.items()}
+        out = []
+        for members in groups.values():
+            if len(members) < self.MIN_SIZE:
+                continue                  # a pair is not a concept
+            vectors = [t.vector for t in members]
             centre = centroid(vectors)
             cohesion = sum(cosine(v, centre) for v in vectors) / len(vectors)
             if cohesion < self.COHESION:
                 continue
-            if any(cosine(centre, c) > 0.85 for c in taken):
-                continue                  # the same neighbourhood twice
-            taken.append(centre)
-            shared = _shared_words(traces)
-            out.append(Derived(
-                Thought.CONCEPT,
-                f"these {len(traces)} memories share a centre"
-                + (f", about: {shared}" if shared else "")
-                + f" -- {_clip(traces[0].text)}",
-                centre, traces,
-                {"cohesion": round(cohesion, 4), "size": len(traces), "shared": shared}))
-            if len(out) >= limit:
-                break
+            out.append(Cluster(members, centre, cohesion, _shared_words(members)))
+        out.sort(key=lambda c: (c.cohesion * len(c.members)), reverse=True)
         return out
 
-    # -- 2. analogy by arithmetic --------------------------------------------
+    def linkage(self, similarities: list[float]) -> float:
+        """The cut, taken from this store's own distribution.
 
-    def analogies(self, limit: int = 2) -> list[Derived]:
-        """a - b + c, and whatever is nearest the result.
-
-        The one operation here that can reach somewhere no single memory sits.
-        The offset `a - b` is a *relation* held as a direction; adding it to `c`
-        asks "what stands to c as a stands to b?" -- and the answer is a point,
-        which may or may not have a memory near it. Both outcomes are worth
-        writing: a near hit is a relation the store confirms, and a miss is a
-        region the system has reason to look at and nothing in.
+        `mean + SPREAD * stdev` over the observed pairs. A pair that is merely
+        average for this corpus is not evidence of anything -- everything is
+        average somewhere -- so what matters is being unusually close *here*.
         """
-        pool = [t for t in self.pool() if t.graded]
-        if len(pool) < 3:
-            return []
-        pool.sort(key=lambda t: t.credibility(self.policy), reverse=True)
-        skip = self._derived_ids()
-        out = []
-        for i, a in enumerate(pool[:6]):
-            for b in pool[i + 1:i + 4]:
-                if cosine(a.vector, b.vector) > self.SAME:
-                    continue              # no relation between a thing and itself
-                for c in pool[:4]:
-                    if c.id in (a.id, b.id):
-                        continue
-                    target = normalise([x - y + z for x, y, z in
-                                        zip(a.vector, b.vector, c.vector)])
-                    near = [h for h in self.memory.recall_vector(
-                                target, k=2, exclude=skip | {a.id, b.id, c.id})]
-                    landed = near[0].trace if near else None
-                    out.append(Derived(
-                        Thought.ANALOGY,
-                        f"{_clip(a.text, 44)} is to {_clip(b.text, 44)} as "
-                        f"{_clip(c.text, 44)} is to "
-                        + (_clip(landed.text, 44) if landed
-                           else "nothing the store holds -- an unoccupied region"),
-                        target, [t for t in (a, b, c, landed) if t is not None],
-                        {"landed": bool(landed),
-                         "similarity": round(near[0].similarity, 4) if near else 0.0}))
-                    if len(out) >= limit:
-                        return out
-        return out
+        import statistics
+        if len(similarities) < 2:
+            return self.FLOOR
+        return max(self.FLOOR,
+                   statistics.mean(similarities)
+                   + self.SPREAD * statistics.pstdev(similarities))
 
-    # -- 3. bridges ----------------------------------------------------------
+    # -- naming --------------------------------------------------------------
 
-    def bridges(self, limit: int = 1) -> list[Derived]:
-        """The empty midpoint between two populated regions.
+    def concepts(self, limit: int = 3, kinds: tuple[str, ...] | None = None) -> list[Derived]:
+        """Every cluster worth naming, best first."""
+        return [self._name(c) for c in self.clusters(kinds)[:limit]]
 
-        A question rather than a claim, and phrased as one.
+    def _name(self, cluster: Cluster) -> Derived:
+        """A label for what a cluster is about.
 
-        **The parents have to be excluded from the search**, and getting this
-        wrong made the operation return nothing at all. The midpoint of two
-        near-orthogonal vectors sits at cos 45deg ~ 0.707 from *each of them*, so
-        the nearest neighbour to any midpoint is always one of the two traces
-        that defined it. Asking "is anything near the midpoint?" therefore always
-        answered yes, and every candidate was discarded. The question that means
-        something is whether any *third* memory sits between them.
+        Words common to most members, which is a label rather than an
+        understanding -- a real model would do better, and this deliberately does
+        not require one. The example member is carried because the label alone is
+        rarely enough to recognise the group.
         """
-        pool = self.pool()
-        if len(pool) < 4:
-            return []
-        pool.sort(key=lambda t: t.credibility(self.policy), reverse=True)
-        skip = self._derived_ids()
-        out = []
-        for i, a in enumerate(pool[:8]):
-            for b in pool[i + 1:8]:
-                sim = cosine(a.vector, b.vector)
-                if not (self.FAR <= sim <= 0.45):
-                    continue
-                mid = normalise([(x + y) / 2.0 for x, y in zip(a.vector, b.vector)])
-                near = [h for h in self.memory.recall_vector(
-                            mid, k=3, exclude=skip | {a.id, b.id})]
-                # Only interesting if no THIRD memory sits between them.
-                if near and near[0].similarity > self.OCCUPIED:
-                    continue
-                out.append(Derived(
-                    Thought.BRIDGE,
-                    f"what connects {_clip(a.text, 50)} and {_clip(b.text, 50)}? "
-                    f"nothing sits between them",
-                    mid, [a, b],
-                    {"separation": round(sim, 4),
-                     "nearest": round(near[0].similarity, 4) if near else 0.0}))
-                if len(out) >= limit:
-                    return out
-        return out
+        head = _clip(cluster.members[0].text)
+        return Derived(
+            f"these {len(cluster.members)} memories share a centre"
+            + (f", about: {cluster.shared}" if cluster.shared else "")
+            + f" -- e.g. {head}",
+            cluster.centre, list(cluster.members),
+            {"cohesion": round(cluster.cohesion, 4), "size": len(cluster.members),
+             "shared": cluster.shared,
+             "kinds": sorted({t.kind for t in cluster.members})})
 
-    # -- 4. tensions ---------------------------------------------------------
-
-    def tensions(self, limit: int = 2) -> list[Derived]:
-        """Two memories about the same thing that disagree about it.
-
-        `memory.gaps` finds a *neighbourhood* of low mean credibility -- diffuse
-        uncertainty. This finds a specific pair: near-identical in the space, one
-        graded up and one graded down. That is not uncertainty, it is a
-        contradiction with two named sides, and it is directly actionable.
-        """
-        pool = [t for t in self.pool() if t.graded and t.mean_grade is not None]
-        out = []
-        for i, a in enumerate(pool):
-            for b in pool[i + 1:]:
-                if a.mean_grade * b.mean_grade >= 0:
-                    continue              # they agree, or one is neutral
-                sim = cosine(a.vector, b.vector)
-                if sim < 0.55 or sim > self.SAME:
-                    continue
-                good, bad = (a, b) if a.mean_grade > 0 else (b, a)
-                out.append(Derived(
-                    Thought.TENSION,
-                    f"contradiction: {_clip(good.text, 46)} graded "
-                    f"{good.mean_grade:+.2f} while {_clip(bad.text, 46)} graded "
-                    f"{bad.mean_grade:+.2f}, and they are {sim:.2f} alike",
-                    centroid([a.vector, b.vector]), [good, bad],
-                    {"similarity": round(sim, 4),
-                     "spread": round(abs(good.mean_grade - bad.mean_grade), 4)}))
-                if len(out) >= limit:
-                    return out
-        return out
+    def think(self, limit: int = 3) -> list[Derived]:
+        return self.concepts(limit=limit)
 
     # -- writing it back -----------------------------------------------------
 
-    def think(self, limit: int = 4) -> list[Derived]:
-        """One pass over all four operations, best-first."""
-        found = (self.concepts() + self.analogies() + self.tensions() + self.bridges())
-        found.sort(key=lambda d: -len(d.sources))
-        return found[:limit]
-
     def absorb(self, derived: list[Derived]) -> list:
-        """Write conjectures into memory, ungraded.
+        """Write the names into memory, ungraded.
 
-        `Kind.FACT` for a concept or an analogy that landed, `Kind.IDEA` for a
-        bridge or an analogy that did not, `Kind.FAILURE` for a tension -- which
-        is what a contradiction is: a record that something here does not work.
-
-        Ungraded on purpose, and marked `derived`. These are read off the shape
-        of the store, not observed, and entering them as established would be the
-        system manufacturing evidence about its own contents.
+        `Kind.FACT`, because a cluster's centre is an observation about the store
+        — but ungraded and marked `derived`, because it is read off the geometry
+        rather than checked against anything.
         """
         written = []
         for d in derived:
-            kind = {Thought.CONCEPT: Kind.FACT,
-                    Thought.BRIDGE: Kind.IDEA,
-                    Thought.TENSION: Kind.FAILURE}.get(d.kind)
-            if kind is None:              # analogy: fact if it landed, idea if not
-                kind = Kind.FACT if d.detail.get("landed") else Kind.IDEA
             written.append(self.memory.remember(
-                kind, d.text,
-                meta={"derived": True, "thought": d.kind, **d.detail},
+                Kind.FACT, d.text,
+                meta={"derived": True, "thought": "concept", **d.detail},
                 links=[t.id for t in d.sources],
-                # Identity keyed on the operation and its sources, so the same
-                # conjecture re-derived next pass merges instead of accumulating.
-                identity=f"think:{d.kind}:" + ",".join(sorted(t.id for t in d.sources))))
+                # Keyed on the members, so the same cluster re-derived next pass
+                # merges instead of accumulating a near-duplicate.
+                identity="think:concept:" + ",".join(sorted(t.id for t in d.sources))))
         return written
 
 
 def _shared_words(traces, floor: int = 2) -> str:
-    """Words common to most of a cluster: a cheap name for what it is about."""
+    """Words most of a cluster has in common: a cheap name for what it is about."""
     import collections
     import re
     counts = collections.Counter()
     for t in traces:
         counts.update(set(re.findall(r"[a-z]{4,}", t.text.lower())))
-    common = [w for w, n in counts.most_common(6) if n >= max(floor, len(traces) // 2)]
+    common = [w for w, n in counts.most_common(8) if n >= max(floor, len(traces) // 2)]
     return ", ".join(common[:4])
 
 
