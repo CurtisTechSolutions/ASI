@@ -254,6 +254,88 @@ def cmd_regress(a):
     print("  conjunct written first, which is why it is easy to have done already.")
 
 
+def cmd_transfer(a):
+    """Do the RULES transfer? Train a growing code-predictor on one game's
+    (shared-vocabulary features -> refusal code), test it per code on another."""
+    import statistics as stat
+    from gren.oracle import build_all as _oracles
+    from gren.sbnn import GrowingSBNN
+    from cortex.games import ALL
+    G = ["chess", "checkers", "go", "sudoku"]
+    OR = _oracles()
+
+    def probes(name, rng, states, k=10):
+        o = OR[name]; g = o.game; rows = []
+        for _ in range(states):
+            s = (g.random_state(rng) if hasattr(g, "random_state")
+                 else g.new(seed=rng.randrange(10 ** 6)))
+            for mv in o.candidates(s, rng, k):
+                try:
+                    f = g.generalise(s, mv)
+                    lab = "LEGAL" if g.is_legal(s, mv) else o.why(s, mv)[0]
+                except Exception:
+                    continue
+                rows.append(({f"{b}[{i}]": v for b, vec in f.items() for i, v in enumerate(vec)}, lab))
+        return rows
+
+    def balance(rows, rng, cap=120):
+        by = {}
+        for f, l in rows: by.setdefault(l, []).append((f, l))
+        out = []
+        for l, rs in by.items(): rng.shuffle(rs); out += rs[:cap]
+        rng.shuffle(out); return out
+
+    def surface(x, y):
+        # SIDE is whose turn it is: one slot, no rule content. A net given only
+        # that emits its prior, and a prior is not transfer.
+        k = set(ALL[x].spec) & set(ALL[y].spec) - {"SIDE"}
+        return sum(ALL[x].spec[b] for b in k)
+
+    print("\nLegality is one bit. A RULE is which refusal fires, and under what")
+    print("condition. Train on A, test per code on B, through the vocabulary they")
+    print("share -- the only channel a rule can cross.\n")
+    test = {b: balance(probes(b, random.Random(500 + i), 50), random.Random(1)) for i, b in enumerate(G)}
+    R = {}
+    for x in G:
+        for y in G:
+            accs, conf = {}, {}
+            for seed in range(a.trials):
+                tr = balance(probes(x, random.Random(seed * 31 + 7), 60), random.Random(seed))
+                net = GrowingSBNN(nh=24, seed=seed)
+                for _ in range(6):
+                    for f, l in tr: net.step(f, l, lr=0.05)
+                hit, tot = {}, {}
+                for f, l in test[y]:
+                    p = net.predict(f); pred = max(p, key=p.get) if p else "?"
+                    tot[l] = tot.get(l, 0) + 1
+                    if pred == l: hit[l] = hit.get(l, 0) + 1
+                    else: conf.setdefault(l, {}); conf[l][pred] = conf[l].get(pred, 0) + 1
+                for l in tot: accs.setdefault(l, []).append(hit.get(l, 0) / tot[l])
+            R[(x, y)] = ({l: stat.mean(v) for l, v in accs.items()}, tot, conf)
+
+    print(f"  {'A -> B':<22}{'rule-bearing slots':>20}   per-code recall on B")
+    for x in G:
+        for y in G:
+            if x == y: continue
+            pc, tot, _ = R[(x, y)]
+            shared = [c for c in sorted(pc) if c in R[(x, x)][1] and tot.get(c, 0) >= 10]
+            sf = surface(x, y)
+            body = "  ".join(f"{c}={pc[c]:.2f}" for c in shared) if sf else "(no rule-bearing surface: any score is a prior)"
+            print(f"  {x + ' -> ' + y:<22}{sf:>20}   {body}")
+
+    print("\n  The two facts that decide it:\n")
+    pc, tot, conf = R[("go", "sudoku")]
+    print(f"  go -> sudoku through GRID_PLACE:  LEGAL {pc.get('LEGAL', 0):.2f}  "
+          f"OCCUPIED_TARGET {pc.get('OCCUPIED_TARGET', 0):.2f}")
+    print("     the one rule they share means the same thing, and it transfers whole.")
+    pc, tot, conf = R[("chess", "checkers")]
+    c = conf.get("LEGAL", {}); t = sum(c.values()) or 1
+    print(f"  chess -> checkers on checkers' LEGAL moves: recall {pc.get('LEGAL', 0):.2f}; "
+          f"called BLOCKED_PATH {c.get('BLOCKED_PATH', 0) / t:.0%} of the time it was wrong")
+    print("     a checkers jump has an occupied midpoint -- the piece being taken. To")
+    print("     chess that is a blocked bishop. Same feature, opposite rule.")
+
+
 def _spearman(a, b):
     def rk(v):
         o = sorted(range(len(v)), key=lambda i: v[i]); r = [0]*len(v)
@@ -271,7 +353,7 @@ def main(argv=None):
     for name, fn in (("explore", cmd_explore), ("similar", cmd_similar),
                      ("policies", cmd_policies), ("tree", cmd_tree),
                      ("package", cmd_package), ("grow", cmd_grow),
-                     ("regress", cmd_regress)):
+                     ("regress", cmd_regress), ("transfer", cmd_transfer)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--budget", type=int, default=1200)
         q.add_argument("--policy", default="eig", choices=list(POLICIES))

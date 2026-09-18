@@ -828,6 +828,79 @@ compared.
 
 *Where:* `AGI/GREN/gren/regress.py` (`conjunctive`, `expected_work`) · **confirmed**
 
+### 40. A rule transfers exactly when the feature that carries it means the same thing
+> Expect to learn valid moves, the rules, and underlying mechanics of a game as
+> well.
+
+Three levels, and "similar" was only ever being measured at the third. **Valid
+moves** is one bit per candidate. A **rule** is which refusal fires and under
+what condition. **Mechanics** are the decomposed parts — GREN's signature — and
+every similarity measure in this repository is built on them. Asked to go back
+to basics on identification and grouping, the first thing to do was measure
+transfer at all three levels, for all six pairs, and hold the measures to it.
+
+**Level 1, GTMNN legality, twelve directed pairs: flat.** Every value within
+±0.09 and inside its own seed spread. It agrees with the three earlier
+chess→checkers numbers and adds nothing on its own.
+
+**Level 1 on CyclicCortex — the harness that learns well — against the majority
+baseline, each pair forced into one region:** go/sudoku **+0.341**, chess/checkers
+**+0.081**, every other pair 0.000 for want of a rule-bearing channel. The same
+ranking as level 2, the same +0.30 / +0.07 agreement, from an independent
+harness. And it is asymmetric: checkers→chess +0.139, chess→checkers +0.023 — the
+simpler game's rules carry into the richer one, not back.
+
+**Level 2 is the result.** Train a growing code-predictor on game A's
+(shared-vocabulary features → refusal code), test it per code on game B:
+
+| pair | rule-bearing shared slots | rule transfer | rank by every feature measure | rank by rule transfer |
+|---|---|---|---|---|
+| chess / checkers | 7 | 0.32 | **1st** | 2nd |
+| go / sudoku | 3 | **0.98** | 4th | **1st** |
+| the other four | 0 | — | | |
+
+Every feature-based measure — GREN's signature, the hand-written mechanics, the
+GTMNN modifier — calls chess/checkers the *most* similar pair and go/sudoku among
+the *least*. Rule transfer says the opposite, by a mile. Agreement with rule
+transfer is **+0.30** for all three mechanic measures and **+0.07** for the goal
+tree: they capture "cross-family is far", which is a tautology once a shared
+feature is required, and get the top of the ranking backwards.
+
+The mechanism, exactly. **`go→sudoku`** transfers the one rule they share
+through `GRID_PLACE[2]` — "target cell empty", the feature the vocabulary
+alignment had already matched with the same orientation — at LEGAL 1.00 and
+OCCUPIED_TARGET 0.99. On sudoku's *constraint* refusals, which fire on an empty
+cell, it says LEGAL every time: correct by its own lights, since go has no
+concept of a value clash. **`chess→checkers`** calls **95% of checkers' legal
+moves `BLOCKED_PATH`** — a code checkers does not have. A checkers jump is a
+two-square diagonal with the midpoint occupied by the piece being taken. To a
+chess-trained net an occupied midpoint on a diagonal is a blocked bishop. Same
+feature, *opposite* rule: in checkers the occupied midpoint is required, in chess
+it is forbidden. Insight 30 measured at the level of a single rule, on a second
+rule pair.
+
+**A third instance of the prior trap (33, 35, 39).** `sudoku→chess` scored
+OCCUPIED_TARGET 1.00 with every other class at 0.00 — and the two share no
+feature at all. A net given a zero input emits its bias. `SIDE`, whose turn it
+is, is one shared slot with no rule content and produced the same artefact at
+83%. The guard: a shared surface that can *carry* a rule, or the score is a
+prior. Applying it moved the three mechanic measures' agreement from a flattering
++0.60 to +0.30.
+
+**So: identify by mechanics, group by rules.** Identification is solved (GREN,
+one token, goal-first). Grouping by shared mechanic *names* measurably groups the
+wrong pairs, because a name does not carry its condition. Two ways to group
+right: the operational measure — train on A, test per rule on B — which cannot
+be wrong about the thing it is for and is now `gren.cli transfer`; or a
+decomposition deep enough that a shared name *implies* a shared condition, which
+is §8.3's minimality rule, still unbuilt, and which now has a concrete
+acceptance test — after splitting `OCCUPIED_TARGET` and `BLOCKED_PATH` into their
+condition-level parts, the feature ranking should put go/sudoku first.
+
+*Where:* `AGI/GREN/gren/cli.py` (`transfer`), `AGI/GREN/README.md`,
+`AGI/GREN/tests/test_gren.py` · **confirmed** (and 11's grouping claim
+**contradicted** as stated)
+
 ---
 
 ## What to test next
@@ -836,7 +909,7 @@ Ordered by how much they would change, per unit of effort:
 
 0. ~~**Does transfer survive ACROSS regions, or only within them?**~~ (29) **Answered: the graph is doing routing.** Cross-region transfer is +0.025 in one case of four; the within-region shared vocabulary is +0.023 against its proper baseline. Regions earn their place by *placing* games correctly — the wrong region is measurably worse, per the negative Shapley values — not by teaching each other.
 1. ~~**Does validity transfer?**~~ (19) **Answered, and it is the same +0.023.** `p_valid` trained on chess alone leaves checkers at its majority class. The interesting follow-up is 29's refinement: build a region whose vocabulary is *mostly* shared, as `common_denominator.py` did with three inputs, and see whether 0.646 survives inside a cortex.
-2. **Can the minimality criterion split a mechanic?** (38, and §8.3) Regression now has operators, but their preconditions are whole refusal codes. §8.3's rule — keep splitting a part while its halves are seen independently — would say whether `SELF_CHECK` is one precondition or two (king attacked, and no interposition). That changes what regression can plan through, and it is decidable from the corpus rather than argued about.
+2. **Can the minimality criterion split a mechanic?** (38, 40, and §8.3) Now with an acceptance test. `OCCUPIED_TARGET` is "own piece there" in chess and "any piece there" in checkers, go and sudoku; `BLOCKED_PATH`'s occupied-midpoint feature is a block in chess and a capture in checkers. §8.3's rule — keep splitting a part while its halves are seen independently — should split both. **Pass condition: after the split, the feature-based similarity ranking puts go/sudoku first, where rule transfer already puts it.** If it still ranks chess/checkers first, name-level decomposition cannot be made to predict transfer and grouping must use the operational measure.
 3. **Does goal-first ordering still pay at scale?** (37) The compression half of the result is small-N: four games and one perfectly-discriminating axis. Generate or gather thirty-odd games with overlapping goals and re-measure tokens-to-identification against alphabetical and against a highest-entropy-axis-first ordering. The knowability argument does not need this; the compression claim does.
 4. **Is a trajectory worth more than the input that produced it?** (36) The premise of the whole memory design, and an afternoon to settle. Take CyclicCortex, which already has four games and trained regions: record input features, trajectory (region id, vocabulary slots written, hidden-activation pattern) and outcome per position, then build two lookup tables over the same episodes — one keyed by input, one by trajectory — and see which predicts the held-out outcome better. If trajectory-keyed does not win, the premise is wrong and nothing else in `AGI/Memory/` needs building.
 5. **Can a mechanic be split when two games disagree about it?** (30) Chess and checkers both refuse `OCCUPIED_TARGET` under opposite conditions. If GREN probed *conditionally* — does this game still refuse when the occupant is an enemy? — the code would split into `OCCUPIED_TARGET_OWN` and `OCCUPIED_TARGET_ANY`, and the two games would stop sharing a slot they should never have shared. This is the cheapest test of whether the refusal channel can be widened enough to carry feature alignment, and it is a direct consequence of the only sharp negative result so far.

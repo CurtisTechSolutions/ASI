@@ -51,7 +51,7 @@ more useful half.
 |---|---|
 | A game can be identified by what it refuses | **holds** — the discovered signature reproduces the hand-written regions exactly |
 | Credit can be assigned without backpropagation | **holds** — Shapley efficiency exact to 3e-15, per sample, not in expectation |
-| Similar games share structure that transfers | **fails** — chess→checkers measures at approximately nothing, three independent ways |
+| Similar games share structure that transfers | **fails as measured** — every feature-based measure ranks chess/checkers most similar and go/sudoku near least; rule transfer is 0.32 and **0.98** respectively. A rule transfers exactly when the feature carrying it means the same thing, and mechanic *names* do not say whether it does |
 | A population playing a game learns to predict | **holds, with a gap** — real inference loss 2.35 against uniform 2.71, improving monotonically; the same micros supervised reach 0.91, because only seats holding `y` ever receive credit |
 | Index a game by its END GOAL and work backwards | **holds** — one token to identify against alphabetical's 2.5, and it is the one thing you can state about an unfamiliar game before playing it |
 | Goal regression needs hand-written operators | **fails, usefully** — a refusal code *is* a precondition violation, so GREN already had them |

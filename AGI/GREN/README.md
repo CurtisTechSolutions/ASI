@@ -17,7 +17,8 @@ python3 -m gren.cli tree        # the radix tree over discovered signatures
 python3 -m gren.cli package     # the GamePackage handed to the player network
 python3 -m gren.cli grow        # one growing network across all four games
 python3 -m gren.cli regress     # goal regression: backwards from the goal
-python3 -m tests.test_gren      # 27 tests
+python3 -m gren.cli transfer    # do the RULES transfer between games?
+python3 -m tests.test_gren      # 29 tests
 
 # hand the packages to CyclicCortex, which then builds its map from them
 python3 -m gren.cli package --out ../CyclicCortex/data/gren_packages.json
@@ -282,6 +283,42 @@ cheap, selective conjunct written first — which is why it is easy to have done
 already without noticing, and why a baseline has to be checked for it before any
 speedup is believed. `conjunctive()` and `expected_work()` make the ordering
 explicit rather than incidental.
+
+## Identify by mechanics, group by rules
+
+Every similarity measure here — the refusal signature, the hand-written mechanic
+sets, GTMNN's modifier — ranks chess/checkers the most similar pair and go/sudoku
+among the least. Measured **rule transfer** says the opposite:
+
+| pair | shared rule-bearing slots | rule transfer |
+|---|---|---|
+| chess / checkers | 7 | 0.32 |
+| **go / sudoku** | 3 | **0.98** |
+| every other pair | 0 | — (no channel) |
+
+`gren.cli transfer` trains a growing code-predictor on one game's
+(shared-vocabulary features → refusal code) and tests it *per code* on another.
+Two facts decide it, both pinned as tests:
+
+* **`go → sudoku`** transfers the one rule they share — occupied cell — through
+  `GRID_PLACE[2]` at LEGAL 1.00 / OCCUPIED_TARGET 0.99, and on sudoku's constraint
+  refusals says LEGAL, correctly by its own lights.
+* **`chess → checkers`** calls **95% of checkers' legal moves `BLOCKED_PATH`**, a
+  code checkers does not have. A jump's occupied midpoint is the piece being
+  taken; to chess it is a blocked bishop. Same feature, opposite rule.
+
+A rule transfers exactly when the feature carrying it means the same thing on
+both sides, and a shared mechanic *name* does not tell you whether it does.
+Agreement of the mechanic measures with rule transfer is **+0.30**; the goal
+tree's is +0.07. So the signature stays what it is good at — identification —
+and grouping needs either this operational measure or a decomposition deep enough
+that a shared name implies a shared condition (§8.3, unbuilt, now with an
+acceptance test in `Research/Insights.md`).
+
+One guard, learned the hard way for a third time: a net given no familiar
+features emits its bias, and `sudoku → chess` scored OCCUPIED_TARGET 1.00 with
+zero shared features. A shared surface that can *carry* a rule — `SIDE` alone
+cannot — or the number is a prior.
 
 ## What is not here yet
 

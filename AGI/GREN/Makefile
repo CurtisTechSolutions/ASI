@@ -26,7 +26,7 @@ HANDOFF ?= ../CyclicCortex/data/gren_packages.json
 
 COMMON  = --budget $(BUDGET) --policy $(POLICY) --seed $(SEED)
 
-.PHONY: help check test explore similar policies tree grow package regress all clean
+.PHONY: help check test explore similar policies tree grow package regress transfer all clean
 
 help: ## Show this help
 	@echo "GREN make targets  (override variables like: make explore BUDGET=3000)"
@@ -60,6 +60,9 @@ grow: ## One Self-Building network growing its inputs and outputs across all fou
 
 regress: ## Goal regression -- backwards from the goal to subgoals
 	$(CLI) regress --trials 6
+
+transfer: ## Do the RULES transfer between games? Per-code, through the shared vocabulary
+	$(CLI) transfer --trials 3
 
 ##@ The handoff
 package: ## Build a GamePackage per game and write the handoff to HANDOFF
