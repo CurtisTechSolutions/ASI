@@ -109,7 +109,8 @@ This became the central claim of GREN: **a game's identity is its refusal
 boundary**, and two games are similar exactly to the degree they refuse the same
 things.
 
-*Where:* `AGI/GREN/DESIGN.md` §2 · **held**
+*Where:* `AGI/GREN/DESIGN.md` §2 · **confirmed** (41: six of chess's seven refusal
+kinds from 166 random submissions, with no rules in hand)
 
 ### 6. The failure rate should be about 50%
 Not a setting — a consequence. Choosing probes by expected information gain is
@@ -118,7 +119,10 @@ informative probe is the one half the surviving candidates call legal. The
 system reports its observed failure rate as a diagnostic: a run at 5% is
 confirming what it already believes; at 95% it is thrashing outside the boundary.
 
-*Where:* `AGI/GREN/DESIGN.md` §4 · **held** (derivation, not yet measured on a real oracle)
+*Where:* `AGI/GREN/DESIGN.md` §4 · **refined** (41: holds where the boundary is
+reachable — go 0.51, chess 0.94 under the same policy. In a sparse grammar the
+failure rate is 94–99.9% not by choice, and the recipe is to keep every
+acceptance, not to fail more. Maximising failure is the worst policy everywhere.)
 
 ### 7. Programming is the game worth optimising for
 > The compiler will tell you: this ain't working, bro.
@@ -903,6 +907,122 @@ condition-level parts, the feature ranking should put go/sudoku first.
 
 ---
 
+### 41. Map a new game blind: refusals name the rules, acceptances are the scarce resource
+> What is an automated way to map out a new game? I would like to try failing at
+> the game as much as possible to learn the game's rules/inputs/outputs.
+
+**First, an honest finding about the existing explorer: it is not blind.** Every
+`candidates()` in `cortex/games.py` returns `good[:k] + bad[:k]` — half legal by
+construction, chosen with `is_legal`. The Boundary and EIG policies perturb
+`oracle.actions()`, which is the legal move list. `random_state` plays random
+legal moves. So GREN's measured 50% failure rate is partly handed to it by its
+candidate pool, and three rules are out of its reach by construction: sudoku's
+OFF_BOARD and OUT_OF_RANGE (the pool never leaves the grid) and go's REPETITION
+(`random_go` builds boards with no previous position, so ko can never fire). A
+new game gives none of this. It gives a grammar — what a submission looks like —
+a yes or a no, and the next state when it says yes.
+
+**The blind loop, as measured** (scratch `blind.py`; 4 games × 5 policies × 5
+seeds at 1200 and 3000 probes): sample the grammar one step past its edges;
+submit; remember every acceptance and replay it against the flood of refusals;
+choose the next probe from grammar samples and one-step edits of remembered
+acceptances by a learned p(accept | features); take the accepted move half the
+time, restart after 40 moves or 100 straight refusals; name the rules by
+grouping refusals on the feature the model blames (input × gradient); read the
+mechanics off the state diff of every acceptance. The rules are consulted by the
+scorer only, after the fact, to say what the explorer tripped.
+
+**"Fail as much as possible" is right about the mechanism and wrong about the
+objective.** The mechanism holds: random grammar samples fail 99.8% of the time
+in chess, and that flood names six of the seven refusal kinds within 166 probes —
+every failure is a rule, and the rules are cheap. But the policy that
+*maximises* failure is the worst mapper on every level, in every game:
+
+| game, 3000 probes | policy | failure | accepted | rules found | mechanics found | legality acc. |
+|---|---|---|---|---|---|---|
+| chess (7 rules) | GREN eig, rules in hand | 0.46 | — | 7.0 | — | — |
+| | random | 0.998 | 5 | 6.0 | 1.0 | — |
+| | maximise failure | 0.996 | 13 | 6.0 | 1.0 | 0.50 |
+| | aim for p = ½ | 0.940 | 179 | **7.0** (SELF_CHECK 5 of 5) | 2.0 | 0.57 |
+| go (4 rules) | GREN eig, rules in hand | 0.15 | — | 2.8 | — | — |
+| | random | 0.49 | 1523 | 3.0 | 3.0 | — |
+| | maximise failure | 0.94 | 190 | 2.2 | 2.8 | 1.00 |
+| | aim for p = ½ | 0.51 | 1464 | **4.0** (5 of 5) | 4.0 | 1.00 |
+
+Maximising failure finds go's two easy refusals and then trips them for the
+remaining 2,900 probes: 93% failure, half the rules, and a rule-naming purity
+gap over chance of +0.06 where the p = ½ policy's is +0.52. On sudoku it finds
+all six rules but takes 732 probes to the last one against 55. Until the first
+acceptance the learned policies are all the same random policy — a model with
+one label cannot rank — which is why they find chess's first six rules at the
+same probe; the rules that separate policies are the ones behind the boundary.
+The quantity to maximise is not failures per probe but *new information* per
+probe, and after the first hundred probes the informative submissions are the
+ones the model cannot call: insight 6's p = ½, now measured on a blind oracle.
+
+**Where the grammar is sparse, the bottleneck is the inputs, and only
+acceptances buy them.** In go and sudoku the grammar is dense (half of go's
+submissions are accepted) and every blind policy learns the legal set to 0.99+
+balanced accuracy. In chess about 0.2% of the grammar is legal and in checkers
+0.07%: random probing accepts 5 chess moves in 3000 and 2 checkers moves. A
+model trained on that stream learns to say no — balanced accuracy 0.50, a
+majority classifier. Replaying one remembered acceptance per refusal lifts it to
+0.62–0.65 in chess and 0.66–0.76 in checkers at 1200 probes; the p = ½ policy,
+with 36× the acceptances of random, is what reaches SELF_CHECK — a rule that
+lives in the midgame, which no policy that cannot get to the midgame will ever
+see. Checkers is the negative: at most three acceptances per run under every
+blind policy, no jump ever performed, WRONG_DIRECTION never seen and
+FORCED_ALTERNATIVE once in 65 runs. You cannot learn the rules of the midgame
+if you cannot reach it, and reaching it is paid for in acceptances, not
+failures.
+
+**The rules can be named from yes/no alone — up to the feature language.** Group
+each refusal by the present feature the legality model blames hardest, and
+compare the groups with the true codes, which the explorer never saw (1200
+probes, p = ½ policy):
+
+| game | purity | chance | rules named / found |
+|---|---|---|---|
+| sudoku | 0.83 | 0.32 | 5.0 / 6.0 |
+| go | 0.99 | 0.47 | 3.0 / 3.8 |
+| checkers | 0.87 | 0.43 | 4.7 / 5.6 |
+| chess | 0.77 | 0.32 | 5.4 / 6.0 |
+
+Sudoku's map reads like the rulebook: `filled → OCCUPIED_TARGET` 1.00,
+`in_row → CONSTRAINT_ROW` 0.88, `in_col → CONSTRAINT_COL` 0.80, `in_box →
+CONSTRAINT_BOX` 0.88. The misses are the feature language's, not the method's,
+exactly as §14 specifies: OFF_BOARD and OUT_OF_RANGE share the one `range`
+feature, so they merge; chess's NOT_YOURS is the *absence* of "mine" and of
+"empty", and a rule carried by no present feature cannot be blamed on one, so
+its refusals spill into the geometry groups. Where the oracle and the blind
+namer disagree — checkers' "target occupied" group is 52% EMPTY_SOURCE — both
+are right: `why()` reports the first violated precondition in its own order,
+the model reports the strongest, and a probe with an empty source and an
+occupied target violates both. This is insight 38 from the other side: a
+refusal is a precondition violation, and a blind explorer recovers the
+precondition.
+
+**Outputs are read off the state diff, and playing forward is what finds them.**
+Go: place; place and take one; place and take several; pass (no cell changes,
+the turn passes) — four mechanics, all found. Chess: move, and capture, the
+second only under the learned policies that reach it. Checkers: the plain step
+and nothing else, for the same reason it has no midgame. Sudoku: fill, and the
+turn does not pass.
+
+**So the automated way is:** grammar in, yes/no out. Fail freely at first,
+because every refusal is a rule. Then aim at the boundary, not past it. Treat
+each acceptance as the scarce resource — remember it, replay it, play it
+forward — because the legal set, the midgame rules and every mechanic are paid
+for in acceptances. Name rules by what the model blames; read mechanics from the
+diff; stop when no new rule group or delta kind has appeared for a while
+(`Evidence.settled`). Every piece of this exists in GREN except the blindness.
+
+*Where:* scratch `blind.py` (not yet in the package), `AGI/GREN/gren/probe.py`,
+`AGI/CyclicCortex/cortex/games.py` · **confirmed**; 5 **confirmed** and 6
+**refined** by it
+
+---
+
 ## What to test next
 
 Ordered by how much they would change, per unit of effort:
@@ -917,4 +1037,5 @@ Ordered by how much they would change, per unit of effort:
 7. **Fix `b` everywhere and re-measure.** (24, 20) Upstream of everything in the vanishing-gradient work. `RadixCyclicNN` carries the same default — measure its realised `E|z|` before changing it.
 8. ~~**Does the population actually specialise?**~~ (2) **Answered: yes, when it gets to play.** `gini` reaches 0.54 with every micro seated and 0.05 with 24 of 256 — so the split reward does bite, and seat count is what gates it. That is why 3 above is the sharper question.
 9. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
-10. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
+10. **Get a blind explorer to the midgame of a sparse game.** (41) Checkers is unmapped at the input level under every blind policy: at most three acceptances per run, no jump ever performed. Two candidates, one experiment each: a two-phase policy that exploits p(accept) until a run of accepted moves is banked and then switches to p = ½; and edits of remembered acceptances at distance two, since a checkers move's one-step neighbours are almost all illegal. Pass condition: a jump performed and FORCED_ALTERNATIVE found blind in most seeds. Then promote `blind.py` to `gren.cli blind`, so a new game is mapped from its grammar alone, and give the rule-namer a feature it can blame for NOT_YOURS — the one chess rule no present feature carries.
+11. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.

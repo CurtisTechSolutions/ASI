@@ -98,6 +98,13 @@ Random probing finds four of chess's seven refusal kinds. Probing *at the
 boundary* finds all seven. A policy that only ever trips the common refusal
 never learns the rare rules, and that is what a probe policy is for.
 
+**Caveat, measured later (Insights 41):** these policies are not blind. The
+candidate pool is half legal by construction and the boundary policies perturb
+the legal move list, so the 50% is partly handed over rather than found. Given
+only a grammar and a yes/no, a policy that aims at p(accept) = ½ still maps
+every rule of chess and go, and the policy that maximises failure is the worst
+mapper in every game.
+
 ## A radix tree with the mechanics of a trie
 
 **Ordered by the end goal, working backwards.** The order tokens are inserted in
