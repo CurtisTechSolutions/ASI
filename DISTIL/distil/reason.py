@@ -187,6 +187,11 @@ class Session:
     frame: object = None          # the game, as understood before any reasoning
     agenda: object = None         # what it needs vs what this system can do
     precedent: dict = field(default_factory=dict)
+    #: The belief over states of the world, kept so the caller can re-select
+    #: from the frontier after a goal is met without re-running the whole chain.
+    #: Continuous distillation needs this: one selection per task was one goal
+    #: per task, and the rest of the tree sat open forever.
+    belief: list = field(default_factory=list)
 
 
 class Reasoner:
@@ -465,4 +470,5 @@ class Reasoner:
                                      meta={"task": task, "selected": goal.text if goal else None,
                                            "belief": dict(zip(State.ALL, belief))})
         return Session(task=task, chain=chain, tree=tree, chosen=goal,
-                       questions=questions, why=why, trace_id=trace.id)
+                       questions=questions, why=why, trace_id=trace.id,
+                       belief=list(belief))

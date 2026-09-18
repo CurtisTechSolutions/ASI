@@ -58,7 +58,8 @@ def cmd_ask(args) -> int:
     print()
     print(result["session"].tree.render())
     print()
-    print(f"  solved: {result['solved']}  ({result['reason']})")
+    print(f"  solved: {result['solved']}  ({result['reason']}; "
+          f"{result.get('goals_met', 0)} goal(s) met, {result.get('goals_open', 0)} open)")
     for a in result["attempts"]:
         print(f"    attempt via {a['via']:<24} reframe={a['reframe'] or '-':<12} ok={a['ok']}")
     if result.get("boundary"):

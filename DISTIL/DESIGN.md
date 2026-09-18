@@ -362,6 +362,21 @@ the specification gap, named clause by clause. It is where §9 is pointed.
 
 ---
 
+### 8.1 Acting continues until the frontier is empty
+
+Distillation stops at verifiability; *acting* does not stop at the first goal.
+`solve` selects a goal from the frontier, acts, verifies, and — if it was met —
+selects again from what remains, until the frontier is empty, a goal is
+blocked, or a cap is reached. Only then does it report.
+
+This was a defect for the first several rounds of this codebase. One selection
+per task meant one goal per task: the second goal of every two-goal task sat
+open forever, nothing ever came back for it, and `solved` reported the *goal*
+rather than the task — `True` with half the tree still open. The directive
+says to distil continuously, and a loop that stops after one leaf is not that.
+`solved` is now `tree.solved`, which `GoalTree.mark` propagates upward only when
+every child is met.
+
 ## 9. Question everything; never take no for an answer
 
 Three mechanisms, none of them a prompt telling a model to be sceptical. A prompt

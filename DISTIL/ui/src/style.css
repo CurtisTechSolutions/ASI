@@ -102,6 +102,7 @@ body {
 .verdict.ok strong { color: var(--good); }
 .verdict.no { border-left-color: var(--warn); }
 .verdict.no strong { color: var(--warn); }
+.verdict .goal-count { font: 11px var(--mono); color: var(--faint); font-style: normal; margin-left: auto; }
 
 .attempts { list-style: none; margin: 0 0 12px; padding: 0; font-size: 12.5px; }
 .attempts li { display: flex; gap: 10px; padding: 3px 0; align-items: baseline; }

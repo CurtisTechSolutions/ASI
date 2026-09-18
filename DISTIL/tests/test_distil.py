@@ -3543,6 +3543,35 @@ def test_state_reports_why_each_provider_is_unavailable():
         assert ("why" in entry) and (entry["available"] or entry["why"]), entry
 
 
+def test_solve_acts_on_every_goal_not_just_the_first():
+    """One selection per task was one GOAL per task.
+
+    The second goal of every two-goal task sat open forever, nothing came back
+    for it, and `solved` reported the goal rather than the task -- True with
+    half the tree still open. The directive is to distil continuously.
+    """
+    d = fresh(seed=1)
+    r = d.solve("build a csv cleaner and compute the median of each column")
+    tree = r["session"].tree
+    assert len(tree.goals) - 1 >= 2, "the fixture task no longer distils to two goals"
+    assert r["solved"] == tree.solved, "reported solved must be the TREE, not the last goal"
+    assert r["goals_open"] == len(tree.frontier())
+    selects = [s for s in r["session"].chain.steps if s.kind == "SELECT"]
+    assert len(selects) >= 2, "it must come back to the frontier after the first goal"
+    assert r["goals_met"] == sum(1 for g in tree.goals.values()
+                                 if g.id != "root" and g.status == "met")
+
+
+def test_a_blocked_goal_stops_the_frontier_loop():
+    """Mapping the boundary is the result; pushing on past a refusal is not."""
+    d = fresh(seed=1)
+    r = d.solve("parse a quantum waveform capture file", ask=lambda q: {})
+    assert not r["solved"]
+    assert r["goals_met"] == 0
+    verifies = [s for s in r["session"].chain.steps if s.kind == "VERIFY"]
+    assert len(verifies) == 1, "a blocked goal must end the loop, not be skipped past"
+
+
 def test_workspace_creates_its_directories():
     w = Workspace(tmpdir() / "nested" / "home")
     assert w.home.exists() and w.workshop.exists()

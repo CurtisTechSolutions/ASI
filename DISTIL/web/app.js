@@ -8451,7 +8451,18 @@ function Answer({ message, onGrade, onAnswer, onTrace }) {
 		children: [
 			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
 				className: `verdict ${data.solved ? "ok" : "no"}`,
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.solved ? "Solved" : "Not solved" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: data.reason })]
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: data.solved ? "Solved" : "Not solved" }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: data.reason }),
+					(data.goals_met > 0 || data.goals_open > 0) && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("em", {
+						className: "goal-count",
+						children: [
+							data.goals_met,
+							" met",
+							data.goals_open > 0 ? `, ${data.goals_open} open` : ""
+						]
+					})
+				]
 			}),
 			data.attempts && data.attempts.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", {
 				className: "attempts",

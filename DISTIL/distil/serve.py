@@ -325,6 +325,8 @@ class Api:
                "frame": frame_json(result.get("frame"), result.get("agenda")),
                "needs_clarification": bool(result.get("needs_clarification")),
                "attempts": result.get("attempts", []),
+               "goals_met": result.get("goals_met", 0),
+               "goals_open": result.get("goals_open", 0),
                "refusals": result.get("refusals", []),
                "boundary": result.get("boundary"),
                # Every reply carries what the store already knew, gated or not.

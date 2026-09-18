@@ -46,6 +46,13 @@ export default function Answer({ message, onGrade, onAnswer, onTrace }) {
       <p className={`verdict ${data.solved ? 'ok' : 'no'}`}>
         <strong>{data.solved ? 'Solved' : 'Not solved'}</strong>
         <span>{data.reason}</span>
+        {/* The task, not the last goal. "Solved" with a goal still open was
+            the old behaviour, and it was a lie by omission. */}
+        {(data.goals_met > 0 || data.goals_open > 0) && (
+          <em className="goal-count">
+            {data.goals_met} met{data.goals_open > 0 ? `, ${data.goals_open} open` : ''}
+          </em>
+        )}
       </p>
 
       {data.attempts && data.attempts.length > 0 && (

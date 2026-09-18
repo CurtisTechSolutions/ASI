@@ -199,8 +199,15 @@ class Distil:
                     "reason": "nothing on the frontier to act on"}
 
         goal = session.chosen
-        session.tree.mark(goal.id, Status.ACTIVE)
         attempts: list[dict] = []
+        outcomes: list[dict] = []
+        # Act on the frontier until it is empty, a goal is blocked, or this many
+        # have been tried. One selection per task was one GOAL per task: the
+        # second goal of every two-goal task sat open forever, nothing came back
+        # for it, and `solved` reported the goal rather than the task. The
+        # directive is to distil *continuously*, and the cap is against a tree
+        # that keeps producing verifiable leaves faster than they can be met.
+        MAX_GOALS = 8
 
         def attempt(goal_text: str, reframe: str | None):
             """One try at a goal: reuse a verified tool if one fits, else write one.
@@ -254,49 +261,65 @@ class Distil:
                               f"as well ({grade.summary()})")
             return False, f"{spec.name} failed verification: {grade.diagnostic}"
 
-        if persist:
-            runner = Persistence(self.memory.embedder, max_attempts=6)
-            outcome = runner.pursue(goal.text, attempt)
-        else:
-            ok, detail = attempt(goal.text, None)
-            outcome = {"solved": ok, "reason": detail, "refusals": [] if ok else [detail],
-                       "attempts": []}
+        while goal is not None and len(outcomes) < MAX_GOALS:
+            session.tree.mark(goal.id, Status.ACTIVE)
+            if persist:
+                runner = Persistence(self.memory.embedder, max_attempts=6)
+                outcome = runner.pursue(goal.text, attempt)
+            else:
+                ok, detail = attempt(goal.text, None)
+                outcome = {"solved": ok, "reason": detail, "refusals": [] if ok else [detail],
+                           "attempts": []}
 
-        session.chain.add(Step.ACT,
-                          f"{len(attempts)} attempt(s) on {goal.text[:60]!r}",
-                          attempts=attempts)
-        session.chain.add(Step.VERIFY,
-                          ("met: " if outcome["solved"] else "not met: ") + outcome["reason"],
-                          refusals=outcome.get("refusals", []))
-        session.tree.mark(goal.id, Status.MET if outcome["solved"] else Status.BLOCKED,
-                          outcome["reason"])
+            session.chain.add(Step.ACT,
+                              f"{len(attempts)} attempt(s) on {goal.text[:60]!r}",
+                              attempts=attempts)
+            session.chain.add(Step.VERIFY,
+                              ("met: " if outcome["solved"] else "not met: ") + outcome["reason"],
+                              refusals=outcome.get("refusals", []))
+            session.tree.mark(goal.id, Status.MET if outcome["solved"] else Status.BLOCKED,
+                              outcome["reason"])
 
-        # Everything learned goes back to the same store, including the boundary
-        # mapped by failing -- which is the output a system that stops at the
-        # first refusal can never produce.
-        for refusal in outcome.get("refusals", []):
-            self.memory.remember(Kind.FAILURE, f"refused while pursuing {goal.text!r}: {refusal}",
-                                 links=[goal.trace_id] if goal.trace_id else None,
-                                 meta={"task": task, "goal": goal.text},
-                                 grade=-0.5, source=Source.SELF)
-        # File it as a case: the problem, what was tried, and whether it worked.
-        # Failures are filed with the same care as successes -- "that has been
-        # tried and it does not work" is the more valuable of the two records.
-        solution_text = (attempts[-1]["via"] if attempts else "nothing was attempted")
-        self.casebook.record(
-            problem=goal.text,
-            solution=f"{solution_text} :: {outcome['reason']}",
-            grade=1.0 if outcome["solved"] else -1.0,
-            via=solution_text, evidence=outcome["reason"],
-            cost=float(len(attempts) or 1),
-            links=[goal.trace_id] if goal.trace_id else None,
-            tags=[frame.players, frame.payoff] if frame is not None else [])
+            # Everything learned goes back to the same store, including the boundary
+            # mapped by failing -- which is the output a system that stops at the
+            # first refusal can never produce.
+            for refusal in outcome.get("refusals", []):
+                self.memory.remember(Kind.FAILURE, f"refused while pursuing {goal.text!r}: {refusal}",
+                                     links=[goal.trace_id] if goal.trace_id else None,
+                                     meta={"task": task, "goal": goal.text},
+                                     grade=-0.5, source=Source.SELF)
+            # File it as a case: the problem, what was tried, and whether it worked.
+            # Failures are filed with the same care as successes -- "that has been
+            # tried and it does not work" is the more valuable of the two records.
+            solution_text = (attempts[-1]["via"] if attempts else "nothing was attempted")
+            self.casebook.record(
+                problem=goal.text,
+                solution=f"{solution_text} :: {outcome['reason']}",
+                grade=1.0 if outcome["solved"] else -1.0,
+                via=solution_text, evidence=outcome["reason"],
+                cost=float(len(attempts) or 1),
+                links=[goal.trace_id] if goal.trace_id else None,
+                tags=[frame.players, frame.payoff] if frame is not None else [])
+            outcomes.append(outcome)
+            if not outcome["solved"]:
+                break                      # blocked: mapping the boundary is the result
+            goal, _ = self.reasoner.select(session.tree, session.belief, session.chain)
+
+        outcome = outcomes[-1] if outcomes else {"solved": False, "reason": "nothing attempted",
+                                                "refusals": [], "boundary": None}
+        solved = session.tree.solved
+        left = len(session.tree.frontier())
+        reason = (f"all {len(outcomes)} goal(s) met" if solved
+                  else outcome["reason"] if not outcome["solved"]
+                  else f"stopped after {len(outcomes)} goal(s); {left} still open")
+
         shares = self.reasoner.credit(session.tree, {"source": Source.SELF}, session.chain)
         if session.trace_id:
-            self.memory.grade(session.trace_id, 1.0 if outcome["solved"] else -0.5, Source.SELF)
+            self.memory.grade(session.trace_id, 1.0 if solved else -0.5, Source.SELF)
         self.save()
-        return {"task": task, "session": session, "solved": outcome["solved"],
-                "reason": outcome["reason"], "goal": goal.text, "attempts": attempts,
+        return {"task": task, "session": session, "solved": solved,
+                "reason": reason, "goals_met": len([o for o in outcomes if o["solved"]]),
+                "goals_open": left, "attempts": attempts,
                 "refusals": outcome.get("refusals", []), "credit": shares,
                 "boundary": outcome.get("boundary"), "frame": frame,
                 "agenda": plan, "precedent": precedent, "recall": recalled}
