@@ -21,6 +21,24 @@ proved.  The natural opponent model does not commute: ``min_r(-v)`` is
 the move directly keeps §4.3's operator exact all the way to the policy - the
 inversion negates all 4096 scores at once, so the move the failure network most
 wanted is exactly the one it now least wants.
+
+What the network outputs
+------------------------
+Seven numbers, not one (``rules.HEADS``).  The first is the score the softmax
+and the ranking have always used; the other six are sigmoid heads carrying the
+rules and some elementary chess - is this move legal, is it even geometrically
+possible, does it capture, does it check, does it hang the piece, is the piece
+already hanging - each with exact ground truth from the board itself.  They all
+read one trunk, so what the network learns about chess it learns once.
+
+Proposing then ranks by::
+
+    quality  +  rule_weight * legal_logit
+
+which is "play the best move you believe the board will accept".  The two terms
+negate together under §4.3's inversion, so the composite ranking inverts
+exactly as the bare score did, and ``rule_weight = 0`` reproduces the old
+behaviour to the bit.
 """
 
 from __future__ import annotations
@@ -32,6 +50,7 @@ from features import FEATURE_DIM as BOARD_DIM
 from features import encode
 from moves import (INPUT_DIM, N_ACTIONS, dense, preactivation,
                    square_contents, to_action, to_move)
+from rules import LEGAL, N_HEADS, QUALITY
 from sbnn import SineNet
 
 NEG_INF = -1.0e30
@@ -42,19 +61,38 @@ MAX_REFUSALS = 1000         # give up and take a random legal move after this ma
 class Agent:
     """A :class:`SineNet` over (position, move) pairs, proposing into a closed door."""
 
-    def __init__(self, net: SineNet, tau: float = 1.0) -> None:
+    def __init__(self, net: SineNet, tau: float = 1.0, rule_weight: float = 1.0) -> None:
         self.net = net
         self.tau = tau
+        # A one-output network predates the heads; there is nothing to weigh in
+        # that case, so old saved networks keep working and rank as they always did.
+        self.rule_weight = rule_weight if net.sizes[-1] > 1 else 0.0
+
+    @property
+    def n_heads(self) -> int:
+        return self.net.sizes[-1]
 
     @staticmethod
-    def build(hidden: list[int], seed: int, tau: float = 1.0) -> "Agent":
+    def build(hidden: list[int], seed: int, tau: float = 1.0,
+              n_heads: int = N_HEADS, rule_weight: float = 1.0) -> "Agent":
         rng = np.random.default_rng(seed)
-        return Agent(SineNet([INPUT_DIM, *hidden, 1], rng), tau)
+        return Agent(SineNet([INPUT_DIM, *hidden, n_heads], rng), tau, rule_weight)
+
+    def rank_of(self, heads: np.ndarray) -> np.ndarray:
+        """The ordering moves are proposed in: quality, plus belief in legality.
+
+        Both columns are read-outs of the same negated units, so this whole
+        expression negates when the network is inverted - ``argmax`` becomes
+        ``argmin`` for the composite exactly as it did for the bare score.
+        """
+        if self.rule_weight == 0.0 or heads.shape[1] == 1:
+            return heads[:, QUALITY]
+        return heads[:, QUALITY] + self.rule_weight * heads[:, LEGAL]
 
     # ------------------------------------------------------------- scoring
 
-    def action_scores(self, board: chess.Board) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Score all 4096 actions.  Returns ``(scores, board vector, square contents)``.
+    def action_heads(self, board: chess.Board) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Every head for all 4096 actions.  ``((4096, heads), board vector, contents)``.
 
         The first layer is split: the board half is one vector shared by every
         action, and the move half is six gathers (see :func:`moves.preactivation`).
@@ -69,7 +107,12 @@ class Agent:
         y = first.a * np.sin(first.b * (z - first.h)) + first.k
         for layer in self.net.layers[1:]:
             y = layer.forward(y, train=False)
-        return y[:, 0], x, states
+        return y, x, states
+
+    def action_scores(self, board: chess.Board) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The proposal ranking over all 4096 actions."""
+        heads, x, states = self.action_heads(board)
+        return self.rank_of(heads), x, states
 
     def dense_rows(self, board_x: np.ndarray, states: np.ndarray,
                    actions: np.ndarray) -> np.ndarray:
@@ -85,7 +128,8 @@ class Agent:
         sampling without replacement from the softmax - exploration that still
         produces a whole ordering to walk.
         """
-        scores, board_x, states = self.action_scores(board)
+        heads, board_x, states = self.action_heads(board)
+        scores = self.rank_of(heads)
         ranked = scores if temperature <= 0.0 or rng is None else (
             scores / max(temperature, 1e-6) + rng.gumbel(size=N_ACTIONS))
         order = np.argsort(-ranked)
@@ -111,7 +155,8 @@ class Agent:
         chosen = to_action(board, move, board.turn)
         return {"action": chosen, "move": move,
                 "refused": refused, "n_refused": n_refused, "gave_up": gave_up,
-                "scores": scores, "board_x": board_x, "states": states,
+                "scores": scores, "heads": heads,
+                "board_x": board_x, "states": states,
                 "top1_legal": n_refused == 0}
 
 
@@ -175,7 +220,7 @@ class Batch:
 
 def policy(net: SineNet, batch: Batch, tau: float, train: bool = True) -> np.ndarray:
     """Probabilities over each sample's candidate moves."""
-    s = net.forward(np.asarray(batch.X, dtype=np.float64), train=train)[:, 0]
+    s = net.forward(np.asarray(batch.X, dtype=np.float64), train=train)[:, QUALITY]
     logits = np.where(batch.mask, s.reshape(batch.n, batch.width) / tau, NEG_INF)
     logits = logits - logits.max(axis=1, keepdims=True)
     e = np.exp(logits) * batch.mask
@@ -208,8 +253,16 @@ def unlikelihood_grad(p: np.ndarray, target: np.ndarray, weights: np.ndarray,
 
 
 def apply_grad(net: SineNet, opt, batch: Batch, dlogits: np.ndarray, tau: float) -> None:
-    """Push ``dlogits`` back through the score head and take one Adam step."""
-    opt.step(net.backward((dlogits / (tau * max(batch.n, 1))).reshape(-1, 1)))
+    """Push ``dlogits`` back through the quality head and take one Adam step.
+
+    The rule heads get zero here: the softmax over candidate moves is about
+    which move is *best*, and legality is taught by :func:`rules.bce_grad` on
+    its own rows, at its own rate.  Keeping the two gradients on separate
+    columns is what stops "illegal" and "bad" being the same signal again.
+    """
+    dy = np.zeros((batch.n * batch.width, net.sizes[-1]))
+    dy[:, QUALITY] = (dlogits / (tau * max(batch.n, 1))).ravel()
+    opt.step(net.backward(dy))
 
 
 def nll(p: np.ndarray, target: np.ndarray) -> float:

@@ -97,11 +97,12 @@ import chess
 import numpy as np
 
 import dataset
+import rules
 from agent import (Agent, Batch, apply_grad, cross_entropy_grad, nll, policy,
                    unlikelihood_grad)
 from engine import Judge, Opponent, find_stockfish
 from features import material
-from moves import N_ACTIONS, dense, to_action, to_move
+from moves import INPUT_DIM, N_ACTIONS, dense, to_action, to_move
 from sbnn import Adam
 
 ARMS = ("2nrl", "2nrl-worst", "2nrl-random", "positive", "repulsion")
@@ -125,6 +126,17 @@ class Config:
     tau: float = 1.0                 # softmax temperature over the score head
     explore: float = 0.5             # Gumbel temperature while playing training games
     width: int = 12                  # candidate moves kept per decision
+    # The rule curriculum (see `rules.py`): legality stops being a by-product
+    # of the ranking and becomes a supervised problem with exact labels.
+    rule_updates: int = 40           # Adam steps a round on the rule heads; 0 = off
+    rule_lr: float = 0.01
+    rule_minibatch: int = 24         # positions a step, not rows
+    rule_weight: float = 1.0         # how much the legal head steers the ranking
+    rule_legal: int = 32             # curriculum: legal moves sampled per position
+    rule_hard: int = 16              #   top-ranked illegal actions (mined)
+    rule_pin: int = 8                #   pseudo-legal but illegal: pins, checks
+    rule_wild: int = 32              #   uniform over the 4096
+    pos_weight_cap: float = 10.0     # class-imbalance correction per head
     blunder_margin: float = 50.0     # centipawns; below this a move is not a failure
     refusal_margin: float = 4.0      # refusals; the rule-failure equivalent of the above
     boost: float = 3.0               # cap on §6.1's proportional boosting
@@ -213,7 +225,8 @@ def play_game(agent: Agent, judge: Judge, opponent: Opponent, cfg: Config,
         final_cp = int(cp.max())
 
         if collect:
-            samples.append(_sample(proposal, actions, cp, best, worst, loss_cp, cfg, nprng))
+            samples.append(_sample(proposal, actions, cp, best, worst, loss_cp, cfg,
+                                   nprng, board))
         board.push(proposal["move"])
         plies += 1
 
@@ -242,7 +255,8 @@ def play_game(agent: Agent, judge: Judge, opponent: Opponent, cfg: Config,
 
 
 def _sample(proposal: dict, legal_actions: list[int], cp: np.ndarray, best: int,
-            worst: int, loss_cp: float, cfg: Config, nprng: np.random.Generator) -> dict:
+            worst: int, loss_cp: float, cfg: Config, nprng: np.random.Generator,
+            board: chess.Board | None = None) -> dict:
     """One decision, reduced to ``width`` candidate actions with every target in it.
 
     See :class:`agent.Batch` for what each slot holds.  The rows are built once
@@ -277,6 +291,16 @@ def _sample(proposal: dict, legal_actions: list[int], cp: np.ndarray, best: int,
     for action in pool[:max(0, cfg.width - len(order))]:
         add(int(action))
 
+    # The rule curriculum for this position, labelled here while the board is
+    # still in hand.  Only the action indices and the labels are kept - the
+    # feature rows are rebuilt from `board_x` and `states` when a minibatch
+    # wants them, which is the difference between 8 KB and 300 KB a decision.
+    rule_actions = rule_y = rule_mask = None
+    if board is not None and cfg.rule_updates:
+        rule_actions = rules.curriculum(
+            board, board.turn, proposal["scores"], nprng, cfg.rule_legal,
+            cfg.rule_hard, cfg.rule_pin, cfg.rule_wild)
+        rule_y, rule_mask = rules.labels(board, rule_actions, board.turn)
     is_rule = float(proposal["n_refused"] > 0)
     magnitude = (proposal["n_refused"] / cfg.refusal_margin if is_rule
                  else loss_cp / cfg.blunder_margin)
@@ -286,7 +310,10 @@ def _sample(proposal: dict, legal_actions: list[int], cp: np.ndarray, best: int,
             # where the played move sits among the legal ones: 0 is Stockfish's
             # own choice, 1 its worst. This is what H(q) is measured over.
             "rank": float((cp > cp.max() - loss_cp).mean()),
-            "weight": float(min(cfg.boost, 1.0 + magnitude)), "is_rule": is_rule}
+            "weight": float(min(cfg.boost, 1.0 + magnitude)), "is_rule": is_rule,
+            "board_x": np.asarray(proposal["board_x"], dtype=np.float32),
+            "states": proposal["states"], "rule_actions": rule_actions,
+            "rule_y": rule_y, "rule_mask": rule_mask}
 
 
 def play_round(agent: Agent, judge: Judge, opponent: Opponent, cfg: Config,
@@ -488,9 +515,45 @@ def run_block(net, opt, batch: Batch, target: np.ndarray, weights: np.ndarray,
     return last
 
 
+def rule_rows(samples: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rebuild the feature rows for a minibatch of positions' rule curricula.
+
+    Stored per decision are the board vector, the square contents and the
+    action indices; `moves.dense` turns those back into rows on demand.  A
+    position contributes about ninety rows, so a minibatch of 24 positions is
+    roughly two thousand labelled examples of what the board will and will not
+    accept - against the two the twelve-wide softmax used to carry.
+    """
+    X, Y, M = [], [], []
+    for s in samples:
+        if s.get("rule_actions") is None or not len(s["rule_actions"]):
+            continue
+        X.append(dense(s["board_x"], s["states"], s["rule_actions"]))
+        Y.append(s["rule_y"])
+        M.append(s["rule_mask"])
+    if not X:
+        return (np.zeros((0, INPUT_DIM)), np.zeros((0, rules.N_RULE_HEADS)),
+                np.zeros((0, rules.N_RULE_HEADS)))
+    return np.concatenate(X), np.concatenate(Y), np.concatenate(M)
+
+
+def pos_weight(target: np.ndarray, mask: np.ndarray, cap: float) -> np.ndarray:
+    """Per-head negative:positive ratio, so a head cannot win by learning the prior.
+
+    `check` is true of about one legal move in twenty, so an unweighted head
+    scores 95% by answering "no" forever and has learned nothing about chess.
+    Weighting the positives by how rare they are makes the trivial answer cost
+    exactly as much as the informative one.  Capped, because a head whose
+    positive is absent from a minibatch would otherwise get an unbounded rate.
+    """
+    n_pos = (target * mask).sum(axis=0)
+    n_neg = ((1.0 - target) * mask).sum(axis=0)
+    return np.clip(np.where(n_pos > 0, n_neg / np.maximum(n_pos, 1.0), 1.0), 1.0, cap)
+
+
 def train_round(agent: Agent, cfg: Config, samples: list[dict],
                 nprng: np.random.Generator, phase: str, should_end_phase1,
-                probe=None, on_flip=None) -> dict:
+                probe=None, on_flip=None, rule_samples: list[dict] | None = None) -> dict:
     """One round of training.
 
     ``phase`` is ``"negative"``, ``"positive"`` or ``"both"``.  The first two are
@@ -503,6 +566,15 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
     block finishes and answers whether phase 1 is over.  Every arm asks it; only
     the inverting arms then flip, so the controls switch learning rate on the
     same rule without acquiring an inversion they are not supposed to have.
+
+    ``rule_samples`` is every decision of the last few rounds, not just the
+    failures, because the rule heads want the legal moves as much as the
+    illegal ones.  It is the same list for every arm, so the rules are taught
+    identically and only the *sign* of the lesson differs: the inverting arms
+    learn the complement of the truth in phase 1 and flip it, the others learn
+    the truth throughout.  §4.3's operator turns a sigmoid head's ``z`` into
+    ``-z``, and ``sigma(-z) == 1 - sigma(z)`` exactly, so that flip is a
+    genuine logical NOT of a probability rather than a re-ordering.
 
     ``probe`` is called immediately before and immediately after the sign flip,
     with nothing in between, so ``inversion_before`` and ``inversion_after``
@@ -534,6 +606,35 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
                                         updates, nprng, repel)
         out["negative_entropy"] = target_entropy(batch, target) if arm != "positive" else 0.0
 
+    def rule_block(updates: int, complement: bool) -> None:
+        """Supervised legality and chess knowledge, on their own heads and rate.
+
+        Separate from the quality softmax on purpose.  The heads are sigmoids
+        with exact labels; the softmax is a ranking with a graded target.
+        Mixing them is what made "illegal" and "bad" the same signal.
+        """
+        rows = rule_samples or []
+        if not updates or net.sizes[-1] < rules.N_HEADS or not rows:
+            return
+        opt = Adam(net, lr=cfg.rule_lr, act_lr=cfg.rule_lr / 10.0)
+        last = float("nan")
+        for _ in range(updates):
+            idx = nprng.choice(len(rows), size=min(cfg.rule_minibatch, len(rows)),
+                               replace=False)
+            X, Y, M = rule_rows([rows[i] for i in idx])
+            if not len(X):
+                continue
+            y = net.forward(X, train=True)
+            logits = y[:, 1:]
+            target = (1.0 - Y) if complement else Y
+            w = pos_weight(target, M, cfg.pos_weight_cap)
+            dy = np.zeros_like(y)
+            dy[:, 1:] = rules.bce_grad(logits, target, M, w)
+            opt.step(net.backward(dy))
+            last = rules.bce(logits, target, M)
+        out["rule_loss"] = last
+        out["rule_complement"] = complement
+
     def positive_block(updates: int) -> None:
         opt = Adam(net, lr=cfg.pos_lr, act_lr=cfg.pos_lr / 10.0)
         out["positive_nll"] = run_block(net, opt, batch, batch.best,
@@ -557,18 +658,26 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
         out["inverted"] = True
 
     updates = cfg.neg_updates + cfg.pos_updates
+    # An inverting arm spends phase 1 learning the *complement*: "this move is
+    # illegal", "this move does not check".  The flip then turns each head into
+    # its own negation at the same confidence, which is the claim.
+    inverts = arm in INVERTING
     if phase == "negative":
         negative_block(updates)
+        rule_block(cfg.rule_updates, complement=inverts)
         if should_end_phase1(out["negative_nll"]):
             out["phase1_done"] = True
-            if arm in INVERTING:
+            if inverts:
                 invert()
     elif phase == "positive":
         positive_block(updates)
+        rule_block(cfg.rule_updates, complement=False)
     else:                                   # "both": the per-round schedule
         negative_block(cfg.neg_updates)
-        if arm in INVERTING:
+        rule_block(cfg.rule_updates, complement=inverts)
+        if inverts:
             invert()
+        rule_block(cfg.rule_updates, complement=False)
         positive_block(cfg.pos_updates)
     return out
 
@@ -576,7 +685,29 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
 # -------------------------------------------------------------- evaluation
 
 
-def evaluate_heldout(agent: Agent, positions: list[dict]) -> dict:
+def rule_exam(item: dict, n_wild: int = 96) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A fixed set of labelled actions for one held-out position, cached on it.
+
+    Deliberately *not* mined from the network the way the training curriculum
+    is: an exam whose questions depend on the candidate is not the same exam
+    for every arm.  Every legal move plus a seeded uniform sample, drawn once
+    and reused for every arm, every seed and every round.
+    """
+    cached = item.get("_exam")
+    if cached is not None:
+        return cached
+    board = item["board"]
+    pov = board.turn
+    nprng = np.random.default_rng(abs(hash(board.board_fen())) % (2 ** 31))
+    legal = {to_action(board, m, pov) for m in board.legal_moves}
+    wild = {int(a) for a in nprng.integers(N_ACTIONS, size=n_wild)}
+    actions = np.array(sorted(legal | wild), dtype=np.int64)
+    y, mask = rules.labels(board, actions, pov)
+    item["_exam"] = (actions, y, mask)
+    return item["_exam"]
+
+
+def evaluate_heldout(agent: Agent, positions: list[dict], heads: int = 48) -> dict:
     """The exam: propose into the same positions, and see what comes back.
 
     Costs no engine calls - every legal move in every position was graded once,
@@ -585,12 +716,24 @@ def evaluate_heldout(agent: Agent, positions: list[dict]) -> dict:
     learned, ``cp_loss`` and ``agreement`` whether the **payoffs** have.  The
     loss is clipped at ``CP_CLIP`` because a missed mate scores 10000 and would
     otherwise *be* the mean.
+
+    ``heads`` positions also sit the rule exam, which asks the sigmoid heads
+    directly what they know instead of inferring it from the ranking.
+    ``legal_auc`` is the headline there: the chance a random legal move outranks
+    a random illegal one under the ``legal`` head, averaged within positions.
+    0.5 is no knowledge and 1.0 is the rules, and unlike accuracy it cannot be
+    bought by answering "illegal" to everything, which is right 97% of the time.
     """
     agree = top1 = 0
     losses, refusals = [], []
-    for item in positions:
+    exams: list[dict] = []
+    for n, item in enumerate(positions):
         board = item["board"]
-        scores, _, _ = agent.action_scores(board)
+        head_scores, _, _ = agent.action_heads(board)
+        scores = agent.rank_of(head_scores)
+        if n < heads and agent.n_heads >= rules.N_HEADS:
+            actions, y, mask = rule_exam(item)
+            exams.append(rules.head_report(head_scores[actions, 1:], y, mask))
         order = np.argsort(-scores)
         n_refused = 0
         for action in order:
@@ -606,7 +749,10 @@ def evaluate_heldout(agent: Agent, positions: list[dict]) -> dict:
         losses.append(min(CP_CLIP, item["best_cp"] - item["cp"][idx]))
     loss = np.array(losses, dtype=float)
     n = max(len(positions), 1)
-    return {"agreement": agree / n, "top1_legal": top1 / n,
+    head_stats = {}
+    if exams:
+        head_stats = {k: float(np.nanmean([e[k] for e in exams])) for k in exams[0]}
+    return {**head_stats, "agreement": agree / n, "top1_legal": top1 / n,
             "refusals": float(np.mean(refusals)), "cp_loss": float(loss.mean()),
             "cp_loss_median": float(np.median(loss)),
             "blunder_rate": float((loss > 200).mean()), "positions": len(positions)}
@@ -622,7 +768,9 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
     opponent = Opponent(path, skill=cfg.opp_skill, depth=cfg.opp_depth, elo=cfg.opp_elo)
     rng = random.Random(cfg.seed)
     nprng = np.random.default_rng(cfg.seed + 977)
-    agent = Agent.build(list(cfg.hidden), seed=cfg.seed + 1000, tau=cfg.tau)
+    agent = Agent.build(list(cfg.hidden), seed=cfg.seed + 1000, tau=cfg.tau,
+                        n_heads=rules.N_HEADS if cfg.rule_updates else 1,
+                        rule_weight=cfg.rule_weight)
     positions = dataset.load(cfg.heldout)
     # Selecting on the same positions the result is reported on would be
     # cheating, so the exam is split: the first `track_positions` choose the
@@ -649,7 +797,8 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
     if verbose:
         h = history[0]
         print(f"  [{cfg.arm:12s} seed {cfg.seed}] round  0  legal@1 {h['top1_legal']:.3f}  "
-              f"refusals {h['refusals']:6.1f}  cp loss {h['cp_loss']:6.1f}  (untrained)")
+              f"refusals {h['refusals']:6.1f}  cp loss {h['cp_loss']:6.1f}  "
+              f"legalAUC {h.get('legal_auc', float('nan')):.3f}  (untrained)")
 
     trigger = FlipTrigger(cfg)
     phase1_over = False
@@ -659,11 +808,18 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
     # A short replay of the last few rounds' failures. A block of updates on the
     # handful of decisions in one round would be noise. Identical in every arm.
     buffer: collections.deque = collections.deque(maxlen=max(1, cfg.buffer_rounds))
+    # The rule heads want *every* decision, not only the ones that went wrong:
+    # the legal moves are the positives, and a run that has stopped failing
+    # would otherwise stop being taught the rules at the moment it knows them
+    # least securely.  Same list for every arm.
+    rule_buffer: collections.deque = collections.deque(maxlen=max(1, cfg.buffer_rounds))
     for r in range(1, cfg.rounds + 1):
         samples, play = play_round(agent, judge, opponent, cfg, rng, nprng, cfg.games)
         buffer.append([s for s in samples
                        if s["is_rule"] > 0 or s["loss_cp"] > cfg.blunder_margin])
         failures = [s for group in buffer for s in group]
+        rule_buffer.append(samples)
+        rule_set = [s for group in rule_buffer for s in group]
         if cfg.schedule == "phased":
             phase = "positive" if phase1_over else "negative"
         else:
@@ -674,7 +830,8 @@ def run(cfg: Config, verbose: bool = True) -> tuple[dict, Agent]:
             agent, cfg, failures, nprng, phase,
             should_end_phase1=lambda nll, _r=r: trigger.observe(_r, nll),
             probe=lambda: evaluate_heldout(agent, tracked),
-            on_flip=lambda when: checkpoint("phase1_end" if when == "before" else "after_invert"))
+            on_flip=lambda when: checkpoint("phase1_end" if when == "before" else "after_invert"),
+            rule_samples=rule_set)
         if train.get("phase1_done"):
             phase1_over = True
         ev = evaluate_heldout(agent, tracked)
@@ -763,17 +920,20 @@ def summarise(runs: list[dict]) -> None:
         arms.setdefault(r["arm"], []).append(r)
     print()
     print(f"{'arm':<14}{'H(q)':>6}{'legal@1':>18}{'refusals':>16}"
-          f"{'cp loss':>18}{'vs SF':>14}")
+          f"{'legalAUC':>10}{'pseudo':>9}{'cp loss':>18}{'vs SF':>14}")
     for arm, rs in arms.items():
         def col(key):
             return np.array([r["heldout"][key] for r in rs])
         legal, refus, cpl = col("top1_legal"), col("refusals"), col("cp_loss")
+        auc = np.array([r["heldout"].get("legal_auc", float("nan")) for r in rs])
+        pau = np.array([r["heldout"].get("pseudo_auc", float("nan")) for r in rs])
         score = np.array([r["vs_stockfish"]["score"] for r in rs])
         ent = [h["train"]["negative_entropy"] for r in rs for h in r["history"][1:]
                if h["train"].get("phase") in ("negative", "both") and h["train"]["n"]]
         print(f"{arm:<14}{np.mean(ent) if ent else 0:6.2f}"
               f"{legal.mean():11.3f} +-{legal.std():5.3f}"
               f"{refus.mean():9.1f} +-{refus.std():5.1f}"
+              f"{np.nanmean(auc):10.3f}{np.nanmean(pau):9.3f}"
               f"{cpl.mean():11.1f} +-{cpl.std():5.1f}"
               f"{score.mean():9.2f} +-{score.std():4.2f}")
 
@@ -795,6 +955,14 @@ def main() -> None:
     p.add_argument("--judge-depth", type=int, default=Config.judge_depth)
     p.add_argument("--eval-games", type=int, default=Config.eval_games)
     p.add_argument("--buffer-rounds", type=int, default=Config.buffer_rounds)
+    p.add_argument("--rule-updates", type=int, default=Config.rule_updates,
+                   help="Adam steps a round on the rule heads; 0 drops them "
+                        "entirely and reproduces the single-score network")
+    p.add_argument("--rule-lr", type=float, default=Config.rule_lr)
+    p.add_argument("--rule-weight", type=float, default=Config.rule_weight,
+                   help="how much the legal head steers the proposal ranking; "
+                        "0 ranks on quality alone, as before the heads existed")
+    p.add_argument("--rule-minibatch", type=int, default=Config.rule_minibatch)
     p.add_argument("--track-positions", type=int, default=Config.track_positions,
                    help="how many held-out positions form the validation split")
     p.add_argument("--select-on", default=Config.select_on,
@@ -845,6 +1013,9 @@ def main() -> None:
                          judge_depth=args.judge_depth, eval_games=args.eval_games,
                          buffer_rounds=args.buffer_rounds, width=args.width,
                          track_positions=args.track_positions,
+                         rule_updates=args.rule_updates, rule_lr=args.rule_lr,
+                         rule_weight=args.rule_weight,
+                         rule_minibatch=args.rule_minibatch,
                          select_on=args.select_on,
                          schedule=args.schedule, neg_fraction=args.neg_fraction,
                          invert_mode=args.invert_mode,

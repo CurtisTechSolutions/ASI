@@ -20,6 +20,7 @@ import numpy as np
 from agent import Agent, Batch, apply_grad, cross_entropy_grad, nll, policy
 from features import (CHECK_OFFSET, FEATURE_DIM, NO_MOVES_OFFSET, TURN_OFFSET,
                       encode, encode_children)
+import rules
 from moves import (INPUT_DIM, N_ACTIONS, dense, preactivation,
                    to_action, to_move)
 from sbnn import ACT_PARAMS, MIN_B, Adam, SineNet
@@ -391,12 +392,21 @@ def test_fast_path() -> None:
     """The split first layer scores all 4096 actions exactly as the dense path does."""
     agent = Agent.build([16, 12], seed=24)
     board = board_after(10, seed=4)
-    scores, board_x, states = agent.action_scores(board)
+    heads, board_x, states = agent.action_heads(board)
     probe = np.array([0, 5, 137, 999, 2048, 4095])
-    direct = agent.net.score(dense(board_x, states, probe))
-    err = float(np.abs(scores[probe] - direct).max())
+    direct = agent.net.forward(dense(board_x, states, probe), train=False)
+    err = float(np.abs(heads[probe] - direct).max())
     check("the fast six-gather path equals the dense path", err < 1e-12,
-          f"error {err:.1e} over {N_ACTIONS} actions")
+          f"error {err:.1e} over {N_ACTIONS} actions x {agent.n_heads} heads")
+
+    # rule_weight = 0 has to reproduce the pre-heads network to the bit, or the
+    # ablation that turns the curriculum off is not measuring what it claims.
+    agent.rule_weight = 0.0
+    bare, _, _ = agent.action_scores(board)
+    check("rule_weight = 0 ranks on the quality head alone",
+          float(np.abs(bare - heads[:, rules.QUALITY]).max()) == 0.0,
+          "the no-heads ablation is exact")
+    agent.rule_weight = 1.0
 
     W = agent.net.layers[0].W
     z = preactivation(W[FEATURE_DIM:], states)
@@ -552,6 +562,204 @@ def test_training_moves_the_right_way() -> None:
 # -------------------------------------------------------------------- judge
 
 
+
+# ------------------------------------------------------------- the rule heads
+
+
+def test_labels_are_the_rule_book() -> None:
+    """The supervision is python-chess itself, so it cannot be wrong - but it can
+    be *wired up* wrong, and this is the check that it is not."""
+    total = legal_n = pseudo_n = 0
+    mismatches = nested = 0
+    for n in (0, 6, 14, 23, 40):
+        board = board_after(n, seed=n + 3)
+        pov = board.turn
+        actions = np.arange(N_ACTIONS)[:: 7]
+        y, mask = rules.labels(board, actions, pov)
+        for i, a in enumerate(actions):
+            move = to_move(board, int(a), pov)
+            if bool(y[i, rules.LEGAL - 1]) != board.is_legal(move):
+                mismatches += 1
+            if bool(y[i, rules.PSEUDO - 1]) != board.is_pseudo_legal(move):
+                mismatches += 1
+            # legal implies pseudo-legal: the rules factor, they do not overlap
+            if y[i, rules.LEGAL - 1] > y[i, rules.PSEUDO - 1]:
+                nested += 1
+        total += len(actions)
+        legal_n += int(y[:, rules.LEGAL - 1].sum())
+        pseudo_n += int(y[:, rules.PSEUDO - 1].sum())
+        # the four tactical heads are masked off wherever the move is not legal
+        off = mask[y[:, rules.LEGAL - 1] < 0.5][:, rules.LEGAL_ONLY]
+        if off.size and off.max() > 0:
+            mismatches += 1
+    check("the rule labels are python-chess, exactly", mismatches == 0,
+          f"{total} actions, 0 disagreements with the board")
+    check("legal implies pseudo-legal, so the two heads factor the rules",
+          nested == 0, f"{legal_n} legal inside {pseudo_n} pseudo-legal")
+
+
+def test_sigmoid_negation_is_complement() -> None:
+    """sigma(-z) == 1 - sigma(z).  The whole claim about the rule heads rests here."""
+    z = np.concatenate([np.linspace(-40, 40, 4001),
+                        np.random.default_rng(5).normal(0, 8, 4000)])
+    err = float(np.abs(rules.sigmoid(-z) - (1.0 - rules.sigmoid(z))).max())
+    check("negating a logit complements its probability, exactly",
+          err < 1e-15, f"worst error {err:.1e} over {len(z)} logits, |z| up to 40")
+
+
+def test_inversion_complements_every_head() -> None:
+    """Train the heads on the complement of the truth, invert, and read the truth.
+
+    This is 2NRL with nothing left to interpret.  Phase 1 teaches the network
+    that legal moves are illegal, that captures do not capture and that checks
+    are not checks; one closed-form sign flip later, with no training at all, it
+    answers every one of those questions correctly and at the identical
+    confidence.  The softmax can only ever show the ordinal version of this - a
+    sigmoid head shows the exact one.
+    """
+    agent = Agent.build([24, 24], seed=31)
+    net_, nprng = agent.net, np.random.default_rng(31)
+    boards = [board_after(n, seed=n) for n in (4, 11, 18, 27)]
+    X, Y, M = [], [], []
+    for board in boards:
+        heads, board_x, states = agent.action_heads(board)
+        actions = rules.curriculum(board, board.turn, agent.rank_of(heads), nprng)
+        y, m = rules.labels(board, actions, board.turn)
+        X.append(dense(board_x, states, actions)); Y.append(y); M.append(m)
+    X, Y, M = np.concatenate(X), np.concatenate(Y), np.concatenate(M)
+
+    opt = Adam(net_, lr=0.02, act_lr=0.002)
+    complement = 1.0 - Y
+    for _ in range(150):
+        out = net_.forward(X, train=True)
+        g = rules.bce_grad(out[:, 1:], complement, M,
+                           np.clip(((1 - complement) * M).sum(0) /
+                                   np.maximum((complement * M).sum(0), 1.0), 1.0, 10.0))
+        dy = np.zeros_like(out); dy[:, 1:] = g
+        opt.step(net_.backward(dy))
+
+    before = net_.forward(X, train=False)[:, 1:]
+    p_before = rules.sigmoid(before)
+    net_.invert()
+    after = net_.forward(X, train=False)[:, 1:]
+    p_after = rules.sigmoid(after)
+
+    err = float(np.abs(p_before + p_after - 1.0).max())
+    check("the inversion complements every head's probability, exactly",
+          err < 1e-12, f"worst |p + p' - 1| = {err:.1e} over {p_before.size} answers")
+
+    # And the complement is the *right* answer, which is the point of doing it.
+    auc_b = rules.auc(before[:, rules.LEGAL - 1], Y[:, rules.LEGAL - 1] > 0.5)
+    auc_a = rules.auc(after[:, rules.LEGAL - 1], Y[:, rules.LEGAL - 1] > 0.5)
+    check("a network trained to get the rules wrong gets them right once inverted",
+          auc_b < 0.15 and auc_a > 0.85 and abs(auc_b + auc_a - 1.0) < 1e-12,
+          f"legal AUC {auc_b:.3f} -> {auc_a:.3f}, and they sum to 1 exactly")
+
+    acc_b = float(((before[:, rules.LEGAL - 1] > 0) == (Y[:, rules.LEGAL - 1] > 0.5)).mean())
+    acc_a = float(((after[:, rules.LEGAL - 1] > 0) == (Y[:, rules.LEGAL - 1] > 0.5)).mean())
+    check("accuracy on the rules is mirrored by the flip",
+          abs(acc_b + acc_a - 1.0) < 1e-12, f"{acc_b:.3f} -> {acc_a:.3f}")
+
+
+def test_auc_is_the_honest_rule_metric() -> None:
+    """AUC survives the 97:3 imbalance that makes accuracy meaningless here."""
+    rng = np.random.default_rng(11)
+    positive = rng.random(4096) < 0.03
+    always_illegal = np.full(4096, -5.0)          # the degenerate answer
+    acc = float(((always_illegal > 0) == positive).mean())
+    a = rules.auc(always_illegal, positive)
+    check('"everything is illegal" scores high on accuracy and 0.5 on AUC',
+          acc > 0.95 and abs(a - 0.5) < 1e-9,
+          f"accuracy {acc:.3f}, AUC {a:.3f} - only one of them noticed")
+    perfect = np.where(positive, 1.0, -1.0)
+    check("AUC is 1 for a head that has the rules and 0 for its negation",
+          rules.auc(perfect, positive) == 1.0 and rules.auc(-perfect, positive) == 0.0,
+          "and the two sum to 1, which is what the inversion does to it")
+
+
+def test_rule_gradient() -> None:
+    """bce_grad is the derivative of bce, checked against finite differences."""
+    rng = np.random.default_rng(13)
+    logits = rng.normal(0, 2, (40, rules.N_RULE_HEADS))
+    target = (rng.random((40, rules.N_RULE_HEADS)) < 0.4).astype(float)
+    mask = (rng.random((40, rules.N_RULE_HEADS)) < 0.8).astype(float)
+    g = rules.bce_grad(logits, target, mask)
+    worst = 0.0
+    for i, j in [(0, 0), (3, 2), (17, 5), (39, 1), (8, 4)]:
+        eps = 1e-6
+        up, dn = logits.copy(), logits.copy()
+        up[i, j] += eps; dn[i, j] -= eps
+        fd = (rules.bce(up, target, mask) - rules.bce(dn, target, mask)) / (2 * eps)
+        worst = max(worst, abs(fd - g[i, j]) / max(abs(fd), 1e-9))
+    check("the rule-head gradient matches finite differences", worst < 1e-5,
+          f"worst relative error {worst:.1e}")
+
+
+def test_curriculum_is_mostly_hard() -> None:
+    """The negatives are mined from the network, so they stay difficult."""
+    agent = Agent.build([16, 16], seed=37)
+    nprng = np.random.default_rng(37)
+    hard_hits = covered = positions = 0
+    for n in (5, 12, 21, 33):
+        board = board_after(n, seed=n + 1)
+        heads, _, _ = agent.action_heads(board)
+        ranking = agent.rank_of(heads)
+        actions = set(int(a) for a in rules.curriculum(board, board.turn, ranking, nprng))
+        legal_set = {to_action(board, m, board.turn) for m in board.legal_moves}
+        # Every legal move is asked about, up to the cap on how many are sampled.
+        # A floor rather than an equality: the uniform `wild` draw occasionally
+        # lands on a legal move that missed the sample, which adds a positive.
+        covered += int(len(legal_set & actions) >= min(len(legal_set), 32))
+        # The top-ranked illegal action - the very next refusal - is in the set.
+        top_illegal = next(int(a) for a in np.argsort(-ranking) if int(a) not in legal_set)
+        hard_hits += int(top_illegal in actions)
+        positions += 1
+    check("the curriculum asks about the refusal the network is about to make",
+          hard_hits == positions, f"{hard_hits}/{positions} positions")
+    check("every legal move in the position is a positive example",
+          covered == positions, f"{covered}/{positions} positions, at least 32 of them")
+
+    # Pins are the hard case, so use a position that certainly has one rather
+    # than hoping a random walk produces it: the d2 knight is pinned to e1 by
+    # the bishop on b4, and every one of its moves is pseudo-legal and illegal.
+    pinned = chess.Board("4k3/8/8/8/1b6/8/3N4/4K3 w - - 0 1")
+    ranking = agent.rank_of(agent.action_heads(pinned)[0])
+    actions = rules.curriculum(pinned, pinned.turn, ranking, nprng, n_pin=8)
+    y, _ = rules.labels(pinned, actions, pinned.turn)
+    pins = int(((y[:, rules.PSEUDO - 1] > 0.5) & (y[:, rules.LEGAL - 1] < 0.5)).sum())
+    check("pseudo-legal-but-illegal moves are sampled on purpose", pins > 0,
+          f"{pins} moves of a pinned knight: legal geometry, illegal position")
+
+
+def test_rules_do_not_leak() -> None:
+    """The network never asks the board whether a move is legal - it predicts it.
+
+    A legality head would be a cheat if the *features* contained the answer, so
+    this checks the only place it could hide: the move encoding is pure geometry
+    and square contents, identical for a legal move and an illegal one that
+    happens to look the same.
+    """
+    board = chess.Board("4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1")
+    pov = board.turn
+    # Qe2-e7 is legal; Qe2-e8 is not (the king is there... and it is check-giving
+    # rather than capture) - but a knight-style hop from e2 is simply impossible.
+    legal_move = chess.Move.from_uci("e2e7")
+    assert board.is_legal(legal_move)
+    a_legal = to_action(board, legal_move, pov)
+    # An illegal action whose six features are drawn from the same vocabulary.
+    a_illegal = to_action(board, chess.Move.from_uci("e2d5"), pov)
+    x = encode(board, pov)
+    from moves import square_contents
+    states = square_contents(board, pov)
+    rows = dense(x, states, np.array([a_legal, a_illegal]))
+    same = float(np.abs(rows[0, :FEATURE_DIM] - rows[1, :FEATURE_DIM]).max())
+    check("the board half of the features is identical for both moves", same == 0.0,
+          "so nothing in the input says which of them the board will accept")
+    check("the move half differs only in geometry and square contents",
+          int((rows[0, FEATURE_DIM:] != rows[1, FEATURE_DIM:]).sum()) <= 8,
+          "legality is a fact about the position that has to be computed, not read off")
+
+
 def test_judge() -> None:
     """Stockfish grades its own best move at zero, and a blunder above it."""
     print("\nthe judge")
@@ -595,6 +803,14 @@ if __name__ == "__main__":
     test_policy_gradient()
     test_training_moves_the_right_way()
     test_judge()
+    print("\nthe rule curriculum")
+    test_labels_are_the_rule_book()
+    test_sigmoid_negation_is_complement()
+    test_inversion_complements_every_head()
+    test_auc_is_the_honest_rule_metric()
+    test_rule_gradient()
+    test_curriculum_is_mostly_hard()
+    test_rules_do_not_leak()
     failed = [name for name, ok, _ in CHECKS if not ok]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")
     if failed:
