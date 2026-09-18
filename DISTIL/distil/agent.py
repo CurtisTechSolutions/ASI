@@ -62,6 +62,12 @@ class Distil:
                 else use_provider_embeddings)
         base = HashEmbedder()
         self.embedder = ProviderEmbedder(self.provider, base) if want and self.provider.can_embed else base
+        # DISTIL_STORE picks the backend; `from_env` raises rather than falling
+        # back, because a misconfigured store that quietly degrades to in-process
+        # memory writes your data somewhere other than where you asked.
+        if store is None:
+            from .store import from_env
+            store = from_env()
         self.memory = Memory(self.embedder, self.policy, store=store)
         self.memory.load(self.workspace.memory)
         self.mcp = McpRegistry(self.memory, self.workspace)

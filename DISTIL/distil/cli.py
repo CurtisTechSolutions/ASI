@@ -30,6 +30,22 @@ def cmd_ui(args) -> int:
     return 0
 
 
+def cmd_stores(args) -> int:
+    """What DISTIL_STORE is set to, and what each backend needs."""
+    from .store import describe
+    d = describe()
+    print(f"  backend    {d['backend']}" + ("" if d["known"] else "   <- UNKNOWN"))
+    print(f"  DATABASE_URL {'set' if d['database_url'] else 'not set'}")
+    print(f"  REDIS_URL    {'set' if d['redis_url'] else 'not set'}")
+    print(f"  short-term TTL {d['ttl_seconds']}s\n")
+    for name, blurb in sorted(d["options"].items()):
+        mark = "*" if name == d["backend"] else " "
+        print(f"  {mark} {name:<10} {blurb}")
+    print("\n  Neither Redis nor Postgres is exercised by the test suite -- there is"
+          "\n  no server in the environment this was built in.")
+    return 0
+
+
 def cmd_providers(args) -> int:
     for p in catalogue():
         state = "available" if p.available() else "not configured"
@@ -587,6 +603,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("tools", help="list registered tools")
     s.set_defaults(fn=cmd_tools)
+
+    s = sub.add_parser("stores", help="which memory backend is configured")
+    s.set_defaults(fn=cmd_stores)
 
     s = sub.add_parser("auto", help="run by itself: question, experiment, build, pursue")
     s.add_argument("--cycles", type=int, default=0,

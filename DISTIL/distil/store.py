@@ -37,6 +37,7 @@ as the store grows, which is the failure mode that would take longest to notice.
 from __future__ import annotations
 
 import json
+import os
 from typing import Iterable
 
 from .vector import Vector, cosine
@@ -475,3 +476,80 @@ def tiered(redis_url: str = "redis://localhost:6379", dsn: str = "",
     return TieredStore(hot=RedisStore(redis_url, ttl_seconds=ttl_seconds),
                        cold=PostgresStore(dsn), ttl_seconds=ttl_seconds,
                        write_through=write_through)
+
+
+class StoreError(RuntimeError):
+    """A backend was asked for and could not be built. The message is the fix."""
+
+
+#: What `DISTIL_STORE` accepts, and what each needs.
+BACKENDS = {
+    "memory": "in-process exact search; no server, the default",
+    "postgres": "pgvector; needs DATABASE_URL and the psycopg package",
+    "redis": "Redis vector search; needs REDIS_URL and the redis package",
+    "tiered": "Redis short-term over Postgres long-term; needs both",
+}
+
+
+def describe() -> dict:
+    """Which backend is configured and what it would need. For `distil stores`."""
+    kind = (os.environ.get("DISTIL_STORE") or "memory").strip().lower()
+    return {"backend": kind, "known": kind in BACKENDS,
+            "database_url": bool(os.environ.get("DATABASE_URL")),
+            "redis_url": bool(os.environ.get("REDIS_URL")),
+            "ttl_seconds": _ttl(),
+            "options": BACKENDS}
+
+
+def _ttl() -> int:
+    raw = os.environ.get("DISTIL_REDIS_TTL", "")
+    try:
+        return int(raw) if raw else TieredStore.WEEK
+    except ValueError:
+        raise StoreError(f"DISTIL_REDIS_TTL must be a whole number of seconds, not {raw!r}")
+
+
+def _need(var: str, what: str) -> str:
+    value = os.environ.get(var, "").strip()
+    if not value:
+        raise StoreError(f"{what} needs {var}; set it, or unset DISTIL_STORE to use "
+                         f"the in-process store")
+    return value
+
+
+def from_env(kind: str | None = None):
+    """Build the store `DISTIL_STORE` asks for, or None for the default.
+
+    Raises rather than falling back. A misconfigured backend that quietly
+    degrades to in-process memory is the same failure as a provider that answers
+    nothing while reporting healthy: the system keeps working, the data goes
+    somewhere other than where you think, and nothing says so. If you asked for
+    Postgres you want Postgres or an error.
+
+    Neither Redis nor Postgres is exercised by the test suite -- there is no
+    server in the environment this was built in -- so treat the first run against
+    a real one as the actual test.
+    """
+    kind = (kind or os.environ.get("DISTIL_STORE") or "memory").strip().lower()
+    if kind in ("", "memory", "inprocess", "in-process"):
+        return None                       # Memory builds its own InProcessStore
+    if kind not in BACKENDS:
+        raise StoreError(f"unknown DISTIL_STORE {kind!r}; have {', '.join(sorted(BACKENDS))}")
+    try:
+        if kind == "postgres":
+            return PostgresStore(_need("DATABASE_URL", "the postgres store"))
+        if kind == "redis":
+            return RedisStore(_need("REDIS_URL", "the redis store"), ttl_seconds=_ttl())
+        return tiered(redis_url=_need("REDIS_URL", "the tiered store"),
+                      dsn=_need("DATABASE_URL", "the tiered store"),
+                      ttl_seconds=_ttl())
+    except StoreError:
+        raise
+    except ImportError as exc:
+        # The drivers are the one place this package is not standard-library
+        # only, and they are optional on purpose. Say which one is missing.
+        driver = "psycopg[binary]" if "psycopg" in str(exc) else "redis"
+        raise StoreError(f"the {kind} store needs the {driver} package: "
+                         f"pip install {driver}") from exc
+    except Exception as exc:
+        raise StoreError(f"could not connect the {kind} store: {exc}") from exc

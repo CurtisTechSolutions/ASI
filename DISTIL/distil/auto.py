@@ -23,6 +23,10 @@ bandit would be wrong:
     CONSOLIDATE compress cold memory into digests that keep the detail.
     TUNE        re-fit its own policy against measured outcomes.
     PURSUE      set itself a new problem and actually solve it.
+    THINK       compute on the embedding space itself -- centroids, vector
+                arithmetic, empty midpoints, contradictions -- and write what it
+                finds back as new memories. The only move whose input is the
+                *shape* of the store rather than its contents.
 
 **Running dry.** The first five moves all draw from pools that empty: there is a
 last unquestioned belief, a last known gap, a last cold cluster. When they are
@@ -63,7 +67,8 @@ class Move:
     CONSOLIDATE = "consolidate"
     TUNE = "tune"
     PURSUE = "pursue"
-    ALL = (QUESTION, EXPERIMENT, BUILD, CONSOLIDATE, TUNE, PURSUE)
+    THINK = "think"
+    ALL = (QUESTION, EXPERIMENT, BUILD, CONSOLIDATE, TUNE, PURSUE, THINK)
 
 
 @dataclass
@@ -270,6 +275,39 @@ class Auto:
                      detail={"goal": gap, "name": spec.name, "registered": kept,
                              "grade": grade.score,
                              "stages": [{"name": s.name, "passed": s.passed} for s in grade.stages]})
+
+    def _think(self) -> Cycle:
+        """Reason in the embedding space, and write the result back into it.
+
+        Every other move consumes memory or produces it from outside; this one
+        produces memory *from memory*, by computing on the geometry. It is the
+        move that makes the store grow denser rather than only longer -- a
+        centroid gives recall one hop to a whole neighbourhood, and an analogy
+        reaches a region no single trace is near.
+
+        Rewarded for what it found, weighted by how well-evidenced it is: a
+        contradiction between two graded memories is worth more than a bridge
+        between two the system is unsure of.
+        """
+        from .think import Thinker, Thought
+        thinker = Thinker(self.agent.memory, self.agent.policy, self.agent.rng)
+        found = thinker.think(limit=4)
+        if not found:
+            return Cycle(self.n, Move.THINK,
+                         "nothing new in the shape of what it knows", barren=True)
+        written = thinker.absorb(found)
+        worth = {Thought.TENSION: 0.9, Thought.ANALOGY: 0.6,
+                 Thought.CONCEPT: 0.45, Thought.BRIDGE: 0.35}
+        counts: dict[str, int] = {}
+        for d in found:
+            counts[d.kind] = counts.get(d.kind, 0) + 1
+        return Cycle(self.n, Move.THINK,
+                     "thought in the embedding space: "
+                     + ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+                     + f" -- {_clip(found[0].text, 72)}",
+                     learned=sum(worth.get(d.kind, 0.3) for d in found) / len(found),
+                     detail={"found": [d.to_json() for d in found],
+                             "written": [t.id for t in written]})
 
     def _consolidate(self) -> Cycle:
         report = self.agent.compress(dry_run=False)
@@ -636,3 +674,8 @@ def _subject(text: str, limit: int = 70) -> str:
             head = head.split(cut, 1)[-1] if head.startswith("tool ") else head
             break
     return head[:limit].strip()
+
+
+def _clip(text: str, n: int = 60) -> str:
+    flat = " ".join((text or "").split())
+    return flat[:n] + ("…" if len(flat) > n else "")

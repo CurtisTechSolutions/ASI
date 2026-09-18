@@ -14,7 +14,7 @@ it then has to prove work.
 cd DISTIL
 make help                                   # every target, with its defaults
 make demo                                   # the whole system, offline, no key
-make test                                   # 319 tests, ~60s
+make test                                   # 335 tests, ~60s
 ```
 
 There is a `Makefile` for all of it — `make ask TASK="..."`, `make recall
@@ -24,7 +24,7 @@ here cannot quietly rewrite a real memory. The commands it wraps:
 
 ```bash
 python3 -m distil.cli demo                  # the whole system, offline, no key
-python3 -m tests.test_distil                # 319 tests, ~60s
+python3 -m tests.test_distil                # 335 tests, ~60s
 
 python3 -m distil.cli seed                  # plant the starter toolkit (12 verified tools)
 python3 -m distil.cli clarify "make the thing better"    # it asks instead of guessing
@@ -226,6 +226,7 @@ FRAME ──▶ AGENDA ──▶ PRECEDENT ──▶ WHY ──▶ CHALLENGE ─
 | `serve.py` | 700 | the local HTTP API the frontend drives, including two SSE streams |
 | `auto.py` | 380 | the loop that runs itself: six moves, regret-matched, rewarded for information |
 | `browser.py` | 200 | a Chrome it can drive, over W3C WebDriver, as tools in the same embedding layer |
+| `think.py` | 300 | reasoning performed *in* the embedding space: centroids, vector arithmetic, empty midpoints, contradictions |
 | `speech.py` | 175 | local transcription when a Whisper binary exists, and honesty when it does not |
 | `project.py` | 139 | PCA by power iteration: 512 dims down to a plane you can look at |
 
@@ -339,6 +340,64 @@ directly, and its `Host` header is then perfectly honest. Without the third, a
 visited page could POST `/api/forge` and have this agent write and run code.
 `--bind` exists because someone will want it in a container; the warning it
 prints exists because they should know what they are opening.
+
+## Thinking in the embedding space
+
+Everything else treats the embedding layer as something to *read*: embed a query,
+retrieve neighbours, rank them. `think.py` treats it as something to **compute
+with**, and writes every result back — so the store grows from its own structure,
+not only from what it was asked.
+
+| operation | the question it asks of the geometry |
+|---|---|
+| **concept** | a dense cluster has a centre nobody has named — name it, and embed the name |
+| **analogy** | `a − b + c`: what stands to *c* as *a* stands to *b*? |
+| **bridge** | two populated regions with nothing between them — what would sit there? |
+| **tension** | two memories near-identical in the space, graded opposite: a contradiction with two named sides |
+
+Analogy is the one that matters most: the offset `a − b` is a *relation held as a
+direction*, and adding it to `c` reaches a point no single memory is near. A
+similarity search cannot do that by construction.
+
+Everything written is **ungraded and marked `derived`**. These are conjectures
+read off the shape of the store, not observations — they enter at the credibility
+prior like an MCP tool nobody has run, and earn credibility only if something
+later confirms them. A derived trace asserting itself as fact would be the system
+manufacturing evidence about its own contents.
+
+Derived traces are excluded from every source pool **and from the k-nearest
+search itself**. Filtering them out of the results is not enough: they still
+occupy slots in the top-k, so each pass saw a different neighbourhood and
+re-derived the same conjecture under different sources forever. The same
+self-reference that broke the why-chains twice.
+
+`think` is a seventh autonomous move, so this runs constantly.
+
+## Choosing where memory lives
+
+```bash
+make stores                 # what is configured, and what each backend needs
+
+export DISTIL_STORE=tiered  # memory | postgres | redis | tiered
+export REDIS_URL=redis://localhost:6379
+export DATABASE_URL=postgresql://localhost/distil
+export DISTIL_REDIS_TTL=604800      # one week
+```
+
+`from_env` **raises rather than falling back**. A misconfigured backend that
+quietly degrades to in-process memory is the same failure as a provider that
+answers nothing while reporting healthy: the system keeps working and your data
+goes somewhere other than where you asked.
+
+```
+$ DISTIL_STORE=postgres make stats
+StoreError: the postgres store needs DATABASE_URL; set it, or unset
+DISTIL_STORE to use the in-process store
+```
+
+Neither Redis nor Postgres is exercised by the test suite — there is no server in
+the environment this was built in, so treat your first run against a real one as
+the actual test.
 
 ## When it is not using your model
 

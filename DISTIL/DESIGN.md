@@ -50,6 +50,7 @@ answers and the loop that learns are the same loop.
 | Embed tools, MCPs, and its own tooling in one layer | `mcp.py`, `toolsmith.py` (§11.1–11.3) |
 | A starter toolkit worth building first | `seed.py` (§11.4) |
 | A frontend, with visualisations, to use all of it | `serve.py`, `project.py`, `ui/` (§16) |
+| Think *using* the embeddings; create new embeddings constantly | `think.py` (§20) |
 
 ---
 
@@ -941,3 +942,81 @@ Stated because a specification that only lists strengths is marketing.
   never be complete, and a task whose verb it misses gets its first content word
   taken as the move. That is a guess, and the frame's confidence does not count
   it as a settled axis.
+
+
+---
+
+## 20. Thinking in the embedding space
+
+§3 says the embedding layer *is* the memory. §4 makes it rank well. Neither makes
+it a place where reasoning happens — both treat it as a store to read from, which
+leaves it a lookup table with good ordering. `think.py` closes that: it computes
+on the geometry and writes every result back, so the space grows from its own
+structure rather than only from what the system was handed.
+
+### 20.1 Four operations
+
+**CONCEPT.** The centroid of a tight cluster is a point near everything in the
+cluster and identical to none of it — which is what a concept *is*. Writing it
+back gives recall one hop to the whole neighbourhood where before it needed to be
+similar to a specific member.
+
+**ANALOGY.** `a − b + c`. The offset between two memories is a relation held as a
+direction, and applying it to a third reaches a point no single memory is near.
+This is the only operation here a similarity search cannot express: nearest
+neighbour can only return things close to something you already have, and the
+whole value of an analogy is that it does not.
+
+Both outcomes are recorded. A near hit is a relation the store confirms; a miss
+is a region the system has a *reason* to look at and nothing in — which is the
+more interesting of the two, and exactly the shape §10 wants from an experiment.
+
+**BRIDGE.** Two populated regions with nothing between them. Phrased as a
+question, because that is what it is.
+
+The geometry has a trap here, and it made the operation return nothing at all
+until it was found. The midpoint of two near-orthogonal vectors sits at
+cos 45° ≈ 0.707 from *each of its parents*, so the nearest neighbour to any
+midpoint is always one of the two traces that defined it. "Is anything near the
+midpoint?" therefore always answered yes. The question that means something is
+whether any **third** memory sits between them, and the parents have to be
+excluded from the search for it to be asked at all.
+
+**TENSION.** Two memories near-identical in the space carrying opposite grades.
+`memory.gaps` (§4.5) finds a *neighbourhood* of low mean credibility — diffuse
+uncertainty. This finds a specific pair: same subject, contradictory verdicts,
+two named sides. Not uncertainty, a contradiction, and directly actionable.
+
+### 20.2 Conjecture, not observation
+
+Nothing written here is graded, and every trace carries `derived: True`. These
+are read off the shape of the store, not observed. They enter at the credibility
+prior exactly like an MCP tool nobody has run, and earn credibility only if
+something later confirms them.
+
+This is the same rule §10 applies to experiments and §11 to tools, and for the
+same reason: a derived trace entering as established would be the system
+manufacturing evidence about its own contents — the one thing the grading layer
+exists to prevent, turned inward.
+
+### 20.3 It must not feed on itself
+
+A derived trace is a point in the same space the next pass reads. Without a
+guard, the centroid of a set of centroids becomes a concept and the analogy
+between two analogies becomes an analogy — the identical failure that broke
+`auto.py`'s why-chains twice (§17.3).
+
+Excluding derived traces from the source *pool* is not sufficient, and the
+insufficiency is subtle enough to have shipped. They still occupy slots in the
+k-nearest search, so each pass saw a slightly different neighbourhood, produced
+the same conjecture under a different source set, and — because the identity key
+is built from the sources — wrote a near-duplicate instead of merging. The
+exclusion has to happen at search time.
+
+### 20.4 What it does not do
+
+It does not name concepts well. `_shared_words` takes the words common to a
+cluster, which is a label, not an understanding; a real model would do better and
+this deliberately does not require one. And the operations are O(n²) in the pool
+for tensions and bridges, which is fine at ten thousand traces and is not a plan
+for a million.

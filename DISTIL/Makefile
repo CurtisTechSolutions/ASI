@@ -58,7 +58,7 @@ CMD       ?=
         ask clarify frame distill why cases recall grade \
         explore upgrade compress compress-now restore auto \
         selfedit lineage rollback \
-        mcp mcp-add providers stats \
+        mcp mcp-add providers stats stores \
         ui ui-install ui-build ui-dev ui-clean \
         clean clean-state clean-all
 
@@ -75,7 +75,7 @@ check: ## Byte-compile the package and report which providers are reachable
 	$(PY) -m compileall -q distil tests
 	$(DISTIL) providers
 
-test: ## Run the suite (319 tests, ~60s, no network, no key)
+test: ## Run the suite (335 tests, ~60s, no network, no key)
 	$(PY) -m tests.test_distil
 
 lint: ## Byte-compile everything (a syntax check without extra tools)
@@ -141,6 +141,10 @@ restore: | home ## Bring archived traces back out of the archive
 
 stats: | home ## Memory and tool counts
 	$(DISTIL) stats
+
+##@ Memory backend
+stores: ## Which memory backend is configured, and what each one needs
+	$(DISTIL) stores
 
 ##@ Running by itself
 CYCLES ?= 0
