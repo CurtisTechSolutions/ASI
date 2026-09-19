@@ -210,6 +210,38 @@ The rules half of §6.5 is genuinely solved here — 4096-way, from scratch, wit
 legal-move list ever handed over. The payoffs half is not, and this is the
 measurement that stops the first from flattering the second.
 
+### And now the arms separate
+
+While legality was the dominant term, no arm was distinguishable from any other
+at the board. With it supervised away, the payoff half comes into view and the
+ordering is unambiguous — and it is not the one §11's P1 predicts:
+
+| | score for the first |
+|---|---|
+| `2nrl` vs `positive` | **0.229 ± 0.088** |
+| `2nrl` vs `2nrl-worst` | 0.340 ± 0.097 |
+| `2nrl` vs `repulsion` | 0.368 ± 0.084 |
+| `2nrl` vs `2nrl-random` | 0.389 ± 0.099 |
+
+`2nrl` — the full method, train on the failure, invert, fine-tune — loses to
+every other arm, including to both of its own degraded negative sets. `positive`,
+the control that only ever trains toward Stockfish's move, beats everything. The
+same ordering appears against a common opponent: scoring against a random legal
+mover, `positive` 0.535, `repulsion` 0.465, `2nrl-worst` 0.368, `2nrl-random`
+0.340, `2nrl` 0.243.
+
+This is the comparison §10 asks for and §11 specifies, and on this task the
+answer is that 2NRL costs move quality rather than buying it. What the inversion
+*does* buy is the rules — ×850 on refusals in one closed-form operation — and
+that benefit is now obtainable more cheaply and more completely by supervising
+legality directly.
+
+One number keeps all of this in proportion. Against Stockfish, a random legal
+mover gives away 397.5 centipawns a move. Every arm here gives away more:
+`2nrl-worst` 420.8, `positive` 486.7, `2nrl-random` 491.2, `2nrl` 562.8,
+`repulsion` 566.4. None of these networks has learned to play chess. They have
+learned its rules, which is what §6.5 set out to test and is a different claim.
+
 <!--HEADLINE-->
 ### Final, on the held-out positions (mean ± sd over 3 seeds)
 
@@ -500,6 +532,32 @@ No engine anywhere is given a time limit, only depths, so the numbers do not mov
 when the machine is busy.
 
 <!--BENCH-->
+### Head to head
+
+| match | score for the first | W–D–L | games | 95% CI | Elo |
+|---|---|---|---|---|---|
+| 2nrl vs positive | 0.229 | 12–9–51 | 72 | ±0.088 | -211 |
+| 2nrl vs 2nrl-worst | 0.340 | 19–11–42 | 72 | ±0.097 | -115 |
+| 2nrl vs 2nrl-random | 0.389 | 19–18–35 | 72 | ±0.099 | -78 |
+| 2nrl vs repulsion | 0.368 | 12–29–31 | 72 | ±0.084 | -94 |
+| positive vs 2nrl-worst | 0.632 | 37–17–18 | 72 | ±0.097 | +94 |
+| positive vs 2nrl-random | 0.667 | 44–8–20 | 72 | ±0.103 | +120 |
+| positive vs repulsion | 0.583 | 27–30–15 | 72 | ±0.088 | +58 |
+| 2nrl-worst vs 2nrl-random | 0.653 | 43–8–21 | 72 | ±0.104 | +110 |
+| 2nrl-worst vs repulsion | 0.507 | 28–17–27 | 72 | ±0.101 | +5 |
+| 2nrl-random vs repulsion | 0.396 | 17–23–32 | 72 | ±0.090 | -74 |
+
+### Common opponent
+
+| player | vs Stockfish | vs a random *legal* mover | legal first try | refusals per move |
+|---|---|---|---|---|
+| `2nrl` | 0.000 ± 0.000 | 0.243 ± 0.099 | 0.884 | 20.3 |
+| `positive` | 0.000 ± 0.000 | 0.535 ± 0.115 | 0.846 | 13.6 |
+| `2nrl-worst` | 0.000 ± 0.000 | 0.368 ± 0.112 | 0.896 | 9.1 |
+| `2nrl-random` | 0.000 ± 0.000 | 0.340 ± 0.107 | 0.926 | 10.1 |
+| `repulsion` | 0.000 ± 0.000 | 0.465 ± 0.105 | 0.805 | 35.0 |
+| `random` | 0.000 ± 0.000 | — | 1.000 | 0.0 |
+<!--/BENCH-->
 
 ## Files
 
