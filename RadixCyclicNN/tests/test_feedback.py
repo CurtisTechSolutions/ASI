@@ -2,7 +2,8 @@
 
 Both kinds rated: 2NRL (bad, invert, good).  Only thumbs up: reward (a
 positive-phase pass).  Only thumbs down: punish (a negative-phase pass, then
-the network is inverted).
+the network is inverted).  Every model kind has to answer the same call, which
+:class:`KindParityTests` pins down.
 """
 
 import json
@@ -11,12 +12,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.api import feedback_action  # noqa: E402
+from radixnet.model import model_classes  # noqa: E402
 
 try:  # ``python -m unittest discover -s tests`` imports test modules as top-level modules
     from test_api import CORPUS, GARBAGE, start_server  # noqa: F401
@@ -137,6 +140,100 @@ class ApiFeedbackTests(unittest.TestCase):
                 status, data, _ = self.client.post("/api/feedback", {**body, **SETTINGS})
                 self.assertEqual(status, 400, data)
                 self.assertIn(expected, data["error"])
+
+
+class KindParityTests(unittest.TestCase):
+    """Every model kind answers the same feedback call the API, the tutor and the chat loop make.
+
+    The resonant and negative models used to let ``weights`` / ``progress`` /
+    ``stop_event`` fall through into their :class:`TrainConfig` overrides, so
+    rating the texts - which is all the ratings card ever does - killed the job
+    with ``unknown train option(s): stop_event, weights``.
+    """
+
+    TEXTS = ["the sun rises in the east", "the sun sets in the west", "the moon rises at night"]
+    GARBAGE = ["qx zz vv qq", "zzzz xxxx vvvv"]
+
+    def fresh(self, cls):
+        model = cls(seed=0)
+        model.train(self.TEXTS, epochs=1)
+        return model
+
+    def test_rated_reward_and_punish(self):
+        """What ``ApiService.start_feedback`` passes, for every kind: weights, progress, stop_event and all."""
+        for kind, cls in model_classes().items():
+            for action, texts in (("reward", self.TEXTS), ("punish", self.GARBAGE)):
+                with self.subTest(kind=kind, action=action):
+                    seen = []
+                    records = getattr(self.fresh(cls), action)(
+                        texts[:2], epochs=1, lr=0.1, strength=None, weights=[1.0, 0.5], batch_size=4,
+                        progress=seen.append, stop_event=threading.Event(),
+                    )
+                    # heaviest first, one pass each, and the job history sees every one of them
+                    self.assertEqual([r["weight"] for r in records], [1.0, 0.5])
+                    self.assertEqual(len(seen), len(records))
+
+    def test_rated_two_nrl(self):
+        for kind, cls in model_classes().items():
+            with self.subTest(kind=kind):
+                seen = []
+                out = self.fresh(cls).two_nrl(
+                    self.GARBAGE[:2], self.TEXTS[:2], neg_epochs=1, pos_epochs=1, neg_lr=0.5, pos_lr=0.1,
+                    strength=None, bad_weights=[1.0, 0.5], good_weights=[1.0, 0.5], batch_size=4,
+                    progress=seen.append, stop_event=threading.Event(),
+                )
+                self.assertEqual([r["weight"] for r in out["negative"]], [1.0, 0.5])
+                self.assertEqual([r["weight"] for r in out["positive"]], [1.0, 0.5])
+                self.assertEqual(len(seen), len(out["negative"]) + len(out["positive"]))
+
+    def test_unrated_records_carry_no_weight(self):
+        """No weights given is a thumbs up, not a rating - nothing in the records says otherwise."""
+        for kind, cls in model_classes().items():
+            with self.subTest(kind=kind):
+                out = self.fresh(cls).two_nrl(self.GARBAGE[:2], self.TEXTS[:2], neg_epochs=1, pos_epochs=1)
+                self.assertTrue(all("weight" not in r for r in out["negative"] + out["positive"]))
+
+    def test_a_set_stop_event_stops_every_kind(self):
+        """Stopping the job mid-rating stops the passes; the inverting kinds still never stay in the garbage."""
+        for kind, cls in model_classes().items():
+            with self.subTest(kind=kind):
+                model = self.fresh(cls)
+                stop = threading.Event()
+                stop.set()
+                self.assertEqual(model.reward(self.TEXTS[:2], weights=[1.0, 0.5], stop_event=stop), [])
+                self.assertEqual(model.punish(self.GARBAGE[:2], weights=[1.0, 0.5], stop_event=stop), [])
+                out = model.two_nrl(
+                    self.GARBAGE[:2], self.TEXTS[:2], neg_epochs=1, pos_epochs=1,
+                    bad_weights=[1.0, 0.5], good_weights=[1.0, 0.5], stop_event=stop,
+                )
+                self.assertEqual((out["negative"], out["positive"]), ([], []))
+
+    def test_the_job_runs_for_every_kind(self):
+        """End to end: the ratings card posts marks, and the job finishes instead of dying in the worker thread."""
+        for kind in model_classes():
+            with self.subTest(kind=kind):
+                client, _server, _service = start_server(self.addCleanup, kind=kind)
+                client.post("/api/train", {"texts": self.TEXTS, "epochs": 1, "batch_size": 4})
+                wait_job(client)
+                status, data, _ = client.post("/api/feedback", {
+                    "good": self.TEXTS[:2], "good_ratings": [10, 5],
+                    "bad": self.GARBAGE[:1], "bad_ratings": [8], "neg_epochs": 1, "pos_epochs": 1, "batch_size": 4,
+                })
+                self.assertEqual(status, 202, data)
+                job = wait_job(client)
+                self.assertEqual(job["state"], "done", job)
+                self.assertTrue(job["history"], job)
+
+    def test_weights_have_to_match_the_texts(self):
+        for kind, cls in model_classes().items():
+            with self.subTest(kind=kind):
+                model = self.fresh(cls)
+                with self.assertRaises(ValueError):
+                    model.reward(self.TEXTS[:2], weights=[1.0])
+                with self.assertRaises(ValueError):
+                    model.punish(self.GARBAGE[:2], weights=[1.0, -1.0])
+                with self.assertRaises(ValueError):
+                    model.two_nrl(self.GARBAGE[:2], self.TEXTS[:2], bad_weights=[1.0])
 
 
 class CliFeedbackTests(unittest.TestCase):

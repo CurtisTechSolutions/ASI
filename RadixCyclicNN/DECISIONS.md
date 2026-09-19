@@ -1804,10 +1804,20 @@ list**, one line of teaching, and the sentence written out correctly.
 **Status** Accepted · 2026-09-12 (`907a7af`) · **Layer** learning
 
 **Decision** `two_nrl` takes `good_weights`; `reward`/`punish` take `weights`;
-both kinds scale the pass per text. **A 9-out-of-10 sentence is learned nine
-tenths as hard as a perfect one; a 0 is skipped.** `/api/feedback` and
-`/api/2nrl` accept `good_ratings` / `bad_ratings` (marks out of 10) or raw
-weights, and the Ratings card carries a mark per rated text.
+**every kind** scales the pass per text, in whatever currency it learns in — a
+learning rate (radix), a reward (count), a phase lock (resonant) or blame
+(negative). **A 9-out-of-10 sentence is learned nine tenths as hard as a
+perfect one; a 0 is skipped.** `/api/feedback` and `/api/2nrl` accept
+`good_ratings` / `bad_ratings` (marks out of 10) or raw weights, and the
+Ratings card carries a mark per rated text.
+
+A kind that took the ratings but not the rest of the call was the same bug
+twice: the resonant and negative models let `weights` / `progress` /
+`stop_event` fall through into their `TrainConfig` overrides, and since the
+Ratings card always sends marks, selecting either kind failed every feedback
+job with `unknown train option(s)`. The four kinds are interchangeable by
+design, so the whole feedback call is one interface and
+`tests/test_feedback.py::KindParityTests` holds every kind to it.
 
 **Rationale** A binary thumb throws away most of what a grader knows. It also
 makes the boost mechanism of D-027 available on the *positive* side — see Q-13,
@@ -1817,7 +1827,8 @@ which this partly answers.
 judge in the system (LLM grader, sandbox, discriminator, human) can express
 confidence rather than only direction.
 
-**Lives in** `radixnet/model.py`, `radixnet/countnet.py`
+**Lives in** `radixnet/model.py`, `radixnet/countnet.py`, `radixnet/resonance.py`,
+`radixnet/negative.py`
 
 ---
 

@@ -1842,8 +1842,8 @@ pass appends a record (`phase: "negative" | "clear"`, `loss` = mean `-log P` of 
 | `blame(texts, reason, severity, source, note, epochs)` | learn a failure — the only operation that adds structure |
 | `clear(texts, weight, epochs)` | the tutor passed these: take blame off what they share, create nothing |
 | `train(texts, ...)` | **is** a blame pass (`lr` / `act_lr` / `batch_size` accepted and ignored) |
-| `punish` / `reward` | thumbs down = `blame` (reason `thumbs-down`), thumbs up = `clear` |
-| `two_nrl(bad, good, ...)` | blame `bad` (optionally per-text `bad_weights` scaling the severity), then clear `good`; no inversion |
+| `punish` / `reward` | thumbs down = `blame` (reason `thumbs-down`), thumbs up = `clear`; `weights=` rates them per text, one pass each |
+| `two_nrl(bad, good, ...)` | blame `bad` (optionally per-text `bad_weights` scaling the severity), then clear `good` (`good_weights` scaling how much blame each clears); no inversion |
 | `invert_paths(texts, amounts=...)` | the evolve loop's failures: blame each path by `strength * amount` |
 | `predict(prefix, ...)` | the beam search of section 19 over the failure distribution: the K most likely ways to go wrong (and the K least likely as `bottom`) |
 | `crossings(text)` | every transition of a text through the failure structure: `{index, start, end, fragment, parent, edge, blame, fails, clear, evidence, reason, reasons}`, `edge = None` where the network has never been |
@@ -2865,6 +2865,9 @@ which phase it was in, so `BACK` competes on its share rather than pretending to
 in one line and with an exact meaning.  `reward` counts a traversal, adds `+strength` and *sharpens* the phase lock;
 `punish` subtracts and *decoheres* it (taking away the context in which the path was right, this model's own way of
 forgetting); `invert_paths` rotates a failed path's edges into antiphase (`activation`) or decoheres them (`state`).
+`reward(weights=)` / `punish(weights=)` / `two_nrl(bad_weights=, good_weights=)` scale all three of those per text
+(D-050): a text of weight `w` moves `w * strength` of reward and `w` of the sharpening, so how the phases lock
+follows the mark.
 
 ### 30.3 Cycles — the handoff
 

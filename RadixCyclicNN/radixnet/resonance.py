@@ -816,28 +816,112 @@ class ResonantNet(GraphModel):
         self.meta["trained_texts"] += len(cleaned)
         return records
 
-    def reward(self, texts: Iterable[str] | str, *, strength: float = 1.0, epochs: int = 1, **overrides) -> list[dict]:
-        """Thumbs up: count the texts' paths, reward their edges and lock their phases tighter."""
-        cfg = _resolve_config(None, {**overrides, "epochs": epochs})
-        records = self._passes(
-            texts, cfg, count=True, reward=abs(strength), strength=abs(strength), phase="positive",
-            sharpen=1.0 + 0.5 * abs(strength),
+    def _feedback_passes(
+        self,
+        texts: Iterable[str] | str,
+        cfg: TrainConfig,
+        *,
+        count: bool,
+        reward: float,
+        strength: float,
+        phase: str,
+        sharpen_rate: float = 0.0,
+        weights: Sequence[float] | None = None,
+        name: str = "weights",
+        progress: ProgressFn | None = None,
+        checkpoint_manager=None,
+        stop_event: threading.Event | None = None,
+    ) -> list[dict]:
+        """:meth:`_passes` over all the texts at once, or once per group of equally weighted texts.
+
+        ``sharpen_rate`` is how far one unit of ``strength`` moves the phase
+        lock: ``+0.5`` tightens it (a reward), ``-0.5`` scrambles it (a
+        penalty), ``0`` leaves it alone.  ``weights`` (one per text, ``>= 0``)
+        scales everything a pass does - the reward, the strength and with it
+        the sharpening - so a text rated 9 out of 10 is treated nine tenths as
+        hard as a perfect one.  Texts of equal weight share a pass (heaviest
+        first) and their records carry ``"weight"``; a weight of 0 is skipped.
+        """
+        if weights is None:
+            return self._passes(
+                texts, cfg, count=count, reward=reward, strength=strength, phase=phase,
+                sharpen=max(0.0, 1.0 + sharpen_rate * strength),
+                checkpoint_manager=checkpoint_manager, progress=progress, stop_event=stop_event,
+            )
+        records: list[dict] = []
+        for weight, group in _weight_groups(texts, weights, name):
+            if stop_event is not None and stop_event.is_set():
+                break
+            group_records = self._passes(
+                group, cfg, count=count, reward=reward * weight, strength=strength * weight, phase=phase,
+                sharpen=max(0.0, 1.0 + sharpen_rate * strength * weight),
+                checkpoint_manager=checkpoint_manager, stop_event=stop_event,
+            )
+            for record in group_records:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(group_records)
+        return records
+
+    def reward(
+        self,
+        texts: Iterable[str] | str,
+        *,
+        epochs: int = 1,
+        strength: float | None = 1.0,
+        weights: Sequence[float] | None = None,
+        progress: ProgressFn | None = None,
+        checkpoint_manager=None,
+        stop_event: threading.Event | None = None,
+        lr: float | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """Thumbs up: count the texts' paths, reward their edges and lock their phases tighter.
+
+        ``weights`` (one per text, ``>= 0``) turns the thumbs up into a
+        rating: a text of weight ``w`` is rewarded by ``w * strength`` and its
+        phases are locked in proportion, so a text rated 9 out of 10 keeps
+        nine tenths of what a perfect one would.  ``lr`` is accepted for
+        interface parity with RadixNet and ignored.
+        """
+        base = abs(1.0 if strength is None else float(strength))
+        records = self._feedback_passes(
+            texts, _resolve_config(None, {**overrides, "epochs": epochs}),
+            count=True, reward=base, strength=base, phase="positive", sharpen_rate=0.5, weights=weights,
+            progress=progress, checkpoint_manager=checkpoint_manager, stop_event=stop_event,
         )
         self.meta["rewards_total"] += sum(r["reward"] for r in records)
         self.meta["feedback_passes"] += 1
         return records
 
-    def punish(self, texts: Iterable[str] | str, *, strength: float = 1.0, epochs: int = 1, **overrides) -> list[dict]:
+    def punish(
+        self,
+        texts: Iterable[str] | str,
+        *,
+        epochs: int = 1,
+        strength: float | None = 1.0,
+        weights: Sequence[float] | None = None,
+        progress: ProgressFn | None = None,
+        checkpoint_manager=None,
+        stop_event: threading.Event | None = None,
+        lr: float | None = None,
+        **overrides,
+    ) -> list[dict]:
         """Thumbs down: penalise the texts' edges and *decohere* them - their phase lock is scrambled.
 
         A penalty makes a path unlikely; decohering it also takes away the
         context in which it was right, which is the phase model's own way of
-        forgetting.  The traversals are not counted.
+        forgetting.  The traversals are not counted.  ``weights`` rates the
+        failures the way :meth:`reward` rates the successes: the worse a text,
+        the larger its penalty and the harder its phases are scrambled.  ``lr``
+        is accepted for interface parity with RadixNet and ignored.
         """
-        cfg = _resolve_config(None, {**overrides, "epochs": epochs})
-        records = self._passes(
-            texts, cfg, count=False, reward=-abs(strength), strength=abs(strength), phase="negative",
-            sharpen=max(0.0, 1.0 - 0.5 * abs(strength)),
+        base = abs(1.0 if strength is None else float(strength))
+        records = self._feedback_passes(
+            texts, _resolve_config(None, {**overrides, "epochs": epochs}),
+            count=False, reward=-base, strength=base, phase="negative", sharpen_rate=-0.5, weights=weights,
+            progress=progress, checkpoint_manager=checkpoint_manager, stop_event=stop_event,
         )
         self.meta["penalties_total"] += sum(-r["reward"] for r in records)
         self.meta["feedback_passes"] += 1
@@ -847,15 +931,17 @@ class ResonantNet(GraphModel):
         self,
         bad: Iterable[str] | str,
         good: Iterable[str] | str,
-        *,
         neg_epochs: int = 3,
         pos_epochs: int = 3,
-        strength: float = 1.0,
-        bad_weights: Sequence[float] | None = None,
+        neg_lr: float | None = None,
+        pos_lr: float | None = None,
         progress: ProgressFn | None = None,
         checkpoint_manager=None,
         stop_event: threading.Event | None = None,
-        **_ignored,
+        strength: float | None = 1.0,
+        bad_weights: Sequence[float] | None = None,
+        good_weights: Sequence[float] | None = None,
+        **overrides,
     ) -> dict:
         """2NRL: learn the garbage, invert, then fine-tune on the good data.
 
@@ -864,29 +950,42 @@ class ResonantNet(GraphModel):
         the phases the garbage just locked in now *cancel* rather than
         reinforce, and the metacognitive layer flips with them.  The
         fine-tuning pass then relocks the phases on the real texts.
+
         ``bad_weights`` (the evolve loop's per-failure boost) runs the negative
-        phase once per distinct weight, heaviest first.
+        phase once per distinct weight, heaviest first, at ``weight *
+        strength``; ``good_weights`` rates the positive phase the same way - a
+        rating, not a thumbs up.  ``neg_lr`` / ``pos_lr`` are accepted for
+        interface parity with RadixNet and ignored; the magnitude per pass is
+        ``strength``.  If ``stop_event`` is set after the negative phase the
+        network is still inverted (so it never stays in the garbage-favouring
+        state) but the positive phase is skipped.  With a
+        ``checkpoint_manager`` one checkpoint tagged ``"2nrl"`` is written at
+        the end (step = number of 2NRL runs).
         """
-        negative: list[dict] = []
-        groups = _weight_groups(bad, bad_weights) if bad_weights else [(1.0, self._clean_texts(bad)[0])]
-        for weight, group in groups:
-            if not group:
-                continue
-            records = self._passes(
-                group, _resolve_config(None, {"epochs": neg_epochs}),
-                count=True, reward=0.0, strength=weight * strength, phase="negative",
-                progress=progress, checkpoint_manager=checkpoint_manager, stop_event=stop_event,
-            )
-            for record in records:
-                record["weight"] = weight
-            negative.extend(records)
-        self.invert()
-        positive = self._passes(
-            good, _resolve_config(None, {"epochs": pos_epochs}),
-            count=True, reward=abs(strength), strength=abs(strength), phase="positive",
+        reserved = sorted({"epochs", "lr", "act_lr"} & set(overrides))
+        if reserved:
+            raise TypeError(f"two_nrl sets {', '.join(reserved)} per phase; use neg_epochs/pos_epochs")
+        base = abs(1.0 if strength is None else float(strength))
+        # the garbage is *learned*, phases and all; the inversion below is what turns that into avoidance
+        negative = self._feedback_passes(
+            bad, _resolve_config(None, {**overrides, "epochs": neg_epochs}),
+            count=True, reward=0.0, strength=base, phase="negative",
+            weights=bad_weights, name="bad_weights",
             progress=progress, checkpoint_manager=checkpoint_manager, stop_event=stop_event,
         )
+        self.invert()
+        positive: list[dict] = []
+        if not (stop_event is not None and stop_event.is_set()):
+            positive = self._feedback_passes(
+                good, _resolve_config(None, {**overrides, "epochs": pos_epochs}),
+                count=True, reward=base, strength=base, phase="positive",
+                weights=good_weights, name="good_weights",
+                progress=progress, checkpoint_manager=checkpoint_manager, stop_event=stop_event,
+            )
         self.meta["twonrl_runs"] += 1
+        if checkpoint_manager is not None:
+            last = positive[-1] if positive else (negative[-1] if negative else None)
+            checkpoint_manager.save(self, self.meta["twonrl_runs"], "2nrl", last)
         return {"negative": negative, "positive": positive, "inverted": self.graph.inverted}
 
     def invert(self) -> None:

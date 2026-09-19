@@ -10,6 +10,7 @@ import math
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -496,6 +497,40 @@ class TestResonantNet(unittest.TestCase):
         model.train(TEXTS, epochs=1)
         result = model.two_nrl(GARBAGE, TEXTS, neg_epochs=1, pos_epochs=1, bad_weights=[3.0, 1.0, 1.0])
         self.assertEqual(sorted({r["weight"] for r in result["negative"]}, reverse=True), [3.0, 1.0])
+
+    def test_ratings_scale_the_feedback(self):
+        """A mark out of ten is a share of the feedback: the better the text, the harder its phases lock."""
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=2)
+        before = [model.score(t)["per_char"] for t in TEXTS[:2]]
+        records = model.reward(TEXTS[:2], strength=2.0, epochs=1, weights=[1.0, 0.25])
+        self.assertEqual([r["weight"] for r in records], [1.0, 0.25])  # one pass each, heaviest first
+        after = [model.score(t)["per_char"] for t in TEXTS[:2]]
+        self.assertGreater(after[0] - before[0], after[1] - before[1])
+
+    def test_a_rating_of_zero_is_skipped(self):
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=1)
+        records = model.punish(TEXTS[:2], strength=2.0, epochs=1, weights=[1.0, 0.0])
+        self.assertEqual([r["weight"] for r in records], [1.0])
+
+    def test_two_nrl_rates_the_good_texts_too(self):
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=1)
+        result = model.two_nrl(GARBAGE, TEXTS[:3], neg_epochs=1, pos_epochs=1, good_weights=[1.0, 0.5, 0.5])
+        self.assertEqual([r["weight"] for r in result["positive"]], [1.0, 0.5])
+        self.assertTrue(all("weight" not in r for r in result["negative"]))
+
+    def test_feedback_reports_progress_and_stops(self):
+        """The API runs these in a worker thread: every record reaches ``progress``, and ``stop_event`` is obeyed."""
+        model = ResonantNet(seed=0)
+        model.train(TEXTS, epochs=1)
+        seen = []
+        records = model.reward(TEXTS[:2], epochs=2, weights=[1.0, 0.5], progress=seen.append)
+        self.assertEqual(len(seen), len(records))
+        stop = threading.Event()
+        stop.set()
+        self.assertEqual(model.reward(TEXTS[:2], epochs=1, weights=[1.0, 0.5], stop_event=stop), [])
 
     def test_invert_paths_modes(self):
         for mode, expected in (("activation", "edges"), ("state", "edges")):
