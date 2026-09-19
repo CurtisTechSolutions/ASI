@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -37,23 +38,23 @@ function rethinkSays(turn) {
 }
 
 export default function ConversePanel({ status }) {
-  const [opening, setOpening] = useState("");
-  const [turns, setTurns] = useState("6");
-  const [mode, setMode] = useState("beam");
-  const [maxLength, setMaxLength] = useState("60");
-  const [context, setContext] = useState("12");
-  const [temperature, setTemperature] = useState("1.0");
-  const [k, setK] = useState("5");
-  const [speakerA, setSpeakerA] = useState("A");
-  const [speakerB, setSpeakerB] = useState("B");
-  const [partner, setPartner] = useState("");
-  const [punishRepeats, setPunishRepeats] = useState(true);
-  const [avoidWordRepeats, setAvoidWordRepeats] = useState(true);
-  const [explore, setExplore] = useState("3");
-  const [learn, setLearn] = useState(true);
-  const [inMemory, setInMemory] = useState([]);
+  const [opening, setOpening] = useStoredState("converse.opening", "");
+  const [turns, setTurns] = useStoredState("converse.turns", "6");
+  const [mode, setMode] = useStoredState("converse.mode", "beam");
+  const [maxLength, setMaxLength] = useStoredState("converse.maxLength", "60");
+  const [context, setContext] = useStoredState("converse.context", "12");
+  const [temperature, setTemperature] = useStoredState("converse.temperature", "1.0");
+  const [k, setK] = useStoredState("converse.k", "5");
+  const [speakerA, setSpeakerA] = useStoredState("converse.speakerA", "A");
+  const [speakerB, setSpeakerB] = useStoredState("converse.speakerB", "B");
+  const [partner, setPartner] = useStoredState("converse.partner", "");
+  const [punishRepeats, setPunishRepeats] = useStoredState("converse.punishRepeats", true);
+  const [avoidWordRepeats, setAvoidWordRepeats] = useStoredState("converse.avoidWordRepeats", true);
+  const [explore, setExplore] = useStoredState("converse.explore", "3");
+  const [learn, setLearn] = useStoredState("converse.learn", true);
+  const [inMemory, setInMemory] = useState(null); // null until GET /api/model answers
   const [transcript, setTranscript] = useState(null);
-  const [guard, setGuard] = useState(true);
+  const [guard, setGuard] = useStoredState("converse.guard", true);
   const [guarded, setGuarded] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -78,10 +79,11 @@ export default function ConversePanel({ status }) {
     };
   }, [kind]);
 
-  const partners = inMemory.filter((x) => x && x !== kind);
+  const partners = asArray(inMemory).filter((x) => x && x !== kind);
   useEffect(() => {
-    if (partner && !partners.includes(partner)) setPartner("");
-  }, [partner, partners]);
+    // a remembered partner survives until the answer says it is not in memory any more
+    if (inMemory && partner && !partners.includes(partner)) setPartner("");
+  }, [inMemory, partner, partners]);
 
   const speakers = [speakerA.trim() || "A", speakerB.trim() || "B"];
 
@@ -323,6 +325,7 @@ export default function ConversePanel({ status }) {
         feedback={feedback}
         status={status}
         emptyText="rate some turns first"
+        namespace="converse.ratings"
       />
     </>
   );

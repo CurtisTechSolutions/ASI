@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
+import { browserStorage, hasSetting } from "../storage.js";
 import { dictationSupported, micSupported, peakOf, startDictation, startRecording, toWav } from "../audio.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
@@ -43,20 +45,20 @@ export default function SpeechPanel({ status }) {
   const [clipUrl, setClipUrl] = useState(null);
   const [transcript, setTranscript] = useState("");
   const [heard, setHeard] = useState(false);
-  const [rate, setRate] = useState("8000");
-  const [codec, setCodec] = useState("auto");
-  const [pair, setPair] = useState(false);
-  const [waveform, setWaveform] = useState(true);
-  const [unique, setUnique] = useState(true);
-  const [normalise, setNormalise] = useState(false);
-  const [epochs, setEpochs] = useState("3");
-  const [lr, setLr] = useState("0.5");
-  const [batchSize, setBatchSize] = useState("8");
-  const [saveName, setSaveName] = useState("");
+  const [rate, setRate] = useStoredState("speech.rate", "8000");
+  const [codec, setCodec] = useStoredState("speech.codec", "auto");
+  const [pair, setPair] = useStoredState("speech.pair", false);
+  const [waveform, setWaveform] = useStoredState("speech.waveform", true);
+  const [unique, setUnique] = useStoredState("speech.unique", true);
+  const [normalise, setNormalise] = useStoredState("speech.normalise", false);
+  const [epochs, setEpochs] = useStoredState("speech.epochs", "3");
+  const [lr, setLr] = useStoredState("speech.lr", "0.5");
+  const [batchSize, setBatchSize] = useStoredState("speech.batchSize", "8");
+  const [saveName, setSaveName] = useStoredState("speech.saveName", "");
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [decodeText, setDecodeText] = useState("");
+  const [decodeText, setDecodeText] = useStoredState("speech.decodeText", "");
   const [decoded, setDecoded] = useState(null);
   const [decodeError, setDecodeError] = useState(null);
   const [decoding, setDecoding] = useState(false);
@@ -70,6 +72,9 @@ export default function SpeechPanel({ status }) {
   const canRecord = micSupported();
   const canDictate = dictationSupported();
 
+  // a rate the user picked is remembered; only an untouched box follows the server's default
+  const ownRate = useRef(hasSetting(browserStorage(), "speech.rate"));
+
   useEffect(() => {
     let alive = true;
     api
@@ -77,7 +82,7 @@ export default function SpeechPanel({ status }) {
       .then((data) => {
         if (!alive) return;
         setInfo(data && typeof data === "object" ? data : null);
-        if (data && data.default_rate) setRate(String(data.default_rate));
+        if (data && data.default_rate && !ownRate.current) setRate(String(data.default_rate));
       })
       .catch((err) => {
         if (alive) setInfoError(err.message);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
 import UploadPicker from "./UploadPicker.jsx";
 import Alert from "./Alert.jsx";
@@ -12,17 +13,17 @@ const MAX_ROWS = 200;
 
 /** GAN-style self-upgrade loop: start / stop, live chart of gap and fake score, latest sample. */
 export default function EvolvePanel({ status }) {
-  const [corpus, setCorpus] = useState("");
+  const [corpus, setCorpus] = useStoredState("evolve.corpus", "");
   const [corpusFiles, setCorpusFiles] = useState([]);
-  const [samples, setSamples] = useState("8");
-  const [realPerGeneration, setRealPerGeneration] = useState("8");
-  const [maxLength, setMaxLength] = useState("40");
-  const [temperature, setTemperature] = useState("1.0");
-  const [generations, setGenerations] = useState("");
-  const [checkpointEvery, setCheckpointEvery] = useState("0");
-  const [blatantMode, setBlatantMode] = useState("none");
-  const [blatantMargin, setBlatantMargin] = useState("1.0");
-  const [blatantBoost, setBlatantBoost] = useState("4");
+  const [samples, setSamples] = useStoredState("evolve.samples", "8");
+  const [realPerGeneration, setRealPerGeneration] = useStoredState("evolve.realPerGeneration", "8");
+  const [maxLength, setMaxLength] = useStoredState("evolve.maxLength", "40");
+  const [temperature, setTemperature] = useStoredState("evolve.temperature", "1.0");
+  const [generations, setGenerations] = useStoredState("evolve.generations", "");
+  const [checkpointEvery, setCheckpointEvery] = useStoredState("evolve.checkpointEvery", "0");
+  const [blatantMode, setBlatantMode] = useStoredState("evolve.blatantMode", "none");
+  const [blatantMargin, setBlatantMargin] = useStoredState("evolve.blatantMargin", "1.0");
+  const [blatantBoost, setBlatantBoost] = useStoredState("evolve.blatantBoost", "4");
   const [formError, setFormError] = useState(null);
   const [serverHistory, setServerHistory] = useState([]);
   const [historyError, setHistoryError] = useState(null);

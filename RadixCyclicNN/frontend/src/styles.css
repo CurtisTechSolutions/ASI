@@ -109,6 +109,17 @@ pre,
   font-size: 12px;
 }
 
+/* "settings saved in this browser": part of the footer line, not a control shouting for attention. */
+.app-footer button.link {
+  font: inherit;
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+
+.app-footer button.link:hover {
+  color: var(--text);
+}
+
 /* Status bar ------------------------------------------------------------- */
 
 .statusbar {

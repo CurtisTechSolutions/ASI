@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -50,15 +51,15 @@ function PhaseTable({ title, rows }) {
  * Also exposes a manual Invert button.
  */
 export default function TwoNRLPanel({ status }) {
-  const [bad, setBad] = useState("");
-  const [good, setGood] = useState("");
+  const [bad, setBad] = useStoredState("2nrl.bad", "");
+  const [good, setGood] = useStoredState("2nrl.good", "");
   const [badFiles, setBadFiles] = useState([]);
   const [goodFiles, setGoodFiles] = useState([]);
-  const [negEpochs, setNegEpochs] = useState("3");
-  const [posEpochs, setPosEpochs] = useState("3");
-  const [negLr, setNegLr] = useState("0.05");
-  const [posLr, setPosLr] = useState("0.01");
-  const [strength, setStrength] = useState("1");
+  const [negEpochs, setNegEpochs] = useStoredState("2nrl.negEpochs", "3");
+  const [posEpochs, setPosEpochs] = useStoredState("2nrl.posEpochs", "3");
+  const [negLr, setNegLr] = useStoredState("2nrl.negLr", "0.05");
+  const [posLr, setPosLr] = useStoredState("2nrl.posLr", "0.01");
+  const [strength, setStrength] = useStoredState("2nrl.strength", "1");
   const [formError, setFormError] = useState(null);
   const [inverting, setInverting] = useState(false);
   const [invertError, setInvertError] = useState(null);

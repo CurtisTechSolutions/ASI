@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -17,12 +18,12 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * Ratings accumulate across generations until they are trained on or cleared.
  */
 export default function GeneratePanel({ status }) {
-  const [count, setCount] = useState("3");
-  const [maxLength, setMaxLength] = useState("60");
-  const [temperature, setTemperature] = useState("1.0");
-  const [mode, setMode] = useState("beam");
-  const [prefix, setPrefix] = useState("");
-  const [guard, setGuard] = useState(true);
+  const [count, setCount] = useStoredState("generate.count", "3");
+  const [maxLength, setMaxLength] = useStoredState("generate.maxLength", "60");
+  const [temperature, setTemperature] = useStoredState("generate.temperature", "1.0");
+  const [mode, setMode] = useStoredState("generate.mode", "beam");
+  const [prefix, setPrefix] = useStoredState("generate.prefix", "");
+  const [guard, setGuard] = useStoredState("generate.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
@@ -155,6 +156,7 @@ export default function GeneratePanel({ status }) {
         onMark={setMark}
         feedback={feedback}
         status={status}
+        namespace="generate.ratings"
       />
     </>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import {
   asArray,
   fmtBytes,
@@ -117,7 +118,6 @@ function ConnectionCard({ defaults, url, setUrl, model, setModel }) {
       const preferred = data && typeof data.model === "string" ? data.model : "";
       // Keep a still-listed choice, otherwise preselect the default model when the server offers it.
       setModel((current) => (current && names.includes(current) ? current : names.includes(preferred) ? preferred : ""));
-      if (url === null && data && typeof data.url === "string" && data.url) setUrl(data.url);
     } catch (err) {
       setModels([]);
       setInfo(null);
@@ -174,10 +174,11 @@ function ConnectionCard({ defaults, url, setUrl, model, setModel }) {
         samples. Every Ollama call can take a minute or two.
       </p>
       <div className="row">
+        {/* An override: blank asks the Ollama the server itself talks to (the summary below names it). */}
         <TextField
           label="Ollama URL"
           hint={defaults.url ? `server default ${defaults.url}` : "blank = server default"}
-          value={url ?? ""}
+          value={url}
           onChange={setUrl}
           placeholder={defaults.url || "http://127.0.0.1:11434"}
           disabled={loading}
@@ -220,9 +221,9 @@ function ConnectionCard({ defaults, url, setUrl, model, setModel }) {
 
 /** Ask Ollama for a corpus (POST /api/ollama/corpus, train=false); the lines go to CorpusResultCard. */
 function CorpusCard({ overrides, onResult }) {
-  const [prompt, setPrompt] = useState("");
-  const [lines, setLines] = useState("20");
-  const [style, setStyle] = useState("good");
+  const [prompt, setPrompt] = useStoredState("ollama.corpus.prompt", "");
+  const [lines, setLines] = useStoredState("ollama.corpus.lines", "20");
+  const [style, setStyle] = useStoredState("ollama.corpus.style", "good");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -289,10 +290,10 @@ function CorpusCard({ overrides, onResult }) {
 /** Generated lines plus what to do with them: train, save as upload, hold as 2NRL data. */
 function CorpusResultCard({ corpus, status, heldBad, heldGood, onHoldBad, onHoldGood, onClearBad, onClearGood }) {
   const texts = corpus ? asTexts(corpus.texts) : [];
-  const [epochs, setEpochs] = useState("5");
-  const [lr, setLr] = useState("0.05");
-  const [batchSize, setBatchSize] = useState("256");
-  const [saveName, setSaveName] = useState("ollama-corpus.txt");
+  const [epochs, setEpochs] = useStoredState("ollama.train.epochs", "5");
+  const [lr, setLr] = useStoredState("ollama.train.lr", "0.05");
+  const [batchSize, setBatchSize] = useStoredState("ollama.train.batchSize", "256");
+  const [saveName, setSaveName] = useStoredState("ollama.train.saveName", "ollama-corpus.txt");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [saved, setSaved] = useState(null);
@@ -490,14 +491,14 @@ function CorpusResultCard({ corpus, status, heldBad, heldGood, onHoldBad, onHold
 
 /** Have Ollama rate samples from the model, or pasted texts (POST /api/ollama/review, apply=none). */
 function ReviewCard({ overrides, onResult }) {
-  const [count, setCount] = useState("8");
-  const [prefix, setPrefix] = useState("");
-  const [maxLength, setMaxLength] = useState("60");
-  const [temperature, setTemperature] = useState("1.0");
-  const [threshold, setThreshold] = useState("6");
-  const [texts, setTexts] = useState("");
-  const [context, setContext] = useState("");
-  const [blame, setBlame] = useState(false);
+  const [count, setCount] = useStoredState("ollama.review.count", "8");
+  const [prefix, setPrefix] = useStoredState("ollama.review.prefix", "");
+  const [maxLength, setMaxLength] = useStoredState("ollama.review.maxLength", "60");
+  const [temperature, setTemperature] = useStoredState("ollama.review.temperature", "1.0");
+  const [threshold, setThreshold] = useStoredState("ollama.review.threshold", "6");
+  const [texts, setTexts] = useStoredState("ollama.review.texts", "");
+  const [context, setContext] = useStoredState("ollama.review.context", "");
+  const [blame, setBlame] = useStoredState("ollama.review.blame", false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -623,10 +624,10 @@ function ReviewCard({ overrides, onResult }) {
 /** Review table plus the "Apply as 2NRL" step (POST /api/2nrl with the failed / passed texts). */
 function ReviewResultCard({ review, status, heldBad, heldGood, onClearBad, onClearGood }) {
   const [goodFiles, setGoodFiles] = useState([]);
-  const [negEpochs, setNegEpochs] = useState("3");
-  const [posEpochs, setPosEpochs] = useState("3");
-  const [negLr, setNegLr] = useState("0.05");
-  const [posLr, setPosLr] = useState("0.01");
+  const [negEpochs, setNegEpochs] = useStoredState("ollama.2nrl.negEpochs", "3");
+  const [posEpochs, setPosEpochs] = useStoredState("ollama.2nrl.posEpochs", "3");
+  const [negLr, setNegLr] = useStoredState("ollama.2nrl.negLr", "0.05");
+  const [posLr, setPosLr] = useStoredState("ollama.2nrl.posLr", "0.01");
   const [nrlSeen, setNrlSeen] = useState(false);
   const nrl = useJob("2nrl");
 
@@ -869,17 +870,13 @@ function ReviewResultCard({ review, status, heldBad, heldGood, onClearBad, onCle
  */
 export default function OllamaPanel({ status }) {
   const defaults = ollamaDefaults(status);
-  const [url, setUrl] = useState(null);
-  const [model, setModel] = useState("");
+  // blank = the server's own Ollama; both boxes are remembered in the browser
+  const [url, setUrl] = useStoredState("ollama.url", "");
+  const [model, setModel] = useStoredState("ollama.model", "");
   const [corpus, setCorpus] = useState(null);
   const [review, setReview] = useState(null);
   const [heldBad, setHeldBad] = useState([]);
   const [heldGood, setHeldGood] = useState([]);
-
-  // Seed the URL field with the server default once /api/status reports it (until the user edits it).
-  useEffect(() => {
-    if (url === null && defaults.url) setUrl(defaults.url);
-  }, [defaults.url, url]);
 
   const overrides = requestOverrides(url, model, defaults);
   const clearBad = () => setHeldBad([]);

@@ -1,6 +1,7 @@
 import { Fragment, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -92,15 +93,15 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike }) 
  * RadixNet, a traversal plus reward on the path for the count model.
  */
 export default function PredictPanel({ status }) {
-  const [prefix, setPrefix] = useState("");
-  const [length, setLength] = useState("20");
-  const [mode, setMode] = useState("dijkstra");
-  const [k, setK] = useState("5");
-  const [beam, setBeam] = useState("");
-  const [toEnd, setToEnd] = useState(false);
-  const [stepPenalty, setStepPenalty] = useState("0");
-  const [temperature, setTemperature] = useState("1.0");
-  const [guard, setGuard] = useState(true);
+  const [prefix, setPrefix] = useStoredState("predict.prefix", "");
+  const [length, setLength] = useStoredState("predict.length", "20");
+  const [mode, setMode] = useStoredState("predict.mode", "dijkstra");
+  const [k, setK] = useStoredState("predict.k", "5");
+  const [beam, setBeam] = useStoredState("predict.beam", "");
+  const [toEnd, setToEnd] = useStoredState("predict.toEnd", false);
+  const [stepPenalty, setStepPenalty] = useStoredState("predict.stepPenalty", "0");
+  const [temperature, setTemperature] = useStoredState("predict.temperature", "1.0");
+  const [guard, setGuard] = useStoredState("predict.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -27,22 +28,22 @@ function multiplierSeries(points, key, base, name, color) {
  * previews the resulting curve through POST /api/schedule/preview while typing.
  */
 export default function TrainPanel({ status }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useStoredState("train.text", "");
   const [files, setFiles] = useState([]);
-  const [wholeFile, setWholeFile] = useState(false);
-  const [epochs, setEpochs] = useState("5");
-  const [lr, setLr] = useState("0.05");
-  const [actLr, setActLr] = useState("0.005");
-  const [lrSchedule, setLrSchedule] = useState("");
-  const [actLrSchedule, setActLrSchedule] = useState("");
-  const [presetName, setPresetName] = useState("");
-  const [reverseSchedule, setReverseSchedule] = useState(false);
+  const [wholeFile, setWholeFile] = useStoredState("train.wholeFile", false);
+  const [epochs, setEpochs] = useStoredState("train.epochs", "5");
+  const [lr, setLr] = useStoredState("train.lr", "0.05");
+  const [actLr, setActLr] = useStoredState("train.actLr", "0.005");
+  const [lrSchedule, setLrSchedule] = useStoredState("train.lrSchedule", "");
+  const [actLrSchedule, setActLrSchedule] = useStoredState("train.actLrSchedule", "");
+  const [presetName, setPresetName] = useStoredState("train.presetName", "");
+  const [reverseSchedule, setReverseSchedule] = useStoredState("train.reverseSchedule", false);
   const [presets, setPresets] = useState([]);
   const [scheduleHelp, setScheduleHelp] = useState(null);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState(null);
-  const [batchSize, setBatchSize] = useState("256");
-  const [autoCompress, setAutoCompress] = useState(true);
+  const [batchSize, setBatchSize] = useStoredState("train.batchSize", "256");
+  const [autoCompress, setAutoCompress] = useStoredState("train.autoCompress", true);
   const [formError, setFormError] = useState(null);
   const [serverHistory, setServerHistory] = useState([]);
   const [historyError, setHistoryError] = useState(null);
@@ -54,8 +55,8 @@ export default function TrainPanel({ status }) {
   const rateless = countingKind(status);
   const goEngine = Boolean(status && status.engine === "go");
   // Go server: what one training text is (each text is handled by its own goroutine)
-  const [split, setSplit] = useState("lines");
-  const [pageLines, setPageLines] = useState("50");
+  const [split, setSplit] = useStoredState("train.split", "lines");
+  const [pageLines, setPageLines] = useStoredState("train.pageLines", "50");
   const [weights, setWeights] = useState({ count_scale: "", global_scale: "", window_scale: "", reward_scale: "", window: "" });
   const [weightsLoaded, setWeightsLoaded] = useState(false);
   const [weightsBusy, setWeightsBusy] = useState(false);

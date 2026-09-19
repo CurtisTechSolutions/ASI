@@ -20,6 +20,7 @@ from radixnet.encoding import Encoder  # noqa: E402
 from radixnet.graph import BACK, FIRST, START  # noqa: E402
 from radixnet.metacog import ABORT, ACTIONS, ESCAPE, RIDE, MetaLayer, cycle_signature  # noqa: E402
 from radixnet.phasesearch import phase_dijkstra, phase_kbest  # noqa: E402
+from radixnet.search import onward  # noqa: E402
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 from radixnet.resonance import (  # noqa: E402
     RESONANT_MODEL_FORMAT,
@@ -204,6 +205,63 @@ class TestResonantGraph(unittest.TestCase):
         self.assertIsNotNone(net.graph.back_cost(node))
         self.assertNotEqual(net.predict("the ", length=12, mode="beam", k=1).text, before)
 
+    def test_back_probability_and_observe_onward(self):
+        net = ResonantNet(seed=0)
+        net.train(TEXTS, epochs=3)
+        graph = net.graph
+        node = graph.trigram_index["the"][0]
+        self.assertEqual(graph.back_probability(node), 0.0)
+        self.assertFalse(graph.observe_onward(node), "nothing to push back on before a hand-over")
+        for _ in range(4):
+            graph.observe_back(node, amount=1.0)
+        risen = graph.back_probability(node)
+        self.assertGreater(risen, 0.0)
+        self.assertTrue(graph.observe_onward(node, 2.0))
+        self.assertLess(graph.back_probability(node), risen, "going round was right: the hand-over comes back down")
+        self.assertFalse(graph.observe_onward(START), "a sentinel has no hand-over to teach")
+
+    def test_metacognition_overrules_the_back_reflex_only_where_it_remembers(self):
+        """``BACK`` hands the branch over; a layer that has seen these cycles and rode them overrules it."""
+        model = ResonantNet(seed=0)
+        model.train(["lol lol lol lol lol"], epochs=3)
+        graph = model.graph
+        node = graph.trigram_index["ol "][0]
+        before = [r.text for r in model.predict("lol ", length=12, mode="kbest", k=3).top]
+        for _ in range(8):
+            graph.observe_back(node, amount=1.0)  # what a voice backing out of this node reports
+        self.assertEqual(onward(graph.child_costs(node)), [], "the reflex must be vetoing for this to mean anything")
+        self.assertTrue(model.metacog.rides(graph.labels[node]))
+        overruled = [r.text for r in model.predict("lol ", length=12, mode="kbest", k=3).top]
+        self.assertTrue(any(t.count("lol") > 1 for t in overruled), overruled)
+        self.assertEqual(len(overruled), len(before))
+
+        forgotten = ResonantNet.from_dict(model.to_dict())
+        forgotten.metacog.scores.clear()
+        stands = [r.text for r in forgotten.predict("lol ", length=12, mode="kbest", k=3).top]
+        self.assertFalse(any(t.count("lol") > 1 for t in stands),
+                         f"with no memory of these cycles the hand-over must stand, got {stands}")
+
+    def test_teaching_back_from_the_corpus_is_off_by_default(self):
+        """It is a dial, not a default: the measurement is in DESIGN section 30.3."""
+        model = ResonantNet(seed=0)
+        self.assertFalse(model.teach_back)
+        model.train(TEXTS, epochs=3)
+        self.assertEqual([n for n in model.graph.alive_nodes() if BACK in model.graph.children[n]], [])
+
+    def test_teaching_back_from_the_corpus_stays_under_the_ceiling(self):
+        model = ResonantNet(seed=0, teach_back=True, back_strength=0.25, back_ceiling=0.10)
+        model.train(["lol lol lol lol", "the cat sat down", "a big cat ran away"], epochs=4)
+        graph = model.graph
+        taught = [n for n in graph.alive_nodes() if BACK in graph.children[n]]
+        self.assertTrue(taught, "declining a cycle must reach BACK when the dial is on")
+        for node in taught:
+            self.assertNotEqual(onward(graph.child_costs(node)), [],
+                                f"{graph.labels[node]!r} reached the veto: observation must not hand branches over")
+        with self.assertRaises(ValueError):
+            ResonantNet(seed=0, back_ceiling=1.5)
+        with self.assertRaises(ValueError):
+            ResonantNet(seed=0, back_strength=-1.0)
+
     def test_configure_rephases_every_node(self):
         g = ResonantGraph(seed=0, buckets=8, kick_scale=0.0)
         g.observe_sequence(grams("hello there world"))
@@ -278,10 +336,51 @@ class TestMetaLayer(unittest.TestCase):
         layer.observe(cycle_signature("xyz", 1), ABORT, 2)
         back = MetaLayer.from_dict(layer.to_dict())
         self.assertEqual(len(back), len(layer))
+        self.assertEqual((back.back_scale, back.prior_weight), (layer.back_scale, layer.prior_weight))
         self.assertEqual(back.observed, layer.observed)
         for sig in ("lol:2", "xyz:1", "unseen:1"):
             self.assertEqual(back.log_policy(sig), layer.log_policy(sig))
         self.assertEqual(len(MetaLayer.from_dict(None)), 0)
+
+    def test_the_prior_carries_the_weight_it_earned_about_one_cycle(self):
+        """A cycle never met must not be judged with the summed confidence of every cycle that was."""
+        layer = MetaLayer(prior_weight=2.0)
+        for _ in range(50):
+            layer.observe(cycle_signature("abc", 2), RIDE)
+        self.assertEqual(layer.decide("unseen:1"), RIDE)  # the prior's direction is kept
+        seen = math.exp(layer.log_policy(cycle_signature("abc", 2))[0])
+        unseen = math.exp(layer.log_policy("unseen:1")[0])
+        self.assertGreater(seen, 0.9)          # 50 observations of this very cycle: confident
+        self.assertLess(unseen, 0.7)           # the same direction, held far more loosely
+        raw = MetaLayer(prior_weight=0.0)      # 0 keeps the prior raw, as it was before
+        for _ in range(50):
+            raw.observe(cycle_signature("abc", 2), RIDE)
+        self.assertAlmostEqual(math.exp(raw.log_policy("unseen:1")[0]), seen, places=6)
+
+    def test_back_is_evidence_against_riding(self):
+        layer = MetaLayer()
+        for _ in range(4):
+            layer.observe(cycle_signature("lol", 2), RIDE)
+        signature = cycle_signature("lol", 2)
+        self.assertEqual(layer.decide(signature), RIDE)
+        self.assertEqual(layer.decide(signature, back=0.95), RIDE, "4 observed rides outrank the node's reflex")
+        thin = MetaLayer()
+        thin.observe(signature, RIDE)
+        self.assertEqual(thin.decide(signature), RIDE)
+        self.assertNotEqual(thin.decide(signature, back=0.95), RIDE, "one observation does not")
+        self.assertGreater(layer.cost(signature, RIDE, back=0.95), layer.cost(signature, RIDE))
+        self.assertEqual(MetaLayer(back_scale=0.0).decide(signature, back=1.0), RIDE)  # the dial turns it off
+
+    def test_about_and_rides_aggregate_a_node_s_cycles(self):
+        layer = MetaLayer()
+        layer.observe(cycle_signature("lol", 2), RIDE, 3)
+        layer.observe(cycle_signature("lol", 5), RIDE, 2)
+        layer.observe(cycle_signature("lol", 5), ABORT, 1)
+        layer.observe(cycle_signature("zzz", 2), ESCAPE, 9)
+        self.assertEqual(layer.about("lol lol"), [5.0, 0.0, 1.0])
+        self.assertTrue(layer.rides("lol lol"))
+        self.assertFalse(layer.rides("zzz zzz"))
+        self.assertFalse(layer.rides("qqq"), "a node it knows nothing about is not a node it rides")
 
     def test_unknown_action_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -573,7 +672,8 @@ class TestResonantNet(unittest.TestCase):
 
 class TestPersistence(unittest.TestCase):
     def test_round_trip_through_a_file(self):
-        model = ResonantNet(seed=3, buckets=12, kick_scale=0.5, resonance_scale=2.0)
+        model = ResonantNet(seed=3, buckets=12, kick_scale=0.5, resonance_scale=2.0,
+                            teach_back=True, back_strength=0.5, back_ceiling=0.2)
         model.train(TEXTS, epochs=2)
         model.train(["lol lol lol lol"], epochs=1)
         model.reward([TEXTS[0]], strength=1.5)
@@ -583,6 +683,12 @@ class TestPersistence(unittest.TestCase):
             back = load_model(path)
         self.assertIsInstance(back, ResonantNet)
         self.assertEqual(back.weight_config(), model.weight_config())
+        self.assertEqual(
+            (back.teach_back, back.back_strength, back.back_ceiling),
+            (model.teach_back, model.back_strength, model.back_ceiling),
+        )
+        self.assertEqual(back.metacog.back_scale, model.metacog.back_scale)
+        self.assertEqual(back.metacog.prior_weight, model.metacog.prior_weight)
         self.assertEqual(back.meta["epochs_total"], model.meta["epochs_total"])
         self.assertEqual(len(back.metacog), len(model.metacog))
         self.assertEqual(len(back.history), len(model.history))

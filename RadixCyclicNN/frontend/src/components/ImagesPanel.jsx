@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -24,22 +25,22 @@ const SIZES = [
 export default function ImagesPanel({ status }) {
   const [info, setInfo] = useState(null);
   const [infoError, setInfoError] = useState(null);
-  const [encoder, setEncoder] = useState("auto");
-  const [size, setSize] = useState("128");
+  const [encoder, setEncoder] = useStoredState("images.encoder", "auto");
+  const [size, setSize] = useStoredState("images.size", "128");
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [encoding, setEncoding] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [roundTrip, setRoundTrip] = useState(null);
-  const [decodeText, setDecodeText] = useState("");
+  const [decodeText, setDecodeText] = useStoredState("images.decodeText", "");
   const [decoded, setDecoded] = useState(null);
   const [decodeError, setDecodeError] = useState(null);
   const [decoding, setDecoding] = useState(false);
-  const [epochs, setEpochs] = useState("3");
-  const [lr, setLr] = useState("0.5");
-  const [batchSize, setBatchSize] = useState("8");
-  const [saveName, setSaveName] = useState("");
+  const [epochs, setEpochs] = useStoredState("images.epochs", "3");
+  const [lr, setLr] = useStoredState("images.lr", "0.5");
+  const [batchSize, setBatchSize] = useStoredState("images.batchSize", "8");
+  const [saveName, setSaveName] = useStoredState("images.saveName", "");
   const [saveNotice, setSaveNotice] = useState(null);
   const [copied, setCopied] = useState(false);
   const inputRef = useRef(null);

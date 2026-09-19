@@ -362,12 +362,22 @@ visited nodes.  The Images and Speech tabs each end with a **What does it
 remember?** card - the recall tutor: ask the network for the picture or the
 utterance back, see the mark out of 10, the agreement and the reason each
 failure failed, and (with "blame it" ticked) hand those failures to the
-negative network.
-adversarial review), Code (code generation with the sandbox and the judge),
-Agent (tool use: solve a list of tasks or let the network explore on its own,
-with a live log of the acceptance criteria, the tasks it chose, every tool call
-tagged by who wrote it, and the verdicts), Checkpoints (save / restore / load /
-reset) and a Graph view of the most visited nodes.
+negative network. The **Agent** tab is tool use: solve a list of tasks or let
+the network explore on its own, with a live log of the acceptance criteria, the
+tasks it chose, every tool call tagged by who wrote it, and the verdicts.
+
+**Settings are remembered in the browser.** Every settings field of every
+panel - epochs, learning rates, modes, thresholds, prefixes, prompts, the topic
+of a tutor run, the text in the boxes - is written to `localStorage` under the
+`radixnet.v1.` prefix as you change it, so a reload (or coming back tomorrow)
+finds the forms as you left them. Nothing is stored until you actually change a
+field, so untouched defaults leave no trace, and results, transcripts, ratings,
+job state and uploaded-file selections are not settings and are never stored. A
+value too large to keep (a pasted corpus over 256 KB) is skipped rather than
+filling the quota, and where the browser has no usable storage (a private
+window, blocked site data) the panels simply work as before. The footer's
+*settings saved in this browser* button forgets all of it - click it twice -
+and reloads with the defaults; nothing is ever sent to the server.
 
 Training files: drop text files onto the Train panel (or press "Upload
 files…"); the browser reads them and sends them to `POST /api/uploads` (a
@@ -380,6 +390,7 @@ the 2NRL (bad / good files) and Evolve (corpus files) panels.
 ```bash
 make frontend-install && make frontend-build   # rebuild dist
 make serve                                     # then make frontend-dev in another shell for hot reload
+make frontend-test                             # unit tests of the settings store (node --test, no install needed)
 ```
 
 ## Ollama: corpus from a prompt, adversarial review
@@ -1137,7 +1148,36 @@ re-entered node's first trigram and how long the loop is, e.g. `lol:4`):
 
 Those are learned by counting what the corpus did at that exact cycle, so a
 cycle the corpus rides stays cheap to ride and one it never rides becomes
-expensive.  Nothing is forbidden.  `info` reports the signatures learned, the
+expensive.  Nothing is forbidden.
+
+**The reflex and the memory.**  The `BACK` sentinel and this layer are the same
+knowledge at two grains.  `BACK` is the reflex — an edge competing for a node's
+probability, taught by voices that caught themselves repeating and backed out,
+and when it wins, the branch is handed over and offers nothing.  The layer is
+the memory of one particular cycle.  They are wired both ways:
+
+* the node's hand-over probability enters the layer's policy as evidence
+  **against** riding, on the same scale as everything else, so:
+
+  ```
+  nothing known                              ride   (weakly)
+  6 hand-overs at the node, P(BACK) = 0.95   escape (the reflex speaks)
+    + 1 observed ride at this exact cycle    escape (one observation is not enough)
+    + 3 observed rides                       ride   (the memory outranks the reflex)
+  ```
+
+* and when `BACK` has handed a branch over, the search asks the layer what it
+  remembers about cycles at *that node* — it has to be the node-level question,
+  because a walk meeting the hand-over is on its first visit and has no cycle to
+  name yet — and restores the branch when the answer is that it rode them.  With
+  no memory, the hand-over stands.
+
+Metacognition supervising the reflex is what the research note describes, and
+that is the line where it happens.  (Going the other way — letting the corpus's
+declines teach `BACK` — is a dial, `teach_back`, and it is **off**: a corpus
+declines cycles constantly, `BACK` only ever rises, and its veto is per *node*
+while the corpus's knowledge is per *child*. Measurements in `DESIGN.md`
+§30.3.1.)  `info` reports the signatures learned, the
 status bar shows coherence and cycles, and `invert` flips the layer with the
 graph so 2NRL covers it too.
 
@@ -2002,8 +2042,9 @@ blame.teach_recall(negative, lessons, source="speech")    # the original is the 
 ## Tests
 
 ```bash
-make test        # python -m unittest discover -s tests -v (includes the Go parity test when `go` is on PATH)
-make go-test     # cd go && go test -race ./...
+make test           # python -m unittest discover -s tests -v (includes the Go parity test when `go` is on PATH)
+make go-test        # cd go && go test -race ./...
+make frontend-test  # cd frontend && npm test (node --test over the settings store; no dependencies)
 ```
 
 ## Layout
@@ -2015,7 +2056,8 @@ RadixCyclicNN/
                       cli, api, llm, ollama, chatgpt, tutor, recall, critic, codegen, tools, agent, browser, mcp,
                       vision, speech, dialogue, chat
   tests/              unittest suite
-  frontend/           Vite + React app (dist/ is prebuilt and served by the API)
+  frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
+                      the panels' settings in localStorage, test/ holds its node --test suite)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
                       sample_problems.* (codegen), sample_tasks.* (agent / explore)

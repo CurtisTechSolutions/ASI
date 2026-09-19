@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField } from "./Fields.jsx";
@@ -23,13 +24,14 @@ const MODES = [
  * about yet (no recording, no image).
  */
 export default function RecallCard({ modality, run, disabled }) {
-  const [length, setLength] = useState(modality === "speech" ? "240" : "0");
-  const [lead, setLead] = useState("");
-  const [attempts, setAttempts] = useState("1");
-  const [mode, setMode] = useState("beam");
-  const [threshold, setThreshold] = useState("6");
-  const [listenBack, setListenBack] = useState(false);
-  const [blame, setBlame] = useState(true);
+  // the Speech and Images tabs each mount one: the settings are remembered per modality
+  const [length, setLength] = useStoredState(`recall.${modality}.length`, modality === "speech" ? "240" : "0");
+  const [lead, setLead] = useStoredState(`recall.${modality}.lead`, "");
+  const [attempts, setAttempts] = useStoredState(`recall.${modality}.attempts`, "1");
+  const [mode, setMode] = useStoredState(`recall.${modality}.mode`, "beam");
+  const [threshold, setThreshold] = useStoredState(`recall.${modality}.threshold`, "6");
+  const [listenBack, setListenBack] = useStoredState(`recall.${modality}.listenBack`, false);
+  const [blame, setBlame] = useStoredState(`recall.${modality}.blame`, true);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);

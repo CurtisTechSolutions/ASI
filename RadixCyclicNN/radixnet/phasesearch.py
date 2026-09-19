@@ -38,7 +38,7 @@ from heapq import heappop, heappush
 
 from .beam import default_beam
 from .encoding import WINDOW
-from .graph import END, FIRST
+from .graph import BACK, END, FIRST
 from .metacog import ABORT, ESCAPE, RIDE, cycle_signature
 from .search import PathResult, _build_result, _start_emission, onward
 
@@ -59,11 +59,15 @@ def start_bucket(graph, start_node: int, start_offset: int, prefix: str = "") ->
     return graph.text_bucket(prefix) if prefix else 0
 
 
-def _meta_costs(meta, label: str, loop_len: int) -> dict[str, float]:
-    """``{action: extra cost}`` from the metacognitive layer for one cycle."""
+def _meta_costs(meta, label: str, loop_len: int, back: float = 0.0) -> dict[str, float]:
+    """``{action: extra cost}`` from the metacognitive layer for one cycle.
+
+    ``back`` is the graph's own probability of handing over at the re-entered
+    node, which the layer folds in as evidence against riding.
+    """
     if meta is None:
         return {RIDE: 0.0, ESCAPE: 0.0, ABORT: 0.0}
-    return meta.costs(cycle_signature(label, loop_len))
+    return meta.costs(cycle_signature(label, loop_len), back)
 
 
 def phase_dijkstra(
@@ -290,6 +294,14 @@ class _Entry:
         return nodes, steps
 
 
+def _back_probability(costs) -> float:
+    """``P(hand over | node, phase)`` - the share the node's ``BACK`` edge takes, 0 when it has none."""
+    for c, _e, cost in costs:
+        if c == BACK:
+            return math.exp(-cost)
+    return 0.0
+
+
 def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float):
     """Children of one partial path as ``(child, edge, step_cost, phase, action)``.
 
@@ -300,16 +312,27 @@ def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float
     cycle, and ``None`` when it does not.  The layer's cost is added to the
     edge's, so a cycle the corpus rides stays cheap and one it never rides is
     dear - neither is ruled out.
+
+    ``BACK`` (section 24's sentinel) and the layer are the same knowledge at two
+    resolutions, and they meet here.  ``BACK`` is the reflex: walks through this
+    node had to be backed out of, so when its edge is the cheapest
+    :func:`~radixnet.search.onward` hands the branch over and it offers nothing.
+    The layer is the memory of *this* cycle.  So the node's hand-over
+    probability enters the layer's policy as evidence against riding, and a
+    hand-over is overruled only when the layer has actually seen this cycle and
+    says to ride it.
     """
     advance = graph.advance
     buckets = graph.buckets
     labels = graph.labels
-    raw = onward(graph.child_costs_at(node, phase))  # a node the model expects to go round offers nothing
+    every = graph.child_costs_at(node, phase)
+    raw = onward(every)  # a node the model expects to go round offers nothing
     extra: dict[str, float] | None = None
     loops: dict[int, int] = {}
     if meta is not None and depth:
         here = depth.get((node, phase), 0)
-        for c, _e, _cost in raw:
+        # the cycle is read off *every* child, so it is still seen when BACK has vetoed the branch
+        for c, _e, _cost in every:
             if c < FIRST:
                 continue  # a sentinel is not a node to loop through
             nphase = (phase + advance[c]) % buckets
@@ -318,7 +341,13 @@ def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float
                 loops[c] = here + 1 - first  # how many steps the loop would close over
         if loops:
             target = min(loops, key=loops.__getitem__)  # the tightest loop names the cycle
-            extra = _meta_costs(meta, labels[target], loops[target])
+            extra = _meta_costs(meta, labels[target], loops[target], _back_probability(every))
+    if not raw and meta is not None and meta.rides(labels[node]):
+        # The reflex says this node goes round, so `onward` handed the branch over and it offers nothing.
+        # But a walk meeting that hand-over has not closed a cycle yet - it is on its *first* visit - so
+        # there is no signature to look up, only what the layer remembers about cycles here.  When that
+        # memory is of riding them, metacognition overrules the reflex; with no memory the hand-over stands.
+        raw = [item for item in every if item[0] != BACK]
     out = []
     for c, e, cost in raw:
         nphase = (phase + advance[c]) % buckets

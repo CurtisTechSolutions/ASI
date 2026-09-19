@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { useJob } from "../hooks/useJob.js";
 import { asArray, fmtCounter, fmtInt, fmtNum, fmtTime, parseInteger, parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
@@ -74,42 +75,42 @@ export default function NegativePanel({ status }) {
   const [busy, setBusy] = useState("");
 
   // filter
-  const [count, setCount] = useState("3");
-  const [prefix, setPrefix] = useState("");
-  const [maxLength, setMaxLength] = useState("60");
-  const [mode, setMode] = useState("sample");
-  const [overSample, setOverSample] = useState("3");
-  const [threshold, setThreshold] = useState("");
-  const [minCoverage, setMinCoverage] = useState("");
-  const [ratio, setRatio] = useState("0");
-  const [peak, setPeak] = useState("");
-  const [noRatio, setNoRatio] = useState(false);
-  const [strict, setStrict] = useState(false);
-  const [learn, setLearn] = useState(false);
-  const [candidates, setCandidates] = useState("");
+  const [count, setCount] = useStoredState("negative.count", "3");
+  const [prefix, setPrefix] = useStoredState("negative.prefix", "");
+  const [maxLength, setMaxLength] = useStoredState("negative.maxLength", "60");
+  const [mode, setMode] = useStoredState("negative.mode", "sample");
+  const [overSample, setOverSample] = useStoredState("negative.overSample", "3");
+  const [threshold, setThreshold] = useStoredState("negative.threshold", "");
+  const [minCoverage, setMinCoverage] = useStoredState("negative.minCoverage", "");
+  const [ratio, setRatio] = useStoredState("negative.ratio", "0");
+  const [peak, setPeak] = useStoredState("negative.peak", "");
+  const [noRatio, setNoRatio] = useStoredState("negative.noRatio", false);
+  const [strict, setStrict] = useStoredState("negative.strict", false);
+  const [learn, setLearn] = useStoredState("negative.learn", false);
+  const [candidates, setCandidates] = useStoredState("negative.candidates", "");
   const [filtered, setFiltered] = useState(null);
 
   // automatic (the reviewer on a loop)
-  const [autoRounds, setAutoRounds] = useState("3");
-  const [autoCount, setAutoCount] = useState("8");
-  const [autoLength, setAutoLength] = useState("60");
-  const [autoThreshold, setAutoThreshold] = useState("6");
-  const [autoContext, setAutoContext] = useState("");
-  const [autoProvider, setAutoProvider] = useState("ollama");
-  const [autoModel, setAutoModel] = useState("");
-  const [autoUrl, setAutoUrl] = useState("");
-  const [autoClear, setAutoClear] = useState(true);
+  const [autoRounds, setAutoRounds] = useStoredState("negative.autoRounds", "3");
+  const [autoCount, setAutoCount] = useStoredState("negative.autoCount", "8");
+  const [autoLength, setAutoLength] = useStoredState("negative.autoLength", "60");
+  const [autoThreshold, setAutoThreshold] = useStoredState("negative.autoThreshold", "6");
+  const [autoContext, setAutoContext] = useStoredState("negative.autoContext", "");
+  const [autoProvider, setAutoProvider] = useStoredState("negative.autoProvider", "ollama");
+  const [autoModel, setAutoModel] = useStoredState("negative.autoModel", "");
+  const [autoUrl, setAutoUrl] = useStoredState("negative.autoUrl", "");
+  const [autoClear, setAutoClear] = useStoredState("negative.autoClear", true);
   const [autoHistory, setAutoHistory] = useState([]);
 
   // judge / teach
-  const [judgeText, setJudgeText] = useState("");
+  const [judgeText, setJudgeText] = useStoredState("negative.judgeText", "");
   const [verdicts, setVerdicts] = useState([]);
-  const [lesson, setLesson] = useState("");
-  const [reason, setReason] = useState("gibberish");
-  const [severity, setSeverity] = useState("1");
-  const [source, setSource] = useState("frontend");
-  const [note, setNote] = useState("");
-  const [cleared, setCleared] = useState("");
+  const [lesson, setLesson] = useStoredState("negative.lesson", "");
+  const [reason, setReason] = useStoredState("negative.reason", "gibberish");
+  const [severity, setSeverity] = useStoredState("negative.severity", "1");
+  const [source, setSource] = useStoredState("negative.source", "frontend");
+  const [note, setNote] = useStoredState("negative.note", "");
+  const [cleared, setCleared] = useStoredState("negative.cleared", "");
 
   const { job: autoJob, running: autoRunning, busy: autoBusy, error: autoError, start: startAuto, stop: stopAuto, clearError: clearAutoError } =
     useJob("critic");

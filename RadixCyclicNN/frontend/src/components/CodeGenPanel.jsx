@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, yesNo } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -434,12 +435,12 @@ function AttemptFeed({ attempts, total, running }) {
 
 /** Solve one problem without training (POST /api/codegen/solve); the attempts go to SolveResultCard. */
 function SolveCard({ shared, onResult }) {
-  const [prompt, setPrompt] = useState("");
-  const [expected, setExpected] = useState("");
-  const [tests, setTests] = useState("");
-  const [source, setSource] = useState("model");
-  const [attempts, setAttempts] = useState("1");
-  const [judge, setJudge] = useState(true);
+  const [prompt, setPrompt] = useStoredState("codegen.solve.prompt", "");
+  const [expected, setExpected] = useStoredState("codegen.solve.expected", "");
+  const [tests, setTests] = useStoredState("codegen.solve.tests", "");
+  const [source, setSource] = useStoredState("codegen.solve.source", "model");
+  const [attempts, setAttempts] = useStoredState("codegen.solve.attempts", "1");
+  const [judge, setJudge] = useStoredState("codegen.solve.judge", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -586,9 +587,9 @@ function SolveResultCard({ result }) {
 
 /** Run a pasted program in the sandbox (POST /api/codegen/run); the report goes to RunResultCard. */
 function RunCard({ shared, onResult }) {
-  const [code, setCode] = useState("");
-  const [expected, setExpected] = useState("");
-  const [tests, setTests] = useState("");
+  const [code, setCode] = useStoredState("codegen.run.code", "");
+  const [expected, setExpected] = useStoredState("codegen.run.expected", "");
+  const [tests, setTests] = useStoredState("codegen.run.tests", "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -689,9 +690,9 @@ function RunResultCard({ result }) {
  * by the solver and the runner.
  */
 export default function CodeGenPanel({ status }) {
-  const [problems, setProblems] = useState("");
+  const [problems, setProblems] = useStoredState("codegen.problems", "");
   const [files, setFiles] = useState([]);
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useStoredState("codegen.settings", DEFAULT_SETTINGS);
   const [formError, setFormError] = useState(null);
   const [serverHistory, setServerHistory] = useState([]);
   const [historyError, setHistoryError] = useState(null);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
 import UploadPicker from "./UploadPicker.jsx";
 import Alert from "./Alert.jsx";
@@ -70,33 +71,33 @@ function LogLine({ record }) {
  * or exploration, where the network chooses every task itself.
  */
 export default function AgentPanel({ status }) {
-  const [mode, setMode] = useState("tasks");
-  const [tasks, setTasks] = useState("");
+  const [mode, setMode] = useStoredState("agent.mode", "tasks");
+  const [tasks, setTasks] = useStoredState("agent.tasks", "");
   const [taskFiles, setTaskFiles] = useState([]);
-  const [steps, setSteps] = useState("10");
-  const [seedUrls, setSeedUrls] = useState("");
-  const [phase, setPhase] = useState("model");
-  const [rounds, setRounds] = useState("1");
-  const [maxSteps, setMaxSteps] = useState("6");
-  const [modelAttempts, setModelAttempts] = useState("2");
-  const [mediation, setMediation] = useState("repair");
-  const [criteria, setCriteria] = useState("4");
-  const [temperature, setTemperature] = useState("1.0");
-  const [maxLength, setMaxLength] = useState("200");
-  const [judge, setJudge] = useState(true);
-  const [teach, setTeach] = useState(true);
-  const [strict, setStrict] = useState(true);
-  const [readReward, setReadReward] = useState(false);
-  const [blame, setBlame] = useState(false);
-  const [blatantMode, setBlatantMode] = useState("fail_invert");
-  const [blatantMargin, setBlatantMargin] = useState("0.5");
-  const [blatantBoost, setBlatantBoost] = useState("4");
-  const [negEpochs, setNegEpochs] = useState("2");
-  const [posEpochs, setPosEpochs] = useState("3");
-  const [negLr, setNegLr] = useState("0.5");
-  const [posLr, setPosLr] = useState("0.1");
-  const [strength, setStrength] = useState("1");
-  const [agentModel, setAgentModel] = useState("");
+  const [steps, setSteps] = useStoredState("agent.steps", "10");
+  const [seedUrls, setSeedUrls] = useStoredState("agent.seedUrls", "");
+  const [phase, setPhase] = useStoredState("agent.phase", "model");
+  const [rounds, setRounds] = useStoredState("agent.rounds", "1");
+  const [maxSteps, setMaxSteps] = useStoredState("agent.maxSteps", "6");
+  const [modelAttempts, setModelAttempts] = useStoredState("agent.modelAttempts", "2");
+  const [mediation, setMediation] = useStoredState("agent.mediation", "repair");
+  const [criteria, setCriteria] = useStoredState("agent.criteria", "4");
+  const [temperature, setTemperature] = useStoredState("agent.temperature", "1.0");
+  const [maxLength, setMaxLength] = useStoredState("agent.maxLength", "200");
+  const [judge, setJudge] = useStoredState("agent.judge", true);
+  const [teach, setTeach] = useStoredState("agent.teach", true);
+  const [strict, setStrict] = useStoredState("agent.strict", true);
+  const [readReward, setReadReward] = useStoredState("agent.readReward", false);
+  const [blame, setBlame] = useStoredState("agent.blame", false);
+  const [blatantMode, setBlatantMode] = useStoredState("agent.blatantMode", "fail_invert");
+  const [blatantMargin, setBlatantMargin] = useStoredState("agent.blatantMargin", "0.5");
+  const [blatantBoost, setBlatantBoost] = useStoredState("agent.blatantBoost", "4");
+  const [negEpochs, setNegEpochs] = useStoredState("agent.negEpochs", "2");
+  const [posEpochs, setPosEpochs] = useStoredState("agent.posEpochs", "3");
+  const [negLr, setNegLr] = useStoredState("agent.negLr", "0.5");
+  const [posLr, setPosLr] = useStoredState("agent.posLr", "0.1");
+  const [strength, setStrength] = useStoredState("agent.strength", "1");
+  const [agentModel, setAgentModel] = useStoredState("agent.agentModel", "");
   // the count / reward model has no learning rates: it pushes by a strength
   const countKind = Boolean(status && status.kind === "count");
   const [formError, setFormError] = useState(null);

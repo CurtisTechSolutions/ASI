@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
+import { browserStorage, clearSettings } from "./storage.js";
 import StatusBar from "./components/StatusBar.jsx";
 import ModelSelector from "./components/ModelSelector.jsx";
 import TrainPanel from "./components/TrainPanel.jsx";
@@ -44,6 +45,38 @@ const TABS = [
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];
+
+/**
+ * "Reset saved settings": forget every remembered panel setting and reload
+ * with the defaults. Two clicks, so a stray one costs nothing; hidden where
+ * the browser has no usable storage (a private window, blocked site data).
+ */
+function SettingsReset() {
+  const storage = browserStorage();
+  const [armed, setArmed] = useState(false);
+  if (!storage) return null;
+  return (
+    <>
+      {" · "}
+      <button
+        type="button"
+        className="link"
+        title="Panel settings (epochs, rates, prefixes, prompts, the text in the boxes) are remembered in this browser. Results, ratings and uploaded-file choices are not."
+        onBlur={() => setArmed(false)}
+        onClick={() => {
+          if (!armed) {
+            setArmed(true);
+            return;
+          }
+          clearSettings(storage);
+          window.location.reload();
+        }}
+      >
+        {armed ? "reset them? click again" : "settings saved in this browser"}
+      </button>
+    </>
+  );
+}
 
 /** The engine behind the API: "go" when the Go server answers, else "python". */
 export function engineOf(status, health) {
@@ -159,7 +192,8 @@ export default function App() {
 
       <footer className="app-footer">
         RadixCyclicNN{version ? ` v${version}` : ""} · API {status ? "connected" : "unreachable"}
-        {engine === "go" ? " (Go server)" : ""} · built with Vite + React, no other dependencies.
+        {engine === "go" ? " (Go server)" : ""} · built with Vite + React, no other dependencies
+        <SettingsReset />
       </footer>
     </div>
   );
