@@ -1,0 +1,800 @@
+{"source": "python", "text": "\"\"\"RadixCyclicGraph - the self-compressing cyclic graph."}
+{"source": "python", "text": "\"\"\"Shortest-path prediction (Dijkstra) and stochastic sampling over the graph."}
+{"source": "python", "text": "\"\"\"Sliding-window character encoding and its inverse."}
+{"source": "python", "text": "\"\"\"Cyclic counters - the odometer every growing integer in the model runs on."}
+{"source": "python", "text": "\"\"\"Learning-rate schedules: a rate as a *graph function* of the epoch."}
+{"source": "python", "text": "\"\"\"RadixNet - training, prediction, generation, scoring, 2NRL and persistence."}
+{"source": "python", "text": "\"\"\"CountRewardNet - the count / reward model: a second algorithm on the same self-compressing graph."}
+{"source": "python", "text": "\"\"\"ResonantNet - the phase model: an analog carrier on the same self-compressing graph."}
+{"source": "python", "text": "\"\"\"NegativeNet - the negative network: the failures, and *why* they were failures."}
+{"source": "python", "text": "\"\"\"Where the negative network's data comes from: the tutor's verdicts, turned into blame."}
+{"source": "python", "text": "_NO_NODES: frozenset[int] = frozenset()\n_W = WINDOW          # trigram length"}
+{"source": "python", "text": "import math\nimport random\nfrom dataclasses import dataclass, field"}
+{"source": "python", "text": "``Decoder`` reverses that for raw windows (:meth:`Decoder.decode_trigrams`) and"}
+{"source": "python", "text": "and the frontend.  So no counter in the model is an unbounded integer.  Each"}
+{"source": "python", "text": "    lr / 10                       # (activation schedule) a tenth of this epoch's learning rate"}
+{"source": "python", "text": "    \"\"\"\n    directory = os.path.dirname(os.path.abspath(path)) or \".\""}
+{"source": "python", "text": "COUNT_MODEL_FORMAT = \"radixnet-count\"\n_W = WINDOW"}
+{"source": "python", "text": "first model here whose distribution depends on more than the parent."}
+{"source": "python", "text": "That judgement is the filter: :mod:`radixnet.duo` pairs this network with"}
+{"source": "python", "text": "  one-sentence critique;\n* the **code-generation teacher and judge** (:mod:`radixnet.codegen`): the"}
+{"source": "python", "text": "    return {**d, \"nodes\": nodes, \"edges\": edges, \"format_version\": _GRAPH_FORMAT_VERSION}"}
+{"source": "python", "text": "    (sentinels included), ``cost`` the summed edge cost (``== sum(step_costs)``),"}
+{"source": "python", "text": "the base64 payload of a text the network predicted is rarely clean, so it is"}
+{"source": "python", "text": "Nothing is lost: ``total`` is the exact number of events, ``value`` is what the"}
+{"source": "python", "text": "log2 log10 sqrt pow abs floor ceil round min max tanh clamp`` and ``pi``, ``e``."}
+{"source": "python", "text": "        if self.lr_schedule is not None or self.act_lr_schedule is not None:"}
+{"source": "python", "text": "    and merges all work unchanged; only how a weight comes about differs."}
+{"source": "python", "text": "    and read as the model's **phase-marginal**: what it believes before the"}
+{"source": "python", "text": "        self.reason_fails_resets: dict[int, int] = {}"}
+{"source": "python", "text": "    \"faults_from_agent\",\n    \"faults_from_attempts\","}
+{"source": "python", "text": "    def _edge_traversals_f(self, e: int) -> float:"}
+{"source": "python", "text": "    full_text: str = \"\"\n    def to_dict(self) -> dict:"}
+{"source": "python", "text": "WINDOW = 3\nSTART_LABEL = \"<s>\"\nEND_LABEL = \"</s>\""}
+{"source": "python", "text": "  unchanged - which an unbounded integer does not;"}
+{"source": "python", "text": "import math\nfrom typing import Any\n__all__ = [\n    \"PRESETS\","}
+{"source": "python", "text": "    cfg.validate()\n    return cfg\nMETA_COUNTERS = ("}
+{"source": "python", "text": "        judged to be - ``True`` correct, ``False`` incorrect, ``None`` not"}
+{"source": "python", "text": "        return 0 if node < FIRST else self.label_advance(label)"}
+{"source": "python", "text": "        if not (0 <= e < len(self.edge_reasons)):"}
+{"source": "python", "text": "}\n\"\"\"How heavily each tool-use failure is blamed (1 = one ordinary failure).\"\"\""}
+{"source": "python", "text": "        return nid\n    def _new_edge(self, p: int, c: int, count: int = 0, count_resets: int = 0) -> int:"}
+{"source": "python", "text": "def onward(costs: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:"}
+{"source": "python", "text": "        if window < 1:\n            raise ValueError(f\"window must be >= 1, got {window}\")"}
+{"source": "python", "text": "events - the odometer's full turn, unreachable by several orders of magnitude"}
+{"source": "python", "text": "CONSTANTS = {\"pi\": math.pi, \"e\": math.e}\nFUNCTIONS: dict[str, Any] = {"}
+{"source": "python", "text": "        out[key], out[f\"{key}_resets\"] = counter.to_pair()"}
+{"source": "python", "text": "        \"\"\"Judge single ``(prev, edge)`` steps - what a diff blames or teaches - rather than a whole walk.\"\"\""}
+{"source": "python", "text": "        if moved:\n            self.recompute_weights()"}
+{"source": "python", "text": "        Use it when the tutor was wrong, or to let old failures fade."}
+{"source": "python", "text": "    (\"grammar\", (\"grammar\", \"grammatic\", \"syntax\", \"word order\", \"punctuation\", \"agreement\", \"tense\", \"malformed sentence\")),"}
+{"source": "python", "text": "            return loc\n        return (self._create_trigram_node(trigram), 0)"}
+{"source": "python", "text": "    back = min(cost for c, _e, cost in costs if c == BACK)"}
+{"source": "python", "text": "        w = self.window\n        n = len(text) - w + 1"}
+{"source": "python", "text": "\"\"\"\nfrom __future__ import annotations\n__all__ = [\"COUNTER_LIMIT\", \"CyclicCounter\", \"as_float\", \"carry\", \"carry_series\", \"total\"]"}
+{"source": "python", "text": "    {\"name\": \"linear ramp x4\", \"lr\": \"linear(lr0, 4 * lr0)\", \"act_lr\": \"linear(act_lr0, 4 * act_lr0)\","}
+{"source": "python", "text": "        first with the whole of its node's label, a later one with everything"}
+{"source": "python", "text": "            for edge in self._by_edge:\n                if 0 <= edge < len(self.edge_parent):"}
+{"source": "python", "text": "        \"\"\"\n        rephase = False\n        for name in (\"buckets\", \"period\", \"kick_scale\", \"resonance_scale\", \"amp_scale\", \"reward_scale\", \"concentration\"):"}
+{"source": "python", "text": "                ew[e] = weight(net[e], total, degree)"}
+{"source": "python", "text": "    \"\"\"How heavily a rated failure is blamed: ``ceiling`` at rating 0, ``floor`` at the pass threshold."}
+{"source": "python", "text": "            index[label[j : j + _W]] = (b_id, j - i)"}
+{"source": "python", "text": "    if start_offset < 0 or remainder < 0:\n        raise ValueError("}
+{"source": "python", "text": "    __slots__ = (\"window\",)\n    def __init__(self, window: int = WINDOW) -> None:"}
+{"source": "python", "text": "    wraps at the same limit::\n        carry(COUNTER_LIMIT + 7, 2) == (7, 3)"}
+{"source": "python", "text": "    {\"name\": \"step x1.5 every 2 epochs\", \"lr\": \"step(lr0, 1.5, 2)\", \"act_lr\": \"step(act_lr0, 1.5, 2)\","}
+{"source": "python", "text": "            else:\n                kept.append(t)"}
+{"source": "python", "text": "        entered without an in-edge whenever a text starts on it, so ``visits``"}
+{"source": "python", "text": "            if items:\n                m = max(s for _, _, s in items)"}
+{"source": "python", "text": "        self.total_blame, self.total_clear = self.total_clear, self.total_blame"}
+{"source": "python", "text": "    read at all is not also judged on its length, and one that stopped early is"}
+{"source": "python", "text": "            for e2 in parents[p].values():\n                ew[e2] *= in_ratio"}
+{"source": "python", "text": "        # From START there is no matched context to strip: emit the first node in full."}
+{"source": "python", "text": "        \"\"\"``[] -> \"\"``; first window in full, then the last char of each following window.\"\"\""}
+{"source": "python", "text": "def as_float(value: int, resets: int = 0) -> float:"}
+{"source": "python", "text": "     \"description\": \"keep the activation rate at a tenth of whatever the learning rate is\"},"}
+{"source": "python", "text": "        short prefix, of the node label) the prefix actually covers; the rest"}
+{"source": "python", "text": "    def split(self, node_id: int, i: int) -> tuple[int, int]:"}
+{"source": "python", "text": "    def observe_onward(self, p: int, amount: float = 1.0) -> bool:"}
+{"source": "python", "text": "        g.reason_blame = [float(v) for v in registry.get(\"blame\", [])]"}
+{"source": "python", "text": "    The order is how far it got: a network that never called anything is not"}
+{"source": "python", "text": "        characters (``x[1:] == y[:2]``) as produced by :class:`Encoder`."}
+{"source": "python", "text": "        text=text,\n        labels=labels,\n        node_ids=node_ids,"}
+{"source": "python", "text": "        start_offset: int = 0,\n        include_context: bool = True,"}
+{"source": "python", "text": "    reset counts of the ids that ever wrapped (absent means 0), so the common"}
+{"source": "python", "text": "        elif isinstance(node, ast.BinOp):\n            if not isinstance(node.op, _BINOPS):"}
+{"source": "python", "text": "    ) -> Prediction:\n        \"\"\"The prediction search from where ``prefix`` ends: ``\"beam\"`` (the ``k`` most and least likely"}
+{"source": "python", "text": "    def observe_back(self, p: int, went: int | None = None, instead: int | None = None,"}
+{"source": "python", "text": "        g.amp_scale = float(weights.get(\"amp_scale\", 1.0))"}
+{"source": "python", "text": "      network stays a network of failures.\n    * :meth:`correct` is the sharpest lesson of all: when the tutor writes the"}
+{"source": "python", "text": "    return {\"text\": text, \"reason\": reason, \"severity\": float(severity), \"note\": note, \"source\": source}"}
+{"source": "python", "text": "                counts[py] += 1\n                ecounts[e] += 1"}
+{"source": "python", "text": "    \"\"\"Cheapest path from ``(start_node, start_offset)`` emitting ``>= min_chars``."}
+{"source": "python", "text": "        ``START_LABEL`` / ``END_LABEL`` entries are skipped while"}
+{"source": "python", "text": "            else:\n                resets.pop(i, None)"}
+{"source": "python", "text": "        elif isinstance(node, ast.BoolOp):\n            if not isinstance(node.op, _BOOL):"}
+{"source": "python", "text": "          RNG; otherwise the model's seeded RNG is consumed)."}
+{"source": "python", "text": "        window_count = max(0.0, float(window_count))"}
+{"source": "python", "text": "        self.back_ceiling = float(back_ceiling)"}
+{"source": "python", "text": "                costs = cache[p] = {edge: cost for _c, edge, cost in child_costs(p)}"}
+{"source": "python", "text": "    A rejected program is blamed for what the sandbox, the style checker or"}
+{"source": "python", "text": "                return None\n            e = children[px].get(py)"}
+{"source": "python", "text": "    (dead end or ``max_expansions``), the popped state with the most emitted"}
+{"source": "python", "text": "        * ``label[start_offset:]`` when ``include_context`` is true (full"}
+{"source": "python", "text": "    for, which keeps ``version`` stamps and ``!=`` cache checks exact across a"}
+{"source": "python", "text": "                raise ScheduleError(f\"{node.func.id}() takes positional arguments only\")"}
+{"source": "python", "text": "        counted as transitions.  An unknown trigram, a missing edge or a"}
+{"source": "python", "text": "        # a = 0 and k = 1 make f(z) = 1 whatever z is: scores reduce to the edge weight"}
+{"source": "python", "text": "        A cycle decision only exists when one of ``p``'s children would land on"}
+{"source": "python", "text": "                else:\n                    touched += graph.record_clear(edges, amount)"}
+{"source": "python", "text": "    apart:\n    * the **transcript** as a whole, for how badly it failed"}
+{"source": "python", "text": "        are the identity.\n        \"\"\"\n        ew = self.edge_w"}
+{"source": "python", "text": "        max_chars = min_chars\n    labels = graph.labels"}
+{"source": "python", "text": "          prediction returns only the continuation."}
+{"source": "python", "text": "        raise AttributeError(f\"{type(self).__name__} is immutable; use += to get a new reading\")"}
+{"source": "python", "text": "            return ast.copy_location(ast.Constant(float(node.value)), node)"}
+{"source": "python", "text": "        return cls.from_dict(read_json_file(path), backend=backend, device=device)"}
+{"source": "python", "text": "        g.window_scale = float(weights.get(\"window_scale\", 0.0 if legacy else 0.5))"}
+{"source": "python", "text": "            self._observe(cleaned, count=False)"}
+{"source": "python", "text": "        *,\n        reason: str | None = None,\n        severity: float = 1.0,"}
+{"source": "python", "text": "            if text:\n                correct.append(text)"}
+{"source": "python", "text": "                continue\n            scale = 1.0 - 2.0 * amt"}
+{"source": "python", "text": "    best_get = best.get\n    prev: dict[tuple[int, int, int], tuple[tuple[int, int, int], float]] = {}"}
+{"source": "python", "text": "        know the node ids strip START/END themselves and pass"}
+{"source": "python", "text": "    def bumped(self, n: int = 1) -> \"CyclicCounter\":"}
+{"source": "python", "text": "    env.update(\n        linear=lambda a, b: a + (b - a) * t,"}
+{"source": "python", "text": "        texts, skipped_short = self._clean_texts(texts)"}
+{"source": "python", "text": "    )\n    def __init__(\n        self,\n        seed: int = 0,"}
+{"source": "python", "text": "        self.meta[\"trained_chars\"] += sum(len(t) for t in cleaned)"}
+{"source": "python", "text": "               lr: float | None = None, weights: Sequence[float] | None = None,"}
+{"source": "python", "text": "                        source,\n                    ))"}
+{"source": "python", "text": "        (:func:`radixnet.dialogue.backtrack`).  Three things are taught at once, and all three are ordinary"}
+{"source": "python", "text": "        expanded += 1\n        if node == END or (not to_end and chars >= min_chars):"}
+{"source": "python", "text": "        parts: list[str] = []\n        first = True"}
+{"source": "python", "text": "        return self.bumped(n)\n    __radd__ = __add__"}
+{"source": "python", "text": "        text = (expression or \"\").strip()\n        if not text:"}
+{"source": "python", "text": "                \"trigrams\": graph.num_trigrams(),"}
+{"source": "python", "text": "            edges = [e for _, e in transitions]"}
+{"source": "python", "text": "        interface parity with RadixNet and ignored."}
+{"source": "python", "text": "            if stop_event is not None and stop_event.is_set():"}
+{"source": "python", "text": "    carries the teacher's explanation of *why* it is wrong and its"}
+{"source": "python", "text": "        paths (:class:`~radixnet.countnet.CountRewardGraph`) uses to price the"}
+{"source": "python", "text": "            nkey = (node if c in context else -1, c, nchars)"}
+{"source": "python", "text": "                parts.append(label[first_cut:])"}
+{"source": "python", "text": "        if isinstance(other, CyclicCounter):\n            return other.total"}
+{"source": "python", "text": "        \"\"\"The rate for ``epoch`` (1-based) of ``epochs``; ``base`` is ``lr0``; extra names (``act_lr0``, ``lr``).\"\"\""}
+{"source": "python", "text": "        matched, the unmatched remainder of that trigram opens the"}
+{"source": "python", "text": "            progress=progress, stop_event=stop_event,"}
+{"source": "python", "text": "        strength``; ``good_weights`` rates the positive phase the same way - a"}
+{"source": "python", "text": "            checkpoint_manager.save(self, runs, \"2nrl\", last)"}
+{"source": "python", "text": "            score = grade.get(\"score\")\n            fault = _fault("}
+{"source": "python", "text": "        if len(params) != len(self.labels):\n            raise ValueError(f\"expected params for {len(self.labels)} nodes, got {len(params)}\")"}
+{"source": "python", "text": "        link = prev.get(key)\n        if link is None:"}
+{"source": "python", "text": "_B64_JUNK = re.compile(r\"[^A-Za-z0-9+/=]\")\ndef repair_base64(body: str) -> tuple[bytes, bool]:"}
+{"source": "python", "text": "        return NotImplemented if o is None else self.total != o"}
+{"source": "python", "text": "            raise ScheduleError(f\"schedule {self.expression!r} must give a number, got {type(value).__name__}\")"}
+{"source": "python", "text": "        for path, amount in zip(self._paths_of(texts), values):"}
+{"source": "python", "text": "        records: list[dict] = []\n        for weight, group in _weight_groups(texts, weights, \"weights\"):"}
+{"source": "python", "text": "            done = self._walk(text, learn=False, count=False, reward=0.0, strength=0.0)"}
+{"source": "python", "text": "        changes = diff.summary(wrong, right, limit=0)"}
+{"source": "python", "text": "                faults.append(similar)\n        for text in (correction, answer):"}
+{"source": "python", "text": "                \"a\": [self.a[i] for i in order],"}
+{"source": "python", "text": ") -> PathResult:\n    \"\"\"Stochastic walk sampling each child from ``softmax(scores / temperature)``."}
+{"source": "python", "text": "    their payload as base64 into a text the network trains on and *predicts*,"}
+{"source": "python", "text": "        return NotImplemented if o is None else self.total > o"}
+{"source": "python", "text": "    \"\"\"``None`` / blank -> ``None`` (a constant rate); otherwise a validated :class:`Schedule`.\"\"\""}
+{"source": "python", "text": "        parameters.  Other :class:`TrainConfig` fields (``batch_size``,"}
+{"source": "python", "text": "    def invert(self) -> None:\n        \"\"\"Flip the sign of every reward.\"\"\""}
+{"source": "python", "text": "        if mode not in (\"kbest\", \"beam\", \"dijkstra\", \"sample\"):"}
+{"source": "python", "text": "            raise ValueError(f\"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'\")"}
+{"source": "python", "text": "        score = grade.get(\"score\")\n        fault = _fault("}
+{"source": "python", "text": "        index: dict[str, tuple[int, int]] = {}\n        for nid in range(FIRST, n):"}
+{"source": "python", "text": "    :func:`dijkstra_predict`.\n    \"\"\"\n    if temperature < 0:"}
+{"source": "python", "text": "    padding is completed, and ``repaired`` says whether any of that changed"}
+{"source": "python", "text": "    def __int__(self) -> int:\n        return self.total"}
+{"source": "python", "text": "    reverse: bool = False,\n) -> list[dict]:\n    \"\"\"``[{\"epoch\", \"lr\", \"act_lr\"}]`` for every epoch; the activation schedule sees the epoch's ``lr``."}
+{"source": "python", "text": "                        record[\"weight\"] = weight"}
+{"source": "python", "text": "          had to be corrected;\n        * ``count`` traverses the correction once, as a training pass does,"}
+{"source": "python", "text": "        out of the middle of a compressed node is impossible) or the edge does"}
+{"source": "python", "text": "        Walks ``text`` through the negative structure and reports"}
+{"source": "python", "text": "        severity = float(fault.get(\"severity\", 1.0))"}
+{"source": "python", "text": "        ``texts`` (optional) are checked for the structural round trip (their"}
+{"source": "python", "text": "            break\n        costs = onward(child_costs(node, came_from))  # a node the model expects to go round offers nothing"}
+{"source": "python", "text": "    clean = _B64_JUNK.sub(\"\", body).rstrip(\"=\")"}
+{"source": "python", "text": "    def __deepcopy__(self, memo: dict) -> \"CyclicCounter\":"}
+{"source": "python", "text": "    points = []\n    for epoch in range(1, epochs + 1):"}
+{"source": "python", "text": "            )\n        if stop_event is None or not stop_event.is_set():"}
+{"source": "python", "text": "        if blamed:\n            penalty = -base * float(weight)"}
+{"source": "python", "text": "        graph = self.graph\n        index = graph.trigram_index"}
+{"source": "python", "text": "        ranked = sorted(blamed, key=lambda c: -c[\"evidence\"])"}
+{"source": "python", "text": "            unmatched = out[-1].get(\"unmatched\", 0)"}
+{"source": "python", "text": "                )\n                assert parents[c].get(p) == e, f\"edge {p}->{c} ({e}) missing from parents[{c}]\""}
+{"source": "python", "text": "            pick = costs[-1]\n            acc = 0.0"}
+{"source": "python", "text": "    try:\n        payload = base64.b64decode(padded, validate=True)"}
+{"source": "python", "text": "    # -- serialisation -------------------------------------------------------"}
+{"source": "python", "text": "        \"constants\": sorted(CONSTANTS),\n        \"functions\": sorted(FUNCTIONS),"}
+{"source": "python", "text": "            raise ValueError(f\"unsupported {MODEL_FORMAT} model version {version}\")"}
+{"source": "python", "text": "        meta = self.meta\n        pos, neg = g.total_reward()"}
+{"source": "python", "text": "            \"kind\": self.kind,\n            \"nodes\": graph.num_nodes(),"}
+{"source": "python", "text": "                \"failures_total\", \"cleared_total\", \"judgements\", \"rejected\","}
+{"source": "python", "text": "    report = teach(negative, faults, passed if clear_passes else (), **options)"}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"math\"\n\t\"sort\"\n)\n// A node against the nodes around it."}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"fmt\"\n\t\"math\"\n\t\"sync/atomic\""}
+{"source": "go", "text": "package radixnet\n// Cyclic counters - the odometer every growing integer in the model runs on,"}
+{"source": "go", "text": "// Package radixnet is the Go port of the count / reward model of RadixCyclicNN:"}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"fmt\"\n\t\"math\"\n\t\"sort\""}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"fmt\"\n\t\"strings\"\n\t\"time\""}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"fmt\"\n\t\"math\"\n\t\"strings\""}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"fmt\"\n\t\"math\"\n)\n// PathResult is the outcome of a prediction / generation walk: Text is the"}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"fmt\"\n\t\"sort\"\n\t\"sync\""}
+{"source": "go", "text": "// that answer that: for one node, a row per previous node and a row per next"}
+{"source": "go", "text": "func (g *Graph) EdgeWeight(count, reward, parentTotal float64, degree int, windowCount, windowTotal float64) float64 {"}
+{"source": "go", "text": "//\n// A number that only ever counts up - traversals, node and edge visit counts,"}
+{"source": "go", "text": "// frequency function of traversal counts (all time and inside a sliding"}
+{"source": "go", "text": "}\n// Kind is the model kind shared with the Python implementation."}
+{"source": "go", "text": "//     from, because that is what a character-level model can reply to"}
+{"source": "go", "text": "// text carries a token of its own, so the exercise can be the token alone; an"}
+{"source": "go", "text": "// path ends at END and FullText prefix + text."}
+{"source": "go", "text": "}\n// DefaultBeam is the beam width used when none is given."}
+{"source": "go", "text": "// entered without an in-edge whenever a text starts on it, so Visits can be"}
+{"source": "go", "text": "// RecordTraversals counts traversals of edges in order: all time (already"}
+{"source": "go", "text": "// the JSON number that carries it through a model file, the HTTP API and the"}
+{"source": "go", "text": "//\n// Model files are interchangeable with the Python implementation"}
+{"source": "go", "text": "func (m *Model) carryMeta() {\n\tfor _, key := range metaCounters {"}
+{"source": "go", "text": "// corpus has no way of finding out that what it said did not answer the"}
+{"source": "go", "text": "// wrong, and the agreement below which a readable, right-length recall is still"}
+{"source": "go", "text": "\tCost       float64   `json:\"cost\"`\n\tStepCosts  []float64 `json:\"step_costs\"`"}
+{"source": "go", "text": "\tnode, parent int\n\tstep         float64\n}\ntype finished struct {"}
+{"source": "go", "text": "\tSeen       int64  `json:\"seen\"`\n\tSeenResets int64  `json:\"seen_resets\"`"}
+{"source": "go", "text": "\t\t\tif old < len(g.WindowEdgeCount) && g.WindowEdgeCount[old] > 0 {"}
+{"source": "go", "text": "//\n// The value counts up as before; the moment it reaches the limit it is set"}
+{"source": "go", "text": "// Python and vice versa with identical numbers."}
+{"source": "go", "text": "\tPhase        string\n\tProgress     func(record map[string]any)"}
+{"source": "go", "text": "\tK int `json:\"k\"`\n\t// Temperature is the sampling temperature of the model's replies."}
+{"source": "go", "text": "\t\t\tcontinue\n\t\t}\n\t\tcolons := 0\n\t\tfor i := at; i < len(text); i++ {"}
+{"source": "go", "text": "// learned about going round.\n//\n// Back is not a continuation - it emits nothing and no text passes through it -"}
+{"source": "go", "text": "\t}\n\treturn a.entry < b.entry\n}\n// runBeam is one beam: the k cheapest (or, with worst, dearest) complete paths."}
+{"source": "go", "text": "\t// signed - so a penalty reads as a negative share of the pressure on the"}
+{"source": "go", "text": "// negative graph: the blame function's scales)."}
+{"source": "go", "text": "// the odometer reads now and resets is how often it went round."}
+{"source": "go", "text": "// increments), recomputes weights and edge costs in parallel over the nodes,"}
+{"source": "go", "text": "\treturn BlameOptions{Epochs: opts.Epochs, NoCompress: !opts.AutoCompress, Progress: opts.Progress, Stop: opts.Stop}"}
+{"source": "go", "text": "\tTeachPartner bool `json:\"teach_partner\"`\n\t// AvoidRepeats keeps the model from saying something the conversation has already heard."}
+{"source": "go", "text": "// to continue.\ntype RecallExercise struct {\n\tID        string `json:\"id\"`"}
+{"source": "go", "text": "// step at this node is to stop rather than carry on: the walk hands over, which"}
+{"source": "go", "text": "\t\t\treturn true\n\t\t}\n\t\treturn !toEnd && chars >= minChars"}
+{"source": "go", "text": "\tPathSeen     int64    `json:\"path_seen\"`\n\tPathRatio    *float64 `json:\"path_ratio\"`"}
+{"source": "go", "text": "\t\t\t\told := g.window[g.windowHead]\n\t\t\t\tg.windowHead++"}
+{"source": "go", "text": "// int64 and a carry sweep at a safe point - the end of an epoch, before a save"}
+{"source": "go", "text": "package radixnet\nimport (\n\t\"encoding/base64\"\n\t\"fmt\""}
+{"source": "go", "text": "\t\to.Reason, o.Severity, o.Source = \"thumbs-down\", math.Abs(strength), \"feedback\""}
+{"source": "go", "text": "\t\tExplore: Explore, NegEpochs: 2, PosEpochs: 3,"}
+{"source": "go", "text": "\t\tif err != nil {\n\t\t\tcontinue\n\t\t}\n\t\tlabel := \"\""}
+{"source": "go", "text": "\tback, hasBack := math.Inf(1), false\n\tfor _, it := range costs {"}
+{"source": "go", "text": "\t\tif k == 0 {\n\t\t\treturn\n\t\t}\n\t\tkey := doneKey{-cost * sign, entry}"}
+{"source": "go", "text": "type SideTotals struct {\n\tEdges        int      `json:\"edges\"`"}
+{"source": "go", "text": "\t\t\tcase \"reward_scale\":\n\t\t\t\tg.RewardScale = value"}
+{"source": "go", "text": "// counter past the end of the world between two sweeps."}
+{"source": "go", "text": "const Overlap = Window - 1\n// StartLabel and EndLabel are the labels of the two sentinel nodes."}
+{"source": "go", "text": "\t\t}\n\t\tgrouped[key] = append(grouped[key], text)"}
+{"source": "go", "text": "\t}\n\tif c.Threshold < 0 || c.Threshold > 10 {\n\t\treturn fmt.Errorf(\"threshold must lie in [0, 10]\")"}
+{"source": "go", "text": "\tif len(truth) == 0 {\n\t\tif len(written) == 0 {\n\t\t\treturn 1"}
+{"source": "go", "text": "\thandOver := true\n\tfor _, it := range costs {\n\t\tif it.Child == Back {"}
+{"source": "go", "text": "\tif complete(startNode, startChars) {\n\t\toffer(0, 0)"}
+{"source": "go", "text": "}\n// NodeStats is one node with both of its sides."}
+{"source": "go", "text": "\tWindowScale float64 `json:\"window_scale\"`\n\tRewardScale float64 `json:\"reward_scale\"`"}
+{"source": "go", "text": "// survives a model file, a JSON response and a JavaScript Number unchanged,"}
+{"source": "go", "text": "\tBackLabel = \"<back>\"\n)\n// runeLen is the character (code point) length of a string, the unit the"}
+{"source": "go", "text": "\t\tif err != nil {\n\t\t\treturn records, err\n\t\t}\n\t\tfor _, record := range grouped {"}
+{"source": "go", "text": "// with the lock held.\ntype Chat struct {\n\tModel       *Model"}
+{"source": "go", "text": "\t\tif b <= 2 || b >= 253 {\n\t\t\tn++\n\t\t}\n\t}\n\treturn float64(n) / float64(len(payload))"}
+{"source": "go", "text": "\t}\n\treturn onward\n}\nfunc (r *PathResult) Probability() float64 {"}
+{"source": "go", "text": "\t\t\tprev := -1\n\t\t\tif parent := entries[st.entry].parent; parent >= 0 {"}
+{"source": "go", "text": "\tVisitResets int64            `json:\"visit_resets\"`"}
+{"source": "go", "text": "type Share struct {\n\tChild, Edge int\n\tAll, Recent float64"}
+{"source": "go", "text": "const CounterLimit int64 = 1_000_000_000_000_000"}
+{"source": "go", "text": "func runeSlice(s string, from, to int) string {"}
+{"source": "go", "text": "func (m *Model) TwoNRL(bad, good []string, negEpochs, posEpochs int, strength float64) (*TwoNRLResult, error) {"}
+{"source": "go", "text": "\t\treturn c.JudgeClient\n\t}\n\treturn c.Client\n}\n// external runs fn, through External when one is set."}
+{"source": "go", "text": "\tpeak, err := recallPeak(payload, codec)\n\tif err != nil { // a codec the reader does not know: fall back to the raw byte spread"}
+{"source": "go", "text": "// remainder after the matched trigram); START and END emit nothing."}
+{"source": "go", "text": "\t\t\t\tstep := cc.Cost + stepPenalty\n\t\t\t\tncost := st.cost + step"}
+{"source": "go", "text": "}\n// EdgePaths is (seen, correct, incorrect) of one edge, summed over every caller that reached it."}
+{"source": "go", "text": "\t\tif total > 0 {\n\t\t\ts.All = counts[i] / total\n\t\t}"}
+{"source": "go", "text": "// wrap at the same limit (so the pair itself cycles after 10^30 events)."}
+{"source": "go", "text": "\t\t\tstart = bi\n\t\t}\n\t\tif to >= 0 && i == to {\n\t\t\tend = bi"}
+{"source": "go", "text": "\t}\n\tif opts.Epochs < 0 {\n\t\treturn nil, fmt.Errorf(\"epochs must be >= 0, got %d\", opts.Epochs)"}
+{"source": "go", "text": "// judgements are remembered rather than repeated, and Refused counts texts"}
+{"source": "go", "text": "func recallCommon(payload, truth []byte, repaired bool, failure, modality string) RecallFacts {"}
+{"source": "go", "text": "\t}\n\tif startNode == Start || startNode == End {"}
+{"source": "go", "text": "\t\t\t}\n\t\t}\n\t\tif len(candidates) > 0 {\n\t\t\tfallback = candidates"}
+{"source": "go", "text": "\t\t}\n\t}\n\treturn seen, correct, incorrect\n}\n// sideRows is one row per neighbour: its share of the side's traffic and of the side's reward."}
+{"source": "go", "text": "\t\treturn\n\t}\n\tcounts := make([]float64, len(adj.order))"}
+{"source": "go", "text": "\tif value < 0 { // Go truncates towards zero; the odometer reads forwards"}
+{"source": "go", "text": "\t\treturn \"\"\n\t}\n\treturn s[start:end]\n}\n// Encode returns the overlapping windows of text (stride 1); nil when the text"}
+{"source": "go", "text": "\t\tseq := newSequencer(parts.Len())\n\t\terr := runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {"}
+{"source": "go", "text": "// reply) pairs the judge marks, and why it ended early when it did."}
+{"source": "go", "text": "// on whether it still says the same thing.\nfunc CheckSpeechRecall(written, reference, said, heard string) RecallFacts {"}
+{"source": "go", "text": "\t}\n\treturn remainder, nil\n}\n// buildResult decodes a node path into a PathResult.  includeContext nil"}
+{"source": "go", "text": "\t\t// one is already dearer than the k-th cheapest, the best side is settled"}
+{"source": "go", "text": "\t\t\treturn pairs[i].P < pairs[j].P\n\t\t}\n\t\treturn pairs[i].E < pairs[j].E"}
+{"source": "go", "text": "// parallel over the nodes for large graphs.\nfunc (g *Graph) RecomputeWeights() {"}
+{"source": "go", "text": "}\n// Counter is one scalar odometer: the reading plus how often it wrapped.  It"}
+{"source": "go", "text": "\tn := len(runes) - Window + 1\n\tif n <= 0 {\n\t\treturn nil"}
+{"source": "go", "text": "\t\t\t\t\t\t\t\tatomic.AddInt64(&traversed[t.E], 1)\n\t\t\t\t\t\t\t} else {"}
+{"source": "go", "text": "\t\t\tTemperature: cfg.PartnerTemperature,\n\t\t})\n\t\tline = out"}
+{"source": "go", "text": "\tfacts := recallCommon(payload, truth, repaired, failure, \"image\")"}
+{"source": "go", "text": "\tlabels := make([]string, len(nodeIDs))\n\tfor i, n := range nodeIDs {"}
+{"source": "go", "text": "\t\t\ten := entries[entry]\n\t\t\tids = append(ids, en.node)"}
+{"source": "go", "text": "\t\ttotal += traversals[t.E]\n\t}\n\tfor _, t := range pairs {"}
+{"source": "go", "text": "\tg.Version.Add(1)\n}\n// flushWeights brings the weights up to date: every row after a structural"}
+{"source": "go", "text": "type Counter struct {\n\tValue  int64\n\tResets int64"}
+{"source": "go", "text": "\t\tgrams[i] = string(runes[i : i+Window])\n\t}\n\treturn grams"}
+{"source": "go", "text": "\t\t\t} else {\n\t\t\t\tm.metaAddFloat(\"penalties_total\", -reward*float64(total))"}
+{"source": "go", "text": "\t\treturn held, nil\n\t}\n\theld.Transcript = append(held.Transcript, Line{Speaker: ChatSpeakers[0], Text: line})"}
+{"source": "go", "text": "\t\tscore *= float64(facts.ExpectedBytes) / float64(facts.WrittenBytes) // the excess is waste"}
+{"source": "go", "text": "\tif startNode == Start || startNode == End {\n\t\toffset = 0"}
+{"source": "go", "text": "\t\t}\n\t\treturn ids, stepsOut\n\t}\n\ttype pick struct {"}
+{"source": "go", "text": "\t\t\tNode: t.P, Label: g.Label(t.P), Edge: t.E,\n\t\t\tSeen: g.EdgeCount[t.E], SeenResets: g.EdgeCountResets[t.E],"}
+{"source": "go", "text": "func (g *Graph) WeightsStale() bool {\n\treturn g.dirtyAll || g.weightsStructure != g.StructureVersion || len(g.dirty) > 0"}
+{"source": "go", "text": "\treturn Counter{Value: v, Resets: r}\n}\n// Float is the exact number of events counted, as a float (the Python"}
+{"source": "go", "text": "// label[startOffset:] when includeContext is true, else label[startOffset+Window:]"}
+{"source": "go", "text": "\t\tfor e, c := range traversed {\n\t\t\tif c != 0 {\n\t\t\t\tsum += float64(c) * g.edgeCost[e]"}
+{"source": "go", "text": "\t\theld.Transcript = append(held.Transcript, Line{Speaker: ChatSpeakers[1], Text: turn.Text})"}
+{"source": "go", "text": "\t\treturn \"overrun\"\n\t}\n\tif facts.Repaired {\n\t\treturn \"garbled\""}
+{"source": "go", "text": "\t\t}\n\t}\n\ttext := DecodePath(real, offset, ctx)\n\tif maxChars >= 0 {"}
+{"source": "go", "text": "\t\t})\n\t} else if len(fallback) > 0 {\n\t\t// nothing completed within the limits: the surviving partial paths, most characters first"}
+{"source": "go", "text": "\t\t}\n\t\tif walked := traversals[t.E]; walked != 0 {"}
+{"source": "go", "text": "\tfor e, ok := range g.EdgeAlive {\n\t\tif ok {\n\t\t\tr := g.EdgeReward[e]"}
+{"source": "go", "text": "}\n// Bumped is the reading n events later, wrapping as often as it takes."}
+{"source": "go", "text": "func DecodePath(labels []string, startOffset int, includeContext bool) string {"}
+{"source": "go", "text": "}\n// InvertPaths (failures): every edge of a text's path loses strength * 2 *"}
+{"source": "go", "text": "\t\theard.Remember(line, \"\")\n\t}\n\theld.Repeats = Repeats(held.Turns)"}
+{"source": "go", "text": "\tthing := \"waveform\"\n\tif facts.Modality == \"image\" {"}
+{"source": "go", "text": "\t\tText: text, Labels: labels, NodeIDs: nodeIDs, Cost: fsum(stepCosts), StepCosts: stepCosts,"}
+{"source": "go", "text": "\t\t})\n\t\tif len(fb) > k {\n\t\t\tfb = fb[:k]\n\t\t}\n\t\tfor _, s := range fb {"}
+{"source": "go", "text": "\t\t}\n\t\trows = append(rows, row)\n\t}\n\tsort.SliceStable(rows, func(i, j int) bool {"}
+{"source": "go", "text": "// ChildCost is one out-edge of a node with its -log softmax probability."}
+{"source": "go", "text": "// Less orders two readings by the number of events they stand for."}
+{"source": "go", "text": "\t\tif i == 0 {\n\t\t\tout = append(out, runeSlice(label, firstCut, -1)...)"}
+{"source": "go", "text": "\t\tif v > 0 {\n\t\t\tapplied++\n\t\t\tsum += v\n\t\t}\n\t}\n\tmean := 0.0"}
+{"source": "go", "text": "\t\t\tif err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\treview = out"}
+{"source": "go", "text": "\tcase \"mishearing\":\n\t\treturn fmt.Sprintf(\"it says %s where %s was said\", pythonRepr(facts.Heard), pythonRepr(facts.Said))"}
+{"source": "go", "text": "// uses the graph's own generator.\nfunc (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool) (*PathResult, error) {"}
+{"source": "go", "text": "type BeamOptions struct {\n\tK             int\n\tBeam          int // 0 = DefaultBeam(K)"}
+{"source": "go", "text": "\t\t\treturn a.Reward > b.Reward\n\t\t}\n\t\treturn a.Node < b.Node"}
+{"source": "go", "text": "\t\tif adj.size() == 0 || !g.Alive[p] {\n\t\t\treturn"}
+{"source": "go", "text": "\t\treturn c.Resets < o.Resets\n\t}\n\treturn c.Value < o.Value"}
+{"source": "go", "text": "func truncateRunes(s string, n int) string {\n\tif n < 0 {"}
+{"source": "go", "text": "\tfor node := 2; node < len(g.Labels); node++ {\n\t\tif g.Alive[node] && len(g.Labels[node]) >= len(prefix) && g.Labels[node][:len(prefix)] == prefix {"}
+{"source": "go", "text": "\tif review.Model != \"\" {\n\t\tjudge = review.Model"}
+{"source": "go", "text": "\tscore := RecallMark(facts)\n\tpassed := score >= threshold"}
+{"source": "go", "text": "\tchars, err := startEmission(g, startNode, startOffset)"}
+{"source": "go", "text": "// The two beams run concurrently when the bottom side's cap is known up front."}
+{"source": "go", "text": "\t\tout.PathSeen += row.PathSeen\n\t\tout.Correct += row.Correct"}
+{"source": "go", "text": "\t\t}\n\t}\n\tif n < 4096 || g.Workers == 1 {\n\t\tfor p := 0; p < n; p++ {"}
+{"source": "go", "text": "// ever wrapped (absent means 0), so the common case - nothing has come near"}
+{"source": "go", "text": "// routinely interrupted by whitespace or a stray character."}
+{"source": "go", "text": "func (m *Model) Predict(prefix string, o PredictOptions) (*Prediction, error) {"}
+{"source": "go", "text": "\t\t\"edges\":            taught.Edges,\n\t\t\"reasons\":          taught.Reasons,"}
+{"source": "go", "text": "\tMode        string\n\tTemperature float64\n\t// Length caps how many payload characters are asked for (0: all of it) and"}
+{"source": "go", "text": "\tsteps := 0\n\tcameFrom := -1\n\tif startNode == Start {"}
+{"source": "go", "text": "\t}\n\tif width < 1 {\n\t\treturn nil, nil, 0, fmt.Errorf(\"beam must be >= 1, got %d\", opts.Beam)"}
+{"source": "go", "text": "func (g *Graph) NodeRatios(node int) *NodeStats {"}
+{"source": "go", "text": "// them.  Without a judged context the costs are the edge costs; where a path"}
+{"source": "go", "text": "\twrapped := 0\n\tfor i, v := range values {\n\t\tif v >= CounterLimit || v < 0 {"}
+{"source": "go", "text": "// returns (payload, repaired, error).\n//\n// The media encoders (vision.go, speech.go) pack their payload as base64 into a"}
+{"source": "go", "text": "\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\ttop, bottom, expanded, width = []*PathResult{walk}, []*PathResult{}, walk.Expanded, 0"}
+{"source": "go", "text": "\t\t}\n\t}\n\tgood := []string{}\n\tfor _, text := range review.Good {"}
+{"source": "go", "text": "\t\treference := item.Reference\n\t\twanted := len(reference) - len(item.Cue)"}
+{"source": "go", "text": "\t\tcosts := Onward(g.ChildCostsFrom(node, cameFrom))"}
+{"source": "go", "text": "\tif maxExp == 0 {\n\t\tmaxExp = 200_000\n\t}\n\tg.Prepare()"}
+{"source": "go", "text": "\t}\n\tfrom, to := g.sideRows(in), g.sideRows(g.Children(node))"}
+{"source": "go", "text": "\t\treturn g.ChildCosts(p)\n\t}\n\tif g.costsVersion != g.Version || g.WeightsStale() {"}
+{"source": "go", "text": "\t\t\t}\n\t\t\twrapped++\n\t\t}\n\t}\n\treturn wrapped\n}\n// anyNonZero reports whether a reset array is worth writing to a model file."}
+{"source": "go", "text": "// alphabet are dropped, a single dangling character (which can never decode)"}
+{"source": "go", "text": "func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {"}
+{"source": "go", "text": "\t\t}\n\t}\n\tbad = kept\n\tresult := map[string]any{\"action\": nil, \"bad\": len(bad), \"good\": len(good), \"repeats\": len(saidTwice),"}
+{"source": "go", "text": "\t\t\t\t}\n\t\t\t\tfacts = CheckSpeechRecall(written, reference, said, \"\")"}
+{"source": "go", "text": "\t\t\tfor _, item := range costs[1:] {\n\t\t\t\tif item.Cost < pick.Cost {"}
+{"source": "go", "text": "\tbottomCap := maxChars\n\tif bottomCap < 0 && opts.ToEnd {"}
+{"source": "go", "text": "\t}\n}\n// NodeRatioRows is NodeRatios of the most visited nodes (node >= 0: only that"}
+{"source": "go", "text": "\tfor key := range g.paths {\n\t\tif key.Edge >= 0 && key.Edge < len(g.EdgeParent) {"}
+{"source": "go", "text": "}\n// resetsMap turns a model file's reset array into the sparse map the graph"}
+{"source": "go", "text": "// truncate it to the length their format needs."}
+{"source": "go", "text": "\tTransitions        int     `json:\"transitions\"`"}
+{"source": "go", "text": "// otherwise when it is 0.  The stop is checked before every conversation, so a"}
+{"source": "go", "text": "\t\tkinds[lesson.Exercise.Modality] = true\n\t\tscores += lesson.Grade.Score"}
+{"source": "go", "text": "\t\t\t\tif item.Cost < lowest {\n\t\t\t\t\tlowest = item.Cost"}
+{"source": "go", "text": "\t\t\t\t\tlongest = l\n\t\t\t\t}\n\t\t\t\tif n != End {\n\t\t\t\t\tsum += g.labelLen[n] - Overlap"}
+{"source": "go", "text": "\t}\n\torder := make([]int, 0, g.NumNodes())\n\tfor i, alive := range g.Alive {"}
+{"source": "go", "text": "\t\tm := math.Inf(-1)\n\t\tfor i := range adj.order {"}
+{"source": "go", "text": "\tfor i, v := range values {\n\t\tif v != 0 {\n\t\t\tout[i] = v"}
+{"source": "go", "text": "\tif len(clean)%4 == 1 { // a single dangling character can never decode"}
+{"source": "go", "text": "\t\t} else {\n\t\t\tlogProb += lp\n\t\t}\n\t\tnode, offset, lost = l.node, l.off, false"}
+{"source": "go", "text": "// held them up, and what it was taught.\n//\n// MeanRating averages the per-reply marks over the conversations that produced"}
+{"source": "go", "text": "// or a picture it had been taught, so the correct text is on file and rides"}
+{"source": "go", "text": "\t\t\tacc := 0.0\n\t\t\tfor i, item := range costs {\n\t\t\t\tacc += weights[i]"}
+{"source": "go", "text": "\t} else {\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(2)\n\t\tgo func() {"}
+{"source": "go", "text": "\t\t\treturn ca > cb\n\t\t}\n\t\treturn a < b\n\t})\n\tif limit > 0 && len(order) > limit {"}
+{"source": "go", "text": "}\n// ChildCosts lists p's out-edges with their costs (-log softmax + nothing"}
+{"source": "prose", "text": "# Cycles Are a Feature\n**The brain is a directed cyclic graph, and the loops are the point**"}
+{"source": "prose", "text": "# A Sine Wave Activation Function\n**Replacing the sigmoid with `f(x) = a·sin(b(x − h)) + k`, default `−sin(x/3)`**"}
+{"source": "prose", "text": "# The Vanishing Gradient Is a Feature\n**Count the multiplications, and the decay stops being a loss and becomes a reading**"}
+{"source": "prose", "text": "# 2NRL: Learning by Inverting Consistent Failure"}
+{"source": "prose", "text": "# Insights — index\nA record of the ideas driving this repository, each with where it is specified,"}
+{"source": "prose", "text": "*when we encounter a cycle, we use metacognition or another part of the brain"}
+{"source": "prose", "text": "per unit. In a CartPole control task, swapping this in for sigmoid or ReLU and"}
+{"source": "prose", "text": "number. The gradient is carrying a message about its own depth, written in an"}
+{"source": "prose", "text": "sentence when I looked at it properly. The load-bearing word is **consistently**."}
+{"source": "prose", "text": "> To solve a game you must understand it. To understand it you must explore it."}
+{"source": "prose", "text": "> feature, not a bug. When we encounter a cycle, we use metacognition or another"}
+{"source": "prose", "text": "> Hence, we assume sine waves are the standard of information"}
+{"source": "prose", "text": "against two controls built to sink the claim: a count-free per-layer"}
+{"source": "prose", "text": "I learned by going at something, getting it wrong, going at it again the same way"}
+{"source": "prose", "text": "> answer is the equilibrium of that game.\n*Where:* `GTMNN/DESIGN.md` · **held**"}
+{"source": "prose", "text": "areas outnumbering the ascending fibres. Cortex and thalamus are wired in closed"}
+{"source": "prose", "text": "noise is expensive. A brain makes the opposite choice. Neurons do not resolve"}
+{"source": "prose", "text": "> The vanishing gradient is a feature of gradient descent. Keep track of the"}
+{"source": "prose", "text": "purpose**, over and over, to work out its rules — and once I had the rules I"}
+{"source": "prose", "text": "the suite's strongest assertion.\n### 4. Everything can be gamified"}
+{"source": "prose", "text": "that cannot possibly loop, you have also built a mind that has no use for"}
+{"source": "prose", "text": "This is the geometric observation the whole idea rests on, and it is exact."}
+{"source": "prose", "text": "`W[p,c] · f_p(z_p) · f_c(z_c)` — a weight times the activation of the parent"}
+{"source": "prose", "text": "fail well before I make it succeed.\n### 3.1 The name"}
+{"source": "prose", "text": "probing.\n*Where:* `GREN/DESIGN.md` §5 · **refined**"}
+{"source": "prose", "text": "def test_self_loop(self):\n    g = RadixCyclicGraph(seed=4)"}
+{"source": "prose", "text": "wave survives as an activation function, and at that limit the curve looks like"}
+{"source": "prose", "text": "the one here: **if the problem is that `n` is large, what happens if you just"}
+{"source": "prose", "text": "  Mine is, and exactly: flipping the sign of a sine unit's amplitude *and* its"}
+{"source": "prose", "text": "### 6. The failure rate should be about 50%\nNot a setting — a consequence. Choosing probes by expected information gain is"}
+{"source": "prose", "text": "\"this can repeat\".\nThat is generalisation, and it did not come from a training procedure, a"}
+{"source": "prose", "text": "                                   *|\n                   **************** |"}
+{"source": "prose", "text": "For the logistic sigmoid, `max |f'| = 0.25`, at `x = 0`, and it is smaller"}
+{"source": "prose", "text": "goes wherever the model's inductive bias happens to send it, and in a large"}
+{"source": "prose", "text": "> The compiler will tell you: this ain't working, bro."}
+{"source": "prose", "text": "```\nTwo nodes, one 2-cycle, and the structure covers `\"abcabc\"`, `\"abcabcabc\"`, and"}
+{"source": "prose", "text": "                                    |      *****************************"}
+{"source": "prose", "text": "would have been without the decay — the part you actually want."}
+{"source": "prose", "text": "and my architecture happens to satisfy it. That is not luck; I built the two"}
+{"source": "prose", "text": "---\n## Finding which game you are in\n### 8. Identify the game by finding similar games"}
+{"source": "prose", "text": "infinitely many strings with a finite pattern, and the same reason a `for` loop"}
+{"source": "prose", "text": "              the logistic sigmoid (scaled to [−1, 1])"}
+{"source": "prose", "text": "> decided to interpret as damage.\nRead `log||g|| / log(c) ≈ n` and the gradient tells you where it came from. We"}
+{"source": "prose", "text": "involutive. A signed bilinear score gives me one. Put ReLU activations and"}
+{"source": "prose", "text": "similarity numbers in §11 below)\n### 9. Information clustering — chess and checkers are closer than chess and a difficult conversation"}
+{"source": "prose", "text": "algorithm. In a cyclic graph it is an infinite loop."}
+{"source": "prose", "text": "wave with 99% of itself deleted. The question is no longer \"why a sine instead"}
+{"source": "prose", "text": "every deep layer just looks small and they all look alike. The vanishing gradient"}
+{"source": "prose", "text": "### 5.1 The claim\nLet `q` be the distribution of the model's failures. Phase 1 fits `θ` to `q`."}
+{"source": "prose", "text": "and they split into **declared** (free — you read the box before you play) and"}
+{"source": "prose", "text": "stylistic preference for log-probabilities. **The decision to allow cycles is"}
+{"source": "prose", "text": "```\nFour parameters, one wave:\n| Param | Name | What it does | Default | Meaning for the unit |"}
+{"source": "prose", "text": "```\nvalue  ->  (mantissa in [-1,1],  count n)\nmultiply: mantissa *= other, renormalise, n += 1"}
+{"source": "prose", "text": "of the task, not of the model, not of the data."}
+{"source": "prose", "text": "*set*, and set overlap is symmetric and order-free. The chess/go pathology (an"}
+{"source": "prose", "text": "is identical to its behaviour on the first, and therefore so is the third, and"}
+{"source": "prose", "text": "                      **        *   |                  **        **"}
+{"source": "prose", "text": "> counting the multiplications — every float does — we just never let the"}
+{"source": "prose", "text": "  reasoning. That is a coherent error mode, not corruption."}
+{"source": "prose", "text": "### 12. An n-dimensional trie, with the game encoded into each path"}
+{"source": "prose", "text": "In `search.py`, the search state is not a node. It is a pair:"}
+{"source": "prose", "text": "      **      **                    |   **     **"}
+{"source": "prose", "text": "regression target. Take the per-layer gradient norms at initialisation, and fit"}
+{"source": "prose", "text": "### 6.1 What it is not\n\"Once I found a thread to pull on, I would pull hard\" reads like a weighting:"}
+{"source": "prose", "text": "Their interaction is one rule: *a terminal node is never merged away.*"}
+{"source": "prose", "text": "partial answer it found rather than raising. Two guards, and they are the two"}
+{"source": "prose", "text": "```\n`4.5 < 4.712`. **Every unit in a fresh network starts somewhere on the monotone"}
+{"source": "prose", "text": "grows — it *sharpens*. That is the opposite of how approximations usually behave,"}
+{"source": "prose", "text": "a 0 is skipped. Every judge in the system — LLM grader, sandbox, discriminator,"}
+{"source": "prose", "text": "---\n## Compression\n### 15. Neural compression: split the output range, plus a selector"}
+{"source": "prose", "text": "copies of a model settle into a loop within a handful of turns, agreeing with"}
+{"source": "prose", "text": "wrapped around the wave several times before it has learned anything, and the"}
+{"source": "prose", "text": "decay. Whatever else is true, the claim that *the decay is predictable from the"}
+{"source": "prose", "text": "about what to do once you have looked.\n### 6.3 The gap"}
+{"source": "prose", "text": "*and* better accuracy. **But the output partition is not what compresses.** Plain"}
+{"source": "prose", "text": "    \"the **the** west\", \"say morning **morning**\", \"**the cat** the cat sat\" - the shape a"}
+{"source": "prose", "text": "```\na = −1:  f(−3.3) = +0.891207        a = +1:  f(−3.3) = −0.891207"}
+{"source": "prose", "text": "can leave the decay alone, or you can equalise everything with some count-free"}
+{"source": "prose", "text": "  back it goes. That is deliberately the opposite direction, and correctly so:"}
+{"source": "prose", "text": "coordinate degrades 8%, and the partitioned version does not degrade at all."}
+{"source": "prose", "text": "balances and rhymes. The monitor has to distinguish *going round* from *coming"}
+{"source": "prose", "text": "weight and every unit's activation — amplitude `a` and offset `k` together, since"}
+{"source": "prose", "text": "  single-scalar constraint is what keeps this honest: it can only remove the"}
+{"source": "prose", "text": "  earlier run finished in. Not \"this looks promising\" but \"this is a place I have"}
+{"source": "prose", "text": "diverging** (9.7× with sine). Ordered, the target is a smooth function of the"}
+{"source": "prose", "text": "repeat is not a bug in it — it is the generator working correctly on a graph"}
+{"source": "prose", "text": "`h` slides the unit along the wave, `k` lifts its resting level. There is a"}
+{"source": "prose", "text": "```\nreallocate the step across layers        (this is where the arms differ)"}
+{"source": "prose", "text": "> I failed on purpose at games to understand the rules, and then figured out the"}
+{"source": "prose", "text": "are: 50% dust costs **3.1×**, 75% costs **4.5×**. Padding 17 games into 32 slots"}
+{"source": "prose", "text": "and punished, so the loop is removed from the model rather than merely dodged."}
+{"source": "prose", "text": "| 4.5 | −0.9975 | −0.0236 | 0.989013057 | 1.09e−02 | 1 |"}
+{"source": "prose", "text": "architecture. If `normalised` matches the best `alpha`, then the count bought"}
+{"source": "prose", "text": "all the way into the failure, because the failure is where the information is."}
+{"source": "prose", "text": "*Where:* `Experiments/NeuralCompression/FINDINGS.md` §6–7 · **confirmed**"}
+{"source": "prose", "text": "   once and is worth keeping.\n3. **Explore from the cut.** Re-run the search with that longer prefix."}
+{"source": "prose", "text": "nothing downstream can tell the difference between an input of 20 and an input"}
+{"source": "prose", "text": "| counted `alpha=0.50` | 0.1265 | 0.0424 | 1.12 |"}
+{"source": "prose", "text": "method: the flat part is not wasted, it is buying the collapse."}
+{"source": "prose", "text": "mechanism added on top.** Width chosen by measurement: 0.177 mean error at 32"}
+{"source": "prose", "text": "up to `explore` times (default 3). Cheap and narrow first, expensive and broad"}
+{"source": "prose", "text": "|---|---:|---:|---:|\n| `[−10, 10]` | 54.2% | **1.8%** | 50.0% |"}
+{"source": "prose", "text": "monotonically, with the total step size held fixed. Whatever else is arguable,"}
+{"source": "prose", "text": "     -> judge against the criteria (LLM)\n     -> teach with the same real tools when it failed (LLM)"}
+{"source": "prose", "text": "which structure. Grade is sparse, delayed and game-specific. Training them"}
+{"source": "prose", "text": "    it weighed from there and ``found`` whether one of them said something new."}
+{"source": "prose", "text": "- **The sine** is dead on a constant ~2% no matter how large the range gets,"}
+{"source": "prose", "text": "direction is right and it repeats across depths below — but 0.018 inside a"}
+{"source": "prose", "text": "and the failure is the input.\nThe clearest instance is already running. The network calls tools by *writing*"}
+{"source": "prose", "text": "*Contradicted in this architecture, specifically.* The sine's derivative near zero"}
+{"source": "prose", "text": "The third exit is the one I find most interesting, because it is not a search"}
+{"source": "prose", "text": "and it updates the *activation parameters* rather than pushing error down a"}
+{"source": "prose", "text": "| 4 | 0.1271 | **0.0807** | 0.0906 | 0.0248 | counting wins |"}
+{"source": "prose", "text": "  directly and the rules story is decoration.\n- **Stating the rules should matter more than stating them well.** Withholding"}
+{"source": "prose", "text": "Here the gradient vanishes because every neuron was initialised into the linear"}
+{"source": "prose", "text": "`SineWaveActivationFunction.md`.)\nThe targeted version is where cycles bite back, and the mathematics here is"}
+{"source": "prose", "text": "very different inputs, one identical output. A downstream unit cannot tell them"}
+{"source": "prose", "text": "normalised all land on 0.147, identical to four significant figures. That is not"}
+{"source": "prose", "text": "**cleared** text has crossed it. The net evidence is"}
+{"source": "prose", "text": "**gradient magnitude** is catastrophic (243–520× worse on healthy networks): a"}
+{"source": "prose", "text": "two-colour the path.\n**And now the cycles.** A path is always two-colourable. A graph with a cycle in"}
+{"source": "prose", "text": "you add a second hand running at a different rate. Biology uses exactly this"}
+{"source": "prose", "text": "The correction is `1 / c**(alpha·n)`. It is **exponential in `n`**, so any error"}
+{"source": "prose", "text": "I can compute. Estimating `H(q)` online and skipping phases 1–2 when the garbage"}
+{"source": "prose", "text": "The stated form — *all weights below X* — is the better of the two magnitude"}
+{"source": "prose", "text": "`f_p²` is non-negative no matter what `f_p` is, so **flipping the node changes a"}
+{"source": "prose", "text": "function can retreat to being a sigmoid. A sigmoid cannot advance to being a"}
+{"source": "prose", "text": "initialisation and never updated; `counted` re-fits it every step. Same formula,"}
+{"source": "prose", "text": "over-samples; the negative one vetoes — by accumulated blame, by peak blame on a"}
+{"source": "prose", "text": "system, which fine-tuning must repair. Replay transfers the *function* rather"}
+{"source": "prose", "text": "adjust about a repetition is how attractive repeating is, not which direction"}
+{"source": "prose", "text": "derivatives, with `u = b(x − h)`:\n```\nf      = a·sin(u) + k"}
+{"source": "prose", "text": "points per step, which costs nothing. But \"fixes it here\" is a claim about a"}
+{"source": "prose", "text": "  and only inversion does the former.\n* **The failure model subsumes it.** Inversion is global and blunt (§12, item 2),"}
+{"source": "prose", "text": "training needs to reach a worse 0.0626. Specialists train independently and in"}
+{"source": "prose", "text": "| within one turn | `backtrack` — notice, cut, explore from past the loop | the query, not the model |"}
+{"source": "prose", "text": "  outliers.** The units seeing inputs far from where they are tuned are the ones"}
+{"source": "prose", "text": "* the systematic geometric decay with depth — the part `c**n` models, **and**"}
+{"source": "prose", "text": "| **Unlikelihood training** | A penalty term on unwanted continuations | Repulsive; a loss modification rather than a phase structure |"}
+{"source": "prose", "text": "*Safe, and for the same reason useless — tested.* With an odd activation"}
+{"source": "prose", "text": "Now the claim I actually care about.\nA DAG mind needs no metacognition. Every computation terminates on its own;"}
+{"source": "prose", "text": "  over the same direction and waste gradient. Pick one."}
+{"source": "prose", "text": "| what it can express | the geometric trend only | essentially anything |"}
+{"source": "prose", "text": "system is shaped around. Every feedback source — a human thumb, an LLM"}
+{"source": "prose", "text": "relocates the network without unlearning; ascent destroys the learned function."}
+{"source": "prose", "text": "watching.\nThat is what I meant by cycles being a feature. Not \"loops are tolerable if you"}
+{"source": "prose", "text": "---\n## 9. Evidence: the CartPole experiment\n`Experiments/ActivationFunctionTest/` holds three scripts — `sigmoid.py`,"}
+{"source": "prose", "text": "Adam's estimate is not, and that is the one window where the structural version"}
+{"source": "prose", "text": "   fine-tune pass.\n6. **The critic** — the model writes freely, a reviewer marks it, and everything"}
+{"source": "prose", "text": "exactly to where it began. *A cycle that returns to its origin does no work.*"}
+{"source": "prose", "text": "partly making a loop cheap; over-learning it is making the loop so cheap you"}
+{"source": "prose", "text": "| ReLU | 10 |\n| **Sine (`−sin(x/3)`)** | **28 – 48** |"}
+{"source": "prose", "text": "is not even defined. The depth signal was not recovered, it was **flattened"}
+{"source": "prose", "text": "— the count/reward network — implements the 2NRL *interface* with a different"}
+{"source": "prose", "text": "*Confirmed as an activation, contradicted at the stated frequency.* Sweeping `b`"}
+{"source": "prose", "text": "which is, incidentally, the only version of \"self-improving\" that means"}
+{"source": "prose", "text": "**And there is a confound I should name myself.** In all three scripts the"}
+{"source": "prose", "text": "used to fix the forward pass and then discarded."}
+{"source": "prose", "text": "been neither falsified nor confirmed. Everything needed is already in the"}
+{"source": "prose", "text": "peak needs `|z| = π/(2b)`, which at `b = 1/3` is 4.71 — far outside the operating"}
+{"source": "prose", "text": "has the larger `|f|`, and the edges on the other side are rescaled by the ratio"}
+{"source": "prose", "text": "gap, and it is also the reason the number should not be quoted without the"}
+{"source": "prose", "text": "  move: a thing that looks like a defect is a compressed representation, and the"}
+{"source": "prose", "text": "got fairly criticised for.\n**Predictions.**\n- **P1.** A beats D. Systematic failure, inverted, beats not using it."}
+{"source": "prose", "text": "parameterisation.** The rule is `b ≈ π / (2·E|z|)`."}
+{"source": "prose", "text": "**6. Monitors watch outputs, not structure.** Do not write a cycle detector over"}
+{"source": "prose", "text": "measures the activation function and nothing else, and it is the one I would"}
+{"source": "prose", "text": "  than away from it, because the failure carries the information."}
+{"source": "prose", "text": "- **If the rate ratio optimum sits at 1**, §4.4 is wrong. Sweep `η⁻/η⁺` over"}
+{"source": "prose", "text": "*Where:* `Research/CyclesAreAFeature.md`, `GTMNN/DESIGN.md` §2.1, §14 · **held**"}
+{"source": "prose", "text": "digits. If conversations stay varied without the monitors, then the generator is"}
+{"source": "prose", "text": "   than asserting it.\n7. Report wall-clock too. `sin` is not free next to `max(0, x)`."}
+{"source": "prose", "text": "   The premise measurement (§6) is solid; the optimiser comparison (§9) is not,"}
+{"source": "prose", "text": "   flips alternating nodes along one failed path, used instead of a global"}
+{"source": "prose", "text": "insight 21 independently confirmed is the only trigger that separates *stuck*"}
+{"source": "prose", "text": "**Prediction 3.** Targeted inversion is measurably less effective on paths"}
+{"source": "prose", "text": "k actually produces |\nThe edge signal in RadixCyclicNN is `w · f_p(z_p) · f_c(z_c)` — weight times the"}
+{"source": "prose", "text": "   something that is not there.\n5. **Adam wins and I have not beaten it.** The count-based method is better than"}
+{"source": "prose", "text": "   with no convergence criterion and no held-out evaluation, and its only signal"}
+{"source": "prose", "text": "network does not need to be told which game it is playing."}
+{"source": "prose", "text": "is the experiment that separates them, but it is the result that would cost me"}
+{"source": "prose", "text": "   in a range you chose. Pre-activations that grow without bound turn the layer"}
+{"source": "prose", "text": "* **`normalised` matching the best `alpha` across seeds and depths.** That would"}
+{"source": "prose", "text": "---\n## 13. Summary\n- Train on the failures at full rate, invert the network, fine-tune on the"}
+{"source": "prose", "text": "speech.\nAnd it must be **cyclic**: chess/checkers 0.609, checkers/go ~0.730, chess/go"}
+{"source": "prose", "text": "   quantity must come from outside the cycle, and then listed three kinds. The"}
+{"source": "prose", "text": "   large dense network it would.\n6. **Not yet tested at depth.** Everything here is 2–3 layers, or a graph with"}
+{"source": "prose", "text": "  `n` equal to the depth.\n* `c**n` is **invertible**. The magnitude was not destroyed, it was moved into an"}
+{"source": "prose", "text": "  failure's negative entropy. Systematic failure inverts into signal; random"}
+{"source": "prose", "text": "> For chess, a piece moving one space would count here. This allows us to train"}
+{"source": "prose", "text": "  graph can. That is what the loop is for.\n- The costs are real: no guaranteed termination, no layer order, no negative"}
+{"source": "prose", "text": "  the two should be removed.\n---\n## 13. Summary"}
+{"source": "prose", "text": "  `max |f'| = 0.25`, the value the activation's derivative predicts a priori. The"}
+{"source": "prose", "text": "  the rules, it is the instrument.\n- Which is why the curve is a hockey-stick and not a climb. A long flat stretch"}
+{"source": "prose", "text": ", not the chosen features."}
+{"source": "prose", "text": "  that runs past it, which forces the walk out of the loop; taking the"}
+{"source": "prose", "text": "  machine precision. That is what makes 2NRL's `invert()` possible, and neither"}
+{"source": "prose", "text": "  4 plain, counted and count-free normalisation all land on the same number, so"}
+{"source": "prose", "text": "stabilizing effect in collective memories. *Nature* 304, 158–159."}
+{"source": "prose", "text": "0. **Does transfer survive ACROSS regions, or only within them?** (29) The measured transfer was between two grid games sharing displacement semantics — within a region, which is what regions are for. If nothing transfers between a board region and a progr"}
+{"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"seed\": 0,\n      \"config\": {"}
+{"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"seed\": 0,\n      \"config\": {"}
+{"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"seed\": 0,\n      \"config\": {"}
+{"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"arm\": \"2nrl\",\n      \"seed\": 0,"}
+{"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"arm\": \"2nrl-worst\",\n      \"seed\": 0,"}
+{"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"arm\": \"2nrl\",\n      \"seed\": 0,"}
+{"source": "json", "text": "        \"grading\": \"margin\",\n        \"seed\": 0\n      },"}
+{"source": "json", "text": "        \"seed\": 0\n      },\n      \"untrained\": {"}
+{"source": "json", "text": "        \"neg_updates\": 150,\n        \"pos_updates\": 1,"}
+{"source": "json", "text": "          }\n        },\n        {\n          \"round\": 5,"}
+{"source": "json", "text": "          \"positions\": 120,\n          \"hidden\": ["}
+{"source": "json", "text": "          \"cp_loss_median\": 256.0,\n          \"blunder_rate\": 0.5583333333333333,"}
+{"source": "json", "text": "        \"max\": 10.0,\n        \"episodes\": 20\n      },"}
+{"source": "json", "text": "        \"max\": 10.0,\n        \"episodes\": 20\n      },"}
+{"source": "json", "text": "      },\n      \"failure_episode_length\": 8.04,\n      \"failure_graded_loss\": 0.5254669879845211,"}
+{"source": "json", "text": "          },\n          \"play\": {\n            \"score\": 0.0,"}
+{"source": "json", "text": "          }\n        },\n        {\n          \"round\": 13,"}
+{"source": "json", "text": "            \"refusals\": 38.407746485540606,\n            \"top1_legal\": 0.04588235294117647,"}
+{"source": "json", "text": "        \"episodes\": 100\n      },\n      \"activation_parameters\": ["}
+{"source": "json", "text": "        \"episodes\": 100\n      },\n      \"activation_parameters\": ["}
+{"source": "json", "text": "        \"max\": 9.0,\n        \"episodes\": 20\n      },"}
+{"source": "json", "text": "            \"blunder_rate\": 0.7294117647058823,"}
+{"source": "json", "text": "            40,\n            32\n          ],\n          \"train\": {"}
+{"source": "json", "text": "              \"blunder_rate\": 0.5083333333333333,"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "      },\n      \"after_finetune\": {\n        \"mean\": 500.0,"}
+{"source": "json", "text": "            \"positive_nll\": 0.7208534782395926,"}
+{"source": "json", "text": "          \"cp_loss_median\": 259.5,\n          \"blunder_rate\": 0.6083333333333333,"}
+{"source": "json", "text": "            \"phase\": \"both\",\n            \"negative_nll\": 2.19672786865942,"}
+{"source": "json", "text": "          \"graded_loss\": 0.528,\n          \"start_radius\": 0.528"}
+{"source": "json", "text": "          \"failure_delta\": 0.864,\n          \"start_radius\": 0.691"}
+{"source": "json", "text": "          \"b\": 0.38356137080670794,\n          \"h\": -9.642138497849206e-05,"}
+{"source": "json", "text": "          \"refusals\": 131.275,\n          \"cp_loss\": 396.43333333333334,"}
+{"source": "json", "text": "          }\n        },\n        {\n          \"round\": 36,"}
+{"source": "json", "text": "          \"agreement\": 0.06666666666666667,\n          \"top1_legal\": 0.0,"}
+{"source": "json", "text": "          \"graded_loss\": 0.532,\n          \"start_radius\": 0.532"}
+{"source": "json", "text": "          \"failure_delta\": 1.0,\n          \"start_radius\": 0.8"}
+{"source": "json", "text": "          \"update\": 15,\n          \"mean_episode_length\": 13.1,"}
+{"source": "json", "text": "        \"refusals\": 104.18333333333334,\n        \"cp_loss\": 372.78333333333336,"}
+{"source": "json", "text": "          \"h\": 6.237419643065803e-05,\n          \"k\": -0.0020613788615978287"}
+{"source": "json", "text": "            \"refusals\": 135.5541919191919,\n            \"top1_legal\": 0.04200757575757576,"}
+{"source": "json", "text": "          \"graded_loss\": 0.528,\n          \"start_radius\": 0.528"}
+{"source": "json", "text": "          \"failure_delta\": 1.0,\n          \"start_radius\": 0.8"}
+{"source": "json", "text": "          \"update\": 45,\n          \"mean_episode_length\": 8.38,"}
+{"source": "json", "text": "            \"material\": -1020.0,\n            \"games\": 10"}
+{"source": "json", "text": "            \"material\": -1030.0,\n            \"games\": 10"}
+{"source": "json", "text": "            \"inversion_after\": {\n              \"agreement\": 0.041666666666666664,"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "          \"update\": 75,\n          \"mean_episode_length\": 7.84,"}
+{"source": "json", "text": "            \"gave_up\": 33,\n            \"plies\": 17.3,"}
+{"source": "json", "text": "            \"refusals\": 71.56924242424242,\n            \"top1_legal\": 0.08166666666666667,"}
+{"source": "json", "text": "            \"inverted\": true,\n            \"negative_entropy\": 0.04304732872579112,"}
+{"source": "json", "text": "          \"update\": 36,\n          \"mean_episode_length\": 453.17"}
+{"source": "json", "text": "          \"update\": 36,\n          \"mean_episode_length\": 485.96"}
+{"source": "json", "text": "          \"update\": 105,\n          \"mean_episode_length\": 7.61,"}
+{"source": "json", "text": "            \"negative_entropy\": -0.0,\n            \"phase1_done\": false"}
+{"source": "json", "text": "            \"positive_nll\": NaN,\n            \"inverted\": false,"}
+{"source": "json", "text": "          \"positions\": 120,\n          \"hidden\": ["}
+{"source": "json", "text": "          \"update\": 60,\n          \"mean_episode_length\": 415.91"}
+{"source": "json", "text": "          \"update\": 60,\n          \"mean_episode_length\": 469.31"}
+{"source": "json", "text": "          \"update\": 135,\n          \"mean_episode_length\": 7.87,"}
+{"source": "json", "text": "          \"agreement\": 0.016666666666666666,\n          \"top1_legal\": 0.0,"}
+{"source": "json", "text": "            \"gave_up\": 1,\n            \"plies\": 18.6,"}
+{"source": "json", "text": "            \"gave_up\": 4,\n            \"plies\": 17.5,"}
+{"source": "json", "text": "        \"weight_by_delta\": true,\n        \"grading\": \"margin\","}
+{"source": "json", "text": "        \"weight_by_delta\": true,\n        \"seed\": 1"}
+{"source": "json", "text": "          \"update\": 1,\n          \"mean_episode_length\": 500.0"}
+{"source": "json", "text": "            \"inverted\": false,\n            \"negative_entropy\": 0.0,"}
+{"source": "json", "text": "            \"acpl\": 361.5334704184705,\n            \"refusals\": 155.88611111111112,"}
+{"source": "json", "text": "            \"inversion_after\": {\n              \"agreement\": 0.03333333333333333,"}
+{"source": "json", "text": "        \"std\": 0.6224949798994366,\n        \"min\": 8.0,"}
+{"source": "json", "text": "        \"std\": 0.6000000000000001,\n        \"min\": 8.0,"}
+{"source": "json", "text": "        \"pos_entropy\": 0.01,\n        \"neg_batch_steps\": 400,"}
+{"source": "json", "text": "          },\n          \"play\": {\n            \"score\": 0.0,"}
+{"source": "json", "text": "          }\n        },\n        {\n          \"round\": 3,"}
+{"source": "json", "text": "          \"top1_legal\": 0.0,\n          \"refusals\": 91.40833333333333,"}
+{"source": "json", "text": "        \"std\": 0.0,\n        \"min\": 500.0,\n        \"max\": 500.0,"}
+{"source": "json", "text": "        \"std\": 48.296305241705596,\n        \"min\": 300.0,"}
+{"source": "json", "text": "        \"mean\": 9.0,\n        \"std\": 0.4472135954999579,"}
+{"source": "json", "text": "          },\n          \"play\": {\n            \"score\": 0.0,"}
+{"source": "json", "text": "            \"refusals\": 68.29534780578899,\n            \"top1_legal\": 0.04444444444444444,"}
+{"source": "json", "text": "              \"cp_loss\": 314.6666666666667,\n              \"cp_loss_median\": 200.5,"}
+{"source": "json", "text": "          \"graded_loss\": 0.421,\n          \"start_radius\": 0.421"}
+{"source": "json", "text": "          \"failure_delta\": 0.638,\n          \"start_radius\": 0.511"}
+{"source": "json", "text": "      },\n      \"after_negative\": {\n        \"mean\": 9.2,"}
+{"source": "json", "text": "          },\n          \"play\": {\n            \"score\": 0.0,"}
+{"source": "json", "text": "            \"positive_nll\": NaN,\n            \"inverted\": false,"}
+{"source": "json", "text": "            \"phase1_done\": false,\n            \"inversion_before\": {"}
+{"source": "json", "text": "          \"update\": 45,\n          \"mean_episode_length\": 7.91,"}
+{"source": "json", "text": "          \"update\": 45,\n          \"mean_episode_length\": 7.19,"}
+{"source": "json", "text": "      },\n      \"env_steps\": {\n        \"negative\": 60532,"}
+{"source": "json", "text": "          },\n          \"play\": {\n            \"score\": 0.0,"}
+{"source": "json", "text": "            \"refusals\": 69.04894660894661,\n            \"top1_legal\": 0.04409090909090909,"}
+{"source": "json", "text": "          \"positions\": 120,\n          \"hidden\": ["}
+{"source": "json", "text": "          \"update\": 90,\n          \"mean_episode_length\": 7.83,"}
+{"source": "json", "text": "          \"update\": 90,\n          \"mean_episode_length\": 7.12,"}
+{"source": "json", "text": "          \"b\": 0.3394500352276189,\n          \"h\": -0.0012152373809624685,"}
+{"source": "json", "text": "            \"gave_up\": 6,\n            \"plies\": 19.1,"}
+{"source": "json", "text": "            \"score\": 0.0,\n            \"acpl\": 406.8734584859585,"}
+{"source": "json", "text": "            \"refusals\": 45.40958407605466,\n            \"top1_legal\": 0.059292929292929286,"}
+{"source": "json", "text": "          \"update\": 135,\n          \"mean_episode_length\": 7.82,"}
+{"source": "json", "text": "          \"update\": 135,\n          \"mean_episode_length\": 6.84,"}
+{"source": "json", "text": "          \"graded_loss\": 0.421,\n          \"start_radius\": 0.421"}
+{"source": "json", "text": "            \"rule_share\": 1.0,\n            \"mean_loss_cp\": 298.51063829787233,"}
+{"source": "json", "text": "        \"blunder_margin\": 50.0,\n        \"refusal_margin\": 4.0,"}
+{"source": "json", "text": "              \"blunder_rate\": 0.6166666666666667,"}
+{"source": "json", "text": "          \"update\": 6,\n          \"mean_episode_length\": 361.74285714285713"}
+{"source": "json", "text": "          \"update\": 6,\n          \"mean_episode_length\": 242.55769230769232"}
+{"source": "json", "text": "          \"graded_loss\": 0.54,\n          \"start_radius\": 0.54"}
+{"source": "json", "text": "          }\n        },\n        {\n          \"round\": 4,"}
+{"source": "json", "text": "            \"phase\": \"negative\",\n            \"negative_nll\": 1.0310745230552838,"}
+{"source": "json", "text": "            \"positive_nll\": 1.9208184202953005,"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "          \"graded_loss\": 0.525,\n          \"start_radius\": 0.525"}
+{"source": "json", "text": "            \"plies\": 19.6,\n            \"blunder_rate\": 0.75,"}
+{"source": "json", "text": "            40,\n            32\n          ],\n          \"train\": {"}
+{"source": "json", "text": "            56,\n            32\n          ],\n          \"train\": {"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "          \"graded_loss\": 0.528,\n          \"start_radius\": 0.528"}
+{"source": "json", "text": "            \"gave_up\": 1,\n            \"plies\": 21.3,"}
+{"source": "json", "text": "            \"positive_nll\": 0.904404532760595,\n            \"inverted\": false,"}
+{"source": "json", "text": "            \"blunder_rate\": 0.7766990291262136,"}
+{"source": "json", "text": "        \"final_eval_episodes\": 100,\n        \"adaptive_starts\": true,"}
+{"source": "json", "text": "        \"final_eval_episodes\": 100,\n        \"adaptive_starts\": true,"}
+{"source": "json", "text": "          \"graded_loss\": 0.521,\n          \"start_radius\": 0.521"}
+{"source": "json", "text": "            \"rule_share\": 0.9401088929219601,\n            \"mean_loss_cp\": 349.0671506352087,"}
+{"source": "json", "text": "            \"n\": 481,\n            \"mean_weight\": 2.6928690228690226,"}
+{"source": "json", "text": "              \"refusals\": 148.38333333333333,\n              \"cp_loss\": 362.8833333333333,"}
+{"source": "json", "text": "        \"anti_balance_agreement\": 0.9206807897984368"}
+{"source": "json", "text": "        \"anti_balance_agreement\": 0.8184080625257095"}
+{"source": "json", "text": "          \"graded_loss\": 0.54,\n          \"start_radius\": 0.54"}
+{"source": "json", "text": "          \"agreement\": 0.03333333333333333,\n          \"top1_legal\": 0.08333333333333333,"}
+{"source": "json", "text": "          \"cp_loss_median\": 331.0,\n          \"blunder_rate\": 0.5916666666666667,"}
+{"source": "json", "text": "              \"top1_legal\": 0.0,\n              \"refusals\": 299.175,"}
+{"source": "json", "text": "      },\n      \"after_finetune\": {\n        \"mean\": 500.0,"}
+{"source": "json", "text": "      },\n      \"after_finetune\": {\n        \"mean\": 500.0,"}
+{"source": "json", "text": "        \"tau\": 0.2,\n        \"gamma\": 0.99,\n        \"neg_lr\": 0.01,"}
+{"source": "json", "text": "        \"positions\": 400\n      },\n      \"heldout_tracked\": {"}
+{"source": "json", "text": "        {\n          \"a\": 0.12892129005045067,\n          \"b\": 0.40429017532831807,"}
+{"source": "json", "text": "        \"gave_up\": 2,\n        \"plies\": 19.7,\n        \"blunder_rate\": 0.7920792079207921,"}
+{"source": "json", "text": "          \"update\": 1,\n          \"mean_episode_length\": 11.542857142857143,"}
+{"source": "json", "text": "          \"update\": 1,\n          \"mean_episode_length\": 19.38095238095238,"}
+{"source": "json", "text": "        \"weight_by_delta\": false,\n        \"grading\": \"margin\","}
+{"source": "json", "text": "            \"top1_legal\": 0.09649743230625583,\n            \"gave_up\": 0,"}
+{"source": "json", "text": "            \"blunder_rate\": 0.7777777777777778,"}
+{"source": "json", "text": "              \"agreement\": 0.03333333333333333,"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "      \"failure_state_dependence\": {\n        \"majority_action_share\": 0.5238095238095238,"}
+{"source": "json", "text": "            \"top1_legal\": 0.14802978883861237,\n            \"gave_up\": 1,"}
+{"source": "json", "text": "            \"phase1_done\": false\n          },\n          \"play\": {"}
+{"source": "json", "text": "            \"n\": 489,\n            \"mean_weight\": 2.769325153374233,"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "        \"mean\": 469.3,\n        \"std\": 63.4889754209343,"}
+{"source": "json", "text": "            \"top1_legal\": 0.061330891330891334,"}
+{"source": "json", "text": "            \"material\": -1180.0,\n            \"games\": 10"}
+{"source": "json", "text": "          \"agreement\": 0.041666666666666664,\n          \"top1_legal\": 0.058333333333333334,"}
+{"source": "json", "text": "          \"graded_loss\": 0.545,\n          \"start_radius\": 0.545"}
+{"source": "json", "text": "          \"failure_delta\": 1.0,\n          \"start_radius\": 0.8"}
+{"source": "json", "text": "        \"max\": 500.0,\n        \"episodes\": 100\n      },"}
+{"source": "json", "text": "            \"phase\": \"positive\",\n            \"negative_nll\": NaN,"}
+{"source": "json", "text": "            \"blunder_rate\": 0.7586206896551724,"}
+{"source": "json", "text": "          \"play\": {\n            \"score\": 0.0,\n            \"acpl\": 909.5375291375292,"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"positive\","}
+{"source": "json", "text": "        }\n      ],\n      \"log\": [\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "          \"refusals\": 49.35,\n          \"cp_loss\": 369.93333333333334,"}
+{"source": "json", "text": "            \"phase1_done\": false\n          },\n          \"play\": {"}
+{"source": "json", "text": "              \"cp_loss_median\": 216.0,\n              \"blunder_rate\": 0.55,"}
+{"source": "json", "text": "          \"update\": 30,\n          \"mean_episode_length\": 405.67"}
+{"source": "json", "text": "          \"update\": 30,\n          \"mean_episode_length\": 493.95"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "            \"material\": -880.0,\n            \"games\": 10"}
+{"source": "json", "text": "            \"negative_entropy\": 0.6697955255112249,"}
+{"source": "json", "text": "            \"phase\": \"both\",\n            \"negative_nll\": 1.3337070539756701,"}
+{"source": "json", "text": "          \"update\": 54,\n          \"mean_episode_length\": 484.04"}
+{"source": "json", "text": "          \"update\": 54,\n          \"mean_episode_length\": 500.0"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "            \"top1_legal\": 0.06651154401154401,\n            \"gave_up\": 3,"}
+{"source": "json", "text": "            \"n\": 495,\n            \"mean_weight\": 2.55169696969697,"}
+{"source": "json", "text": "          \"cp_loss_median\": 321.5,\n          \"blunder_rate\": 0.6416666666666667,"}
+{"source": "json", "text": "          \"mean_episode_length\": 51.2\n        },"}
+{"source": "json", "text": "          \"mean_episode_length\": 51.2\n        },"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "            \"top1_legal\": 0.0904040404040404,\n            \"gave_up\": 2,"}
+{"source": "json", "text": "            \"phase1_done\": false\n          },\n          \"play\": {"}
+{"source": "json", "text": "            \"refusals\": 145.25273809523807,\n            \"top1_legal\": 0.0,"}
+{"source": "json", "text": "        \"min\": 186.0,\n        \"max\": 500.0,\n        \"episodes\": 100"}
+{"source": "json", "text": "        \"min\": 216.0,\n        \"max\": 500.0,\n        \"episodes\": 100"}
+{"source": "json", "text": "        },\n        {\n          \"phase\": \"negative\","}
+{"source": "json", "text": "            \"top1_legal\": 0.05694444444444444,\n            \"gave_up\": 3,"}
+{"source": "json", "text": "            \"rule_share\": 0.9657387580299786,\n            \"mean_loss_cp\": 438.91434689507497,"}
+{"source": "json", "text": "            \"inversion_after\": {\n              \"agreement\": 0.041666666666666664,"}
+{"source": "json", "text": "        \"mean\": 500.0,\n        \"std\": 0.0,\n        \"min\": 500.0,"}
+{"source": "json", "text": "        \"mean\": 500.0,\n        \"std\": 0.0,\n        \"min\": 500.0,"}
