@@ -108,7 +108,7 @@ def test_invert_exact() -> None:
     ``x`` whatever ``h``, ``b`` and the bias have become, so `randomise_act`
     moving all four off their defaults cannot disturb it.  The shipped
     weights-only operator is exact under a condition instead, which is what
-    :func:`test_weights_only_inversion` measures.
+    :func:`test_complement_inversion` measures.
     """
     print("\ninversion")
     rng = np.random.default_rng(4)
@@ -127,72 +127,6 @@ def test_invert_exact() -> None:
         check(f"inverting twice is the identity ({depth})", back == 0.0, f"error {back:.1e}")
 
 
-def test_weights_only_inversion() -> None:
-    """``invert()`` is ``W -> -W`` and nothing else. What that buys, and what it costs.
-
-    The operator the arms use.  It is worth being exact about when it is exact,
-    because the answer is "at the network's starting point, and approximately
-    thereafter" rather than "always".
-
-    A unit is ``y = a*sin(b*(z - h)) + k`` over ``z = x@W + bias``.  Negating
-    ``W`` alone gives ``z' = -x@W + bias``.  With ``bias = 0`` that is ``-z``,
-    and with ``h = k = 0`` the sine is odd about the origin, so ``y' = -y``
-    exactly.  Those are the defaults every unit starts at, so the flip is exact
-    on an untrained network - and on a trained one it is not, because training
-    moves all three.
-
-    Deeper layers are the good case and they need saying: their input has
-    already been negated, so ``W -> -W`` restores their pre-activation exactly.
-    The whole of the error enters at the first layer, whose input is the
-    feature vector that nobody negated, and it is ``2 * bias``.
-    """
-    rng = np.random.default_rng(11)
-    x = rng.normal(size=(32, 12))
-
-    # --- exact where the network starts ---
-    n = net(5, (12, 9, 7, 1))                       # h = k = bias = 0
-    before = n.forward(x, train=False)
-    n.invert()
-    err = float(np.abs(n.forward(x, train=False) + before).max())
-    check("W -> -W negates the output exactly at h = k = bias = 0", err == 0.0,
-          f"error {err:.1e} - the sine is odd about the origin, so the flip passes through it")
-    n.invert()
-    back = float(np.abs(n.forward(x, train=False) - before).max())
-    check("W -> -W is its own inverse", back == 0.0, f"error {back:.1e}")
-
-    # --- and it touches nothing else ---
-    n2 = net(5, (12, 9, 7, 1))
-    randomise_act(n2, 6)
-    ref = n2.copy()
-    n2.invert()
-    flipped = [p for p in ("W", "bias", "a", "b", "h", "k")
-               if any(not np.allclose(getattr(l, p), getattr(r, p))
-                      for l, r in zip(n2.layers, ref.layers))]
-    check("it moves the weights and nothing else", flipped == ["W"],
-          f"changed {flipped}, so bias, a, b, h and k are all left where they were")
-    same = all(np.allclose(getattr(l, "W"), -getattr(r, "W"))
-               for l, r in zip(n2.layers, ref.layers))
-    check("...and it is exactly the negation of every weight matrix", same,
-          f"all {len(n2.layers)} layers")
-
-    # --- the deep layers are restored exactly; the first is off by 2*bias ---
-    n3 = net(7, (12, 9, 7, 1))
-    randomise_act(n3, 8)
-    pre_before, _ = trace(n3, x)
-    n3.invert()
-    pre_after, _ = trace(n3, x)
-    deep = max(float(np.abs(pre_after[i] - pre_before[i]).max())
-               for i in range(1, len(pre_before)))
-    check("every layer past the first sees exactly the pre-activation it saw before",
-          deep == 0.0,
-          f"error {deep:.1e} - their input was already negated, so W -> -W restores z")
-    first = float(np.abs(pre_after[0] + pre_before[0]).max())
-    expect = float(np.abs(2.0 * n3.layers[0].bias).max())
-    check("the first layer's is off by exactly twice its bias",
-          abs(first - expect) < 1e-12,
-          f"|z' + z| = {first:.3f} against 2*max|bias| = {expect:.3f}; "
-          "its input is the feature vector, which nobody negated")
-
 def trace(n: SineNet, x: np.ndarray):
     """Every layer's pre-activation and output, computed by hand."""
     pre, out, h = [], [], x
@@ -202,6 +136,127 @@ def trace(n: SineNet, x: np.ndarray):
         h = layer.a * np.sin(layer.b * (z - layer.h)) + layer.k
         out.append(h.copy())
     return pre, out
+
+
+def test_complement_inversion() -> None:
+    """``invert()`` is ``W -> 1 - W``: the complement of every weight, and nothing else.
+
+    2NRL's step 2 is a logical NOT, and the NOT of a quantity in [0, 1] is
+    ``1 - x``.  0.2 becomes 0.8.  What the network barely used it now leans on,
+    and what it leaned on it now barely uses.
+
+    Two things are asserted here and a third is measured rather than asserted,
+    because it is the interesting one.
+
+    It is an **exact involution** - ``1 - (1 - w) == w`` - which is ``¬¬P ⟹ P``,
+    the property §4 asks of the operator, and unlike the output-negation
+    operators it holds whatever training has done to ``h``, ``k`` and the bias,
+    because it never touches them.
+
+    It touches ``W`` and only ``W``.
+
+    And it is **not** an output negation, which the negation-based operators
+    are.  That is by design and is worth having on the record with a number:
+    a Glorot layer's weights sit symmetrically about zero and the complement
+    sends them to roughly one, so the network after the flip is a different
+    function rather than the old one read backwards.
+    """
+    rng = np.random.default_rng(11)
+    x = rng.normal(size=(32, 12))
+
+    n = net(5, (12, 9, 7, 1))
+    randomise_act(n, 6)
+    ref = n.copy()
+    n.invert()
+
+    same = all(np.allclose(l.W, 1.0 - r.W) for l, r in zip(n.layers, ref.layers))
+    check("every weight becomes one minus itself", same,
+          f"all {len(n.layers)} layers: 0.2 -> 0.8, 0.8 -> 0.2")
+
+    flipped = [p for p in ("W", "bias", "a", "b", "h", "k")
+               if any(not np.allclose(getattr(l, p), getattr(r, p))
+                      for l, r in zip(n.layers, ref.layers))]
+    check("it moves the weights and nothing else", flipped == ["W"],
+          f"changed {flipped}, so bias, a, b, h and k are all left where they were")
+
+    n.invert()
+    back = max(float(np.abs(l.W - r.W).max()) for l, r in zip(n.layers, ref.layers))
+    fn = float(np.abs(n.forward(x, train=False) - ref.forward(x, train=False)).max())
+    check("complementing twice is exactly the identity", back < 1e-15 and fn < 1e-12,
+          f"weights {back:.1e}, function {fn:.1e} - 1 - (1 - w) = w, which is ¬¬P ⟹ P")
+
+    # The measured part: what the complement does to the scale of the weights.
+    big = net(9, (959, 32, 32, 7))
+    W = big.layers[0].W
+    C = 1.0 - W
+    check("the complement is a reflection about 0.5, not a sign flip",
+          abs(float(W.mean())) < 0.01 and abs(float(C.mean()) - 1.0) < 0.01,
+          f"Glorot mean {float(W.mean()):+.4f} -> {float(C.mean()):+.4f}, "
+          f"mean magnitude {float(abs(W).mean()):.3f} -> {float(abs(C).mean()):.3f} "
+          f"({float(abs(C).mean()) / float(abs(W).mean()):.1f}x); the post-flip network "
+          "is a different function, not the old one read backwards")
+
+    # And the sign-flip ablation still behaves as documented.
+    n2 = net(5, (12, 9, 7, 1))                      # h = k = bias = 0
+    before = n2.forward(x, train=False)
+    n2.invert_negate()
+    err = float(np.abs(n2.forward(x, train=False) + before).max())
+    check("the negate ablation gives exactly -output at h = k = bias = 0", err == 0.0,
+          f"error {err:.1e} - the sine is odd about the origin")
+
+    # W -> -W restores a deeper layer's pre-activation only if the layer below
+    # it was negated exactly, and that needs h = k = 0 there.  With the
+    # activation parameters off their defaults it is not, so the error does not
+    # stay at the first layer - it compounds up the stack.  Asserted in both
+    # directions so the boundary is on the record rather than assumed.
+    n3 = net(7, (12, 9, 7, 1))
+    randomise_act(n3, 8)
+    pre_before, _ = trace(n3, x)
+    n3.invert_negate()
+    pre_after, _ = trace(n3, x)
+    first = float(np.abs(pre_after[0] + pre_before[0]).max())
+    expect = float(np.abs(2.0 * n3.layers[0].bias).max())
+    check("under negation the first layer's pre-activation is -z plus twice its bias",
+          abs(first - expect) < 1e-12,
+          f"|z' + z| = {first:.3f} against 2*max|bias| = {expect:.3f}")
+    deep = max(float(np.abs(pre_after[i] - pre_before[i]).max())
+               for i in range(1, len(pre_before)))
+    check("and with h, k off zero the error compounds past it rather than cancelling",
+          deep > 1e-6,
+          f"deepest |z' - z| = {deep:.2f}: restoring z needs the layer below negated "
+          "exactly, which needs h = k = 0 there")
+
+    # At h = k = bias = 0 the sign does not propagate, it **alternates**: layer 0
+    # sees -z, so its output is -y; layer 1 therefore gets a negated input and a
+    # negated W, which cancel, so it sees +z and its output is unchanged; layer 2
+    # gets an unchanged input and a negated W, so it sees -z again.  The network's
+    # output is negated only when the number of weight layers is odd - and on an
+    # even stack W -> -W is a no-op on the function.  That parity dependence is
+    # the reason the complement, which has no such condition, is the shipped
+    # operator.
+    clean = net(7, (12, 9, 7, 1))                   # h = k = bias = 0
+    pre_c, _ = trace(clean, x)
+    clean.invert_negate()
+    pre_c2, _ = trace(clean, x)
+    alternates = all(
+        float(np.abs(pre_c2[i] + pre_c[i]).max()) == 0.0 if i % 2 == 0
+        else float(np.abs(pre_c2[i] - pre_c[i]).max()) == 0.0
+        for i in range(len(pre_c)))
+    check("at h = k = bias = 0 the sign alternates layer by layer, exactly",
+          alternates,
+          f"{len(pre_c)} layers: -z, +z, -z ... each to 0.0e+00")
+
+    for depth, sizes in (("even (2 layers)", (12, 9, 1)), ("odd (3 layers)", (12, 9, 7, 1))):
+        m = net(5, sizes)
+        b0 = m.forward(x, train=False)
+        m.invert_negate()
+        a0 = m.forward(x, train=False)
+        negated = float(np.abs(a0 + b0).max()) == 0.0
+        unchanged = float(np.abs(a0 - b0).max()) == 0.0
+        odd = len(sizes) - 1 == 3
+        check(f"W -> -W negates the output only on an odd stack - {depth}",
+              negated if odd else unchanged,
+              "output negated" if negated else "output unchanged - the flip cancels itself")
 
 
 def test_inversion_is_a_not() -> None:
@@ -278,7 +333,7 @@ def test_the_two_operators_are_equivalent() -> None:
     The pair that has this property is the per-unit flip and the read-out flip,
     which is why it is stated of those two.  The shipped ``W -> -W`` operator is
     a third point and is *not* in this equivalence class once training has moved
-    ``h``, ``k`` and the bias off zero - see ``test_weights_only_inversion``.
+    ``h``, ``k`` and the bias off zero - see ``test_complement_inversion``.
     ``results/invert_readout.json`` is that prediction run for real: an arm that
     differs only in this reproduces the headline run to every digit.
     """
@@ -359,10 +414,26 @@ def test_growth_identity() -> None:
     base = ng.forward(xg, train=False)
     ng.grow_hidden(6, rng, layer=0)
     grew = float(np.abs(ng.forward(xg, train=False) - base).max())
-    ng.invert()
+    ng.invert_negate()
     inv_w = float(np.abs(ng.forward(xg, train=False) + base).max())
     check("W -> -W is still exact after growth", grew == 0.0 and inv_w == 0.0,
           f"error {inv_w:.1e} - negating a zero out-weight leaves it zero")
+
+    # The complement does not have that property, and it matters: growth is an
+    # identity because the new units leave with *zero* outgoing weight, and
+    # 1 - 0 is 1.  A unit that was silent before the flip leaves it contributing
+    # at full strength.  Recorded because growth runs during phase 1, so every
+    # unit grown there meets the flip.
+    nc = net(5, (12, 9, 7, 1))
+    nc.grow_hidden(6, rng, layer=0)
+    out_w = nc.layers[1].W[-6:]
+    silent = float(np.abs(out_w).max())
+    nc.invert()
+    loud = float(np.abs(nc.layers[1].W[-6:]).max())
+    check("the complement turns a grown unit's silent out-weights into full ones",
+          silent == 0.0 and abs(loud - 1.0) < 1e-12,
+          f"out-weights {silent:.1f} -> {loud:.1f}: growth is identity-preserving, "
+          "the complement of it is not")
 
     n2 = net(12, (12, 8, 8, 1))
     n2.grow_hidden(4, rng, layer=1)
@@ -506,24 +577,42 @@ def test_fast_path() -> None:
 
 
 def test_action_inversion() -> None:
-    """Inverting flips the whole 4096-move ranking, exactly."""
-    agent = Agent.build([16, 16], seed=25)
-    worst, flipped, total = 0.0, 0, 0
-    for seed in range(6):
-        board = board_after(8 + 2 * seed, seed=seed + 20)
-        if board.is_game_over():
-            continue
-        before, _, _ = agent.action_scores(board)
-        agent.net.invert()
-        after, _, _ = agent.action_scores(board)
-        agent.net.invert()
-        worst = max(worst, float(np.abs(after + before).max()))
-        flipped += int(np.argmax(before) == np.argmin(after))
-        total += 1
-    check("inverting negates every one of the 4096 move scores exactly",
+    """What each operator does to the whole 4096-move ranking.
+
+    The negation reverses it exactly: the move the failure policy most wanted is
+    the one it now least wants.  The complement does not, and that is the point
+    of measuring it rather than asserting it - it rebuilds the ranking instead
+    of reading it backwards, so the correlation with the old ordering is what
+    says how much of the old policy survives.
+    """
+    def sweep(flip):
+        worst, reversed_top, corr, total = 0.0, 0, [], 0
+        for seed in range(6):
+            agent = Agent.build([16, 16], seed=25)
+            board = board_after(8 + 2 * seed, seed=seed + 20)
+            if board.is_game_over():
+                continue
+            before, _, _ = agent.action_scores(board)
+            flip(agent.net)
+            after, _, _ = agent.action_scores(board)
+            worst = max(worst, float(np.abs(after + before).max()))
+            reversed_top += int(np.argmax(before) == np.argmin(after))
+            corr.append(float(np.corrcoef(before, after)[0, 1]))
+            total += 1
+        return worst, reversed_top, total, float(np.mean(corr))
+
+    worst, flipped, total, _ = sweep(SineNet.invert_negate)
+    check("negating the weights negates every one of the 4096 move scores exactly",
           worst == 0.0 and flipped == total,
           f"error {worst:.1e}, {flipped}/{total} positions: "
           "the most wanted move became the least wanted")
+
+    _, flipped_c, total_c, corr_c = sweep(SineNet.invert)
+    check("the complement rebuilds the ranking rather than reversing it",
+          corr_c > -0.99,
+          f"correlation with the old ranking {corr_c:+.3f}, top move became the "
+          f"bottom in {flipped_c}/{total_c} positions - it is a different policy, "
+          "not the old one read backwards")
 
 
 def test_minimax_would_break_inversion() -> None:
@@ -641,12 +730,24 @@ def test_training_moves_the_right_way() -> None:
         p = policy(agent.net, batch, 1.0, train=True)
         apply_grad(agent.net, opt, batch, cross_entropy_grad(p, target, np.ones(len(batch))), 1.0)
     trained = policy(agent.net, batch, 1.0, train=False)[idx, target].mean()
-    agent.net.invert()
+    shipped = agent.net.copy()
+    agent.net.invert_negate()
     after = policy(agent.net, batch, 1.0, train=False)[idx, target].mean()
     check("the negative phase makes the refused move more likely",
           trained > start, f"p(refused move) {start:.3f} -> {trained:.3f}")
-    check("the inversion then makes it less likely than it ever was",
+    check("negating the weights then makes it less likely than it ever was",
           after < start, f"p(refused move) {trained:.3f} -> {after:.3f} after inverting")
+
+    # The shipped complement is weaker here, and the number is the finding: it
+    # suppresses most of what phase 1 built but does not drive the failure below
+    # where the untrained network had it.  Phase 3 starts from that, not from a
+    # policy that actively avoids its own failures.
+    shipped.invert()
+    after_c = policy(shipped, batch, 1.0, train=False)[idx, target].mean()
+    check("the complement suppresses the learned failure without reversing it",
+          trained > after_c > 0.0,
+          f"p(refused move) {start:.3f} untrained, {trained:.3f} trained, "
+          f"{after_c:.3f} after the complement - down, but not below where it began")
 
 
 # -------------------------------------------------------------------- judge
@@ -748,10 +849,11 @@ def test_inversion_complements_every_head() -> None:
     err_w = float(np.abs(p_before + p_shipped - 1.0).max())
     med_w = float(np.median(np.abs(p_before + p_shipped - 1.0)))
     agree = float(((p_shipped > 0.5) != (p_before > 0.5)).mean())
-    check("W -> -W complements it approximately, and still flips every answer",
-          agree > 0.95,
+    check("the shipped complement reverses most answers but not as an identity",
+          0.2 < agree < 1.0,
           f"worst |p + p' - 1| = {err_w:.2f}, median {med_w:.3f}, "
-          f"{agree:.1%} of answers reversed - exact only at h = k = bias = 0")
+          f"{agree:.1%} of answers reversed - W -> 1 - W is an involution on the "
+          "weights, not a complement of the output probability")
 
     # And the complement is the *right* answer, which is the point of doing it.
     auc_b = rules.auc(before[:, rules.LEGAL - 1], Y[:, rules.LEGAL - 1] > 0.5)
@@ -893,6 +995,7 @@ if __name__ == "__main__":
     print("SBNN + 2NRL on chess - correctness proofs")
     test_gradients()
     test_invert_exact()
+    test_complement_inversion()
     test_inversion_is_a_not()
     test_the_two_operators_are_equivalent()
     test_literal_is_noop()

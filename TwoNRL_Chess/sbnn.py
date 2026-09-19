@@ -205,48 +205,67 @@ class SineNet:
     # ---------------------------------------------------------------- 2NRL
 
     def invert(self) -> None:
-        """2NRL step 2: **negate the weights, and only the weights.**
+        """2NRL step 2: **complement the weights.** ``W -> 1 - W``, and nothing else.
 
-        ``W -> -W`` in every layer.  Nothing else is touched - not the bias,
-        not the amplitude ``a``, not the frequency ``b``, not the phase ``h``,
-        not the offset ``k``.  One line, every layer::
+        The photographic negative, applied to the weights themselves: 0.2
+        becomes 0.8, 0.8 becomes 0.2, white becomes black.  Not the bias, not
+        ``a``, not ``b``, not ``h``, not ``k`` - one line, every layer::
 
-            W -> -W
+            W -> 1 - W
 
-        What that does to a unit, exactly
-        ---------------------------------
-        A unit computes ``y = a*sin(b*(z - h)) + k`` over ``z = x@W + bias``.
-        Negating ``W`` alone gives ``z' = -x@W + bias``, so::
+        Why a complement rather than a sign flip
+        ----------------------------------------
+        2NRL's step 2 is a **logical NOT**, and the NOT of a quantity in [0, 1]
+        is ``1 - x``, not ``-x``.  Negation takes 0.2 to -0.2, which is not the
+        opposite of 0.2 in any sense the method is reaching for - it is the same
+        magnitude pointing the other way, and it leaves 0 fixed while sending
+        the strongest weights furthest.  The complement takes 0.2 to 0.8: what
+        the network barely used it now leans on, and what it leaned on it now
+        barely uses.  Every weight's role is exchanged with its opposite's.
 
-            bias = 0   =>   z' = -z
-            h = k = 0  =>   y' = a*sin(-b*z) = -a*sin(b*z) = -y
+        It is its own inverse, exactly::
 
-        With ``h = k = bias = 0`` - which is where every unit in this network
-        starts, since ``DEFAULT_H``, ``DEFAULT_K`` and the bias are all zero -
-        the sine is **odd**, the negated pre-activation passes straight through
-        it, and the unit's output is exactly negated.  Every layer's input is
-        then negated too, and its own ``W -> -W`` negates that back, so the
-        pre-activation seen deeper in is unchanged and the negation propagates
-        cleanly to the output.  Under those conditions this operator and the
-        per-unit one in :meth:`invert_unit` are the *same function*, and
-        ``test_sbnn.py`` shows them agreeing to zero error.
+            1 - (1 - w) == w
 
-        Training moves ``h``, ``k`` and the bias off zero, and once it has, the
-        equality above stops being exact.  The sine is odd about ``h``, not
-        about the origin, and ``k`` shifts it off the axis, so the flipped unit
-        reads ``-a*sin(b*(z + h)) + k`` where an exact negation wants
-        ``-a*sin(b*(z - h)) - k``.  The two agree at ``h = k = 0`` and drift
-        apart as those grow.  The experiment records the gap as
-        ``inversion_error`` at every flip, so it is measured rather than
-        assumed, and ``act_lr = lr/10`` keeps the activation parameters moving
-        an order of magnitude slower than the weights, which is what keeps it
-        small.
+        which is ``¬¬P ⟹ P``, the property §4 asks of the operator, and it holds
+        in floating point to one ulp rather than approximately.  The suite
+        checks it.
 
-        This is the operator the arms use.  The alternatives - negating each
-        unit through ``a`` and ``k`` (:meth:`invert_unit`), and negating the
-        read-out (:meth:`invert_readout`) - are kept as ablations, because they
-        leave the parameters in different places even where they agree on the
-        function, and phase 3 starts from wherever the flip left them.
+        What it does to the network, stated plainly
+        -------------------------------------------
+        This is not an output negation and does not pretend to be.  The weights
+        of a freshly initialised layer are Glorot-symmetric about zero - mean
+        +0.0003, mean magnitude 0.116 - and the complement sends them to mean
+        0.9997 with mean magnitude 0.9997.  They all become positive and roughly
+        unit-sized, an 8.6x increase, so pre-activations grow with the number of
+        active inputs instead of cancelling.  The network after the flip is a
+        genuinely different function, not the old one read backwards, and the
+        experiment measures what phase 3 can do from there rather than assuming
+        anything about it.
+
+        The alternatives are kept as ablations and selected with
+        ``--invert-mode``: ``negate`` is ``W -> -W``, ``unit`` negates each unit
+        through ``a`` and ``k``, and ``readout`` negates only the output.  The
+        last two negate the network's output exactly; this one does not, and the
+        difference is the thing the arms are there to measure.
+        """
+        for layer in self.layers:
+            layer.W = 1.0 - layer.W
+        self.inverted = not self.inverted
+
+    def invert_negate(self) -> None:
+        """Ablation: ``W -> -W``, every layer, and nothing else.
+
+        The sign flip rather than the complement.  It is exact as an output
+        negation while ``h``, ``k`` and the bias are at zero - the sine is odd
+        about the origin, so a negated pre-activation passes straight through it
+        - and approximate once training has moved them.  Layers past the first
+        are restored exactly, because their input has already been negated and
+        ``W -> -W`` undoes that; the whole of the error enters at the first
+        layer, whose input is the feature vector nobody negated, and it is
+        exactly ``2 * bias``.
+
+        ``--invert-mode negate`` runs it.
         """
         for layer in self.layers:
             layer.W *= -1.0

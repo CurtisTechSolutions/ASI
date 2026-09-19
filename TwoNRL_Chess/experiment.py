@@ -141,7 +141,8 @@ class Config:
     refusal_margin: float = 4.0      # refusals; the rule-failure equivalent of the above
     boost: float = 3.0               # cap on §6.1's proportional boosting
     buffer_rounds: int = 5           # how many rounds of failures a block trains on
-    invert_mode: str = "weights"     # "weights" = negate W and only W, every layer;
+    invert_mode: str = "complement"  # "complement" = W -> 1 - W, every layer;
+                                     # "negate" = W -> -W;
                                      # "unit" = negate each unit through a and k;
                                      # "readout" = negate only the output
     invert_trigger: str = "plateau"  # "plateau" = flip when the failure is learned;
@@ -650,8 +651,8 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
             out["inversion_before"] = probe()
         # Both operators produce -output exactly, so phase 2 cannot tell them
         # apart. They leave the parameters in different places, and phase 3 can.
-        {"weights": net.invert, "unit": net.invert_unit,
-         "readout": net.invert_readout}[cfg.invert_mode]()
+        {"complement": net.invert, "negate": net.invert_negate,
+         "unit": net.invert_unit, "readout": net.invert_readout}[cfg.invert_mode]()
         out["inversion_error"] = float(np.abs(net.forward(rows, train=False) + before).max())
         if probe is not None:
             out["inversion_after"] = probe()
@@ -971,12 +972,13 @@ def main() -> None:
                    choices=["refusals", "cp_loss", "top1_legal", ""],
                    help="validation metric used to keep the best network; "
                         "empty keeps the last round instead")
-    p.add_argument("--invert-mode", choices=["weights", "unit", "readout"],
+    p.add_argument("--invert-mode",
+                   choices=["complement", "negate", "unit", "readout"],
                    default=Config.invert_mode,
-                   help="weights: negate W and only W, every layer (default).  "
-                        "unit: negate each unit through a and k, which is exact "
-                        "whatever h, k and the bias have become.  readout: negate "
-                        "only the network's output, leaving the hidden units alone")
+                   help="complement: W -> 1 - W, the logical NOT of each weight "
+                        "(default).  negate: W -> -W.  unit: negate each unit "
+                        "through a and k, exact whatever h, k and the bias have "
+                        "become.  readout: negate only the network's output")
     p.add_argument("--invert-trigger", choices=["plateau", "schedule"],
                    default=Config.invert_trigger,
                    help="plateau: flip the round the negative loss stops improving, "
