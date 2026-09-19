@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -106,12 +107,14 @@ export default function RatingsCard({
   feedback,
   status,
   emptyText = "rate some samples first",
+  namespace = "ratings",
 }) {
-  const [negEpochs, setNegEpochs] = useState("2");
-  const [posEpochs, setPosEpochs] = useState("3");
-  const [negLr, setNegLr] = useState("0.5");
-  const [posLr, setPosLr] = useState("0.1");
-  const [strength, setStrength] = useState("1");
+  // the card is mounted once per tab, so each one remembers its own settings
+  const [negEpochs, setNegEpochs] = useStoredState(`${namespace}.negEpochs`, "2");
+  const [posEpochs, setPosEpochs] = useStoredState(`${namespace}.posEpochs`, "3");
+  const [negLr, setNegLr] = useStoredState(`${namespace}.negLr`, "0.5");
+  const [posLr, setPosLr] = useStoredState(`${namespace}.posLr`, "0.1");
+  const [strength, setStrength] = useStoredState(`${namespace}.strength`, "1");
   const [lastAction, setLastAction] = useState(null);
   const { job, running, busy, error: jobError, start, stop, clearError } = feedback;
   const countKind = Boolean(status && status.kind === "count");

@@ -600,6 +600,37 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count, hover label).
 * `ScorePanel.jsx` — score a text.
+* `TutorPanel.jsx` — the automated English lessons (section 16.1): the settings, a dry run that marks without training, the marks per round as a chart, the report card with the mistake histogram, and every lesson beside its correction.
+
+### 13.1 Settings remembered in the browser (`src/storage.js`, `src/hooks/useStoredState.js`)
+
+Every settings field of every panel keeps its value in `localStorage`, so the forms survive a reload.
+
+```js
+STORAGE_PREFIX = "radixnet.v1."        // the namespace; the version retires an old format wholesale
+MAX_VALUE_CHARS = 256 * 1024           // larger values (a pasted corpus) are not stored
+
+storageKey(name)                       // "radixnet.v1." + name
+sameShape(value, fallback)             // a stored value is used only while it still looks like the default
+readSetting(storage, name, fallback)   // missing / unreadable / reshaped -> fallback; objects merge into it
+writeSetting(storage, name, value)     // -> stored?  (unserialisable, too large, quota full: false, never throws)
+removeSetting / settingNames / clearSettings(storage)   // only this app's keys
+browserStorage()                       // localStorage probed once with a real write, else null
+```
+
+`useStoredState(name, initialValue)` is `useState` with that store behind it: the initial value is the stored
+one when a value of the same shape exists, every later change is written back 250 ms after the last keystroke,
+and the value just read is *not* written again - a panel nobody touched leaves no trace. `name` is
+`"<panel>.<field>"` (`tutor.topic`, `train.epochs`, `codegen.settings`, `generate.ratings.negLr`); two mounted
+components must not share one (`RatingsCard` takes a `namespace` prop for exactly that reason, since Generate and
+Converse each mount one). Where the browser has no usable storage - a private window, blocked site data - every
+call falls back and the hook is plain `useState`.
+
+What is *not* a setting and never stored: results and transcripts, ratings, job state, server data (the model
+list, presets, checkpoints) and uploaded-file selections (the file may be gone by the next visit). The footer's
+"settings saved in this browser" button (`SettingsReset` in `App.jsx`, two clicks) calls `clearSettings` and
+reloads. Tests: `frontend/test/storage.test.mjs` (`npm test`, `make frontend-test`) runs the store against a
+`localStorage` stand-in, including ones whose methods throw.
 
 Plain readable CSS, responsive (single column under 800px). No TypeScript.
 

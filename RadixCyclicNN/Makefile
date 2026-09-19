@@ -67,7 +67,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve train resume predict generate score 2nrl invert compress \
         evolve evolve-forever info checkpoints restore bench demo serve frontend-install frontend-build \
-        frontend-dev ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
+        frontend-dev frontend-test tutor tutor-dry tutor-focus ollama-models ollama-corpus ollama-garbage ollama-review ollama-2nrl \
         codegen codegen-teacher codegen-model \
         docker-build up up-auto up-dev up-gpu up-ollama down logs shell docker-train docker-evolve \
         docker-test docker-bench docker-reload docker-export docker-clean clean clean-all
@@ -210,6 +210,9 @@ frontend-build: ## Rebuild frontend/dist (what `make serve` serves)
 
 frontend-dev: ## Vite dev server with hot reload on http://localhost:5173 (expects `make serve` running)
 	cd frontend && npm run dev
+
+frontend-test: ## Unit tests of the frontend's settings store (node --test, no dependencies, no npm install needed)
+	cd frontend && npm test
 
 ##@ Docker (Compose stack)
 docker-build: ## Build the image (WITH_TORCH=1 adds torch)

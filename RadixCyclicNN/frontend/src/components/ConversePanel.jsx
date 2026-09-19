@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -16,16 +17,16 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * model of the other kind kept in memory. Turns can be rated like samples.
  */
 export default function ConversePanel({ status }) {
-  const [opening, setOpening] = useState("");
-  const [turns, setTurns] = useState("6");
-  const [mode, setMode] = useState("beam");
-  const [maxLength, setMaxLength] = useState("60");
-  const [context, setContext] = useState("12");
-  const [temperature, setTemperature] = useState("1.0");
-  const [k, setK] = useState("5");
-  const [speakerA, setSpeakerA] = useState("A");
-  const [speakerB, setSpeakerB] = useState("B");
-  const [partner, setPartner] = useState("");
+  const [opening, setOpening] = useStoredState("converse.opening", "");
+  const [turns, setTurns] = useStoredState("converse.turns", "6");
+  const [mode, setMode] = useStoredState("converse.mode", "beam");
+  const [maxLength, setMaxLength] = useStoredState("converse.maxLength", "60");
+  const [context, setContext] = useStoredState("converse.context", "12");
+  const [temperature, setTemperature] = useStoredState("converse.temperature", "1.0");
+  const [k, setK] = useStoredState("converse.k", "5");
+  const [speakerA, setSpeakerA] = useStoredState("converse.speakerA", "A");
+  const [speakerB, setSpeakerB] = useStoredState("converse.speakerB", "B");
+  const [partner, setPartner] = useStoredState("converse.partner", "");
   const [inMemory, setInMemory] = useState([]);
   const [transcript, setTranscript] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -233,6 +234,7 @@ export default function ConversePanel({ status }) {
         onClear={clear}
         onRemove={remove}
         onMark={setMark}
+        namespace="converse.ratings"
         feedback={feedback}
         status={status}
         emptyText="rate some turns first"

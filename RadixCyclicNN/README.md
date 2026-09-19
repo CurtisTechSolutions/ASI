@@ -256,6 +256,19 @@ and the teacher's line), Code (code generation with the sandbox and the judge),
 Checkpoints (save / restore / load / reset) and a Graph view of the most
 visited nodes.
 
+**Settings are remembered in the browser.** Every settings field of every
+panel - epochs, learning rates, modes, thresholds, prefixes, prompts, the topic
+of a tutor run, the text in the boxes - is written to `localStorage` under the
+`radixnet.v1.` prefix as you change it, so a reload (or coming back tomorrow)
+finds the forms as you left them. Nothing is stored until you actually change a
+field, so untouched defaults leave no trace, and results, ratings, job state
+and uploaded-file selections are not settings and are never stored. A value too
+large to keep (a pasted corpus over 256 KB) is skipped rather than filling the
+quota, and where the browser has no usable storage (a private window, blocked
+site data) the panels simply work as before. The footer's *settings saved in
+this browser* button forgets all of it - click it twice - and reloads with the
+defaults; nothing is ever sent to the server.
+
 Training files: drop text files onto the Train panel (or press "Upload
 files…"); the browser reads them and sends them to `POST /api/uploads` (a
 `.zip` goes up as bytes and stays one entry in the list; the server unpacks the
@@ -267,6 +280,7 @@ the 2NRL (bad / good files) and Evolve (corpus files) panels.
 ```bash
 make frontend-install && make frontend-build   # rebuild dist
 make serve                                     # then make frontend-dev in another shell for hot reload
+make frontend-test                             # unit tests of the settings store (node --test, no install needed)
 ```
 
 ## Ollama: corpus from a prompt, adversarial review
@@ -742,8 +756,9 @@ Evolver(RadixNet.load("model.json.gz"), corpus=["the cat sat on the mat"]).run(g
 ## Tests
 
 ```bash
-make test        # python -m unittest discover -s tests -v (includes the Go parity test when `go` is on PATH)
-make go-test     # cd go && go test -race ./...
+make test           # python -m unittest discover -s tests -v (includes the Go parity test when `go` is on PATH)
+make go-test        # cd go && go test -race ./...
+make frontend-test  # cd frontend && npm test (node --test over the settings store; no dependencies)
 ```
 
 ## Layout
@@ -753,7 +768,8 @@ RadixCyclicNN/
   radixnet/           activation, encoding, graph, backend(+torch), search, beam, model, countnet, schedule, gan,
                       checkpoint, bench, cli, api, ollama, tutor, codegen
   tests/              unittest suite
-  frontend/           Vite + React app (dist/ is prebuilt and served by the API)
+  frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
+                      the panels' settings in localStorage, test/ holds its node --test suite)
   go/                 Go port of the count / reward model: radixnet/ (library), cmd/radixnet-count (CLI)
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data)
   docker/             container entrypoint (optional checkpoint resume)

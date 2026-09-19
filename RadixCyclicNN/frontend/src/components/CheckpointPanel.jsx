@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtBytes, fmtInt, fmtNum, fmtTime, jobIsRunning, parseInteger } from "../util.js";
 import Alert from "./Alert.jsx";
 import { NumberField, TextField } from "./Fields.jsx";
@@ -21,10 +22,10 @@ export default function CheckpointPanel({ status }) {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [pending, setPending] = useState(null);
-  const [tag, setTag] = useState("manual");
-  const [savePath, setSavePath] = useState("");
-  const [loadPath, setLoadPath] = useState("");
-  const [seed, setSeed] = useState("0");
+  const [tag, setTag] = useStoredState("checkpoints.tag", "manual");
+  const [savePath, setSavePath] = useStoredState("checkpoints.savePath", "");
+  const [loadPath, setLoadPath] = useStoredState("checkpoints.loadPath", "");
+  const [seed, setSeed] = useStoredState("checkpoints.seed", "0");
 
   const busy = pending !== null;
   const locked = busy || jobIsRunning(status);

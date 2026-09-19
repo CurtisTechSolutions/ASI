@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, parseInteger, showWhitespace } from "../util.js";
 import Alert from "./Alert.jsx";
 import { NumberField } from "./Fields.jsx";
@@ -65,7 +66,7 @@ function truncate(text) {
 
 /** SVG view of the top-N nodes of the graph: circular layout, hover tooltips, edge highlighting. */
 export default function GraphView() {
-  const [limit, setLimit] = useState(String(DEFAULT_LIMIT));
+  const [limit, setLimit] = useStoredState("graph.limit", String(DEFAULT_LIMIT));
   const [graph, setGraph] = useState({ nodes: [], edges: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { useStoredState } from "../hooks/useStoredState.js";
 import { fmtInt, fmtNum } from "../util.js";
 import Alert from "./Alert.jsx";
 import { TextArea } from "./Fields.jsx";
 
 /** Log-probability of a text under the model. */
 export default function ScorePanel() {
-  const [text, setText] = useState("");
+  const [text, setText] = useStoredState("score.text", "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
