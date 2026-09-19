@@ -205,54 +205,83 @@ class SineNet:
     # ---------------------------------------------------------------- 2NRL
 
     def invert(self) -> None:
-        """2NRL step 2: negate every unit in the network - a logical NOT, not a
-        sign flip on the read-out.
+        """2NRL step 2: **negate the weights, and only the weights.**
 
-        ``Research/2NRL.md`` §4.3 gives the primitive, and it is a statement
-        about a *unit*, not about the output::
+        ``W -> -W`` in every layer.  Nothing else is touched - not the bias,
+        not the amplitude ``a``, not the frequency ``b``, not the phase ``h``,
+        not the offset ``k``.  One line, every layer::
 
-            a -> -a ,  k -> -k          negates that unit, exactly
+            W -> -W
 
-        because ``-a*sin(b*(x-h)) + (-k) == -(a*sin(b*(x-h)) + k)`` for every
-        ``x``.  The unit's verdict flips and nothing else about it moves: not
-        its phase ``h``, not its frequency ``b``, not its bias.  §13 says the
-        same in one line - ``W -> -W``, and ``a -> -a`` with ``k -> -k``.
+        What that does to a unit, exactly
+        ---------------------------------
+        A unit computes ``y = a*sin(b*(z - h)) + k`` over ``z = x@W + bias``.
+        Negating ``W`` alone gives ``z' = -x@W + bias``, so::
 
-        Applying that to every unit is what this method does.  The one thing
-        composition adds is bookkeeping about what each unit *sees*.  In the
-        radix graph a node's pre-activation ``z_p`` is a node state, so negating
-        the two endpoint units and the edge weight flips the edge signal exactly
-        once and there is nothing further to do.  In a stack, layer ``i``'s input
-        is layer ``i-1``'s **output**, which has just been negated - so its
-        pre-activation would flip too, and an odd sine would undo the very
-        negation we applied.  Flipping that layer's weights cancels it::
+            bias = 0   =>   z' = -z
+            h = k = 0  =>   y' = a*sin(-b*z) = -a*sin(b*z) = -y
+
+        With ``h = k = bias = 0`` - which is where every unit in this network
+        starts, since ``DEFAULT_H``, ``DEFAULT_K`` and the bias are all zero -
+        the sine is **odd**, the negated pre-activation passes straight through
+        it, and the unit's output is exactly negated.  Every layer's input is
+        then negated too, and its own ``W -> -W`` negates that back, so the
+        pre-activation seen deeper in is unchanged and the negation propagates
+        cleanly to the output.  Under those conditions this operator and the
+        per-unit one in :meth:`invert_unit` are the *same function*, and
+        ``test_sbnn.py`` shows them agreeing to zero error.
+
+        Training moves ``h``, ``k`` and the bias off zero, and once it has, the
+        equality above stops being exact.  The sine is odd about ``h``, not
+        about the origin, and ``k`` shifts it off the axis, so the flipped unit
+        reads ``-a*sin(b*(z + h)) + k`` where an exact negation wants
+        ``-a*sin(b*(z - h)) - k``.  The two agree at ``h = k = 0`` and drift
+        apart as those grow.  The experiment records the gap as
+        ``inversion_error`` at every flip, so it is measured rather than
+        assumed, and ``act_lr = lr/10`` keeps the activation parameters moving
+        an order of magnitude slower than the weights, which is what keeps it
+        small.
+
+        This is the operator the arms use.  The alternatives - negating each
+        unit through ``a`` and ``k`` (:meth:`invert_unit`), and negating the
+        read-out (:meth:`invert_readout`) - are kept as ablations, because they
+        leave the parameters in different places even where they agree on the
+        function, and phase 3 starts from wherever the flip left them.
+        """
+        for layer in self.layers:
+            layer.W *= -1.0
+        self.inverted = not self.inverted
+
+    def invert_unit(self) -> None:
+        """Ablation: negate every *unit* rather than every weight.
+
+        The per-unit primitive is ``a -> -a`` with ``k -> -k``, because
+        ``-a*sin(b*(x-h)) + (-k) == -(a*sin(b*(x-h)) + k)`` for every ``x`` -
+        the unit's verdict flips and nothing else about it moves, not its phase
+        ``h``, not its frequency ``b``, not its bias.
+
+        Composition adds one piece of bookkeeping.  Layer ``i``'s input is
+        layer ``i-1``'s **output**, which has just been negated, so its
+        pre-activation would flip too; flipping that layer's weights cancels
+        it::
 
             z_i' = (-W_i)(-y_{i-1}) + bias_i = W_i y_{i-1} + bias_i = z_i
 
-        The first layer is the exception, and it is the whole of the exception:
-        its input is the feature vector, which nobody negated, so its weights
-        stay as they are.  Flip those too and you get :meth:`invert_literal`,
-        where the odd sine cancels the unit negation and the operation is a
-        no-op.
+        The first layer is the exception - its input is the feature vector,
+        which nobody negated - so its weights stay as they are.
 
-        So, for every layer::
-
-            a -> -a ,  k -> -k                       every unit is negated
-            W -> -W    for every layer but the first  so it still sees the same z
-
-        Three things hold afterwards, and ``test_sbnn.py`` asserts all three:
-        every pre-activation is **unchanged**, so each unit is looking at
-        exactly the evidence it looked at before; every unit's output is
-        **exactly negated**, so the verdict on that evidence is reversed
-        throughout; and the network's output is therefore ``-output``, so
-        ``argmax`` becomes ``argmin`` and the move the failure policy most
-        wanted is the one it now least wants.  It is its own inverse, which is
-        ``¬¬P ⟹ P``.
+        Three things hold afterwards, unconditionally, and ``test_sbnn.py``
+        asserts all three: every pre-activation is **unchanged**, every unit's
+        output is **exactly negated**, and the network's output is therefore
+        ``-output`` - at zero error, whatever ``h``, ``k`` and the bias have
+        become.  That unconditional exactness is the one thing this operator
+        has that :meth:`invert` does not, and it is why it is kept.
+        ``--invert-mode unit`` runs it.
         """
         for i, layer in enumerate(self.layers):
             if i > 0:
                 layer.W *= -1.0        # so this unit still sees the same z
-            layer.a *= -1.0            # negate the unit: the paper's primitive
+            layer.a *= -1.0            # negate the unit
             layer.k *= -1.0
         self.inverted = not self.inverted
 
