@@ -501,6 +501,18 @@ class NegativeGraph(RadixCyclicGraph):
         return g
 
 
+def _rated(texts, weights: Sequence[float], name: str) -> list[tuple[str, float]]:
+    """``[(text, weight)]`` for the texts worth a pass: one finite ``>= 0`` weight each, zero weights dropped."""
+    items = [texts] if isinstance(texts, str) else list(texts)
+    values = [float(w) for w in weights]
+    if len(values) != len(items):
+        raise ValueError(f"{name} has {len(values)} entries for {len(items)} texts")
+    for weight in values:
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"{name} must be finite and >= 0, got {weight}")
+    return [(text, weight) for text, weight in zip(items, values) if weight > 0]
+
+
 def _float_array(values, n: int, name: str) -> list[float]:
     """A per-edge float array from a document (zeros when absent); length must match."""
     if values is None:
@@ -793,23 +805,83 @@ class NegativeNet(GraphModel):
         )
 
     def punish(self, texts: Iterable[str] | str, *, epochs: int = 1, strength: float | None = 1.0,
-               lr: float | None = None, reason: str | None = "thumbs-down", source: str = "feedback",
-               note: str = "", progress: ProgressFn | None = None, stop_event: threading.Event | None = None,
+               lr: float | None = None, weights: Sequence[float] | None = None,
+               reason: str | None = "thumbs-down", source: str = "feedback", note: str = "",
+               progress: ProgressFn | None = None, stop_event: threading.Event | None = None,
                **overrides) -> list[dict]:
-        """Thumbs down: :meth:`blame` with ``strength`` as the severity."""
-        return self.blame(
-            texts, reason=reason, severity=1.0 if strength is None else float(strength), source=source, note=note,
-            epochs=epochs, progress=progress, stop_event=stop_event, **overrides,
+        """Thumbs down: :meth:`blame` with ``strength`` as the severity.
+
+        ``weights`` (one per text, ``>= 0``) rates the failures rather than
+        blaming them all alike: a text of weight ``w`` is blamed with
+        ``w * strength``, one pass per text, and its records carry
+        ``"weight"``; a weight of 0 is skipped.
+        """
+        severity = 1.0 if strength is None else float(strength)
+        if weights is None:
+            return self.blame(
+                texts, reason=reason, severity=severity, source=source, note=note,
+                epochs=epochs, progress=progress, stop_event=stop_event, **overrides,
+            )
+        return self._rated_blame(
+            _rated(texts, weights, "weights"), severity=severity, epochs=epochs, reason=reason, source=source,
+            note=note, progress=progress, stop_event=stop_event, **overrides,
         )
 
     def reward(self, texts: Iterable[str] | str, *, epochs: int = 1, strength: float | None = 1.0,
-               lr: float | None = None, progress: ProgressFn | None = None,
-               stop_event: threading.Event | None = None, **overrides) -> list[dict]:
-        """Thumbs up: :meth:`clear` - the negative network never learns *from* correct text, it only lets go of blame."""
-        return self.clear(
-            texts, weight=1.0 if strength is None else float(strength), epochs=epochs, progress=progress,
-            stop_event=stop_event, **overrides,
-        )
+               lr: float | None = None, weights: Sequence[float] | None = None,
+               progress: ProgressFn | None = None, stop_event: threading.Event | None = None,
+               **overrides) -> list[dict]:
+        """Thumbs up: :meth:`clear` - the negative network never learns *from* correct text, it only lets go of blame.
+
+        ``weights`` (one per text, ``>= 0``) rates how much blame each text
+        clears: a text of weight ``w`` clears ``w * strength``, one pass per
+        text, and its records carry ``"weight"``; a weight of 0 is skipped.
+        """
+        base = 1.0 if strength is None else float(strength)
+        if weights is None:
+            return self.clear(
+                texts, weight=base, epochs=epochs, progress=progress, stop_event=stop_event, **overrides,
+            )
+        records: list[dict] = []
+        for text, weight in _rated(texts, weights, "weights"):
+            if stop_event is not None and stop_event.is_set():
+                break
+            cleared = self.clear([text], weight=base * weight, epochs=epochs, stop_event=stop_event, **overrides)
+            for record in cleared:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(cleared)
+        return records
+
+    def _rated_blame(
+        self,
+        rated: list[tuple[str, float]],
+        *,
+        severity: float,
+        epochs: int,
+        reason: str | None,
+        source: str,
+        note: str,
+        progress: ProgressFn | None = None,
+        stop_event: threading.Event | None = None,
+        **overrides,
+    ) -> list[dict]:
+        """One blame pass per rated text, the severity scaled by its weight; the records carry ``"weight"``."""
+        records: list[dict] = []
+        for text, weight in rated:
+            if stop_event is not None and stop_event.is_set():
+                break
+            blamed = self.blame(
+                [text], reason=reason, severity=severity * weight, source=source, note=note, epochs=epochs,
+                stop_event=stop_event, **overrides,
+            )
+            for record in blamed:
+                record["weight"] = weight
+                if progress is not None:
+                    progress(record)
+            records.extend(blamed)
+        return records
 
     def two_nrl(
         self,
@@ -824,6 +896,7 @@ class NegativeNet(GraphModel):
         stop_event: threading.Event | None = None,
         strength: float | None = 1.0,
         bad_weights: Sequence[float] | None = None,
+        good_weights: Sequence[float] | None = None,
         reason: str | None = None,
         source: str = "",
         note: str = "",
@@ -834,7 +907,8 @@ class NegativeNet(GraphModel):
         Nothing is inverted - blame already makes a path the *likely* one here
         and the model is never asked to write text.  ``neg_lr`` / ``pos_lr``
         are accepted for interface parity and ignored; ``bad_weights`` scales
-        the severity per text (the worse the failure, the heavier the blame).
+        the severity per text (the worse the failure, the heavier the blame)
+        and ``good_weights`` scales how much blame each good text clears.
         """
         reserved = sorted({"epochs", "lr", "act_lr"} & set(overrides))
         if reserved:
@@ -847,27 +921,16 @@ class NegativeNet(GraphModel):
                 stop_event=stop_event, **overrides,
             )
         else:
-            items = [bad] if isinstance(bad, str) else list(bad)
-            weights = [float(w) for w in bad_weights]
-            if len(weights) != len(items):
-                raise ValueError(f"bad_weights has {len(weights)} entries for {len(items)} texts")
-            for text, weight in zip(items, weights):
-                if stop_event is not None and stop_event.is_set():
-                    break
-                if weight <= 0:
-                    continue
-                records = self.blame(
-                    [text], reason=reason, severity=base * weight, source=source, note=note, epochs=neg_epochs,
-                    stop_event=stop_event, **overrides,
-                )
-                for record in records:
-                    record["weight"] = weight
-                    if progress is not None:
-                        progress(record)
-                negative.extend(records)
+            negative = self._rated_blame(
+                _rated(bad, bad_weights, "bad_weights"), severity=base, epochs=neg_epochs, reason=reason,
+                source=source, note=note, progress=progress, stop_event=stop_event, **overrides,
+            )
         positive: list[dict] = []
         if not (stop_event is not None and stop_event.is_set()):
-            positive = self.clear(good, weight=base, epochs=pos_epochs, progress=progress, stop_event=stop_event, **overrides)
+            positive = self.reward(
+                good, epochs=pos_epochs, strength=base, weights=good_weights, progress=progress,
+                stop_event=stop_event, **overrides,
+            )
         runs = meta_add(self.meta, "twonrl_runs", 1)
         if checkpoint_manager is not None:
             last = positive[-1] if positive else (negative[-1] if negative else None)
