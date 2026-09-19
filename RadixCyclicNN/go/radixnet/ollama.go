@@ -76,7 +76,8 @@ func DefaultOllamaModel() string {
 	return DefaultOllamaModelName
 }
 
-// OllamaClient talks to one Ollama server.
+// OllamaClient talks to one Ollama server.  It implements LLMClient, so the
+// tutor cannot tell it from a ChatGPTClient.
 type OllamaClient struct {
 	URL     string
 	Model   string
@@ -101,6 +102,15 @@ func NewOllamaClient(url, model string, timeout time.Duration) (*OllamaClient, e
 	}
 	return &OllamaClient{URL: normalised, Model: strings.TrimSpace(model), Timeout: timeout, client: &http.Client{}}, nil
 }
+
+// Provider is "ollama".
+func (c *OllamaClient) Provider() string { return ProviderOllama }
+
+// BaseURL is the endpoint it talks to.
+func (c *OllamaClient) BaseURL() string { return c.URL }
+
+// ModelName is the model it answers with by default.
+func (c *OllamaClient) ModelName() string { return c.Model }
 
 func (c *OllamaClient) request(method, path string, body any, timeout time.Duration) ([]byte, error) {
 	var reader io.Reader
@@ -171,17 +181,8 @@ func (c *OllamaClient) Available() bool {
 	return err == nil
 }
 
-// OllamaGenerateOptions are the knobs of one completion.
-type OllamaGenerateOptions struct {
-	System      string        // the system prompt
-	Model       string        // override the client's model
-	JSON        bool          // ask for a JSON answer (format: json)
-	Temperature float64       // 0 = Ollama's own default
-	Timeout     time.Duration // 0 = the client's timeout
-}
-
 // Generate runs one non-streaming completion (POST /api/generate).
-func (c *OllamaClient) Generate(prompt string, o OllamaGenerateOptions) (string, error) {
+func (c *OllamaClient) Generate(prompt string, o LLMOptions) (string, error) {
 	model := strings.TrimSpace(o.Model)
 	if model == "" {
 		model = c.Model
@@ -213,6 +214,57 @@ func (c *OllamaClient) Generate(prompt string, o OllamaGenerateOptions) (string,
 }
 
 var linePrefix = regexp.MustCompile(`^\s*(?:[-*•]+|\(?\d+[.):]|\d+\s*-)\s*`)
+
+// Chat is one chat turn: the assistant's text.  messages are
+// {"role", "content"} maps, as Ollama's /api/chat takes them.
+func (c *OllamaClient) Chat(messages []map[string]any, o LLMOptions) (string, error) {
+	message, err := c.ChatMessage(messages, o, nil)
+	if err != nil {
+		return "", err
+	}
+	content, _ := message["content"].(string)
+	return content, nil
+}
+
+// ChatMessage is the whole assistant message of one chat turn.
+//
+// tools are JSON-schema function definitions (Ollama's own tools format, see
+// ToolBox.Schemas); a model that supports tool calling answers with
+// {"tool_calls": [...]} beside (or instead of) "content".  The message comes
+// back as it arrived, with "content" guaranteed to be a string.
+func (c *OllamaClient) ChatMessage(messages []map[string]any, o LLMOptions, tools []map[string]any) (map[string]any, error) {
+	model := strings.TrimSpace(o.Model)
+	if model == "" {
+		model = c.Model
+	}
+	body := map[string]any{"model": model, "messages": messages, "stream": false}
+	if o.JSON {
+		body["format"] = "json"
+	}
+	if o.Temperature > 0 {
+		body["options"] = map[string]any{"temperature": o.Temperature}
+	}
+	if len(tools) > 0 {
+		body["tools"] = tools
+	}
+	raw, err := c.request("POST", "/api/chat", body, o.Timeout)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Message map[string]any `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, ollamaErrorf("Ollama returned invalid JSON for /api/chat: %v", err)
+	}
+	if doc.Message == nil {
+		return nil, ollamaErrorf("unexpected /api/chat response (no message)")
+	}
+	if _, ok := doc.Message["content"].(string); !ok {
+		doc.Message["content"] = ""
+	}
+	return doc.Message, nil
+}
 
 // ParseLines turns an LLM answer into clean lines: numbering, bullets and
 // quotes stripped, blank lines, code fences and duplicates dropped.  A limit

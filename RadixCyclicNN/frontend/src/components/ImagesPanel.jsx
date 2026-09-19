@@ -5,6 +5,7 @@ import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
+import RecallCard from "./RecallCard.jsx";
 import { NumberField, SelectField, TextArea } from "./Fields.jsx";
 
 const SIZES = [
@@ -278,6 +279,12 @@ export default function ImagesPanel({ status }) {
           starts with an encoded text (Predict tab) can be pasted below to see it.
         </p>
       </div>
+
+      <RecallCard
+        modality="image"
+        disabled={!file}
+        run={(options) => api.imageTutor(file, { size: parseInteger(size, 128), encoder, ...options })}
+      />
 
       <div className="card">
         <h2>Decode a text</h2>

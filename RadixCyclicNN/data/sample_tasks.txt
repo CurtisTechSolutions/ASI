@@ -1,0 +1,8 @@
+# One question per line; `radixnet agent --tasks data/sample_tasks.txt`.
+# Each is settled by browsing and answered in a sentence, so the LLM can write
+# acceptance criteria for it before the network attempts anything.
+What is the HTTP status code for "I'm a teapot", and which RFC defined it?
+Who wrote the standard library module `difflib` is based on, and what is the algorithm called?
+What does the acronym CSR stand for in sparse-matrix storage?
+What is the boiling point of water in Fahrenheit at sea level?
+How many bytes does a UTF-8 encoded em dash take?

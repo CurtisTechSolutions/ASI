@@ -1,7 +1,9 @@
 package radixnet
 
-// Automated English lessons: Ollama sets the exercise, the network completes
-// it, Ollama marks it.
+// Automated English lessons: the teacher sets the exercise, the network
+// completes it, the teacher marks it.  The teacher is any provider client - a
+// local Ollama model or ChatGPT (TutorConfig.TutorProvider) - and the marking
+// follows it unless GraderProvider names the other one.
 //
 //	topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
 //
@@ -26,6 +28,7 @@ package radixnet
 // teacher for extra correct sentences about them.
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -238,12 +241,13 @@ type ExerciseRequest struct {
 	Level       string   // "beginner", "intermediate", ...
 	Weak        []string // the mistakes the student keeps making
 	Words       string   // how long a prefix is, e.g. "3 to 6"
+	Brief       string   // the plan this batch of lessons is being taught to (LessonPlan.Prompt)
 	Model       string
 	Temperature float64
 }
 
 // WriteExercises asks the teacher for sentence openings about a topic.
-func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, error) {
+func WriteExercises(client LLMClient, req ExerciseRequest) ([]Exercise, error) {
 	if req.Count < 1 {
 		return nil, fmt.Errorf("count must be >= 1")
 	}
@@ -264,6 +268,9 @@ func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, erro
 		temperature = 0.9
 	}
 	lines := []string{"Topic: " + topic, "Level: " + level}
+	if brief := strings.Join(strings.Fields(req.Brief), " "); brief != "" {
+		lines = append(lines, "The plan for this batch of lessons: "+brief)
+	}
 	if strings.TrimSpace(req.Focus) != "" {
 		lines = append(lines, "Every exercise must drill: "+strings.TrimSpace(req.Focus))
 	}
@@ -271,7 +278,7 @@ func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, erro
 		lines = append(lines, "The student keeps making these mistakes, so drill them: "+strings.Join(weak, ", ")+".")
 	}
 	lines = append(lines, fmt.Sprintf("Write the %d exercises now.", req.Count))
-	raw, err := client.Generate(strings.Join(lines, "\n"), OllamaGenerateOptions{
+	raw, err := client.Generate(strings.Join(lines, "\n"), LLMOptions{
 		System: fmt.Sprintf(exerciseSystem, words, req.Count), Model: req.Model, JSON: true, Temperature: temperature,
 	})
 	if err != nil {
@@ -281,9 +288,9 @@ func WriteExercises(client *OllamaClient, req ExerciseRequest) ([]Exercise, erro
 	if len(exercises) == 0 {
 		name := req.Model
 		if name == "" {
-			name = client.Model
+			name = client.ModelName()
 		}
-		return nil, ollamaErrorf("Ollama model %q returned no usable exercises", name)
+		return nil, llmErrorf("the teacher model %q returned no usable exercises", name)
 	}
 	return exercises, nil
 }
@@ -307,7 +314,7 @@ const drillSystem = "You are an English teacher writing model sentences for a be
 	"student learns English by copying them."
 
 // DrillSentences asks for correct example sentences about the topic, demonstrating the weak points.
-func DrillSentences(client *OllamaClient, topic string, count int, weak []string, model string) ([]string, error) {
+func DrillSentences(client LLMClient, topic string, count int, weak []string, model string) ([]string, error) {
 	if count < 1 {
 		return nil, nil
 	}
@@ -316,7 +323,7 @@ func DrillSentences(client *OllamaClient, topic string, count int, weak []string
 		user += "Each sentence must clearly demonstrate the correct use of: " + strings.Join(useful, ", ") + ".\n"
 	}
 	user += fmt.Sprintf("Write the %d sentences now.", count)
-	raw, err := client.Generate(user, OllamaGenerateOptions{
+	raw, err := client.Generate(user, LLMOptions{
 		System: fmt.Sprintf(drillSystem, count), Model: model, Temperature: 0.8,
 	})
 	if err != nil {
@@ -337,7 +344,7 @@ type Grade struct {
 	Error      string   `json:"error"`      // one of ErrorTypes, or "other"
 	Correction string   `json:"correction"` // the whole sentence in correct English: what the network is taught
 	Comment    string   `json:"comment"`    // one sentence of teaching
-	GradedBy   string   `json:"graded_by"`  // "ollama" | "empty" (nothing to mark) | "unrated" (no usable answer)
+	GradedBy   string   `json:"graded_by"`  // the marking provider ("ollama" | "chatgpt"), "empty" or "unrated"
 }
 
 // Lesson is one exercise, one completion by the network and one grade.
@@ -352,10 +359,26 @@ type Lesson struct {
 	ReachedEnd   bool     `json:"reached_end"`
 	Seconds      float64  `json:"seconds"`
 	Grade        Grade    `json:"grade"`
+	// Changes is what the teacher changed, span by span; filled in when the lesson is graded.
+	Changes []Edit `json:"changes"`
+	// Why is why the sentence is wrong: the rule behind the mistake (ExplainMistakes).
+	Why string `json:"why"`
+	// Variants are more sentences that make the same mistake, each with its
+	// correct form - the negative network's lesson, and nothing else's.
+	Variants []TutorCorrection `json:"variants"`
 }
 
 // Empty reports whether the network wrote nothing at all.
 func (l *Lesson) Empty() bool { return strings.TrimSpace(l.Continuation) == "" }
+
+// ChangesOfLesson is what the teacher changed in one lesson (empty when it passed or was left uncorrected).
+func ChangesOfLesson(lesson *Lesson) []Edit {
+	grade := lesson.Grade
+	if grade.Passed || strings.TrimSpace(grade.Correction) == "" || strings.TrimSpace(lesson.Sentence) == "" {
+		return []Edit{}
+	}
+	return DiffSummary(strings.TrimSpace(lesson.Sentence), strings.TrimSpace(grade.Correction), 8)
+}
 
 const gradeSystem = "You are a strict but constructive English teacher marking sentence completions. The student is a beginner " +
 	"learning English: it is given the opening words of a sentence (the prefix, shown in <<>>) and writes the " +
@@ -396,8 +419,13 @@ func numberField(item map[string]any, keys ...string) *float64 {
 	return nil
 }
 
-// ParseGrades reads the marks of an LLM answer, keyed by the index of the completion they belong to.
-func ParseGrades(raw string, count int, grammarWeight, threshold float64) map[int]Grade {
+// ParseGrades reads the marks of an LLM answer, keyed by the index of the
+// completion they belong to; gradedBy (empty: the default provider) is the
+// provider that gave them and ends up in every grade.
+func ParseGrades(raw string, count int, grammarWeight, threshold float64, gradedBy string) map[int]Grade {
+	if gradedBy == "" {
+		gradedBy = DefaultProvider
+	}
 	grades := map[int]Grade{}
 	var items []any
 	switch data := loadsLenient(raw).(type) {
@@ -449,7 +477,7 @@ func ParseGrades(raw string, count int, grammarWeight, threshold float64) map[in
 			Error:      ErrorTypeOf(stringField(item, "error", "error_type", "mistake")),
 			Correction: stringField(item, "correction", "corrected", "fixed"),
 			Comment:    clipText(stringField(item, "comment", "critique", "feedback", "reason"), maxCommentChars),
-			GradedBy:   "ollama",
+			GradedBy:   gradedBy,
 		}
 	}
 	return grades
@@ -480,6 +508,7 @@ type GradeOptions struct {
 	Model         string
 	Batch         int
 	Temperature   float64
+	GradedBy      string // the provider behind the client (empty: the client's own)
 }
 
 // GradeCompletions marks every lesson in place, in batches of Batch.
@@ -488,10 +517,14 @@ type GradeOptions struct {
 // teacher's model answer as the correction; a lesson the LLM said nothing
 // usable about keeps a nil score and GradedBy "unrated" and counts as a
 // failure.
-func GradeCompletions(client *OllamaClient, lessons []*Lesson, o GradeOptions) error {
+func GradeCompletions(client LLMClient, lessons []*Lesson, o GradeOptions) error {
 	batch := o.Batch
 	if batch < 1 {
 		return fmt.Errorf("batch must be >= 1")
+	}
+	gradedBy := o.GradedBy
+	if gradedBy == "" {
+		gradedBy = ProviderOf(client)
 	}
 	temperature := o.Temperature
 	if temperature <= 0 {
@@ -530,13 +563,13 @@ func GradeCompletions(client *OllamaClient, lessons []*Lesson, o GradeOptions) e
 			user = "Topic of the lesson: " + strings.TrimSpace(o.Topic) + "\n\n"
 		}
 		user += fmt.Sprintf("Mark these %d completions:\n%s\n\nReturn the JSON now.", len(asked), strings.Join(body, "\n"))
-		raw, err := client.Generate(user, OllamaGenerateOptions{
+		raw, err := client.Generate(user, LLMOptions{
 			System: system, Model: o.Model, JSON: true, Temperature: temperature,
 		})
 		if err != nil {
 			return err
 		}
-		parsed := ParseGrades(raw, len(chunk), o.GrammarWeight, o.Threshold)
+		parsed := ParseGrades(raw, len(chunk), o.GrammarWeight, o.Threshold, gradedBy)
 		for _, i := range asked {
 			lesson := chunk[i]
 			grade, ok := parsed[i]
@@ -557,6 +590,9 @@ func GradeCompletions(client *OllamaClient, lessons []*Lesson, o GradeOptions) e
 			lesson.Grade = grade
 		}
 	}
+	for _, lesson := range lessons { // what the teacher changed rides along with the lesson
+		lesson.Changes = ChangesOfLesson(lesson)
+	}
 	return nil
 }
 
@@ -569,6 +605,230 @@ func quotedErrorTypes() string {
 }
 
 func floatPtr(v float64) *float64 { return &v }
+
+// -- why it is wrong, and the same mistake again ---------------------------
+
+const (
+	// DefaultVariants is how many sentences with the same mistake the teacher
+	// writes per failure, for the negative network.
+	DefaultVariants = 3
+	// MaxVariants is the most that can be asked for at once (a longer list
+	// starts repeating itself).
+	MaxVariants = 10
+	maxWhyChars = 400
+)
+
+const whySchema = `{"mistakes": [{"index": <int>, "why": "<why the sentence is wrong>", "again": ` +
+	`[{"wrong": "<another sentence with the same mistake>", "right": "<that sentence in correct English>"}, ...]}, ...]}`
+
+const whySystem = "You are an English teacher explaining a beginner's mistake and then showing it again. For every sentence you " +
+	"are given the student's wrong sentence, the mistake you named and the correct sentence. Answer two things. " +
+	"'why' explains in one or two sentences why the sentence is wrong: name the rule that was broken and what the " +
+	"student is doing instead - the pattern, not just this one sentence. 'again' is %d MORE examples of the SAME " +
+	"mistake: each 'wrong' is a different short sentence that breaks that same rule in that same way - a different " +
+	"subject, verb or noun, never a repeat of the student's sentence or of another example - and its 'right' is " +
+	"that same sentence in correct English, changed only where the mistake is, so the two differ in the mistake " +
+	"and nothing else. Keep every sentence short, simple and about everyday life. Reply with JSON only, no prose, " +
+	"exactly of the form %s with one entry per sentence, in the given order and with the given index."
+
+// Explanation is what the teacher said about one mistake: why it is wrong, and
+// more sentences that are wrong in the same way.
+type Explanation struct {
+	Why   string
+	Again []TutorCorrection
+}
+
+// pairsOf reads an "again" list - objects or bare strings - dropping blanks and repeats.
+func pairsOf(value any, limit int, skip map[string]bool) []TutorCorrection {
+	out := []TutorCorrection{}
+	list, ok := value.([]any)
+	if !ok {
+		return out
+	}
+	for _, entry := range list {
+		wrong, right := "", ""
+		switch item := entry.(type) {
+		case string:
+			wrong = strings.Join(strings.Fields(item), " ")
+		case map[string]any:
+			wrong = strings.Join(strings.Fields(stringField(item, "wrong", "sentence", "example")), " ")
+			right = strings.Join(strings.Fields(stringField(item, "right", "correction", "correct")), " ")
+		default:
+			continue
+		}
+		key := strings.ToLower(wrong)
+		if wrong == "" || skip[key] {
+			continue
+		}
+		skip[key] = true
+		if strings.ToLower(right) == key {
+			right = "" // a correction that corrects nothing
+		}
+		out = append(out, TutorCorrection{Wrong: wrong, Right: right})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// ParseExplanations reads the teacher's answer: {index: {why, again}} for the
+// entries that could be understood.
+func ParseExplanations(raw string, count, limit int) map[int]Explanation {
+	out := map[int]Explanation{}
+	var items []any
+	switch data := loadsLenient(raw).(type) {
+	case map[string]any:
+		for _, key := range []string{"mistakes", "explanations", "results", "items", "grades"} {
+			if list, ok := data[key].([]any); ok {
+				items = list
+				break
+			}
+		}
+		if items == nil {
+			for _, key := range []string{"why", "again", "reason"} {
+				if _, ok := data[key]; ok {
+					items = []any{data}
+					break
+				}
+			}
+		}
+	case []any:
+		items = data
+	}
+	for position, entry := range items {
+		item, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		index := position
+		if value := numberFieldRaw(item, "index"); value != nil {
+			index = int(*value)
+		}
+		if index < 0 || index >= count {
+			continue
+		}
+		if _, seen := out[index]; seen {
+			continue
+		}
+		why := strings.Join(strings.Fields(stringField(item, "why", "reason", "explanation")), " ")
+		var again any
+		for _, key := range []string{"again", "examples", "variants", "sentences"} {
+			if value, ok := item[key]; ok {
+				again = value
+				break
+			}
+		}
+		out[index] = Explanation{Why: clipText(why, maxWhyChars), Again: pairsOf(again, limit, map[string]bool{})}
+	}
+	return out
+}
+
+// ExplainOptions are the settings of one ExplainMistakes call.
+type ExplainOptions struct {
+	Topic       string
+	Count       int     // sentences with the same mistake per failure
+	Weight      float64 // their share of the failure's severity
+	Model       string
+	Batch       int
+	Temperature float64
+}
+
+// ExplainMistakes asks the teacher why these sentences are wrong and for Count
+// more with the same mistake, filling Why and Variants in place.
+//
+// Blank completions are skipped (nothing was written to be wrong about), and an
+// entry the teacher said nothing usable about is left exactly as it was.
+func ExplainMistakes(client LLMClient, lessons []*Lesson, o ExplainOptions) error {
+	batch := o.Batch
+	if batch < 1 {
+		return fmt.Errorf("batch must be >= 1")
+	}
+	if o.Weight < 0 {
+		return fmt.Errorf("weight must be >= 0, got %g", o.Weight)
+	}
+	count := o.Count
+	if count < 1 {
+		count = 1
+	}
+	if count > MaxVariants {
+		count = MaxVariants
+	}
+	temperature := o.Temperature
+	if temperature <= 0 {
+		temperature = 0.9
+	}
+	asked := []*Lesson{}
+	for _, lesson := range lessons {
+		if lesson != nil && strings.TrimSpace(lesson.Sentence) != "" && !lesson.Empty() {
+			asked = append(asked, lesson)
+		}
+	}
+	system := fmt.Sprintf(whySystem, count, whySchema)
+	for start := 0; start < len(asked); start += batch {
+		end := start + batch
+		if end > len(asked) {
+			end = len(asked)
+		}
+		chunk := asked[start:end]
+		body := make([]string, 0, len(chunk))
+		for i, lesson := range chunk {
+			mistake := lesson.Grade.Error
+			if mistake == "" {
+				mistake = "other"
+			}
+			right := strings.TrimSpace(lesson.Grade.Correction)
+			if right == "" {
+				right = strings.TrimSpace(lesson.Exercise.Answer)
+			}
+			line := fmt.Sprintf("[%d] mistake: %s\n    the student wrote: %s\n    correct English:   %s",
+				i, mistake, jsonQuote(strings.TrimSpace(lesson.Sentence)), jsonQuote(right))
+			if comment := strings.TrimSpace(lesson.Grade.Comment); comment != "" {
+				line += "\n    you told the student: " + comment
+			}
+			body = append(body, line)
+		}
+		user := ""
+		if strings.TrimSpace(o.Topic) != "" {
+			user = "Topic of the lesson: " + strings.TrimSpace(o.Topic) + "\n\n"
+		}
+		user += fmt.Sprintf("Explain these %d mistakes and show each one again:\n%s\n\nReturn the JSON now.",
+			len(chunk), strings.Join(body, "\n"))
+		raw, err := client.Generate(user, LLMOptions{
+			System: system, Model: o.Model, JSON: true, Temperature: temperature,
+		})
+		if err != nil {
+			return err
+		}
+		parsed := ParseExplanations(raw, len(chunk), count)
+		for i, lesson := range chunk {
+			entry, ok := parsed[i]
+			if !ok {
+				continue
+			}
+			lesson.Why = entry.Why
+			variants := []TutorCorrection{}
+			for _, pair := range entry.Again {
+				if strings.EqualFold(pair.Wrong, strings.TrimSpace(lesson.Sentence)) {
+					continue
+				}
+				pair.Weight = o.Weight
+				variants = append(variants, pair)
+			}
+			lesson.Variants = variants
+		}
+	}
+	return nil
+}
+
+// jsonQuote is a string as JSON: quoted, on one line, whatever whitespace it holds.
+func jsonQuote(text string) string {
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		return `"` + text + `"`
+	}
+	return string(encoded)
+}
 
 // ReportCard sums up a set of lessons: the marks, the pass rate, the mistakes and the weakest points.
 func ReportCard(lessons []*Lesson) map[string]any {
@@ -641,15 +901,21 @@ func weakest(errors map[string]int) []string {
 
 // TutorConfig holds the settings of a tutoring run.
 type TutorConfig struct {
-	Topic       string `json:"topic"`
-	Rounds      int    `json:"rounds"`
-	Exercises   int    `json:"exercises"` // sentence openings per round
-	Attempts    int    `json:"attempts"`  // completions the network writes per exercise
-	Focus       string `json:"focus"`     // pin every exercise to one point of grammar
-	Level       string `json:"level"`
-	Words       string `json:"words"`
-	TutorModel  string `json:"tutor_model"`
-	GraderModel string `json:"grader_model"` // a different model for the marking
+	Topic     string `json:"topic"`
+	Rounds    int    `json:"rounds"`
+	Exercises int    `json:"exercises"` // sentence openings per round
+	Attempts  int    `json:"attempts"`  // completions the network writes per exercise
+	Focus     string `json:"focus"`     // pin every exercise to one point of grammar
+	Level     string `json:"level"`
+	Words     string `json:"words"`
+	// Brief is what this batch of lessons is being taught to: the previous batch's plan (LessonPlan.Prompt).
+	Brief string `json:"brief"`
+	// TutorProvider names who teaches: "ollama" (a local model) or "chatgpt" (OpenAI).
+	TutorProvider string `json:"tutor_provider"`
+	TutorModel    string `json:"tutor_model"`
+	// GraderProvider marks with the other provider; empty means the teacher's own.
+	GraderProvider string `json:"grader_provider"`
+	GraderModel    string `json:"grader_model"` // a different model for the marking
 	// the completion
 	Mode        string  `json:"mode"`
 	Length      int     `json:"length"`
@@ -662,17 +928,31 @@ type TutorConfig struct {
 	Threshold     float64 `json:"threshold"`
 	GrammarWeight float64 `json:"grammar_weight"`
 	Batch         int     `json:"batch"`
-	Adapt         bool    `json:"adapt"`        // drill the previous round's weakest points
-	Drills        int     `json:"drills"`       // extra correct example sentences per round
-	TeachAnswer   bool    `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
-	Learn         bool    `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
+	Adapt         bool    `json:"adapt"`  // drill the previous round's weakest points
+	Drills        int     `json:"drills"` // extra correct example sentences per round
+	// Variants is how many sentences with the same mistake the teacher writes
+	// per failure, for the negative network (0 = do not ask); VariantWeight is
+	// their share of the failure's severity, since the student never wrote them.
+	Variants      int     `json:"variants"`
+	VariantWeight float64 `json:"variant_weight"`
+	Plan          int     `json:"plan"` // lessons to plan from the final report card (0 = no plan)
+	// Batches is the auto run: batches of Rounds rounds, each planned from the one before (0 = until stopped).
+	Batches     int  `json:"batches"`
+	TeachAnswer bool `json:"teach_answer"` // a failed lesson also learns the teacher's model answer
+	Learn       bool `json:"learn"`        // false: a dry run - the grades are reported, nothing is trained
 	// 2NRL
-	TwoNRLPer string  `json:"twonrl_per"`
-	MinWeight float64 `json:"min_weight"` // negative-phase weight of a near miss (a hopeless answer weighs 1)
-	NegEpochs int     `json:"neg_epochs"`
-	PosEpochs int     `json:"pos_epochs"`
-	Strength  float64 `json:"strength"`
-	Replay    bool    `json:"replay"`
+	TwoNRLPer string `json:"twonrl_per"`
+	// DiffCorrections teaches a correction from its diff with the sentence the network wrote
+	// instead of as two whole sentences: only the trigram nodes they disagree on move.
+	DiffCorrections bool `json:"diff_corrections"`
+	// KeepWeight is what the unchanged part of a correction still earns.  It is 0 by default:
+	// a whole path is rewarded when the output was correct, not when it had to be corrected.
+	KeepWeight float64 `json:"keep_weight"`
+	MinWeight  float64 `json:"min_weight"` // negative-phase weight of a near miss (a hopeless answer weighs 1)
+	NegEpochs  int     `json:"neg_epochs"`
+	PosEpochs  int     `json:"pos_epochs"`
+	Strength   float64 `json:"strength"`
+	Replay     bool    `json:"replay"`
 	// ReplayLimit caps the corrections kept for the replay (0 = no limit).
 	ReplayLimit int `json:"replay_limit"`
 }
@@ -681,14 +961,55 @@ type TutorConfig struct {
 func DefaultTutorConfig() TutorConfig {
 	return TutorConfig{
 		Topic: "everyday life", Rounds: 3, Exercises: 5, Attempts: 1, Level: "beginner", Words: "3 to 6",
-		TutorModel: DefaultTutorModel(), Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
-		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Adapt: true, TeachAnswer: true, Learn: true,
-		TwoNRLPer: "round", MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3, Strength: 1.0, Replay: true, ReplayLimit: 64,
+		TutorProvider: DefaultProvider, TutorModel: DefaultTutorModel(),
+		Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
+		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Batches: 1, Adapt: true, TeachAnswer: true, Learn: true,
+		Variants: DefaultVariants, VariantWeight: 0.5,
+		TwoNRLPer: "round", DiffCorrections: true, KeepWeight: 0, MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3,
+		Strength: 1.0, Replay: true, ReplayLimit: 64,
 	}
+}
+
+// Resolve normalises the providers and fills in the models they imply, the way
+// the Python TutorConfig.__post_init__ does; Validate calls it first.
+func (c *TutorConfig) Resolve() error {
+	tutor, err := NormaliseProvider(c.TutorProvider)
+	if err != nil {
+		return fmt.Errorf("tutor_provider: %v", err)
+	}
+	c.TutorProvider = tutor
+	if strings.TrimSpace(c.GraderProvider) == "" {
+		c.GraderProvider = tutor
+	} else {
+		grader, err := NormaliseProvider(c.GraderProvider)
+		if err != nil {
+			return fmt.Errorf("grader_provider: %v", err)
+		}
+		c.GraderProvider = grader
+	}
+	if strings.TrimSpace(c.TutorModel) == "" {
+		c.TutorModel = DefaultProviderModel(c.TutorProvider)
+	}
+	return nil
+}
+
+// ResolvedGraderModel is the model the marking runs on: GraderModel, else the
+// teacher's model on the teacher's provider, else that provider's default.
+func (c *TutorConfig) ResolvedGraderModel() string {
+	if strings.TrimSpace(c.GraderModel) != "" {
+		return c.GraderModel
+	}
+	if c.GraderProvider == "" || c.GraderProvider == c.TutorProvider {
+		return c.TutorModel
+	}
+	return DefaultProviderModel(c.GraderProvider)
 }
 
 // Validate checks the settings the way the Python TutorConfig.validate does.
 func (c *TutorConfig) Validate() error {
+	if err := c.Resolve(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Topic) == "" {
 		return fmt.Errorf("topic must not be empty")
 	}
@@ -725,11 +1046,26 @@ func (c *TutorConfig) Validate() error {
 	if c.MinWeight < 0 || c.MinWeight > 1 {
 		return fmt.Errorf("min_weight must lie in [0, 1]")
 	}
+	if c.KeepWeight < 0 || c.KeepWeight > 1 {
+		return fmt.Errorf("keep_weight must lie in [0, 1]")
+	}
 	if c.Batch < 1 {
 		return fmt.Errorf("batch must be >= 1")
 	}
 	if c.Drills < 0 || c.ReplayLimit < 0 {
 		return fmt.Errorf("drills and replay_limit must be >= 0")
+	}
+	if c.Variants < 0 || c.Variants > MaxVariants {
+		return fmt.Errorf("variants must lie in [0, %d]", MaxVariants)
+	}
+	if c.VariantWeight < 0 {
+		return fmt.Errorf("variant_weight must be >= 0")
+	}
+	if c.Plan < 0 {
+		return fmt.Errorf("plan must be >= 0")
+	}
+	if c.Batches < 0 {
+		return fmt.Errorf("batches must be >= 0 (0 = until stopped)")
 	}
 	if c.NegEpochs < 0 || c.PosEpochs < 0 {
 		return fmt.Errorf("epochs must be >= 0")
@@ -752,12 +1088,19 @@ func contains(values []string, value string) bool {
 // TutorTrainer runs the lessons: the LLM sets and marks the exercises, the
 // network completes them and learns from the grades.
 type TutorTrainer struct {
-	Model   *Model
-	Client  *OllamaClient
-	Config  TutorConfig
-	History []map[string]any
-	Lessons []*Lesson
-	Weak    []string
+	Model  *Model
+	Client LLMClient
+	// GraderClient marks the completions; nil means the teacher marks its own.
+	GraderClient LLMClient
+	Config       TutorConfig
+	History      []map[string]any
+	Lessons      []*Lesson
+	Weak         []string
+	// Negative is an optional negative network that learns why each failed
+	// sentence failed: the mistake the teacher named is the reason, its mark
+	// the severity, and only the characters its correction changed are blamed
+	// (TeachLessons).
+	Negative *Model
 	// Progress receives every lesson, round and report record as it happens.
 	Progress func(map[string]any)
 	// Stop is polled between steps; a true answer ends the run cleanly.
@@ -768,12 +1111,31 @@ type TutorTrainer struct {
 	replay []string
 }
 
-// NewTutorTrainer validates the configuration and returns a trainer.
-func NewTutorTrainer(model *Model, client *OllamaClient, config TutorConfig) (*TutorTrainer, error) {
+// NewTutorTrainer validates the configuration and returns a trainer whose
+// teacher is client; the marking shares it unless GraderClient is set
+// afterwards or the configuration names the other provider, in which case a
+// client for it is built from the environment.
+func NewTutorTrainer(model *Model, client LLMClient, config TutorConfig) (*TutorTrainer, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &TutorTrainer{Model: model, Client: client, Config: config}, nil
+	trainer := &TutorTrainer{Model: model, Client: client, Config: config}
+	if config.GraderProvider != "" && config.GraderProvider != ProviderOf(client) {
+		grader, err := NewLLMClient(config.GraderProvider, "", config.ResolvedGraderModel(), 0)
+		if err != nil {
+			return nil, err
+		}
+		trainer.GraderClient = grader
+	}
+	return trainer, nil
+}
+
+// grader is the client that marks the completions (the teacher by default).
+func (t *TutorTrainer) grader() LLMClient {
+	if t.GraderClient != nil {
+		return t.GraderClient
+	}
+	return t.Client
 }
 
 func (t *TutorTrainer) stopped() bool { return t.Stop != nil && t.Stop() }
@@ -803,7 +1165,7 @@ func (t *TutorTrainer) SetExercises(round int) ([]Exercise, error) {
 	err := t.outside(func() error {
 		written, err := WriteExercises(t.Client, ExerciseRequest{
 			Topic: cfg.Topic, Count: cfg.Exercises, Focus: cfg.Focus, Level: cfg.Level, Weak: weak,
-			Words: cfg.Words, Model: cfg.TutorModel,
+			Words: cfg.Words, Brief: cfg.Brief, Model: cfg.TutorModel,
 		})
 		exercises = written
 		return err
@@ -846,16 +1208,14 @@ func (t *TutorTrainer) Complete(exercise Exercise, attempt int) (*Lesson, error)
 	}, nil
 }
 
-// GradeLessons is step 3: the teacher marks the completions (one call per Batch).
+// GradeLessons is step 3: the marker marks the completions (one call per Batch).
 func (t *TutorTrainer) GradeLessons(lessons []*Lesson) error {
 	cfg := t.Config
-	model := cfg.GraderModel
-	if strings.TrimSpace(model) == "" {
-		model = cfg.TutorModel
-	}
+	grader := t.grader()
 	return t.outside(func() error {
-		return GradeCompletions(t.Client, lessons, GradeOptions{
-			Topic: cfg.Topic, Threshold: cfg.Threshold, GrammarWeight: cfg.GrammarWeight, Model: model, Batch: cfg.Batch,
+		return GradeCompletions(grader, lessons, GradeOptions{
+			Topic: cfg.Topic, Threshold: cfg.Threshold, GrammarWeight: cfg.GrammarWeight,
+			Model: cfg.ResolvedGraderModel(), Batch: cfg.Batch, GradedBy: ProviderOf(grader),
 		})
 	})
 }
@@ -888,13 +1248,67 @@ type Graded struct {
 	BadWeights  []float64
 	Good        []string
 	GoodWeights []float64
+	// Corrections are taught from their diff instead of as whole sentences (DiffCorrections).
+	Corrections []TutorCorrection
 }
+
+// TutorCorrection is a sentence the network wrote, the sentence the teacher
+// wrote instead, and how bad the mark was.
+type TutorCorrection struct {
+	Wrong  string  `json:"wrong"`
+	Right  string  `json:"right"`
+	Weight float64 `json:"weight"`
+}
+
+// Diffs: is a correction taught from its diff with the sentence it corrects?
+func (t *TutorTrainer) Diffs() bool { return t.Config.DiffCorrections && t.Model != nil }
+
+// CorrectionsOf lists the failed lessons a diff can teach.  A lesson that
+// wrote nothing has no mistake to align, and one the teacher left uncorrected
+// has nothing to align it against; both go the old way, through TextsOf.
+func (t *TutorTrainer) CorrectionsOf(lessons []*Lesson) []TutorCorrection {
+	if !t.Diffs() {
+		return nil
+	}
+	out := []TutorCorrection{}
+	seen := map[string]int{}
+	for _, lesson := range lessons {
+		grade := lesson.Grade
+		if grade.Passed || strings.TrimSpace(lesson.Continuation) == "" || strings.TrimSpace(grade.Correction) == "" {
+			continue
+		}
+		correction := TutorCorrection{
+			Wrong: strings.TrimSpace(lesson.Sentence), Right: strings.TrimSpace(grade.Correction),
+			Weight: t.WeightOf(grade),
+		}
+		key := correction.Wrong + "\x00" + correction.Right
+		if at, ok := seen[key]; ok { // the same mistake twice (several attempts) keeps its worst mark
+			if correction.Weight > out[at].Weight {
+				out[at] = correction
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, correction)
+	}
+	return out
+}
+
+// ChangesOf is what the teacher changed in one lesson, span by span (empty when nothing was corrected).
+func (t *TutorTrainer) ChangesOf(lesson *Lesson) []Edit { return ChangesOfLesson(lesson) }
 
 // TextsOf splits graded lessons into garbage (weighted by how bad the mark
 // was) and good English (the sentences that passed, weighted by their mark,
-// plus the teacher's corrections at full weight).
+// plus the teacher's corrections at full weight).  With DiffCorrections on, a
+// failure the teacher corrected is left out of both lists and carried in
+// Corrections instead, so the diff can punish the words that were actually
+// wrong rather than the whole sentence.
 func (t *TutorTrainer) TextsOf(lessons []*Lesson) Graded {
-	out := Graded{}
+	out := Graded{Corrections: t.CorrectionsOf(lessons)}
+	diffed := map[string]bool{}
+	for _, c := range out.Corrections {
+		diffed[c.Wrong+"\x00"+c.Right] = true
+	}
 	pairs := []weightedText{}
 	for _, lesson := range lessons {
 		grade := lesson.Grade
@@ -903,6 +1317,12 @@ func (t *TutorTrainer) TextsOf(lessons []*Lesson) Graded {
 				pairs = append(pairs, weightedText{strings.TrimSpace(lesson.Sentence), t.RewardOf(grade)})
 			}
 			continue
+		}
+		if diffed[strings.TrimSpace(lesson.Sentence)+"\x00"+strings.TrimSpace(grade.Correction)] {
+			if t.Config.TeachAnswer && strings.TrimSpace(lesson.Exercise.Answer) != "" {
+				pairs = append(pairs, weightedText{strings.TrimSpace(lesson.Exercise.Answer), TeacherWeight})
+			}
+			continue // the diff teaches this one, sentence against correction
 		}
 		if strings.TrimSpace(lesson.Continuation) != "" { // nothing written is nothing to punish
 			out.Bad = append(out.Bad, strings.TrimSpace(lesson.Sentence))
@@ -973,14 +1393,42 @@ func (t *TutorTrainer) Learn(graded Graded) (map[string]any, error) {
 	result := map[string]any{
 		"bad": len(graded.Bad), "good": len(good), "action": nil, "neg_loss": nil, "pos_loss": nil,
 		"mean_weight": mean(graded.BadWeights), "mean_reward": mean(goodWeights),
-	}
-	if len(graded.Bad) == 0 && len(good) == 0 {
-		return result, nil
+		"corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
 	}
 	opts := TrainOptions{Epochs: cfg.NegEpochs, AutoCompress: true, Stop: t.Stop}
 	strength := cfg.Strength
 	if strength <= 0 {
 		strength = 1.0
+	}
+	actions := []string{}
+	for _, correction := range graded.Corrections {
+		if t.stopped() {
+			break
+		}
+		moved, err := t.Model.Correct(correction.Wrong, correction.Right, CorrectOptions{
+			Strength: strength, Weight: correction.Weight, Reward: TeacherWeight, Keep: cfg.KeepWeight,
+		})
+		if err != nil {
+			return result, err
+		}
+		result["corrections"] = result["corrections"].(int) + 1
+		result["edits"] = result["edits"].(int) + moved.Edits
+		result["penalised"] = result["penalised"].(int) + moved.Penalised
+		result["rewarded"] = result["rewarded"].(int) + moved.Rewarded
+		result["marked_correct"] = result["marked_correct"].(int) + moved.MarkedCorrect
+		result["marked_incorrect"] = result["marked_incorrect"].(int) + moved.MarkedIncorrect
+		result["pos_loss"] = moved.Loss
+		if !containsString(t.replay, correction.Right) {
+			t.replay = append(t.replay, correction.Right)
+		}
+	}
+	if result["corrections"].(int) > 0 {
+		actions = append(actions, "correct")
+	}
+	if len(graded.Bad) == 0 && len(good) == 0 {
+		result["action"] = joinActions(actions)
+		t.trimReplay()
+		return result, nil
 	}
 	switch {
 	case len(graded.Bad) > 0 && len(good) > 0:
@@ -990,7 +1438,7 @@ func (t *TutorTrainer) Learn(graded Graded) (map[string]any, error) {
 		if err != nil {
 			return result, err
 		}
-		result["action"] = "2nrl"
+		actions = append(actions, "2nrl")
 		result["neg_loss"] = lastLoss(res.Negative)
 		result["pos_loss"] = lastLoss(res.Positive)
 	case len(good) > 0:
@@ -999,7 +1447,7 @@ func (t *TutorTrainer) Learn(graded Graded) (map[string]any, error) {
 		if err != nil {
 			return result, err
 		}
-		result["action"] = "reward"
+		actions = append(actions, "reward")
 		result["pos_loss"] = lastLoss(records)
 	default:
 		opts.Epochs, opts.Phase = cfg.NegEpochs, "negative"
@@ -1007,18 +1455,38 @@ func (t *TutorTrainer) Learn(graded Graded) (map[string]any, error) {
 		if err != nil {
 			return result, err
 		}
-		result["action"] = "punish"
+		actions = append(actions, "punish")
 		result["neg_loss"] = lastLoss(records)
 	}
+	result["action"] = joinActions(actions)
 	for _, text := range graded.Good {
 		if !containsString(t.replay, text) {
 			t.replay = append(t.replay, text)
 		}
 	}
-	if cfg.ReplayLimit > 0 && len(t.replay) > cfg.ReplayLimit {
-		t.replay = t.replay[len(t.replay)-cfg.ReplayLimit:]
-	}
+	t.trimReplay()
 	return result, nil
+}
+
+// trimReplay keeps the replay buffer to ReplayLimit texts (0 = no limit).
+func (t *TutorTrainer) trimReplay() {
+	if limit := t.Config.ReplayLimit; limit > 0 && len(t.replay) > limit {
+		t.replay = t.replay[len(t.replay)-limit:]
+	}
+}
+
+// joinActions names what a set of grades did, in order and without repeats ("correct+2nrl").
+func joinActions(actions []string) any {
+	out := []string{}
+	for _, action := range actions {
+		if action != "" && !containsString(out, action) {
+			out = append(out, action)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return strings.Join(out, "+")
 }
 
 func containsString(values []string, value string) bool {
@@ -1040,21 +1508,39 @@ func lastLoss(records []map[string]any) any {
 	return nil
 }
 
-func (t *TutorTrainer) emitLesson(round int, lesson *Lesson) {
+func (t *TutorTrainer) emitLesson(round int, lesson *Lesson, batch int) {
 	grade := lesson.Grade
 	t.emit(map[string]any{
-		"kind": "lesson", "round": round, "exercise": lesson.Exercise.ID, "prefix": lesson.Exercise.Prefix,
-		"focus": lesson.Exercise.Focus, "attempt": lesson.Attempt + 1, "mode": lesson.Mode,
+		"kind": "lesson", "batch": batch, "round": round, "exercise": lesson.Exercise.ID,
+		"prefix": lesson.Exercise.Prefix,
+		"focus":  lesson.Exercise.Focus, "attempt": lesson.Attempt + 1, "mode": lesson.Mode,
 		"continuation": clipText(lesson.Continuation, 400), "sentence": clipText(lesson.Sentence, 400),
 		"score": grade.Score, "grammar": grade.Grammar, "spelling": grade.Spelling, "fluency": grade.Fluency,
 		"passed": grade.Passed, "error": grade.Error, "correction": clipText(grade.Correction, 400),
 		"comment": grade.Comment, "graded_by": grade.GradedBy, "probability": lesson.Probability,
-		"seconds": lesson.Seconds,
+		"seconds": lesson.Seconds, "changes": t.ChangesOf(lesson), "why": lesson.Why,
+		"variants": variantsOf(lesson),
 	})
+}
+
+// variantsOf is a lesson's widened family as the record carries it (never nil).
+func variantsOf(lesson *Lesson) []map[string]any {
+	out := make([]map[string]any, 0, len(lesson.Variants))
+	for _, variant := range lesson.Variants {
+		out = append(out, map[string]any{
+			"wrong": variant.Wrong, "right": variant.Right, "weight": variant.Weight,
+		})
+	}
+	return out
 }
 
 // RunRound runs one round: exercises, completions, grades and the 2NRL they lead to.
 func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
+	return t.runRound(round, 1)
+}
+
+// runRound is RunRound, tagging its records with the batch they belong to.
+func (t *TutorTrainer) runRound(round, batch int) (map[string]any, []*Lesson, error) {
 	cfg := t.Config
 	started := time.Now()
 	exercises, err := t.SetExercises(round)
@@ -1079,8 +1565,9 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 			return nil, nil, err
 		}
 	}
+	widened := t.Widen(lessons, round)
 	for _, lesson := range lessons {
-		t.emitLesson(round, lesson)
+		t.emitLesson(round, lesson, batch)
 	}
 	t.Lessons = append(t.Lessons, lessons...)
 	card := ReportCard(lessons)
@@ -1102,11 +1589,15 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 			return nil, nil, err
 		}
 	}
+	blamed, err := t.TeachNegative(lessons)
+	if err != nil {
+		return nil, nil, err
+	}
 	if cfg.Adapt {
 		t.Weak = card["weakest"].([]string)
 	}
 	record := map[string]any{
-		"kind": "round", "round": round, "topic": cfg.Topic, "focus": cfg.Focus,
+		"kind": "round", "batch": batch, "round": round, "topic": cfg.Topic, "focus": cfg.Focus,
 		"exercises": len(exercises), "drills": len(drills), "seconds": time.Since(started).Seconds(),
 	}
 	for key, value := range card {
@@ -1115,7 +1606,68 @@ func (t *TutorTrainer) RunRound(round int) (map[string]any, []*Lesson, error) {
 	for key, value := range learned {
 		record[key] = value
 	}
+	if blamed != nil {
+		record["negative_blamed"] = blamed.Blamed
+		record["negative_edges"] = blamed.Edges
+		record["negative_reasons"] = blamed.Reasons
+		record["explained"] = widened["explained"]
+		record["similar"] = widened["similar"]
+	}
 	return record, lessons, nil
+}
+
+// Widen is step 4 of a round: why are the failures wrong, and what else is
+// wrong in the same way?
+//
+// Only asked when a negative network is attached and Config.Variants is more
+// than 0 - it is the only thing that learns from the answer, and it costs one
+// LLM call per batch of failures.  A teacher that cannot answer costs the
+// widening, not the round.
+func (t *TutorTrainer) Widen(lessons []*Lesson, round int) map[string]any {
+	cfg := t.Config
+	out := map[string]any{"explained": 0, "similar": 0}
+	if t.Negative == nil || cfg.Variants < 1 || t.stopped() {
+		return out
+	}
+	failed := []*Lesson{}
+	for _, lesson := range lessons {
+		if lesson != nil && !lesson.Grade.Passed && strings.TrimSpace(lesson.Sentence) != "" && !lesson.Empty() {
+			failed = append(failed, lesson)
+		}
+	}
+	if len(failed) == 0 {
+		return out
+	}
+	err := t.outside(func() error {
+		return ExplainMistakes(t.Client, failed, ExplainOptions{
+			Topic: cfg.Topic, Count: cfg.Variants, Weight: cfg.VariantWeight, Model: cfg.TutorModel, Batch: cfg.Batch,
+		})
+	})
+	if err != nil { // the round stands without the widening
+		t.emit(map[string]any{"kind": "note", "round": round, "message": "no similar mistakes: " + err.Error()})
+		return out
+	}
+	explained, similar := 0, 0
+	for _, lesson := range failed {
+		if lesson.Why != "" {
+			explained++
+		}
+		similar += len(lesson.Variants)
+	}
+	out["explained"] = explained
+	out["similar"] = similar
+	return out
+}
+
+// TeachNegative hands this round's failures to the negative network: the
+// teacher named the mistake, so it is the reason, and where it wrote the
+// sentence out correctly only the characters it changed are blamed.  Returns
+// nil when no negative network is attached.
+func (t *TutorTrainer) TeachNegative(lessons []*Lesson) (*TeachReport, error) {
+	if t.Negative == nil || len(lessons) == 0 {
+		return nil, nil
+	}
+	return TeachLessons(t.Negative, lessons, t.Config.Threshold, true, "tutor", TeachOptions{Stop: t.Stop})
 }
 
 // learnLessons applies the round's grades: once for the whole round, or lesson
@@ -1135,9 +1687,15 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 	}
 	if !cfg.Learn { // a dry run: what would have been learned, without touching the network
 		graded := withDrills(t.TextsOf(lessons))
+		edits := 0
+		for _, c := range graded.Corrections {
+			edits += len(DiffSummary(c.Wrong, c.Right, 0))
+		}
 		return map[string]any{
 			"bad": len(graded.Bad), "good": len(graded.Good), "action": nil, "neg_loss": nil, "pos_loss": nil,
 			"mean_weight": mean(graded.BadWeights), "mean_reward": mean(graded.GoodWeights),
+			"corrections": len(graded.Corrections), "edits": edits, "penalised": 0, "rewarded": 0,
+			"marked_correct": 0, "marked_incorrect": 0,
 		}, nil
 	}
 	if cfg.TwoNRLPer != "lesson" {
@@ -1145,6 +1703,7 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 	}
 	merged := map[string]any{
 		"bad": 0, "good": 0, "action": nil, "neg_loss": nil, "pos_loss": nil, "mean_weight": nil, "mean_reward": nil,
+		"corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
 	}
 	actions := []string{}
 	badSeen, goodSeen := []float64{}, []float64{}
@@ -1160,43 +1719,158 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 		}
 		badSeen = append(badSeen, graded.BadWeights...)
 		goodSeen = append(goodSeen, graded.GoodWeights...)
-		if action, ok := outcome["action"].(string); ok && !containsString(actions, action) {
-			actions = append(actions, action)
+		if action, ok := outcome["action"].(string); ok {
+			actions = append(actions, strings.Split(action, "+")...)
 		}
 		merged["bad"] = merged["bad"].(int) + outcome["bad"].(int)
 		merged["good"] = merged["good"].(int) + outcome["good"].(int)
+		for _, key := range []string{"corrections", "edits", "penalised", "rewarded", "marked_correct", "marked_incorrect"} {
+			if value, ok := outcome[key].(int); ok {
+				merged[key] = merged[key].(int) + value
+			}
+		}
 		for _, key := range []string{"neg_loss", "pos_loss"} {
 			if outcome[key] != nil {
 				merged[key] = outcome[key]
 			}
 		}
 	}
-	if len(actions) > 0 {
-		merged["action"] = strings.Join(actions, "+")
-	}
+	merged["action"] = joinActions(actions)
 	merged["mean_weight"] = mean(badSeen)
 	merged["mean_reward"] = mean(goodSeen)
 	return merged, nil
 }
 
-// Run works through every round and finishes with a report card over all of them.
+// Run works through every batch of rounds, each ending in its own report card.
+//
+// One batch is Rounds rounds and the card over them.  With Batches > 1 (or 0,
+// which keeps going until it is stopped) the run drives itself: the card is
+// planned from (PlanNext), the plan is applied (ApplyPlan: its brief becomes
+// the next batch's standing instruction and the step up its difficulty), and
+// the next batch is taught to it.  A batch that cannot be planned ends the run
+// rather than repeating itself.
 func (t *TutorTrainer) Run() ([]map[string]any, error) {
+	cfg := &t.Config
 	records := []map[string]any{}
-	for round := 1; round <= t.Config.Rounds; round++ {
-		if t.stopped() {
+	round, batch := 0, 0
+	for cfg.Batches == 0 || batch < cfg.Batches {
+		if batch > 0 && t.stopped() {
+			break // stopped between batches: no empty card for one that never ran
+		}
+		batch++
+		taught := len(t.Lessons) // this batch's lessons, so its card is its own
+		here := 0
+		for i := 0; i < cfg.Rounds; i++ {
+			if t.stopped() {
+				break
+			}
+			round++
+			here++
+			record, _, err := t.runRound(round, batch)
+			if err != nil {
+				return records, err
+			}
+			t.emit(record)
+			records = append(records, record)
+		}
+		summary := map[string]any{"kind": "report", "batch": batch, "rounds": here, "topic": cfg.Topic}
+		for key, value := range ReportCard(t.Lessons[taught:]) {
+			summary[key] = value
+		}
+		t.emit(summary) // a batch always ends with its card, stopped or not
+		records = append(records, summary)
+		last := cfg.Batches > 0 && batch >= cfg.Batches
+		wanted := cfg.Plan > 0 || !last // a batch that has a successor is always planned
+		if t.stopped() || !wanted || len(t.Lessons) == taught {
 			break
 		}
-		record, _, err := t.RunRound(round)
-		if err != nil {
-			return records, err
+		count := cfg.Plan
+		if count < 1 {
+			count = DefaultPlanLessons
+		}
+		plan, err := t.PlanNext(summary, count)
+		if err != nil { // the lessons stand without a plan for the next ones
+			t.emit(map[string]any{"kind": "note", "batch": batch, "message": "no lesson plan: " + err.Error()})
+			break
+		}
+		record := map[string]any{"kind": "plan", "batch": batch, "rounds": here}
+		for key, value := range plan.Map() {
+			record[key] = value
 		}
 		t.emit(record)
 		records = append(records, record)
+		if last {
+			break
+		}
+		applied := t.ApplyPlan(plan)
+		if t.stopped() {
+			break // stopped while it was planning: do not announce a batch that will not run
+		}
+		started := map[string]any{"kind": "batch", "batch": batch + 1}
+		for key, value := range applied {
+			started[key] = value
+		}
+		t.emit(started)
+		records = append(records, started)
 	}
-	summary := map[string]any{"kind": "report", "rounds": len(records), "topic": t.Config.Topic}
-	for key, value := range ReportCard(t.Lessons) {
-		summary[key] = value
+	return records, nil
+}
+
+// ApplyPlan teaches what comes next to a plan: its brief, and the step up the
+// marks earned.  The brief becomes TutorConfig.Brief - handed to the exercise
+// writer with every round from now on - and the upgrade sets the level, how
+// long the openings are, the pass mark and the drill sentences.  The
+// single-focus pin is released: the brief carries the points of grammar, in
+// order, and a pin from an earlier batch would silently overrule it.
+func (t *TutorTrainer) ApplyPlan(plan LessonPlan) map[string]any {
+	cfg := &t.Config
+	upgrade := plan.Upgrade
+	if upgrade == nil {
+		upgrade = map[string]any{}
 	}
-	t.emit(summary)
-	return append(records, summary), nil
+	if plan.Prompt != "" {
+		cfg.Brief = plan.Prompt
+	}
+	cfg.Focus = ""
+	if level, _ := upgrade["level"].(string); level != "" {
+		cfg.Level = level
+	}
+	if words, _ := upgrade["words"].(string); words != "" {
+		cfg.Words = words
+	}
+	if threshold := markOf(upgrade["threshold"]); threshold != nil {
+		cfg.Threshold = *threshold
+	}
+	if drills, ok := upgrade["drills"].(int); ok {
+		cfg.Drills = drills
+	}
+	step, _ := upgrade["step"].(string)
+	note, _ := upgrade["note"].(string)
+	return map[string]any{
+		"step": step, "brief": cfg.Brief, "topic": cfg.Topic, "level": cfg.Level, "words": cfg.Words,
+		"threshold": cfg.Threshold, "drills": cfg.Drills, "note": note,
+	}
+}
+
+// PlanNext is the next lessons, planned by the teacher from a report card - by
+// default the run's own.  The weaknesses of the card become the syllabus, each
+// lesson carrying the settings to run it with.
+func (t *TutorTrainer) PlanNext(card map[string]any, count int) (LessonPlan, error) {
+	cfg := t.Config
+	if card == nil {
+		card = ReportCard(t.Lessons)
+	}
+	if count < 1 {
+		count = DefaultPlanLessons
+	}
+	var plan LessonPlan
+	err := t.outside(func() error {
+		var err error
+		plan, err = PlanLessons(t.Client, card, PlanRequest{
+			Topic: cfg.Topic, Level: cfg.Level, Words: cfg.Words, Threshold: cfg.Threshold, Count: count,
+			Exercises: cfg.Exercises, Drills: cfg.Drills, Model: cfg.TutorModel,
+		})
+		return err
+	})
+	return plan, err
 }

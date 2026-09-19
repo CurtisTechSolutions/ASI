@@ -12,6 +12,7 @@ import {
   STORAGE_PREFIX,
   browserStorage,
   clearSettings,
+  hasSetting,
   readSetting,
   removeSetting,
   resetBrowserStorage,
@@ -126,6 +127,17 @@ test("a storage that refuses is the same as no storage", () => {
   assert.equal(writeSetting(null, "train.epochs", "5"), false);
   assert.deepEqual(settingNames(null), []);
   assert.equal(clearSettings(null), 0);
+});
+
+test("hasSetting says whether a value was ever chosen", () => {
+  const storage = fakeStorage();
+  assert.equal(hasSetting(storage, "speech.rate"), false);
+  writeSetting(storage, "speech.rate", ""); // even an empty choice counts as chosen
+  assert.equal(hasSetting(storage, "speech.rate"), true);
+  removeSetting(storage, "speech.rate");
+  assert.equal(hasSetting(storage, "speech.rate"), false);
+  assert.equal(hasSetting(fakeStorage({}, "getItem"), "speech.rate"), false);
+  assert.equal(hasSetting(null, "speech.rate"), false);
 });
 
 test("only this app's keys are listed and cleared", () => {

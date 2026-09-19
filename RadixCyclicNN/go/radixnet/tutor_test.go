@@ -12,8 +12,10 @@ import (
 )
 
 // A fake Ollama plays the English teacher: it writes exercises as JSON, marks
-// completions by a rule (only the corpus sentences are correct English) and
-// answers drill requests with plain lines.  Every prompt is recorded.
+// completions by a rule (only the corpus sentences are correct English),
+// explains why a sentence is wrong and writes more sentences with the same
+// mistake, and answers drill requests with plain lines.  Every prompt is
+// recorded.
 type fakeTeacher struct {
 	server   *httptest.Server
 	prompts  map[string][]string
@@ -21,11 +23,15 @@ type fakeTeacher struct {
 	// answers replace the generated ones when set
 	exerciseAnswer string
 	gradeAnswer    string
+	planAnswer     string
+	whyAnswer      string
 }
 
 var tutorCorpus = []string{"the cat sat on the mat", "the dogs run in the park", "the cat likes the mat"}
 
 var gradeLine = regexp.MustCompile(`^\[(\d+)\] <<(.*?)>>(.*)$`)
+
+var whyLine = regexp.MustCompile(`^\[(\d+)\] mistake: (.*)$`)
 
 func markSentence(prefix, continuation string) map[string]any {
 	sentence := strings.Join(strings.Fields(prefix+continuation), " ")
@@ -72,6 +78,10 @@ func newFakeTeacher(t *testing.T) *fakeTeacher {
 			kind = "grades"
 		case strings.Contains(system, "model sentences"):
 			kind = "drills"
+		case strings.Contains(system, "planning the next lessons"):
+			kind = "plan"
+		case strings.Contains(system, "explaining a beginner's mistake"):
+			kind = "why"
 		}
 		fake.prompts[kind] = append(fake.prompts[kind], prompt)
 		writeJSONBody(w, map[string]any{"model": body["model"], "response": fake.answer(kind, prompt, system), "done": true})
@@ -116,6 +126,34 @@ func (f *fakeTeacher) answer(kind, prompt, system string) string {
 		}
 		raw, _ := json.Marshal(map[string]any{"grades": grades})
 		return string(raw)
+	case "why":
+		if f.whyAnswer != "" {
+			return f.whyAnswer
+		}
+		count := numberIn(system, `is (\d+) MORE examples`, 3)
+		mistakes := []map[string]any{}
+		for _, line := range strings.Split(prompt, "\n") {
+			match := whyLine.FindStringSubmatch(line)
+			if match == nil {
+				continue
+			}
+			index := numberIn(match[1], `(\d+)`, 0)
+			again := []map[string]any{}
+			for i := 0; i < count; i++ {
+				again = append(again, map[string]any{
+					"wrong": fmt.Sprintf("the dogs sits on the mat %d", i),
+					"right": fmt.Sprintf("the dogs sit on the mat %d", i),
+				})
+			}
+			mistakes = append(mistakes, map[string]any{
+				"index": index,
+				"why": fmt.Sprintf("A plural subject takes a plural verb; the student breaks that rule (%s).",
+					strings.TrimSpace(match[2])),
+				"again": again,
+			})
+		}
+		raw, _ := json.Marshal(map[string]any{"mistakes": mistakes})
+		return string(raw)
 	case "drills":
 		count := numberIn(system, `exactly (\d+) lines`, 3)
 		lines := make([]string, count)
@@ -123,6 +161,25 @@ func (f *fakeTeacher) answer(kind, prompt, system string) string {
 			lines[i] = fmt.Sprintf("%d. the cat sat on the mat number %d", i+1, i)
 		}
 		return strings.Join(lines, "\n")
+	case "plan":
+		if f.planAnswer != "" {
+			return f.planAnswer
+		}
+		count := numberIn(system, `exactly (\d+) lessons`, 2)
+		pool := []map[string]any{
+			{"focus": "subject-verb agreement", "targets": "agreement", "topic": "animals",
+				"why": "Nearly every sentence lost marks here."},
+			{"focus": "plural nouns", "targets": "plural", "topic": "the market", "why": "Plurals were shaky."},
+			{"focus": "past tense", "targets": "tense", "topic": "yesterday", "why": "Tenses drifted."},
+		}
+		lessons := []map[string]any{}
+		for i := 0; i < count; i++ {
+			lessons = append(lessons, pool[i%len(pool)])
+		}
+		raw, _ := json.Marshal(map[string]any{
+			"summary": "The student writes verbs badly.", "level": "beginner", "lessons": lessons,
+		})
+		return string(raw)
 	}
 	return "unexpected request"
 }
@@ -286,7 +343,7 @@ func TestParseGrades(t *testing.T) {
 		{"index": 9, "grammar": 5},
 		"nonsense"
 	]}`
-	grades := ParseGrades(raw, 2, 0.6, 6.0)
+	grades := ParseGrades(raw, 2, 0.6, 6.0, "")
 	if len(grades) != 2 {
 		t.Fatalf("got %d grades: %+v", len(grades), grades)
 	}
@@ -298,10 +355,10 @@ func TestParseGrades(t *testing.T) {
 	if second.Passed || *second.Score != 3 || second.Error != "plural" || second.Comment != "bad" {
 		t.Fatalf("second grade wrong: %+v", second)
 	}
-	if got := ParseGrades("not json", 2, 0.6, 6); len(got) != 0 {
+	if got := ParseGrades("not json", 2, 0.6, 6, ""); len(got) != 0 {
 		t.Fatalf("junk should grade nothing: %+v", got)
 	}
-	if got := ParseGrades(`{"grades": [{"index": 0}]}`, 1, 0.6, 6); len(got) != 0 {
+	if got := ParseGrades(`{"grades": [{"index": 0}]}`, 1, 0.6, 6, ""); len(got) != 0 {
 		t.Fatalf("an entry without marks should be skipped: %+v", got)
 	}
 }
@@ -352,8 +409,9 @@ func TestWriteExercisesAndDrills(t *testing.T) {
 		t.Fatal("a count of 0 must be refused")
 	}
 	fake.exerciseAnswer = `{"exercises": []}`
-	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); !IsOllamaError(err) {
-		t.Fatalf("no usable exercises must be an OllamaError, got %v", err)
+	// an unusable answer is not the provider's transport failing
+	if _, err := WriteExercises(client, ExerciseRequest{Topic: "animals", Count: 2}); !IsLLMError(err) {
+		t.Fatalf("no usable exercises must be an LLMError, got %v", err)
 	}
 	fake.exerciseAnswer = ""
 	drills, err := DrillSentences(client, "animals", 3, []string{"plural"}, "")
@@ -515,7 +573,9 @@ func scriptedTrainer(t *testing.T, fake *fakeTeacher, cfg TutorConfig) *TutorTra
 
 func TestTutorWeighsGarbageAndRewardsByTheMark(t *testing.T) {
 	fake := newFakeTeacher(t)
-	trainer := scriptedTrainer(t, fake, tutorConfig())
+	cfg := tutorConfig()
+	cfg.DiffCorrections = false // the whole-sentence path: the diff has a test of its own
+	trainer := scriptedTrainer(t, fake, cfg)
 	nine, one := 9.9, 1.0
 	exercise := Exercise{ID: "e1", Prefix: "the dogs run", Focus: "agreement", Answer: "the dogs run in the park"}
 	passed := &Lesson{Exercise: exercise, Continuation: "the park", Sentence: "the dogs run the park",
@@ -540,6 +600,47 @@ func TestTutorWeighsGarbageAndRewardsByTheMark(t *testing.T) {
 	}
 	if len(graded.BadWeights) != 1 || graded.BadWeights[0] <= trainer.Config.MinWeight {
 		t.Fatalf("a hopeless sentence should weigh more than the minimum: %v", graded.BadWeights)
+	}
+	if len(graded.Corrections) != 0 {
+		t.Fatalf("with the diff off, no correction is carried as a pair: %v", graded.Corrections)
+	}
+}
+
+// A corrected failure is taught as a correction: the sentence and the teacher's
+// version travel together, out of the whole-sentence lists.
+func TestTutorCarriesCorrectionsAsPairs(t *testing.T) {
+	fake := newFakeTeacher(t)
+	trainer := scriptedTrainer(t, fake, tutorConfig())
+	one := 1.0
+	exercise := Exercise{ID: "e1", Prefix: "the dogs run", Focus: "agreement", Answer: "the dogs run in the park"}
+	failed := &Lesson{Exercise: exercise, Continuation: "run run", Sentence: "the dogs run run run",
+		Grade: Grade{Score: &one, Error: "agreement", Correction: "the dogs run in the park"}}
+	uncorrected := &Lesson{Exercise: exercise, Continuation: "xx", Sentence: "the dogs run xx",
+		Grade: Grade{Score: &one, Error: "nonsense"}}
+	graded := trainer.TextsOf([]*Lesson{failed, uncorrected})
+	if len(graded.Corrections) != 1 || graded.Corrections[0].Wrong != "the dogs run run run" ||
+		graded.Corrections[0].Right != "the dogs run in the park" {
+		t.Fatalf("the corrected failure should travel as a pair: %v", graded.Corrections)
+	}
+	if graded.Corrections[0].Weight != trainer.WeightOf(failed.Grade) {
+		t.Fatalf("a correction carries the mark's weight: %v", graded.Corrections)
+	}
+	if want := []string{"the dogs run xx"}; !equalStrings(graded.Bad, want) {
+		t.Fatalf("only the uncorrected failure is whole-sentence garbage: %v", graded.Bad)
+	}
+	for _, text := range graded.Good {
+		if text == "the dogs run in the park" && len(graded.Corrections) == 1 {
+			continue // the teacher's model answer, which happens to be the same sentence
+		}
+		if text == "the dogs run run run" {
+			t.Fatalf("a diffed sentence must not be rewarded whole: %v", graded.Good)
+		}
+	}
+	if changes := trainer.ChangesOf(failed); len(changes) == 0 {
+		t.Fatal("the lesson record should carry what the teacher changed")
+	}
+	if changes := trainer.ChangesOf(uncorrected); len(changes) != 0 {
+		t.Fatalf("nothing was corrected, so nothing changed: %v", changes)
 	}
 }
 
@@ -653,8 +754,8 @@ func TestTutorDryRunLeavesTheModelAlone(t *testing.T) {
 	if records[0]["action"] != nil {
 		t.Fatalf("a dry run must not train: %v", records[0])
 	}
-	if records[0]["bad"].(int) == 0 {
-		t.Fatalf("a dry run still reports what it would punish: %v", records[0])
+	if records[0]["corrections"].(int) == 0 && records[0]["bad"].(int) == 0 {
+		t.Fatalf("a dry run still reports what it would have taught: %v", records[0])
 	}
 	after := model.Stats()
 	if after["epochs_total"] != before["epochs_total"] || after["twonrl_runs"] != before["twonrl_runs"] {
@@ -674,7 +775,7 @@ func TestTutorDrillsAndPerLessonLearning(t *testing.T) {
 	if record["drills"] != 3 || len(fake.prompts["drills"]) != 1 {
 		t.Fatalf("the drills were not written: %v", record)
 	}
-	if len(lessons) != 2 || record["bad"].(int) != 2 {
+	if len(lessons) != 2 || record["corrections"].(int) != 2 {
 		t.Fatalf("per-lesson learning should sum the lessons: %v", record)
 	}
 	if record["action"] == nil {
@@ -700,6 +801,230 @@ func TestTutorStopEndsTheRun(t *testing.T) {
 	}
 }
 
+// -- why it is wrong, and the same mistake again ---------------------------
+
+func newNegative(t *testing.T, seed int64) *Model {
+	t.Helper()
+	model, err := NewNegativeModel(seed, DefaultNegativeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model
+}
+
+func failedLesson(sentence string) *Lesson {
+	two := 2.0
+	return &Lesson{
+		Exercise:     Exercise{ID: "e1", Prefix: "the dogs", Focus: "agreement", Answer: "the dogs run in the park"},
+		Continuation: " runs in the park", Sentence: sentence,
+		Grade: Grade{Score: &two, Error: "agreement", Correction: "the dogs run in the park",
+			Comment: "A plural subject takes a plural verb."},
+	}
+}
+
+func TestParseExplanations(t *testing.T) {
+	raw := `{"mistakes": [{"index": 1, "why": "A plural subject takes a plural verb.", "again": ` +
+		`[{"wrong": "the dogs sits", "right": "the dogs sit"}, {"wrong": "the cats runs", "right": "the cats run"}]}, ` +
+		`{"index": 0, "reason": "The past tense of go is went.", "again": ["she go yesterday"]}]}`
+	parsed := ParseExplanations(raw, 2, 4)
+	if len(parsed) != 2 {
+		t.Fatalf("both entries should be read: %v", parsed)
+	}
+	if len(parsed[1].Again) != 2 || parsed[1].Again[0].Wrong != "the dogs sits" || parsed[1].Again[0].Right != "the dogs sit" {
+		t.Fatalf("the pairs should be read: %+v", parsed[1].Again)
+	}
+	if !strings.Contains(parsed[0].Why, "past tense") || len(parsed[0].Again) != 1 || parsed[0].Again[0].Right != "" {
+		t.Fatalf("a bare line has no correct form: %+v", parsed[0])
+	}
+	fenced := "```json\n{\"mistakes\": [{\"index\": 0, \"why\": \"w\", \"examples\": " +
+		"[{\"sentence\": \"a b c\", \"correction\": \"a b\"}]}]}\n```"
+	if got := ParseExplanations(fenced, 1, 4)[0].Again; len(got) != 1 || got[0].Wrong != "a b c" || got[0].Right != "a b" {
+		t.Fatalf("the shapes an LLM drifts into should still read: %+v", got)
+	}
+	if len(ParseExplanations("the teacher wandered off", 2, 4)) != 0 {
+		t.Fatal("an unreadable answer explains nothing")
+	}
+	if len(ParseExplanations(`{"mistakes": [{"index": 9, "why": "w"}]}`, 2, 4)) != 0 {
+		t.Fatal("an index out of range is dropped")
+	}
+	repeats := `{"mistakes": [{"index": 0, "why": "w", "again": [{"wrong": "a b c"}, {"wrong": "A B C"}, ` +
+		`{"wrong": "d e f"}, {"wrong": "g h i"}]}]}`
+	again := ParseExplanations(repeats, 1, 2)[0].Again
+	if len(again) != 2 || again[0].Wrong != "a b c" || again[1].Wrong != "d e f" {
+		t.Fatalf("the repeat drops and the limit holds: %+v", again)
+	}
+	same := `{"mistakes": [{"index": 0, "why": "w", "again": [{"wrong": "a b c", "right": "a b c"}]}]}`
+	if got := ParseExplanations(same, 1, 4)[0].Again; got[0].Right != "" {
+		t.Fatalf("a correction that corrects nothing is no correction: %+v", got)
+	}
+}
+
+func TestExplainMistakes(t *testing.T) {
+	fake := newFakeTeacher(t)
+	lessons := []*Lesson{failedLesson("the dogs runs in the park")}
+	if err := ExplainMistakes(fake.client(t), lessons, ExplainOptions{Topic: "animals", Count: 2, Weight: 0.5, Batch: 10}); err != nil {
+		t.Fatal(err)
+	}
+	lesson := lessons[0]
+	if !strings.Contains(lesson.Why, "plural verb") {
+		t.Fatalf("the teacher should explain the rule: %q", lesson.Why)
+	}
+	if len(lesson.Variants) != 2 || lesson.Variants[0].Weight != 0.5 {
+		t.Fatalf("two weighted variants expected: %+v", lesson.Variants)
+	}
+	if lesson.Variants[0].Wrong == lesson.Variants[0].Right {
+		t.Fatal("a variant needs a correct form of its own")
+	}
+	prompt := fake.prompts["why"][0]
+	for _, want := range []string{"Topic of the lesson: animals", "[0] mistake: agreement",
+		`the student wrote: "the dogs runs in the park"`, `correct English:   "the dogs run in the park"`,
+		"you told the student: A plural subject"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("the prompt should carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestExplainMistakesBatchesAndSkipsWhatWasNeverWritten(t *testing.T) {
+	fake := newFakeTeacher(t)
+	lessons := []*Lesson{}
+	for i := 0; i < 5; i++ {
+		lessons = append(lessons, failedLesson("the dogs runs in the park"))
+	}
+	if err := ExplainMistakes(fake.client(t), lessons, ExplainOptions{Count: 1, Batch: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.prompts["why"]) != 3 {
+		t.Fatalf("five failures in batches of two is three calls, got %d", len(fake.prompts["why"]))
+	}
+	blank := &Lesson{Exercise: Exercise{ID: "e9"}, Continuation: "  ", Sentence: "the dogs "}
+	if err := ExplainMistakes(fake.client(t), []*Lesson{blank}, ExplainOptions{Count: 1, Batch: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.prompts["why"]) != 3 {
+		t.Fatal("nothing was written, so there is nothing to ask about")
+	}
+	if err := ExplainMistakes(fake.client(t), lessons, ExplainOptions{Batch: -1}); err == nil {
+		t.Fatal("a batch below one should be refused")
+	}
+	if err := ExplainMistakes(fake.client(t), lessons, ExplainOptions{Weight: -1, Batch: 10}); err == nil {
+		t.Fatal("a negative weight should be refused")
+	}
+}
+
+func TestExplainMistakesSurvivesAnUnreadableAnswer(t *testing.T) {
+	fake := newFakeTeacher(t)
+	fake.whyAnswer = "the teacher wandered off"
+	lessons := []*Lesson{failedLesson("the dogs runs in the park")}
+	if err := ExplainMistakes(fake.client(t), lessons, ExplainOptions{Count: 2, Batch: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if lessons[0].Why != "" || len(lessons[0].Variants) != 0 {
+		t.Fatalf("the lesson should be left as it was: %+v", lessons[0])
+	}
+	fake.whyAnswer = `{"mistakes": [{"index": 0, "why": "w", "again": [` +
+		`{"wrong": "the dogs runs in the park", "right": "the dogs run in the park"}, ` +
+		`{"wrong": "the cats sits down", "right": "the cats sit down"}]}]}`
+	lessons = []*Lesson{failedLesson("the dogs runs in the park")}
+	if err := ExplainMistakes(fake.client(t), lessons, ExplainOptions{Count: 4, Batch: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if len(lessons[0].Variants) != 1 || lessons[0].Variants[0].Wrong != "the cats sits down" {
+		t.Fatalf("a repeat of the student's own sentence is dropped: %+v", lessons[0].Variants)
+	}
+}
+
+func TestWidenOnlyAsksWhenSomethingLearnsFromIt(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := tutorConfig()
+	cfg.Variants = 2
+	trainer := scriptedTrainer(t, fake, cfg)
+	lessons := []*Lesson{failedLesson("the dogs runs in the park")}
+
+	out := trainer.Widen(lessons, 1) // no negative network: nothing learns from the answer
+	if out["explained"] != 0 || out["similar"] != 0 || len(fake.prompts["why"]) != 0 {
+		t.Fatalf("without a negative network nothing should be asked: %v", out)
+	}
+
+	trainer.Negative = newNegative(t, 1)
+	if out = trainer.Widen(lessons, 1); out["explained"] != 1 || out["similar"] != 2 {
+		t.Fatalf("one mistake explained and widened expected: %v", out)
+	}
+	if len(lessons[0].Variants) != 2 || len(fake.prompts["why"]) != 1 {
+		t.Fatalf("one call, two variants: %+v", lessons[0].Variants)
+	}
+
+	trainer.Config.Variants = 0
+	if out = trainer.Widen(lessons, 1); out["similar"] != 0 || len(fake.prompts["why"]) != 1 {
+		t.Fatal("variants 0 switches the question off")
+	}
+}
+
+func TestWidenSurvivesATeacherThatCannotAnswer(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := tutorConfig()
+	cfg.Variants = 2
+	trainer := scriptedTrainer(t, fake, cfg)
+	trainer.Negative = newNegative(t, 1)
+	records := []map[string]any{}
+	trainer.Progress = func(record map[string]any) { records = append(records, record) }
+	fake.failWith = 500
+	out := trainer.Widen([]*Lesson{failedLesson("the dogs runs in the park")}, 1)
+	if out["similar"] != 0 {
+		t.Fatalf("nothing should have been widened: %v", out)
+	}
+	if len(records) != 1 || records[0]["kind"] != "note" ||
+		!strings.Contains(records[0]["message"].(string), "no similar mistakes") {
+		t.Fatalf("the round should stand with a note: %v", records)
+	}
+}
+
+func TestARoundWidensEveryMistakeForTheNegativeNetwork(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := tutorConfig()
+	cfg.Threshold, cfg.Variants = 9.5, 2 // nothing passes at 9.5
+	trainer := scriptedTrainer(t, fake, cfg)
+	negative := newNegative(t, 3)
+	trainer.Negative = negative
+	records := []map[string]any{}
+	trainer.Progress = func(record map[string]any) { records = append(records, record) }
+	if _, err := trainer.Run(); err != nil {
+		t.Fatal(err)
+	}
+	var round map[string]any
+	lessons := 0
+	for _, record := range records {
+		switch record["kind"] {
+		case "round":
+			round = record
+		case "lesson":
+			lessons++
+			if record["why"] == "" {
+				t.Fatal("a failed lesson should carry the teacher's explanation")
+			}
+			if variants, _ := record["variants"].([]map[string]any); len(variants) != 2 {
+				t.Fatalf("a failed lesson should carry its family: %v", record["variants"])
+			}
+		}
+	}
+	if round["explained"] != lessons || round["similar"] != 2*lessons {
+		t.Fatalf("every mistake should be explained and widened: %v", round)
+	}
+	if blamed, _ := round["negative_blamed"].(int); blamed <= lessons {
+		t.Fatalf("the family should be blamed, not one sentence each: %v", round["negative_blamed"])
+	}
+	if len(fake.prompts["why"]) != 1 {
+		t.Fatalf("one call for the whole round, got %d", len(fake.prompts["why"]))
+	}
+	sources, _ := negative.Stats()["sources"].(map[string]any)
+	if toFloat(sources["tutor"]) != float64(lessons) || toFloat(sources["tutor:similar"]) != float64(2*lessons) {
+		t.Fatalf("the negative network should know where each failure came from: %v", sources)
+	}
+	if verdict := negative.Judge("the dogs sits on the mat 0", DefaultJudgeOptions()); verdict.Verdict == "pass" {
+		t.Fatalf("a sentence the network never wrote should already be suspect: %+v", verdict)
+	}
+}
+
 func TestTutorConfigValidation(t *testing.T) {
 	cases := []func(c *TutorConfig){
 		func(c *TutorConfig) { c.Topic = " " },
@@ -713,6 +1038,9 @@ func TestTutorConfigValidation(t *testing.T) {
 		func(c *TutorConfig) { c.MinWeight = -1 },
 		func(c *TutorConfig) { c.Batch = 0 },
 		func(c *TutorConfig) { c.Strength = -1 },
+		func(c *TutorConfig) { c.Variants = -1 },
+		func(c *TutorConfig) { c.Variants = MaxVariants + 1 },
+		func(c *TutorConfig) { c.VariantWeight = -0.5 },
 	}
 	for i, break_ := range cases {
 		cfg := DefaultTutorConfig()

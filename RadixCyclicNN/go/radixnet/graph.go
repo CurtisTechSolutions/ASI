@@ -5,10 +5,19 @@ import (
 	"sync"
 )
 
-// Node ids of the two sentinels.
+// Node ids of the sentinels.  Start and End are where a text begins and ends -
+// observed in the corpus, like everything else.  Back is where the graph has
+// *learned* that a walk goes round: nothing in a corpus says so, so its edges
+// are taught by the voices that caught themselves repeating (Backtrack).  An
+// edge p -> Back competes for probability with p's real children, so the more
+// often walks through p had to be backed out of, the likelier the search is to
+// hand over there instead of carrying on.  First is the first node id that is
+// not a sentinel.
 const (
 	Start = 0
 	End   = 1
+	Back  = 2
+	First = 3
 )
 
 // New edge weights of the sine network are drawn from [WLow, WHigh]; the count
@@ -26,44 +35,105 @@ const (
 	defaultH = 0.0
 )
 
+// BackZ is the Back sentinel's state: fixed at the far edge of the range the
+// sine model draws from instead of drawn, so adding the sentinel moved no
+// random stream and its activation is firmly non-zero (see the Python graph).
+const BackZ = 4.5
+
 const (
-	graphFormat        = "radixnet-graph"
-	graphFormatVersion = 1
+	graphFormat = "radixnet-graph"
+	// 2 added the counter reset fields (version 1 files load with no resets); 3 the Back sentinel (older
+	// files gain an unvisited one on load, and their node ids shift up by one)
+	graphFormatVersion = 3
 )
 
 type loc struct{ node, off int }
 
-// adjacency holds a node's out-edges: child -> edge id, plus the children in
-// insertion order (Python dict order), which decides the summation order of
-// the softmax and therefore keeps the numbers identical to the Python model.
+// adjacency holds a node's edges keyed by the node at the other end - child
+// -> edge id for the out-edges, parent -> edge id for the in-edges - in
+// insertion order (Python dict order, which decides the summation order of
+// the softmax and therefore keeps the numbers identical to the Python model).
+// Two parallel slices searched linearly cover the small degrees of almost
+// every node in a few dozen bytes; a node past adjacencyIndexAt entries (the
+// sentinels, hubs like " th") gets a map index too.  Go maps cost a few
+// hundred bytes each, which for millions of nodes was most of the graph.
 type adjacency struct {
-	order []int
-	edge  map[int]int
+	order []int       // node ids in insertion order
+	edges []int       // edge ids, parallel to order
+	idx   map[int]int // node id -> position, only past adjacencyIndexAt entries
+}
+
+// adjacencyIndexAt is the degree above which an adjacency keeps a map index.
+const adjacencyIndexAt = 16
+
+// find returns the position of node c, or -1.
+func (a *adjacency) find(c int) int {
+	if a.idx != nil {
+		if i, ok := a.idx[c]; ok {
+			return i
+		}
+		return -1
+	}
+	for i, x := range a.order {
+		if x == c {
+			return i
+		}
+	}
+	return -1
 }
 
 func (a *adjacency) get(c int) (int, bool) {
-	if a.edge == nil {
-		return 0, false
+	if i := a.find(c); i >= 0 {
+		return a.edges[i], true
 	}
-	e, ok := a.edge[c]
-	return e, ok
+	return 0, false
 }
 
+// set records edge e to / from node c, appending c when it is new.
 func (a *adjacency) set(c, e int) {
-	if a.edge == nil {
-		a.edge = make(map[int]int, 2)
+	if i := a.find(c); i >= 0 {
+		a.edges[i] = e
+		return
 	}
-	if _, ok := a.edge[c]; !ok {
-		a.order = append(a.order, c)
+	a.order = append(a.order, c)
+	a.edges = append(a.edges, e)
+	if a.idx != nil {
+		a.idx[c] = len(a.order) - 1
+	} else if len(a.order) > adjacencyIndexAt {
+		a.idx = make(map[int]int, 2*len(a.order))
+		for i, x := range a.order {
+			a.idx[x] = i
+		}
 	}
-	a.edge[c] = e
+}
+
+// unset drops node c; the last entry takes its slot, so the order of the
+// rest changes - fine for the parents, which have no order to keep (the
+// children are only ever cleared wholesale).
+func (a *adjacency) unset(c int) bool {
+	i := a.find(c)
+	if i < 0 {
+		return false
+	}
+	last := len(a.order) - 1
+	if i != last {
+		a.order[i], a.edges[i] = a.order[last], a.edges[last]
+		if a.idx != nil {
+			a.idx[a.order[i]] = i
+		}
+	}
+	a.order = a.order[:last]
+	a.edges = a.edges[:last]
+	if a.idx != nil {
+		delete(a.idx, c)
+	}
+	return true
 }
 
 func (a *adjacency) clear() {
 	a.order = a.order[:0]
-	for k := range a.edge {
-		delete(a.edge, k)
-	}
+	a.edges = a.edges[:0]
+	a.idx = nil
 }
 
 func (a *adjacency) size() int { return len(a.order) }
@@ -83,12 +153,25 @@ type Graph struct {
 	Count    []int64
 	Alive    []bool
 	children []adjacency
-	parents  []map[int]int
+	parents  []adjacency // in-edges: parent -> edge id (any order)
 
 	EdgeW      []float64
 	EdgeCount  []int64
 	EdgeAlive  []bool
 	EdgeParent []int
+
+	// Every visit count is a cyclic counter (counter.go): the slices above hold
+	// the odometer readings, these maps the reset counts of the ids that ever
+	// wrapped (absent = 0), and CarryCounters does the wrapping - never the
+	// counting loops, which stay plain or atomic increments.
+	CountResets     map[int]int64
+	EdgeCountResets map[int]int64
+	// Traversals counts every increment made to those counters and so bounds
+	// each of them: while it has not wrapped, none of them can have.
+	Traversals Counter
+
+	// Neg is the negative network's evidence (nil on a count / reward graph).
+	Neg *NegativeData
 
 	// the count / reward numbers
 	EdgeReward      []float64
@@ -96,7 +179,7 @@ type Graph struct {
 	window          []int
 	windowHead      int
 	WindowSize      int
-	TotalTraversals int64
+	TotalTraversals Counter
 	CountScale      float64
 	RewardScale     float64
 	GlobalScale     float64
@@ -105,17 +188,26 @@ type Graph struct {
 	index    map[string]loc
 	Inverted bool
 
-	Version          int
-	StructureVersion int
+	Version          Counter
+	StructureVersion Counter
 	nAliveNodes      int
 	nAliveEdges      int
+
+	// what the walks did: (the node before an edge's parent, the edge) -> seen / correct / incorrect
+	paths       map[PathKey]*PathRow
+	pathsByEdge map[int]map[int]bool // edge -> the nodes that called it
+	pathsByPrev map[int]map[int]bool // node -> the edges it called
+	pathParents map[int]bool         // nodes whose costs depend on where the walk came from (lazy)
+	ctxCache    map[PathKey][]ChildCost
+	ctxVersion  Counter
+	PathScale   float64
 
 	// lazy weights and costs
 	dirty            map[int]struct{}
 	dirtyAll         bool
-	weightsStructure int
+	weightsStructure Counter
 	edgeCost         []float64
-	costsVersion     int
+	costsVersion     Counter
 
 	// mu guards structural changes: splits / merges / new nodes and edges take
 	// the write lock, concurrent traces the read lock.
@@ -129,12 +221,13 @@ type GraphOptions struct {
 	RewardScale float64
 	GlobalScale float64
 	WindowScale float64
+	PathScale   float64
 	Window      int
 }
 
 // DefaultGraphOptions mirror the Python defaults (geometric mean of the two shares).
 func DefaultGraphOptions() GraphOptions {
-	return GraphOptions{CountScale: 0, RewardScale: 1, GlobalScale: 0.5, WindowScale: 0.5, Window: 10_000}
+	return GraphOptions{CountScale: 0, RewardScale: 1, GlobalScale: 0.5, WindowScale: 0.5, PathScale: 1, Window: 10_000}
 }
 
 // NewGraph creates an empty graph with the two sentinels.
@@ -147,55 +240,118 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 		rng:              NewMT19937(seed),
 		index:            make(map[string]loc),
 		dirty:            make(map[int]struct{}),
-		weightsStructure: -1,
-		costsVersion:     -1,
+		CountResets:      map[int]int64{},
+		EdgeCountResets:  map[int]int64{},
+		weightsStructure: invalidStamp,
+		costsVersion:     invalidStamp,
 		WindowSize:       opts.Window,
 		CountScale:       opts.CountScale,
 		RewardScale:      opts.RewardScale,
 		GlobalScale:      opts.GlobalScale,
 		WindowScale:      opts.WindowScale,
+		PathScale:        opts.PathScale,
+		paths:            map[PathKey]*PathRow{},
+		pathsByEdge:      map[int]map[int]bool{},
+		pathsByPrev:      map[int]map[int]bool{},
+		ctxVersion:       invalidStamp,
 		Workers:          Workers,
 	}
-	g.newNode(StartLabel, 0)
-	g.newNode(EndLabel, 0)
+	g.newNode(StartLabel, 0, 0)
+	g.newNode(EndLabel, 0, 0)
+	g.newNode(BackLabel, 0, 0)
 	return g, nil
+}
+
+// -- counters ------------------------------------------------------------------
+
+// invalidStamp is a version stamp no real reading can equal, so a cache marked
+// with it is always stale.
+var invalidStamp = Counter{Value: -1}
+
+// setResets stores one reset count, keeping the map sparse (absent = never wrapped).
+func setResets(resets map[int]int64, key int, value int64) {
+	if value != 0 {
+		resets[key] = value
+	} else {
+		delete(resets, key)
+	}
+}
+
+// NodeCount is how often node i was visited, as an odometer reading.
+func (g *Graph) NodeCount(i int) Counter { return Counter{g.Count[i], g.CountResets[i]} }
+
+// EdgeTraversals is how often edge e was traversed, as an odometer reading.
+func (g *Graph) EdgeTraversals(e int) Counter { return Counter{g.EdgeCount[e], g.EdgeCountResets[e]} }
+
+// edgeTraversalsF is the exact traversal count of an edge, as the float the
+// weight function sums (the Python implementation computes it the same way).
+func (g *Graph) edgeTraversalsF(e int) float64 {
+	return counterTotal(g.EdgeCount[e], g.EdgeCountResets, e)
+}
+
+// CarryCounters sets every counter that reached CounterLimit back to 0,
+// counting the reset; returns how many wrapped.
+//
+// This is the only place the visit counters wrap, so the counting loops stay
+// plain (or atomic) increments and several goroutines can count into a raw
+// int64 at once.  Call it at a safe point - the end of an epoch, before a save
+// - while nothing else is touching the graph.  While the graph has not seen
+// CounterLimit increments no counter can have reached the limit (Traversals
+// counts them all and so bounds every single one), so the sweep is skipped
+// after one comparison; force runs it anyway.
+func (g *Graph) CarryCounters(force bool) int {
+	wrapped := 0
+	if force || g.Traversals.Resets != 0 {
+		wrapped = CarrySeries(g.Count, g.CountResets) + CarrySeries(g.EdgeCount, g.EdgeCountResets)
+	}
+	if n := g.Neg; n != nil && (force || n.TotalFails.Resets != 0) {
+		// the negative network's fail counts, bounded by TotalFails the same way
+		wrapped += CarrySeries(n.Fails, n.FailsResets) + CarrySeries(n.ReasonFails, n.ReasonFailsResets)
+	}
+	return wrapped
 }
 
 // -- construction --------------------------------------------------------------
 
-func (g *Graph) newNode(label string, count int64) int {
+func (g *Graph) newNode(label string, count, countResets int64) int {
 	nid := len(g.Labels)
 	g.Labels = append(g.Labels, label)
 	g.labelLen = append(g.labelLen, runeLen(label))
 	g.Count = append(g.Count, count)
+	if countResets != 0 {
+		g.CountResets[nid] = countResets
+	}
 	g.Alive = append(g.Alive, true)
 	g.children = append(g.children, adjacency{})
-	g.parents = append(g.parents, nil)
+	g.parents = append(g.parents, adjacency{})
 	g.nAliveNodes++
-	g.Version++
-	g.StructureVersion++
+	g.Version.Add(1)
+	g.StructureVersion.Add(1)
 	return nid
 }
 
-func (g *Graph) newEdge(p, c int, count int64) int {
+func (g *Graph) newEdge(p, c int, count, countResets int64) int {
 	// the sine network draws a weight here; the count model recomputes the
 	// weight but consumes the same random number
 	g.rng.Uniform(WLow, WHigh)
 	e := len(g.EdgeW)
 	g.EdgeW = append(g.EdgeW, 0.0)
 	g.EdgeCount = append(g.EdgeCount, count)
+	if countResets != 0 {
+		g.EdgeCountResets[e] = countResets
+	}
 	g.EdgeAlive = append(g.EdgeAlive, true)
 	g.EdgeParent = append(g.EdgeParent, p)
 	g.EdgeReward = append(g.EdgeReward, 0.0)
 	g.WindowEdgeCount = append(g.WindowEdgeCount, 0)
-	g.children[p].set(c, e)
-	if g.parents[c] == nil {
-		g.parents[c] = make(map[int]int, 2)
+	if g.Neg != nil {
+		g.Neg.appendEdge()
 	}
-	g.parents[c][p] = e
+	g.children[p].set(c, e)
+	g.parents[c].set(p, e)
 	g.nAliveEdges++
-	g.Version++
-	g.StructureVersion++
+	g.Version.Add(1)
+	g.StructureVersion.Add(1)
 	g.dirty[p] = struct{}{}
 	return e
 }
@@ -204,9 +360,85 @@ func (g *Graph) createTrigramNode(trigram string) int {
 	if runeLen(trigram) != Window {
 		panic(fmt.Sprintf("expected a %d-character trigram, got %q", Window, trigram))
 	}
-	nid := g.newNode(trigram, 0)
+	nid := g.newNode(trigram, 0, 0)
 	g.index[trigram] = loc{nid, 0}
 	return nid
+}
+
+// Nothing in a corpus says where a walk loops, so this is the one thing the
+// graph learns from *experience* rather than from observation - a voice that
+// caught itself repeating and had to back up (Backtrack).  Three things are
+// taught at once, and all three are ordinary learned quantities:
+//
+//   - p -> Back is created on first use and bumped like any observed
+//     transition.  It competes with p's real children for probability, so every
+//     hand-over raises the model's own estimate that walks through p go round -
+//     and once that estimate beats the real children, the search hands over
+//     there by itself, wherever it is walking.
+//   - went - the child the walk was about to loop through - gets amount dearer.
+//   - instead - the child the voice took after backing up - gets amount cheaper.
+//
+// The first is where it goes round; the other two are what to do instead.
+// Pass -1 for a child that is not known.  Returns the Back edge id.
+// NudgeEdge moves the weight of p -> c so the transition gets amount likelier
+// (negative: dearer).  The count model derives its weights from counts and
+// rewards, so this is where the sine model's direct nudge would go; here it
+// only reports whether such an edge exists.
+func (g *Graph) NudgeEdge(p, c int, amount float64) bool {
+	if p < First || p >= len(g.children) {
+		return false
+	}
+	_, ok := g.children[p].get(c)
+	return ok && amount != 0
+}
+
+// ObserveBack teaches what a voice learned by backing out of a repeat at p.
+func (g *Graph) ObserveBack(p int, went, instead int, amount float64) (int, error) {
+	if p < First || p >= len(g.Labels) || !g.Alive[p] {
+		return 0, fmt.Errorf("node %d is not a real node to go back from", p)
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("amount must be >= 0, got %v", amount)
+	}
+	e, ok := g.children[p].get(Back)
+	if !ok {
+		e = g.newEdge(p, Back, 0, 0)
+	}
+	g.Count[Back]++
+	g.EdgeCount[e]++
+	g.Traversals.Add(1)
+	g.Version.Add(1)
+	// a weight here is a function of the counts and the rewards, so going round is taught by the Back edge's
+	// count and what to do instead by a penalty on the step it looped through and a reward on the step it took
+	// after backing up - the same rewards 2NRL moves (the sine model nudges the weights themselves instead)
+	g.RecordTraversals([]int{e})
+	g.AddReward([]int{e}, amount) // the hand-over itself, learned the way this model learns everything
+	for _, pair := range [2]struct {
+		child int
+		sign  float64
+	}{{went, -1}, {instead, 1}} {
+		if pair.child < First || pair.child == Back {
+			continue
+		}
+		if edge, ok := g.children[p].get(pair.child); ok {
+			g.AddReward([]int{edge}, pair.sign*amount)
+		}
+	}
+	g.RecomputeWeights()
+	return e, nil
+}
+
+// BackCost is what the model thinks a walk arriving at p costs to go round, or
+// ok = false when it has no idea (a node that was never backed out of).  When it
+// is the cheapest of p's children the model's most likely next step there is to
+// stop, which is what the search acts on.
+func (g *Graph) BackCost(p int) (float64, bool) {
+	for _, it := range g.ChildCosts(p) {
+		if it.Child == Back {
+			return it.Cost, true
+		}
+	}
+	return 0, false
 }
 
 // -- sizes and lookup ------------------------------------------------------------
@@ -222,7 +454,7 @@ func (g *Graph) NumTrigrams() int { return len(g.index) }
 
 // CompressionRatio is trigrams per real node.
 func (g *Graph) CompressionRatio() float64 {
-	real := g.nAliveNodes - 2
+	real := g.nAliveNodes - First
 	if real < 1 {
 		real = 1
 	}
@@ -254,7 +486,7 @@ func (g *Graph) Children(p int) []Transition {
 	adj := &g.children[p]
 	out := make([]Transition, len(adj.order))
 	for i, c := range adj.order {
-		out[i] = Transition{c, adj.edge[c]}
+		out[i] = Transition{c, adj.edges[i]}
 	}
 	return out
 }
@@ -267,11 +499,7 @@ func (g *Graph) Degree(p int) int { return g.children[p].size() }
 
 // Parents lists the parent ids of c (any order).
 func (g *Graph) Parents(c int) []int {
-	out := make([]int, 0, len(g.parents[c]))
-	for p := range g.parents[c] {
-		out = append(out, p)
-	}
-	return out
+	return append([]int(nil), g.parents[c].order...)
 }
 
 // -- structural operations ----------------------------------------------------------
@@ -280,7 +508,7 @@ func (g *Graph) Parents(c int) []int {
 // label[:i+2], B is a new node with label[i:] that inherits A's out-edges
 // (edge ids kept) and count; A gets the single new edge A -> B.
 func (g *Graph) Split(node, i int) (int, int, error) {
-	if node == Start || node == End {
+	if node < First {
 		return 0, 0, fmt.Errorf("cannot split a sentinel node")
 	}
 	if node < 0 || node >= len(g.Labels) || !g.Alive[node] {
@@ -292,32 +520,40 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 		return 0, 0, fmt.Errorf("split index %d out of range 1..%d for label %q", i, length-Window, string(label))
 	}
 	a := node
-	b := g.newNode(string(label[i:]), g.Count[a])
+	aResets := g.CountResets[a]
+	b := g.newNode(string(label[i:]), g.Count[a], aResets)
 	chA := &g.children[a]
 	chB := &g.children[b]
-	for _, c := range chA.order {
-		e := chA.edge[c]
+	moved := append([]int(nil), chA.edges...)
+	for i, c := range chA.order {
+		e := chA.edges[i]
 		chB.set(c, e)
-		pc := g.parents[c]
-		delete(pc, a)
-		pc[b] = e
+		pc := &g.parents[c]
+		pc.unset(a)
+		pc.set(b, e)
 		g.EdgeParent[e] = b
 	}
 	chA.clear()
-	g.newEdge(a, b, g.Count[a])
+	g.newEdge(a, b, g.Count[a], aResets)
 	for j := i; j < length-Overlap; j++ {
 		g.index[string(label[j:j+Window])] = loc{b, j - i}
 	}
 	g.Labels[a] = string(label[:i+Overlap])
 	g.labelLen[a] = i + Overlap
 	g.dirtyAll = true
+	bridge := -1
+	if e, ok := g.children[a].get(b); ok {
+		bridge = e
+	}
+	g.splitPaths(a, b, moved, bridge) // q -> P -> c is now q -> A -> B -> c
+	g.pathParents = nil
 	return a, b, nil
 }
 
 // MergeChild merges p's single child c into p when the chain is unary
 // (p has exactly one child, c exactly one parent, no sentinels, p != c).
 func (g *Graph) MergeChild(p int) bool {
-	if p == Start || p == End || p < 0 || p >= len(g.Labels) || !g.Alive[p] {
+	if p < First || p >= len(g.Labels) || !g.Alive[p] {
 		return false
 	}
 	ch := &g.children[p]
@@ -325,37 +561,35 @@ func (g *Graph) MergeChild(p int) bool {
 		return false
 	}
 	c := ch.order[0]
-	if c == p || c == Start || c == End {
+	if c == p || c < First {
 		return false
 	}
-	pc := g.parents[c]
-	if len(pc) != 1 {
+	pc := &g.parents[c]
+	if pc.size() != 1 {
 		return false
+	}
+	if g.blocksMerge(ch.edges[0]) {
+		return false // a blamed transition stays an edge, so the negative network can still name it
 	}
 	lp := []rune(g.Labels[p])
 	lc := []rune(g.Labels[c])
 	shift := len(lp) - Overlap
-	e := ch.edge[c]
+	e := ch.edges[0]
+	movedOut := append([]int(nil), g.children[c].edges...)
 	ch.clear()
-	for k := range pc {
-		delete(pc, k)
-	}
+	pc.clear()
 	g.EdgeAlive[e] = false
 	g.nAliveEdges--
 	// activations are the constant 1: no rescale of the moved edges is needed
 	cc := &g.children[c]
-	for _, target := range cc.order {
-		e2 := cc.edge[target]
+	for i, target := range cc.order {
+		e2 := cc.edges[i]
 		if target == c {
 			target = p
 		}
-		pt := g.parents[target]
-		if pt == nil {
-			pt = make(map[int]int, 2)
-			g.parents[target] = pt
-		}
-		delete(pt, c)
-		pt[p] = e2
+		pt := &g.parents[target]
+		pt.unset(c)
+		pt.set(p, e2)
 		ch.set(target, e2)
 		g.EdgeParent[e2] = p
 	}
@@ -367,14 +601,17 @@ func (g *Graph) MergeChild(p int) bool {
 	g.labelLen[p] = len(lp) + len(lc) - Overlap
 	g.Labels[c] = ""
 	g.labelLen[c] = 0
-	if g.Count[c] > g.Count[p] {
+	if g.NodeCount(p).Less(g.NodeCount(c)) {
 		g.Count[p] = g.Count[c]
+		setResets(g.CountResets, p, g.CountResets[c])
 	}
 	g.Alive[c] = false
 	g.nAliveNodes--
-	g.Version++
-	g.StructureVersion++
+	g.Version.Add(1)
+	g.StructureVersion.Add(1)
 	g.dirtyAll = true
+	g.mergePaths(p, c, e, movedOut) // the chain was unary: what its contexts knew was never a choice
+	g.pathParents = nil
 	return true
 }
 
@@ -385,7 +622,7 @@ func (g *Graph) Compress() int {
 	merges := 0
 	for {
 		done := 0
-		for p := 2; p < len(g.Labels); p++ {
+		for p := First; p < len(g.Labels); p++ {
 			if g.Alive[p] {
 				for g.MergeChild(p) {
 					done++
@@ -435,7 +672,7 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 	}
 	e, ok := g.children[Start].get(px)
 	if !ok {
-		e = g.newEdge(Start, px, 0)
+		e = g.newEdge(Start, px, 0, 0)
 	}
 	transitions = append(transitions, Transition{Start, e})
 	if count {
@@ -480,7 +717,7 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 		}
 		e, ok := g.children[px].get(py)
 		if !ok {
-			e = g.newEdge(px, py, 0)
+			e = g.newEdge(px, py, 0, 0)
 		}
 		transitions = append(transitions, Transition{px, e})
 		if count {
@@ -497,12 +734,15 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 	}
 	e, ok = g.children[px].get(End)
 	if !ok {
-		e = g.newEdge(px, End, 0)
+		e = g.newEdge(px, End, 0, 0)
 	}
 	transitions = append(transitions, Transition{px, e})
 	if count {
 		g.Count[End]++
 		g.EdgeCount[e]++
+		// every transition bumped one node counter and one edge counter, plus Start's:
+		// the total bounds each of them and so decides when CarryCounters has work
+		g.Traversals.Add(int64(2*len(transitions) + 1))
 	}
 	if didSplit {
 		traced, _, ok := g.trace(trigrams)
@@ -597,30 +837,31 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 	if !(len(g.EdgeCount) == m && len(g.EdgeAlive) == m && len(g.EdgeReward) == m && len(g.WindowEdgeCount) == m && len(g.EdgeParent) == m) {
 		return fmt.Errorf("edge arrays have inconsistent lengths")
 	}
-	if n < 2 || !g.Alive[Start] || !g.Alive[End] || g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel {
+	if n < First || !g.Alive[Start] || !g.Alive[End] || !g.Alive[Back] ||
+		g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel || g.Labels[Back] != BackLabel {
 		return fmt.Errorf("sentinels missing or changed")
 	}
-	if len(g.parents[Start]) != 0 || g.children[End].size() != 0 {
+	if g.parents[Start].size() != 0 || g.children[End].size() != 0 {
 		return fmt.Errorf("START has parents or END has children")
 	}
 	aliveNodes := 0
 	seen := make(map[int]bool)
 	for p := 0; p < n; p++ {
 		if !g.Alive[p] {
-			if g.children[p].size() != 0 || len(g.parents[p]) != 0 {
+			if g.children[p].size() != 0 || g.parents[p].size() != 0 {
 				return fmt.Errorf("dead node %d still has edges", p)
 			}
 			continue
 		}
 		aliveNodes++
-		if p > End && g.labelLen[p] < Window {
+		if p >= First && g.labelLen[p] < Window {
 			return fmt.Errorf("node %d label %q shorter than %d", p, g.Labels[p], Window)
 		}
 		if g.labelLen[p] != runeLen(g.Labels[p]) {
 			return fmt.Errorf("node %d has a stale label length", p)
 		}
-		for _, c := range g.children[p].order {
-			e := g.children[p].edge[c]
+		for i, c := range g.children[p].order {
+			e := g.children[p].edges[i]
 			if e < 0 || e >= m || !g.EdgeAlive[e] || seen[e] {
 				return fmt.Errorf("edge %d on %d->%d is invalid, dead or listed twice", e, p, c)
 			}
@@ -628,20 +869,21 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 			if !g.Alive[c] || c == Start || p == End {
 				return fmt.Errorf("edge %d->%d touches a dead node or a sentinel illegally", p, c)
 			}
-			if g.parents[c][p] != e {
+			if got, ok := g.parents[c].get(p); !ok || got != e {
 				return fmt.Errorf("edge %d->%d missing from parents", p, c)
 			}
 			if g.EdgeParent[e] != p {
 				return fmt.Errorf("edge %d records parent %d, listed under %d", e, g.EdgeParent[e], p)
 			}
-			if p > End && c > End {
+			if p >= First && c >= First {
 				lp := []rune(g.Labels[p])
 				if string(lp[len(lp)-Overlap:]) != runeSlice(g.Labels[c], 0, Overlap) {
 					return fmt.Errorf("edge %d->%d violates the window overlap", p, c)
 				}
 			}
 		}
-		for q, e := range g.parents[p] {
+		for i, q := range g.parents[p].order {
+			e := g.parents[p].edges[i]
 			if got, ok := g.children[q].get(p); !ok || got != e {
 				return fmt.Errorf("parents[%d] lists %d but children[%d] does not", p, q, q)
 			}
@@ -660,7 +902,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		return fmt.Errorf("alive edge bookkeeping is stale")
 	}
 	expected := 0
-	for p := 2; p < n; p++ {
+	for p := First; p < n; p++ {
 		if !g.Alive[p] {
 			continue
 		}
@@ -680,7 +922,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		for p := 2; p < n; p++ {
 			if g.Alive[p] && g.children[p].size() == 1 {
 				c := g.children[p].order[0]
-				if !(c == p || c <= End || len(g.parents[c]) != 1) {
+				if !(c == p || c <= End || g.parents[c].size() != 1) {
 					return fmt.Errorf("unary chain %d->%d survived compress", p, c)
 				}
 			}

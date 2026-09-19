@@ -1,4 +1,4 @@
-"""Automated English lessons: Ollama sets the exercise, the network completes it, Ollama marks it.
+"""Automated English lessons: the tutor sets the exercise, the network completes it, the tutor marks it.
 
     topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
 
@@ -18,11 +18,21 @@ prediction process run end to end without a human:
    sentence of teaching, and — the part the network learns from — the
    *correction*: the same sentence written out in correct English, keeping
    the prefix word for word.
-4. **The lesson learned** — failed sentences are 2NRL garbage, the
-   corrections and the passed sentences are the fine-tune pass, and the
-   negative phase is weighted per sentence by how bad the grade was
-   (:meth:`TutorTrainer.learn`), so a hopeless answer is punished harder than
-   a near miss.
+4. **The lesson learned** — a correction is taught *as a correction*: the
+   sentence the network wrote and the sentence the teacher wrote instead are
+   aligned character by character (:mod:`radixnet.diff`), and only the
+   trigram nodes they disagree on move — the step that wrote the wrong
+   character is penalised, the step that writes the right one is rewarded,
+   and the words both sentences share keep what they earned
+   (:meth:`radixnet.countnet.CountRewardNet.correct`,
+   ``diff_corrections``).  A whole path is rewarded only when the sentence
+   *passed*: an answer that had to be corrected earns its fix, not its
+   sentence (``keep_weight``).  Every judged step is also counted as a path -
+   correct or incorrect in the context it was taken from - so the same edge
+   can be the right move after one word and the wrong one after another.
+   Everything else is 2NRL as before: sentences with no correction to diff
+   are garbage weighted by how bad the mark was, the passed sentences and the
+   teacher's own English are the fine-tune pass.
 
 Grammar is what is being taught, so grammar is what the overall score mostly
 is: ``score = grammar_weight * grammar + (1 - grammar_weight) * mean(spelling,
@@ -33,14 +43,48 @@ next one, and ``drills`` asks it for extra correct example sentences about
 them - a teacher noticing that the class keeps failing plurals and setting
 plural exercises.
 
+5. **Why, and the same mistake again** - a mark says *that* a sentence is
+   wrong; the negative network (:mod:`radixnet.negative`) wants to know *why*
+   and to have seen the mistake more than once.  So when one is attached,
+   every failed sentence is handed back to the teacher
+   (:func:`explain_mistakes`): it explains **why** the sentence is wrong - the
+   rule that was broken and the pattern behind it, not just this instance -
+   and writes ``variants`` more short sentences that make the *same* mistake,
+   each with its own correct form.  Those pairs are blamed exactly like the
+   student's own mistake (diffed against their corrections,
+   :mod:`radixnet.blame`) at ``variant_weight`` of its severity, so the
+   negative network learns the *error*, not the one sentence it happened to
+   appear in.  Nothing synthetic reaches the network being taught: the
+   variants are the negative network's lesson alone.
+
+6. **The next lesson plan** - the report card at the end of a run is handed
+   back to the teacher (:func:`plan_lessons`, ``plan`` / ``--plan N`` /
+   ``POST /api/tutor/plan``), which writes the syllabus of the lessons that
+   follow: one point of grammar per lesson, the mistake of the card it
+   repairs, a topic and a line on why it is being taught.  What the marks
+   alone imply (:func:`plan_from_card`: a lesson per weak point, worst first,
+   and a level that goes up when the card is strong) is the floor, so a
+   weakness the teacher's plan skips is still somebody's lesson and an
+   unreadable answer still leaves a plan.  Every lesson of it can be started
+   as the next run.
+
+The teacher is a local Ollama model by default (``OLLAMA_HOST``,
+``RADIXNET_TUTOR_MODEL``) or ChatGPT (``tutor_provider="chatgpt"``, see
+:mod:`radixnet.chatgpt`, which needs ``OPENAI_API_KEY``); the marking follows
+the tutor unless ``grader_provider`` names the other one, so the lessons can
+be set by one and marked by the other.  A hosted tutor sends the topic, the
+exercises and everything the network writes to OpenAI, and costs money per
+call.
+
 Cost, per round: one call for the exercises, one per grading batch, one more
-when ``drills`` is on.  The Ollama endpoint and model follow the usual
-conventions (``OLLAMA_HOST``, ``RADIXNET_TUTOR_MODEL``).
+when ``drills`` is on, and one per batch of failed sentences when the mistakes
+are being widened for a negative network.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import statistics
 import threading
@@ -50,31 +94,71 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import nullcontext
 from typing import Any
 
+from . import diff
 from .beam import path_probability
-from .ollama import DEFAULT_MODEL, OllamaClient, OllamaError, _loads_lenient, parse_lines
+from .llm import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    LLMClient,
+    LLMError,
+    default_model,
+    loads_lenient,
+    normalise_provider,
+    provider_of,
+)
+from .ollama import DEFAULT_MODEL, parse_lines
 
 __all__ = [
+    "DEFAULT_PLAN_LESSONS",
     "DEFAULT_TUTOR_MODEL",
+    "DEFAULT_VARIANTS",
+    "MAX_VARIANTS",
+    "ERROR_FOCUS",
     "ERROR_TYPES",
+    "LEVELS",
+    "UPGRADE_STEPS",
+    "WORDS_LADDER",
+    "PROVIDERS",
     "TEACHER_WEIGHT",
     "MODES",
     "TWONRL_PER",
+    "Correction",
     "Exercise",
     "Grade",
     "Lesson",
+    "LessonPlan",
+    "PlannedLesson",
     "TutorConfig",
     "TutorTrainer",
+    "card_lines",
     "cue",
+    "default_tutor_model",
     "drill_sentences",
+    "explain_mistakes",
+    "focus_for",
     "grade_completions",
+    "next_level",
+    "next_words",
     "overall_score",
     "parse_exercises",
+    "parse_plan",
+    "plan_brief",
+    "plan_from_card",
+    "plan_lessons",
+    "upgrade_from_card",
     "report_card",
+    "weak_points",
     "write_exercises",
 ]
 
 DEFAULT_TUTOR_MODEL = os.environ.get("RADIXNET_TUTOR_MODEL", "").strip() or DEFAULT_MODEL
 """Ollama model that sets and marks the exercises (``RADIXNET_TUTOR_MODEL``, else the Ollama default)."""
+
+
+def default_tutor_model(provider: str | None = None) -> str:
+    """The model a teacher uses when none is named: :data:`DEFAULT_TUTOR_MODEL` for Ollama, else the provider's own default."""
+    provider = normalise_provider(provider)
+    return DEFAULT_TUTOR_MODEL if provider == "ollama" else default_model(provider)
 
 ERROR_TYPES = (
     "none",
@@ -206,7 +290,7 @@ def parse_exercises(raw: str, count: int, round_no: int = 1) -> list[Exercise]:
     ``stem`` instead of ``prefix``, and a model answer that repeats the prefix
     or omits it.
     """
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     items: Any = None
     if isinstance(data, dict):
         for key in ("exercises", "prefixes", "items", "results"):
@@ -260,7 +344,7 @@ def parse_exercises(raw: str, count: int, round_no: int = 1) -> list[Exercise]:
 
 
 def write_exercises(
-    client: OllamaClient,
+    client: LLMClient,
     topic: str,
     count: int = 5,
     *,
@@ -268,6 +352,7 @@ def write_exercises(
     level: str = "beginner",
     weak: Sequence[str] = (),
     words: str = "3 to 6",
+    brief: str = "",
     model: str | None = None,
     temperature: float = 0.9,
 ) -> list[Exercise]:
@@ -275,7 +360,9 @@ def write_exercises(
 
     ``focus`` pins the point of grammar for every exercise, ``weak`` lists the
     mistakes the student has been making (the previous round's report card),
-    which the teacher is asked to drill.
+    which the teacher is asked to drill, and ``brief`` is the plan this batch
+    of lessons is being taught to - the prompt the last report card led to
+    (:attr:`LessonPlan.prompt`), in the teacher's own words.
     """
     if count < 1:
         raise ValueError("count must be >= 1")
@@ -284,6 +371,8 @@ def write_exercises(
         raise ValueError("topic must be a non-empty string")
     system = _EXERCISE_SYSTEM.format(n=count, words=words)
     lines = [f"Topic: {topic}", f"Level: {(level or 'beginner').strip()}"]
+    if brief and brief.strip():
+        lines.append(f"The plan for this batch of lessons: {' '.join(brief.split())}")
     if focus and focus.strip():
         lines.append(f"Every exercise must drill: {focus.strip()}")
     weak = [w for w in weak if w and w != "none"]
@@ -297,7 +386,7 @@ def write_exercises(
     )
     exercises = parse_exercises(raw, count)
     if not exercises:
-        raise OllamaError(f"Ollama model {model or client.model!r} returned no usable exercises")
+        raise LLMError(f"the teacher model {model or client.model!r} returned no usable exercises")
     return exercises
 
 
@@ -310,7 +399,7 @@ _DRILL_SYSTEM = (
 
 
 def drill_sentences(
-    client: OllamaClient,
+    client: LLMClient,
     topic: str,
     count: int = 5,
     *,
@@ -347,7 +436,7 @@ class Grade:
     error: str = "none"  # one of ERROR_TYPES, or "other"
     correction: str = ""  # the whole sentence in correct English: what the network is taught
     comment: str = ""  # one sentence of teaching
-    graded_by: str = "ollama"  # "ollama" | "empty" (nothing to mark) | "unrated" (no usable answer)
+    graded_by: str = DEFAULT_PROVIDER  # the marking provider ("ollama" | "chatgpt"), "empty" (nothing to mark) or "unrated"
 
     def to_dict(self) -> dict:
         return {
@@ -371,18 +460,42 @@ class Lesson:
     reached_end: bool = False
     seconds: float = 0.0
     grade: Grade = dataclasses.field(default_factory=Grade)
+    why: str = ""
+    """Why the sentence is wrong: the rule behind the mistake (:func:`explain_mistakes`)."""
+    variants: list["Correction"] = dataclasses.field(default_factory=list)
+    """More sentences that make the same mistake, each with its correct form - the negative network's lesson."""
 
     @property
     def empty(self) -> bool:
         return not self.continuation.strip()
+
+    @property
+    def changes(self) -> list[dict]:
+        """What the teacher changed, span by span (empty when the sentence passed or was left uncorrected)."""
+        if self.grade.passed or not self.grade.correction.strip() or not self.sentence.strip():
+            return []
+        return diff.summary(self.sentence.strip(), self.grade.correction.strip())
 
     def to_dict(self) -> dict:
         return {
             "exercise": self.exercise.to_dict(), "attempt": self.attempt, "mode": self.mode,
             "continuation": self.continuation, "sentence": self.sentence, "cost": self.cost,
             "probability": self.probability, "reached_end": self.reached_end, "seconds": self.seconds,
-            "grade": self.grade.to_dict(),
+            "grade": self.grade.to_dict(), "changes": self.changes, "why": self.why,
+            "variants": [v.to_dict() for v in self.variants],
         }
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Correction:
+    """A sentence the network wrote, the sentence the teacher wrote instead, and how bad the mark was."""
+
+    wrong: str
+    right: str
+    weight: float = 1.0
+
+    def to_dict(self) -> dict:
+        return {"wrong": self.wrong, "right": self.right, "weight": self.weight}
 
 
 _GRADE_SYSTEM = (
@@ -402,9 +515,11 @@ _GRADE_SYSTEM = (
 )
 
 
-def _parse_grades(raw: str, count: int, grammar_weight: float, threshold: float) -> dict[int, Grade]:
+def _parse_grades(
+    raw: str, count: int, grammar_weight: float, threshold: float, graded_by: str = DEFAULT_PROVIDER
+) -> dict[int, Grade]:
     """``{index: Grade}`` for the entries of an LLM answer that could be understood."""
-    data = _loads_lenient(raw)
+    data = loads_lenient(raw)
     items: Any = None
     if isinstance(data, dict):
         for key in ("grades", "reviews", "results", "items", "marks"):
@@ -442,13 +557,13 @@ def _parse_grades(raw: str, count: int, grammar_weight: float, threshold: float)
             error=_error_type(item.get("error", item.get("error_type", item.get("mistake")))),
             correction=" ".join(str(correction or "").split()),
             comment=_clip(comment if isinstance(comment, str) else "", MAX_COMMENT_CHARS),
-            graded_by="ollama",
+            graded_by=graded_by,
         )
     return grades
 
 
 def grade_completions(
-    client: OllamaClient,
+    client: LLMClient,
     lessons: Sequence[Lesson],
     *,
     topic: str = "",
@@ -458,8 +573,12 @@ def grade_completions(
     batch: int = 10,
     temperature: float = 0.2,
     external: Callable[[], Any] | None = None,
+    graded_by: str | None = None,
 ) -> list[Lesson]:
     """Mark every lesson in place (``lesson.grade``) in batches of ``batch``; returns ``lessons``.
+
+    ``graded_by`` names the provider doing the marking (the client's own by
+    default) and ends up in every grade it gives.
 
     An empty completion is failed without asking (``graded_by="empty"``), with
     the teacher's model answer as the correction when the exercise has one; a
@@ -468,6 +587,7 @@ def grade_completions(
     """
     if batch < 1:
         raise ValueError("batch must be >= 1")
+    graded_by = graded_by or provider_of(client)
     system = _GRADE_SYSTEM.format(types=", ".join(f'"{t}"' for t in ERROR_TYPES), schema=_SCHEMA)
     hold = external or nullcontext
     for start in range(0, len(lessons), batch):
@@ -493,7 +613,7 @@ def grade_completions(
         )
         with hold():
             raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": temperature})
-        parsed = _parse_grades(raw, len(chunk), grammar_weight, threshold)
+        parsed = _parse_grades(raw, len(chunk), grammar_weight, threshold, graded_by)
         for i, lesson in asked:
             grade = parsed.get(i)
             if grade is None:
@@ -506,6 +626,148 @@ def grade_completions(
                 grade.correction = lesson.exercise.answer if not grade.passed else lesson.sentence
             lesson.grade = grade
     return list(lessons)
+
+
+# ---------------------------------------------------------------------------
+# why it is wrong, and the same mistake again
+# ---------------------------------------------------------------------------
+
+DEFAULT_VARIANTS = 3
+"""Sentences with the same mistake the teacher writes per failure, for the negative network."""
+MAX_VARIANTS = 10
+"""Most that can be asked for at once (a longer list starts repeating itself)."""
+MAX_WHY_CHARS = 400
+
+_WHY_SCHEMA = (
+    '{"mistakes": [{"index": <int>, "why": "<why the sentence is wrong>", "again": '
+    '[{"wrong": "<another sentence with the same mistake>", "right": "<that sentence in correct English>"}, ...]}, ...]}'
+)
+
+_WHY_SYSTEM = (
+    "You are an English teacher explaining a beginner's mistake and then showing it again. For every sentence you "
+    "are given the student's wrong sentence, the mistake you named and the correct sentence. Answer two things. "
+    "'why' explains in one or two sentences why the sentence is wrong: name the rule that was broken and what the "
+    "student is doing instead - the pattern, not just this one sentence. 'again' is {n} MORE examples of the SAME "
+    "mistake: each 'wrong' is a different short sentence that breaks that same rule in that same way - a different "
+    "subject, verb or noun, never a repeat of the student's sentence or of another example - and its 'right' is "
+    "that same sentence in correct English, changed only where the mistake is, so the two differ in the mistake "
+    "and nothing else. Keep every sentence short, simple and about everyday life. Reply with JSON only, no prose, "
+    "exactly of the form {schema} with one entry per sentence, in the given order and with the given index."
+)
+
+
+def _pairs_of(value: Any, limit: int, skip: set[str]) -> list[tuple[str, str]]:
+    """``[(wrong, right)]`` of an ``again`` list: dicts or bare strings, blanks and repeats dropped."""
+    out: list[tuple[str, str]] = []
+    if not isinstance(value, list):
+        return out
+    for entry in value:
+        if isinstance(entry, str):
+            wrong, right = " ".join(entry.split()), ""
+        elif isinstance(entry, dict):
+            wrong = " ".join(str(entry.get("wrong") or entry.get("sentence") or entry.get("example") or "").split())
+            right = " ".join(str(entry.get("right") or entry.get("correction") or entry.get("correct") or "").split())
+        else:
+            continue
+        key = wrong.lower()
+        if not wrong or key in skip:
+            continue
+        skip.add(key)
+        out.append((wrong, right if right.lower() != key else ""))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_explanations(raw: str, count: int, limit: int) -> dict[int, dict]:
+    """``{index: {"why", "again": [(wrong, right)]}}`` for the entries of an LLM answer that could be understood."""
+    data = loads_lenient(raw)
+    items: Any = None
+    if isinstance(data, dict):
+        for key in ("mistakes", "explanations", "results", "items", "grades"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+        if items is None and any(k in data for k in ("why", "again", "reason")):
+            items = [data]
+    elif isinstance(data, list):
+        items = data
+    out: dict[int, dict] = {}
+    if not isinstance(items, list):
+        return out
+    for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        if not (0 <= index < count) or index in out:
+            continue
+        why = " ".join(str(item.get("why") or item.get("reason") or item.get("explanation") or "").split())
+        again = item.get("again", item.get("examples", item.get("variants", item.get("sentences"))))
+        out[index] = {"why": _clip(why, MAX_WHY_CHARS), "again": _pairs_of(again, limit, set())}
+    return out
+
+
+def explain_mistakes(
+    client: LLMClient,
+    lessons: Sequence[Lesson],
+    *,
+    topic: str = "",
+    count: int = DEFAULT_VARIANTS,
+    weight: float = 0.5,
+    model: str | None = None,
+    batch: int = 10,
+    temperature: float = 0.9,
+    external: Callable[[], Any] | None = None,
+) -> list[Lesson]:
+    """Ask the teacher *why* each of these sentences is wrong, and for ``count`` more with the same mistake.
+
+    ``lessons`` are the failures of a round (blank completions are skipped:
+    nothing was written to be wrong about).  Each one is filled in place -
+    :attr:`Lesson.why` with the teacher's explanation and
+    :attr:`Lesson.variants` with :class:`Correction` pairs at ``weight``, the
+    share of the failure's severity the negative network should give a
+    sentence the student never actually wrote.  Returns the lessons asked
+    about; an entry the teacher said nothing usable about simply keeps its
+    empty ``why`` and no variants.
+    """
+    if batch < 1:
+        raise ValueError("batch must be >= 1")
+    count = max(1, min(int(count), MAX_VARIANTS))
+    if weight < 0:
+        raise ValueError(f"weight must be >= 0, got {weight}")
+    asked = [l for l in lessons if l.sentence.strip() and not l.empty]
+    hold = external or nullcontext
+    system = _WHY_SYSTEM.format(n=count, schema=_WHY_SCHEMA)
+    for start in range(0, len(asked), batch):
+        chunk = asked[start : start + batch]
+        body = "\n".join(
+            f"[{i}] mistake: {lesson.grade.error or 'other'}\n"
+            f"    the student wrote: {json.dumps(lesson.sentence.strip(), ensure_ascii=False)}\n"
+            f"    correct English:   {json.dumps(lesson.grade.correction.strip() or lesson.exercise.answer.strip(), ensure_ascii=False)}"
+            + (f"\n    you told the student: {lesson.grade.comment.strip()}" if lesson.grade.comment.strip() else "")
+            for i, lesson in enumerate(chunk)
+        )
+        user = (
+            (f"Topic of the lesson: {topic.strip()}\n\n" if topic and topic.strip() else "")
+            + f"Explain these {len(chunk)} mistakes and show each one again:\n{body}\n\nReturn the JSON now."
+        )
+        with hold():
+            raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": temperature})
+        parsed = _parse_explanations(raw, len(chunk), count)
+        for i, lesson in enumerate(chunk):
+            entry = parsed.get(i)
+            if entry is None:
+                continue
+            lesson.why = entry["why"]
+            lesson.variants = [
+                Correction(wrong=wrong, right=right, weight=float(weight))
+                for wrong, right in entry["again"]
+                if wrong.lower() != lesson.sentence.strip().lower()
+            ]
+    return asked
 
 
 def report_card(lessons: Iterable[Lesson]) -> dict:
@@ -539,6 +801,512 @@ def report_card(lessons: Iterable[Lesson]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# the next lesson plan
+# ---------------------------------------------------------------------------
+
+ERROR_FOCUS = {
+    "agreement": "subject-verb agreement",
+    "tense": "verb tenses",
+    "article": "articles (a, an, the)",
+    "preposition": "prepositions",
+    "plural": "plural nouns",
+    "pronoun": "pronouns",
+    "word-order": "word order",
+    "spelling": "spelling",
+    "punctuation": "punctuation",
+    "vocabulary": "word choice",
+    "fragment": "finishing the sentence",
+    "nonsense": "writing a sentence that means something",
+    "other": "sentence structure",
+}
+"""The point of grammar a lesson drills to fix each mistake of :data:`ERROR_TYPES`."""
+
+LEVELS = ("beginner", "intermediate", "advanced")
+"""How hard the exercises are; a plan moves the student one step up a card it has nothing left to fix in."""
+
+DEFAULT_PLAN_LESSONS = 3
+"""Lessons a plan holds unless more are asked for."""
+
+STRONG_PASS_RATE = 0.8
+STRONG_SCORE = 8.0
+"""A report card at or above both is a student ready for the next level."""
+
+STRETCH_PASS_RATE = 0.5
+"""Half the lessons passed: not a level up, but the openings get longer."""
+
+WORDS_LADDER = ("3 to 6", "5 to 8", "7 to 12", "10 to 16")
+"""How long an opening the teacher writes; an upgrade moves one rung up."""
+
+UPGRADE_STEPS = ("hold", "stretch", "advance")
+"""What the next batch does with the difficulty: hold it, stretch it, or move up a level."""
+
+HOLD_DRILLS = 3
+"""Correct example sentences a held-back batch gets to imitate."""
+
+MAX_BRIEF_CHARS = 600
+
+
+def focus_for(error: str) -> str:
+    """The grammar point that drills one mistake (``""`` for ``"none"`` and anything unrecognised)."""
+    return ERROR_FOCUS.get(_error_type(error), "")
+
+
+def _count_of(value: Any) -> int:
+    """A count from a report card, however it survived the JSON round trip (``0`` when unusable)."""
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mark_of(value: Any) -> float | None:
+    """A mean mark of a report card, or ``None`` when it is missing."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if number != number else number
+
+
+def weak_points(card: dict, limit: int = 3) -> list[dict]:
+    """The mistakes of a report card, worst first: ``[{"error", "count", "share", "focus"}]``.
+
+    ``share`` is how many of the lessons made the mistake.  Ties are broken
+    alphabetically, like :func:`report_card`'s own ``weakest``, so the same
+    marks always plan the same lessons.
+    """
+    errors = card.get("errors") if isinstance(card, dict) else None
+    counts: Counter[str] = Counter()
+    if isinstance(errors, dict):
+        for name, count in errors.items():
+            error = _error_type(name)
+            number = _count_of(count)
+            if error != "none" and number > 0:
+                counts[error] += number
+    lessons = _count_of(card.get("lessons")) if isinstance(card, dict) else 0
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return [
+        {"error": error, "count": count, "share": count / lessons if lessons else None, "focus": focus_for(error)}
+        for error, count in ranked[: max(0, limit)]
+    ]
+
+
+def next_level(level: str, card: dict) -> str:
+    """One step up :data:`LEVELS` when the card is strong (``STRONG_PASS_RATE`` passed at ``STRONG_SCORE``), else ``level``."""
+    level = str(level or "").strip().lower() or LEVELS[0]
+    pass_rate = _mark_of(card.get("pass_rate")) if isinstance(card, dict) else None
+    score = _mark_of(card.get("mean_score")) if isinstance(card, dict) else None
+    strong = pass_rate is not None and pass_rate >= STRONG_PASS_RATE and score is not None and score >= STRONG_SCORE
+    if not strong or level not in LEVELS:
+        return level
+    return LEVELS[min(LEVELS.index(level) + 1, len(LEVELS) - 1)]
+
+
+def next_words(words: str, steps: int = 1) -> str:
+    """One rung up :data:`WORDS_LADDER`; a setting that is not on the ladder is left alone."""
+    text = " ".join(str(words or "").split())
+    if text not in WORDS_LADDER:
+        return text or WORDS_LADDER[0]
+    return WORDS_LADDER[min(WORDS_LADDER.index(text) + max(0, steps), len(WORDS_LADDER) - 1)]
+
+
+def _percent(value: float | None) -> str:
+    return f"{value * 100:.0f}%" if value is not None else "too few"
+
+
+def upgrade_from_card(
+    card: dict, *, level: str = "beginner", words: str = "3 to 6", threshold: float = 6.0, drills: int = 0,
+) -> dict:
+    """The incremental step the next batch takes, read off the marks: ``{"step", "level", "words", "threshold", "drills", "note"}``.
+
+    ``advance`` when the card is strong (:data:`STRONG_PASS_RATE` of the
+    lessons passed at :data:`STRONG_SCORE`): a level up, longer openings and a
+    higher pass mark.  ``stretch`` when :data:`STRETCH_PASS_RATE` passed: the
+    same level, but longer openings.  ``hold`` otherwise: nothing gets harder,
+    the weak points are drilled and the teacher's own example sentences
+    (:data:`HOLD_DRILLS`) come with them, because a student who is failing
+    does not need a harder exercise.
+    """
+    rate = _mark_of(card.get("pass_rate")) if isinstance(card, dict) else None
+    score = _mark_of(card.get("mean_score")) if isinstance(card, dict) else None
+    level = str(level or "").strip().lower() or LEVELS[0]
+    words = " ".join(str(words or "").split()) or WORDS_LADDER[0]
+    passed, mark = _percent(rate), f"{score:.1f}" if score is not None else "-"
+    if rate is not None and rate >= STRONG_PASS_RATE and score is not None and score >= STRONG_SCORE:
+        step, level, words = "advance", next_level(level, card), next_words(words)
+        threshold = min(9.0, threshold + 1.0)
+        note = (
+            f"The last batch passed {passed} at {mark} out of 10, so this one steps up to {level}: openings of "
+            f"{words} words and a pass mark of {threshold:.0f} out of 10."
+        )
+    elif rate is not None and rate >= STRETCH_PASS_RATE:
+        step, words = "stretch", next_words(words)
+        note = (
+            f"The last batch passed {passed}, so this one stays at {level} but stretches the openings to "
+            f"{words} words."
+        )
+    else:
+        step, drills = "hold", max(drills, HOLD_DRILLS)
+        note = (
+            f"The last batch passed {passed}, so this one holds at {level} with openings of {words} words, drills "
+            f"the mistakes and comes with {drills} correct sentences to imitate."
+        )
+    return {"step": step, "level": level, "words": words, "threshold": threshold, "drills": drills, "note": note}
+
+
+def _and_list(names: Sequence[str]) -> str:
+    """``"a, b and c"`` - the teacher's own English, so its brief reads like one."""
+    names = list(names)
+    if len(names) < 2:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def plan_brief(weak: Sequence[dict], upgrade: dict, topic: str = "") -> str:
+    """The brief the marks alone write for the next batch: what to drill, how it steps up, what it is about."""
+    points = [str(point.get("focus") or point.get("error") or "") for point in weak if isinstance(point, dict)]
+    points = [name for name in points if name]
+    if len(points) > 1:
+        opening = f"Drill {_and_list(points)}, worst first: that is what the last batch got wrong."
+    elif points:
+        opening = f"Drill {points[0]}: that is what the last batch got wrong."
+    else:
+        opening = "Nothing was marked down, so widen the vocabulary instead of drilling one point of grammar."
+    lines = [opening, str(upgrade.get("note") or "").strip()]
+    if topic and topic.strip():
+        lines.append(f"Keep the sentences about {topic.strip()}.")
+    return " ".join(line for line in lines if line)
+
+
+@dataclasses.dataclass(slots=True)
+class PlannedLesson:
+    """One lesson of a plan: the point of grammar it drills, what its sentences are about and the mistake it is aimed at."""
+
+    focus: str = ""
+    topic: str = ""
+    why: str = ""  # one sentence for the student's file: why this lesson is being taught
+    targets: str = "none"  # the mistake of :data:`ERROR_TYPES` it fixes ("none": no particular one)
+    exercises: int = 5
+    drills: int = 0
+    prefixes: list[str] = dataclasses.field(default_factory=list)  # openings the teacher already wrote, if any
+
+    def to_dict(self) -> dict:
+        return {
+            "focus": self.focus, "topic": self.topic, "why": self.why, "targets": self.targets,
+            "exercises": self.exercises, "drills": self.drills, "prefixes": list(self.prefixes),
+        }
+
+
+@dataclasses.dataclass(slots=True)
+class LessonPlan:
+    """The lessons to run next, written from a report card: what they drill and why."""
+
+    lessons: list[PlannedLesson] = dataclasses.field(default_factory=list)
+    summary: str = ""  # where the student stands, in a sentence or two
+    prompt: str = ""  # the brief for the next batch: what to drill, how it steps up, what it is about
+    upgrade: dict = dataclasses.field(default_factory=dict)  # :func:`upgrade_from_card`: the step the next batch takes
+    level: str = "beginner"  # the level the next lessons should be at
+    topic: str = ""  # the topic they were planned around
+    weak: list[dict] = dataclasses.field(default_factory=list)  # :func:`weak_points` of the card behind the plan
+    source: str = "report card"  # who wrote it: a provider name, or "report card" (the marks alone)
+
+    @property
+    def targets(self) -> list[str]:
+        """The mistakes the plan drills, in its own order."""
+        return list(dict.fromkeys(l.targets for l in self.lessons if l.targets not in ("none", "")))
+
+    def to_dict(self) -> dict:
+        return {
+            "summary": self.summary, "prompt": self.prompt, "upgrade": dict(self.upgrade), "level": self.level,
+            "topic": self.topic, "source": self.source, "weak": [dict(point) for point in self.weak],
+            "targets": self.targets, "lessons": [lesson.to_dict() for lesson in self.lessons],
+        }
+
+
+_PLAN_SCHEMA = (
+    '{"summary": "<one or two sentences>", "prompt": "<the brief for the next batch>", "lessons": '
+    '[{"focus": "<the point of grammar>", "targets": "<the mistake it fixes>", "topic": "<what its sentences are '
+    'about>", "why": "<one sentence>"}, ...]}'
+)
+
+_PLAN_SYSTEM = (
+    "You are an English teacher planning the next lessons for a beginner student from its report card. The "
+    "student is given the opening words of a sentence and writes the rest; the report card is the marking of the "
+    "lessons it has just done - how many it passed, its mean marks out of 10 for grammar, spelling and fluency, "
+    "and how often each kind of mistake was the worst thing in a sentence. Plan the {n} lessons that repair the "
+    "most: each one drills a single point of grammar ('focus', two or three words, e.g. 'subject-verb "
+    "agreement', 'past tense', 'plural nouns'), names the mistake from the report card it is aimed at "
+    "('targets', one of: {types}), gives the everyday subject its sentences should be about ('topic', two or "
+    "three words) and says in one short sentence why it is being taught ('why'). Put the worst mistake first, "
+    "never plan two lessons for the same mistake. How much harder the next batch gets is decided by the marks and "
+    "given to you below: it is not yours to change. 'summary' is one or two sentences on where the student "
+    "stands. 'prompt' is the brief for the teacher who writes the next batch of exercises: two or three "
+    "sentences addressed to them, naming the points of grammar to drill in order, repeating the step up in "
+    "difficulty word for word, and saying what the sentences should be about - instructions to a colleague, not "
+    "a report on the student. Reply with JSON only, no prose, exactly of the form {schema} with exactly {n} "
+    "lessons."
+)
+
+
+def card_lines(card: dict) -> list[str]:
+    """The report card as the teacher reads it: the marks, then the mistakes worst first."""
+    lessons = _count_of(card.get("lessons"))
+    passed = _count_of(card.get("passed"))
+    pass_rate = _mark_of(card.get("pass_rate"))
+    lines = [
+        f"Lessons marked: {lessons}",
+        f"Passed: {passed}" + (f" ({pass_rate * 100:.0f}%)" if pass_rate is not None else ""),
+    ]
+    marks = [
+        (name, _mark_of(card.get(key)))
+        for name, key in (("overall", "mean_score"), ("grammar", "mean_grammar"),
+                          ("spelling", "mean_spelling"), ("fluency", "mean_fluency"))
+    ]
+    known = [f"{name} {value:.1f}" for name, value in marks if value is not None]
+    lines.append("Mean marks out of 10: " + (", ".join(known) if known else "none recorded"))
+    points = weak_points(card, limit=len(ERROR_TYPES))
+    if points:
+        lines.append("Mistakes, worst first: " + ", ".join(
+            f"{point['error']} x{point['count']}"
+            + (f" ({point['share'] * 100:.0f}% of the lessons)" if point["share"] is not None else "")
+            for point in points
+        ))
+    else:
+        lines.append("Mistakes: none were named.")
+    return lines
+
+
+def _plan_prefixes(item: dict, limit: int) -> list[str]:
+    """The openings a planned lesson came with (a list, or lines of text)."""
+    for key in ("prefixes", "openings", "examples"):
+        value = item.get(key)
+        if isinstance(value, str):
+            value = parse_lines(value, limit=limit)
+        if isinstance(value, list):
+            return [_clip(text, 120) for text in value if isinstance(text, str) and text.strip()][:limit]
+    return []
+
+
+def parse_plan(raw: str, count: int, *, topic: str = "", exercises: int = 5, drills: int = 0) -> LessonPlan:
+    """LLM answer -> a :class:`LessonPlan` of at most ``count`` lessons; unusable and duplicate entries are dropped.
+
+    Tolerates the shapes an LLM drifts into: ``{"lessons": [...]}``,
+    ``{"plan": [...]}``, a bare list, plain strings instead of objects,
+    ``point`` / ``skill`` / ``grammar`` instead of ``focus``, ``reason``
+    instead of ``why``, and a ``targets`` that names the mistake in its own
+    words (:func:`_error_type` maps it back).  A lesson that names no mistake
+    keeps the one its focus implies.  How much harder the next batch gets is
+    not read from the answer at all: :func:`upgrade_from_card` decides it from
+    the marks.
+    """
+    data = loads_lenient(raw)
+    items: Any = None
+    summary = ""
+    prompt = ""
+    if isinstance(data, dict):
+        for key in ("lessons", "plan", "syllabus", "items", "results"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+        if items is None and any(k in data for k in ("focus", "point", "skill")):
+            items = [data]
+        for key in ("summary", "assessment", "comment"):
+            if isinstance(data.get(key), str) and data[key].strip():
+                summary = _clip(data[key], MAX_COMMENT_CHARS)
+                break
+        for key in ("prompt", "brief", "instructions", "next_prompt"):
+            if isinstance(data.get(key), str) and data[key].strip():
+                prompt = _clip(data[key], MAX_BRIEF_CHARS)
+                break
+    elif isinstance(data, list):
+        items = data
+    if not isinstance(items, list):
+        items = [{"focus": line} for line in parse_lines(raw, limit=count)]  # plain lines: still a syllabus
+    lessons: list[PlannedLesson] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, str):
+            item = {"focus": item}
+        if not isinstance(item, dict):
+            continue
+        focus = ""
+        for key in ("focus", "point", "skill", "grammar", "lesson", "title"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                focus = _clip(value, 60)
+                break
+        named = ""
+        for key in ("targets", "target", "error", "mistake"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                named = value
+                break
+        targets = _error_type(named) if named else "none"
+        if not named:  # "plural nouns" is a lesson about plurals whatever it calls itself
+            inferred = _error_type(focus)
+            targets = inferred if inferred not in ("none", "other") else "none"
+        if not focus:
+            focus = focus_for(targets)
+        if not focus:
+            continue
+        key = focus.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        why = ""
+        for name in ("why", "reason", "because", "rationale", "note"):
+            value = item.get(name)
+            if isinstance(value, str) and value.strip():
+                why = _clip(value, MAX_COMMENT_CHARS)
+                break
+        subject = item.get("topic", item.get("subject", item.get("theme", "")))
+        lessons.append(PlannedLesson(
+            focus=focus,
+            topic=_clip(subject if isinstance(subject, str) else "", 60) or topic,
+            why=why,
+            targets=targets,
+            exercises=exercises,
+            drills=drills,
+            prefixes=_plan_prefixes(item, count),
+        ))
+        if len(lessons) >= count:
+            break
+    return LessonPlan(lessons=lessons, summary=summary, prompt=prompt, topic=topic, source="llm")
+
+
+def plan_from_card(
+    card: dict, *, topic: str = "", level: str = "beginner", words: str = "3 to 6", threshold: float = 6.0,
+    count: int = DEFAULT_PLAN_LESSONS, exercises: int = 5, drills: int = 0,
+) -> LessonPlan:
+    """The lesson plan the marks alone imply: one lesson per weak point of the card, worst first.
+
+    No LLM is involved, so a report card always leads to a plan - this is both
+    what :func:`plan_lessons` asks the teacher to improve on and what it falls
+    back to when the answer cannot be read.  A card with no mistake left to
+    name plans one lesson that keeps the topic and lets the upgrade move the
+    student on.  The step up (:func:`upgrade_from_card`) and the brief for the
+    next batch (:func:`plan_brief`) come with it.
+    """
+    weak = weak_points(card, limit=max(1, count))
+    upgrade = upgrade_from_card(card, level=level, words=words, threshold=threshold, drills=drills)
+    lessons = [
+        PlannedLesson(
+            focus=point["focus"] or point["error"],
+            topic=topic,
+            why=f"{point['count']} of {_count_of(card.get('lessons'))} lessons"
+                + (f" ({point['share'] * 100:.0f}%)" if point["share"] is not None else "")
+                + (" was" if point["count"] == 1 else " were")
+                + f" marked down for {point['error']}.",
+            targets=point["error"],
+            exercises=exercises,
+            drills=upgrade["drills"],
+        )
+        for point in weak
+    ]
+    if not lessons:
+        lessons = [PlannedLesson(
+            focus="", topic=topic, targets="none", exercises=exercises, drills=upgrade["drills"],
+            why="No mistake was named, so the next lessons stay on the topic and take the step up instead.",
+        )]
+    passed, total = _count_of(card.get("passed")), _count_of(card.get("lessons"))
+    score = _mark_of(card.get("mean_score"))
+    summary = (
+        f"{passed} of {total} lessons passed"
+        + (f" at a mean of {score:.1f} out of 10" if score is not None else "")
+        + ("; the weakest points are " + ", ".join(point["error"] for point in weak) if weak else "; nothing was marked down")
+        + "."
+    )
+    return LessonPlan(
+        lessons=lessons, summary=summary, prompt=plan_brief(weak, upgrade, topic), upgrade=upgrade,
+        level=upgrade["level"], topic=topic, weak=weak, source="report card",
+    )
+
+
+def plan_lessons(
+    client: LLMClient,
+    card: dict,
+    *,
+    topic: str = "",
+    level: str = "beginner",
+    words: str = "3 to 6",
+    threshold: float = 6.0,
+    count: int = DEFAULT_PLAN_LESSONS,
+    exercises: int = 5,
+    drills: int = 0,
+    model: str | None = None,
+    temperature: float = 0.7,
+) -> LessonPlan:
+    """Ask the teacher for the next ``count`` lessons, given the report card of the ones just marked.
+
+    The teacher sees the card - the marks, how often each mistake was the worst
+    thing in a sentence, and the step up in difficulty the marks have earned -
+    and answers with a syllabus: one point of grammar per lesson, the mistake
+    it repairs, a topic, a line on why, and ``prompt``: **the brief for the
+    next batch**, which :attr:`TutorConfig.brief` hands to the exercise writer
+    of the run that follows.
+
+    :func:`plan_from_card` is the floor.  A weakness the teacher's plan does
+    not target takes the place of a lesson that drills nothing the card marked
+    down (and is appended when there is no such lesson), so every mistake on
+    the card is somebody's lesson; a brief it does not write is the one the
+    marks wrote; an answer that cannot be read - or that names no mistake and
+    says nothing about the student - leaves the whole plan as it stands.
+    ``source`` says which of the two wrote it.  The upgrade itself is never
+    the LLM's to invent: :func:`upgrade_from_card` computes it from the marks
+    and the teacher is asked to repeat it, so the settings a plan carries are
+    always the ones the report card earned.
+    """
+    if count < 1:
+        raise ValueError("count must be >= 1")
+    if not isinstance(card, dict) or _count_of(card.get("lessons")) < 1:
+        raise ValueError("a report card of at least one lesson is needed to plan the next lessons")
+    fallback = plan_from_card(
+        card, topic=topic, level=level, words=words, threshold=threshold, count=count, exercises=exercises,
+        drills=drills,
+    )
+    system = _PLAN_SYSTEM.format(n=count, types=", ".join(ERROR_TYPES[1:]), schema=_PLAN_SCHEMA)
+    lines = list(card_lines(card))
+    if topic and topic.strip():
+        lines.insert(0, f"The lessons so far were about: {topic.strip()}")
+    lines.append(f"Level so far: {(level or LEVELS[0]).strip()}, openings of {words} words, pass mark "
+                 f"{threshold:.0f} out of 10")
+    lines.append(f"The step up this batch has earned, to repeat in your brief: {fallback.upgrade['note']}")
+    lines.append(f"Plan the next {count} lesson(s) now.")
+    raw = client.generate(
+        "\n".join(lines), system=system, model=model, json_mode=True, options={"temperature": temperature}
+    )
+    plan = parse_plan(raw, count, topic=topic, exercises=exercises, drills=drills)
+    if not plan.lessons or (not plan.summary and not plan.targets):
+        return fallback  # nothing usable came back: the marks alone still plan the lessons
+    plan.source = provider_of(client)
+    plan.weak = fallback.weak
+    plan.topic = topic
+    plan.summary = plan.summary or fallback.summary
+    plan.prompt = plan.prompt or fallback.prompt
+    plan.upgrade = dict(fallback.upgrade)  # the marks decide the step up, not the answer
+    plan.level = fallback.level
+    for lesson in plan.lessons:
+        lesson.topic = lesson.topic or topic
+        lesson.drills = plan.upgrade["drills"]
+        lesson.why = lesson.why or next(
+            (l.why for l in fallback.lessons if l.targets == lesson.targets and lesson.targets != "none"), ""
+        )
+    covered = {lesson.targets for lesson in plan.lessons if lesson.targets != "none"}
+    marked = {point["error"] for point in fallback.weak}
+    # a weakness the teacher's plan skipped takes the place of a lesson that drills nothing the card marked down
+    spare = [i for i, lesson in enumerate(plan.lessons) if lesson.targets not in marked]
+    for lesson in fallback.lessons:
+        if lesson.targets == "none" or lesson.targets in covered:
+            continue
+        covered.add(lesson.targets)
+        if spare:
+            plan.lessons[spare.pop(0)] = lesson
+        else:
+            plan.lessons.append(lesson)
+    return plan
+
+
+# ---------------------------------------------------------------------------
 # the loop
 # ---------------------------------------------------------------------------
 
@@ -554,7 +1322,10 @@ class TutorConfig:
     focus: str | None = None  # pin every exercise to one point of grammar
     level: str = "beginner"
     words: str = "3 to 6"  # how long a prefix the teacher writes
-    tutor_model: str = DEFAULT_TUTOR_MODEL
+    brief: str = ""  # standing instructions for the exercise writer: the previous batch's plan (LessonPlan.prompt)
+    tutor_provider: str = DEFAULT_PROVIDER  # "ollama" | "chatgpt": who teaches
+    tutor_model: str = ""  # "" = the teacher provider's default model
+    grader_provider: str = ""  # "" = the teacher's provider
     grader_model: str | None = None  # a different model for the marking (default: the tutor model)
     # the completion
     mode: str = "dijkstra"
@@ -569,10 +1340,17 @@ class TutorConfig:
     batch: int = 10
     adapt: bool = True  # drill the previous round's weakest points
     drills: int = 0  # extra correct example sentences per round
+    # why it is wrong, and the same mistake again (the negative network's lesson; see explain_mistakes)
+    variants: int = DEFAULT_VARIANTS  # sentences with the same mistake per failure (0 = do not ask)
+    variant_weight: float = 0.5  # their share of the failure's severity (they are the teacher's, not the student's)
+    plan: int = 0  # lessons to plan from the final report card at the end of the run (0 = no plan)
+    batches: int = 1  # auto run: batches of ``rounds`` rounds, each planned from the last (0 = until stopped)
     teach_answer: bool = True  # a failed lesson also learns the teacher's model answer
     # 2NRL
     learn: bool = True  # False: a dry run - the grades are reported, the network is left alone
     twonrl_per: str = "round"
+    diff_corrections: bool = True  # teach a correction from its diff with the sentence, not as two whole sentences
+    keep_weight: float = 0.0  # what the unchanged part of a correction still earns (1 = the whole sentence)
     min_weight: float = 0.25  # negative-phase weight of a near miss (a hopeless answer weighs 1)
     neg_epochs: int = 2
     pos_epochs: int = 3
@@ -584,7 +1362,27 @@ class TutorConfig:
     replay_limit: int = 64  # how many of them to keep (0 = no limit)
     checkpoint_every: int = 0  # rounds
 
+    def __post_init__(self) -> None:
+        """Resolve the providers and the model names they imply (so reports name the real model)."""
+        self.tutor_provider = normalise_provider(self.tutor_provider)
+        self.grader_provider = normalise_provider(self.grader_provider) if str(self.grader_provider).strip() else self.tutor_provider
+        if not str(self.tutor_model).strip():
+            self.tutor_model = default_tutor_model(self.tutor_provider)
+        if self.grader_model is not None and not str(self.grader_model).strip():
+            self.grader_model = None
+
+    @property
+    def resolved_grader_model(self) -> str:
+        """The model the marking runs on: ``grader_model``, else the teacher's model on the teacher's provider."""
+        if self.grader_model:
+            return self.grader_model
+        if self.grader_provider == self.tutor_provider:
+            return self.tutor_model
+        return default_tutor_model(self.grader_provider)
+
     def validate(self) -> None:
+        if self.tutor_provider not in PROVIDERS or self.grader_provider not in PROVIDERS:
+            raise ValueError(f"tutor_provider and grader_provider must be one of {', '.join(PROVIDERS)}")
         if not str(self.topic or "").strip():
             raise ValueError("topic must be a non-empty string")
         if self.rounds < 1:
@@ -609,10 +1407,20 @@ class TutorConfig:
             raise ValueError("grammar_weight must lie in [0, 1]")
         if not (0.0 <= self.min_weight <= 1.0):
             raise ValueError("min_weight must lie in [0, 1]")
+        if not (0.0 <= self.keep_weight <= 1.0):
+            raise ValueError("keep_weight must lie in [0, 1]")
         if self.batch < 1:
             raise ValueError("batch must be >= 1")
         if self.drills < 0 or self.replay_limit < 0 or self.checkpoint_every < 0:
             raise ValueError("drills, replay_limit and checkpoint_every must be >= 0")
+        if self.variants < 0 or self.variants > MAX_VARIANTS:
+            raise ValueError(f"variants must lie in [0, {MAX_VARIANTS}]")
+        if self.variant_weight < 0:
+            raise ValueError("variant_weight must be >= 0")
+        if self.plan < 0:
+            raise ValueError("plan must be >= 0")
+        if self.batches < 0:
+            raise ValueError("batches must be >= 0 (0 = until stopped)")
         if self.neg_epochs < 0 or self.pos_epochs < 0:
             raise ValueError("epochs must be >= 0")
         if self.neg_lr < 0 or self.pos_lr < 0:
@@ -632,22 +1440,43 @@ ProgressFn = Callable[[dict], None]
 class TutorTrainer:
     """Runs the lessons: the LLM sets and marks the exercises, the network completes them and learns from the grades.
 
+    ``client`` is the teacher: any provider client (Ollama or ChatGPT).  The
+    marking shares it unless ``grader_client`` is given or the configuration
+    names a different ``grader_provider``, in which case a client for that
+    provider is built from the environment; every grade records which one
+    marked it.
+
     ``external`` is an optional zero-argument callable returning a context
     manager entered around the LLM calls; the API passes its lock-releasing
     one so the server stays responsive while the teacher thinks.
+    ``negative`` is an optional
+    :class:`~radixnet.negative.NegativeNet` that learns *why* each failed
+    sentence failed - the mistake the teacher named, the mark it gave and, via
+    the same diff the correction is taught from, the characters it changed
+    (:func:`radixnet.blame.teach_lessons`).
     """
 
     def __init__(
         self,
         model: Any,
-        client: OllamaClient,
+        client: LLMClient,
         config: TutorConfig | None = None,
         external: Callable[[], Any] | None = None,
+        grader_client: LLMClient | None = None,
+        negative: Any = None,
     ) -> None:
         self.model = model
         self.client = client
         self.config = config or TutorConfig()
         self.config.validate()
+        if grader_client is None and self.config.grader_provider != provider_of(client):
+            from .llm import make_client
+
+            grader_client = make_client(self.config.grader_provider, model=self.config.resolved_grader_model)
+        self.grader_client = grader_client if grader_client is not None else client
+        self.tutor_provider = provider_of(client)
+        self.grader_provider = provider_of(self.grader_client)
+        self.negative = negative
         self._external = external or nullcontext
         self.history: list[dict] = []
         self.lessons: list[Lesson] = []
@@ -666,7 +1495,7 @@ class TutorTrainer:
         with self._external():
             exercises = write_exercises(
                 self.client, cfg.topic, cfg.exercises, focus=cfg.focus, level=cfg.level,
-                weak=self.weak if cfg.adapt else (), words=cfg.words, model=cfg.tutor_model,
+                weak=self.weak if cfg.adapt else (), words=cfg.words, brief=cfg.brief, model=cfg.tutor_model,
             )
         for position, exercise in enumerate(exercises, 1):
             exercise.id = f"r{round_no}e{position}"
@@ -693,9 +1522,37 @@ class TutorTrainer:
         """Step 3: the teacher marks the completions (one call per :attr:`TutorConfig.batch`)."""
         cfg = self.config
         return grade_completions(
-            self.client, lessons, topic=cfg.topic, threshold=cfg.threshold, grammar_weight=cfg.grammar_weight,
-            model=cfg.grader_model or cfg.tutor_model, batch=cfg.batch, external=self._external,
+            self.grader_client, lessons, topic=cfg.topic, threshold=cfg.threshold, grammar_weight=cfg.grammar_weight,
+            model=cfg.resolved_grader_model, batch=cfg.batch, external=self._external,
+            graded_by=self.grader_provider,
         )
+
+    def widen(self, lessons: Sequence[Lesson], round_no: int = 1, progress: ProgressFn | None = None) -> dict:
+        """Step 4: why are the failures wrong, and what else is wrong in the same way?
+
+        Only asked when a negative network is attached and
+        ``config.variants`` is more than 0 - it is the only thing that learns
+        from the answer, and it costs one LLM call per batch of failures.  A
+        teacher that cannot answer costs the widening, not the round.
+        """
+        cfg = self.config
+        out = {"explained": 0, "similar": 0}
+        if self.negative is None or cfg.variants < 1 or self._stopped():
+            return out
+        failed = [l for l in lessons if not l.grade.passed and l.sentence.strip() and not l.empty]
+        if not failed:
+            return out
+        try:
+            explain_mistakes(
+                self.client, failed, topic=cfg.topic, count=cfg.variants, weight=cfg.variant_weight,
+                model=cfg.tutor_model, batch=cfg.batch, external=self._external,
+            )
+        except LLMError as exc:  # the round stands without the widening
+            self._emit(progress, {"kind": "note", "round": round_no, "message": f"no similar mistakes: {exc}"})
+            return out
+        out["explained"] = sum(1 for lesson in failed if lesson.why)
+        out["similar"] = sum(len(lesson.variants) for lesson in failed)
+        return out
 
     # -- what a grade is worth -----------------------------------------------
 
@@ -722,14 +1579,48 @@ class TutorTrainer:
             return 0.0
         return max(0.0, min(1.0, grade.score / 10.0))
 
+    def diffs(self) -> bool:
+        """Is a correction taught from its diff (``diff_corrections``, and a model that can learn one)?"""
+        return bool(self.config.diff_corrections) and callable(getattr(self.model, "correct", None))
+
+    def corrections_of(self, lessons: Iterable[Lesson]) -> list[Correction]:
+        """The failed lessons a diff can teach: what the network wrote, what the teacher wrote, how bad it was.
+
+        A lesson that wrote nothing has no mistake to align, and one the
+        teacher left uncorrected has nothing to align it against; both go the
+        old way, through :meth:`texts_of`.
+        """
+        if not self.diffs():
+            return []
+        out: list[Correction] = []
+        seen: dict[tuple[str, str], int] = {}
+        for lesson in lessons:
+            grade = lesson.grade
+            if grade.passed or not lesson.continuation.strip() or not grade.correction.strip():
+                continue
+            pair = (lesson.sentence.strip(), grade.correction.strip())
+            weight = self.weight_of(grade)
+            if pair in seen:  # the same mistake twice (several attempts) keeps its worst mark
+                at = seen[pair]
+                if weight > out[at].weight:
+                    out[at] = Correction(*pair, weight)
+                continue
+            seen[pair] = len(out)
+            out.append(Correction(*pair, weight))
+        return out
+
     def texts_of(self, lessons: Iterable[Lesson]) -> tuple[list[str], list[float], list[str], list[float]]:
         """``(bad, bad_weights, good, good_weights)`` of graded lessons.
 
         Failures are garbage weighted by how bad the mark was; the sentences
         that passed are rewarded in proportion to their mark and the
-        teacher's own English at full weight.
+        teacher's own English at full weight.  With ``diff_corrections`` on,
+        a failure the teacher corrected is left out of both lists:
+        :meth:`corrections_of` hands it to the diff instead, which punishes
+        the words that were actually wrong rather than the whole sentence.
         """
         cfg = self.config
+        diffed = {(c.wrong, c.right) for c in self.corrections_of(lessons)}
         bad: list[str] = []
         bad_weights: list[float] = []
         good: list[tuple[str, float]] = []
@@ -738,6 +1629,11 @@ class TutorTrainer:
             if grade.passed:
                 if lesson.sentence.strip():
                     good.append((lesson.sentence.strip(), self.reward_of(grade)))
+                continue
+            pair = (lesson.sentence.strip(), grade.correction.strip())
+            if pair in diffed:  # the diff teaches this one, sentence against correction
+                if cfg.teach_answer and lesson.exercise.answer.strip():
+                    good.append((lesson.exercise.answer.strip(), TEACHER_WEIGHT))
                 continue
             if lesson.continuation.strip():  # nothing written is nothing to punish - the prefix itself is correct
                 bad.append(lesson.sentence.strip())
@@ -749,12 +1645,22 @@ class TutorTrainer:
         texts, weights = _merge_weighted(good)
         return bad, bad_weights, texts, weights
 
-    def learn(self, bad: list[str], bad_weights: list[float], good: list[str], good_weights: list[float] | None = None) -> dict:
-        """2NRL over one round (or one lesson): garbage weighted by how bad it was, corrections by how good.
+    def learn(
+        self,
+        bad: list[str],
+        bad_weights: list[float],
+        good: list[str],
+        good_weights: list[float] | None = None,
+        corrections: Sequence[Correction] = (),
+    ) -> dict:
+        """One set of grades: the corrections taught from their diffs, then 2NRL over whatever is left.
 
-        ``good_weights`` defaults to the full rate for every text (the
-        teacher's own English); replayed corrections are taught at the full
-        rate too.
+        Every :class:`Correction` moves only the trigram nodes its two
+        sentences disagree on (``diff_corrections``); the rest is the old
+        whole-sentence pass - garbage weighted by how bad it was, good
+        English by how good.  ``good_weights`` defaults to the full rate for
+        every text (the teacher's own English); replayed corrections are
+        taught at the full rate too.
         """
         cfg = self.config
         weights_of = dict(zip(good, good_weights)) if good_weights else {}
@@ -771,8 +1677,31 @@ class TutorTrainer:
             "bad": len(bad), "good": len(good_all), "action": None, "neg_loss": None, "pos_loss": None,
             "mean_weight": statistics.fmean(bad_weights) if bad_weights else None,
             "mean_reward": statistics.fmean(good_all_weights) if good_all_weights else None,
+            "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
         }
+        actions: list[str] = []
+        for correction in corrections:
+            if self._stopped():
+                break
+            moved = self.model.correct(
+                correction.wrong, correction.right, strength=cfg.strength, weight=correction.weight,
+                reward=TEACHER_WEIGHT, keep=cfg.keep_weight,
+            )
+            result["corrections"] += 1
+            result["edits"] += int(moved.get("edits") or 0)
+            result["penalised"] += int(moved.get("penalised") or 0)
+            result["rewarded"] += int(moved.get("rewarded") or 0)
+            result["marked_correct"] += int(moved.get("marked_correct") or 0)
+            result["marked_incorrect"] += int(moved.get("marked_incorrect") or 0)
+            if moved.get("loss") is not None:
+                result["pos_loss"] = moved["loss"]
+            if correction.right not in self.replay_buffer:
+                self.replay_buffer.append(correction.right)
+        if result["corrections"]:
+            actions.append("correct")
         if not bad and not good_all:
+            result["action"] = "+".join(actions) or None
+            self._trim_replay()
             return result
         shared = {"batch_size": cfg.batch_size, "stop_event": self._stop}
         if bad and good_all:
@@ -781,24 +1710,33 @@ class TutorTrainer:
                 pos_lr=cfg.pos_lr, strength=cfg.strength, bad_weights=bad_weights or None,
                 good_weights=good_all_weights or None, **shared,
             )
-            result.update(action="2nrl", neg_loss=_last_loss(outcome["negative"]), pos_loss=_last_loss(outcome["positive"]))
+            actions.append("2nrl")
+            result.update(neg_loss=_last_loss(outcome["negative"]), pos_loss=_last_loss(outcome["positive"]))
         elif good_all:
             records = self.model.reward(
                 good_all, epochs=cfg.pos_epochs, lr=cfg.pos_lr, strength=cfg.strength,
                 weights=good_all_weights or None, **shared,
             )
-            result.update(action="reward", pos_loss=_last_loss(records))
+            actions.append("reward")
+            result.update(pos_loss=_last_loss(records))
         else:
             records = self.model.punish(
                 bad, epochs=cfg.neg_epochs, lr=cfg.neg_lr, strength=cfg.strength, weights=bad_weights or None, **shared,
             )
-            result.update(action="punish", neg_loss=_last_loss(records))
+            actions.append("punish")
+            result.update(neg_loss=_last_loss(records))
+        result["action"] = "+".join(dict.fromkeys(actions)) or None
         for text in good:
             if text not in self.replay_buffer:
                 self.replay_buffer.append(text)
-        if cfg.replay_limit and len(self.replay_buffer) > cfg.replay_limit:
-            del self.replay_buffer[: len(self.replay_buffer) - cfg.replay_limit]
+        self._trim_replay()
         return result
+
+    def _trim_replay(self) -> None:
+        """Keep the replay buffer to ``replay_limit`` texts (0 = no limit)."""
+        limit = self.config.replay_limit
+        if limit and len(self.replay_buffer) > limit:
+            del self.replay_buffer[: len(self.replay_buffer) - limit]
 
     # -- driving ---------------------------------------------------------------
 
@@ -807,19 +1745,27 @@ class TutorTrainer:
         if progress is not None:
             progress(record)
 
-    def _emit_lesson(self, progress: ProgressFn | None, round_no: int, lesson: Lesson) -> None:
+    def _emit_lesson(self, progress: ProgressFn | None, round_no: int, lesson: Lesson, batch: int = 1) -> None:
         grade = lesson.grade
         self._emit(progress, {
-            "kind": "lesson", "round": round_no, "exercise": lesson.exercise.id, "prefix": lesson.exercise.prefix,
+            "kind": "lesson", "batch": batch, "round": round_no, "exercise": lesson.exercise.id,
+            "prefix": lesson.exercise.prefix,
             "focus": lesson.exercise.focus, "attempt": lesson.attempt + 1, "mode": lesson.mode,
             "continuation": _clip(lesson.continuation, 400), "sentence": _clip(lesson.sentence, 400),
             "score": grade.score, "grammar": grade.grammar, "spelling": grade.spelling, "fluency": grade.fluency,
             "passed": grade.passed, "error": grade.error, "correction": _clip(grade.correction, 400),
             "comment": grade.comment, "graded_by": grade.graded_by, "probability": lesson.probability,
-            "seconds": lesson.seconds,
+            "seconds": lesson.seconds, "changes": self.changes_of(lesson), "why": lesson.why,
+            "variants": [v.to_dict() for v in lesson.variants],
         })
 
-    def run_round(self, round_no: int, progress: ProgressFn | None = None) -> tuple[dict, list[Lesson]]:
+    def changes_of(self, lesson: Lesson) -> list[dict]:
+        """What the teacher changed, span by span - ``[{"op", "wrong", "right"}]`` - or ``[]``."""
+        return lesson.changes
+
+    def run_round(
+        self, round_no: int, progress: ProgressFn | None = None, batch: int = 1
+    ) -> tuple[dict, list[Lesson]]:
         """One round: exercises, completions, grades, and the 2NRL they lead to."""
         cfg = self.config
         t0 = time.perf_counter()
@@ -832,8 +1778,9 @@ class TutorTrainer:
                 lessons.append(self.complete(exercise, attempt))
         if lessons and not self._stopped():
             self.grade(lessons)
+        widened = self.widen(lessons, round_no, progress)
         for lesson in lessons:
-            self._emit_lesson(progress, round_no, lesson)
+            self._emit_lesson(progress, round_no, lesson, batch)
         self.lessons.extend(lessons)
         card = report_card(lessons)
         drills: list[str] = []
@@ -843,22 +1790,38 @@ class TutorTrainer:
                     drills = drill_sentences(
                         self.client, cfg.topic, cfg.drills, weak=card["weakest"], model=cfg.tutor_model
                     )
-                except OllamaError as exc:  # the lesson stands without its drill sentences
+                except LLMError as exc:  # the lesson stands without its drill sentences
                     self._emit(progress, {"kind": "note", "round": round_no, "message": f"no drill sentences: {exc}"})
         learned = {} if self._stopped() else self._learn_lessons(lessons, drills)
+        blamed = self._teach_negative(lessons)
         if cfg.adapt:
             self.weak = card["weakest"]
         record = {
-            "kind": "round", "round": round_no, "topic": cfg.topic, "focus": cfg.focus,
+            "kind": "round", "batch": batch, "round": round_no, "topic": cfg.topic, "focus": cfg.focus,
             "exercises": len(exercises), "drills": len(drills), "seconds": time.perf_counter() - t0,
             **card, **learned,
         }
+        if blamed is not None:
+            record["negative_blamed"] = blamed["blamed"]
+            record["negative_edges"] = blamed["edges"]
+            record["negative_reasons"] = blamed["reasons"]
+            record["explained"] = widened["explained"]
+            record["similar"] = widened["similar"]
         return record, lessons
+
+    def _teach_negative(self, lessons: list[Lesson]) -> dict | None:
+        """Hand this round's failures to the negative network: the teacher named the mistake, so it is the reason."""
+        if self.negative is None or not lessons:
+            return None
+        from . import blame  # local import: the tutor runs without a negative network
+
+        return blame.teach_lessons(self.negative, lessons, threshold=self.config.threshold)
 
     def _learn_lessons(self, lessons: list[Lesson], drills: list[str]) -> dict:
         """2NRL over the whole round, or lesson by lesson (the drill sentences are taught once either way)."""
         if not self.config.learn:  # a dry run: what would have been learned, without touching the network
             bad, bad_weights, good, good_weights = self.texts_of(lessons)
+            corrections = self.corrections_of(lessons)
             good, good_weights = _merge_weighted(
                 list(zip(good, good_weights)) + [(t, TEACHER_WEIGHT) for t in drills]
             )
@@ -866,13 +1829,20 @@ class TutorTrainer:
                 "bad": len(bad), "good": len(good), "action": None, "neg_loss": None, "pos_loss": None,
                 "mean_weight": statistics.fmean(bad_weights) if bad_weights else None,
                 "mean_reward": statistics.fmean(good_weights) if good_weights else None,
+                "corrections": len(corrections),
+                "edits": sum(len(diff.summary(c.wrong, c.right, limit=0)) for c in corrections),
+                "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
             }
         if self.config.twonrl_per != "lesson":
             bad, bad_weights, good, good_weights = self.texts_of(lessons)
-            return self.learn(bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills))
+            return self.learn(
+                bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills),
+                self.corrections_of(lessons),
+            )
         merged: dict[str, Any] = {
             "bad": 0, "good": 0, "action": None, "neg_loss": None, "pos_loss": None,
-            "mean_weight": None, "mean_reward": None,
+            "mean_weight": None, "mean_reward": None, "corrections": 0, "edits": 0, "penalised": 0, "rewarded": 0,
+            "marked_correct": 0, "marked_incorrect": 0,
         }
         actions: list[str] = []
         bad_seen: list[float] = []
@@ -881,14 +1851,19 @@ class TutorTrainer:
             if self._stopped():
                 break
             bad, bad_weights, good, good_weights = self.texts_of([lesson])
-            outcome = self.learn(bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills))
+            outcome = self.learn(
+                bad, bad_weights, good + drills, good_weights + [TEACHER_WEIGHT] * len(drills),
+                self.corrections_of([lesson]),
+            )
             drills = []
             bad_seen += bad_weights
             good_seen += good_weights
             if outcome["action"]:
-                actions.append(outcome["action"])
+                actions.extend(outcome["action"].split("+"))
             merged["bad"] += outcome["bad"]
             merged["good"] += outcome["good"]
+            for key in ("corrections", "edits", "penalised", "rewarded", "marked_correct", "marked_incorrect"):
+                merged[key] += outcome.get(key, 0)
             for key in ("neg_loss", "pos_loss"):
                 if outcome[key] is not None:
                     merged[key] = outcome[key]
@@ -904,27 +1879,111 @@ class TutorTrainer:
         stop_event: threading.Event | None = None,
         checkpoint_manager: Any = None,
     ) -> list[dict]:
-        """Every round, then a final report card; the lesson records go to ``progress`` as they happen."""
+        """Every batch of rounds, each ending in its own report card; the records go to ``progress`` as they happen.
+
+        One **batch** is ``rounds`` rounds and the report card over them.  With
+        ``batches`` > 1 (or 0, which keeps going until it is stopped) the run
+        drives itself: the card is planned from (:meth:`plan`), the plan is
+        applied (:meth:`apply_plan`: its brief becomes the next batch's
+        standing instruction and the step up its difficulty), and the next
+        batch is taught to it.  A batch that cannot be planned ends the run
+        rather than repeating itself.
+        """
         cfg = self.config
         self._stop = stop_event if stop_event is not None else threading.Event()
         total = cfg.rounds if rounds is None else rounds
         if total < 1:
             raise ValueError("rounds must be >= 1")
         records: list[dict] = []
-        for round_no in range(1, total + 1):
-            if self._stopped():
+        round_no = 0
+        batch = 0
+        while cfg.batches == 0 or batch < cfg.batches:
+            if batch and self._stopped():
+                break  # stopped between batches: no empty card for one that never ran
+            batch += 1
+            taught = len(self.lessons)  # this batch's lessons, so its card is its own
+            rounds_here = 0
+            for _ in range(total):
+                if self._stopped():
+                    break
+                round_no += 1
+                rounds_here += 1
+                record, _lessons = self.run_round(round_no, progress, batch)
+                self._emit(progress, record)
+                records.append(record)
+                if checkpoint_manager is not None and cfg.checkpoint_every and round_no % cfg.checkpoint_every == 0:
+                    checkpoint_manager.save(self.model, round_no, "tutor", {
+                        "round": round_no, "batch": batch, "mean_score": record.get("mean_score"),
+                        "pass_rate": record.get("pass_rate"),
+                    })
+            summary = {
+                "kind": "report", "batch": batch, "rounds": rounds_here, "topic": cfg.topic,
+                **report_card(self.lessons[taught:]),
+            }
+            self._emit(progress, summary)  # a batch always ends with its card, stopped or not
+            records.append(summary)
+            last = bool(cfg.batches) and batch >= cfg.batches
+            wanted = bool(cfg.plan) or not last  # a batch that has a successor is always planned
+            if self._stopped() or not wanted or not self.lessons[taught:]:
+                break  # the run was stopped, nothing was asked for, or there is nothing to plan from
+            try:
+                plan = self.plan(summary, cfg.plan or DEFAULT_PLAN_LESSONS)
+            except LLMError as exc:  # the lessons stand without a plan for the next ones
+                self._emit(progress, {"kind": "note", "batch": batch, "message": f"no lesson plan: {exc}"})
                 break
-            record, _lessons = self.run_round(round_no, progress)
+            record = {"kind": "plan", "batch": batch, "rounds": rounds_here, **plan.to_dict()}
             self._emit(progress, record)
             records.append(record)
-            if checkpoint_manager is not None and cfg.checkpoint_every and round_no % cfg.checkpoint_every == 0:
-                checkpoint_manager.save(self.model, round_no, "tutor", {
-                    "round": round_no, "mean_score": record.get("mean_score"), "pass_rate": record.get("pass_rate"),
-                })
-        summary = {"kind": "report", "rounds": len(records), "topic": cfg.topic, **report_card(self.lessons)}
-        self._emit(progress, summary)
-        records.append(summary)
+            if last:
+                break
+            applied = self.apply_plan(plan)
+            if self._stopped():
+                break  # stopped while it was planning: do not announce a batch that will not run
+            started = {"kind": "batch", "batch": batch + 1, **applied}
+            self._emit(progress, started)
+            records.append(started)
         return records
+
+    def apply_plan(self, plan: LessonPlan) -> dict:
+        """Teach what comes next to a plan: its brief, and the step up the marks earned.
+
+        The brief becomes :attr:`TutorConfig.brief` - handed to the exercise
+        writer with every round from now on - and the upgrade sets the level,
+        how long the openings are, the pass mark and the drill sentences.  The
+        single-focus pin is released: the brief carries the points of grammar,
+        in order, and a pin from an earlier batch would silently overrule it.
+        """
+        cfg = self.config
+        upgrade = plan.upgrade or {}
+        cfg.brief = plan.prompt or cfg.brief
+        cfg.focus = None
+        cfg.level = str(upgrade.get("level") or cfg.level)
+        cfg.words = str(upgrade.get("words") or cfg.words)
+        threshold = _mark_of(upgrade.get("threshold"))
+        if threshold is not None:
+            cfg.threshold = threshold
+        if upgrade.get("drills") is not None:
+            cfg.drills = _count_of(upgrade.get("drills"))
+        cfg.validate()
+        return {
+            "step": upgrade.get("step", "hold"), "brief": cfg.brief, "topic": cfg.topic, "level": cfg.level,
+            "words": cfg.words, "threshold": cfg.threshold, "drills": cfg.drills, "note": upgrade.get("note", ""),
+        }
+
+    def plan(self, card: dict | None = None, count: int = DEFAULT_PLAN_LESSONS) -> LessonPlan:
+        """The next lessons, planned by the teacher from a report card - by default the run's own.
+
+        The weaknesses of the card become the syllabus (:func:`plan_lessons`),
+        each lesson carrying the settings to run it with: the point of grammar
+        to drill, the topic, and how many exercises and drill sentences.
+        """
+        cfg = self.config
+        card = report_card(self.lessons) if card is None else card
+        with self._external():
+            return plan_lessons(
+                self.client, card, topic=cfg.topic, level=cfg.level, words=cfg.words, threshold=cfg.threshold,
+                count=count, exercises=cfg.exercises, drills=cfg.drills, model=cfg.tutor_model,
+            )
 
 
 def _unique(texts: Iterable[str]) -> list[str]:

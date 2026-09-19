@@ -1,0 +1,112 @@
+
+=== 2NRL, seed 0 (delta-driven negative-phase starts) ===
+  untrained                      reward    80.3
+    negative  update    1/150  mean episode length    42.0  delta 0.19  venture radius 0.15
+    negative  update   15/150  mean episode length    12.1  delta 0.66  venture radius 0.53
+    negative  update   30/150  mean episode length    10.1  delta 0.79  venture radius 0.63
+    negative  update   45/150  mean episode length     9.3  delta 0.86  venture radius 0.69
+    negative  update   60/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update   75/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+    negative  update   90/150  mean episode length     7.1  delta 1.00  venture radius 0.80
+    negative  update  105/150  mean episode length     7.0  delta 1.00  venture radius 0.80
+    negative  update  120/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+    negative  update  135/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update  150/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+  after negative phase           reward     9.0   (fail length 6.8, delta 1.00, radius 0.80, majority action 52%, anti-balance 85%)
+  after INVERSION (no training)  reward   498.0   (negation error 0.0e+00)
+    positive  update    1/60  mean episode length   453.2
+    positive  update    6/60  mean episode length   475.4
+    positive  update   12/60  mean episode length   479.3
+    positive  update   18/60  mean episode length   476.2
+    positive  update   24/60  mean episode length   481.0
+    positive  update   30/60  mean episode length   480.2
+    positive  update   36/60  mean episode length   486.0
+    positive  update   42/60  mean episode length   482.5
+    positive  update   48/60  mean episode length   469.2
+    positive  update   54/60  mean episode length   465.4
+    positive  update   60/60  mean episode length   469.3
+  after fine-tune                reward   500.0   over 100 episodes   SOLVED
+--- control, seed 0 (matched 198148 steps) ---
+    control   update    1/400  mean episode length    51.2
+    control   update   40/400  mean episode length   197.8
+    control   update   80/400  mean episode length   474.3
+    control   step budget reached at update 94 (200013 steps)
+  control (no 2NRL)              reward   500.0
+
+=== 2NRL, seed 1 (delta-driven negative-phase starts) ===
+  untrained                      reward     9.0
+    negative  update    1/150  mean episode length    12.5  delta 0.64  venture radius 0.51
+    negative  update   15/150  mean episode length     7.6  delta 1.00  venture radius 0.80
+    negative  update   30/150  mean episode length     7.3  delta 1.00  venture radius 0.80
+    negative  update   45/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update   60/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update   75/150  mean episode length     6.9  delta 1.00  venture radius 0.80
+    negative  update   90/150  mean episode length     7.1  delta 1.00  venture radius 0.80
+    negative  update  105/150  mean episode length     6.9  delta 1.00  venture radius 0.80
+    negative  update  120/150  mean episode length     6.6  delta 1.00  venture radius 0.80
+    negative  update  135/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+    negative  update  150/150  mean episode length     7.0  delta 1.00  venture radius 0.80
+  after negative phase           reward     9.2   (fail length 7.0, delta 1.00, radius 0.80, majority action 57%, anti-balance 88%)
+  after INVERSION (no training)  reward   253.8   (negation error 0.0e+00)
+    positive  update    1/60  mean episode length   229.3
+    positive  update    6/60  mean episode length   242.6
+    positive  update   12/60  mean episode length   248.5
+    positive  update   18/60  mean episode length   255.8
+    positive  update   24/60  mean episode length   263.3
+    positive  update   30/60  mean episode length   285.2
+    positive  update   36/60  mean episode length   323.1
+    positive  update   42/60  mean episode length   347.7
+    positive  update   48/60  mean episode length   371.0
+    positive  update   54/60  mean episode length   380.2
+    positive  update   60/60  mean episode length   404.8
+  after fine-tune                reward   481.4   over 100 episodes   SOLVED
+--- control, seed 1 (matched 191116 steps) ---
+    control   update    1/384  mean episode length    12.8
+    control   update   38/384  mean episode length    23.8
+    control   update   76/384  mean episode length    87.1
+    control   step budget reached at update 95 (192855 steps)
+  control (no 2NRL)              reward   315.0
+
+=== 2NRL, seed 2 (delta-driven negative-phase starts) ===
+  untrained                      reward     9.9
+    negative  update    1/150  mean episode length    19.4  delta 0.41  venture radius 0.33
+    negative  update   15/150  mean episode length     8.0  delta 1.00  venture radius 0.80
+    negative  update   30/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update   45/150  mean episode length     7.0  delta 1.00  venture radius 0.80
+    negative  update   60/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update   75/150  mean episode length     6.9  delta 1.00  venture radius 0.80
+    negative  update   90/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+    negative  update  105/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+    negative  update  120/150  mean episode length     6.8  delta 1.00  venture radius 0.80
+    negative  update  135/150  mean episode length     7.2  delta 1.00  venture radius 0.80
+    negative  update  150/150  mean episode length     7.1  delta 1.00  venture radius 0.80
+  after negative phase           reward     9.1   (fail length 7.1, delta 1.00, radius 0.80, majority action 58%, anti-balance 82%)
+  after INVERSION (no training)  reward   281.9   (negation error 0.0e+00)
+    positive  update    1/60  mean episode length   253.5
+    positive  update    6/60  mean episode length   293.4
+    positive  update   12/60  mean episode length   363.5
+    positive  update   18/60  mean episode length   397.9
+    positive  update   24/60  mean episode length   447.0
+    positive  update   30/60  mean episode length   493.9
+    positive  update   36/60  mean episode length   500.0
+    positive  update   42/60  mean episode length   500.0
+    positive  update   48/60  mean episode length   500.0
+    positive  update   54/60  mean episode length   500.0
+    positive  update   60/60  mean episode length   500.0
+  after fine-tune                reward   500.0   over 100 episodes   SOLVED
+--- control, seed 2 (matched 182330 steps) ---
+    control   update    1/368  mean episode length    17.3
+    control   update   36/368  mean episode length    62.9
+    control   update   72/368  mean episode length   218.9
+    control   step budget reached at update 88 (182841 steps)
+  control (no 2NRL)              reward   500.0
+
+==============================================================================
+stage                           seed 0      seed 1      seed 2        mean
+untrained                         80.3         9.0         9.9        33.1
+trained to fail                    9.0         9.2         9.1         9.1
+INVERTED (no training)           498.0       253.8       281.9       344.5
+fine-tuned                       500.0       481.4       500.0       493.8
+control (no 2NRL)                500.0       315.0       500.0       438.3
+==============================================================================
+wrote results/twonrl_results.json

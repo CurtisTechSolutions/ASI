@@ -4,7 +4,8 @@ import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, SelectField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 
 /**
@@ -22,11 +23,15 @@ export default function GeneratePanel({ status }) {
   const [temperature, setTemperature] = useStoredState("generate.temperature", "1.0");
   const [mode, setMode] = useStoredState("generate.mode", "beam");
   const [prefix, setPrefix] = useStoredState("generate.prefix", "");
+  const [guard, setGuard] = useStoredState("generate.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
+  const [guarded, setGuarded] = useState(null);
   const feedback = useJob("feedback");
   const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
+  // the resonant model's k-best search returns the exact K most likely texts, and far cheaper than a beam
+  const resonantKind = Boolean(status && status.kind === "resonant");
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -38,9 +43,11 @@ export default function GeneratePanel({ status }) {
         max_length: parseInteger(maxLength, 60),
         temperature: parseNumber(temperature, 1),
         mode,
+        guard,
         ...(prefix ? { prefix } : {}),
       });
       setSamples(asArray(data && data.samples));
+      setGuarded((data && data.guard) || null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -58,6 +65,13 @@ export default function GeneratePanel({ status }) {
           Whole texts from the prediction search: <b>beam</b> runs it to the end of a text and returns the K most
           likely complete texts (from START, or continuing a prefix); <b>sample</b> draws stochastic walks;{" "}
           <b>dijkstra</b> is the single cheapest text.
+          {resonantKind ? (
+            <>
+              {" "}
+              <b>k-best</b> returns the same K most likely texts <i>exactly</i> - Dijkstra with K labels per state
+              instead of one - and stops as soon as it has them.
+            </>
+          ) : null}
         </p>
         <TextField label="Prefix" hint="optional: every text starts with it" value={prefix} onChange={setPrefix} placeholder="the quick" />
         <div className="row">
@@ -70,6 +84,7 @@ export default function GeneratePanel({ status }) {
             value={mode}
             onChange={setMode}
             options={[
+              ...(resonantKind ? [["kbest", "k-best (the exact K most likely texts)"]] : []),
               ["beam", "beam (the K most likely texts)"],
               ["sample", "sample (stochastic)"],
               ["dijkstra", "dijkstra (the single cheapest text)"],
@@ -83,6 +98,12 @@ export default function GeneratePanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <CheckField
+          label="Filter with the negative network"
+          hint="the pair: the model over-samples and the negative network vetoes what it knows to be a failure"
+          checked={guard}
+          onChange={setGuard}
+        />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading}>
             {loading ? "Generating…" : "Generate"}
@@ -97,6 +118,7 @@ export default function GeneratePanel({ status }) {
           Rate a sample: thumbs up marks it correct (2NRL positive phase), thumbs down marks it garbage (negative
           phase). Press the same thumb again to remove the rating.
         </p>
+        <GuardNotice guard={guarded} what="candidates" />
         {samples === null ? (
           <p className="muted">Press Generate to sample texts from the model.</p>
         ) : samples.length === 0 ? (

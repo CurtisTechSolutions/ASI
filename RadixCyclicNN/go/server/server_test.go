@@ -6,14 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
 
 type env struct {
@@ -125,12 +129,20 @@ func TestHealthStatusModel(t *testing.T) {
 	}
 	hasKeys(t, st, "nodes", "edges", "trigrams", "compression_ratio", "inverted", "backend", "device", "epochs_total",
 		"trained_chars", "trained_texts", "twonrl_runs", "history_len", "last_loss", "kind", "model_label", "kinds", "job",
-		"backends", "model_path", "checkpoint_dir", "upload_dir", "engine", "workers", "total_traversals", "window_traversals", "window")
+		"backends", "model_path", "checkpoint_dir", "upload_dir", "engine", "workers", "total_traversals", "window_traversals", "window",
+		"heap_bytes", "heap_sys_bytes", "memory_limit_bytes")
 	if st["kind"] != "count" || st["engine"] != "go" || st["job"] != nil || st["backends"].(map[string]any)["default"] != "go" {
 		t.Fatalf("status content: %v", st)
 	}
 	if st["counting"] != "exact" || st["workers"] != 0.0 || h["counting"] != "exact" {
 		t.Fatalf("counting / workers in status and health: %v %v", st["counting"], h["counting"])
+	}
+	// the status reports how close the process is to its soft memory limit
+	if heap, ok := st["heap_bytes"].(float64); !ok || heap <= 0 {
+		t.Fatalf("heap_bytes: %v", st["heap_bytes"])
+	}
+	if limit, ok := st["memory_limit_bytes"].(float64); ok && limit <= 0 {
+		t.Fatalf("memory_limit_bytes: %v", st["memory_limit_bytes"])
 	}
 	status, m := e.get("/api/model")
 	if status != 200 || m["kind"] != "count" || len(m["kinds"].([]any)) != 1 || m["weights"] == nil {
@@ -238,6 +250,9 @@ func TestTrainJobAndInference(t *testing.T) {
 	turns := c["turns"].([]any)
 	if turns[0].(map[string]any)["given"] != true || turns[1].(map[string]any)["speaker"] != "y" {
 		t.Fatalf("turns: %v", turns)
+	}
+	if _, ok := c["repeats"].([]any); !ok { // the duplicates spoken anyway, ready to be punished
+		t.Fatalf("converse: no repeats in %v", c)
 	}
 	status, c = e.post("/api/converse", map[string]any{"turns": 1, "partner": "radix"})
 	if status != 400 {
@@ -530,7 +545,7 @@ func TestGraphPersistenceAndCheckpoints(t *testing.T) {
 		t.Fatalf("save to path: %d %v", status, saved)
 	}
 	status, reset := e.post("/api/reset", map[string]any{"seed": 5, "window": 42})
-	if status != 200 || reset["nodes"] != 2.0 || reset["window"] != 42.0 {
+	if status != 200 || reset["nodes"] != float64(radixnet.First) || reset["window"] != 42.0 {
 		t.Fatalf("reset: %d %v", status, reset)
 	}
 	status, reset = e.post("/api/reset", map[string]any{"kind": "radix"})
@@ -586,6 +601,84 @@ func TestGraphPersistenceAndCheckpoints(t *testing.T) {
 	if status != 400 {
 		t.Fatalf("save without a directory: %d %v", status, ck)
 	}
+
+	// the judged paths: nothing until a text is judged, then one row per step in its context
+	status, p := e.get("/api/paths?limit=5")
+	if status != 200 {
+		t.Fatalf("paths: %d %v", status, p)
+	}
+	if totals := p["totals"].(map[string]any); totals["contexts"].(float64) != 0 {
+		t.Fatalf("training alone judges nothing: %v", totals)
+	}
+	status, _ = e.post("/api/feedback", map[string]any{"good": []string{corpus[0]}, "bad": []string{"zzz qqq"}, "strength": 1})
+	if status != 202 {
+		t.Fatalf("feedback: %d", status)
+	}
+	e.waitJob()
+	status, p = e.get("/api/paths?limit=5")
+	totals := p["totals"].(map[string]any)
+	if status != 200 || totals["contexts"].(float64) == 0 || totals["correct"].(float64) == 0 || totals["incorrect"].(float64) == 0 {
+		t.Fatalf("a judged path should be counted: %d %v", status, p)
+	}
+	rows := p["paths"].([]any)
+	if len(rows) == 0 || len(rows) > 5 {
+		t.Fatalf("paths rows: %d", len(rows))
+	}
+	hasKeys(t, rows[0].(map[string]any), "prev", "edge", "after", "parent_label", "child_label", "seen", "correct",
+		"incorrect", "correct_ratio", "seen_ratio", "term")
+	_, st := e.get("/api/status")
+	if st["path_contexts"] != totals["contexts"] || st["path_correct"] != totals["correct"] {
+		t.Fatalf("the status should agree with /api/paths: %v vs %v", st["path_contexts"], totals["contexts"])
+	}
+	status, _ = e.get("/api/paths?limit=x")
+	if status != 400 {
+		t.Fatalf("bad paths limit: %d", status)
+	}
+	status, w := e.post("/api/model/weights", map[string]any{"path_scale": 0.5})
+	if status != 200 || w["weights"].(map[string]any)["path_scale"] != 0.5 {
+		t.Fatalf("path_scale: %d %v", status, w)
+	}
+
+	// the same judgements from the node's point of view: its traffic and its reward, shared out both ways
+	status, n := e.get("/api/nodes?limit=4")
+	if status != 200 {
+		t.Fatalf("nodes: %d %v", status, n)
+	}
+	nodeRows := n["nodes"].([]any)
+	if len(nodeRows) == 0 || len(nodeRows) > 4 {
+		t.Fatalf("nodes rows: %d", len(nodeRows))
+	}
+	hasKeys(t, nodeRows[0].(map[string]any), "node", "label", "visits", "from", "to", "in_totals", "out_totals")
+	var picked map[string]any
+	for _, row := range nodeRows {
+		if out := row.(map[string]any)["to"].([]any); len(out) > 1 {
+			picked = row.(map[string]any)
+			break
+		}
+	}
+	if picked == nil {
+		t.Fatal("no node in the top 4 branches")
+	}
+	shares := 0.0
+	for _, r := range picked["to"].([]any) {
+		row := r.(map[string]any)
+		hasKeys(t, row, "node", "label", "edge", "seen", "seen_ratio", "reward", "reward_ratio",
+			"path_seen", "path_ratio", "correct", "incorrect", "correct_ratio")
+		shares += row["seen_ratio"].(float64)
+	}
+	if math.Abs(shares-1) > 1e-9 {
+		t.Fatalf("the out-side shares add up to %g, want 1", shares)
+	}
+	status, one := e.get("/api/nodes?node=" + url.QueryEscape(picked["label"].(string)))
+	if status != 200 || len(one["nodes"].([]any)) != 1 {
+		t.Fatalf("one node by label: %d %v", status, one)
+	}
+	if status, _ = e.get("/api/nodes?node=no+such+label"); status != 404 {
+		t.Fatalf("an unknown label should be 404, got %d", status)
+	}
+	if status, _ = e.get("/api/nodes?limit=x"); status != 400 {
+		t.Fatalf("bad nodes limit: %d", status)
+	}
 }
 
 func TestStaticAndErrors(t *testing.T) {
@@ -618,7 +711,7 @@ func TestStaticAndErrors(t *testing.T) {
 	if status != 404 || !strings.Contains(doc["error"].(string), "unknown API endpoint") {
 		t.Fatalf("unknown endpoint: %d %v", status, doc)
 	}
-	status, doc = e.get("/api/evolve/history")
+	status, doc = e.post("/api/schedule/preview", map[string]any{"lr_schedule": "lr"}) // still Python-only
 	if status != 404 || !strings.Contains(doc["error"].(string), "not available on the Go server") {
 		t.Fatalf("python-only endpoint: %d %v", status, doc)
 	}
@@ -736,5 +829,40 @@ func TestStreamedArchiveUploadAndChunkedTraining(t *testing.T) {
 	status, doc = e.post("/api/train", map[string]any{"files": []string{"big.zip"}, "chunk_size": 0})
 	if status != 400 {
 		t.Fatalf("chunk_size 0: %d %v", status, doc)
+	}
+}
+
+// A big upload must train inside a bounded amount of memory: the reader waits
+// for a chunk slot, so the job's footprint is the graph plus the chunks in
+// flight, not the corpus.
+func TestTrainingHonoursTheInflightBound(t *testing.T) {
+	e := newEnv(t, true)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("corpus.txt")
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(w, "the cat sat on the mat number %d\n", i)
+	}
+	zw.Close()
+	status, doc, _ := e.do("POST", "/api/uploads?name=corpus.zip", buf.Bytes(), map[string]string{"Content-Type": "application/zip"})
+	if status != 201 {
+		t.Fatalf("upload: %d %v", status, doc)
+	}
+	status, doc = e.post("/api/train", map[string]any{"files": []string{"corpus.zip"}, "epochs": 1, "chunk_size": 100, "inflight": 2})
+	if status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	job := e.waitJob()
+	if job["state"] != "done" {
+		t.Fatalf("job: %v", job)
+	}
+	rec := job["history"].([]any)[0].(map[string]any)
+	if rec["chunks"] != float64(40) {
+		t.Fatalf("chunks: %v", rec["chunks"])
+	}
+	// an inflight of zero or less is refused like the other positive counts
+	status, doc = e.post("/api/train", map[string]any{"files": []string{"corpus.zip"}, "inflight": 0})
+	if status != 400 {
+		t.Fatalf("inflight 0: %d %v", status, doc)
 	}
 }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
+import { countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { NumberField } from "./Fields.jsx";
@@ -40,6 +40,8 @@ export function clampMark(value) {
  * rating also carries a mark out of 10 (10 by default: a plain thumb) that
  * says *how* good or bad the text is - the network then learns each text in
  * proportion to its mark instead of treating every thumb alike.
+ * ``punish`` marks a whole batch thumbs-down without toggling (the Converse
+ * and Chat tabs punish the duplicates the model could not avoid that way).
  */
 export function useRatings() {
   const [ratings, setRatings] = useState([]);
@@ -56,11 +58,25 @@ export function useRatings() {
       return [...rest, { text, rating, mark: current ? current.mark : DEFAULT_MARK, ...extra }];
     });
   }
+  /**
+   * Thumbs down for every one of ``texts`` at once, without the toggling of
+   * ``rate``: the duplicates a conversation could not avoid, marked for the
+   * 2NRL negative phase. Returns how many distinct texts are now punished.
+   */
+  function punish(texts, extra = {}) {
+    const wanted = [...new Set((Array.isArray(texts) ? texts : []).map((t) => String(t ?? "")).filter((t) => t.trim()))];
+    if (!wanted.length) return 0;
+    setRatings((prev) => [
+      ...prev.filter((r) => !wanted.includes(r.text)),
+      ...wanted.map((text) => ({ text, rating: "down", mark: DEFAULT_MARK, ...extra })),
+    ]);
+    return wanted.length;
+  }
   const setMark = (text, mark) =>
     setRatings((prev) => prev.map((r) => (r.text === text ? { ...r, mark } : r)));
   const remove = (text) => setRatings((prev) => prev.filter((r) => r.text !== text));
   const clear = () => setRatings([]);
-  return { ratings, setRatings, rate, ratingOf, setMark, remove, clear };
+  return { ratings, setRatings, rate, punish, ratingOf, setMark, remove, clear };
 }
 
 /** The thumbs up / thumbs down pair for one text. */
@@ -109,7 +125,7 @@ export default function RatingsCard({
   emptyText = "rate some samples first",
   namespace = "ratings",
 }) {
-  // the card is mounted once per tab, so each one remembers its own settings
+  // mounted once per tab, so each card remembers its own settings
   const [negEpochs, setNegEpochs] = useStoredState(`${namespace}.negEpochs`, "2");
   const [posEpochs, setPosEpochs] = useStoredState(`${namespace}.posEpochs`, "3");
   const [negLr, setNegLr] = useStoredState(`${namespace}.negLr`, "0.5");
@@ -117,7 +133,7 @@ export default function RatingsCard({
   const [strength, setStrength] = useStoredState(`${namespace}.strength`, "1");
   const [lastAction, setLastAction] = useState(null);
   const { job, running, busy, error: jobError, start, stop, clearError } = feedback;
-  const countKind = Boolean(status && status.kind === "count");
+  const countKind = countingKind(status);  // the count and resonant models take a strength, not a learning rate
   const otherJobRunning = jobIsRunning(status) && !running;
   const ups = ratings.filter((r) => r.rating === "up");
   const downs = ratings.filter((r) => r.rating === "down");

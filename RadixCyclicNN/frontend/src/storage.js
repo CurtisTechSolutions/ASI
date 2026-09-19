@@ -93,6 +93,16 @@ export function writeSetting(storage, name, value) {
   }
 }
 
+/** Has `name` ever been stored? (A panel seeding a field from the server must not overwrite a chosen value.) */
+export function hasSetting(storage, name) {
+  if (!storage) return false;
+  try {
+    return storage.getItem(storageKey(name)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export function removeSetting(storage, name) {
   try {
     storage.removeItem(storageKey(name));

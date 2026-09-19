@@ -62,6 +62,23 @@ services:
       RADIXNET_OLLAMA_MODEL: ${RADIXNET_OLLAMA_MODEL:-llama3.2}
       # Teacher of the English lessons (falls back to RADIXNET_OLLAMA_MODEL)
       RADIXNET_TUTOR_MODEL: ${RADIXNET_TUTOR_MODEL:-llama3.2}
+      # ChatGPT for the lessons and the code-generation tutor: the server uses
+      # this key, which is never accepted as a request field.  Empty = ChatGPT
+      # stays off and the tabs say so.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RADIXNET_OPENAI_MODEL: ${RADIXNET_OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Speech to text for the /api/speech endpoints: the local Whisper size, or an
+      # OpenAI-compatible /v1/audio/transcriptions endpoint. Without either, the browser's
+      # own dictation (or the text box) supplies the words.
+      RADIXNET_WHISPER_MODEL: ${RADIXNET_WHISPER_MODEL:-base}
+      RADIXNET_ASR_URL: ${RADIXNET_ASR_URL:-}
+      RADIXNET_ASR_MODEL: ${RADIXNET_ASR_MODEL:-whisper-1}
+      # Tool use (/api/agent/*): the model that writes the criteria, mediates, judges
+      # and teaches, and where the web_search tool sends its queries.
+      RADIXNET_AGENT_MODEL: ${RADIXNET_AGENT_MODEL:-}
+      RADIXNET_SEARCH_URL: ${RADIXNET_SEARCH_URL:-}
+      RADIXNET_USER_AGENT: ${RADIXNET_USER_AGENT:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

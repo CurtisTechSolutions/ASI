@@ -33,11 +33,30 @@ export function fmtInt(value) {
   return String(value);
 }
 
+/**
+ * Every counter in the model is a two-digit odometer (see radixnet/counter.py):
+ * it counts up to COUNTER_LIMIT, is set back to 0 and counts the wrap as a
+ * reset, so nothing ever outgrows a JavaScript number.
+ */
+export const COUNTER_LIMIT = 1e15;
+
+/** One odometer reading: the count, plus how often it went round once it has. */
+export function fmtCounter(value, resets) {
+  const turns = Number(resets) || 0;
+  return turns ? `${fmtInt(value)} (+${fmtInt(turns)} resets)` : fmtInt(value);
+}
+
+/** The events an odometer reading stands for - for sizing and ratios, not for display. */
+export function counterTotal(value, resets) {
+  return (Number(resets) || 0) * COUNTER_LIMIT + (Number(value) || 0);
+}
+
 export function fmtBytes(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "–";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 /** ISO timestamp (or epoch seconds / milliseconds) -> local date-time; unknown input is echoed back. */
@@ -67,4 +86,19 @@ export function asArray(value) {
 /** True when the status payload reports a running background job. */
 export function jobIsRunning(status) {
   return Boolean(status && status.job && status.job.state === "running");
+}
+
+/** The active model kind reported by the status payload (`""` when offline). */
+export function modelKind(status) {
+  return status && typeof status.kind === "string" ? status.kind : "";
+}
+
+/**
+ * True for a model that learns by counting rather than by a gradient: the
+ * count / reward model and the resonant one. Those have no learning rates or
+ * batches to set, and take a `strength` instead.
+ */
+export function countingKind(status) {
+  const kind = modelKind(status);
+  return kind !== "" && kind !== "radix";
 }

@@ -279,6 +279,44 @@ class TestInference(unittest.TestCase):
                 self.assertTrue(any(words[j:j + len(wanted)] == wanted for j in range(len(words))), (words, wanted))
                 self.assertEqual(turn["text"], turn["context"] + turn["reply"])
         self.assertEqual(doc["transcript"], "\n".join(f"{t['speaker']}: {t['text']}" for t in turns))
+        self.assertEqual(doc["repeats"], [t["text"] for t in turns if t["repeat"]])
+        # a long conversation runs out of new things to say; the repeats come with the command that punishes them
+        long = run_cli("converse", "--turns", 40, model=MODEL, json_mode=False).stdout
+        self.assertIn("could only repeat - punish them (2NRL negative phase):", long)
+        self.assertIn("radixnet feedback --bad-text ", long)
+        self.assertIn("repeat]", long)
+        # a reply may not repeat its own words: only one that had to repeat something may stutter
+        strict = run_json("converse", "--opening", "the cat sat on the mat", "--turns", 25, model=MODEL)
+        self.assertFalse([t for t in strict["turns"] if t["stutter"] and not t["repeat"]])
+        # --allow-word-repeats lets a voice that can only stutter say it, flagged and unpunished
+        stutterer = os.path.join(TMP.name, "stutter.json")
+        corpus = os.path.join(TMP.name, "stutter.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write("ha ha ha ha ha\n")
+        run_json("train", "--data", corpus, "--epochs", 3, *FAST, model=stutterer)
+        loose = run_json("converse", "--turns", 4, "--allow-word-repeats", "--no-learn", model=stutterer)
+        self.assertTrue(all(t["stutter"] and not t["repeat"] for t in loose["turns"]), loose["transcript"])
+        self.assertEqual(loose["repeats"], [])
+        human = run_cli("converse", "--turns", 4, "--allow-word-repeats", "--no-learn",
+                        model=stutterer, json_mode=False).stdout
+        self.assertIn("repeats itself", human)
+        punished = run_json("converse", "--turns", 4, "--no-learn", model=stutterer)
+        self.assertTrue(punished["repeats"])  # with the setting on they are repeats, and punished
+        # --explore: the voice backs out of a loop it walks into, and the transcript says what it noticed
+        ways = os.path.join(TMP.name, "ways.json")
+        with open(corpus, "w", encoding="utf-8") as fh:  # "ha ha ..." loops; the other lines leave the loop
+            fh.write("ha ha ha ha ha\nha ha ho ho hum\nha ha and then the cat sat\n")
+        run_json("train", "--data", corpus, "--epochs", 3, *FAST, model=ways)
+        thought = run_json("converse", "--turns", 4, model=ways)
+        rethinks = [t["rethink"] for t in thought["turns"] if t["rethink"]]
+        self.assertTrue(rethinks, thought["transcript"])
+        for record in rethinks:
+            self.assertEqual(set(record), {"kind", "noticed", "cut", "steps", "explored", "found", "taught"})
+            self.assertTrue(record["noticed"])
+        plain = run_json("converse", "--turns", 4, "--explore", 0, model=ways)
+        self.assertFalse([t for t in plain["turns"] if t["rethink"]])
+        self.assertIn("caught itself",  # "saying X twice", or "repeating X"
+                      run_cli("converse", "--turns", 4, model=ways, json_mode=False).stdout)
         human = run_cli("converse", "--opening", "the cat sat on the mat", "--turns", 2, model=MODEL, json_mode=False).stdout
         self.assertIn("A: the cat sat on the mat", human)
         self.assertIn("[given]", human)

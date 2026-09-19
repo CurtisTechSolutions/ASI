@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, SelectField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 
 /**
@@ -14,8 +15,28 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * continuation the conversation has not heard yet; sample draws stochastic
  * walks. When nothing follows, the context loses a word at a time and finally
  * the voice changes the subject with a fresh text. The second voice may be the
- * model of the other kind kept in memory. Turns can be rated like samples.
+ * model of the other kind kept in memory. Turns can be rated like samples, and
+ * the duplicates the model could not avoid are marked thumbs-down for the 2NRL
+ * negative phase ("Punish duplicates") - a reply that repeats its own words
+ * counts as one of those while "Avoid repeated words" is on, though a voice
+ * that catches itself repeating - its own words, or the conversation's - first
+ * backs up to where it would have said them again and explores other ways on
+ * ("Explore"), and says so. New turns are
+ * appended to the top of
+ * the conversation and push the older ones down, so nothing has to scroll.
  */
+/** What a turn's rethink record says in one line: what it caught itself doing, and how that turned out. */
+function rethinkSays(turn) {
+  const r = turn.rethink;
+  const caught =
+    r.kind === "stutter" ? `caught itself saying “${r.noticed}” twice` : `caught itself repeating “${r.noticed}”`;
+  if (!r.steps) return `${caught}: the words it picked up, not its own`;
+  const learned = r.taught >= 0 ? " (and learned to hand over there)" : "";
+  if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)${learned}`;
+  const ending = turn.repeat ? "said it anyway" : "took a lesser answer";
+  return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}${learned}`;
+}
+
 export default function ConversePanel({ status }) {
   const [opening, setOpening] = useStoredState("converse.opening", "");
   const [turns, setTurns] = useStoredState("converse.turns", "6");
@@ -27,15 +48,20 @@ export default function ConversePanel({ status }) {
   const [speakerA, setSpeakerA] = useStoredState("converse.speakerA", "A");
   const [speakerB, setSpeakerB] = useStoredState("converse.speakerB", "B");
   const [partner, setPartner] = useStoredState("converse.partner", "");
-  const [inMemory, setInMemory] = useState([]);
+  const [punishRepeats, setPunishRepeats] = useStoredState("converse.punishRepeats", true);
+  const [avoidWordRepeats, setAvoidWordRepeats] = useStoredState("converse.avoidWordRepeats", true);
+  const [explore, setExplore] = useStoredState("converse.explore", "3");
+  const [learn, setLearn] = useStoredState("converse.learn", true);
+  const [inMemory, setInMemory] = useState(null); // null until GET /api/model answers
   const [transcript, setTranscript] = useState(null);
+  const [guard, setGuard] = useStoredState("converse.guard", true);
+  const [guarded, setGuarded] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const feedback = useJob("feedback");
-  const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
+  const { ratings, rate, punish, ratingOf, setMark, remove, clear } = useRatings();
   const kind = status ? status.kind : null;
-  const endRef = useRef(null);
 
   // the kinds kept in memory decide which partner can answer
   useEffect(() => {
@@ -53,14 +79,11 @@ export default function ConversePanel({ status }) {
     };
   }, [kind]);
 
-  const partners = inMemory.filter((x) => x && x !== kind);
+  const partners = asArray(inMemory).filter((x) => x && x !== kind);
   useEffect(() => {
-    if (partner && !partners.includes(partner)) setPartner("");
-  }, [partner, partners]);
-
-  useEffect(() => {
-    if (endRef.current && transcript && transcript.length) endRef.current.scrollIntoView({ block: "nearest" });
-  }, [transcript]);
+    // a remembered partner survives until the answer says it is not in memory any more
+    if (inMemory && partner && !partners.includes(partner)) setPartner("");
+  }, [inMemory, partner, partners]);
 
   const speakers = [speakerA.trim() || "A", speakerB.trim() || "B"];
 
@@ -78,12 +101,30 @@ export default function ConversePanel({ status }) {
         temperature: parseNumber(temperature, 1),
         k: parseInteger(k, 5),
         speakers,
+        guard,
+        avoid_word_repeats: avoidWordRepeats,
+        explore: parseInteger(explore, 3),
+        learn,
         ...(partner ? { partner } : {}),
         ...(history.length ? { history } : opening.trim() ? { opening } : {}),
       });
       const fresh = asArray(data && data.turns);
+      setGuarded((data && data.guard) || null);
       setTranscript((prev) => (history.length ? [...asArray(prev), ...fresh] : fresh));
-      if (!fresh.length && history.length) setNotice("The model had nothing more to say.");
+      // the duplicates the search could not avoid: thumbs down, so "Train on ratings" punishes them
+      const duplicates = Array.isArray(data && data.repeats)
+        ? data.repeats
+        : fresh.filter((t) => t && t.repeat).map((t) => t.text);
+      const punished = punishRepeats ? punish(duplicates) : 0;
+      const notes = [];
+      if (!fresh.length && history.length) notes.push("The model had nothing more to say.");
+      if (punished) {
+        notes.push(
+          `${punished} duplicate${punished === 1 ? "" : "s"} the model could not avoid:` +
+            " marked 👎 for “Train on ratings” below (the 2NRL negative phase).",
+        );
+      }
+      setNotice(notes.join(" ") || null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -92,6 +133,9 @@ export default function ConversePanel({ status }) {
   }
 
   const spoken = asArray(transcript);
+  // the newest turn first: a new turn is appended to the top of the list and pushes the older ones down,
+  // so the latest reply is where the eye already is and nothing has to be scrolled to
+  const newestFirst = [...spoken].reverse();
   const partnerLabel = partner ? `${speakers[0]} is the ${kind} model, ${speakers[1]} the ${partner} model` : null;
 
   return (
@@ -134,6 +178,15 @@ export default function ConversePanel({ status }) {
             ]}
           />
           <NumberField label="K" hint="candidates per turn" value={k} onChange={setK} min={1} step={1} />
+          <NumberField
+            label="Explore"
+            hint="times it may back up out of a repeat (0 = not at all)"
+            value={explore}
+            onChange={setExplore}
+            min={0}
+            step={1}
+            disabled={!avoidWordRepeats}
+          />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} disabled={mode !== "sample"} />
         </div>
         <div className="row">
@@ -147,6 +200,33 @@ export default function ConversePanel({ status }) {
             options={[["", `the same model (${kind || "active"})`], ...partners.map((x) => [x, `the ${x} model (in memory)`])]}
           />
         </div>
+        <CheckField
+          label="Filter with the negative network"
+          hint="a reply it vetoes is left unsaid and the voice looks for another one"
+          checked={guard}
+          onChange={setGuard}
+        />
+        <CheckField
+          label="Avoid repeated words"
+          hint="skip a reply that says the same word or phrase twice in a row (“say morning morning”)"
+          checked={avoidWordRepeats}
+          onChange={setAvoidWordRepeats}
+          disabled={loading}
+        />
+        <CheckField
+          label="Learn where it goes round"
+          hint="what a rethink finds out is taught to the graph, so the model itself hands over there next time (this changes the model)"
+          checked={learn}
+          onChange={setLearn}
+          disabled={loading || !explore || explore === "0"}
+        />
+        <CheckField
+          label="Punish duplicates"
+          hint="the repeats the model could not avoid are marked 👎 for the 2NRL negative phase"
+          checked={punishRepeats}
+          onChange={setPunishRepeats}
+          disabled={loading}
+        />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading}>
             {loading ? "Talking…" : spoken.length ? "Start over" : "Start"}
@@ -172,26 +252,35 @@ export default function ConversePanel({ status }) {
       <div className="card">
         <h2>Conversation</h2>
         {partnerLabel ? <p className="muted">{partnerLabel}.</p> : null}
+        {spoken.length > 1 ? (
+          <p className="muted">Newest first: the latest turn is at the top and the conversation grows downwards.</p>
+        ) : null}
+        {notice ? <p className="muted">{notice}</p> : null}
+        <GuardNotice guard={guarded} what="replies" />
         {transcript === null ? (
           <p className="muted">Press Start to let the model talk to itself.</p>
         ) : spoken.length === 0 ? (
           <p className="muted">The model had nothing to say (train it first).</p>
         ) : (
-          <ol className="dialogue" aria-label="conversation">
-            {spoken.map((t, i) => {
+          <ol className="dialogue" aria-label="conversation" reversed>
+            {newestFirst.map((t, i) => {
+              const position = spoken.length - i; // where the turn stands in the conversation, counted from its start
               const side = t.index % 2 === 0 ? "a" : "b";
               const rating = ratingOf(t.text);
               const flags = [
                 t.given ? "given" : null,
                 t.fresh && !t.given ? "new topic" : null,
                 t.repeat ? "repeat" : null,
+                t.stutter ? "repeats itself" : null,
+                t.rethink && t.rethink.found ? "thought again" : null,
+                t.vetoed ? `${fmtInt(t.vetoed)} vetoed` : null,
               ].filter(Boolean);
               return (
-                <li key={`${t.index}-${i}`} className={`turn ${side}${rating ? ` rated ${rating}` : ""}`}>
+                <li key={`${t.index}-${position}`} className={`turn ${side}${rating ? ` rated ${rating}` : ""}`}>
                   <div className="speaker">
                     <b>{t.speaker}</b>
                     {flags.map((f) => (
-                      <span key={f} className={`badge${f === "repeat" ? " down" : ""}`}>
+                      <span key={f} className={`badge${f === "repeat" || f === "repeats itself" ? " down" : ""}${f === "thought again" ? " up" : ""}`}>
                         {f}
                       </span>
                     ))}
@@ -212,21 +301,20 @@ export default function ConversePanel({ status }) {
                     cost {fmtNum(t.cost, 3)} · p {fmtNum(t.probability, 4)}
                     {t.context ? <> · picked up “{t.context}”</> : null}
                     {t.skipped ? <> · skipped {fmtInt(t.skipped)}</> : null}
+                    {t.rethink ? <> · {rethinkSays(t)}</> : null}
                     <RateButtons
                       text={t.text}
                       rating={rating}
                       disabled={!String(t.text ?? "").trim() || feedback.running}
                       onRate={(text, r) => rate(text, r, { cost: t.cost })}
-                      label={`turn ${i + 1}`}
+                      label={`turn ${position}`}
                     />
                   </div>
                 </li>
               );
             })}
-            <li ref={endRef} className="end" aria-hidden="true" />
           </ol>
         )}
-        {notice ? <p className="muted">{notice}</p> : null}
       </div>
 
       <RatingsCard
@@ -234,10 +322,10 @@ export default function ConversePanel({ status }) {
         onClear={clear}
         onRemove={remove}
         onMark={setMark}
-        namespace="converse.ratings"
         feedback={feedback}
         status={status}
         emptyText="rate some turns first"
+        namespace="converse.ratings"
       />
     </>
   );

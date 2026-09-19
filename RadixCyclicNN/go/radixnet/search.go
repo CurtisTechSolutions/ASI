@@ -21,6 +21,42 @@ type PathResult struct {
 }
 
 // Probability is exp(-cost) (0 for an infinite cost).
+// Onward is the children a walk may actually take, given what the model has
+// learned about going round.
+//
+// Back is not a continuation - it emits nothing and no text passes through it -
+// so it never appears in a path.  But it *competes* with the real children for
+// probability, and when it is the cheapest of them the model's most likely next
+// step at this node is to stop rather than carry on: the walk hands over, which
+// here means the branch offers nothing and the search goes on with its others
+// (Graph.ObserveBack).
+func Onward(costs []ChildCost) []ChildCost {
+	back, hasBack := math.Inf(1), false
+	for _, it := range costs {
+		if it.Child == Back && (!hasBack || it.Cost < back) {
+			back, hasBack = it.Cost, true
+		}
+	}
+	if !hasBack {
+		return costs
+	}
+	onward := make([]ChildCost, 0, len(costs))
+	handOver := true
+	for _, it := range costs {
+		if it.Child == Back {
+			continue
+		}
+		onward = append(onward, it)
+		if it.Cost < back {
+			handOver = false
+		}
+	}
+	if handOver {
+		return nil
+	}
+	return onward
+}
+
 func (r *PathResult) Probability() float64 {
 	if math.IsInf(r.Cost, 0) || math.IsNaN(r.Cost) {
 		return 0
@@ -98,11 +134,16 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 	nodeIDs := []int{node}
 	stepCosts := []float64{}
 	steps := 0
+	cameFrom := -1
+	if startNode == Start {
+		cameFrom = Start // every walk from the sentinel starts in the same context
+	}
 	for {
 		if node == End || (maxChars >= 0 && chars >= maxChars) {
 			break
 		}
-		costs := g.ChildCosts(node)
+		// a node the model expects to go round offers nothing
+		costs := Onward(g.ChildCostsFrom(node, cameFrom))
 		if len(costs) == 0 {
 			break
 		}
@@ -142,6 +183,7 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 		if pick.Child != End {
 			chars += g.labelLen[pick.Child] - Overlap
 		}
+		cameFrom = node
 		node = pick.Child
 		steps++
 	}

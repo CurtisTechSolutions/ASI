@@ -1,0 +1,65 @@
+python3 twonrl_cartpole.py --seeds 0 1 2 --neg-updates 150 --pos-updates 1 --no-delta-weights \
+	--out results/ablation_no_weights.json
+
+=== 2NRL, seed 0 (delta-driven negative-phase starts) ===
+  untrained                      reward    80.3
+    negative  update    1/150  mean episode length    28.6  graded loss 0.44  venture radius 0.44
+    negative  update   15/150  mean episode length    13.1  graded loss 0.52  venture radius 0.52
+    negative  update   30/150  mean episode length     9.0  graded loss 0.51  venture radius 0.51
+    negative  update   45/150  mean episode length     8.4  graded loss 0.54  venture radius 0.54
+    negative  update   60/150  mean episode length     8.0  graded loss 0.51  venture radius 0.51
+    negative  update   75/150  mean episode length     7.8  graded loss 0.53  venture radius 0.53
+    negative  update   90/150  mean episode length     7.7  graded loss 0.50  venture radius 0.50
+    negative  update  105/150  mean episode length     7.6  graded loss 0.54  venture radius 0.54
+    negative  update  120/150  mean episode length     7.7  graded loss 0.51  venture radius 0.51
+    negative  update  135/150  mean episode length     7.9  graded loss 0.52  venture radius 0.52
+    negative  update  150/150  mean episode length     8.0  graded loss 0.53  venture radius 0.53
+  after negative phase           reward     8.9   (fail length 8.0, graded loss 0.53, radius 0.53, majority action 50%, anti-balance 93%)
+  after INVERSION (no training)  reward   500.0   (negation error 0.0e+00)
+    positive  update    1/1  mean episode length   500.0
+  after fine-tune                reward   500.0   over 100 episodes   SOLVED
+
+=== 2NRL, seed 1 (delta-driven negative-phase starts) ===
+  untrained                      reward     9.0
+    negative  update    1/150  mean episode length     8.8  graded loss 0.42  venture radius 0.42
+    negative  update   15/150  mean episode length     8.7  graded loss 0.54  venture radius 0.54
+    negative  update   30/150  mean episode length     8.0  graded loss 0.54  venture radius 0.54
+    negative  update   45/150  mean episode length     7.7  graded loss 0.52  venture radius 0.52
+    negative  update   60/150  mean episode length     7.7  graded loss 0.52  venture radius 0.52
+    negative  update   75/150  mean episode length     7.8  graded loss 0.51  venture radius 0.51
+    negative  update   90/150  mean episode length     7.9  graded loss 0.53  venture radius 0.53
+    negative  update  105/150  mean episode length     7.8  graded loss 0.52  venture radius 0.52
+    negative  update  120/150  mean episode length     7.7  graded loss 0.52  venture radius 0.52
+    negative  update  135/150  mean episode length     7.8  graded loss 0.53  venture radius 0.53
+    negative  update  150/150  mean episode length     7.8  graded loss 0.54  venture radius 0.54
+  after negative phase           reward     9.2   (fail length 7.8, graded loss 0.54, radius 0.54, majority action 56%, anti-balance 89%)
+  after INVERSION (no training)  reward   372.7   (negation error 0.0e+00)
+    positive  update    1/1  mean episode length   289.3
+  after fine-tune                reward   412.1   over 100 episodes   
+
+=== 2NRL, seed 2 (delta-driven negative-phase starts) ===
+  untrained                      reward     9.9
+    negative  update    1/150  mean episode length    11.5  graded loss 0.44  venture radius 0.44
+    negative  update   15/150  mean episode length     8.5  graded loss 0.55  venture radius 0.55
+    negative  update   30/150  mean episode length     8.3  graded loss 0.54  venture radius 0.54
+    negative  update   45/150  mean episode length     8.0  graded loss 0.55  venture radius 0.55
+    negative  update   60/150  mean episode length     7.7  graded loss 0.53  venture radius 0.53
+    negative  update   75/150  mean episode length     7.7  graded loss 0.51  venture radius 0.51
+    negative  update   90/150  mean episode length     7.8  graded loss 0.52  venture radius 0.52
+    negative  update  105/150  mean episode length     7.7  graded loss 0.54  venture radius 0.54
+    negative  update  120/150  mean episode length     7.8  graded loss 0.52  venture radius 0.52
+    negative  update  135/150  mean episode length     7.9  graded loss 0.52  venture radius 0.52
+    negative  update  150/150  mean episode length     7.7  graded loss 0.50  venture radius 0.50
+  after negative phase           reward     8.9   (fail length 7.7, graded loss 0.50, radius 0.50, majority action 52%, anti-balance 93%)
+  after INVERSION (no training)  reward   469.3   (negation error 0.0e+00)
+    positive  update    1/1  mean episode length   296.7
+  after fine-tune                reward   471.6   over 100 episodes   
+
+==============================================================================
+stage                           seed 0      seed 1      seed 2        mean
+untrained                         80.3         9.0         9.9        33.1
+trained to fail                    8.9         9.2         8.9         9.0
+INVERTED (no training)           500.0       372.7       469.3       447.3
+fine-tuned                       500.0       412.1       471.6       461.2
+==============================================================================
+wrote results/ablation_no_weights.json
