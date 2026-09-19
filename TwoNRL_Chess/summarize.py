@@ -263,9 +263,14 @@ def table_exposure(path: str) -> None:
     print("| network | ranked by | score vs random | centipawn loss | refusals per move |")
     print("|---|---|---|---|---|")
     for name, r in rows.items():
-        arm, _, weight = name.partition(" (rule_weight=")
+        arm, tagged, weight = name.partition(" (rule_weight=")
         w = weight.rstrip(")")
-        how = "quality alone" if w in ("0", "0.0") else f"quality + {w} × legal"
+        if not tagged:                       # the baseline row ranks nothing
+            how = "—"
+        elif w in ("0", "0.0"):
+            how = "quality alone"
+        else:
+            how = f"quality + {w} × legal"
         print(f"| `{arm}` | {how} | {r['score']:.3f} ± {r['stderr']:.3f} | "
               f"{r['acpl']:.0f} | {r['refusals']:.1f} |")
     print("\nNothing was retrained between the two rows of a pair and not one weight\n"

@@ -1,0 +1,83 @@
+{
+ "weights": "weights_rules",
+ "openings": 40,
+ "rows": {
+  "positive (rule_weight=0)": {
+   "score": 0.63125,
+   "stderr": 0.05284392556150612,
+   "acpl": 771.5183599127877,
+   "refusals": 108.71266345492086,
+   "games": 80
+  },
+  "positive (rule_weight=1)": {
+   "score": 0.4625,
+   "stderr": 0.05503904863821684,
+   "acpl": 709.6417458467447,
+   "refusals": 4.161247947454844,
+   "games": 80
+  },
+  "2nrl (rule_weight=0)": {
+   "score": 0.58125,
+   "stderr": 0.054085977561194175,
+   "acpl": 693.2434731106359,
+   "refusals": 110.12886430198503,
+   "games": 80
+  },
+  "2nrl (rule_weight=1)": {
+   "score": 0.2375,
+   "stderr": 0.04590666482113463,
+   "acpl": 709.9423200546737,
+   "refusals": 5.188138385502471,
+   "games": 80
+  },
+  "2nrl-worst (rule_weight=0)": {
+   "score": 0.50625,
+   "stderr": 0.053395451292689716,
+   "acpl": 811.8563513465227,
+   "refusals": 100.23388640714741,
+   "games": 80
+  },
+  "2nrl-worst (rule_weight=1)": {
+   "score": 0.35625,
+   "stderr": 0.051685459451861315,
+   "acpl": 811.2250090055702,
+   "refusals": 4.411290322580645,
+   "games": 80
+  },
+  "2nrl-random (rule_weight=0)": {
+   "score": 0.5375,
+   "stderr": 0.05212290163642082,
+   "acpl": 720.7629226354796,
+   "refusals": 121.43323539014038,
+   "games": 80
+  },
+  "2nrl-random (rule_weight=1)": {
+   "score": 0.275,
+   "stderr": 0.049133110017583866,
+   "acpl": 741.7067137060883,
+   "refusals": 2.448125,
+   "games": 80
+  },
+  "repulsion (rule_weight=0)": {
+   "score": 0.61875,
+   "stderr": 0.05172323432220765,
+   "acpl": 535.2771591140512,
+   "refusals": 571.1312657771367,
+   "games": 80
+  },
+  "repulsion (rule_weight=1)": {
+   "score": 0.3875,
+   "stderr": 0.05374636615623423,
+   "acpl": 692.6661513060124,
+   "refusals": 18.791503267973855,
+   "games": 80
+  },
+  "random legal mover": {
+   "score": 0.48125,
+   "stderr": 0.05551164714499112,
+   "acpl": 773.92819545379,
+   "refusals": 0.0,
+   "games": 80
+  }
+ }
+}

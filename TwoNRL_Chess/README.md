@@ -120,6 +120,21 @@ The rule heads show the strong one, and `test_sbnn.py` asserts it to machine
 precision.
 
 <!--RULES-->
+### What the heads know, on the held-out exam
+
+| arm | legal AUC | pseudo-legal AUC | capture | gives check | lands safely | piece is loose | refusals per move |
+|---|---|---|---|---|---|---|---|
+| `2nrl` | 0.962 ± 0.012 | 0.970 ± 0.008 | 0.957 ± 0.026 | 0.956 ± 0.003 | 0.659 ± 0.011 | 0.419 ± 0.041 | 1.1 ± 1.0 |
+| `2nrl-worst` | 0.951 ± 0.014 | 0.952 ± 0.014 | 0.997 ± 0.003 | 0.921 ± 0.018 | 0.650 ± 0.019 | 0.415 ± 0.028 | 0.4 ± 0.2 |
+| `2nrl-random` | 0.959 ± 0.015 | 0.967 ± 0.016 | 0.995 ± 0.001 | 0.956 ± 0.004 | 0.647 ± 0.019 | 0.427 ± 0.034 | 0.5 ± 0.2 |
+| `positive` | 0.966 ± 0.005 | 0.974 ± 0.006 | 0.995 ± 0.005 | 0.934 ± 0.012 | 0.632 ± 0.021 | 0.407 ± 0.017 | 0.9 ± 0.5 |
+| `repulsion` | 0.976 ± 0.011 | 0.978 ± 0.011 | 0.991 ± 0.013 | 0.941 ± 0.014 | 0.641 ± 0.011 | 0.475 ± 0.072 | 4.0 ± 1.9 |
+| `2nrl (no rule heads)` | — | — | — | — | — | — | 97.9 ± 4.1 |
+| `positive (no rule heads)` | — | — | — | — | — | — | 41.8 ± 9.5 |
+
+0.5 is no knowledge of the rules and 1.0 is the rules. A network and its
+inversion score `a` and `1 - a`, exactly.
+<!--/RULES-->
 
 `--rule-updates 0 --rule-weight 0` reproduces the single-score network exactly,
 which is the ablation in the table and also a proof in the suite. It reproduces
@@ -143,13 +158,46 @@ uniform draw over the legal moves. At `rule_weight = 1` it plays the move it
 actually wants and finds it in a handful of tries.
 
 <!--EXPOSURE-->
+### The same networks, ranked two ways (80 games a row, against a random legal mover)
 
-The move it chooses is **better** by Stockfish's grading — centipawn loss falls —
-and it scores **worse** against a random opponent. That is not a paradox. A
-player drawing near-uniformly from the legal moves scores about a half against
-another player drawing uniformly from the legal moves, by symmetry; it cannot do
-much worse, because it has no plan to be punished for. A player with a
-consistent bad policy can, and does.
+| network | ranked by | score vs random | centipawn loss | refusals per move |
+|---|---|---|---|---|
+| `positive` | quality alone | 0.631 ± 0.053 | 772 | 108.7 |
+| `positive` | quality + 1 × legal | 0.463 ± 0.055 | 710 | 4.2 |
+| `2nrl` | quality alone | 0.581 ± 0.054 | 693 | 110.1 |
+| `2nrl` | quality + 1 × legal | 0.237 ± 0.046 | 710 | 5.2 |
+| `2nrl-worst` | quality alone | 0.506 ± 0.053 | 812 | 100.2 |
+| `2nrl-worst` | quality + 1 × legal | 0.356 ± 0.052 | 811 | 4.4 |
+| `2nrl-random` | quality alone | 0.537 ± 0.052 | 721 | 121.4 |
+| `2nrl-random` | quality + 1 × legal | 0.275 ± 0.049 | 742 | 2.4 |
+| `repulsion` | quality alone | 0.619 ± 0.052 | 535 | 571.1 |
+| `repulsion` | quality + 1 × legal | 0.388 ± 0.054 | 693 | 18.8 |
+| `random legal mover` | — | 0.481 ± 0.056 | 774 | 0.0 |
+
+Nothing was retrained between the two rows of a pair and not one weight
+differs. Only the ordering the moves are proposed in changes.
+<!--/EXPOSURE-->
+
+Every arm falls, by 0.15 to 0.34, and every fall is two to five standard errors.
+Read against the random legal mover in the last row: ranked on quality alone
+every arm scores **above** it, and ranked with the legal head every arm scores
+**at or below** it.
+
+Centipawn loss does not account for this. It barely moves, it moves in both
+directions, and it is not bad — three of the five policies give away *less* than
+the random mover's 774. So the network's own moves are not worse by the grader,
+and its games are much worse.
+
+One piece of this is genuinely unexplained, and is left that way rather than
+tidied: why the refusal walk *beats* a random mover, 0.63 against 0.48, when the
+two give away the same 772 and 774 centipawns a move. Something about the
+distribution the walk produces is worth ~0.15 of score and is invisible to a
+per-move centipawn average. Worth chasing; not chased here.
+
+The direction is not a mystery. A player drawing near-uniformly from the legal
+moves has no plan to be punished for; a player with a consistent bad policy does.
+Expressing a policy is only an improvement if the policy is good, and at ~700
+centipawns given away per move these are not.
 
 So the earlier ratings — `positive` at 112 Elo, and every number in this
 repository from before the rule heads — were not measuring what they appeared to.
@@ -163,6 +211,18 @@ legal-move list ever handed over. The payoffs half is not, and this is the
 measurement that stops the first from flattering the second.
 
 <!--HEADLINE-->
+### Final, on the held-out positions (mean ± sd over 3 seeds)
+
+| arm | H(q) | legal first try | refusals per move | centipawn loss | agrees with Stockfish |
+|---|---|---|---|---|---|
+| `2nrl` | 0.00 | 0.790 ± 0.017 | 1.1 ± 1.0 | 289.9 ± 17.4 | 0.044 ± 0.004 |
+| `2nrl-worst` | 0.14 | 0.785 ± 0.061 | 0.4 ± 0.2 | 279.4 ± 17.4 | 0.052 ± 0.006 |
+| `2nrl-random` | 0.72 | 0.817 ± 0.016 | 0.5 ± 0.2 | 296.1 ± 6.2 | 0.033 ± 0.009 |
+| `positive` | — | 0.783 ± 0.029 | 0.9 ± 0.5 | 290.9 ± 10.1 | 0.058 ± 0.013 |
+| `repulsion` | 1.52 | 0.777 ± 0.040 | 4.0 ± 1.9 | 321.6 ± 10.3 | 0.042 ± 0.007 |
+| `2nrl (no rule heads)` | 0.00 | 0.008 ± 0.004 | 97.9 ± 4.1 | 315.4 ± 5.5 | 0.032 ± 0.006 |
+| `positive (no rule heads)` | — | 0.065 ± 0.023 | 41.8 ± 9.5 | 290.0 ± 2.3 | 0.045 ± 0.012 |
+<!--/HEADLINE-->
 
 ## Phase 1 ends when the failure is learned, not on a date
 
@@ -214,6 +274,25 @@ control to a board game:
    ratio and `TrainConfig.lr` / `act_lr`.
 
 <!--CURVE-->
+### The curve: refusals and centipawn loss, by round
+
+| arm | metric | r0 | r4 | r8 | r12 | r16 | r20 | r24 | r28 | r32 | r36 | r40 | r44 | r48 | r52 | r56 | r60 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `2nrl` | refusals/move | 114.2 | 2034.5 | 2303.2 | 2376.1 | 2406.3 | 2246.7 | 2022.8 | 2267.4 | 2440.0 | 2354.7 | 889.2 | 875.3 | 0.6 | 0.3 | 1.0 | 0.3 |
+| `2nrl` | cp loss | 384 | 372 | 371 | 371 | 371 | 357 | 344 | 355 | 354 | 347 | 355 | 365 | 343 | 350 | 356 | 355 |
+| `2nrl-worst` | refusals/move | 114.2 | 267.9 | 218.7 | 200.2 | 303.7 | 270.3 | 233.8 | 262.1 | 3.0 | 1.0 | 0.5 | 0.4 | 0.4 | 0.3 | 0.3 | 0.2 |
+| `2nrl-worst` | cp loss | 384 | 412 | 402 | 429 | 409 | 391 | 392 | 381 | 364 | 350 | 346 | 358 | 351 | 359 | 366 | 366 |
+| `2nrl-random` | refusals/move | 114.2 | 490.0 | 184.5 | 255.4 | 268.5 | 239.4 | 217.2 | 185.1 | 118.3 | 116.5 | 0.5 | 0.4 | 0.3 | 0.1 | 0.2 | 0.1 |
+| `2nrl-random` | cp loss | 384 | 340 | 375 | 361 | 380 | 361 | 338 | 354 | 371 | 350 | 360 | 362 | 355 | 365 | 359 | 355 |
+| `positive` | refusals/move | 114.2 | 1.7 | 1.6 | 2.4 | 2.7 | 1.8 | 0.6 | 0.6 | 1.8 | 0.6 | 2.2 | 0.7 | 0.5 | 0.6 | 0.5 | 0.3 |
+| `positive` | cp loss | 384 | 345 | 340 | 350 | 343 | 344 | 346 | 340 | 312 | 354 | 353 | 328 | 342 | 344 | 359 | 345 |
+| `repulsion` | refusals/move | 114.2 | 4.4 | 1.4 | 0.7 | 0.5 | 0.3 | 0.3 | 0.6 | 0.3 | 4.8 | 0.3 | 9.7 | 0.1 | 11.3 | 8.6 | 12.6 |
+| `repulsion` | cp loss | 384 | 382 | 378 | 352 | 359 | 365 | 329 | 374 | 332 | 363 | 371 | 356 | 366 | 364 | 369 | 357 |
+| `2nrl (no rule heads)` | refusals/move | 153.6 | 721.6 | 664.2 | 656.4 | 674.6 | 670.2 | 586.9 | 574.0 | 394.0 | 243.6 | 100.5 | 129.6 | 138.2 | 151.1 | 138.1 | 153.5 |
+| `2nrl (no rule heads)` | cp loss | 367 | 382 | 383 | 340 | 373 | 367 | 345 | 344 | 342 | 334 | 343 | 357 | 378 | 341 | 365 | 373 |
+| `positive (no rule heads)` | refusals/move | 153.6 | 10.7 | 6.4 | 11.7 | 11.2 | 22.0 | 23.3 | 24.3 | 28.3 | 33.1 | 35.1 | 38.2 | 43.7 | 55.4 | 64.2 | 73.5 |
+| `positive (no rule heads)` | cp loss | 367 | 351 | 349 | 349 | 341 | 345 | 327 | 330 | 341 | 345 | 338 | 357 | 344 | 359 | 380 | 353 |
+<!--/CURVE-->
 
 ## The arms
 
@@ -238,6 +317,37 @@ so the learned trigger can be measured against one, and `--invert-mode readout`
 swaps the operator for the read-out flip described above.
 
 <!--ARMS-->
+### Phase 2 on its own: one sign flip, no training
+
+| arm | metric | before the flip | after the flip | change |
+|---|---|---|---|---|
+| `2nrl` | refusals per move | 2341.9 ± 416.1 | 1.7 ± 0.3 | ×1355.4 better |
+| `2nrl` | legal first try | 0.003 ± 0.004 | 0.453 ± 0.028 | +0.450 |
+| `2nrl` | legal AUC | 0.011 ± 0.000 | 0.989 ± 0.000 | +0.979 |
+| `2nrl` | pseudo-legal AUC | 0.011 ± 0.000 | 0.989 ± 0.000 | +0.978 |
+| `2nrl` | capture | 0.002 ± 0.001 | 0.998 ± 0.001 | +0.996 |
+| `2nrl` | gives check | 0.016 ± 0.001 | 0.984 ± 0.001 | +0.967 |
+| `2nrl` | centipawn loss | 336.9 ± 30.2 | 355.8 ± 7.8 | ×1.1 worse |
+| `2nrl-worst` | refusals per move | 260.4 ± 105.0 | 3.9 ± 2.5 | ×67.5 better |
+| `2nrl-worst` | legal first try | 0.011 ± 0.010 | 0.411 ± 0.090 | +0.400 |
+| `2nrl-worst` | legal AUC | 0.014 ± 0.002 | 0.986 ± 0.002 | +0.972 |
+| `2nrl-worst` | pseudo-legal AUC | 0.014 ± 0.002 | 0.986 ± 0.002 | +0.972 |
+| `2nrl-worst` | capture | 0.004 ± 0.001 | 0.996 ± 0.001 | +0.992 |
+| `2nrl-worst` | gives check | 0.015 ± 0.000 | 0.985 ± 0.000 | +0.971 |
+| `2nrl-worst` | centipawn loss | 398.1 ± 2.7 | 350.0 ± 7.0 | ×1.1 better |
+| `2nrl-random` | refusals per move | 247.2 ± 83.9 | 6.9 ± 7.0 | ×35.8 better |
+| `2nrl-random` | legal first try | 0.019 ± 0.014 | 0.464 ± 0.055 | +0.444 |
+| `2nrl-random` | legal AUC | 0.012 ± 0.003 | 0.988 ± 0.003 | +0.975 |
+| `2nrl-random` | pseudo-legal AUC | 0.013 ± 0.003 | 0.987 ± 0.003 | +0.974 |
+| `2nrl-random` | capture | 0.008 ± 0.005 | 0.992 ± 0.005 | +0.984 |
+| `2nrl-random` | gives check | 0.015 ± 0.001 | 0.985 ± 0.001 | +0.970 |
+| `2nrl-random` | centipawn loss | 352.5 ± 6.0 | 374.1 ± 12.7 | ×1.1 worse |
+| `2nrl (no rule heads)` | refusals per move | 568.4 ± 17.0 | 85.3 ± 6.8 | ×6.7 better |
+| `2nrl (no rule heads)` | legal first try | 0.003 ± 0.004 | 0.006 ± 0.004 | +0.003 |
+| `2nrl (no rule heads)` | centipawn loss | 348.0 ± 6.5 | 329.9 ± 18.1 | ×1.1 better |
+
+Measured negation error over every flip: **0.0e+00**.
+<!--/ARMS-->
 
 ## What the network is
 
@@ -264,6 +374,18 @@ path from input to output flips sign exactly once, which zeros survive and
 random values would not. `test_sbnn.py` asserts both, at 0.0 error.
 
 <!--GROWTH-->
+### Self-building: where the network ended up
+
+| arm | hidden layers | parameters | growth steps |
+|---|---|---|---|
+| `2nrl` | [56, 32] | 64,163 | 4.3 |
+| `2nrl-worst` | [48, 32] | 64,163 | 4.7 |
+| `2nrl-random` | [72, 32] | 74,787 | 5.3 |
+| `positive` | [88, 32] | 80,099 | 6.7 |
+| `repulsion` | [152, 32] | 149,155 | 14.7 |
+| `2nrl (no rule heads)` | [80, 32] | 58,629 | 5.3 |
+| `positive (no rule heads)` | [56, 32] | 55,973 | 6.0 |
+<!--/GROWTH-->
 
 ## The inversion negates every unit, not the output
 
