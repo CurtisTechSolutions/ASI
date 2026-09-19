@@ -93,31 +93,41 @@ and the second is the one that matters:
 About ninety rows a position instead of two, with the negatives chasing the
 network's current error rather than sitting still.
 
-### Why a sigmoid head is the ideal 2NRL object
+### The heads run on the sine activation, not a sigmoid
 
-This is the part worth reading twice. §4.3's inversion negates every unit, so
-every head's logit `z` becomes `−z`. For a **sigmoid** head that is not an
-approximation of anything:
+[`Research/SineWaveActivationFunction.md`](../Research/SineWaveActivationFunction.md)
+exists to replace the sigmoid with `f(x) = a·sin(b(x − h)) + k`, so putting a
+logistic on top of these heads would have been the one thing the paper removes.
+It would also be redundant. The network's last layer is a `SineDense` like every
+other, so a head's output is **already** squashed by the wave, bounded in
+`[k − |a|, k + |a|]` — exactly `[−1, 1]` at the defaults `a = −1, b = 1/3,
+h = 0, k = 0`.
+
+So a head is read the way `Experiments/ActivationFunctionTest/sinewave.py` reads
+its output layer: the activated value directly, against a mean-squared error,
+with no second squashing function anywhere. The two answers are the two ends of
+the wave —
 
 ```
-sigma(-z)  ==  1 - sigma(z)        exactly, at every z
++1   the answer is yes        -1   the answer is no        threshold 0
 ```
 
-The negation of the network is **the complement of the probability**. A head
-trained in phase 1 to answer *"is this move illegal?"* answers *"is this move
-legal?"* the instant it is inverted, at the identical confidence, with no
-training whatsoever.
+— and that makes the logical NOT *simpler* than it was, not weaker. A sigmoid
+needs `σ(−z) = 1 − σ(z)` to turn a negation into a complement. On the wave the
+negation **is** the complement: `+1` and `−1` are each other's opposite, and the
+activation is odd about `h` when `k = 0`, so negating a head reverses every one
+of its answers at the same distance from the threshold. `test_sbnn.py` checks
+that the per-unit flip does exactly this, at 0.0 error over 1866 answers.
 
-So the inverting arms learn the complement of the truth in phase 1 — that legal
+So the inverting arms learn the opposite of the truth in phase 1 — that legal
 moves are illegal, that captures do not capture, that checks are not checks —
 and flip. The controls learn the truth throughout. Same rows, same labels, same
 number of updates; only the sign differs, which is the entire comparison.
 
-It is also the one place in this experiment where the inversion is *literally* a
-logical NOT rather than an order reversal. `softmax(-z)` is not `1 - softmax(z)`,
-so the quality head can only ever show the weaker, ordinal version of the claim.
-The rule heads show the strong one, and `test_sbnn.py` asserts it to machine
-precision.
+The shipped operator is the weight complement `W → 1 − W`, and it does **not**
+reverse the answers as an identity: it turns over 56.5% of them where the
+per-unit flip turns over 100%. That gap is measured rather than assumed, and it
+is the thing the arms are there to weigh.
 
 <!--RULES-->
 ### What the heads know, on the held-out exam
@@ -508,8 +518,9 @@ last two its payoffs:
 `legal AUC` is the honest version of "has it learned the rules". Accuracy is
 worthless here — answering "illegal" to everything scores 97% — and AUC is not
 fooled by the imbalance: 0.5 is exactly no knowledge, 1.0 is the rules, and
-because the inversion negates the logit, a network and its inverse score
-`a` and `1 − a`. The rule exam is a **fixed** set of actions per position, drawn
+because negating a head's output reverses its ranking, a network and its
+negation score `a` and `1 − a`. It reads the activated value directly, which is
+all a rank statistic needs. The rule exam is a **fixed** set of actions per position, drawn
 once from a seed and never mined from the network being graded, so it is the
 same exam for every arm.
 

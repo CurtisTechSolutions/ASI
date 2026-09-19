@@ -53,34 +53,31 @@ after the rules, and they are here because the user asked for "more about
 chess": the trunk that has to answer them cannot get away with memorising which
 squares are usually fine.
 
-Inversion, and why a sigmoid head is the ideal 2NRL object
-----------------------------------------------------------
+The heads use the sine activation, not a sigmoid
+------------------------------------------------
 
-This is the part worth reading twice.
+``Research/SineWaveActivationFunction.md`` is about replacing the sigmoid with
+``f(x) = a*sin(b*(x - h)) + k``, so putting a logistic on top of these heads
+would have been the one thing the paper exists to remove.  It is also
+redundant: the network's last layer is a :class:`sbnn.SineDense` like every
+other, so a head's output is **already** squashed by the sine, bounded in
+``[k - |a|, k + |a|]`` - by default exactly ``[-1, 1]``.
 
-§4.3's inversion negates every unit, so every head's logit ``z`` becomes
-``-z``.  For a *sigmoid* head that is not an approximation of anything::
+So a head is read the way ``Experiments/ActivationFunctionTest/sinewave.py``
+reads its output layer: the activated value directly, against a mean-squared
+error, with no second squashing function anywhere.  The targets are the two
+ends of the wave::
 
-    sigma(-z)  ==  1 - sigma(z)          exactly, at every z, in floating point
-                                         to within one ulp
+    +1   the answer is yes        -1   the answer is no
 
-The negation of the network is therefore the **complement of the probability**.
-A head trained in phase 1 to answer *"is this move illegal?"* answers, the
-instant it is inverted and with no training whatsoever, *"is this move legal?"*
-- at the identical confidence.  That is 2NRL's central claim with nothing left
-to argue about, and ``test_sbnn.py`` asserts it to machine precision.
+and the decision threshold is ``0``, exactly as ``logit > 0`` would have been.
 
-It is also the one place in this experiment where the inversion is *literally*
-a logical NOT rather than an order reversal.  The twelve-wide softmax does not
-have this property - ``softmax(-z)`` is not ``1 - softmax(z)`` - which is why
-the quality head can only ever demonstrate the weaker, ordinal version of the
-claim.  The rule heads demonstrate the strong one.
-
-So the inverting arms train these heads toward the **complement** of the truth
-in phase 1 (label 1 means *illegal*, *not* a capture, *not* check) and flip.
-The ``positive`` control trains toward the truth throughout and never flips.
-Same labels, same rows, same number of updates; only the sign and the flip
-differ, which is the whole comparison.
+This also makes the logical NOT cleaner rather than weaker.  A sigmoid needed
+``sigma(-z) == 1 - sigma(z)`` to turn a negation into a complement; on the wave
+the negation *is* the complement, because ``+1`` and ``-1`` are each other's
+opposite and the activation is odd about ``h`` when ``k = 0``.  Negate a head
+and every answer it gives is reversed, at the same distance from the threshold.
+``test_sbnn.py`` checks it.
 
 Which actions get asked about
 -----------------------------
@@ -120,7 +117,8 @@ import numpy as np
 from moves import N_ACTIONS, to_move
 
 # The output layer, in order.  Index 0 is the score the ranking and the softmax
-# have always used; 1.. are the sigmoid heads this module supervises.
+# have always used; 1.. are the answer heads this module supervises, read on
+# the sine activation's own two ends (+1 yes, -1 no).
 HEADS = ("quality", "legal", "pseudo", "capture", "check", "safe", "threat")
 N_HEADS = len(HEADS)
 QUALITY, LEGAL, PSEUDO, CAPTURE, CHECK, SAFE, THREAT = range(N_HEADS)
@@ -222,48 +220,47 @@ def _action_of(board: chess.Board, move: chess.Move, pov: chess.Color) -> int:
     return f * 64 + t
 
 
-def sigmoid(z: np.ndarray) -> np.ndarray:
-    """Stable logistic.  ``sigmoid(-z) == 1 - sigmoid(z)`` is the identity the
-    whole inversion argument rests on, so it is computed symmetrically."""
-    out = np.empty_like(z, dtype=np.float64)
-    pos = z >= 0
-    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
-    e = np.exp(z[~pos])
-    out[~pos] = e / (1.0 + e)
-    return out
+YES, NO = 1.0, -1.0          # the two ends of the default wave
 
 
-def bce(logits: np.ndarray, target: np.ndarray, mask: np.ndarray) -> float:
-    """Mean binary cross-entropy over the unmasked entries."""
-    p = np.clip(sigmoid(logits), 1e-12, 1.0 - 1e-12)
-    loss = -(target * np.log(p) + (1.0 - target) * np.log(1.0 - p))
-    denom = max(float(mask.sum()), 1.0)
-    return float((loss * mask).sum() / denom)
+def targets(y: np.ndarray) -> np.ndarray:
+    """Turn 0/1 ground truth into the activation's own two ends, -1 and +1."""
+    return np.where(y > 0.5, YES, NO)
 
 
-def bce_grad(logits: np.ndarray, target: np.ndarray, mask: np.ndarray,
-             pos_weight: np.ndarray | None = None) -> np.ndarray:
-    """``d/dlogits`` of that loss.
+def mse(pred: np.ndarray, target: np.ndarray, mask: np.ndarray) -> float:
+    """Mean squared error over the unmasked entries.
 
-    ``pos_weight`` re-weights the positives per head.  Legal moves are about 3%
-    of a uniformly drawn action set, and without the correction the head learns
-    the prior ("everything is illegal") instead of the rule - which is the exact
-    failure this module exists to remove.
+    The loss ``sinewave.py`` compiles with, on the value the sine activation
+    already produced.  No second squashing function.
     """
-    p = sigmoid(logits)
-    g = (p - target) * mask
+    err = (pred - target) ** 2
+    return float((err * mask).sum() / max(float(mask.sum()), 1.0))
+
+
+def mse_grad(pred: np.ndarray, target: np.ndarray, mask: np.ndarray,
+             pos_weight: np.ndarray | None = None) -> np.ndarray:
+    """``d/dpred`` of that loss.
+
+    ``pos_weight`` re-weights the ``+1`` answers per head.  Legal moves are
+    about 3% of a uniformly drawn action set, and without the correction a head
+    learns the prior - answer ``-1`` to everything - instead of the rule, which
+    is the exact failure this module exists to remove.
+    """
+    g = 2.0 * (pred - target) * mask
     if pos_weight is not None:
-        g = g * np.where(target > 0.5, pos_weight, 1.0)
+        g = g * np.where(target > 0.0, pos_weight, 1.0)
     return g / max(float(mask.sum()), 1.0)
 
 
-def head_report(logits: np.ndarray, target: np.ndarray, mask: np.ndarray) -> dict:
+def head_report(scores: np.ndarray, target: np.ndarray, mask: np.ndarray) -> dict:
     """Per-head accuracy, plus the one number that says whether the rules are known.
 
     ``legal_auc`` is the probability that a random legal move outranks a random
     illegal one under the ``legal`` head.  It needs no threshold, it is not
     fooled by the 97:3 class imbalance the way accuracy is, and 0.5 is exactly
     "no idea" - so it is the honest version of "has it learned the rules".
+    It reads the activated value directly, which is all a rank statistic needs.
     """
     out: dict[str, float] = {}
     for j, name in enumerate(RULE_HEADS):
@@ -271,11 +268,11 @@ def head_report(logits: np.ndarray, target: np.ndarray, mask: np.ndarray) -> dic
         if not keep.any():
             out[f"{name}_acc"] = float("nan")
             continue
-        pred = logits[keep, j] > 0.0
+        pred = scores[keep, j] > 0.0
         out[f"{name}_acc"] = float((pred == (target[keep, j] > 0.5)).mean())
     j = LEGAL - 1
-    out["legal_auc"] = auc(logits[:, j], target[:, j] > 0.5)
-    out["pseudo_auc"] = auc(logits[:, PSEUDO - 1], target[:, PSEUDO - 1] > 0.5)
+    out["legal_auc"] = auc(scores[:, j], target[:, j] > 0.5)
+    out["pseudo_auc"] = auc(scores[:, PSEUDO - 1], target[:, PSEUDO - 1] > 0.5)
     return out
 
 

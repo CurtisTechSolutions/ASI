@@ -25,7 +25,8 @@ wanted is exactly the one it now least wants.
 What the network outputs
 ------------------------
 Seven numbers, not one (``rules.HEADS``).  The first is the score the softmax
-and the ranking have always used; the other six are sigmoid heads carrying the
+and the ranking have always used; the other six answer on the sine
+activation's own two ends (+1 yes, -1 no) and carry the
 rules and some elementary chess - is this move legal, is it even geometrically
 possible, does it capture, does it check, does it hang the piece, is the piece
 already hanging - each with exact ground truth from the board itself.  They all
@@ -256,7 +257,7 @@ def apply_grad(net: SineNet, opt, batch: Batch, dlogits: np.ndarray, tau: float)
     """Push ``dlogits`` back through the quality head and take one Adam step.
 
     The rule heads get zero here: the softmax over candidate moves is about
-    which move is *best*, and legality is taught by :func:`rules.bce_grad` on
+    which move is *best*, and legality is taught by :func:`rules.mse_grad` on
     its own rows, at its own rate.  Keeping the two gradients on separate
     columns is what stops "illegal" and "bad" being the same signal again.
     """

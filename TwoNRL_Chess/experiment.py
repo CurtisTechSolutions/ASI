@@ -543,13 +543,17 @@ def pos_weight(target: np.ndarray, mask: np.ndarray, cap: float) -> np.ndarray:
     """Per-head negative:positive ratio, so a head cannot win by learning the prior.
 
     `check` is true of about one legal move in twenty, so an unweighted head
-    scores 95% by answering "no" forever and has learned nothing about chess.
-    Weighting the positives by how rare they are makes the trivial answer cost
-    exactly as much as the informative one.  Capped, because a head whose
-    positive is absent from a minibatch would otherwise get an unbounded rate.
+    scores 95% by answering "no" - that is, -1 - forever, and has learned
+    nothing about chess.  Weighting the positives by how rare they are makes the
+    trivial answer cost exactly as much as the informative one.  Capped, because
+    a head whose positive is absent from a minibatch would otherwise get an
+    unbounded rate.
+
+    ``target`` is in the sine activation's own units, ``+1`` for yes and ``-1``
+    for no, so a positive is ``target > 0``.
     """
-    n_pos = (target * mask).sum(axis=0)
-    n_neg = ((1.0 - target) * mask).sum(axis=0)
+    n_pos = ((target > 0.0) * mask).sum(axis=0)
+    n_neg = ((target < 0.0) * mask).sum(axis=0)
     return np.clip(np.where(n_pos > 0, n_neg / np.maximum(n_pos, 1.0), 1.0), 1.0, cap)
 
 
@@ -574,9 +578,9 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
     illegal ones.  It is the same list for every arm, so the rules are taught
     identically and only the *sign* of the lesson differs: the inverting arms
     learn the complement of the truth in phase 1 and flip it, the others learn
-    the truth throughout.  §4.3's operator turns a sigmoid head's ``z`` into
-    ``-z``, and ``sigma(-z) == 1 - sigma(z)`` exactly, so that flip is a
-    genuine logical NOT of a probability rather than a re-ordering.
+    the truth throughout.  The heads answer on the sine activation's own two
+    ends - ``+1`` for yes, ``-1`` for no - so reversing an answer is negating
+    it, and no sigmoid is needed to express the NOT.
 
     ``probe`` is called immediately before and immediately after the sign flip,
     with nothing in between, so ``inversion_before`` and ``inversion_after``
@@ -611,9 +615,9 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
     def rule_block(updates: int, complement: bool) -> None:
         """Supervised legality and chess knowledge, on their own heads and rate.
 
-        Separate from the quality softmax on purpose.  The heads are sigmoids
-        with exact labels; the softmax is a ranking with a graded target.
-        Mixing them is what made "illegal" and "bad" the same signal.
+        Separate from the quality softmax on purpose.  The heads are the sine
+        activation read directly against exact labels; the softmax is a ranking
+        with a graded target.  Mixing them made "illegal" and "bad" one signal.
         """
         rows = rule_samples or []
         if not updates or net.sizes[-1] < rules.N_HEADS or not rows:
@@ -627,13 +631,15 @@ def train_round(agent: Agent, cfg: Config, samples: list[dict],
             if not len(X):
                 continue
             y = net.forward(X, train=True)
-            logits = y[:, 1:]
-            target = (1.0 - Y) if complement else Y
+            scores = y[:, 1:]
+            # The heads answer on the sine activation's own two ends, +1 and -1,
+            # so the complement of an answer is its negation rather than 1 - p.
+            target = rules.targets(1.0 - Y if complement else Y)
             w = pos_weight(target, M, cfg.pos_weight_cap)
             dy = np.zeros_like(y)
-            dy[:, 1:] = rules.bce_grad(logits, target, M, w)
+            dy[:, 1:] = rules.mse_grad(scores, target, M, w)
             opt.step(net.backward(dy))
-            last = rules.bce(logits, target, M)
+            last = rules.mse(scores, target, M)
         out["rule_loss"] = last
         out["rule_complement"] = complement
 
@@ -720,7 +726,7 @@ def evaluate_heldout(agent: Agent, positions: list[dict], heads: int = 48) -> di
     loss is clipped at ``CP_CLIP`` because a missed mate scores 10000 and would
     otherwise *be* the mean.
 
-    ``heads`` positions also sit the rule exam, which asks the sigmoid heads
+    ``heads`` positions also sit the rule exam, which asks the answer heads
     directly what they know instead of inferring it from the ranking.
     ``legal_auc`` is the headline there: the chance a random legal move outranks
     a random illegal one under the ``legal`` head, averaged within positions.

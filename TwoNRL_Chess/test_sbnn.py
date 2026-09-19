@@ -789,24 +789,56 @@ def test_labels_are_the_rule_book() -> None:
           nested == 0, f"{legal_n} legal inside {pseudo_n} pseudo-legal")
 
 
-def test_sigmoid_negation_is_complement() -> None:
-    """sigma(-z) == 1 - sigma(z).  The whole claim about the rule heads rests here."""
-    z = np.concatenate([np.linspace(-40, 40, 4001),
-                        np.random.default_rng(5).normal(0, 8, 4000)])
-    err = float(np.abs(rules.sigmoid(-z) - (1.0 - rules.sigmoid(z))).max())
-    check("negating a logit complements its probability, exactly",
-          err < 1e-15, f"worst error {err:.1e} over {len(z)} logits, |z| up to 40")
+def test_the_wave_is_its_own_squashing() -> None:
+    """The heads run on the sine activation, and its NOT is plain negation.
+
+    ``Research/SineWaveActivationFunction.md`` replaces the sigmoid, so there is
+    no sigmoid here to complement.  A head's output is the activated value
+    ``a*sin(b*(z - h)) + k``, bounded in ``[k - |a|, k + |a|]`` - exactly
+    ``[-1, 1]`` at the defaults - and the two answers are the two ends of that
+    wave.  Negating the output maps ``+1`` to ``-1`` and back, which is the same
+    logical NOT the sigmoid needed ``1 - p`` to express, without the extra
+    function.
+    """
+    from sbnn import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
+    x = np.linspace(-40, 40, 8001)
+    f = DEFAULT_A * np.sin(DEFAULT_B * (x - DEFAULT_H)) + DEFAULT_K
+    hi, lo = DEFAULT_K + abs(DEFAULT_A), DEFAULT_K - abs(DEFAULT_A)
+    # Bounded by k +- |a|, and reaching both ends: a sampled grid lands near the
+    # peaks rather than exactly on them, so the tolerance is the sampling step.
+    check("the activation is bounded by its own amplitude and offset",
+          float(f.max()) <= hi + 1e-12 and float(f.min()) >= lo - 1e-12
+          and float(f.max()) > hi - 1e-3 and float(f.min()) < lo + 1e-3,
+          f"range [{f.min():.4f}, {f.max():.4f}] within [{lo}, {hi}] over |x| up "
+          "to 40 - no squashing function is needed on top of it")
+
+    # Odd about h when k = 0, which is what makes negation the NOT.
+    err = float(np.abs(
+        (DEFAULT_A * np.sin(DEFAULT_B * (-x - DEFAULT_H)) + DEFAULT_K)
+        + (DEFAULT_A * np.sin(DEFAULT_B * (x - DEFAULT_H)) + DEFAULT_K)).max())
+    check("f(-x) == -f(x) at h = k = 0, so negating an answer reverses it exactly",
+          err < 1e-12, f"worst error {err:.1e} over {len(x)} points")
+
+    yes, no = rules.targets(np.array([1.0])), rules.targets(np.array([0.0]))
+    check("the two answers are the two ends of the wave, and each is the other's negation",
+          float(yes[0]) == 1.0 and float(no[0]) == -1.0 and float(yes[0]) == -float(no[0]),
+          "yes = +1, no = -1, threshold 0")
 
 
 def test_inversion_complements_every_head() -> None:
-    """Train the heads on the complement of the truth, invert, and read the truth.
+    """Train the heads on the opposite of the truth, invert, and read the truth.
 
-    This is 2NRL with nothing left to interpret.  Phase 1 teaches the network
-    that legal moves are illegal, that captures do not capture and that checks
-    are not checks; one closed-form sign flip later, with no training at all, it
-    answers every one of those questions correctly and at the identical
-    confidence.  The softmax can only ever show the ordinal version of this - a
-    sigmoid head shows the exact one.
+    2NRL with nothing left to interpret.  Phase 1 teaches the network that legal
+    moves are illegal, that captures do not capture and that checks are not
+    checks; the flip is then asked to turn that into the right answers with no
+    training at all.
+
+    On the sine activation the two answers are ``+1`` and ``-1``, so reversing
+    an answer is negating it - there is no probability to complement and no
+    sigmoid to do it with.  The per-unit operator negates the output exactly and
+    therefore reverses every answer exactly; the shipped ``W -> 1 - W``
+    complement does not, and the gap between the two is measured here rather
+    than asserted away.
     """
     agent = Agent.build([24, 24], seed=31)
     net_, nprng = agent.net, np.random.default_rng(31)
@@ -819,53 +851,49 @@ def test_inversion_complements_every_head() -> None:
         X.append(dense(board_x, states, actions)); Y.append(y); M.append(m)
     X, Y, M = np.concatenate(X), np.concatenate(Y), np.concatenate(M)
 
+    truth = rules.targets(Y)
+    opposite = -truth                       # the wave's own NOT: +1 <-> -1
     opt = Adam(net_, lr=0.02, act_lr=0.002)
-    complement = 1.0 - Y
     for _ in range(150):
         out = net_.forward(X, train=True)
-        g = rules.bce_grad(out[:, 1:], complement, M,
-                           np.clip(((1 - complement) * M).sum(0) /
-                                   np.maximum((complement * M).sum(0), 1.0), 1.0, 10.0))
-        dy = np.zeros_like(out); dy[:, 1:] = g
+        w = np.clip(((opposite < 0) * M).sum(0) /
+                    np.maximum(((opposite > 0) * M).sum(0), 1.0), 1.0, 10.0)
+        dy = np.zeros_like(out)
+        dy[:, 1:] = rules.mse_grad(out[:, 1:], opposite, M, w)
         opt.step(net_.backward(dy))
 
     before = net_.forward(X, train=False)[:, 1:]
-    p_before = rules.sigmoid(before)
-    shipped = net_.copy()                      # the same trained network, W -> -W
+    shipped = net_.copy()                   # the same trained net, for W -> 1 - W
     net_.invert_unit()
     after = net_.forward(X, train=False)[:, 1:]
-    p_after = rules.sigmoid(after)
 
-    err = float(np.abs(p_before + p_after - 1.0).max())
-    check("the per-unit inversion complements every head's probability, exactly",
-          err < 1e-12, f"worst |p + p' - 1| = {err:.1e} over {p_before.size} answers")
+    err = float(np.abs(before + after).max())
+    check("the per-unit inversion negates every head's answer, exactly",
+          err < 1e-12,
+          f"worst |y + y'| = {err:.1e} over {before.size} answers - on the wave, "
+          "reversing an answer is negating it")
 
-    # The shipped operator is W -> -W, which is an exact negation only while
-    # h, k and the bias are at zero.  This network has been trained, so they are
-    # not, and the identity holds approximately instead of exactly.  Measured
-    # rather than claimed, because it is the one the arms actually run.
-    shipped.invert()
-    p_shipped = rules.sigmoid(shipped.forward(X, train=False)[:, 1:])
-    err_w = float(np.abs(p_before + p_shipped - 1.0).max())
-    med_w = float(np.median(np.abs(p_before + p_shipped - 1.0)))
-    agree = float(((p_shipped > 0.5) != (p_before > 0.5)).mean())
-    check("the shipped complement reverses most answers but not as an identity",
-          0.2 < agree < 1.0,
-          f"worst |p + p' - 1| = {err_w:.2f}, median {med_w:.3f}, "
-          f"{agree:.1%} of answers reversed - W -> 1 - W is an involution on the "
-          "weights, not a complement of the output probability")
-
-    # And the complement is the *right* answer, which is the point of doing it.
-    auc_b = rules.auc(before[:, rules.LEGAL - 1], Y[:, rules.LEGAL - 1] > 0.5)
-    auc_a = rules.auc(after[:, rules.LEGAL - 1], Y[:, rules.LEGAL - 1] > 0.5)
+    j = rules.LEGAL - 1
+    pos = Y[:, j] > 0.5
+    auc_b = rules.auc(before[:, j], pos)
+    auc_a = rules.auc(after[:, j], pos)
     check("a network trained to get the rules wrong gets them right once inverted",
           auc_b < 0.15 and auc_a > 0.85 and abs(auc_b + auc_a - 1.0) < 1e-12,
           f"legal AUC {auc_b:.3f} -> {auc_a:.3f}, and they sum to 1 exactly")
 
-    acc_b = float(((before[:, rules.LEGAL - 1] > 0) == (Y[:, rules.LEGAL - 1] > 0.5)).mean())
-    acc_a = float(((after[:, rules.LEGAL - 1] > 0) == (Y[:, rules.LEGAL - 1] > 0.5)).mean())
+    acc_b = float(((before[:, j] > 0) == pos).mean())
+    acc_a = float(((after[:, j] > 0) == pos).mean())
     check("accuracy on the rules is mirrored by the flip",
           abs(acc_b + acc_a - 1.0) < 1e-12, f"{acc_b:.3f} -> {acc_a:.3f}")
+
+    # The shipped complement, measured on the same network.
+    shipped.invert()
+    y_shipped = shipped.forward(X, train=False)[:, 1:]
+    reversed_frac = float(((y_shipped > 0) != (before > 0)).mean())
+    check("the shipped complement reverses most answers but not as an identity",
+          0.2 < reversed_frac < 1.0,
+          f"{reversed_frac:.1%} of answers reversed, against 100% for the per-unit "
+          "flip - W -> 1 - W is an involution on the weights, not on the answers")
 
 
 def test_auc_is_the_honest_rule_metric() -> None:
@@ -885,18 +913,18 @@ def test_auc_is_the_honest_rule_metric() -> None:
 
 
 def test_rule_gradient() -> None:
-    """bce_grad is the derivative of bce, checked against finite differences."""
+    """mse_grad is the derivative of mse, checked against finite differences."""
     rng = np.random.default_rng(13)
-    logits = rng.normal(0, 2, (40, rules.N_RULE_HEADS))
-    target = (rng.random((40, rules.N_RULE_HEADS)) < 0.4).astype(float)
+    scores = rng.uniform(-1, 1, (40, rules.N_RULE_HEADS))
+    target = rules.targets((rng.random((40, rules.N_RULE_HEADS)) < 0.4).astype(float))
     mask = (rng.random((40, rules.N_RULE_HEADS)) < 0.8).astype(float)
-    g = rules.bce_grad(logits, target, mask)
+    g = rules.mse_grad(scores, target, mask)
     worst = 0.0
     for i, j in [(0, 0), (3, 2), (17, 5), (39, 1), (8, 4)]:
         eps = 1e-6
-        up, dn = logits.copy(), logits.copy()
+        up, dn = scores.copy(), scores.copy()
         up[i, j] += eps; dn[i, j] -= eps
-        fd = (rules.bce(up, target, mask) - rules.bce(dn, target, mask)) / (2 * eps)
+        fd = (rules.mse(up, target, mask) - rules.mse(dn, target, mask)) / (2 * eps)
         worst = max(worst, abs(fd - g[i, j]) / max(abs(fd), 1e-9))
     check("the rule-head gradient matches finite differences", worst < 1e-5,
           f"worst relative error {worst:.1e}")
@@ -1013,7 +1041,7 @@ if __name__ == "__main__":
     test_judge()
     print("\nthe rule curriculum")
     test_labels_are_the_rule_book()
-    test_sigmoid_negation_is_complement()
+    test_the_wave_is_its_own_squashing()
     test_inversion_complements_every_head()
     test_auc_is_the_honest_rule_metric()
     test_rule_gradient()
