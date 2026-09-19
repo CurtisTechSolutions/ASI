@@ -577,9 +577,18 @@ when the machine is busy.
 | `summarize.py` | rebuilds the tables in this README from the run JSON |
 | `export_viz.py` | scores the action space from the phase-boundary networks, for the page |
 | `viz/` | the visualisation: one self-contained HTML file with the data inside it |
-| `results/` | run logs and JSON behind every table here |
+| `run_rules.sh` | the whole rule-curriculum pipeline: both configurations, the ladder, the benchmark, the ranking ablation, the tables |
+| `results/` | the original 40-round runs |
+| `results_long/`, `results_r400/` | the 200- and 400-round runs, before the rule heads |
+| `results_rules/` | the runs behind every table in this file |
 
 ## Running it
+
+```bash
+./run_rules.sh   # everything behind the tables above, end to end
+```
+
+or, a target at a time:
 
 ```bash
 make install     # numpy, python-chess, and Stockfish itself
@@ -597,11 +606,17 @@ make all         # proofs, every arm, the benchmark, the tables, then the page
 the page can put the two sides of the sign flip next to each other. Open
 `viz/index.html` from a clone; it needs no server.
 
-Every target takes overrides, as in `TwoNRL_CartPole`:
+Every target takes overrides, as in `TwoNRL_CartPole`, and `run_rules.sh` takes
+the same three:
 
 ```bash
 make run SEEDS="0 1 2 3 4" ROUNDS=40 JOBS=4
+SEEDS="0 1 2" ROUNDS=60 JOBS=4 ./run_rules.sh
 ```
+
+`summarize.py --results results_rules --write-readme README.md` regenerates
+every table in this file from the run JSON, so the document and the runs cannot
+drift apart.
 
 ## Caveats
 
