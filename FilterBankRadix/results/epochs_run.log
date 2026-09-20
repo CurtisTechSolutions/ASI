@@ -1,0 +1,17 @@
+# epochs: the one-hop rule against counting, depth 5
+  counts  epochs= 0 seed=0 bits/char=2.6144 train=0.8725 1s
+  counts  epochs= 0 seed=1 bits/char=2.6144 train=0.8725 1s
+  counts  epochs= 0 seed=2 bits/char=2.6144 train=0.8725 1s
+  single  epochs= 1 seed=0 bits/char=2.8373 train=1.0661 22s
+  single  epochs= 1 seed=1 bits/char=2.8424 train=1.0614 21s
+  single  epochs= 1 seed=2 bits/char=2.8469 train=1.0690 21s
+  single  epochs= 3 seed=0 bits/char=2.7720 train=1.0169 44s
+  single  epochs= 3 seed=1 bits/char=2.7842 train=1.0180 45s
+  single  epochs= 3 seed=2 bits/char=2.8017 train=1.0310 44s
+  single  epochs=10 seed=0 bits/char=2.7151 train=0.9691 127s
+  single  epochs=10 seed=1 bits/char=2.7225 train=0.9719 128s
+  single  epochs=10 seed=2 bits/char=2.7413 train=0.9896 132s
+  single  epochs=30 seed=0 bits/char=2.6743 train=0.9383 383s
+  single  epochs=30 seed=1 bits/char=2.6774 train=0.9343 372s
+  single  epochs=30 seed=2 bits/char=2.6805 train=0.9357 374s
+

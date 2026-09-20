@@ -144,12 +144,13 @@ class ActivationFilter:
         answer, and the joint answer is about as good as the product of the
         parts.  Measured on this corpus (``make probe``, three seeds): the
         three ways to split the four registers two-against-two are answerable
-        at 0.817, 0.797 and 0.757 by one unit each, their two best multiply to
-        0.65, and the sign code's supervised ceiling over all 24 assignments is
-        0.710 - the same number.  ``argmax`` has no such constraint: each
-        expert owns a unit and the partition never has to factor.  It costs
-        ``K`` units instead of ``log2 K``, and reaches 0.697 here, so on this
-        corpus the two codes end up in the same place for different reasons.
+        at 0.797, 0.711 and 0.636 by one unit each, their two best multiply to
+        0.57, and the sign code's supervised ceiling over all 24 assignments is
+        0.693 - the same neighbourhood.  ``argmax`` has no such constraint:
+        each expert owns a unit and the partition never has to factor.  It
+        costs ``K`` units instead of ``log2 K``, and reaches 0.723, so the two
+        codes end up close together for different reasons - and in the bank
+        itself they are 2.887 against 2.908 bits/char, inside the spread.
         """
         self.act_rate = float(act_rate)
         """Rate of ``a, b, h, k`` relative to ``v``; 0 holds the wave fixed.
@@ -160,10 +161,12 @@ class ActivationFilter:
         silently loses half of its experts - and freezing the wave makes that
         impossible.  But freezing it also strands a *periodic* unit: measured,
         a sine filter with its wave fixed cannot be fitted to an argmax address
-        at all (0.245 against a chance of 0.25), because the response wraps and
-        the hinge pushes it into the next lobe, while the same filter with the
-        wave free reaches 0.697.  What learning the wave mostly does in layer 1
-        is flatten it until it is monotone over the data's range.
+        at all (0.243 against a chance of 0.25), because the response wraps and
+        the hinge pushes it into the next lobe - 100% of its units end up past
+        their first peak - while the same filter with the wave free reaches
+        0.723 and lowers ``b`` from 0.333 to 0.176.  What learning the wave
+        mostly does in layer 1 is flatten it until it is monotone over the
+        data's range, and in the bank it is worth 0.18 bits/char.
         """
         self.rng = random.Random(seed)
         s = spread / math.sqrt(dim)

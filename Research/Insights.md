@@ -346,16 +346,17 @@ parameterisation.** The rule is `b ≈ π / (2·E|z|)`.
 `FilterBankRadix/` reads the wave for its *sign* and uses it to route: a hinge
 raises a unit's response by pushing its projection, and the address is the sign
 pattern. Held at `b = 1/3` with `a, b, h, k` frozen, that push carries the
-wave's argument `|u| = |b(x−h)|` from a median of 0.28 to **100.1** — 98.3% of
-units end up past their first peak, where a sine is coming *back down* — and the
-filter scores **0.245 against a chance of 0.25**: it cannot be fitted at all. A
-tanh under the identical rule ends up past its own first peak just as often
-(73.8%) and does not care, because saturation preserves an ordering and
-periodicity does not; it is the best router measured (0.736). With the wave
-learnable the sine recovers to 0.697, and the parameter that recovers it is `b`,
-which falls from 0.333 to **0.177** — *learning the wave, here, means flattening
-it*. Same frequency, two opposite failures: too linear for a deep network, too
-periodic for a gate.
+wave's argument `|u| = |b(x−h)|` from a median of 0.28 to **143.5** — 100% of
+units end up past their first peak, twenty-two periods out, where a sine is
+coming *back down* — and the filter scores **0.243 against a chance of 0.25**:
+it cannot be fitted at all. A tanh under the identical rule ends up past its own
+first peak too (75.6%) and does not care, because saturation preserves an
+ordering and periodicity does not; it scores 0.716. With the wave learnable the
+sine recovers to 0.723, and the parameter that recovers it is `b`, which falls
+from 0.333 to **0.176** — *learning the wave, here, means flattening it*, and in
+the bank itself that flattening is worth 0.18 bits/char while a tanh filter
+still routes 0.08 bits/char better than the sine. Same frequency, two opposite
+failures: too linear for a deep network, too periodic for a gate.
 
 *Where:* `Research/SineWaveActivationFunction.md`, FINDINGS §5,
 `FilterBankRadix/README.md` · **refined**

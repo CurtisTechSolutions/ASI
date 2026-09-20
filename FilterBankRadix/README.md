@@ -15,7 +15,9 @@
 ```
 
 Layer 1 is a bank of learnable sine units, read for their **sign**. The signs
-spell an address. The address picks one radix tree out of a bank of them, and
+spell an address (there is a second code, where the address is simply the unit
+with the largest response; §4.5 of `DESIGN.md` says why that choice matters
+more than it sounds). The address picks one radix tree out of a bank of them, and
 that tree — a path-compressed context trie with a learnable sine on every node
 and `RadixCyclicNN`'s one-hop rule on every branch — predicts the next
 character. Nothing else crosses between the layers: no representation goes
@@ -29,7 +31,7 @@ number points at.
 
 ```bash
 cd FilterBankRadix
-make test         # 27 tests, standard library, seconds
+make test         # 28 tests, standard library, seconds
 make check        # finite-difference checks of all three learning rules
 make demo         # fit a small bank and see what each address ended up holding
 make quick        # a one-seed smoke run of every sweep, a few minutes
@@ -40,135 +42,225 @@ Standard library only. No install, no download, nothing optional.
 
 ## The result that matters
 
-**The architecture works, learns, and loses.** A learned filter beats the same
-filter left frozen, and beats a random split by a wide margin — so the routing
-is doing something. But one radix tree over the whole corpus beats a bank of
-four almost everywhere, *even when the router is perfect*, and the experiment
-says exactly where that stops being true:
+**The architecture works, learns, and is beaten by one tree — except in the two
+places where the experiment says it should not be.**
+
+A learned filter beats the same filter left frozen by 0.22 bits/char, and beats
+a random split by 0.44, so the routing does something. A single radix tree over
+the whole corpus still beats the bank at the default depth and size. But the
+deficit is not a constant, and both sweeps cross:
 
 | | one tree wins | the bank wins |
 |---|---|---|
-| **context depth** | 4, 5, 6 | **2 and 3** |
-| **corpus size** | 100 and 200 segments per source | **400 and 800** |
+| **context depth** (58k chars) | 5, 6 | **2 and 3** (a perfect router), **4** (the learned one) |
+| **corpus size** (depth 5) | 100 – 400 segments per source | **800** (232k characters) |
 
-Both boundaries are the same sentence read two ways. Routing hands the model a
-fact — *which register this is* — that a deep tree already has in its context
-and that a small corpus has too little data to exploit. Where the tree can work
-the fact out for itself, a router is an overhead; where it cannot, a router is
-worth a fifth of a bit a character.
+Both boundaries say the same thing twice. Routing hands the model a fact —
+*which register this is* — that a deep tree already has in its context and that
+a small corpus has too little data to exploit. Where the tree can work the fact
+out for itself, a router is overhead; where it cannot, it is worth up to 0.2
+bits a character.
 
-And two things this was not built to find:
+Three things this was not built to find:
 
-* **Counting beats the learning rule.** The same trees, the same compression,
-  the same backoff, with the softmax of `w·f_p·f_c` replaced by relative
-  traversal counts — and nothing trained at all — give better held-out bits
-  than training does, under both routings.
+* **The learned filter beats the true labels.** `monotone` routes on nothing
+  but a character histogram and reaches **2.831** against the source-perfect
+  oracle's **2.873**. The best partition for predicting text is not the
+  partition a human would call correct.
+* **Counting beats the learning rule.** The same trees with the softmax of
+  `w·f_p·f_c` replaced by relative traversal counts — nothing trained at all,
+  one second against forty — give **2.614** against **2.786**, and the rule
+  closes the gap only slowly with ten times the training.
 * **The author's wave is a good activation and a poor gate.** A sine filter
-  with its wave held fixed cannot be fitted to an address at all, and the
-  reason is measurable: the hinge can only raise a response by pushing the
-  projection, and a periodic response *comes back down*. It ends up sixteen
-  periods out.
+  with its wave held fixed cannot be fitted to an address at all — 0.243
+  against a chance of 0.25 — and the reason is measurable: the hinge can only
+  raise a response by pushing the projection, a periodic response *comes back
+  down*, and 100% of its units end up past their first peak, a median of 143
+  radians out.
 
 ## What the experiment says
 
 Every number is on held-out segments, stratified by source, that no arm trained
-on, and every arm shares the corpus, the smoothing constants, the shared prior
-and the seeds. `python3 summarize.py` prints these tables back out of
+on; every arm shares the corpus, the smoothing constants, the shared prior and
+the seeds. `python3 summarize.py` prints these tables back out of
 `results/*.json`.
 
-(no results/main_results.json - run `make main`)
+| arm | bits/char (held out) | nodes | live | purity | nmi |
+|---|---|---|---|---|---|
+| `single` - one radix tree, no filter | **2.786** ± 0.012 | 34,317 | 1.0 | 0.250 | 0.000 |
+| `monotone` - tanh units, same knobs | **2.831** ± 0.009 | 35,346 | 3.0 | 0.433 | 0.276 |
+| `unbalanced` - no load pressure | **2.831** ± 0.040 | 35,862 | 3.0 | 0.488 | 0.329 |
+| `deep-oracle` - oracle, deep shared prior | **2.873** ± 0.005 | 38,142 | 4.0 | 1.000 | 1.000 |
+| `oracle` - routed by the true source | **2.873** ± 0.005 | 38,142 | 4.0 | 1.000 | 1.000 |
+| argmax | **2.887** ± 0.057 | 36,846 | 3.7 | 0.473 | 0.305 |
+| `deep` - learned, deep shared prior | **2.906** ± 0.119 | 36,236 | 3.0 | 0.388 | 0.178 |
+| **`learned`** - the architecture | **2.908** ± 0.007 | 37,458 | 3.7 | 0.415 | 0.167 |
+| `fixedwave` - only the projection learns | **3.088** ± 0.138 | 39,419 | 4.0 | 0.408 | 0.130 |
+| `frozen` - calibrated random filter | **3.132** ± 0.067 | 40,320 | 4.0 | 0.465 | 0.180 |
+| frozen-argmax | **3.143** ± 0.009 | 40,448 | 4.0 | 0.500 | 0.219 |
+| `roundrobin` - split at random | **3.346** ± 0.003 | 43,915 | 4.0 | 0.331 | 0.021 |
 
-The ordering is stable across seeds. **`learned` beats `frozen`** — the same
-filter, drawn the same way, differing only in whether the refilter step is
-allowed to move it — which is the control that says learning the filter is
-worth something. **`roundrobin` is the worst arm**, so the gain is routing and
-not merely splitting. And **`single` beats `oracle`**: a bank with a *perfect*
-router, told the answer, still loses to one tree at this depth and this size.
-Splitting a radix tree's corpus costs every expert data and costs the bank the
-prefixes the sources share, and at 58k characters that costs more than knowing
-the register is worth.
+800 segments / 58389 characters, alphabet 101, depth 5, 4 addresses, 3 seeds.
+
+**`learned` beats `frozen`** (2.908 against 3.132) — the same filter, drawn the
+same way, differing only in whether the refilter step may move it. **`frozen`
+beats `roundrobin`** (3.132 against 3.346) — so even an unlearned filter routes
+better than chance, because a random projection of a character histogram is
+already correlated with the register. And **`single` beats `oracle`**: a bank
+with a perfect router, told the answer, still loses to one tree here, because
+splitting the corpus costs every expert data and costs the bank the prefixes
+the sources share.
+
+The ablations are more interesting than the headline:
+
+| control | what it removes | costs |
+|---|---|---|
+| `fixedwave` | the wave's four parameters (only `v` learns) | **0.18 bits** — more than learning the projection is worth |
+| `frozen` | all of layer 1's learning | 0.22 bits |
+| `monotone` | the periodicity (tanh units, same knobs) | **−0.08 bits — removing it *helps*** |
+| `unbalanced` | the load pressure on crowded addresses | **−0.08 bits — removing it helps too**, and it is what keeps addresses alive |
+| `deep` | nothing; it deepens the shared prior | 0.00 bits — neutral, as §5.3 predicts |
 
 ### What the one-hop rule is worth
 
-(no results/baseline_results.json - run `make baseline`)
+| arm | bits/char (held out) | nodes | live | purity | nmi |
+|---|---|---|---|---|---|
+| `counts` - one tree, **nothing learned** | **2.614** ± 0.000 | 34,317 | 1.0 | 0.250 | 0.000 |
+| `counts-oracle` - routed by source, nothing learned | **2.740** ± 0.000 | 38,142 | 4.0 | 1.000 | 1.000 |
+| `single` - one radix tree, no filter | **2.786** ± 0.012 | 34,317 | 1.0 | 0.250 | 0.000 |
+| `oracle` - routed by the true source | **2.873** ± 0.005 | 38,142 | 4.0 | 1.000 | 1.000 |
+
+800 segments / 58389 characters, alphabet 101, depth 5, 4 addresses, 3 seeds.
 
 Nothing is learned in the `counts` arms: the branch probabilities are relative
-traversal counts, the trees are otherwise identical, and each run takes about a
-second against forty. They win by 0.14–0.18 bits/char. Two conclusions, each
-confirmed twice: **one tree beats four under either scoring rule**, so the
-routing result does not depend on the learning rule; and **the learning rule
-costs bits** on this task at this scale.
+traversal counts, the trees are otherwise identical. They win by 0.17 bits/char
+unrouted and 0.13 routed.
+Two conclusions, each confirmed twice: **one tree beats four under either
+scoring rule**, so the routing result does not depend on the learning rule; and
+**the learning rule costs bits** on this task at this scale.
 
-(no results/epochs_results.json - run `make epochs`)
+It is not a representational limit. The parent's activation multiplies every
+sibling equally, so it is an inverse temperature, and `w_c · f_c` is a free
+per-child logit — `w_c f_c = (log p_c)/f_p` reproduces any distribution exactly.
+So the gap is optimisation, and the next table is how much of it training
+closes:
+
+| branch probabilities | epochs | train bits/char | held-out bits/char |
+|---|---|---|---|
+| relative counts, nothing learned | — | 0.872 | **2.614** ± 0.000 |
+| the one-hop rule | 1 | 1.066 | 2.842 ± 0.004 |
+| the one-hop rule | 3 | 1.022 | 2.786 ± 0.012 |
+| the one-hop rule | 10 | 0.977 | 2.726 ± 0.011 |
+| the one-hop rule | 30 | 0.936 | 2.677 ± 0.003 |
+
+**Under-trained, not over-fitted.** Counting has the lower *training* loss too
+(0.872 against 1.022), and every extra epoch moves the rule towards it from
+above without reaching it: ten times the training buys 0.11 bits and still
+leaves 0.06 on the table. A rule that gets a worse answer than counting, more
+slowly, is doing nothing here that counting does not — which is worth knowing
+about a rule this repository uses everywhere.
 
 ### Context depth — where routing is worth something
 
-(no results/depth_results.json - run `make depth`)
+| depth | `single` | `oracle` | `learned` | `argmax` | `frozen` | best |
+|---|---|---|---|---|---|---|
+| 2 | 3.517 | **3.320** | 3.618 | 3.516 | 3.684 | `oracle` |
+| 3 | 2.972 | **2.958** | 3.110 | 2.978 | 3.326 | `oracle` |
+| 4 | 2.814 | 2.878 | **2.807** | 2.849 | 3.239 | `learned` |
+| 5 | **2.772** | 2.867 | 2.898 | 2.960 | 3.225 | `single` |
+| 6 | **2.777** | 2.902 | 2.930 | 2.893 | 3.237 | `single` |
 
 This is the mechanism, and it is monotone. At depth 2 a tree sees two
 characters of context, which is not enough to tell Go from Python, and being
-*told* the register is worth 0.24 bits/char. By depth 4 the tree has worked it
-out for itself and the same knowledge is worth less than the data it costs. A
-router buys context; if the model already has the context, the router is paying
-for something it owns.
+told the register is worth 0.20 bits/char. By depth 5 the tree has worked it
+out for itself and the same knowledge costs more than it is worth. Depth 4 is
+the crossing, and it is the one place the **learned** filter is the best arm in
+the table.
 
 ### Corpus size — the other boundary
 
-(no results/scale_results.json - run `make scale`)
+| segments per source | `single` | `oracle` | `learned` | `argmax` | best |
+|---|---|---|---|---|---|
+| 100 (28,990 chars) | **3.032** | 3.140 | 3.142 | 3.222 | `single` |
+| 200 (58,389 chars) | **2.772** | 2.867 | 2.898 | 2.960 | `single` |
+| 400 (115,475 chars) | **2.426** | 2.432 | 2.626 | 2.488 | `single` |
+| 800 (232,105 chars) | 2.234 | **2.220** | 2.235 | 2.303 | `oracle` |
 
 Splitting costs every expert data, so the bank's penalty should shrink as there
-is more of it, and it does: the oracle's deficit narrows with every step and
-turns into a win. The learned arms do not follow, because their problem is not
-data.
+is more of it. It does, monotonically: the oracle's deficit runs 0.108, 0.095,
+0.006 and then **−0.015** — at 232k characters a source-perfect router finally
+beats one tree, and the learned filter draws level with it (2.235 against
+2.234).
 
 ### Where the routing gap is
 
-(no results/probe_results.json - run `make probe`)
+| measurement | purity | nmi | median \|u\| after | past first peak | mean `b` |
+|---|---|---|---|---|---|
+| the target layer 2 hands back (perfect experts) | **1.000** | **1.000** | — | — | — |
+| supervised ceiling, sign code (best of 24 assignments) | 0.693 | 0.478 | 0.63 | 30.0% | 0.230 |
+| supervised ceiling, argmax code, sine | 0.723 | 0.542 | 0.41 | 13.0% | 0.176 |
+| supervised ceiling, argmax code, sine, wave held fixed | 0.292 | 0.008 | 143.54 | 100.0% | 0.333 |
+| supervised ceiling, argmax code, tanh | 0.707 | 0.524 | 1.05 | 37.2% | 0.295 |
+| supervised ceiling, argmax code, tanh, wave held fixed | 0.716 | 0.535 | 3.12 | 75.6% | 0.333 |
+
+| one unit, supervised, asked for… | sine | tanh |
+|---|---|---|
+| `go + json` against the rest | 0.711 | 0.711 |
+| `go + prose` against the rest | 0.797 | 0.816 |
+| `go + python` against the rest | 0.636 | 0.733 |
+| `go` alone against the rest | 0.667 | — |
+| `json` alone against the rest | 0.967 | — |
+| `prose` alone against the rest | 0.783 | — |
+| `python` alone against the rest | 0.803 | — |
 
 Four supervised measurements — things the architecture is never allowed to do —
 that say where the gap between the learned router and the oracle sits.
 
 **The signal is perfect.** Give the bank true experts and ask which one prices
-each segment cheapest: it is the segment's own register, for every single
-segment, NMI 1.000. That is exactly the target the refilter step chases, so
-nothing is wrong with what layer 2 tells layer 1.
+each segment cheapest: it is the segment's own register, for every one of the
+640 training segments, NMI 1.000. Nothing is wrong with what layer 2 tells
+layer 1.
 
-**Layer 1 is the bottleneck, and it is short of the answer twice over.** Fitted
-*directly on the labels*, the filter reaches 0.71–0.74 purity, not 1.0 — the
-17-number histogram and one unit per question do not contain the partition.
-And the unsupervised rule reaches about 0.5, well short of its own supervised
-ceiling. Roughly half of the gap is representation and half is the rule.
+**Layer 1 is the bottleneck, and it falls short twice.** Fitted *directly on
+the labels*, the filter reaches 0.69–0.72 purity, not 1.0 — a 17-number
+histogram and one unit per question do not contain the partition. Unsupervised
+it reaches 0.42–0.49. Roughly half the gap is representation and half is the
+rule that has to find it without labels.
 
-**A periodic unit is the wrong shape for a gate.** A sine filter with its wave
-held fixed scores 0.245 against a chance of 0.25 — it cannot be fitted at all —
-while the same filter with `a, b, h, k` free reaches 0.697, and a *monotone*
-unit with its wave fixed is the best router of the four at 0.736. The mechanism
-is measured, not inferred: a hinge raises a response by pushing the projection,
-and the wave's argument `|u| = |b(z − h)|` goes from a median of 0.28 at
-initialisation to **100.1** — **98.3%** of the units end up past their first
-peak, where a sine is coming back down and only a monotone unit is still going
-up. The tanh ends up past its first peak too (73.8%), and does not care: past
-the peak it is merely saturated, and an argmax only reads the ordering.
+**A periodic unit is the wrong shape for a gate, and the measurement says why.**
+A hinge raises a response by pushing the projection, so the wave's argument
+`|u| = |b(z − h)|` grows. With the wave frozen it grows to a median of **143.5
+radians — 100% of the units past their first peak**, twenty-two periods out,
+and the filter scores 0.243 against a chance of 0.25: it cannot be fitted at
+all. A tanh under the identical rule ends up past its own first peak too
+(75.6%) and does not care, because saturation preserves an ordering and
+periodicity does not — it scores 0.716. With the wave learnable the sine
+recovers to 0.723, and the parameter that recovers it is `b`, which falls from
+0.333 to **0.176**: what learning the wave mostly does in layer 1 is *flatten
+it* until it is monotone over the range the data occupies.
 
-What learning the wave mostly does in layer 1 is **flatten it**: `b` falls from
-0.333 to 0.177, lengthening the period until the unit is monotone over the range
-the data occupies, and the share past the first peak drops to 12.2%.
-
-That is the same trap `Research/Insights.md` §24 names from the other end. There,
-`b = 1/3` is too *low* — it puts every neuron in the sine's linear region and a
-deep network collapses to a linear one. Here the same `b = 1/3` is what lets a
-hinge push a gate right around the circle. One frequency, two opposite failures,
-and the parameter that fixes both is the one the design already makes learnable.
+That is `Research/Insights.md` §24's trap from the other end. There, `b = 1/3`
+is too *low* — it puts every neuron in the sine's linear region and a deep
+network collapses to a linear one. Here the same `b = 1/3` is what lets a hinge
+push a gate right around the circle. One frequency, two opposite failures, and
+the parameter that fixes both is the one the design already makes learnable.
 
 ### The refilter step's hinge passes
 
-(no results/passes_results.json - run `make passes`)
+| hinge passes | bits/char (held out) | nmi | live addresses | seconds |
+|---|---|---|---|---|
+| 1 | 2.898 ± 0.019 | 0.194 | 3.3 | 125 |
+| 2 | **2.812** ± 0.037 | 0.170 | 2.3 | 136 |
+| 4 (default) | 2.908 ± 0.007 | 0.167 | 3.7 | 123 |
+| 8 | 2.955 ± 0.124 | 0.234 | 3.0 | 122 |
 
 The pricing half of the refilter step is expensive and the hinge half is nearly
 free, so running the hinge more than once over the same prices costs almost
 nothing — which is an argument for more passes, not a measurement. The
-measurement says it barely matters. The default is 4 because the argument is
-still sound, and this table is here because the argument is not evidence.
+measurement finds no reliable effect: two passes score best, eight worst, and
+the spread between seeds (up to ±0.124) is larger than the spread between
+settings. The default stays at 4, and this table is here because that default
+was chosen by an argument rather than by evidence.
 
 ## How it works
 
@@ -234,20 +326,21 @@ carries `|a·b|` beside it.
 
 ## What it does not establish
 
-One corpus, cut out of this repository; four registers; 58k to 233k characters;
+One corpus, cut out of this repository; four registers; 29k to 232k characters;
 character-level prediction; one segmentation; 4 addresses in most runs; depths
-2 to 6; three seeds. Nothing here says anything about routing at other
-granularities (per character, per document), about more than four registers,
+2 to 6; three seeds on the headline table and one on the sweeps. Nothing here
+says anything about routing at other granularities (per character, per
+document), about more than four registers,
 about a learned encoder in front of the filter, or about soft routing — a
 softmax over experts would make the whole bank differentiable, and is the
 obvious next thing to try, but it is not a *filter* and so it is not this
 design.
 
 The bits/char are a measurement of these models on this text, not of anything's
-capability in general: a byte-level n-gram baseline with proper discounting
-would beat every arm here, and that is not what any of these numbers are for.
-What they are for is the comparison *between* the arms, which share every
-constant, every smoothing rule and every seed.
+capability in general — the `counts` arm, which is an interpolated n-gram model
+with no discounting worth the name, already beats every trained arm here. What
+they are for is the comparison *between* the arms, which share every constant,
+every smoothing rule and every seed.
 
 ## Contents
 
@@ -263,7 +356,7 @@ constant, every smoothing rule and every seed.
 | `fbradix/check.py` | finite-difference checks of all three learning rules |
 | `fbradix/cli.py` | `python3 -m fbradix.cli <command>` |
 | `summarize.py` | the tables above, read back out of `results/*.json` |
-| `data/`, `results/`, `tests/` | the corpus snapshot, the numbers, and 27 tests |
+| `data/`, `results/`, `tests/` | the corpus snapshot, the numbers, and 28 tests |
 
 ## Where it sits
 

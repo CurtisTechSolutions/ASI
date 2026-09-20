@@ -83,8 +83,8 @@ structure, and the ``scale`` and ``depth`` sweeps are where that trade is
 priced."""
 
 
-def make_router(arm: str, bits: int, labels, seed: int):
-    """One router per arm name."""
+def make_router(arm: str, bits: int, labels, seed: int, **kw):
+    """One router per arm name; ``kw`` reaches the :class:`FilterRouter` arms."""
     arm = COUNT_ARMS.get(arm, arm)
     if arm == "single":
         return ConstantRouter()
@@ -93,22 +93,22 @@ def make_router(arm: str, bits: int, labels, seed: int):
     if arm == "oracle":
         return OracleRouter(labels)
     if arm == "frozen":
-        return FilterRouter(bits=bits, seed=seed, frozen=True)
+        return FilterRouter(bits=bits, seed=seed, frozen=True, **kw)
     if arm == "argmax":
         # the same number of experts, one unit each instead of log2 of them
-        return FilterRouter(bits=1 << bits, seed=seed, code="argmax")
+        return FilterRouter(bits=1 << bits, seed=seed, code="argmax", **kw)
     if arm == "frozen-argmax":
-        return FilterRouter(bits=1 << bits, seed=seed, code="argmax", frozen=True)
+        return FilterRouter(bits=1 << bits, seed=seed, code="argmax", frozen=True, **kw)
     if arm == "learned":
-        return FilterRouter(bits=bits, seed=seed)
+        return FilterRouter(bits=bits, seed=seed, **kw)
     if arm == "monotone":
-        return FilterRouter(bits=bits, seed=seed, kind="monotone")
+        return FilterRouter(bits=bits, seed=seed, kind="monotone", **kw)
     if arm == "unbalanced":
-        return FilterRouter(bits=bits, seed=seed, balance=0.0)
+        return FilterRouter(bits=bits, seed=seed, balance=0.0, **kw)
     if arm == "fixedwave":
-        return FilterRouter(bits=bits, seed=seed, act_rate=0.0)
+        return FilterRouter(bits=bits, seed=seed, act_rate=0.0, **kw)
     if arm == "deep":
-        return FilterRouter(bits=bits, seed=seed)
+        return FilterRouter(bits=bits, seed=seed, **kw)
     if arm == "deep-oracle":
         return OracleRouter(labels)
     raise ValueError(f"unknown arm {arm!r} (have {ARMS})")
@@ -187,10 +187,11 @@ def run_arm(
     epochs: int = 3,
     lr: float = 0.5,
     seed: int = 0,
+    **router_kw,
 ) -> dict:
     """Fit one arm and measure it on the held-out segments."""
     labels = [s["source"] for s in train]
-    router = make_router(arm, bits, labels, seed)
+    router = make_router(arm, bits, labels, seed, **router_kw)
     bank = FilteredRadixBank(router, depth=depth, alphabet=alphabet, seed=seed,
                              prior_depth=depth if arm in DEEP else 1,
                              scores="counts" if arm in COUNT_ARMS else "learned")
@@ -231,65 +232,104 @@ def make_corpus(per_source: int, seed: int = 0):
     return data, train, test, corpus.alphabet(data)
 
 
+# -- running the arms ---------------------------------------------------------
+
+def run_key(r: dict) -> tuple:
+    """What makes a run unique inside one sweep file - the resume key."""
+    return (r.get("arm"), r.get("seed"), r.get("depth"), r.get("per_source"),
+            r.get("passes"), r.get("epochs"))
+
+
+def _task(args):
+    """One run; top-level so a process pool can pickle it."""
+    arm, train, test, alpha, kw, extra = args
+    r = run_arm(arm, train, test, alpha, **kw)
+    r.update(extra)
+    return r
+
+
+def execute(tasks, jobs: int, log, fmt) -> list[dict]:
+    """Run the tasks, in a process pool when ``jobs > 1``.
+
+    Every run is independent and seeded, so the pool changes the wall clock and
+    nothing else; results come back in the order the tasks were listed, which
+    keeps the logs comparable between a parallel run and a serial one.
+    """
+    if not tasks:
+        return []
+    if jobs and jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(_task, tasks))
+    else:
+        results = [_task(t) for t in tasks]
+    for r in results:
+        log(fmt(r))
+    return results
+
+
 # -- sweeps --------------------------------------------------------------------
 
-def sweep_main(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epochs=3, log=print) -> dict:
+def sweep_main(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epochs=3,
+               log=print, jobs=1, done=frozenset(), arms=ARMS) -> dict:
     """Every arm, every seed, one corpus and one depth: the headline table."""
     data, train, test, alpha = make_corpus(per_source)
     log(f"# main: {len(train)} train / {len(test)} test segments, alphabet {alpha}, "
         f"{sum(len(s['text']) for s in data)} chars, {1 << bits} addresses, depth {depth}")
-    runs = []
-    for arm in ARMS:
-        for seed in seeds:
-            r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
-                        rounds=rounds, epochs=epochs, seed=seed)
-            runs.append(r)
-            log(f"  {arm:11s} seed={seed} bits/char={r['test_bits_per_char']:.4f} "
-                f"nodes={r['nodes']:6d} live={r['live_experts']} "
-                f"purity={r['purity']:.3f} nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
+    kw = dict(bits=bits, depth=depth, rounds=rounds, epochs=epochs)
+    tasks = [(arm, train, test, alpha, dict(kw, seed=seed), {})
+             for arm in arms for seed in seeds
+             if (arm, seed, depth, None, None, None) not in done]
+    runs = execute(tasks, jobs, log, lambda r:
+                   f"  {r['arm']:13s} seed={r['seed']} "
+                   f"bits/char={r['test_bits_per_char']:.4f} nodes={r['nodes']:6d} "
+                   f"live={r['live_experts']} purity={r['purity']:.3f} "
+                   f"nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
     return {"sweep": "main", "corpus": corpus.summarise(data), "bits": bits,
             "depth": depth, "runs": runs}
 
 
 def sweep_depth(per_source=200, bits=2, depths=(2, 3, 4, 5, 6),
                 arms=("single", "oracle", "learned", "argmax", "frozen"),
-                seed=0, rounds=3, epochs=3, log=print) -> dict:
+                seed=0, rounds=3, epochs=3, log=print, jobs=1, done=frozenset()) -> dict:
     """Does routing matter more when the tree has less context of its own?"""
     data, train, test, alpha = make_corpus(per_source)
     log(f"# depth sweep: depths {depths}, arms {arms}")
-    runs = []
-    for depth in depths:
-        for arm in arms:
-            r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
-                        rounds=rounds, epochs=epochs, seed=seed)
-            runs.append(r)
-            log(f"  depth={depth} {arm:9s} bits/char={r['test_bits_per_char']:.4f} "
-                f"nodes={r['nodes']:6d} nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
+    tasks = [(arm, train, test, alpha,
+              dict(bits=bits, depth=d, rounds=rounds, epochs=epochs, seed=seed), {})
+             for d in depths for arm in arms
+             if (arm, seed, d, None, None, None) not in done]
+    runs = execute(tasks, jobs, log, lambda r:
+                   f"  depth={r['depth']} {r['arm']:9s} "
+                   f"bits/char={r['test_bits_per_char']:.4f} nodes={r['nodes']:6d} "
+                   f"nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
     return {"sweep": "depth", "corpus": corpus.summarise(data), "bits": bits, "runs": runs}
 
 
 def sweep_scale(sizes=(100, 200, 400, 800), bits=2, depth=5,
                 arms=("single", "oracle", "learned", "argmax"), seed=0,
-                rounds=3, epochs=3, log=print) -> dict:
+                rounds=3, epochs=3, log=print, jobs=1, done=frozenset()) -> dict:
     """Splitting costs every expert data - does the cost go away with more text?"""
     log(f"# scale sweep: {sizes} segments per source, arms {arms}")
-    runs = []
+    tasks = []
     for size in sizes:
         data, train, test, alpha = make_corpus(size)
         chars = sum(len(s["text"]) for s in data)
         for arm in arms:
-            r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
-                        rounds=rounds, epochs=epochs, seed=seed)
-            r["per_source"] = size
-            r["corpus_chars"] = chars
-            runs.append(r)
-            log(f"  n={size:4d} ({chars:6d} chars) {arm:9s} bits/char={r['test_bits_per_char']:.4f} "
-                f"nodes={r['nodes']:6d} nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
+            if (arm, seed, depth, size, None, None) in done:
+                continue
+            tasks.append((arm, train, test, alpha,
+                          dict(bits=bits, depth=depth, rounds=rounds, epochs=epochs, seed=seed),
+                          {"per_source": size, "corpus_chars": chars}))
+    runs = execute(tasks, jobs, log, lambda r:
+                   f"  n={r['per_source']:4d} ({r['corpus_chars']:6d} chars) {r['arm']:9s} "
+                   f"bits/char={r['test_bits_per_char']:.4f} nodes={r['nodes']:6d} "
+                   f"nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
     return {"sweep": "scale", "bits": bits, "depth": depth, "runs": runs}
 
 
 def sweep_epochs(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=1,
-                 values=(1, 3, 10, 30), log=print) -> dict:
+                 values=(1, 3, 10, 30), log=print, jobs=1, done=frozenset()) -> dict:
     """Is the one-hop rule under-trained, or over-trained, against counting?
 
     The ``baseline`` sweep says a tree whose branches are relative traversal
@@ -302,24 +342,26 @@ def sweep_epochs(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=1,
     """
     data, train, test, alpha = make_corpus(per_source)
     log(f"# epochs: the one-hop rule against counting, depth {depth}")
-    runs = []
+    tasks = []
     for arm, values_for in (("counts", (0,)), ("single", values)):
         for ep in values_for:
             for seed in seeds:
-                r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
-                            rounds=rounds, epochs=max(1, ep), seed=seed)
-                r["epochs"] = ep
-                r["arm"] = arm
-                runs.append(r)
-                log(f"  {arm:7s} epochs={ep:2d} seed={seed} "
-                    f"bits/char={r['test_bits_per_char']:.4f} "
-                    f"train={r['train_bits_per_char']:.4f} {r['seconds']:.0f}s")
+                if (arm, seed, depth, None, None, ep) in done:
+                    continue
+                tasks.append((arm, train, test, alpha,
+                              dict(bits=bits, depth=depth, rounds=rounds,
+                                   epochs=max(1, ep), seed=seed),
+                              {"epochs": ep, "arm": arm}))
+    runs = execute(tasks, jobs, log, lambda r:
+                   f"  {r['arm']:7s} epochs={r['epochs']:2d} seed={r['seed']} "
+                   f"bits/char={r['test_bits_per_char']:.4f} "
+                   f"train={r['train_bits_per_char']:.4f} {r['seconds']:.0f}s")
     return {"sweep": "epochs", "corpus": corpus.summarise(data), "bits": bits,
             "depth": depth, "runs": runs}
 
 
 def sweep_passes(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epochs=3,
-                 values=(1, 2, 4, 8), log=print) -> dict:
+                 values=(1, 2, 4, 8), log=print, jobs=1, done=frozenset()) -> dict:
     """How many hinge passes the refilter step should take.
 
     The pricing half of :meth:`FilterRouter.learn` is expensive and the hinge
@@ -331,31 +373,21 @@ def sweep_passes(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epo
     """
     data, train, test, alpha = make_corpus(per_source)
     log(f"# passes: hinge passes per refilter step, depth {depth}")
-    runs = []
-    for n in values:
-        for seed in seeds:
-            router = FilterRouter(bits=bits, seed=seed, passes=n)
-            bank = FilteredRadixBank(router, depth=depth, alphabet=alpha, seed=seed)
-            t0 = time.time()
-            history = bank.fit(train, rounds=rounds, epochs=epochs, test=test)
-            routes = bank.assign(test)
-            labels = [s["source"] for s in test]
-            r = {
-                "arm": f"passes={n}", "passes": n, "seed": seed, "depth": depth,
-                "test_bits_per_char": bank.bits_per_char(test, routes)[0],
-                "purity": purity(routes, labels), "nmi": nmi(routes, labels),
-                "seconds": time.time() - t0, "history": history,
-                **bank.size_stats(), **bank.load_stats(bank.routes),
-            }
-            runs.append(r)
-            log(f"  passes={n:2d} seed={seed} bits/char={r['test_bits_per_char']:.4f} "
-                f"live={r['live_experts']} nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
+    tasks = [("learned", train, test, alpha,
+              dict(bits=bits, depth=depth, rounds=rounds, epochs=epochs, seed=seed, passes=n),
+              {"passes": n})
+             for n in values for seed in seeds
+             if ("learned", seed, depth, None, n, None) not in done]
+    runs = execute(tasks, jobs, log, lambda r:
+                   f"  passes={r['passes']:2d} seed={r['seed']} "
+                   f"bits/char={r['test_bits_per_char']:.4f} live={r['live_experts']} "
+                   f"nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
     return {"sweep": "passes", "corpus": corpus.summarise(data), "bits": bits,
             "depth": depth, "runs": runs}
 
 
 def sweep_baseline(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epochs=3,
-                   log=print) -> dict:
+                   log=print, jobs=1, done=frozenset()) -> dict:
     """What is the one-hop rule worth?  The same trees, with nothing learned.
 
     ``counts`` and ``counts-oracle`` keep every other part of the architecture
@@ -365,14 +397,14 @@ def sweep_baseline(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, e
     """
     data, train, test, alpha = make_corpus(per_source)
     log(f"# baseline: what the one-hop rule is worth, depth {depth}")
-    runs = []
-    for arm in ("single", "counts", "oracle", "counts-oracle"):
-        for seed in seeds:
-            r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
-                        rounds=rounds, epochs=epochs, seed=seed)
-            runs.append(r)
-            log(f"  {arm:14s} seed={seed} bits/char={r['test_bits_per_char']:.4f} "
-                f"nodes={r['nodes']:6d} {r['seconds']:.0f}s")
+    tasks = [(arm, train, test, alpha,
+              dict(bits=bits, depth=depth, rounds=rounds, epochs=epochs, seed=seed), {})
+             for arm in ("single", "counts", "oracle", "counts-oracle") for seed in seeds
+             if (arm, seed, depth, None, None, None) not in done]
+    runs = execute(tasks, jobs, log, lambda r:
+                   f"  {r['arm']:14s} seed={r['seed']} "
+                   f"bits/char={r['test_bits_per_char']:.4f} nodes={r['nodes']:6d} "
+                   f"{r['seconds']:.0f}s")
     return {"sweep": "baseline", "corpus": corpus.summarise(data), "bits": bits,
             "depth": depth, "runs": runs}
 
@@ -607,6 +639,16 @@ def main(argv=None) -> int:
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--out", default=RESULTS)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="run this many arms at once (every run is independent)")
+    ap.add_argument("--arms", default="",
+                    help="comma-separated subset of the arms (main sweep); "
+                         "with --jobs and the resume, this is how a long sweep "
+                         "is run in several sittings")
+    ap.add_argument("--sizes", default="", help="comma-separated corpus sizes (scale sweep)")
+    ap.add_argument("--depths", default="", help="comma-separated depths (depth sweep)")
+    ap.add_argument("--fresh", action="store_true",
+                    help="ignore the runs already in results/ instead of resuming")
     args = ap.parse_args(argv)
 
     seeds = tuple(range(args.seeds))
@@ -614,6 +656,10 @@ def main(argv=None) -> int:
     sizes = (100, 200, 400, 800)
     epoch_values = (1, 3, 10, 30)
     pass_values = (1, 2, 4, 8)
+    if args.sizes:
+        sizes = tuple(int(v) for v in args.sizes.split(","))
+    if args.depths:
+        depths = tuple(int(v) for v in args.depths.split(","))
     if args.quick:
         seeds = (0,)
         args.per_source = 60
@@ -633,9 +679,43 @@ def main(argv=None) -> int:
 
     started = time.time()
     out: dict[str, dict] = {}
+
+    def already(name: str) -> tuple[list, frozenset]:
+        """Runs already in ``results/<name>_results.json``, unless --fresh.
+
+        A sweep is a list of independent runs, so one that was interrupted (or
+        that a new arm has been added to) does not have to be repeated: the
+        runs that are already there are kept and only the missing ones are
+        computed.
+        """
+        if args.fresh:
+            return [], frozenset()
+        path = os.path.join(args.out, f"{name}_results.json")
+        if not os.path.exists(path):
+            return [], frozenset()
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        runs = (doc.get(name) or {}).get("runs", [])
+        if runs:
+            log(f"# resuming {name}: {len(runs)} runs already measured")
+        return runs, frozenset(run_key(r) for r in runs)
+
+    def merge(name: str, fresh: dict, old: list) -> dict:
+        """Old runs first, then the new ones, de-duplicated by key."""
+        seen, runs = set(), []
+        for r in old + fresh["runs"]:
+            k = run_key(r)
+            if k not in seen:
+                seen.add(k)
+                runs.append(r)
+        fresh["runs"] = runs
+        return fresh
     if args.sweep in ("all", "main"):
-        out["main"] = sweep_main(args.per_source, args.bits, args.depth, seeds,
-                                 args.rounds, args.epochs, log)
+        old, done = already("main")
+        arms = tuple(a.strip() for a in args.arms.split(",") if a.strip()) or ARMS
+        out["main"] = merge("main", sweep_main(args.per_source, args.bits, args.depth, seeds,
+                                               args.rounds, args.epochs, log,
+                                               jobs=args.jobs, done=done, arms=arms), old)
         log("")
         log("  arm          bits/char      nodes  live  purity    nmi")
         for row in summarise_main(out["main"]):
@@ -643,28 +723,38 @@ def main(argv=None) -> int:
                 f"{row['nodes']:8.0f} {row['live']:5.1f} {row['purity']:6.3f} {row['nmi']:6.3f}")
         log("")
     if args.sweep in ("all", "depth"):
-        out["depth"] = sweep_depth(args.per_source, args.bits, depths, seed=0,
-                                   rounds=args.rounds, epochs=args.epochs, log=log)
+        old, done = already("depth")
+        out["depth"] = merge("depth", sweep_depth(
+            args.per_source, args.bits, depths, seed=0, rounds=args.rounds,
+            epochs=args.epochs, log=log, jobs=args.jobs, done=done), old)
         log("")
     if args.sweep in ("all", "epochs"):
-        out["epochs"] = sweep_epochs(args.per_source, args.bits, args.depth, seeds,
-                                     values=epoch_values, log=log)
+        old, done = already("epochs")
+        out["epochs"] = merge("epochs", sweep_epochs(
+            args.per_source, args.bits, args.depth, seeds, values=epoch_values, log=log,
+            jobs=args.jobs, done=done), old)
         log("")
     if args.sweep in ("all", "passes"):
-        out["passes"] = sweep_passes(args.per_source, args.bits, args.depth, seeds,
-                                     args.rounds, args.epochs, values=pass_values, log=log)
+        old, done = already("passes")
+        out["passes"] = merge("passes", sweep_passes(
+            args.per_source, args.bits, args.depth, seeds, args.rounds, args.epochs,
+            values=pass_values, log=log, jobs=args.jobs, done=done), old)
         log("")
     if args.sweep in ("all", "baseline"):
-        out["baseline"] = sweep_baseline(args.per_source, args.bits, args.depth, seeds,
-                                         args.rounds, args.epochs, log)
+        old, done = already("baseline")
+        out["baseline"] = merge("baseline", sweep_baseline(
+            args.per_source, args.bits, args.depth, seeds, args.rounds, args.epochs, log,
+            jobs=args.jobs, done=done), old)
         log("")
     if args.sweep in ("all", "probe"):
         log("# probe: where the routing gap is")
         out["probe"] = probe(args.per_source, args.bits, args.depth, args.epochs, log=log)
         log("")
     if args.sweep in ("all", "scale"):
-        out["scale"] = sweep_scale(sizes, args.bits, args.depth, seed=0,
-                                   rounds=args.rounds, epochs=args.epochs, log=log)
+        old, done = already("scale")
+        out["scale"] = merge("scale", sweep_scale(
+            sizes, args.bits, args.depth, seed=0, rounds=args.rounds,
+            epochs=args.epochs, log=log, jobs=args.jobs, done=done), old)
         log("")
     out["meta"] = {
         "seconds": time.time() - started,

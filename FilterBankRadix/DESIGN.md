@@ -33,7 +33,7 @@ Directory: `FilterBankRadix/`. Python package: `fbradix`. Python 3.11+,
 FilterBankRadix/
   DESIGN.md              this file — the contract
   README.md              what it measured, including what failed
-  Makefile               make test | check | demo | experiment | quick | corpus
+  Makefile               make test | check | demo | experiment | quick | corpus | …
   summarize.py           the README's tables, read back out of results/*.json
   data/corpus.jsonl      the committed corpus snapshot (with a digest)
   results/               the numbers, committed beside the code that made them
@@ -45,10 +45,10 @@ FilterBankRadix/
     tree.py              LAYER 2: the radix context tree and the one-hop rule
     bank.py              the routers and the route/build/train/refilter loop
     corpus.py            the four-source corpus and the labels it is scored against
-    experiment.py        the arms, the metrics and the sweeps
-    check.py             finite-difference checks of both learning rules
+    experiment.py        the arms, the metrics, the sweeps and the probe
+    check.py             finite-difference checks of all three learning rules
     cli.py               python3 -m fbradix.cli <command>
-  tests/test_fbradix.py  25 tests, standard library, seconds
+  tests/test_fbradix.py  28 tests, standard library, seconds
 ```
 
 ---
@@ -134,10 +134,11 @@ owns a unit, and the partition never has to factor — at a cost of `K` units
 instead of `log2 K`.
 
 Measured (`make probe`, §9): supervised on the labels, the sign code tops out
-at 0.710 purity over the best of its 24 possible assignments, and the argmax
-code at 0.697 with the sine. Both are far above what the unsupervised rule
-reaches and far below the oracle's 1.000, which is what puts the gap in layer 1
-rather than in the signal.
+at 0.693 purity over the best of its 24 possible assignments, and the argmax
+code at 0.723 with the sine. Both are far above what the unsupervised rule
+reaches (0.42–0.49) and far below the oracle's 1.000, which is what puts the
+gap in layer 1 rather than in the signal. In the bank the two codes score 2.908
+and 2.887 bits/char — a difference inside the spread between seeds.
 
 ### 4.6 The argmax hinge
 
@@ -204,9 +205,11 @@ miss.
 load-bearing.** Folding only the deepest matching level is worse in both
 directions: the root's count is enormous, so `own` at the root is ≈ 1, and a
 backed-off prediction then drowns out both the levels above it and the shared
-prior. The product of `(1 − own)` down the chain is what stops that. Measured
-on the same corpus: 2.998 → 2.808 bits/char for one tree, and it is what makes
-a deep shared prior neutral instead of harmful (`README.md`, "what went wrong").
+prior. The product of `(1 − own)` down the chain is what stops that. Measured,
+on the corpus of the day and before it was frozen: 2.998 → 2.808 bits/char for
+one tree. It is also what makes a deep shared prior neutral instead of harmful
+— `deep` against `learned` and `deep-oracle` against `oracle` now differ by
+0.002 and 0.000 bits/char (`README.md`, "what went wrong first").
 
 ### 5.4 Training
 
@@ -326,12 +329,17 @@ address is done by pushing a response across a boundary, and a periodic
 response *wraps*: the gradient points the right way locally, but pushing harder
 carries the unit into the next lobe, where the answer is wrong again. With its
 wave held fixed, a sine filter cannot be fitted to an argmax address at all —
-0.245 supervised accuracy against a chance of 0.25 — while the same filter with
-`a, b, h, k` free reaches 0.697, because what learning the wave mostly does
-here is *flatten it* until it is monotone over the range the data occupies. The
-monotone unit with a fixed wave is the best router of the four (0.736). The
-periodicity that makes the sine a good *activation* (`Research/SineWaveActivationFunction.md`
-§6: it does not die along `x`) is what makes it an awkward *gate*.
+0.243 supervised accuracy against a chance of 0.25, with **100% of its units
+past their first peak**, a median of 143 radians out — while the same filter
+with `a, b, h, k` free reaches 0.723, because what learning the wave mostly
+does here is *flatten it* (`b` falls from 0.333 to 0.176) until it is monotone
+over the range the data occupies. A tanh with its wave frozen goes just as far
+out (75.6% past its own first peak) and does not care, because saturation
+preserves an ordering and periodicity does not: it scores 0.716. In the bank
+itself the tanh filter is the better router by 0.08 bits/char. The periodicity
+that makes the sine a good *activation*
+(`Research/SineWaveActivationFunction.md` §6: it does not die along `x`) is
+what makes it an awkward *gate*.
 
 The address is also, read as a binary number, a **radix-2 prefix over the
 units** — a tree of experts keyed by that prefix is the same structure as the
@@ -393,7 +401,7 @@ Every supervised fit runs `SUP_EPOCHS = 100` and is averaged over three seeds,
 and reports `|a·b|` beside its accuracy. Both are there because of a measurement
 that was wrong at 25 epochs: one split read 0.500, exactly chance, and the cause
 was a unit whose `|a·b|` had collapsed to 0.0100 — it had died and was answering
-a constant. At four times the epochs the same split reads 0.777. A ceiling has
+a constant. At four times the epochs the same split read 0.777. A ceiling has
 to be measured after the fit converges, and unit death has to be visible rather
 than silently lowering the number.
 

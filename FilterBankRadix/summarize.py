@@ -108,8 +108,13 @@ def table_by(doc: dict, key: str, label: str, fmt="{}") -> str:
     for v in values:
         got = [(a, cell[(v, a)]["test_bits_per_char"]) for a in arms if (v, a) in cell]
         best = min(got, key=lambda t: t[1])[0] if got else "-"
+        have = dict(got)
         cells = []
-        for a, b in got:
+        for a in arms:
+            if a not in have:
+                cells.append("—")          # not run at this point
+                continue
+            b = have[a]
             cells.append(f"**{b:.3f}**" if a == best else f"{b:.3f}")
         extra = cell.get((v, arms[0]))
         note = ""

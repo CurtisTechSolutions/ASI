@@ -26,7 +26,7 @@ Two details decide whether any of it works:
 
 **The shared prior.**  Every expert falls back to one shallow tree built over
 all of the training text.  Without it an empty address scores about 11 bits a
-character against a trained expert's 3, the counterfactual is swamped by that
+character against a trained expert's 3 (`README.md`, "what went wrong first"), the counterfactual is swamped by that
 constant, and the filter spends its updates avoiding a cliff rather than
 learning a boundary.  The same prior is attached in every arm, the single-tree
 baseline included, so it cannot flatter the bank.
@@ -71,9 +71,10 @@ FOLDS = 2
 
 An expert has *memorised* the segments it was built from, so asking "would
 another expert have done better on this one" of the segments that trained it
-answers no almost every time.  Measured: on training segments 99.4% to 100% of
-them are already at the cheapest expert and the mean advantage is 0.001 bits;
-on segments the experts never saw, 52.5% to 70.6% and 0.20 to 0.30 bits.  The
+answers no almost every time.  Measured over three seeds: on training segments 99.5% to
+100% of them are already at the cheapest expert and the mean advantage rounds
+to 0.000 bits; on segments the experts never saw, 53.1% to 70.0% and 0.21 to
+0.31 bits.  The
 first number is a property of memorisation and the second is the signal, so the
 filter is taught on prices it did not help produce: the training segments are
 split into folds, and each fold is priced under experts built without it."""
