@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from . import blame as blame_module
-from .encoding import WINDOW
+from .encoding import WINDOW, Encoding
 from .model import GraphModel, RadixNet
 from .negative import NegativeNet
 
@@ -70,8 +70,13 @@ class EvolveConfig:
     blatant_boost: float = 4.0
     """``fail_invert``: the largest learning-rate multiplier a failure can get."""
 
-    def validate(self) -> None:
-        """Raise ``ValueError`` for values the loop cannot run with."""
+    def validate(self, encoding: Encoding | None = None) -> None:
+        """Raise ``ValueError`` for values the loop cannot run with.
+
+        ``max_length`` is measured in the units of ``encoding`` (the default
+        one when none is given): a generation has to be able to hold one gram.
+        """
+        self._min_length = (encoding or Encoding()).n
         if self.blatant_mode not in BLATANT_MODES:
             raise ValueError(f"blatant_mode must be one of {', '.join(BLATANT_MODES)}, got {self.blatant_mode!r}")
         if not (self.blatant_margin >= 0):
@@ -82,8 +87,8 @@ class EvolveConfig:
             raise ValueError(f"samples must be >= 1, got {self.samples}")
         if self.real_per_generation < 1:
             raise ValueError(f"real_per_generation must be >= 1, got {self.real_per_generation}")
-        if self.max_length < WINDOW:
-            raise ValueError(f"max_length must be >= {WINDOW}, got {self.max_length}")
+        if self.max_length < self._min_length:
+            raise ValueError(f"max_length must be >= {self._min_length}, got {self.max_length}")
         if self.temperature < 0:
             raise ValueError(f"temperature must be >= 0, got {self.temperature}")
         if self.batch_size < 1:
@@ -105,15 +110,18 @@ class Evolver:
         negative: NegativeNet | None = None,
     ) -> None:
         self.config = EvolveConfig() if config is None else config
-        self.config.validate()
+        enc = generator.encoding
+        self.config.validate(enc)
         self.generator = generator
-        self.corpus = [t for t in corpus if isinstance(t, str) and len(t) >= WINDOW]
+        self.corpus = [t for t in corpus if isinstance(t, str) and enc.encode(t)]
         if not self.corpus:
-            raise ValueError(f"corpus needs at least one text of {WINDOW}+ characters")
+            raise ValueError(f"corpus needs at least one text of {enc.n}+ {enc.unit}s")
         if discriminator is None:
-            # the same kind as the generator (RadixNet, or the count / reward model)
+            # the same kind as the generator (RadixNet, or the count / reward model), reading
+            # text the same way: two networks on different encodings judge different grams
             discriminator = type(generator)(
-                seed=self.config.seed + 1, backend=generator.backend.name, device=generator.backend.device
+                seed=self.config.seed + 1, backend=generator.backend.name, device=generator.backend.device,
+                encoding=enc,
             )
         self.discriminator = discriminator
         self.negative = negative
@@ -132,10 +140,11 @@ class Evolver:
                 max_length=cfg.max_length, mode="sample", temperature=cfg.temperature, count=cfg.samples
             )
         ]
-        fakes = [f for f in fakes if len(f) >= WINDOW]
+        enc = self.generator.encoding
+        fakes = [f for f in fakes if enc.encode(f)]
         if not fakes:
             text = self.generator.generate(max_length=cfg.max_length, mode="dijkstra")[0].text
-            if len(text) >= WINDOW:
+            if enc.encode(text):
                 fakes = [text]
         return fakes
 

@@ -30,17 +30,7 @@ from .backend import (
 )
 from .checkpoint import CheckpointManager
 from .encoding import (
-    END_LABEL,
-    MAX_WORDS,
-    START_LABEL,
-    UNKNOWN_WORD,
-    WINDOW,
-    Decoder,
-    Encoder,
-    Vocabulary,
-    split_words,
-    symbol_word,
-    word_symbol,
+    CHARS, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
 )
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
@@ -61,7 +51,6 @@ from .penalty import (
 )
 from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .resonance import ResonantGraph, ResonantNet, trigram_phase
-from .wordnet import WordGraph, WordNGramNet
 from .search import PathResult, dijkstra_predict, sample_walk
 from .speech import (
     ASR_BACKENDS,
@@ -82,7 +71,6 @@ __all__ = [
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
     "NegativeNet", "NegativeGraph", "NegativeFilter", "FilterConfig",
     "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",
-    "WordNGramNet", "WordGraph", "Vocabulary", "split_words", "word_symbol", "symbol_word",
     "MAX_WORDS", "UNKNOWN_WORD",
     "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
@@ -91,7 +79,7 @@ __all__ = [
     "DEFAULT_A", "DEFAULT_B", "DEFAULT_H", "DEFAULT_K",
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
-    "END_LABEL", "START_LABEL", "WINDOW",
+    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "Encoding", "parse_encoding",
     "SPEECH_TOKEN", "SPEECH_CODECS", "SPEECH_RATE", "ASR_BACKENDS", "Audio", "SpeechError",
     "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",

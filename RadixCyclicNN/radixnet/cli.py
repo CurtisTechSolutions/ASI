@@ -34,7 +34,7 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
-from .encoding import WINDOW
+from .encoding import WINDOW, WORDS, Encoding, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -54,12 +54,10 @@ MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "kbest", "beam", "sample")
 KINDS = ("radix", "count", "word", "negative", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
-DEFAULT_WORD_MODEL = "model.word.json"
 DEFAULT_NEGATIVE_MODEL = "model.negative.json"
 DEFAULT_RESONANT_MODEL = "model.resonant.json"
 DEFAULT_KIND_MODELS = {
     "count": DEFAULT_COUNT_MODEL,
-    "word": DEFAULT_WORD_MODEL,
     "negative": DEFAULT_NEGATIVE_MODEL,
     "resonant": DEFAULT_RESONANT_MODEL,
 }
@@ -589,8 +587,8 @@ def kind_label(model: GraphModel) -> str:
 
 
 def units_of(model: GraphModel) -> str:
-    """What the model counts in: ``"chars"`` everywhere but the word model, which counts ``"words"``."""
-    return getattr(type(model), "units", "chars")
+    """What the model counts in: ``"chars"``, or ``"words"`` under a word encoding."""
+    return model.encoding.units_name
 
 
 def effective_kind(args: argparse.Namespace) -> str:
@@ -664,17 +662,54 @@ def open_model(
             return model, Origin("checkpoint", record["path"], f"{model.kind}, {model.meta['epochs_total']} epochs trained")
         console.note(f"note: no checkpoint to resume from in {manager.directory}")
     path = args.model
+    encoding, encoding_given = effective_encoding(args)
     if os.path.isfile(path):
         model = load_model(path, backend=backend, device=device)
         if wanted and wanted != model.kind:
             console.note(f"note: {path} holds a {model.kind} model; --kind {wanted} applies to new models only")
+        if encoding_given and encoding != model.encoding:
+            # the encoding is fixed when a model is created - every label is written in it - so
+            # ignoring the flag would train a trigram model and call it something else
+            raise CliError(
+                f"{path} is {model.encoding.describe()}; --encoding / --units / --ngram / --stride apply to a "
+                f"NEW model only (train one to a new --model path)"
+            )
         return model, Origin("model", path, f"{model.kind}, {model.meta['epochs_total']} epochs trained")
     if required:
         raise CliError(f"model file not found: {path} (train one first with `{PROG} train --data FILE`)")
     seed = effective_seed(args)
     kind = effective_kind(args)
-    model = model_class(kind)(seed=seed, backend=backend, device=device)
-    return model, Origin("new", None, f"seed {seed}, kind {kind}")
+    model = model_class(kind)(seed=seed, backend=backend, device=device, encoding=encoding)
+    note = f"seed {seed}, kind {kind}"
+    if not encoding.is_default():
+        note += f", {encoding.describe()}"
+    return model, Origin("new", None, note)
+
+
+def effective_encoding(args: argparse.Namespace) -> tuple[Encoding, bool]:
+    """The encoding the flags ask for, and whether any of them was given.
+
+    ``--encoding`` sets all three dials at once; ``--units`` / ``--ngram`` /
+    ``--stride`` override it one at a time.  A bare ``--ngram`` keeps a sliding
+    encoding sliding and grows a grouping one's group.
+    """
+    spec = getattr(args, "encoding", None)
+    try:
+        enc = parse_encoding(spec or "")
+        given = bool(spec)
+        unit = getattr(args, "units", None)
+        if unit:
+            enc, given = Encoding(unit=unit, n=enc.n, stride=enc.stride), True
+        n = getattr(args, "ngram", None)
+        if n is not None:
+            stride = enc.stride if enc.sliding else n
+            enc, given = Encoding(unit=enc.unit, n=n, stride=min(stride, n)), True
+        stride = getattr(args, "stride", None)
+        if stride is not None:
+            enc, given = Encoding(unit=enc.unit, n=enc.n, stride=stride), True
+    except ValueError as exc:
+        raise CliError(str(exc)) from None
+    return enc, given
 
 
 def save_model(model: GraphModel, path: str) -> dict:
@@ -1695,26 +1730,36 @@ def cmd_nodes(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_words(args: argparse.Namespace, console: Console) -> dict:
-    """The word model's alphabet: the words it has read and how much of the graph each one holds."""
+    """A word encoding's alphabet: the words the graph has read and how many grams hold each."""
     model, origin = open_model(args, console, required=True)
-    if not hasattr(model, "vocabulary"):
-        raise CliError(f"{args.model} holds a {model.kind} model; a vocabulary belongs to the word model")
-    rows = model.top_words(limit=args.limit)
+    encoding = model.encoding
+    if encoding.unit != WORDS:
+        raise CliError(
+            f"{args.model} counts in {encoding.units_name}, so it has no words to list; a word alphabet needs a "
+            f"word encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
+        )
+    rows = word_rows(encoding, model.graph.trigram_index)
+    vocabulary = len(rows)
+    if args.limit > 0:
+        rows = rows[:args.limit]
     console.pairs([
         ("model", origin.describe()),
-        ("vocabulary", f"{len(model.vocabulary)} word(s), {len(rows)} shown"),
+        ("encoding", encoding.describe()),
+        ("vocabulary", f"{vocabulary} word(s), {len(rows)} shown"),
         ("read", f"{counter_text(model.stats(), 'trained_chars')} words over "
                  f"{counter_text(model.stats(), 'trained_texts')} texts"),
     ])
     console.say()
+    result = {"words": rows, "vocabulary": vocabulary, "units": encoding.units_name,
+              "encoding": str(encoding), "stats": model.stats()}
     if not rows:
         console.say("nothing has been read yet: train the model on a corpus first")
-        return {"words": [], "vocabulary": len(model.vocabulary), "units": units_of(model), "stats": model.stats()}
+        return result
     console.table(
-        ("word", "id", "windows"),
-        [[quote(row["word"]), row["id"], row["trigrams"]] for row in rows],
+        ("word", "id", f"{encoding.n}-word grams"),
+        [[quote(row["word"]), row["id"], row["grams"]] for row in rows],
     )
-    return {"words": rows, "vocabulary": len(model.vocabulary), "units": units_of(model), "stats": model.stats()}
+    return result
 
 
 def _step_label(graph, edge: int) -> str:
@@ -3457,8 +3502,20 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             "with the tutor's reasons), resonant = the phase model (edges learn the phase at which "
                             "they fire; a phase-locked cycle goes to the metacognitive layer); a loaded file's own "
                             "kind always wins.  The default --model follows the kind "
-                            f"({DEFAULT_COUNT_MODEL}, {DEFAULT_WORD_MODEL}, {DEFAULT_NEGATIVE_MODEL}, "
-                            f"{DEFAULT_RESONANT_MODEL})")
+                            f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
+    group.add_argument("--encoding", metavar="SPEC", default=default(None),
+                       help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word), how "
+                            "many units a gram holds (the n of the n-gram) and how far apart consecutive grams start "
+                            "(1 = the sliding window, n = non-overlapping groups of n).  char:3:1 is the default, "
+                            "char:5:5 groups of five letters, word:2:1 the word bigram, word:3:1 the word trigram; the "
+                            "names trigram | bigram | word-bigram | word-trigram work too.  A loaded file's own "
+                            "encoding always wins, and is fixed for its life")
+    group.add_argument("--units", choices=("char", "word"), default=default(None),
+                       help="what one unit of a NEW model is (default char); --encoding sets this too")
+    group.add_argument("--ngram", type=int, metavar="N", default=default(None),
+                       help="units per gram of a NEW model: the n of the n-gram (default 3)")
+    group.add_argument("--stride", type=int, metavar="N", default=default(None),
+                       help="units between consecutive grams of a NEW model: 1 = sliding window, n = groups (default 1)")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 
@@ -4114,11 +4171,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # words ----------------------------------------------------------------
     p = command(
-        "words", "the word model's alphabet",
-        "A word model is this model over an alphabet whose symbols are words, and this is that alphabet: every\n"
-        "word it has read, in the order it first read them, with how many of the graph's three-word windows the\n"
-        "word appears in - what the graph actually knows about it, and the one count compression cannot change.\n"
-        "The vocabulary grows as training reads new words and is never frozen, pruned or learned.",
+        "words", "a word encoding's alphabet",
+        "Under a word encoding (--encoding word:2:1, word:3:1, ...) a gram is n words rather than n characters,\n"
+        "and this is the alphabet the graph has read: every word, in the order it was first read, with how many\n"
+        "grams hold it - what the graph actually knows about it, and the one count compression cannot change.\n"
+        "There is no vocabulary to freeze, prune or learn: a gram is text, so the alphabet is whatever the grams\n"
+        "are made of, and it grows as training reads new words.",
     )
     p.add_argument("--limit", type=nonneg_int, default=20, help="words to show, most read first (0 = all)")
     p.set_defaults(handler=cmd_words)

@@ -378,7 +378,7 @@ class TestPersistenceAndKinds(unittest.TestCase):
             model_from_dict({"format": "nope"})
 
     def test_kind_registry(self):
-        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "word", "negative", "resonant"])
+        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "negative", "resonant"])
         self.assertIs(model_class("count"), CountRewardNet)
         self.assertIs(model_class(None), RadixNet)
         self.assertIs(model_class(" Radix "), RadixNet)
@@ -443,7 +443,7 @@ class TestApi(unittest.TestCase):
         status, data, _ = self.client.get("/api/model")
         self.assertEqual(status, 200)
         self.assertEqual(data["kind"], "radix")
-        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "word", "negative", "resonant"])
+        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "negative", "resonant"])
         self.assertEqual(data["paths"]["count"], os.path.join(self.tmp.name, "model.count.json"))
         data = self.select("count")
         self.assertEqual((data["kind"], data["origin"]), ("count", "new"))

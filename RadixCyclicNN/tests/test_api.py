@@ -485,8 +485,9 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual((info["stride"], info["overlap"]), (1, WINDOW - 1))
         self.assertEqual((info["start_label"], info["end_label"]), ("<s>", "</s>"))
         self.assertEqual(info["back_label"], "<back>")
-        self.assertFalse(info["configurable"])  # the window is part of the model format, not a setting
-        self.assertIn("window", info["note"])
+        self.assertEqual((info["encoding"], info["unit"], info["ngram"]), ("char:3:1", "char", WINDOW))
+        self.assertTrue(info["configurable"])  # a choice, but one made when a model is created
+        self.assertIn("fixed for a model's life", info["note"])
 
         text = CORPUS[0]
         status, preview, _ = self.client.post("/api/encoding/preview", {"text": text})
@@ -682,7 +683,7 @@ class TestEndpoints(unittest.TestCase):
     def test_score(self):
         status, good, _ = self.client.post("/api/score", {"text": CORPUS[0]})
         self.assertEqual(status, 200)
-        self.assertEqual(set(good), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions"})
+        self.assertEqual(set(good), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions", "units"})
         self.assertEqual(good["chars"], len(CORPUS[0]))
         self.assertEqual(good["unknown_transitions"], 0)
         status, bad, _ = self.client.post("/api/score", {"text": "zqxj vwk plmn qzx"})
@@ -753,6 +754,45 @@ class TestEndpoints(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # background jobs
 # ---------------------------------------------------------------------------
+
+
+class TestEncodingIsAChoice(unittest.TestCase):
+    """`/api/encoding` reports the model's own encoding, and `/api/reset` picks it."""
+
+    def setUp(self):
+        self.client, self.server, self.service = start_server(self.addCleanup)
+
+    def test_reset_chooses_it_and_the_endpoints_follow(self):
+        for spec, unit, n, stride in [
+            ("word:2:1", "word", 2, 1),
+            ("char:5:groups", "char", 5, 5),
+            ("char:3:1", "char", 3, 1),
+        ]:
+            with self.subTest(encoding=spec):
+                status, _, _ = self.client.post("/api/reset", {"encoding": spec})
+                self.assertEqual(status, 200)
+                _, info, _ = self.client.get("/api/encoding")
+                self.assertEqual(
+                    (info["unit"], info["window"], info["stride"], info["overlap"]), (unit, n, stride, n - stride)
+                )
+                self.assertTrue(info["configurable"])
+                _, stats, _ = self.client.get("/api/status")
+                self.assertEqual((stats["ngram"], stats["stride"]), (n, stride))
+
+    def test_a_word_model_previews_in_words(self):
+        self.assertEqual(self.client.post("/api/reset", {"unit": "word", "ngram": 2})[0], 200)
+        _, preview, _ = self.client.post("/api/encoding/preview", {"text": "the cat sat on the mat"})
+        self.assertEqual(preview["windows"][0], "the cat")
+        self.assertEqual((preview["count"], preview["chars"]), (5, 6))
+        self.assertTrue(preview["round_trip"])
+
+    def test_an_encoding_that_cannot_be(self):
+        before = self.service.model.encoding
+        for bad in ({"encoding": "rune:3"}, {"unit": "syllable"}, {"ngram": 3, "stride": 4}, {"ngram": 0}):
+            with self.subTest(body=bad):
+                status, _, _ = self.client.post("/api/reset", bad)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.service.model.encoding, before)  # and the model is left alone
 
 
 class TestJobs(unittest.TestCase):

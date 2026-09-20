@@ -59,20 +59,9 @@ type Correction struct {
 // An edge both sentences walk over a changed span - the network wrote the
 // right characters by another route - is rewarded, never penalised.
 func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, error) {
-	if m.IsWords() {
-		// the symbols of a word model are words, so the alignment is word by word and
-		// WrongChars / RightChars count words; the teacher's words join the vocabulary,
-		// the network's are already in it and anything else is <unk>
-		out, err := m.correct(m.Symbols(wrong, false), m.Symbols(right, true), o)
-		if err != nil || out == nil {
-			return out, err
-		}
-		for i := range out.Changes {
-			out.Changes[i].Wrong = m.Words(out.Changes[i].Wrong)
-			out.Changes[i].Right = m.Words(out.Changes[i].Right)
-		}
-		return out, nil
-	}
+	// the encoding aligns the two: character by character by default, word by
+	// word under a word encoding (Encoding.Edits), so there is nothing to
+	// translate on either side of it
 	return m.correct(wrong, right, o)
 }
 
@@ -82,8 +71,9 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 		o.Strength = 1
 	}
 	base := math.Abs(o.Strength)
-	wrongSpans, rightSpans := ChangedSpans(wrong, right)
-	out := &Correction{Changes: DiffSummary(wrong, right, 8), Edits: len(DiffSummary(wrong, right, 0))}
+	enc := m.Encoding()
+	wrongSpans, rightSpans := enc.ChangedSpans(wrong, right)
+	out := &Correction{Changes: enc.DiffSummary(wrong, right, 8), Edits: len(enc.DiffSummary(wrong, right, 0))}
 	for _, s := range wrongSpans {
 		out.WrongChars += s.Hi - s.Lo
 	}
@@ -91,7 +81,7 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 		out.RightChars += s.Hi - s.Lo
 	}
 	g := m.G
-	wrongGrams, rightGrams := Encode(wrong), Encode(right)
+	wrongGrams, rightGrams := enc.Encode(wrong), enc.Encode(right)
 	if wrongGrams == nil && rightGrams == nil {
 		return out, nil
 	}
@@ -111,7 +101,7 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 	order := []int{}
 	blamed := []PathKey{}
 	if wrongGrams != nil && len(wrongSpans) > 0 && base*o.Weight > 0 {
-		blamed = m.stepsOver(wrongGrams, runeLen(wrong), wrongSpans)
+		blamed = m.stepsOver(wrongGrams, enc.Len(wrong), wrongSpans)
 		for _, step := range blamed {
 			if _, seen := penalties[step.Edge]; !seen {
 				order = append(order, step.Edge)
@@ -132,10 +122,10 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 			g.RecordTraversals(edgesOf(transitions))
 			g.RecordPath(transitions, PathUnjudged, false) // the correction's own traffic
 			m.metaAddInt("trained_texts", 1)
-			m.metaAddInt("trained_chars", int64(runeLen(right)))
+			m.metaAddInt("trained_chars", int64(enc.Len(right)))
 		}
 		if len(rightSpans) > 0 {
-			taught = m.stepsOver(rightGrams, runeLen(right), rightSpans)
+			taught = m.stepsOver(rightGrams, enc.Len(right), rightSpans)
 			for _, step := range taught {
 				fixed[step.Edge] = true
 			}
@@ -192,16 +182,16 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 	return out, nil
 }
 
-// stepsOver returns the edges of a traced text whose step wrote a character
-// inside one of the spans.
+// stepsOver returns the edges of a traced text whose step wrote a unit inside
+// one of the spans.
 //
-// Every step is charged with the characters it adds to the text: the first
-// with the whole of its node's label, a later one with everything past the two
-// characters it overlaps its parent by, and the step into END with the
-// position just past the last character - where a sentence that stopped too
-// early went wrong.
+// Every step is charged with the units it adds to the text: the first with the
+// whole of its node's label, a later one with everything past the units it
+// overlaps its parent by, and the step into END with the position just past
+// the last unit - where a sentence that stopped too early went wrong.
 func (m *Model) stepsOver(grams []string, length int, spans []Span) []PathKey {
 	g := m.G
+	overlap := g.Enc.Overlap()
 	path, ok := g.NodePath(grams)
 	if !ok || len(path) < 2 {
 		return nil
@@ -222,14 +212,14 @@ func (m *Model) stepsOver(grams []string, length int, spans []Span) []PathKey {
 			break
 		}
 		size := g.LabelLen(node)
-		lo := position + Overlap
+		lo := position + overlap
 		if index == 1 {
 			lo = 0
 		}
 		if has && spansTouch(lo, position+size, spans) {
 			out = append(out, PathKey{prev, e})
 		}
-		position += size - Overlap
+		position += size - overlap
 	}
 	return out
 }

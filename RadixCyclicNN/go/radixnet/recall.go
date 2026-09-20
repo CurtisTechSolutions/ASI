@@ -551,7 +551,7 @@ func Quiz(model *Model, texts []string, o RecallOptions) ([]RecallLesson, error)
 			if err != nil {
 				return lessons, err
 			}
-			written := item.Cue + result.Text
+			written := model.Encoding().Join(item.Cue, result.Text)
 			var facts RecallFacts
 			if item.Modality == "speech" {
 				said := ""

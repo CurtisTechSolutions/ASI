@@ -1,7 +1,7 @@
 # radixnet (Go)
 
 `package radixnet` — the Go port of the **count / reward model** of
-RadixCyclicNN: a self-compressing cyclic trigram graph whose edge weights are a
+RadixCyclicNN: a self-compressing cyclic n-gram graph whose edge weights are a
 dual frequency function of traversal counts (all time and inside a sliding
 window) plus rewards, with beam-search prediction (top-K **and** bottom-K
 continuations), generation, scoring, 2NRL feedback and a self-conversation.
@@ -15,6 +15,37 @@ Model files use the `radixnet-count` and `radixnet-negative` formats — the sam
 JSON layout on both sides, **including the Mersenne Twister state** — so a model
 trained here continues in Python and back again with identical numbers.
 `../../tests/test_go_parity.py` checks that in both directions.
+
+That holds for **every encoding**, not only the default one: a graph built with
+anything but the character trigram writes an `encoding` block into its file, and
+both sides read it. `../../tests/test_go_parity.py::TestGoEncodingParity` trains
+the same corpus on both sides under nine of them and compares the graphs, the
+files and the predictions.
+
+## The encoding is a dial
+
+`Encoding{Unit, N, Stride}` is how a graph turns text into grams and its labels
+back into text. It is owned by the graph (`Graph.Enc`), fixed when the graph is
+created and carried in the model file.
+
+```go
+opts := radixnet.DefaultGraphOptions()
+opts.Encoding = radixnet.Encoding{Unit: radixnet.Words, N: 2, Stride: 1} // word bigrams
+m, err := radixnet.NewModel(1, opts)
+
+enc, err := radixnet.ParseEncoding("char:5:groups")   // groups of five letters
+```
+
+* **`Unit`** — `Chars` (a code point) or `Words` (a whitespace word; the text is
+  normalised to single spaces).
+* **`N`** — units per gram, any n ≥ 1.
+* **`Stride`** — units between two grams: `1` slides the window (grams overlap
+  by `N-1`, the trigram's shape), `N` cuts the text into non-overlapping groups.
+
+Everything downstream counts in that unit: `labelLen`, the offset of a gram
+inside a label, `PredictOptions.Length`, `Score.Chars`, and the spans of the
+correction diff. Under the default encoding a unit *is* a character, so every
+one of those is what it always was.
 
 ## Concurrency
 
@@ -35,8 +66,7 @@ takes a write lock.**
 
 | file | what it is |
 |---|---|
-| `encoding.go` | the trigram encoding and its inverse — and the package doc |
-| `words.go` | the word alphabet (`--kind word`): a word is one code point, a `Vocabulary` maps between them, and the graph, the weights and the search do not know the difference (`../../SPEC-WordNGrams.md`) |
+| `encoding.go` | the encoder and decoder — the unit, the n of the n-gram, the stride — and the package doc |
 | `graph.go` | the self-compressing cyclic graph: split, merge, the invariants |
 | `nodes.go` | a node against its neighbours — how much of the node's traffic went each way, counted per side rather than per visit |
 | `weights.go` | the dual frequency weight function over counts and rewards |

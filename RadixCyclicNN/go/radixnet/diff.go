@@ -1,30 +1,35 @@
 package radixnet
 
-// Character diff between what the network wrote and what the teacher
-// corrected.  The tutor's marking used to be a verdict on a whole sentence:
+import "strings"
+
+// Unit diff between what the network wrote and what the teacher corrected -
+// characters under a character encoding, words under a word one.  The tutor's marking used to be a verdict on a whole sentence:
 // the failed attempt was garbage, the correction gospel, and every edge of
 // either path moved by the same amount.  Most of a corrected sentence is
 // however word for word what the network wrote - the teacher changes a tense,
 // an article, a plural - and punishing the parts that were already right is a
 // tax on the trigrams that earned their place.
 //
-// Edits aligns the two sentences so the model can move only the trigram nodes
-// the mistake ran through (Model.Correct).  The alignment is a plain
-// longest-common-subsequence diff over characters after the shared prefix and
+// Edits aligns the two sentences so the model can move only the nodes the
+// mistake ran through (Model.Correct).  The alignment is a plain
+// longest-common-subsequence diff over units after the shared prefix and
 // suffix have been trimmed: deterministic, dependency-free and cheap at
 // sentence length, and written the same way in Python (radixnet/diff.py) so
-// both implementations mark the same characters.
+// both implementations mark the same characters under the default encoding.
 
 // MaxDiffCells caps the alignment: above this many cells (|a| x |b| after
 // trimming) the middle is marked changed as a whole instead of aligned.
 const MaxDiffCells = 4_000_000
 
 // MinEqualRun: changes any closer than a trigram are one change - no trigram
-// fits in the gap, so the same nodes are to blame either way.
+// fits in the gap, so the same nodes are to blame either way.  It is the
+// default encoding's rule; a diff run in another encoding uses that
+// encoding's n the same way.
 const MinEqualRun = Window
 
 // Edit is one step of the alignment: Op is "equal", "replace", "delete" or
-// "insert".  The spans are half-open rune ranges, wrong[A0:A1] against
+// "insert".  The spans are half-open ranges in the encoding's units -
+// characters by default, words under a word encoding - wrong[A0:A1] against
 // right[B0:B1]; "delete" is text the network wrote and the teacher struck
 // out, "insert" text the teacher added.
 type Edit struct {
@@ -37,12 +42,38 @@ type Edit struct {
 	Right string `json:"right"`
 }
 
-// Span is a half-open range of rune positions.
+// Span is a half-open range of unit positions (characters by default).
 type Span struct{ Lo, Hi int }
 
-// Edits aligns wrong against right rune by rune; equal runs included, in order.
-func Edits(wrong, right string) []Edit {
-	a, b := []rune(wrong), []rune(right)
+// Edits aligns wrong against right character by character; equal runs
+// included, in order.  It is Encoding.Edits under the default encoding, and
+// the form the Python implementation mirrors.
+func Edits(wrong, right string) []Edit { return DefaultEncoding().Edits(wrong, right) }
+
+// Edits aligns wrong against right one unit of this encoding at a time: by
+// character for a character encoding, by word for a word one - so the spans it
+// reports index the same units the graph's labels and offsets are measured in,
+// and a correction blames the steps the mistake really ran through.
+func (e Encoding) Edits(wrong, right string) []Edit {
+	e = e.WithDefaults()
+	if e.Unit == Words {
+		return alignAtoms(wordAtoms(wrong), wordAtoms(right), joinWords, e.N)
+	}
+	return alignAtoms([]rune(wrong), []rune(right), joinRunes, e.N)
+}
+
+// joinRunes and joinWords write a run of atoms back out as text.
+func joinRunes(r []rune) string   { return string(r) }
+func joinWords(w []string) string { return strings.Join(w, " ") }
+
+// wordAtoms cuts a text into its words, the atoms a word diff aligns.
+func wordAtoms(text string) []string { return strings.Fields(text) }
+
+// alignAtoms is Edits over any atom: the shared prefix and suffix are trimmed,
+// the middle aligned by longest common subsequence, and neighbouring changes
+// merged.  minRun is how short an equal run has to be to be swallowed by the
+// changes around it (MinEqualRun for the default encoding).
+func alignAtoms[T comparable](a, b []T, join func([]T) string, minRun int) []Edit {
 	n, m := len(a), len(b)
 	head := 0
 	for head < n && head < m && a[head] == b[head] {
@@ -55,23 +86,23 @@ func Edits(wrong, right string) []Edit {
 	midA, midB := a[head:n-tail], b[head:m-tail]
 	out := []Edit{}
 	if head > 0 {
-		out = append(out, newEdit("equal", 0, head, 0, head, a, b))
+		out = append(out, newEdit("equal", 0, head, 0, head, a, b, join))
 	}
 	switch {
 	case len(midA) == 0 && len(midB) == 0:
 	case len(midA) == 0:
-		out = append(out, newEdit("insert", head, head, head, m-tail, a, b))
+		out = append(out, newEdit("insert", head, head, head, m-tail, a, b, join))
 	case len(midB) == 0:
-		out = append(out, newEdit("delete", head, n-tail, head, head, a, b))
+		out = append(out, newEdit("delete", head, n-tail, head, head, a, b, join))
 	case len(midA)*len(midB) > MaxDiffCells: // too big to align: one change covering the middle
-		out = append(out, newEdit("replace", head, n-tail, head, m-tail, a, b))
+		out = append(out, newEdit("replace", head, n-tail, head, m-tail, a, b, join))
 	default:
-		out = append(out, alignRunes(midA, midB, head, head, a, b)...)
+		out = append(out, alignMiddle(midA, midB, head, head, a, b, join)...)
 	}
 	if tail > 0 {
-		out = append(out, newEdit("equal", n-tail, n, m-tail, m, a, b))
+		out = append(out, newEdit("equal", n-tail, n, m-tail, m, a, b, join))
 	}
-	return coalesceEdits(mergeEdits(out, a, b), a, b)
+	return coalesceEdits(mergeEdits(out, a, b, join), a, b, join, minRun)
 }
 
 // ChangedSpans is where the two sentences disagree: the ranges of wrong, then
@@ -79,8 +110,13 @@ func Edits(wrong, right string) []Edit {
 // kept at the position where it belongs: the model blames the step that
 // walked past it.
 func ChangedSpans(wrong, right string) ([]Span, []Span) {
+	return DefaultEncoding().ChangedSpans(wrong, right)
+}
+
+// ChangedSpans is where the two sentences disagree, in this encoding's units.
+func (e Encoding) ChangedSpans(wrong, right string) ([]Span, []Span) {
 	left, other := []Span{}, []Span{}
-	for _, e := range Edits(wrong, right) {
+	for _, e := range e.Edits(wrong, right) {
 		if e.Op == "equal" {
 			continue
 		}
@@ -92,8 +128,13 @@ func ChangedSpans(wrong, right string) ([]Span, []Span) {
 
 // DiffSummary is what changed, for a lesson record; limit 0 keeps every change.
 func DiffSummary(wrong, right string, limit int) []Edit {
+	return DefaultEncoding().DiffSummary(wrong, right, limit)
+}
+
+// DiffSummary is what changed in this encoding's units; limit 0 keeps every change.
+func (e Encoding) DiffSummary(wrong, right string, limit int) []Edit {
 	out := []Edit{}
-	for _, e := range Edits(wrong, right) {
+	for _, e := range e.Edits(wrong, right) {
 		if e.Op != "equal" {
 			out = append(out, e)
 		}
@@ -104,12 +145,12 @@ func DiffSummary(wrong, right string, limit int) []Edit {
 	return out
 }
 
-func newEdit(op string, a0, a1, b0, b1 int, a, b []rune) Edit {
-	return Edit{Op: op, A0: a0, A1: a1, B0: b0, B1: b1, Wrong: string(a[a0:a1]), Right: string(b[b0:b1])}
+func newEdit[T comparable](op string, a0, a1, b0, b1 int, a, b []T, join func([]T) string) Edit {
+	return Edit{Op: op, A0: a0, A1: a1, B0: b0, B1: b1, Wrong: join(a[a0:a1]), Right: join(b[b0:b1])}
 }
 
-// alignRunes walks the longest common subsequence of two trimmed middles into edits.
-func alignRunes(a, b []rune, offA, offB int, full, fullB []rune) []Edit {
+// alignMiddle walks the longest common subsequence of two trimmed middles into edits.
+func alignMiddle[T comparable](a, b []T, offA, offB int, full, fullB []T, join func([]T) string) []Edit {
 	n, m := len(a), len(b)
 	// lcs[i][j] = length of the longest common subsequence of a[i:] and b[j:]
 	lcs := make([][]int, n+1)
@@ -137,7 +178,7 @@ func alignRunes(a, b []rune, offA, offB int, full, fullB []rune) []Edit {
 			for i < n && j < m && a[i] == b[j] {
 				i, j = i+1, j+1
 			}
-			out = append(out, newEdit("equal", offA+startI, offA+i, offB+startJ, offB+j, full, fullB))
+			out = append(out, newEdit("equal", offA+startI, offA+i, offB+startJ, offB+j, full, fullB, join))
 			continue
 		}
 		startI, startJ := i, j
@@ -156,13 +197,13 @@ func alignRunes(a, b []rune, offA, offB int, full, fullB []rune) []Edit {
 		case i > startI:
 			op = "delete"
 		}
-		out = append(out, newEdit(op, offA+startI, offA+i, offB+startJ, offB+j, full, fullB))
+		out = append(out, newEdit(op, offA+startI, offA+i, offB+startJ, offB+j, full, fullB, join))
 	}
 	return out
 }
 
 // mergeEdits joins neighbouring edits of the same kind (the trimming can split a run in two).
-func mergeEdits(items []Edit, a, b []rune) []Edit {
+func mergeEdits[T comparable](items []Edit, a, b []T, join func([]T) string) []Edit {
 	out := []Edit{}
 	for _, edit := range items {
 		if len(out) > 0 && joinsEdit(out[len(out)-1], edit) {
@@ -171,7 +212,7 @@ func mergeEdits(items []Edit, a, b []rune) []Edit {
 			if op != edit.Op {
 				op = "replace"
 			}
-			out[len(out)-1] = newEdit(op, last.A0, edit.A1, last.B0, edit.B1, a, b)
+			out[len(out)-1] = newEdit(op, last.A0, edit.A1, last.B0, edit.B1, a, b, join)
 			continue
 		}
 		out = append(out, edit)
@@ -181,18 +222,18 @@ func mergeEdits(items []Edit, a, b []rune) []Edit {
 
 // coalesceEdits swallows equal runs shorter than a trigram between two changes
 // ("mat" -> "park", not "m" -> "p" and "t" -> "rk").
-func coalesceEdits(items []Edit, a, b []rune) []Edit {
+func coalesceEdits[T comparable](items []Edit, a, b []T, join func([]T) string, minRun int) []Edit {
 	out := []Edit{}
 	for _, edit := range items {
 		n := len(out)
 		if n >= 2 && edit.Op != "equal" && out[n-1].Op == "equal" && out[n-2].Op != "equal" &&
-			out[n-1].A1-out[n-1].A0 < MinEqualRun {
+			out[n-1].A1-out[n-1].A0 < minRun {
 			before := out[n-2]
 			op := before.Op
 			if edit.A1 > before.A0 && edit.B1 > before.B0 {
 				op = "replace"
 			}
-			out = append(out[:n-2], newEdit(op, before.A0, edit.A1, before.B0, edit.B1, a, b))
+			out = append(out[:n-2], newEdit(op, before.A0, edit.A1, before.B0, edit.B1, a, b, join))
 			continue
 		}
 		out = append(out, edit)
@@ -211,8 +252,8 @@ func joinsEdit(last, edit Edit) bool {
 }
 
 // spansTouch: does the half-open range [lo, hi) meet any changed span?  An
-// empty span is an insertion point: the characters belong on the other side,
-// so the step that walked straight past the position is the one at fault.
+// empty span is an insertion point: the units belong on the other side, so the
+// step that walked straight past the position is the one at fault.
 func spansTouch(lo, hi int, spans []Span) bool {
 	for _, s := range spans {
 		end := s.Hi

@@ -257,7 +257,7 @@ func (f *Filter) Filter(texts []string) (*FilterOutcome, error) {
 	if len(out.Rejected) > 0 && f.Config.Learn {
 		blamed := []string{}
 		for _, verdict := range out.Rejected {
-			if runeLen(verdict.Text) >= Window {
+			if enc := f.Negative.Encoding(); enc.Len(verdict.Text) >= enc.N {
 				blamed = append(blamed, verdict.Text)
 			}
 		}
@@ -344,7 +344,7 @@ func (f *Filter) Rank(prefix string, result *Prediction) (*Prediction, []*Filter
 	verdicts := make([]*FilterVerdict, 0, len(offered))
 	kept := []*PathResult{}
 	for _, candidate := range offered {
-		verdict := f.Judge(prefix + candidate.Text)
+		verdict := f.Judge(f.Negative.Encoding().Join(prefix, candidate.Text))
 		verdicts = append(verdicts, verdict)
 		if verdict.Decision != "reject" {
 			kept = append(kept, candidate)
@@ -406,7 +406,7 @@ func (f *Filter) Converse(opening string, o ConverseOptions) (*ConverseOutcome, 
 	if len(rejected) > 0 && f.Config.Learn {
 		blamed := []string{}
 		for _, verdict := range rejected {
-			if runeLen(verdict.Text) >= Window {
+			if enc := f.Negative.Encoding(); enc.Len(verdict.Text) >= enc.N {
 				blamed = append(blamed, verdict.Text)
 			}
 		}
@@ -472,7 +472,7 @@ func (f *Filter) Predict(prefix string, o PredictOptions) (*FilterPrediction, er
 	warnOpts := o
 	warnOpts.K = 1
 	if warning, err := f.Negative.Predict(prefix, warnOpts); err == nil && warning.Text != "" {
-		text := prefix + warning.Text
+		text := f.Negative.Encoding().Join(prefix, warning.Text)
 		out.Warning = &text
 	}
 	return out, nil

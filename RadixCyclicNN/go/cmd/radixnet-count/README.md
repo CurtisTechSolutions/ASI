@@ -8,7 +8,7 @@ files interchangeable with the Python implementation.
 
 | file | what it holds |
 |---|---|
-| `main.go` | the package doc, the global flags (`--model`, `--kind`, `--json`, `--seed`, `--workers`, `--exact`, `--out`, `--memlimit`, `--memprofile`), the dispatcher, and the core commands — `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`, `invert`, `weights`, `nodes`, `paths`, `words`, `info`, `converse`, `tutor`, `serve`, `version` |
+| `main.go` | the package doc, the global flags (`--model`, `--json`, `--seed`, `--workers`, `--exact`, `--out`, `--memlimit`, `--memprofile`, and `--encoding` / `--units` / `--ngram` / `--stride` for a **new** model's encoding), the dispatcher, and the core commands — `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`, `invert`, `weights`, `nodes`, `paths`, `info`, `converse`, `tutor`, `serve`, `version` |
 | `negative.go` | `negative` — `blame`, `clear`, `why`, `filter`, `reasons`, `forget`, `auto` |
 | `ollama.go` | `ollama` (`models`, `corpus`, `review`) and `chatgpt` (`models`, `ask`) |
 | `chat.go` | `chat` — an LLM converses with the model and marks every reply |

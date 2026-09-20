@@ -35,7 +35,9 @@ from collections.abc import Iterable, Sequence
 from .activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
 from .backend import CSR, NodeParams
 from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
-from .encoding import BACK_LABEL, END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
+from .encoding import (
+    BACK_LABEL, CHARS, END_LABEL, START_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
+)
 
 __all__ = ["START", "END", "BACK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
 
@@ -51,8 +53,11 @@ FIRST = BACK + 1
 
 _NO_NODES: frozenset[int] = frozenset()
 
-_W = WINDOW          # trigram length
-_OV = WINDOW - 1     # overlap between consecutive labels
+_W = WINDOW          # the default n of the n-gram
+_OV = WINDOW - 1     # the overlap that goes with it (stride 1)
+# A graph is built in its own Encoding (``self.encoding``): ``_n`` and ``_ov``
+# below are that encoding's n and overlap, and are what the code reads.  These
+# two module constants are only the defaults a graph gets when none is given.
 
 Z_RANGE = 4.5
 """New node state ``z`` is drawn uniformly from ``[-Z_RANGE, Z_RANGE]``."""
@@ -103,11 +108,19 @@ def _with_back(d: dict) -> dict:
     return {**d, "nodes": nodes, "edges": edges, "format_version": _GRAPH_FORMAT_VERSION}
 
 
+
+
 class RadixCyclicGraph:
     """Nodes, edges, trigram index and the radix split / merge operations."""
 
-    def __init__(self, seed: int = 0) -> None:
+    def __init__(self, seed: int = 0, encoding: Encoding | None = None) -> None:
         self.seed = int(seed)
+        self.encoding = encoding if encoding is not None else Encoding()
+        """How this graph turns text into grams and its labels back into text.
+
+        Fixed here: every label, every index key and every offset below is
+        measured in this encoding's units.  It travels with the model file."""
+        self.encoding.validate()
         self.rng = random.Random(self.seed)
         self.labels: list[str] = []
         self.z: list[float] = []
@@ -135,8 +148,12 @@ class RadixCyclicGraph:
         self._cost_cache_version = -1
         self._act_cache: list[float] = []
         self._act_cache_version = -1
-        self._decoder = Decoder(_W)
-        self._encoder = Encoder(_W)
+        self._n_is_chars = self.encoding.unit == CHARS
+        self._n = self.encoding.n
+        self._ov = self.encoding.overlap
+        self._stride = self.encoding.stride
+        self._decoder = Decoder(encoding=self.encoding)
+        self._encoder = Encoder(encoding=self.encoding)
         self._new_node(START_LABEL)
         self._new_node(END_LABEL)
         self._new_node(BACK_LABEL, z=BACK_Z)
@@ -232,10 +249,15 @@ class RadixCyclicGraph:
         self.structure_version += 1
         return e
 
+    def label_len(self, node: int) -> int:
+        """The length of a node's label in the encoding's units (characters by default)."""
+        label = self.labels[node]
+        return len(label) if self._n_is_chars else len(label.split())
+
     def _create_trigram_node(self, trigram: str) -> int:
-        """Create the node for an unknown trigram and index it."""
-        if len(trigram) != _W:
-            raise ValueError(f"expected a {_W}-character trigram, got {trigram!r}")
+        """Create the node for an unknown gram and index it."""
+        if self.encoding.length(trigram) != self._n:
+            raise ValueError(f"expected a gram of {self._n} {self.encoding.unit}s, got {trigram!r}")
         nid = self._new_node(trigram)
         self.trigram_index[trigram] = (nid, 0)
         return nid
@@ -322,14 +344,20 @@ class RadixCyclicGraph:
             raise ValueError("cannot split a sentinel node")
         if node_id < 0 or node_id >= len(self.labels) or not self.alive[node_id]:
             raise ValueError(f"node {node_id} is not alive")
+        enc = self.encoding
+        view = enc.units(self.labels[node_id])
         label = self.labels[node_id]
-        length = len(label)
-        if i < 1 or i > length - _W:
-            raise ValueError(f"split index {i} out of range 1..{length - _W} for label {label!r}")
+        length = len(view)
+        stride, ov, n = self._stride, self._ov, self._n
+        if i < stride or i > length - n or i % stride:
+            raise ValueError(
+                f"split index {i} out of range {stride}..{length - n} "
+                f"(a multiple of the stride {stride}) for label {label!r}"
+            )
         a_id = node_id
         a_resets = self.count_resets.get(a_id, 0)
         b_id = self._new_node(
-            label[i:],
+            _piece(view, i),
             z=self.z[a_id], a=self.a[a_id], b=self.b[a_id], h=self.h[a_id], k=self.k[a_id],
             count=self.count[a_id], count_resets=a_resets,
         )
@@ -344,9 +372,9 @@ class RadixCyclicGraph:
         ch_a.clear()
         self._new_edge(a_id, b_id, count=self.count[a_id], count_resets=a_resets)
         index = self.trigram_index
-        for j in range(i, length - _OV):
-            index[label[j : j + _W]] = (b_id, j - i)
-        self.labels[a_id] = label[: i + _OV]
+        for j in range(i, length - n + 1, stride):
+            index[_piece(view, j, j + n)] = (b_id, j - i)
+        self.labels[a_id] = _piece(view, 0, i + ov)
         return (a_id, b_id)
 
     def merge_child(self, p: int) -> bool:
@@ -377,9 +405,10 @@ class RadixCyclicGraph:
         pc = self.parents[c]
         if len(pc) != 1:
             return False
-        lp = self.labels[p]
+        enc = self.encoding
+        lp_view, lc_view = enc.units(self.labels[p]), enc.units(self.labels[c])
         lc = self.labels[c]
-        shift = len(lp) - _OV
+        shift = len(lp_view) - self._ov
         ew = self.edge_w
         fp = self.activation_of(p)
         fc = self.activation_of(c)
@@ -411,9 +440,9 @@ class RadixCyclicGraph:
             ew[e2] *= out_ratio
         cc.clear()
         index = self.trigram_index
-        for j in range(len(lc) - _OV):
-            index[lc[j : j + _W]] = (p, shift + j)
-        self.labels[p] = lp + lc[_OV:]
+        for j in range(0, len(lc_view) - self._n + 1, self._stride):
+            index[_piece(lc_view, j, j + self._n)] = (p, shift + j)
+        self.labels[p] = enc.join(_piece(lp_view, 0), _piece(lc_view, self._ov))
         self.labels[c] = ""
         if self.node_count(c) > self.node_count(p):
             self.count[p] = self.count[c]
@@ -464,6 +493,9 @@ class RadixCyclicGraph:
         did_split = False
         transitions: list[tuple[int, int]] = []
 
+        enc = self.encoding
+        stride, ov, n = self._stride, self._ov, self._n
+        llen = self.label_len
         x = trigrams[0]
         loc = index_get(x)
         if loc is None:
@@ -490,14 +522,14 @@ class RadixCyclicGraph:
                 py, oy = create(y), 0
             else:
                 py, oy = loc
-            if py == px and oy == ox + 1:
+            if py == px and oy == ox + stride:
                 ox = oy
                 x = y
                 continue
-            if x[1:] != y[:_OV]:
-                raise ValueError(f"trigrams {x!r} -> {y!r} do not overlap")
-            if ox + _W < len(labels[px]):
-                split(px, ox + 1)
+            if enc.piece(x, stride) != enc.piece(y, 0, ov):
+                raise ValueError(f"grams {x!r} -> {y!r} do not overlap")
+            if ox + n < llen(px):
+                split(px, ox + stride)
                 did_split = True
                 py, oy = index[y]
             if oy != 0:
@@ -514,8 +546,8 @@ class RadixCyclicGraph:
                 ecounts[e] += 1
             px, ox, x = py, 0, y
 
-        if ox + _W < len(labels[px]):
-            split(px, ox + 1)
+        if ox + n < llen(px):
+            split(px, ox + stride)
             did_split = True
         e = children[px].get(END)
         if e is None:
@@ -549,8 +581,9 @@ class RadixCyclicGraph:
         if not trigrams:
             return None
         index = self.trigram_index
-        labels = self.labels
         children = self.children
+        stride, n = self._stride, self._n
+        llen = self.label_len
         loc = index.get(trigrams[0])
         if loc is None or loc[1] != 0:
             return None
@@ -565,10 +598,10 @@ class RadixCyclicGraph:
             if loc is None:
                 return None
             py, oy = loc
-            if py == px and oy == ox + 1:
+            if py == px and oy == ox + stride:
                 ox = oy
                 continue
-            if oy != 0 or ox + _W != len(labels[px]):
+            if oy != 0 or ox + n != llen(px):
                 return None
             e = children[px].get(py)
             if e is None:
@@ -576,7 +609,7 @@ class RadixCyclicGraph:
             transitions.append((px, e))
             path.append(py)
             px, ox = py, 0
-        if ox + _W != len(labels[px]):
+        if ox + n != llen(px):
             return None
         e = children[px].get(END)
         if e is None:
@@ -903,6 +936,9 @@ class RadixCyclicGraph:
         return {
             "format": _GRAPH_FORMAT,
             "format_version": _GRAPH_FORMAT_VERSION,
+            # written only when it is not the character trigram of stride 1, so an
+            # ordinary file is byte for byte what it always was
+            **({} if self.encoding.is_default() else {"encoding": self.encoding.to_dict()}),
             "seed": self.seed,
             "inverted": self.inverted,
             "version": self.version.value,
@@ -938,7 +974,8 @@ class RadixCyclicGraph:
         n = len(labels)
         if n < FIRST or labels[START] != START_LABEL or labels[END] != END_LABEL or labels[BACK] != BACK_LABEL:
             raise ValueError("graph document is missing the START/END/BACK sentinels")
-        g = cls(seed=int(d.get("seed", 0)))
+        g = cls(seed=int(d.get("seed", 0)), encoding=Encoding.from_dict(d.get("encoding")))
+        enc = g.encoding
         g.inverted = bool(d.get("inverted", False))
         g.labels = labels
         g.z = [float(v) for v in nodes["z"]]
@@ -959,13 +996,13 @@ class RadixCyclicGraph:
         g._n_alive_nodes = n
         index: dict[str, tuple[int, int]] = {}
         for nid in range(FIRST, n):
-            label = labels[nid]
-            if len(label) < _W:
-                raise ValueError(f"node {nid} label {label!r} is shorter than {_W}")
-            for o in range(len(label) - _OV):
-                t = label[o : o + _W]
+            view = enc.units(labels[nid])
+            if len(view) < enc.n:
+                raise ValueError(f"node {nid} label {labels[nid]!r} is shorter than {enc.n} {enc.unit}s")
+            for o in range(0, len(view) - enc.n + 1, enc.stride):
+                t = _piece(view, o, o + enc.n)
                 if t in index:
-                    raise ValueError(f"trigram {t!r} appears in two nodes")
+                    raise ValueError(f"gram {t!r} appears in two nodes")
                 index[t] = (nid, o)
         g.trigram_index = index
         src, dst = edges["src"], edges["dst"]
@@ -1010,6 +1047,7 @@ class RadixCyclicGraph:
         """
         labels, alive = self.labels, self.alive
         children, parents = self.children, self.parents
+        enc, n_gram, ov = self.encoding, self._n, self._ov
         n = len(labels)
         assert (
             len(self.z) == len(self.a) == len(self.b) == len(self.h) == len(self.k)
@@ -1036,7 +1074,7 @@ class RadixCyclicGraph:
                 assert not children[p] and not parents[p], f"dead node {p} still has edges"
                 continue
             if p >= FIRST:
-                assert len(labels[p]) >= _W, f"node {p} label {labels[p]!r} shorter than {_W}"
+                assert self.label_len(p) >= n_gram, f"node {p} label {labels[p]!r} shorter than {n_gram}"
             for c, e in children[p].items():
                 assert 0 <= e < len(self.edge_w), f"edge id {e} out of range on {p}->{c}"
                 assert self.edge_alive[e], f"dead edge {e} referenced by {p}->{c}"
@@ -1047,9 +1085,10 @@ class RadixCyclicGraph:
                     f"edge {p}->{c} touches a sentinel illegally"
                 )
                 assert parents[c].get(p) == e, f"edge {p}->{c} ({e}) missing from parents[{c}]"
-                if p >= FIRST and c >= FIRST:
-                    assert labels[p][-_OV:] == labels[c][:_OV], (
-                        f"edge {p}->{c} violates window overlap: {labels[p]!r} -> {labels[c]!r}"
+                if p >= FIRST and c >= FIRST and ov:
+                    tail = enc.piece(labels[p], self.label_len(p) - ov)
+                    assert tail == enc.piece(labels[c], 0, ov), (
+                        f"edge {p}->{c} violates the gram overlap: {labels[p]!r} -> {labels[c]!r}"
                     )
             for q, e in parents[p].items():
                 assert children[q].get(p) == e, f"parents[{p}] lists {q} ({e}) but children[{q}] does not"
@@ -1059,15 +1098,21 @@ class RadixCyclicGraph:
         for p in range(FIRST, n):
             if not alive[p]:
                 continue
-            label = labels[p]
-            for o in range(len(label) - _OV):
-                t = label[o : o + _W]
-                assert index.get(t) == (p, o), f"trigram {t!r} of node {p}@{o} indexed as {index.get(t)}"
+            view = enc.units(labels[p])
+            for o in range(0, len(view) - n_gram + 1, enc.stride):
+                t = _piece(view, o, o + n_gram)
+                assert index.get(t) == (p, o), f"gram {t!r} of node {p}@{o} indexed as {index.get(t)}"
                 expected += 1
+            rest = (len(view) - n_gram) % enc.stride
+            assert not rest, (
+                f"node {p} label {labels[p]!r} holds {len(view)} units, {rest} past its last whole gram"
+            )
         assert len(index) == expected, f"trigram_index has {len(index)} entries, expected {expected}"
         for t, (p, o) in index.items():
-            assert alive[p], f"trigram {t!r} maps to dead node {p}"
-            assert labels[p][o : o + _W] == t, f"trigram {t!r} indexed at {p}@{o} but label is {labels[p]!r}"
+            assert alive[p], f"gram {t!r} maps to dead node {p}"
+            assert enc.piece(labels[p], o, o + n_gram) == t, (
+                f"gram {t!r} indexed at {p}@{o} but label is {labels[p]!r}"
+            )
         if compressed:
             for p in range(FIRST, n):
                 if alive[p] and len(children[p]) == 1:
@@ -1086,7 +1131,11 @@ class RadixCyclicGraph:
                 decoded = self._decoder.decode_path(
                     [labels[i] for i in path[1:-1]], 0, True, skip_sentinels=False
                 )
-                assert decoded == text, f"round trip of {text!r} gave {decoded!r}"
+                # what comes back is what the encoding can represent: the text itself
+                # under a sliding character window, its words under a word encoding,
+                # everything but the ragged tail under a grouping one
+                want = enc.normalize(text)
+                assert decoded == want, f"round trip of {want!r} gave {decoded!r}"
 
     def __repr__(self) -> str:
         return (

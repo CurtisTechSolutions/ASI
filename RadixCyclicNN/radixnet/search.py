@@ -30,9 +30,8 @@ traversal (:mod:`radixnet.penalty`) hands in a
 exactly as it always did - it is only reading a different cost function.
 """
 
-_W = WINDOW
-_OV = WINDOW - 1
-_DECODER = Decoder(_W)
+_W = WINDOW      # the default n; a graph's own n is graph.encoding.n
+_OV = WINDOW - 1  # and its own overlap graph.encoding.overlap
 
 
 @dataclass(slots=True)
@@ -154,12 +153,12 @@ def least_punished(steps: list[tuple]) -> list[tuple]:
 
 
 def _start_emission(graph: RadixCyclicGraph, start_node: int, start_offset: int) -> int:
-    """Characters emitted by the start node (its remainder after the matched trigram)."""
+    """Units emitted by the start node (its remainder after the matched gram)."""
     if start_node < 0 or start_node >= len(graph.labels) or not graph.alive[start_node]:
         raise ValueError(f"start node {start_node} is not alive")
     if start_node < FIRST:
         return 0
-    remainder = len(graph.labels[start_node]) - (start_offset + _W)
+    remainder = graph.label_len(start_node) - (start_offset + graph.encoding.n)
     if start_offset < 0 or remainder < 0:
         raise ValueError(
             f"start_offset {start_offset} out of range for label {graph.labels[start_node]!r}"
@@ -184,9 +183,9 @@ def _build_result(
     offset = 0 if start_node < FIRST else start_offset
     # sentinels are stripped by id: a real node may carry the label "<s>" or "</s>"
     real = [lab for n, lab in zip(node_ids, labels) if n >= FIRST]
-    text = _DECODER.decode_path(real, offset, include_context, skip_sentinels=False)
+    text = graph.encoding.decode_path(real, offset, include_context, skip_sentinels=False)
     if max_chars is not None and max_chars >= 0:
-        text = text[:max_chars]
+        text = graph.encoding.truncate(text, max_chars)
     return PathResult(
         text=text,
         labels=labels,
@@ -232,6 +231,7 @@ def dijkstra_predict(
         max_chars = min_chars
     labels = graph.labels
     child_costs = graph.child_costs if costs is None else costs
+    overlap = graph.encoding.overlap
     push = heappush
     pop = heappop
     inf = math.inf
@@ -267,7 +267,7 @@ def dijkstra_predict(
         if max_chars is not None and chars >= max_chars:
             continue
         for c, _e, ec in onward(child_costs(node, came_from if came_from >= 0 else None)):
-            nchars = chars if c == END else chars + len(labels[c]) - _OV
+            nchars = chars if c == END else chars + graph.label_len(c) - overlap
             step = ec + step_penalty
             ncost = cost + step
             nkey = (node if c in context else -1, c, nchars)
@@ -331,6 +331,7 @@ def sample_walk(
     labels = graph.labels
     blamed = traversal == LEAST_PUNISHED
     child_costs = graph.child_steps if blamed else (graph.child_costs if costs is None else costs)
+    overlap = graph.encoding.overlap
     exp = math.exp
     node = start_node
     chars = _start_emission(graph, start_node, start_offset)
@@ -364,7 +365,7 @@ def sample_walk(
         step_costs.append(cst)
         node_ids.append(c)
         if c != END:
-            chars += len(labels[c]) - _OV
+            chars += graph.label_len(c) - overlap
         came_from = node
         node = c
         steps += 1

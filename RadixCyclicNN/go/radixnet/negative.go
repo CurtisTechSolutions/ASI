@@ -29,6 +29,11 @@ type NegativeOptions struct {
 	ShareScale float64
 	BlameScale float64
 	ClearScale float64
+	// Encoding is how the failure structure reads text.  It has to be the
+	// encoding of the count model it accompanies - the two walk the same
+	// texts, and a gram of one is meaningless to the other.  The zero value
+	// is the default encoding.
+	Encoding Encoding
 }
 
 // DefaultNegativeOptions mirror the Python defaults: the edge's share of the
@@ -129,7 +134,9 @@ func (n *NegativeData) lookupReason(reason string) (int, bool) {
 // NewNegativeGraph creates an empty negative graph: the same self-compressing
 // cyclic graph, with the blame arrays and the reason registry attached.
 func NewNegativeGraph(seed int64, o NegativeOptions) (*Graph, error) {
-	g, err := NewGraph(seed, DefaultGraphOptions())
+	opts := DefaultGraphOptions()
+	opts.Encoding = o.Encoding.WithDefaults()
+	g, err := NewGraph(seed, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +725,7 @@ func (m *Model) blamePass(texts []string, o BlameOptions, blame bool, weight flo
 	if err := m.requireNegative("blaming"); err != nil {
 		return nil, err
 	}
-	kept, skippedShort := cleanTexts(texts)
+	kept, skippedShort := cleanTexts(m.Encoding(), texts)
 	g := m.G
 	amount := weight
 	reason := CleanReason(o.Reason)
@@ -730,7 +737,7 @@ func (m *Model) blamePass(texts []string, o BlameOptions, blame bool, weight flo
 		m.metaAddInt("trained_texts", int64(len(kept)))
 		chars := int64(0)
 		for _, text := range kept {
-			chars += int64(runeLen(text))
+			chars += int64(m.Encoding().Len(text))
 			m.note(text, reason, amount, o.Source, o.Note)
 		}
 		m.metaAddInt("trained_chars", chars)
@@ -910,9 +917,10 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 	}
 	reason := CleanReason(o.Reason)
 	amount := o.severity()
-	wrongSpans, rightSpans := ChangedSpans(wrong, right)
+	enc := m.Encoding()
+	wrongSpans, rightSpans := enc.ChangedSpans(wrong, right)
 	out := &NegativeCorrection{
-		Changes: DiffSummary(wrong, right, 8), Edits: len(DiffSummary(wrong, right, 0)), Reason: reason,
+		Changes: enc.DiffSummary(wrong, right, 8), Edits: len(enc.DiffSummary(wrong, right, 0)), Reason: reason,
 		Severity: amount, Phase: "correction",
 	}
 	for _, s := range wrongSpans {
@@ -921,16 +929,16 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 	for _, s := range rightSpans {
 		out.RightChars += s.Hi - s.Lo
 	}
-	if runeLen(wrong) < Window {
+	if enc.Len(wrong) < enc.N {
 		return out, nil
 	}
-	grams := Encode(wrong)
+	grams := enc.Encode(wrong)
 	if _, err := m.register([][]string{grams}); err != nil { // the failure joins the structure; the correction never does
 		return nil, err
 	}
 	cleared := map[int]bool{}
 	clearedEdges := []int{}
-	if runeLen(right) >= Window {
+	if enc.Len(right) >= enc.N {
 		for _, e := range m.sharedEdges(right) {
 			if !cleared[e] {
 				cleared[e] = true
@@ -939,7 +947,7 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 		}
 	}
 	blamed := []int{}
-	for _, step := range m.stepsOver(grams, runeLen(wrong), wrongSpans) {
+	for _, step := range m.stepsOver(grams, enc.Len(wrong), wrongSpans) {
 		if !cleared[step.Edge] {
 			blamed = append(blamed, step.Edge)
 		}
@@ -949,7 +957,7 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 		m.metaAddInt("failures_total", 1)
 		m.metaAddFloat("blame_total", amount*float64(out.Blamed))
 		m.metaAddInt("trained_texts", 1)
-		m.metaAddInt("trained_chars", int64(runeLen(wrong)))
+		m.metaAddInt("trained_chars", int64(enc.Len(wrong)))
 		m.addSource(o.Source)
 		m.note(wrong, reason, amount, o.Source, o.Note)
 	}
@@ -999,23 +1007,24 @@ func (m *Model) Crossings(text string) []Crossing {
 	if !m.IsNegative() {
 		return nil
 	}
-	grams := Encode(text)
+	enc := g.Enc
+	grams := enc.Encode(text)
 	if len(grams) == 0 {
 		return []Crossing{}
 	}
 	g.Prepare()
-	length := runeLen(text)
+	length := enc.Len(text)
 	node, offset, lost := Start, 0, false
 	crossing := func(i, edge int) Crossing {
 		start := i - 1
 		if start < 0 {
 			start = 0
 		}
-		end := i + Window
+		end := i + enc.N
 		if end > length {
 			end = length
 		}
-		entry := Crossing{Index: i, Start: start, End: end, Fragment: runeSlice(text, start, end), Parent: node,
+		entry := Crossing{Index: i, Start: start, End: end, Fragment: enc.Slice(text, start, end), Parent: node,
 			Edge: edge, Reasons: []ReasonRow{}}
 		if edge >= 0 {
 			entry.Blame = g.Neg.Blame[edge]
@@ -1030,7 +1039,7 @@ func (m *Model) Crossings(text string) []Crossing {
 		return entry
 	}
 	edgeFrom := func(n int) int {
-		if lost || (node != Start && offset+Window != g.LabelLen(node)) {
+		if lost || (node != Start && offset+enc.N != g.LabelLen(node)) {
 			return -1
 		}
 		if e, ok := g.Edge(node, n); ok {
@@ -1046,7 +1055,7 @@ func (m *Model) Crossings(text string) []Crossing {
 			lost = true
 			continue
 		}
-		if !lost && at == node && o == offset+1 {
+		if !lost && at == node && o == offset+enc.Stride {
 			offset = o // a deterministic step inside a compressed node: no edge, nothing to blame
 			continue
 		}
@@ -1136,7 +1145,7 @@ func (m *Model) Judge(text string, o JudgeOptions) *Verdict {
 		spans = 5
 	}
 	crossings := m.Crossings(text)
-	chars := runeLen(text)
+	chars := m.Encoding().Len(text)
 	blamed := make([]Crossing, 0, len(crossings))
 	known := 0
 	blame := 0.0
@@ -1305,6 +1314,11 @@ func (m *Model) negativeStats(lastLoss any) map[string]any {
 		"nodes":                   g.NumNodes(),
 		"edges":                   g.NumEdges(),
 		"trigrams":                g.NumTrigrams(),
+		"grams":                   g.NumGrams(),
+		"encoding":                g.Enc.String(),
+		"unit":                    string(g.Enc.Unit),
+		"ngram":                   g.Enc.N,
+		"stride":                  g.Enc.Stride,
 		"compression_ratio":       g.CompressionRatio(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",

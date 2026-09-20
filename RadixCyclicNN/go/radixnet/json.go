@@ -176,9 +176,12 @@ type GraphDoc struct {
 	Weights                *weightsDoc `json:"weights,omitempty"`
 	Paths                  *pathsDoc   `json:"paths,omitempty"`
 
-	// the word model's alphabet: what the symbols are, and the words in id order
-	Units      string   `json:"units,omitempty"`
-	Vocabulary []string `json:"vocabulary,omitempty"`
+	// Encoding is how the labels below are to be read: the unit, the n of the
+	// n-gram and the stride.  Written only when it is not the character
+	// trigram of stride 1, so an ordinary file is byte for byte what it always
+	// was - and so the Python implementation, which only speaks that one,
+	// never meets a file it would misread.
+	Encoding *Encoding `json:"encoding,omitempty"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -199,6 +202,9 @@ func (g *Graph) ToDoc() *GraphDoc {
 		Version: g.Version.Value, VersionResets: g.Version.Resets,
 		StructureVersion: g.StructureVersion.Value, StructureVersionResets: g.StructureVersion.Resets,
 		Traversals: g.Traversals.Value, TraversalsResets: g.Traversals.Resets}
+	if enc := g.Enc.WithDefaults(); !enc.IsDefault() {
+		doc.Encoding = &enc
+	}
 	n := len(order)
 	doc.Nodes = nodesDoc{Labels: make([]string, n), Z: make([]float64, n), A: make([]float64, n), B: make([]float64, n),
 		H: make([]float64, n), K: make([]float64, n), Count: make([]int64, n)}
@@ -316,10 +322,6 @@ func (g *Graph) ToDoc() *GraphDoc {
 		paths.Incorrect = append(paths.Incorrect, rows[at][2])
 	}
 	doc.Paths = paths
-	if g.IsWords() {
-		doc.Units = WordUnits
-		doc.Vocabulary = g.Vocab.List()
-	}
 	return doc
 }
 
@@ -443,21 +445,14 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			opts.Window = 1
 		}
 	}
-	if d.Units != "" && d.Units != WordUnits {
-		return nil, fmt.Errorf("unknown graph units %q", d.Units)
+	if d.Encoding != nil {
+		opts.Encoding = d.Encoding.WithDefaults()
 	}
-	opts.Words = d.Units == WordUnits || d.Vocabulary != nil
 	g, err := NewGraph(d.Seed, opts)
 	if err != nil {
 		return nil, err
 	}
-	if opts.Words {
-		vocab, err := VocabularyFrom(d.Vocabulary)
-		if err != nil {
-			return nil, err
-		}
-		g.Vocab = vocab
-	}
+	enc := g.Enc
 	g.Inverted = d.Inverted
 	g.Labels = make([]string, n)
 	copy(g.Labels, labels)
@@ -474,18 +469,19 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g.index = make(map[string]loc, n*2)
 	for nid := 0; nid < n; nid++ {
 		g.Alive[nid] = true
-		g.labelLen[nid] = runeLen(labels[nid])
 		if nid < First {
+			g.labelLen[nid] = enc.Len(labels[nid]) // the sentinels are labels, not grams
 			continue
 		}
-		label := []rune(labels[nid])
-		if len(label) < Window {
-			return nil, fmt.Errorf("node %d label %q is shorter than %d", nid, labels[nid], Window)
+		label := enc.Units(labels[nid])
+		g.labelLen[nid] = label.Len()
+		if label.Len() < enc.N {
+			return nil, fmt.Errorf("node %d label %q is shorter than %d %ss", nid, labels[nid], enc.N, enc.Unit)
 		}
-		for o := 0; o < len(label)-Overlap; o++ {
-			t := string(label[o : o+Window])
+		for o := 0; o <= label.Len()-enc.N; o += enc.Stride {
+			t := label.Slice(o, o+enc.N)
 			if _, dup := g.index[t]; dup {
-				return nil, fmt.Errorf("trigram %q appears in two nodes", t)
+				return nil, fmt.Errorf("gram %q appears in two nodes", t)
 			}
 			g.index[t] = loc{nid, o}
 		}
@@ -569,9 +565,6 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g.dirtyAll = true
 	g.weightsStructure = invalidStamp
 	g.CarryCounters(true) // normalise whatever the file carried, however it was written
-	if err := g.checkVocabulary(); err != nil {
-		return nil, err
-	}
 	return g, nil
 }
 
@@ -688,9 +681,6 @@ func (m *Model) ToDoc() *ModelDoc {
 	}
 	doc := &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: m.Kind(),
 		Meta: copyMap(m.Meta), History: history, Graph: m.G.ToDoc()}
-	if m.IsWords() {
-		doc.Format = WordFormat
-	}
 	if m.IsNegative() {
 		doc.Format = NegativeFormat
 		doc.Log = append([]LogEntry{}, m.Neg.Log...)
@@ -736,12 +726,6 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 	m.carryMeta() // a file may carry a counter that was never wrapped
 	if d.Format == NegativeFormat && !g.IsNegative() {
 		return nil, fmt.Errorf("%s document without a negative graph", NegativeFormat)
-	}
-	if (d.Format == WordFormat) != g.IsWords() {
-		if d.Format == WordFormat {
-			return nil, fmt.Errorf("%s document without a word graph", WordFormat)
-		}
-		return nil, fmt.Errorf("a word graph belongs to a %s document, not %s", WordFormat, d.Format)
 	}
 	return m, nil
 }
