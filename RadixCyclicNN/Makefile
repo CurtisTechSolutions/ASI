@@ -26,6 +26,7 @@ POS_LR      ?= 0.1
 PREFIX      ?= the quick brown
 LENGTH      ?= 20
 MODE        ?= dijkstra
+TRAVERSAL   ?= reward
 COUNT       ?= 5
 MAX_LENGTH  ?= 60
 TEXT        ?= the cat sat on the mat
@@ -147,11 +148,11 @@ train: ## Train on DATA (incremental: MODEL is loaded first if it exists), check
 resume: ## Continue training from the latest checkpoint in CKPT_DIR
 	$(RADIXNET) $(GLOBAL) train --data $(DATA) --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR) --resume
 
-predict: ## Continue PREFIX by shortest path (MODE=dijkstra|sample) for LENGTH characters
-	$(RADIXNET) $(GLOBAL) predict --prefix "$(PREFIX)" --length $(LENGTH) --mode $(MODE)
+predict: ## Continue PREFIX by shortest path (MODE=dijkstra|sample, TRAVERSAL=reward|punishment) for LENGTH characters
+	$(RADIXNET) $(GLOBAL) predict --prefix "$(PREFIX)" --length $(LENGTH) --mode $(MODE) --traversal $(TRAVERSAL)
 
-generate: ## Generate COUNT texts from scratch (up to MAX_LENGTH characters each)
-	$(RADIXNET) $(GLOBAL) generate --count $(COUNT) --max-length $(MAX_LENGTH)
+generate: ## Generate COUNT texts from scratch (up to MAX_LENGTH characters each; TRAVERSAL=reward|punishment)
+	$(RADIXNET) $(GLOBAL) generate --count $(COUNT) --max-length $(MAX_LENGTH) --traversal $(TRAVERSAL)
 
 score: ## Log-probability of TEXT under the model
 	$(RADIXNET) $(GLOBAL) score --text "$(TEXT)"

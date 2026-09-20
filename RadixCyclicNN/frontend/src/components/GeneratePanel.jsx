@@ -7,6 +7,7 @@ import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
+import TraversalFields, { traversalBody } from "./TraversalFields.jsx";
 
 /**
  * Generate whole texts with the prediction search (beam: the K most likely
@@ -23,6 +24,9 @@ export default function GeneratePanel({ status }) {
   const [temperature, setTemperature] = useStoredState("generate.temperature", "1.0");
   const [mode, setMode] = useStoredState("generate.mode", "beam");
   const [prefix, setPrefix] = useStoredState("generate.prefix", "");
+  const [traversal, setTraversal] = useStoredState("generate.traversal", "reward");
+  const [penaltyScale, setPenaltyScale] = useStoredState("generate.penaltyScale", "1");
+  const [meritScale, setMeritScale] = useStoredState("generate.meritScale", "1");
   const [guard, setGuard] = useStoredState("generate.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -45,6 +49,7 @@ export default function GeneratePanel({ status }) {
         mode,
         guard,
         ...(prefix ? { prefix } : {}),
+        ...traversalBody(traversal, penaltyScale, meritScale),
       });
       setSamples(asArray(data && data.samples));
       setGuarded((data && data.guard) || null);
@@ -98,6 +103,14 @@ export default function GeneratePanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <TraversalFields
+          traversal={traversal}
+          onTraversal={setTraversal}
+          penaltyScale={penaltyScale}
+          onPenaltyScale={setPenaltyScale}
+          meritScale={meritScale}
+          onMeritScale={setMeritScale}
+        />
         <CheckField
           label="Filter with the negative network"
           hint="the pair: the model over-samples and the negative network vetoes what it knows to be a failure"

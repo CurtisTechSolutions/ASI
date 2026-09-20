@@ -94,7 +94,7 @@ from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .duo import FilterConfig, NegativeFilter
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeNet
-from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS, resolve_traversal
+from .penalty import DEFAULT_TRAVERSAL, resolve_traversal
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
     DEFAULT_URL as OLLAMA_DEFAULT_URL,

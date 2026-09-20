@@ -76,6 +76,8 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
+**Part XV — The traversal** · D-069 what a search looks for is an option
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -2413,6 +2415,91 @@ honest accounting of *deliberate* versus *undone* is itself the decision: a gap
 recorded with its reason is a design statement, an unrecorded one is debt.
 
 **Lives in** `go/`, `DESIGN.md`
+
+---
+
+# Part XV — The traversal
+
+### D-069 — What a search *looks for* is an option, separate from how it looks
+
+**Status** Accepted · 2026-09-20 (`dc154c8`) · **Layer** search
+
+**Context** Every reward the system hands out is also, implicitly, a
+navigational instruction. The count / reward model's probability carries
+`exp(reward_scale * reward)` (D-026), so once a path is rewarded the search
+follows it: prediction, generation, conversation, the tutor's completions, the
+agent's attempts. That is the intended behaviour and it is also the whole of
+the behaviour — a network with a thousand corrections and a handful of thumbs
+up still navigates by the handful, because the corrections only enter as the
+same number with a minus sign in front, competing on the rewards' terms.
+
+Rewards and penalties are not symmetric evidence, though. A reward says *this
+was good once*; a penalty says *this was wrong, and here is the correction*.
+The first is an invitation to repeat a success; the second is a boundary. A
+walk that respects every boundary it has been taught is not the walk that
+chases every reward it has been given, and there was no way to ask for it.
+
+**Decision** The cost function a search reads the graph through is an option,
+the **traversal**, beside the existing **mode**:
+
+* `reward` (the default) — the model's own distribution, rewards and all.
+  Exactly the previous behaviour, at exactly the previous cost: the option
+  resolves to `None` and the searches call `graph.child_costs` as before.
+* `punishment` — the rewards leave the score altogether and the penalties
+  price every step, so the cheapest path is the one that accumulated the
+  **least punishment**.
+
+**What was rejected**
+
+* **A fifth mode** (`dijkstra | kbest | beam | sample | punishment`). The
+  wrong axis: it would have had to be written once for Dijkstra, once for each
+  beam, once for the sampler and again for all four phase searches, and it
+  would have made "least punished" and "top-K / bottom-K" mutually exclusive
+  when they are orthogonal. Every search already reads the graph through one
+  funnel — `[(child, edge, cost)]` for a node — so the option replaces the
+  funnel instead. No search changed.
+* **A second graph** holding the punishments. That already exists and is the
+  negative network (D-045); this is about *navigating the model you have*, not
+  about modelling failure.
+* **Flipping the sign of the rewards.** `invert` (D-009) does that, and it is
+  not the same thing: it makes the punished path *attractive*, whereas this
+  makes it expensive and leaves everything else alone.
+* **A lexicographic cost** (total punishment first, the model's own cost as a
+  tie-break). Exact and tempting, but it would have made the cost a tuple
+  through every heap in the package, and it forbids the trade-off that
+  `penalty_scale` exists to express. A blended score with a knob says more.
+
+**How the two currencies are separated** One hook,
+`RadixCyclicGraph.child_evidence`, splits an edge's evidence into **merit** —
+what speaks for the step with every reward taken out of it — and **penalty**
+`>= 0`. Each kind implements it in its own currency: the count / reward model
+and the phase model split `edge_reward` in half, the negative network weighs
+net blame against cleared text, and the sine model reads the negative part of
+`w · f_p · f_c`, because 2NRL trains a failure in and then inverts it, so what
+a punishment leaves behind *is* a negative score on that path. A judged path
+context — a verdict filed against the caller that reached the edge rather than
+against the edge — splits the same way.
+
+**Consequences**
+* `score = merit_scale * merit − penalty_scale * penalty` and
+  `cost = -log softmax(score)`, so costs stay `>= 0`, Dijkstra stays a true
+  shortest path, `exp(-cost)` is still a probability and the two traversals'
+  numbers are comparable. `merit_scale = 0` is the pure form.
+* Every mode of every kind gains the traversal at once, in both languages, and
+  the parity suite requires the same least-punished paths at the same costs.
+* On the sine model the two traversals coincide at the default scales, because
+  there the punishment *is* the negative score; they part company as soon as
+  `penalty_scale` is raised. That is honest rather than convenient: a model
+  that keeps no separate ledger of its punishments cannot be made to pretend
+  it does.
+* On the negative network the option reverses the network's purpose — the
+  least blamed way through the failures rather than the likeliest one — which
+  is a use nobody had before and falls out for free.
+* **The cost:** a second cost cache per graph while a punishment search runs,
+  and one more thing to choose. The default is unchanged behaviour, so nobody
+  who does not want it pays for it.
+
+**Lives in** `radixnet/penalty.py`, `radixnet/graph.py`, `go/radixnet/penalty.go`
 
 ---
 

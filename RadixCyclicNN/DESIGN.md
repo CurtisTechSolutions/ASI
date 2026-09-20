@@ -51,6 +51,9 @@ RadixCyclicNN/
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
+    penalty.py              the punishment traversal: the merit / penalty split of an edge's evidence, and the
+                            cost function that prices a step by the punishment it carries (section 31)
+                            (ported to Go as go/radixnet/penalty.go)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
@@ -412,6 +415,11 @@ def sample_walk(graph, start_node: int, start_offset: int, max_chars: int | None
     # Stochastic walk: at each node sample a child from softmax(scores / temperature). cost = sum of -log p.
     # Stops at END, at max_chars (None = no limit), or at a node without children.
 ```
+
+Both take an optional `costs: CostFn` - `(parent[, prev]) -> [(child, edge, cost)]` - in place of
+`graph.child_costs`, and so do `beam.beam_predict` and the four phase searches of `phasesearch.py`.  That one
+parameter is the **traversal** option of section 31: `None` is the model's own cost function and nothing about
+any search changes; the punishment traversal hands in a cost function built from the penalties alone.
 
 ---
 
@@ -3043,3 +3051,97 @@ invert, prior fallback, round trip), the net (records, falling loss, the three p
 cycle learning, the layer moving the beam while Dijkstra ignores it, reward / punish / decohere, 2NRL with weights,
 `invert_paths`, stats, argument validation), persistence (file, gzip, wrong kind, checkpoints), the kind registry,
 the evolver and `converse`, the CLI and the HTTP API.
+
+---
+
+## 31. The traversal (`penalty.py`, `go/radixnet/penalty.go`) — follow the rewards, or avoid the punishments
+
+Every search in the package reads the graph through one funnel: `[(child, edge, cost)]` for a node, with
+`cost = -log P(child | parent)`.  `search.dijkstra_predict`, `search.sample_walk`, `beam.beam_predict` and the four
+phase searches of `phasesearch.py` all call `graph.child_costs(p[, prev])` (or `child_costs_at(p, bucket)`) and
+nothing else.  **Which cost function fills that list is the traversal**, and it is an option:
+
+| traversal | what the search looks for |
+|---|---|
+| `"reward"` (the default) | what the model believes.  The count / reward model's weight carries `reward_scale * reward`, so a path the tutor rewarded is cheap and the search follows the rewards.  Every release before this option behaved this way, and `traversal_costs` returns `None` for it — the searches call `graph.child_costs` exactly as they always did, at no cost at all. |
+| `"punishment"` | what the model was punished for.  The rewards leave the score altogether and only the penalties price the step, so the cheapest path is the one that accumulated the **least punishment**. |
+
+The traversal is *what* a search looks for; the mode (`dijkstra` / `kbest` / `beam` / `sample`) is *how* it looks.
+They are independent by construction: the option replaces the funnel instead of adding a fifth mode, so every mode
+of every kind gains it at once and no search code changes.
+
+### 31.1 The split: `child_evidence`
+
+```python
+class RadixCyclicGraph:
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]
+        # [(child, edge, merit, penalty)] over p's out-edges.
+        #   merit    - what speaks FOR the step, with every reward taken out of it
+        #   penalty  - what speaks AGAINST it, >= 0
+        # prev is the node the walk arrived from, which a model that counts paths prices the step by.
+```
+
+| graph | merit | penalty |
+|---|---|---|
+| `RadixCyclicGraph` (the sine model) | `max(0, w * f_p * f_c)` | `max(0, -(w * f_p * f_c))` |
+| `CountRewardGraph` | `edge_w[e] - reward_scale * reward` (the dual frequency function, rewards out) | `reward_scale * max(0, -reward)` |
+| `ResonantGraph` | `edge_w[e] - reward_scale * reward`; `child_evidence_at(p, bucket)` adds the resonance | `reward_scale * max(0, -reward)` |
+| `NegativeGraph` | `log1p(edge_clear[e])` | `log1p(evidence(e))` |
+
+The sine model keeps no separate ledger of its punishments — 2NRL trains a failure in and then inverts it, so what
+a punishment leaves behind *is* a negative score on that path's edges — which is why its penalty is read straight
+off the score, and why at the default scales its two traversals coincide and part company as soon as
+`penalty_scale` is raised.  A judged path context (`CountRewardGraph.path_term`) splits the same way: the part of
+the term that says the step was right here is merit, the part that says it was wrong here is penalty.  On the
+negative network the option reverses the network's purpose, which is the point: its ordinary traversal predicts the
+likeliest way a prefix goes wrong, the punishment traversal walks the least blamed way through the same structure.
+
+### 31.2 The cost function
+
+```python
+TRAVERSALS = ("reward", "punishment")
+DEFAULT_TRAVERSAL = "reward"
+
+def resolve_traversal(traversal: str | None) -> str          # None / "" -> the default; ValueError otherwise
+
+class PenaltyCosts:                                          # a drop-in for graph.child_costs
+    def __init__(self, graph, penalty_scale: float = 1.0, merit_scale: float = 1.0)
+    def __call__(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]
+
+class PhasePenaltyCosts:                                     # a drop-in for graph.child_costs_at
+    def __call__(self, p: int, bucket: int) -> list[tuple[int, int, float]]
+
+def traversal_costs(graph, traversal, penalty_scale=1.0, merit_scale=1.0)        # None for "reward"
+def phase_traversal_costs(graph, traversal, penalty_scale=1.0, merit_scale=1.0)  # None for "reward"
+```
+
+`score(child) = merit_scale * merit - penalty_scale * penalty`, and the cost is `-log softmax(score)` over the
+parent's children.  That keeps every invariant the searches rely on: costs are `>= 0` (Dijkstra stays a true
+shortest path, `step_penalty >= 0` still holds), `exp(-cost)` is still a path's probability, the children still sum
+to 1, and `onward()` can still compare a `BACK` edge against the real children.  The result is cached per
+`(parent, prev)` until `graph.version` changes, exactly like the graph's own cost cache; the Go port instead prices
+every edge once into a table before the search starts, because its two beams run in parallel goroutines.
+
+`merit_scale = 0` is the pure form: nothing but the punishment decides, and among equally unpunished children the
+walk is indifferent.  Both scales must be `>= 0`.
+
+### 31.3 Where it is reachable
+
+* Python: `predict(..., traversal=, penalty_scale=, merit_scale=)` and `generate(...)` on all four kinds, and the
+  same three on `NegativeFilter.predict` / `.generate`.  A `Prediction` carries `traversal`, so a result says
+  which one ran.
+* CLI: `--traversal reward|punishment`, `--penalty-scale`, `--merit-scale` on `predict` and `generate`
+  (`add_traversal_flags`), and the `--json` document carries `traversal`.
+* HTTP API: `traversal`, `penalty_scale`, `merit_scale` on `POST /api/predict` and `POST /api/generate`
+  (`_traversal_fields`), both servers.
+* Frontend: a **Traversal** selector on the Predict and Generate tabs
+  (`frontend/src/components/TraversalFields.jsx`), with the two scales shown only when the punishment traversal is
+  chosen; the Result card reports the traversal that ran.
+* Go: `Graph.ChildEvidence`, `Graph.PenaltyCosts`, `Graph.TraversalCosts`, a `CostFn` on `SampleWalk` and
+  `BeamOptions`, and `Traversal` / `PenaltyScale` / `MeritScale` on `PredictOptions` and `GenerateOptions`.
+
+Tests: `tests/test_penalty.py` (the split per kind, that the rewards really do leave the score, the cheapest path
+being the least punished one, the distribution invariant, the cache, every mode of every kind, the CLI and the HTTP
+API), `go/radixnet/penalty_test.go` (the same contract in Go) and
+`tests/test_go_parity.py::TestGoParity::test_the_punishment_traversal_matches` (both sides walk the same
+least-punished paths at the same costs, under three settings of the scales, for `predict` and `generate`).
