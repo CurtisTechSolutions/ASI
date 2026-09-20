@@ -5,6 +5,8 @@ temporary directory; then both implementations train the same corpus with the
 same settings and must produce the same structure, counts, rewards, sliding
 window and RNG state, the same predictions, generated texts, scores and
 conversation, and each side must load and continue the other's model file.
+The punishment traversal is part of that contract: both sides must walk the
+same least-punished paths at the same costs.
 """
 
 import array
@@ -299,6 +301,48 @@ class TestGoParity(unittest.TestCase):
         one_go = go("nodes", "--node", branch["label"], model=go_path)["nodes"]
         self.assertEqual(one_py, one_go)
         self.assertEqual([row["node"] for row in one_py], [branch["node"]])
+
+    def test_the_punishment_traversal_matches(self):
+        """The traversal option, both sides: the same least-punished paths and the same costs."""
+        py_path = os.path.join(TMP.name, "trav_py.count.json")
+        go_path = os.path.join(TMP.name, "trav_go.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.go_model, go_path)
+        for run, path in ((py, py_path), (go, go_path)):
+            run("feedback", "--good-text", "the cat sat on the mat", "--strength", 4, model=path)
+            run("feedback", "--bad-text", "the dog ate the bone", "--strength", 4, model=path)
+        self.assertEqual(
+            load_json(py_path)["graph"]["edges"]["reward"], load_json(go_path)["graph"]["edges"]["reward"]
+        )
+        for scales in (("--merit-scale", 1), ("--merit-scale", 0), ("--penalty-scale", 3)):
+            for prefix in ("the cat", "the dog", "the ", ""):
+                with self.subTest(prefix=prefix, scales=scales):
+                    common = ("predict", "--prefix", prefix, "--length", 8, "--k", 3, "--mode", "beam",
+                              "--traversal", "punishment", *scales)
+                    a = py(*common, model=py_path)
+                    b = go(*common, model=go_path)
+                    self.assertEqual((a["traversal"], b["traversal"]), ("punishment", "punishment"))
+                    self.assertEqual(a["full_text"], b["full_text"])
+                    self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+                    self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+                    self.assertEqual([t["full_text"] for t in a["bottom"]], [t["full_text"] for t in b["bottom"]])
+                    assert_close(self, [t["cost"] for t in a["top"]], [t["cost"] for t in b["top"]])
+        # the two traversals really do differ on a model that has been both praised and corrected
+        moved = []
+        for prefix in ("the cat", "the dog", "the ", "on the ", ""):
+            common = ("predict", "--prefix", prefix, "--length", 12, "--k", 3, "--mode", "beam")
+            plain = py(*common, model=py_path)
+            other = py(*common, "--traversal", "punishment", "--merit-scale", 0, model=py_path)
+            moved.append(plain["full_text"] != other["full_text"])
+        self.assertTrue(any(moved), "the punishment traversal walked exactly where the rewards led")
+        common = ("generate", "--mode", "beam", "--count", 4, "--max-length", 40, "--traversal", "punishment")
+        a = py(*common, model=py_path)
+        b = go(*common, model=go_path)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        assert_close(self, [s["cost"] for s in a["samples"]], [s["cost"] for s in b["samples"]])
+        # and an unknown name is refused on both sides
+        py("predict", "--prefix", "the", "--traversal", "nope", model=py_path, expect=1)
+        go("predict", "--prefix", "the", "--traversal", "nope", model=go_path, expect=1)
 
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")

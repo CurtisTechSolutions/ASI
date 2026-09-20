@@ -42,6 +42,7 @@ takes a write lock.**
 | `counter.go` | the cyclic counters, wrapping at `10^15` |
 | `model.go` | `CountRewardNet` — train, predict, generate, score, feedback / 2NRL, invert, compress |
 | `search.go`, `beam.go`, `paths.go` | shortest-path prediction, the two beams, and paths judged per caller |
+| `penalty.go` | the **punishment traversal**: the merit / penalty split of an edge's evidence, and the cost function that prices a step by the punishment it carries instead of by the reward. `--traversal punishment` on `predict` / `generate`, `traversal` on `/api/predict` and `/api/generate` |
 | `source.go`, `pipeline.go` | `TextSource` streams a corpus in order; `PartSource` splits it into parts each goroutine can stream on its own, including entries of a ZIP opened once |
 | `json.go` | the model file format, written to match Python byte for byte |
 | `mt19937.go`, `blake2b.go` | the RNG and the hash, ported so both sides agree |

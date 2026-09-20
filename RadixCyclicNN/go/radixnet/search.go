@@ -117,8 +117,9 @@ func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxC
 
 // SampleWalk is a stochastic walk sampling each child from softmax(-cost /
 // temperature); temperature 0 is greedy.  maxChars < 0 means no limit; rng nil
-// uses the graph's own generator.
-func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool) (*PathResult, error) {
+// uses the graph's own generator; costs nil reads the graph's own cost
+// function, and the punishment traversal hands in its own (see penalty.go).
+func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn) (*PathResult, error) {
 	if temperature < 0 {
 		return nil, fmt.Errorf("temperature must be >= 0")
 	}
@@ -126,6 +127,7 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 		rng = g.rng
 	}
 	g.Prepare()
+	childCosts := g.costsOrDefault(costs)
 	chars, err := startEmission(g, startNode, startOffset)
 	if err != nil {
 		return nil, err
@@ -143,34 +145,34 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 			break
 		}
 		// a node the model expects to go round offers nothing
-		costs := Onward(g.ChildCostsFrom(node, cameFrom))
-		if len(costs) == 0 {
+		options := Onward(childCosts(node, cameFrom))
+		if len(options) == 0 {
 			break
 		}
 		var pick ChildCost
-		if temperature == 0 || len(costs) == 1 {
-			pick = costs[0]
-			for _, item := range costs[1:] {
+		if temperature == 0 || len(options) == 1 {
+			pick = options[0]
+			for _, item := range options[1:] {
 				if item.Cost < pick.Cost {
 					pick = item
 				}
 			}
 		} else {
 			invT := 1.0 / temperature
-			lowest := costs[0].Cost
-			for _, item := range costs[1:] {
+			lowest := options[0].Cost
+			for _, item := range options[1:] {
 				if item.Cost < lowest {
 					lowest = item.Cost
 				}
 			}
-			weights := make([]float64, len(costs))
-			for i, item := range costs {
+			weights := make([]float64, len(options))
+			for i, item := range options {
 				weights[i] = math.Exp(-(item.Cost - lowest) * invT)
 			}
 			r := rng.Float64() * fsum(weights)
-			pick = costs[len(costs)-1]
+			pick = options[len(options)-1]
 			acc := 0.0
-			for i, item := range costs {
+			for i, item := range options {
 				acc += weights[i]
 				if r < acc {
 					pick = item
