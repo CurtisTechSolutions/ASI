@@ -1,0 +1,14 @@
+# baseline: what the one-hop rule is worth, depth 5
+  single         seed=0 bits/char=2.7720 nodes= 34317 45s
+  single         seed=1 bits/char=2.7842 nodes= 34317 47s
+  single         seed=2 bits/char=2.8017 nodes= 34317 46s
+  counts         seed=0 bits/char=2.6144 nodes= 34317 1s
+  counts         seed=1 bits/char=2.6144 nodes= 34317 1s
+  counts         seed=2 bits/char=2.6144 nodes= 34317 1s
+  oracle         seed=0 bits/char=2.8671 nodes= 38142 25s
+  oracle         seed=1 bits/char=2.8729 nodes= 38142 27s
+  oracle         seed=2 bits/char=2.8800 nodes= 38142 29s
+  counts-oracle  seed=0 bits/char=2.7405 nodes= 38142 1s
+  counts-oracle  seed=1 bits/char=2.7405 nodes= 38142 1s
+  counts-oracle  seed=2 bits/char=2.7405 nodes= 38142 1s
+

@@ -1,0 +1,7 @@
+# resuming scale: 12 runs already measured
+# scale sweep: (800,) segments per source, arms ('single', 'oracle', 'learned', 'argmax')
+  n= 800 (232105 chars) single    bits/char=2.2344 nodes= 95494 nmi=0.000 280s
+  n= 800 (232105 chars) oracle    bits/char=2.2199 nodes=110813 nmi=1.000 161s
+  n= 800 (232105 chars) learned   bits/char=2.2350 nodes=100217 nmi=0.297 818s
+  n= 800 (232105 chars) argmax    bits/char=2.3028 nodes=107152 nmi=0.369 761s
+

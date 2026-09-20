@@ -1,0 +1,1750 @@
+{
+ "meta": {
+  "bits": 2,
+  "depth": 5,
+  "epochs": 3,
+  "per_source": 200,
+  "quick": false,
+  "rounds": 3,
+  "seconds": 387.87110590934753,
+  "seeds": [
+   0,
+   1,
+   2
+  ]
+ },
+ "passes": {
+  "bits": 2,
+  "corpus": {
+   "alphabet": 101,
+   "chars": 58389,
+   "per_source": {
+    "go": {
+     "chars": 14991,
+     "segments": 200
+    },
+    "json": {
+     "chars": 12682,
+     "segments": 200
+    },
+    "prose": {
+     "chars": 15898,
+     "segments": 200
+    },
+    "python": {
+     "chars": 14818,
+     "segments": 200
+    }
+   },
+   "segments": 800,
+   "sha256": "89fc446fbb883a4904387275411999f77dc493736ba175a958a9f658814c2c07"
+  },
+  "depth": 5,
+  "runs": [
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0064,
+     0.135
+    ],
+    "arm": "learned",
+    "balance": 0.538477052907521,
+    "bits": 2,
+    "branches": 9758,
+    "code": "sign",
+    "contingency": {
+     "1": {
+      "go": 29,
+      "json": 19,
+      "prose": 39,
+      "python": 38
+     },
+     "2": {
+      "go": 3,
+      "json": 16,
+      "prose": 1
+     },
+     "3": {
+      "go": 8,
+      "json": 5,
+      "python": 2
+     }
+    },
+    "dead_units": [
+     0
+    ],
+    "depth": 5,
+    "edges": 36310,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 270,
+       "amp_freq": [
+        0.0582,
+        0.1432
+       ],
+       "considered": 640,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5284333921675676,
+       "moved": 484,
+       "passes": 1
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.7189191411002033,
+      "branches": 10265,
+      "decision_loss": 2.2960436708258243,
+      "edges": 37919,
+      "filter": {
+       "agreed": 439,
+       "amp_freq": [
+        0.0064,
+        0.135
+       ],
+       "considered": 640,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.40123943922778443,
+       "moved": 256,
+       "passes": 1
+      },
+      "live_experts": 4,
+      "load": [
+       59,
+       420,
+       113,
+       48
+      ],
+      "nodes": 37923,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 82455,
+      "test_bits": 2.963527326913938,
+      "train_bits": 0.9158954357808684
+     },
+     {
+      "balance": 0.538477052907521,
+      "branches": 9758,
+      "decision_loss": 2.3021637994207396,
+      "edges": 36310,
+      "live_experts": 3,
+      "load": [
+       0,
+       475,
+       70,
+       95
+      ],
+      "nodes": 36314,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 76290,
+      "test_bits": 2.8742354222725908,
+      "train_bits": 0.9437553843063142
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     0,
+     475,
+     70,
+     95
+    ],
+    "nmi": 0.158671940434,
+    "nodes": 36314,
+    "passes": 1,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.39375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 123.91788363456726,
+    "seed": 0,
+    "stored_chars": 76290,
+    "test_bits_per_char": 2.8742354222725908,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9437553843063142
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0301,
+     0.033
+    ],
+    "arm": "learned",
+    "balance": 0.7041382494198966,
+    "bits": 2,
+    "branches": 10010,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 5,
+      "json": 39,
+      "prose": 2,
+      "python": 10
+     },
+     "1": {
+      "python": 1
+     },
+     "2": {
+      "go": 9,
+      "json": 1,
+      "python": 7
+     },
+     "3": {
+      "go": 26,
+      "prose": 38,
+      "python": 22
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 37119,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 424,
+       "amp_freq": [
+        0.0135,
+        0.0171
+       ],
+       "considered": 640,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.39193124634693016,
+       "moved": 269,
+       "passes": 1
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.7047230804056551,
+      "branches": 10020,
+      "decision_loss": 2.2388172579871783,
+      "edges": 37131,
+      "filter": {
+       "agreed": 491,
+       "amp_freq": [
+        0.0301,
+        0.033
+       ],
+       "considered": 640,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.3227343132644247,
+       "moved": 202,
+       "passes": 1
+      },
+      "live_experts": 4,
+      "load": [
+       243,
+       28,
+       28,
+       341
+      ],
+      "nodes": 37135,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 80019,
+      "test_bits": 2.9090118235400375,
+      "train_bits": 0.9223320786696354
+     },
+     {
+      "balance": 0.7041382494198966,
+      "branches": 10010,
+      "decision_loss": 2.2264803650961413,
+      "edges": 37119,
+      "live_experts": 3,
+      "load": [
+       203,
+       0,
+       92,
+       345
+      ],
+      "nodes": 37123,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 79111,
+      "test_bits": 2.898626356569937,
+      "train_bits": 0.9153189438899133
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     203,
+     0,
+     92,
+     345
+    ],
+    "nmi": 0.3437394451651576,
+    "nodes": 37123,
+    "passes": 1,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.54375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 120.50540471076965,
+    "seed": 1,
+    "stored_chars": 79111,
+    "test_bits_per_char": 2.898626356569937,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9153189438899133
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0271,
+     0.1451
+    ],
+    "arm": "learned",
+    "balance": 0.5270994839414019,
+    "bits": 2,
+    "branches": 10117,
+    "code": "sign",
+    "contingency": {
+     "1": {
+      "go": 1,
+      "python": 1
+     },
+     "2": {
+      "go": 20,
+      "json": 22,
+      "prose": 4,
+      "python": 14
+     },
+     "3": {
+      "go": 19,
+      "json": 18,
+      "prose": 36,
+      "python": 25
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 37513,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 202,
+       "amp_freq": [
+        0.0071,
+        0.154
+       ],
+       "considered": 640,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 1.0670002927709945,
+       "moved": 536,
+       "passes": 1
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.5390027605443521,
+      "branches": 10076,
+      "decision_loss": 2.3319151305776993,
+      "edges": 37307,
+      "filter": {
+       "agreed": 492,
+       "amp_freq": [
+        0.0271,
+        0.1451
+       ],
+       "considered": 640,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.26206914081205995,
+       "moved": 177,
+       "passes": 1
+      },
+      "live_experts": 4,
+      "load": [
+       29,
+       40,
+       70,
+       501
+      ],
+      "nodes": 37311,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 79947,
+      "test_bits": 2.9617748864489486,
+      "train_bits": 0.9508246478203716
+     },
+     {
+      "balance": 0.5270994839414019,
+      "branches": 10117,
+      "decision_loss": 2.312453068915812,
+      "edges": 37513,
+      "live_experts": 4,
+      "load": [
+       6,
+       4,
+       223,
+       407
+      ],
+      "nodes": 37517,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 79749,
+      "test_bits": 2.9197395101047623,
+      "train_bits": 0.9369917237873825
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     6,
+     4,
+     223,
+     407
+    ],
+    "nmi": 0.07877936070027476,
+    "nodes": 37517,
+    "passes": 1,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.36875,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 131.8213713169098,
+    "seed": 2,
+    "stored_chars": 79749,
+    "test_bits_per_char": 2.9197395101047623,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9369917237873825
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0206,
+     0.1256
+    ],
+    "arm": "learned",
+    "balance": 0.2513686406020581,
+    "bits": 2,
+    "branches": 9286,
+    "code": "sign",
+    "contingency": {
+     "2": {
+      "json": 15,
+      "prose": 1
+     },
+     "3": {
+      "go": 40,
+      "json": 25,
+      "prose": 39,
+      "python": 40
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 34862,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 473,
+       "amp_freq": [
+        0.024,
+        0.1256
+       ],
+       "considered": 1280,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5888910621384704,
+       "moved": 1058,
+       "passes": 2
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.22186478241213436,
+      "branches": 9319,
+      "decision_loss": 2.3146096827262177,
+      "edges": 35011,
+      "filter": {
+       "agreed": 1145,
+       "amp_freq": [
+        0.0206,
+        0.1256
+       ],
+       "considered": 1280,
+       "dead_units": [],
+       "folds": 2,
+       "live": 2,
+       "mean_advantage": 0.09670430832957842,
+       "moved": 135,
+       "passes": 2
+      },
+      "live_experts": 2,
+      "load": [
+       0,
+       0,
+       59,
+       581
+      ],
+      "nodes": 35015,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 70938,
+      "test_bits": 2.7920117577048877,
+      "train_bits": 0.9857210214649442
+     },
+     {
+      "balance": 0.2513686406020581,
+      "branches": 9286,
+      "decision_loss": 2.309569400541739,
+      "edges": 34862,
+      "live_experts": 2,
+      "load": [
+       0,
+       0,
+       71,
+       569
+      ],
+      "nodes": 34866,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 70210,
+      "test_bits": 2.7770296959417498,
+      "train_bits": 0.9864743547086826
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 2,
+    "load": [
+     0,
+     0,
+     71,
+     569
+    ],
+    "nmi": 0.15246836444146625,
+    "nodes": 34866,
+    "passes": 2,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.34375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 142.60202765464783,
+    "seed": 0,
+    "stored_chars": 70210,
+    "test_bits_per_char": 2.7770296959417498,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9864743547086826
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0456,
+     0.0277
+    ],
+    "arm": "learned",
+    "balance": 0.7010434964806602,
+    "bits": 2,
+    "branches": 9916,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 7,
+      "json": 40,
+      "prose": 2,
+      "python": 11
+     },
+     "2": {
+      "go": 6
+     },
+     "3": {
+      "go": 27,
+      "prose": 38,
+      "python": 29
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36868,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 864,
+       "amp_freq": [
+        0.0374,
+        0.0392
+       ],
+       "considered": 1280,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.3586759315962789,
+       "moved": 511,
+       "passes": 2
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.7284582158959477,
+      "branches": 10171,
+      "decision_loss": 2.222405416713714,
+      "edges": 37377,
+      "filter": {
+       "agreed": 902,
+       "amp_freq": [
+        0.0456,
+        0.0277
+       ],
+       "considered": 1280,
+       "dead_units": [],
+       "folds": 2,
+       "live": 3,
+       "mean_advantage": 0.2108090094222502,
+       "moved": 451,
+       "passes": 2
+      },
+      "live_experts": 3,
+      "load": [
+       232,
+       0,
+       100,
+       308
+      ],
+      "nodes": 37381,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 80292,
+      "test_bits": 2.8725785694243626,
+      "train_bits": 0.9084363394958571
+     },
+     {
+      "balance": 0.7010434964806602,
+      "branches": 9916,
+      "decision_loss": 2.245835228953033,
+      "edges": 36868,
+      "live_experts": 4,
+      "load": [
+       224,
+       20,
+       39,
+       357
+      ],
+      "nodes": 36872,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 79107,
+      "test_bits": 2.863916585186578,
+      "train_bits": 0.9441597291465302
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     224,
+     20,
+     39,
+     357
+    ],
+    "nmi": 0.35897326888277425,
+    "nodes": 36872,
+    "passes": 2,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.525,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 121.6987669467926,
+    "seed": 1,
+    "stored_chars": 79107,
+    "test_bits_per_char": 2.863916585186578,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9441597291465302
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0029,
+     0.1062
+    ],
+    "arm": "learned",
+    "balance": 0.0,
+    "bits": 2,
+    "branches": 9114,
+    "code": "sign",
+    "contingency": {
+     "1": {
+      "go": 40,
+      "json": 40,
+      "prose": 40,
+      "python": 40
+     }
+    },
+    "dead_units": [
+     0
+    ],
+    "depth": 5,
+    "edges": 34316,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 474,
+       "amp_freq": [
+        0.0029,
+        0.1062
+       ],
+       "considered": 1280,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 1.0022098335676142,
+       "moved": 1019,
+       "passes": 2
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.0,
+      "branches": 9114,
+      "decision_loss": 2.350454368764428,
+      "edges": 34316,
+      "filter": {
+       "agreed": 0,
+       "amp_freq": [],
+       "considered": 0,
+       "dead_units": [],
+       "folds": 2,
+       "live": 1,
+       "mean_advantage": 0.0,
+       "moved": 0,
+       "passes": null
+      },
+      "live_experts": 1,
+      "load": [
+       0,
+       640,
+       0,
+       0
+      ],
+      "nodes": 34320,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 68388,
+      "test_bits": 2.7956352685850794,
+      "train_bits": 1.0278332164529966
+     },
+     {
+      "balance": 0.0,
+      "branches": 9114,
+      "decision_loss": 2.350454368764428,
+      "edges": 34316,
+      "live_experts": 1,
+      "load": [
+       0,
+       640,
+       0,
+       0
+      ],
+      "nodes": 34320,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 68388,
+      "test_bits": 2.7956352685850794,
+      "train_bits": 1.0278332164529966
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 1,
+    "load": [
+     0,
+     640,
+     0,
+     0
+    ],
+    "nmi": 0.0,
+    "nodes": 34320,
+    "passes": 2,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.25,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 142.4552183151245,
+    "seed": 2,
+    "stored_chars": 68388,
+    "test_bits_per_char": 2.7956352685850794,
+    "test_chars": 11935,
+    "train_bits_per_char": 1.0278332164529966
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0275,
+     0.0669
+    ],
+    "arm": "learned",
+    "balance": 0.5662789800931544,
+    "bits": 2,
+    "branches": 10230,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 5,
+      "json": 17,
+      "prose": 16,
+      "python": 5
+     },
+     "1": {
+      "go": 35,
+      "json": 17,
+      "prose": 23,
+      "python": 35
+     },
+     "2": {
+      "json": 6,
+      "prose": 1
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 37836,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 1012,
+       "amp_freq": [
+        0.0045,
+        0.1099
+       ],
+       "considered": 2560,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5600411279724462,
+       "moved": 1998,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.6545246030887715,
+      "branches": 10479,
+      "decision_loss": 2.3133661010090734,
+      "edges": 38584,
+      "filter": {
+       "agreed": 1667,
+       "amp_freq": [
+        0.0275,
+        0.0669
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.2625317908461763,
+       "moved": 919,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       275,
+       324,
+       36,
+       5
+      ],
+      "nodes": 38588,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 82916,
+      "test_bits": 2.9714511264755163,
+      "train_bits": 0.9111725404918123
+     },
+     {
+      "balance": 0.5662789800931544,
+      "branches": 10230,
+      "decision_loss": 2.3201323560638873,
+      "edges": 37836,
+      "live_experts": 4,
+      "load": [
+       202,
+       415,
+       17,
+       6
+      ],
+      "nodes": 37840,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 80302,
+      "test_bits": 2.8976828914607435,
+      "train_bits": 0.9214021605439866
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     202,
+     415,
+     17,
+     6
+    ],
+    "nmi": 0.10501519882160029,
+    "nodes": 37840,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.3625,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 125.11744093894958,
+    "seed": 0,
+    "stored_chars": 80302,
+    "test_bits_per_char": 2.8976828914607435,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9214021605439866
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0262,
+     0.0339
+    ],
+    "arm": "learned",
+    "balance": 0.775035806852354,
+    "bits": 2,
+    "branches": 10462,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 11,
+      "json": 40,
+      "prose": 2,
+      "python": 12
+     },
+     "2": {
+      "go": 14,
+      "prose": 7,
+      "python": 16
+     },
+     "3": {
+      "go": 15,
+      "prose": 31,
+      "python": 12
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 38252,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 1764,
+       "amp_freq": [
+        0.0326,
+        0.0225
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.33767543820522816,
+       "moved": 996,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.7642151994471321,
+      "branches": 10607,
+      "decision_loss": 2.2529058203471,
+      "edges": 38832,
+      "filter": {
+       "agreed": 1681,
+       "amp_freq": [
+        0.0262,
+        0.0339
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 3,
+       "mean_advantage": 0.24166802901893725,
+       "moved": 1002,
+       "passes": 4
+      },
+      "live_experts": 3,
+      "load": [
+       300,
+       0,
+       170,
+       170
+      ],
+      "nodes": 38836,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 84742,
+      "test_bits": 3.0115505600834487,
+      "train_bits": 0.8876038834940042
+     },
+     {
+      "balance": 0.775035806852354,
+      "branches": 10462,
+      "decision_loss": 2.21955564592407,
+      "edges": 38252,
+      "live_experts": 3,
+      "load": [
+       256,
+       0,
+       150,
+       234
+      ],
+      "nodes": 38256,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 82864,
+      "test_bits": 2.909772605702845,
+      "train_bits": 0.8799322212517041
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     256,
+     0,
+     150,
+     234
+    ],
+    "nmi": 0.29651127857705656,
+    "nodes": 38256,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.54375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 117.5371904373169,
+    "seed": 1,
+    "stored_chars": 82864,
+    "test_bits_per_char": 2.909772605702845,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8799322212517041
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0182,
+     0.0576
+    ],
+    "arm": "learned",
+    "balance": 0.3712227751009666,
+    "bits": 2,
+    "branches": 9676,
+    "code": "sign",
+    "contingency": {
+     "1": {
+      "go": 1,
+      "python": 1
+     },
+     "2": {
+      "go": 38,
+      "json": 26,
+      "prose": 39,
+      "python": 28
+     },
+     "3": {
+      "go": 1,
+      "json": 14,
+      "prose": 1,
+      "python": 11
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36273,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 943,
+       "amp_freq": [
+        0.0074,
+        0.111
+       ],
+       "considered": 2560,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.996864077409602,
+       "moved": 2012,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.6643719694485241,
+      "branches": 10497,
+      "decision_loss": 2.331350290378784,
+      "edges": 38813,
+      "filter": {
+       "agreed": 1630,
+       "amp_freq": [
+        0.0182,
+        0.0576
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.29945929537623,
+       "moved": 980,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       37,
+       17,
+       394,
+       192
+      ],
+      "nodes": 38817,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 84310,
+      "test_bits": 3.0284579808342094,
+      "train_bits": 0.9024423950033124
+     },
+     {
+      "balance": 0.3712227751009666,
+      "branches": 9676,
+      "decision_loss": 2.318756906591561,
+      "edges": 36273,
+      "live_experts": 4,
+      "load": [
+       4,
+       3,
+       527,
+       106
+      ],
+      "nodes": 36277,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 75449,
+      "test_bits": 2.915067897536828,
+      "train_bits": 0.9751784165354326
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     4,
+     3,
+     527,
+     106
+    ],
+    "nmi": 0.09990102297026679,
+    "nodes": 36277,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.3375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 127.2308418750763,
+    "seed": 2,
+    "stored_chars": 75449,
+    "test_bits_per_char": 2.915067897536828,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9751784165354326
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0269,
+     0.062
+    ],
+    "arm": "learned",
+    "balance": 0.49376886827082533,
+    "bits": 2,
+    "branches": 10007,
+    "code": "sign",
+    "contingency": {
+     "2": {
+      "go": 32,
+      "json": 13,
+      "prose": 34,
+      "python": 11
+     },
+     "3": {
+      "go": 8,
+      "json": 27,
+      "prose": 6,
+      "python": 29
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 37010,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 2052,
+       "amp_freq": [
+        0.0329,
+        0.062
+       ],
+       "considered": 5120,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5282671046770027,
+       "moved": 3964,
+       "passes": 8
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.4810638844834877,
+      "branches": 10034,
+      "decision_loss": 2.3110211696445417,
+      "edges": 37292,
+      "filter": {
+       "agreed": 3963,
+       "amp_freq": [
+        0.0269,
+        0.062
+       ],
+       "considered": 5120,
+       "dead_units": [],
+       "folds": 2,
+       "live": 2,
+       "mean_advantage": 0.15665401105323118,
+       "moved": 1157,
+       "passes": 8
+      },
+      "live_experts": 2,
+      "load": [
+       0,
+       0,
+       393,
+       247
+      ],
+      "nodes": 37296,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 78752,
+      "test_bits": 2.9450955880124456,
+      "train_bits": 0.9114352704490375
+     },
+     {
+      "balance": 0.49376886827082533,
+      "branches": 10007,
+      "decision_loss": 2.2834190821937015,
+      "edges": 37010,
+      "live_experts": 2,
+      "load": [
+       0,
+       0,
+       362,
+       278
+      ],
+      "nodes": 37014,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 78033,
+      "test_bits": 2.928988890363066,
+      "train_bits": 0.9184297288345638
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 2,
+    "load": [
+     0,
+     0,
+     362,
+     278
+    ],
+    "nmi": 0.14466910428099028,
+    "nodes": 37014,
+    "passes": 8,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.39375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 127.13246011734009,
+    "seed": 0,
+    "stored_chars": 78033,
+    "test_bits_per_char": 2.928988890363066,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9184297288345638
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0155,
+     0.0201
+    ],
+    "arm": "learned",
+    "balance": 0.5968524434036038,
+    "bits": 2,
+    "branches": 9674,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 3,
+      "json": 39,
+      "prose": 2,
+      "python": 7
+     },
+     "2": {
+      "go": 5,
+      "json": 1,
+      "python": 4
+     },
+     "3": {
+      "go": 32,
+      "prose": 38,
+      "python": 29
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36175,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 3570,
+       "amp_freq": [
+        0.0231,
+        0.0136
+       ],
+       "considered": 5120,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.32008316377517126,
+       "moved": 1936,
+       "passes": 8
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.6462133848344684,
+      "branches": 10107,
+      "decision_loss": 2.252785313980065,
+      "edges": 37200,
+      "filter": {
+       "agreed": 4070,
+       "amp_freq": [
+        0.0155,
+        0.0201
+       ],
+       "considered": 5120,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.2702205618645831,
+       "moved": 1510,
+       "passes": 8
+      },
+      "live_experts": 4,
+      "load": [
+       295,
+       16,
+       17,
+       312
+      ],
+      "nodes": 37204,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 79964,
+      "test_bits": 2.898086628464469,
+      "train_bits": 0.916364288168913
+     },
+     {
+      "balance": 0.5968524434036038,
+      "branches": 9674,
+      "decision_loss": 2.2428463024266114,
+      "edges": 36175,
+      "live_experts": 3,
+      "load": [
+       194,
+       0,
+       41,
+       405
+      ],
+      "nodes": 36179,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 76008,
+      "test_bits": 2.8172169292265865,
+      "train_bits": 0.9506383316593515
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     194,
+     0,
+     41,
+     405
+    ],
+    "nmi": 0.36525096125673734,
+    "nodes": 36179,
+    "passes": 8,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5125,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 127.282723903656,
+    "seed": 1,
+    "stored_chars": 76008,
+    "test_bits_per_char": 2.8172169292265865,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9506383316593515
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0374,
+     0.0188
+    ],
+    "arm": "learned",
+    "balance": 0.9618036257794277,
+    "bits": 2,
+    "branches": 11258,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 16,
+      "json": 9,
+      "prose": 1,
+      "python": 1
+     },
+     "1": {
+      "go": 16,
+      "json": 17,
+      "prose": 8,
+      "python": 4
+     },
+     "2": {
+      "json": 4,
+      "prose": 3,
+      "python": 19
+     },
+     "3": {
+      "go": 8,
+      "json": 10,
+      "prose": 28,
+      "python": 16
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 41086,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 1972,
+       "amp_freq": [
+        0.0261,
+        0.0654
+       ],
+       "considered": 5120,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.9424770834781496,
+       "moved": 3854,
+       "passes": 8
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.8915802547426794,
+      "branches": 10756,
+      "decision_loss": 2.2993085084285623,
+      "edges": 39354,
+      "filter": {
+       "agreed": 2898,
+       "amp_freq": [
+        0.0374,
+        0.0188
+       ],
+       "considered": 5120,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.4649489108343946,
+       "moved": 2521,
+       "passes": 8
+      },
+      "live_experts": 4,
+      "load": [
+       106,
+       75,
+       146,
+       313
+      ],
+      "nodes": 39358,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 87449,
+      "test_bits": 3.1598043564899427,
+      "train_bits": 0.8769505320955138
+     },
+     {
+      "balance": 0.9618036257794277,
+      "branches": 11258,
+      "decision_loss": 2.3142379126560457,
+      "edges": 41086,
+      "live_experts": 4,
+      "load": [
+       114,
+       186,
+       107,
+       233
+      ],
+      "nodes": 41090,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 92243,
+      "test_bits": 3.1182017166485334,
+      "train_bits": 0.833740190207283
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     114,
+     186,
+     107,
+     233
+    ],
+    "nmi": 0.1934610407129215,
+    "nodes": 41090,
+    "passes": 8,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 111.64628458023071,
+    "seed": 2,
+    "stored_chars": 92243,
+    "test_bits_per_char": 3.1182017166485334,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.833740190207283
+   }
+  ],
+  "sweep": "passes"
+ }
+}
