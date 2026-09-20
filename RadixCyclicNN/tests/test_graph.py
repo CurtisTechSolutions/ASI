@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K  # noqa: E402
 from radixnet.backend import CSR, NodeParams  # noqa: E402
-from radixnet.encoding import BACK_LABEL, END_LABEL, START_LABEL, Decoder, Encoder  # noqa: E402
+from radixnet.encoding import (  # noqa: E402
+    BACK_LABEL, END_LABEL, START_LABEL, WORDS, Decoder, Encoder, Encoding,
+)
 from radixnet.graph import BACK, END, FIRST, START, RadixCyclicGraph  # noqa: E402
 
 ENC = Encoder()
@@ -546,22 +548,27 @@ class TestSerialisation(unittest.TestCase):
         with self.assertRaises(ValueError):
             RadixCyclicGraph.from_dict(d)
 
-    def test_from_dict_refuses_an_encoding_it_cannot_read(self):
-        """The Go implementation can encode in n-grams of any size, in groups
-        of letters and in words, and says so in the file.  A trigram reader
-        would make nonsense of such a graph, so it is turned away."""
-        g = RadixCyclicGraph(seed=1)
-        g.observe_sequence(ENC.encode("hello there"))
-        for encoding in ({"unit": "word", "n": 2, "stride": 1},
-                         {"unit": "char", "n": 5, "stride": 5},
-                         {"unit": "char", "n": 4, "stride": 1}):
-            d = {**g.to_dict(), "encoding": encoding}
-            with self.assertRaises(ValueError) as caught:
-                RadixCyclicGraph.from_dict(d)
-            self.assertIn("Go implementation", str(caught.exception))
-        # the default encoding is what this side speaks: written or not, it loads
-        d = {**g.to_dict(), "encoding": {"unit": "char", "n": 3, "stride": 1}}
-        self.assertEqual(len(RadixCyclicGraph.from_dict(d).labels), len(g.labels))
+    def test_the_encoding_travels_with_the_file(self):
+        """A graph is saved in the encoding it was built in - and only says so
+        when that is not the character trigram, so an ordinary file is what it
+        always was."""
+        plain = RadixCyclicGraph(seed=1)
+        plain.observe_sequence(plain.encoding.encode("hello there"))
+        self.assertNotIn("encoding", plain.to_dict())
+
+        for encoding in (Encoding(unit=WORDS, n=2), Encoding(n=5, stride=5), Encoding(n=4)):
+            g = RadixCyclicGraph(seed=1, encoding=encoding)
+            g.observe_sequence(encoding.encode("the cat sat on the mat"))
+            d = json.loads(json.dumps(g.to_dict()))
+            self.assertEqual(d["encoding"], encoding.to_dict())
+            clone = RadixCyclicGraph.from_dict(d)
+            self.assertEqual(clone.encoding, encoding)
+            self.assertEqual(clone.labels, g.labels)
+            self.assertEqual(clone.trigram_index, g.trigram_index)
+            clone.check_invariants(["the cat sat on the mat"])
+        # a file that spells the default out loads as the default
+        d = {**plain.to_dict(), "encoding": {"unit": "char", "n": 3, "stride": 1}}
+        self.assertEqual(len(RadixCyclicGraph.from_dict(d).labels), len(plain.labels))
 
 
 class TestInvert(unittest.TestCase):

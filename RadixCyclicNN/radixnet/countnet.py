@@ -46,7 +46,7 @@ from .backend import get_backend
 from .beam import Prediction
 from . import diff
 from .counter import CyclicCounter
-from .encoding import WINDOW, Decoder, Encoder
+from .encoding import WINDOW, Decoder, Encoder, Encoding
 from .graph import BACK, END, START, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
@@ -64,7 +64,7 @@ from .model import (
 __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
 
 COUNT_MODEL_FORMAT = "radixnet-count"
-_W = WINDOW
+_W = WINDOW  # the default n; a net's own is self.encoding.n
 _MAX_LOG_PPL = 700.0
 
 
@@ -142,6 +142,7 @@ class CountRewardGraph(RadixCyclicGraph):
         window_scale: float = 0.5,
         path_scale: float = 1.0,
         window: int = 10_000,
+        encoding: Encoding | None = None,
     ) -> None:
         self.count_scale = float(count_scale)
         self.reward_scale = float(reward_scale)
@@ -164,7 +165,7 @@ class CountRewardGraph(RadixCyclicGraph):
         self._path_parents: set[int] | None = None  # nodes whose costs depend on where the walk came from
         self._ctx_cache: dict[tuple[int, int], list[tuple[int, int, float]]] = {}
         self._ctx_version = -1
-        super().__init__(seed)
+        super().__init__(seed, encoding=encoding)
 
     # -- the tracked numbers -------------------------------------------------
 
@@ -799,14 +800,15 @@ class CountRewardNet(GraphModel):
         global_scale: float = 0.5,
         window_scale: float = 0.5,
         window: int = 10_000,
+        encoding: Encoding | None = None,
     ) -> None:
         self.seed = int(seed)
         self.graph = CountRewardGraph(
             seed=self.seed, count_scale=count_scale, reward_scale=reward_scale, global_scale=global_scale,
-            window_scale=window_scale, window=window,
+            window_scale=window_scale, window=window, encoding=encoding,
         )
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
+        self.encoder = Encoder(encoding=self.graph.encoding)
+        self.decoder = Decoder(encoding=self.graph.encoding)
         # no numeric learning rule runs, so the backend is only reported (python / cpu); backend / device are accepted
         # for interface parity with RadixNet
         self.backend = get_backend("python", None)
@@ -1153,8 +1155,8 @@ class CountRewardNet(GraphModel):
         """
         base = abs(1.0 if strength is None else float(strength))
         wrong, right = str(wrong or ""), str(right or "")
-        changes = diff.summary(wrong, right, limit=0)
-        wrong_spans, right_spans = diff.changed_spans(wrong, right)
+        changes = diff.summary(wrong, right, limit=0, encoding=self.encoding)
+        wrong_spans, right_spans = diff.changed_spans(wrong, right, self.encoding)
         result = {
             "edits": len(changes), "changes": changes[:8],
             "penalised": 0, "rewarded": 0, "kept": 0, "penalty": 0.0, "reward": 0.0, "loss": None,
@@ -1163,8 +1165,9 @@ class CountRewardNet(GraphModel):
             "marked_correct": 0, "marked_incorrect": 0,
         }
         graph = self.graph
-        wrong_grams = self.encoder.encode(wrong) if len(wrong) >= _W else []
-        right_grams = self.encoder.encode(right) if len(right) >= _W else []
+        enc = self.encoding
+        wrong_grams = enc.encode(wrong)
+        right_grams = enc.encode(right)
         if not wrong_grams and not right_grams:
             return result
         # both sentences join the structure before either is measured: observing one can split a node the
@@ -1265,6 +1268,11 @@ class CountRewardNet(GraphModel):
             "nodes": g.num_nodes(),
             "edges": g.num_edges(),
             "trigrams": g.num_trigrams(),
+            "grams": g.num_trigrams(),
+            "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "ngram": self.encoding.n,
+            "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
             "inverted": g.inverted,
             "backend": self.backend.name,
@@ -1314,7 +1322,7 @@ class CountRewardNet(GraphModel):
             raise ValueError(f"unsupported {COUNT_MODEL_FORMAT} model version {version}")
         graph = CountRewardGraph.from_dict(d["graph"])
         model = cls(seed=graph.seed, backend=backend, device=device)
-        model.graph = graph
+        model._adopt(graph)
         model.history = [dict(r) for r in d.get("history", [])]
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})

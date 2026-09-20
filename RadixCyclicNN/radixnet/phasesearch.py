@@ -44,7 +44,7 @@ from .search import PathResult, _build_result, _start_emission, onward
 
 __all__ = ["phase_beam", "phase_dijkstra", "phase_kbest", "phase_walk", "start_bucket"]
 
-_OV = WINDOW - 1
+_OV = WINDOW - 1  # the default overlap; a graph's own is graph.encoding.overlap
 
 
 def start_bucket(graph, start_node: int, start_offset: int, prefix: str = "") -> int:
@@ -94,6 +94,7 @@ def phase_dijkstra(
     if max_chars is not None and max_chars < min_chars:
         max_chars = min_chars
     labels = graph.labels
+    overlap = graph.encoding.overlap
     advance = graph.advance
     buckets = graph.buckets
     child_costs_at = graph.child_costs_at
@@ -124,7 +125,7 @@ def phase_dijkstra(
         if max_chars is not None and chars >= max_chars:
             continue
         for c, _e, ec in onward(child_costs_at(node, phase)):
-            nchars = chars if c < FIRST else chars + len(labels[c]) - _OV
+            nchars = chars if c < FIRST else chars + graph.label_len(c) - overlap
             step = ec + step_penalty
             ncost = cost + step
             nkey = (c, nchars, (phase + advance[c]) % buckets)
@@ -199,6 +200,7 @@ def phase_kbest(
     if max_chars is not None and max_chars < min_chars:
         max_chars = min_chars
     labels = graph.labels
+    overlap = graph.encoding.overlap
     start_chars = _start_emission(graph, start_node, start_offset)
     phase0 = start_phase % graph.buckets
     # a label is (node, chars, phase, step cost, parent index); the chain is the walk
@@ -250,7 +252,7 @@ def phase_kbest(
             continue
         depth = walk_back(idx)[2] if meta is not None else {}
         for c, _e, step, nphase, _action in _expand(graph, meta, node, phase, depth, step_penalty):
-            nchars = chars if c < FIRST else chars + len(labels[c]) - _OV
+            nchars = chars if c < FIRST else chars + graph.label_len(c) - overlap
             if max_chars is not None and nchars > max_chars and c >= FIRST:
                 continue
             if settled.get((c, nchars, nphase), 0) >= k:
@@ -325,6 +327,7 @@ def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float
     advance = graph.advance
     buckets = graph.buckets
     labels = graph.labels
+    overlap = graph.encoding.overlap
     every = graph.child_costs_at(node, phase)
     raw = onward(every)  # a node the model expects to go round offers nothing
     extra: dict[str, float] | None = None
@@ -388,6 +391,7 @@ def phase_beam(
     if max_chars is not None and max_chars < min_chars:
         max_chars = min_chars
     labels = graph.labels
+    overlap = graph.encoding.overlap
     start_chars = _start_emission(graph, start_node, start_offset)
     phase0 = start_phase % graph.buckets
     root = _Entry(start_node, start_chars, phase0, 0.0, None, 0.0, {(start_node, phase0): 0})
@@ -415,7 +419,7 @@ def phase_beam(
                 for c, _e, step, nphase, _action in _expand(
                     graph, meta, entry.node, entry.phase, entry.depth, step_penalty
                 ):
-                    nchars = entry.chars if c < FIRST else entry.chars + len(labels[c]) - _OV
+                    nchars = entry.chars if c < FIRST else entry.chars + graph.label_len(c) - overlap
                     if cap_chars is not None and nchars > cap_chars and c >= FIRST:
                         continue
                     key = (c, nphase)
@@ -486,6 +490,7 @@ def phase_walk(
     if rng is None:
         rng = graph.rng
     labels = graph.labels
+    overlap = graph.encoding.overlap
     node = start_node
     phase = start_phase % graph.buckets
     chars = _start_emission(graph, start_node, start_offset)
@@ -517,7 +522,7 @@ def phase_walk(
         step_costs.append(cst)
         node_ids.append(c)
         if c >= FIRST:
-            chars += len(labels[c]) - _OV
+            chars += graph.label_len(c) - overlap
         steps += 1
         key = (c, nphase)
         depth = entry.depth if key in entry.depth else {**entry.depth, key: steps}

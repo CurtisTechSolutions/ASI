@@ -8,8 +8,8 @@ A Go port of the **count / reward model** (`CountRewardNet`) and of the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained here continues in Python and vice versa with
 identical numbers. `../tests/test_go_parity.py` enforces that in both directions.
-That is the default encoding — character trigrams — which is the only one Python
-reads; a model in any other encoding says so in its file and is read here only.
+That holds in every encoding: a model built with anything but the character
+trigram says so in its file, and the Python implementation reads it.
 
 **The encoding is a dial.** Python encodes one way; this implementation makes it
 a choice, fixed when a model is created and carried in its file:

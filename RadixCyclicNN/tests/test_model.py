@@ -116,13 +116,15 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(
             set(stats),
             {
-                "kind", "nodes", "edges", "trigrams", "compression_ratio", "inverted", "backend", "device",
+                "kind", "nodes", "edges", "trigrams", "grams", "compression_ratio", "inverted", "backend", "device",
+                "encoding", "unit", "ngram", "stride",
                 "epochs_total", "epochs_total_resets", "trained_chars", "trained_chars_resets",
                 "trained_texts", "trained_texts_resets", "twonrl_runs", "twonrl_runs_resets",
                 "history_len", "last_loss",
             },
         )
         self.assertEqual((stats["nodes"], stats["edges"], stats["trigrams"]), (FIRST, 0, 0))  # the sentinels
+        self.assertEqual((stats["encoding"], stats["ngram"], stats["stride"]), ("char:3:1", 3, 1))
         self.assertIsNone(stats["last_loss"])
         json.dumps(stats)
         self.assertIn("RadixNet(", repr(model))

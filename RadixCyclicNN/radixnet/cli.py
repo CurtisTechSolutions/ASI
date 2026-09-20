@@ -33,7 +33,7 @@ from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
-from .encoding import WINDOW
+from .encoding import WINDOW, Encoding, parse_encoding
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -656,17 +656,54 @@ def open_model(
             return model, Origin("checkpoint", record["path"], f"{model.kind}, {model.meta['epochs_total']} epochs trained")
         console.note(f"note: no checkpoint to resume from in {manager.directory}")
     path = args.model
+    encoding, encoding_given = effective_encoding(args)
     if os.path.isfile(path):
         model = load_model(path, backend=backend, device=device)
         if wanted and wanted != model.kind:
             console.note(f"note: {path} holds a {model.kind} model; --kind {wanted} applies to new models only")
+        if encoding_given and encoding != model.encoding:
+            # the encoding is fixed when a model is created - every label is written in it - so
+            # ignoring the flag would train a trigram model and call it something else
+            raise CliError(
+                f"{path} is {model.encoding.describe()}; --encoding / --units / --ngram / --stride apply to a "
+                f"NEW model only (train one to a new --model path)"
+            )
         return model, Origin("model", path, f"{model.kind}, {model.meta['epochs_total']} epochs trained")
     if required:
         raise CliError(f"model file not found: {path} (train one first with `{PROG} train --data FILE`)")
     seed = effective_seed(args)
     kind = effective_kind(args)
-    model = model_class(kind)(seed=seed, backend=backend, device=device)
-    return model, Origin("new", None, f"seed {seed}, kind {kind}")
+    model = model_class(kind)(seed=seed, backend=backend, device=device, encoding=encoding)
+    note = f"seed {seed}, kind {kind}"
+    if not encoding.is_default():
+        note += f", {encoding.describe()}"
+    return model, Origin("new", None, note)
+
+
+def effective_encoding(args: argparse.Namespace) -> tuple[Encoding, bool]:
+    """The encoding the flags ask for, and whether any of them was given.
+
+    ``--encoding`` sets all three dials at once; ``--units`` / ``--ngram`` /
+    ``--stride`` override it one at a time.  A bare ``--ngram`` keeps a sliding
+    encoding sliding and grows a grouping one's group.
+    """
+    spec = getattr(args, "encoding", None)
+    try:
+        enc = parse_encoding(spec or "")
+        given = bool(spec)
+        unit = getattr(args, "units", None)
+        if unit:
+            enc, given = Encoding(unit=unit, n=enc.n, stride=enc.stride), True
+        n = getattr(args, "ngram", None)
+        if n is not None:
+            stride = enc.stride if enc.sliding else n
+            enc, given = Encoding(unit=enc.unit, n=n, stride=min(stride, n)), True
+        stride = getattr(args, "stride", None)
+        if stride is not None:
+            enc, given = Encoding(unit=enc.unit, n=enc.n, stride=stride), True
+    except ValueError as exc:
+        raise CliError(str(exc)) from None
+    return enc, given
 
 
 def save_model(model: GraphModel, path: str) -> dict:
@@ -3397,6 +3434,19 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             "they fire; a phase-locked cycle goes to the metacognitive layer); a loaded file's own "
                             "kind always wins.  The default --model follows the kind "
                             f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
+    group.add_argument("--encoding", metavar="SPEC", default=default(None),
+                       help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word), how "
+                            "many units a gram holds (the n of the n-gram) and how far apart consecutive grams start "
+                            "(1 = the sliding window, n = non-overlapping groups of n).  char:3:1 is the default, "
+                            "char:5:5 groups of five letters, word:2:1 the word bigram, word:3:1 the word trigram; the "
+                            "names trigram | bigram | word-bigram | word-trigram work too.  A loaded file's own "
+                            "encoding always wins, and is fixed for its life")
+    group.add_argument("--units", choices=("char", "word"), default=default(None),
+                       help="what one unit of a NEW model is (default char); --encoding sets this too")
+    group.add_argument("--ngram", type=int, metavar="N", default=default(None),
+                       help="units per gram of a NEW model: the n of the n-gram (default 3)")
+    group.add_argument("--stride", type=int, metavar="N", default=default(None),
+                       help="units between consecutive grams of a NEW model: 1 = sliding window, n = groups (default 1)")
     group.add_argument("--json", action="store_true", default=default(False),
                        help="print one JSON document on stdout instead of tables (progress goes to stderr)")
 

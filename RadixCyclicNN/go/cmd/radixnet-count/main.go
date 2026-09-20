@@ -264,7 +264,7 @@ the encoding of a NEW model: --units says what one unit is (a character or a wor
 units a gram holds, --stride how far apart consecutive grams start (1 = the sliding window, n = groups
 of n).  --encoding SPEC sets all three: char:3:1 (the default), char:5:5 (groups of five letters),
 word:2:1 (word bigrams), word:3:1 (word trigrams).  It is fixed when the model is created and travels
-with the file; a model that is not char:3:1 is read by this implementation only.
+with the file; the Python implementation reads every one of them too.
 `, version)
 }
 

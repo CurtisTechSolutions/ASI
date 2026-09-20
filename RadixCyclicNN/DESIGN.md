@@ -124,18 +124,32 @@ def edge_signal(w: float, fp: float, fc: float) -> float    # w * fp * fc  ("act
 
 ## 4. `encoding.py`
 
+The default is the character trigram of stride 1 (D-006); it is the default of a **dial**, and section 23.1 is
+the full account of the dial in both implementations. Everything below is that default.
+
 ```python
-WINDOW = 3
+WINDOW = 3               # the default n of the n-gram
+CHARS, WORDS = "char", "word"   # what one unit is
 START_LABEL = "<s>"      # reserved label of the START node (id 0)
 END_LABEL   = "</s>"     # reserved label of the END node   (id 1)
 
-class Encoder:
-    def __init__(self, window: int = WINDOW)
+@dataclasses.dataclass(frozen=True)
+class Encoding:          # unit x n x stride; the zero value is the trigram
+    unit: str = CHARS
+    n: int = WINDOW
+    stride: int = 1
+    # overlap == n - stride; encode / decode_path / decode_grams / normalize / units / piece / join /
+    # truncate / has_unit_prefix / to_dict / from_dict
+
+def parse_encoding(spec: str) -> Encoding   # "word:2:1", "char:5:groups", "trigram", ...
+
+class Encoder:           # the encoder half of an Encoding, kept as an object
+    def __init__(self, window: int = WINDOW, encoding: Encoding | None = None)
     def encode(self, text: str) -> list[str]
         # sliding window, stride 1. len(text) < window -> [] ; "hello" -> ["hel","ell","llo"]
 
 class Decoder:
-    def __init__(self, window: int = WINDOW)
+    def __init__(self, window: int = WINDOW, encoding: Encoding | None = None)
     def decode_trigrams(self, grams: list[str]) -> str
         # [] -> ""; first gram in full, then gram[-1] for each following gram
     def decode_path(self, labels: list[str], start_offset: int = 0, include_context: bool = True) -> str
@@ -1757,11 +1771,11 @@ both sides and the batch records - brief, step, level, openings, pass mark, dril
 `TestGoChatParity` does the same for the chat loop (section 28.1): one fake partner and judge answers both CLIs,
 and the prompts, the transcripts, the marks, the report card and both saved networks must match.
 
-### 23.1 The encoding (`go/radixnet/encoding.go`) — n-grams of any size, groups of letters, words
+### 23.1 The encoding (`radixnet/encoding.py`, `go/radixnet/encoding.go`) — n-grams of any size, groups of letters, words
 
-The Python side encodes one way: the character trigram of stride 1 (section 4, D-006). The Go side makes that the
-**default of a dial** (D-069). An `Encoding` is three numbers, owned by the graph, fixed when the graph is created
-and written into the model file:
+The character trigram of stride 1 (section 4, D-006) becomes the **default of a dial** (D-069), in *both*
+implementations. An `Encoding` is three numbers, owned by the graph, fixed when the graph is created and written
+into the model file:
 
 ```go
 type Encoding struct {
@@ -1808,17 +1822,30 @@ The three structural operations generalise exactly:
 * **Merge** writes `label(p) + label(c)[Overlap:]`, joined with the unit separator, and re-indexes `c`'s grams at
   `len(p) - Overlap + j`.
 
-**Persistence.** `GraphDoc.Encoding` is written **only when it is not the default**, so an ordinary model file is
-byte for byte what it always was and `tests/test_go_parity.py` is unaffected. A file that does carry the block is
-Go-only: `radixnet/graph.py::_check_encoding` refuses it by name rather than letting a trigram reader make
-nonsense of it.
+**Persistence.** The `encoding` block of the graph document is written **only when it is not the default**, so an
+ordinary model file is byte for byte what it always was and the existing parity tests are unaffected. Both sides
+read the block, so a word model written by either continues in the other:
+`tests/test_go_parity.py::TestGoEncodingParity` trains the same corpus under nine encodings on both sides and
+compares labels, counts, edges, weights and the RNG state, has each side continue the other's file, and holds the
+two to the same prediction in words.
 
-**Reach.** The library (`NewModel` / `NewGraph` via `GraphOptions.Encoding`, `NewNegativeModel` via
-`NegativeOptions.Encoding`), the CLI (`--encoding SPEC`, `--units`, `--ngram`, `--stride`, honoured when a model
-is *created* and refused when they disagree with one that is loaded) and the HTTP API (`POST /api/reset` takes
-`encoding`, or `unit` + `ngram` + `stride`; `GET /api/status` reports `encoding`, `unit`, `ngram`, `stride`). A
-model that trains a discriminator (`evolve`) or a negative network beside itself hands them its own encoding:
-two networks reading one text differently would be judging different grams.
+**Reach.** In Go: the library (`NewModel` / `NewGraph` via `GraphOptions.Encoding`, `NewNegativeModel` via
+`NegativeOptions.Encoding`), the CLI (`--encoding SPEC`, `--units`, `--ngram`, `--stride`) and the HTTP API. In
+Python: `RadixCyclicGraph(seed, encoding=)` and every subclass, `new_model(kind, encoding=)` and all four model
+kinds (RadixNet, count, negative, resonant — they share the graph, so the dial reaches the sine and the phase
+models too), the same four CLI flags and the same `POST /api/reset` fields. On both sides the flags are honoured
+when a model is *created* and refused when they disagree with one that is loaded, `GET /api/status` reports
+`encoding` / `unit` / `ngram` / `stride`, and a model that trains a discriminator (`evolve`) or a negative
+network beside itself hands them its own encoding: two networks reading one text differently would be judging
+different grams.
+
+**Python specifics.** A unit view is whatever slices by unit — the `str` itself for characters (Python slices
+strings by code point already), `text.split()` for words — so `len(view)` is the unit count of both and
+`_piece(view, lo, hi)` writes a slice of either back out; that is the whole of the machinery the Go side needs a
+`Units` index for. `diff.py` takes an `encoding=` on every entry point and aligns units rather than characters,
+so a word model's correction marks whole words. `GraphModel._adopt(graph)` is what a loaded model goes through:
+a model is constructed before its file's graph is read, so its encoder and decoder have to be rebuilt from the
+graph that arrives, or a word graph would be fed character trigrams.
 
 ### 23.2 The Go HTTP server (`go/server`) and the frontend hookup
 

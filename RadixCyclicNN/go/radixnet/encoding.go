@@ -7,10 +7,9 @@
 // Model files are interchangeable with the Python implementation
 // (format "radixnet-count"): both sides read and write the same JSON layout,
 // including the Mersenne Twister state, so a model trained here continues in
-// Python and vice versa with identical numbers.  That holds for the default
-// encoding - character trigrams, stride 1 - which is the only one the Python
-// implementation knows; a graph built with any other Encoding writes an
-// "encoding" block, and a file that carries one is Go-only.
+// Python and vice versa with identical numbers - in every encoding, not only
+// the default one.  A graph built with anything but the character trigram of
+// stride 1 writes an "encoding" block, and both implementations read it.
 //
 // Concurrency: training fans goroutines out over the texts (lines, paragraphs
 // or pages of a file) for encoding, tracing and counting (lock-free atomic

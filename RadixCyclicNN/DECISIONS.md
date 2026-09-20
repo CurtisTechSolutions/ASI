@@ -2419,22 +2419,21 @@ recorded with its reason is a design statement, an unrecorded one is debt.
 
 ### D-069 — The encoding is a dial of the model, not a constant of the package
 
-**Status** Accepted · 2026-09-20 · **Layer** representation (Go) ·
+**Status** Accepted · 2026-09-20 · **Layer** representation ·
 **Extends** D-006, which stays the default
 
 **Context** D-006 fixed the input at three characters with stride 1 and gave the
 reason: the shared character is a *pivot*, and three is the smallest window that
 gives a pivot with context either side. That argument says what the **default**
-should be. It does not say the number should be a compile-time constant - and in
-the Go port it was one, `Window = 3`, read directly by the graph, the model, the
-beams, the diff and the loader, with `Overlap = Window - 1` beside it. Anyone
-wanting to ask "what does this corpus look like in fives?" had to edit two
-constants and rebuild, and nothing in the file said which of the two binaries
-had written a model.
+should be. It does not say the number should be a constant - and in both
+implementations it was one: `WINDOW = 3` / `Window = 3`, read directly by the
+graph, the models, the beams, the diff and the loader, with the overlap beside
+it. Anyone wanting to ask "what does this corpus look like in fives?" had to
+edit two constants, and nothing in a model file said how to read its labels.
 
-**Decision** The encoding becomes a value - `Encoding{Unit, N, Stride}` - owned
+**Decision** The encoding becomes a value - `Encoding(unit, n, stride)` - owned
 by the graph, fixed when the graph is created, written into the model file and
-read back from it. Three dials:
+read back from it, **in every implementation**. Three dials:
 
 | dial | what it is | the default |
 |---|---|---|
@@ -2472,11 +2471,15 @@ is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
   it always was.
 
 **Consequences**
-* **Python refuses what it cannot read.** The Python implementation speaks the
-  character trigram only. Rather than let a trigram reader make nonsense of a
-  word graph, `graph.from_dict` turns away any file carrying a non-default
-  encoding and names the Go implementation. D-039's bit-identical interchange is
-  unchanged for the default encoding, which is the encoding both sides speak.
+* **D-039's bit-identical interchange now covers every encoding.** Both sides
+  write the same `encoding` block and read each other's, and
+  `TestGoEncodingParity` holds them to the same graph, the same file and the
+  same prediction under nine of them. A word model trained in Python continues
+  in Go and back.
+* **The dial reaches all four Python kinds.** RadixNet, the count model, the
+  negative network and the resonant model share one graph, so none of them
+  could have it alone. The sine model trains on word bigrams because the graph
+  it trains on does.
 * **The units leak into the vocabulary of the API.** `--length`, `--max-length`
   and `Score.chars` count units, so on a word model they count words. That is
   the honest reading - a "40-character" cap on a model that thinks in words is
@@ -2488,7 +2491,8 @@ is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
   label in the graph is written in it. The CLI refuses an encoding flag that
   disagrees with the model it loaded rather than ignoring it.
 
-**Lives in** `go/radixnet/encoding.go`, `go/radixnet/graph.go`, `DESIGN.md`
+**Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
+`go/radixnet/graph.go`, `DESIGN.md` § 23.1
 
 ---
 

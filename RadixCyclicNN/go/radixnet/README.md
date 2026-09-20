@@ -16,10 +16,11 @@ JSON layout on both sides, **including the Mersenne Twister state** — so a mod
 trained here continues in Python and back again with identical numbers.
 `../../tests/test_go_parity.py` checks that in both directions.
 
-That holds for the **default encoding**, character trigrams of stride 1, which
-is the only one Python reads. A model built with any other `Encoding` writes an
-`encoding` block into its file, and the Python loader refuses such a file by
-name rather than misreading it.
+That holds for **every encoding**, not only the default one: a graph built with
+anything but the character trigram writes an `encoding` block into its file, and
+both sides read it. `../../tests/test_go_parity.py::TestGoEncodingParity` trains
+the same corpus on both sides under nine of them and compares the graphs, the
+files and the predictions.
 
 ## The encoding is a dial
 

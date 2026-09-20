@@ -86,6 +86,7 @@ from .codegen import (
     parse_problem_file,
     parse_problems,
 )
+from .encoding import Encoding, parse_encoding
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
@@ -1203,8 +1204,14 @@ class ModelService:
         model = load_model(path, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
 
-    def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
+    def reset(
+        self, seed: int | None = None, kind: str | None = None, encoding: Encoding | None = None, **options: Any
+    ) -> dict:
         """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
+
+        ``encoding`` is how the new model reads text - the unit, the n of the
+        n-gram and the stride - and is fixed for its life; ``None`` is the
+        character trigram.
 
         ``options`` are the score-function settings of the kind that has them:
         ``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``
@@ -1218,7 +1225,10 @@ class ModelService:
         if extra and not hasattr(cls, "weight_config"):
             raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) do not apply to the {cls.kind} model")
         try:
-            model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
+            model = cls(
+                seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device,
+                encoding=encoding, **extra,
+            )
         except (TypeError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
         return self._replace_model(model)
@@ -2478,8 +2488,32 @@ def _weight_options(f: Fields) -> dict:
     }
 
 
+def _encoding_option(f: Fields) -> Encoding | None:
+    """``encoding`` as a spec, or the three dials on their own; ``None`` when nothing was asked for."""
+    spec = f.text("encoding", None) or ""
+    unit = f.text("unit", None) or ""
+    n = f.integer("ngram", None)
+    stride = f.integer("stride", None)
+    if not (spec or unit or n is not None or stride is not None):
+        return None
+    try:
+        enc = parse_encoding(spec)
+        if unit:
+            enc = Encoding(unit=unit, n=enc.n, stride=enc.stride)
+        if n is not None:
+            enc = Encoding(unit=enc.unit, n=n, stride=min(enc.stride if enc.sliding else n, n))
+        if stride is not None:
+            enc = Encoding(unit=enc.unit, n=enc.n, stride=stride)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return enc
+
+
 def _r_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.reset(f.integer("seed", None), kind=f.text("kind", None) or None, **_weight_options(f))
+    return 200, svc.reset(
+        f.integer("seed", None), kind=f.text("kind", None) or None, encoding=_encoding_option(f),
+        **_weight_options(f),
+    )
 
 
 def _r_model_weights(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3741,9 +3775,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
     ("POST", "/api/reset", _r_reset,
-     "replace the model with a fresh one: {seed, kind, and the kind's score-function settings - count: "
-     "count_scale, global_scale, window_scale, reward_scale, window; resonant: buckets, period, kick_scale, "
-     "resonance_scale, amp_scale, reward_scale, concentration}"),
+     "replace the model with a fresh one: {seed, kind, encoding | unit + ngram + stride, and the kind's "
+     "score-function settings - count: count_scale, global_scale, window_scale, reward_scale, window; resonant: "
+     "buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, concentration}.  The encoding is how "
+     "text becomes grams and is fixed for the model's life: unit char | word, ngram the n of the n-gram, stride the "
+     "units between two grams (1 = sliding window, n = non-overlapping groups); \"encoding\" sets all three "
+     "(char:3:1 the default, char:5:5 groups of five letters, word:2:1 word bigrams, word:3:1 word trigrams)"),
     ("POST", "/api/model/weights", _r_model_weights,
      "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
      "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "

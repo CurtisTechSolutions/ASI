@@ -1767,6 +1767,62 @@ expansions/s. Dijkstra always runs on the CPU. The graph exports CSR arrays once
 per epoch, caches per-node edge costs, and reuses transition arrays across
 epochs while the structure is unchanged.
 
+## The encoding: n-grams of any size, groups of letters, words
+
+Three dials decide how a text becomes the grams the graph is built from, fixed
+when a model is created and carried in its file.  **Both implementations have
+them** (`python -m radixnet` and `go/bin/radixnet-count` take the same flags,
+build the same graph and read each other's files):
+
+| flag | what it sets | default |
+|---|---|---|
+| `--units char\|word` | what one unit of text is: a character, or a whitespace-delimited word | `char` |
+| `--ngram N` | how many units one gram holds - the *n* of the n-gram, any number | 3 |
+| `--stride N` | how far apart two consecutive grams start: **1** slides them (they overlap by n-1), **n** cuts the text into non-overlapping groups | 1 |
+
+`--encoding SPEC` sets all three at once - `unit[:n[:stride]]`, plus the names
+`trigram`, `bigram`, `word-bigram`, `word-trigram` and the shorthand
+`:groups` for a stride equal to n:
+
+```bash
+python -m radixnet --model m.json --encoding char:3:1 train --data book.txt   # the default: trigrams
+python -m radixnet --model m.json --encoding char:5:1 train --data book.txt   # a sliding window of five
+python -m radixnet --model m.json --encoding char:4:4 train --data book.txt   # groups of four letters
+python -m radixnet --model m.json --encoding char:5:groups train --data book.txt   # ... and of five
+python -m radixnet --model m.json --encoding word:2:1 train --data book.txt   # word bigrams
+python -m radixnet --model m.json --encoding word:3:1 train --data book.txt   # word trigrams
+
+go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt   # the same dial in Go
+go/bin/radixnet-count --model m.json predict --prefix "the cat sat" --k 5        # ... and the same file
+```
+
+The four Python model kinds all take it (`--kind radix | count | negative |
+resonant`), and so do the library constructors:
+
+```python
+from radixnet import Encoding, WORDS, new_model
+
+net = new_model("count", seed=1, encoding=Encoding(unit=WORDS, n=2))   # word bigrams
+net.train(["the cat sat on the mat"], epochs=3)
+net.predict("the cat", length=3)["top"][0]["text"]                     # whole words
+```
+
+Everything downstream is then measured in that unit rather than in characters:
+a node's label, `--length` and `--max-length`, the `chars` of a score, and the
+spans a correction blames (a word model's diff marks whole words). On a word
+model, `predict --prefix "the cat sat"` walks whole words and `--length 3`
+means three more words. `info` and `GET /api/status` say which encoding a model
+is in; over HTTP, `POST /api/reset` takes `{"encoding": "word:2:1"}` or
+`{"unit": "word", "ngram": 2, "stride": 1}` on **both** servers.
+
+The encoding is fixed for the model's life - every label in the graph is
+written in it - so the flags apply to a **new** model, and both CLIs refuse
+them (rather than ignoring them) when they disagree with the model they loaded.
+A model that is not `char:3:1` writes an `encoding` block into its file, and
+**both implementations read it**: `tests/test_go_parity.py::TestGoEncodingParity`
+trains the same corpus on both sides under nine encodings and holds them to the
+same graph, the same file and the same predictions.
+
 ## Go implementation of the count / reward model
 
 `go/` holds a Go port of the count / reward model (`CountRewardNet`) **and of
@@ -1775,9 +1831,7 @@ a CLI (`go/cmd/radixnet-count`); the Python implementation stays as it is.
 Model files are interchangeable: both sides read and write the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained on one side continues on the other with
-identical numbers (that is the default encoding, character trigrams - a Go
-model built with any other encoding is Go-only, and the Python loader says so
-instead of misreading it) (`tests/test_go_parity.py` trains the same corpus on both,
+identical numbers, in every encoding (`tests/test_go_parity.py` trains the same corpus on both,
 compares structure, counts, rewards, window, RNG state, predictions, generated
 texts, scores and conversations, blames the same failures and corrections and
 compares the verdicts character for character, and lets each side read the
@@ -1857,46 +1911,6 @@ contention on shared counters cost more than they save. It is the default
 because it was asked for; `--exact --workers 4` is the reproducible choice and
 the faster one on this hardware. The structure, the window and the weights'
 consistency with whatever was counted are exact in both modes.
-
-### The encoding: n-grams of any size, groups of letters, words
-
-The Python implementation reads text one way - the sliding window of three
-characters. The Go implementation makes that the *default* of three dials,
-fixed when a model is created and carried in its file:
-
-| flag | what it sets | default |
-|---|---|---|
-| `--units char\|word` | what one unit of text is: a character, or a whitespace-delimited word | `char` |
-| `--ngram N` | how many units one gram holds - the *n* of the n-gram, any number | 3 |
-| `--stride N` | how far apart two consecutive grams start: **1** slides them (they overlap by n-1), **n** cuts the text into non-overlapping groups | 1 |
-
-`--encoding SPEC` sets all three at once - `unit[:n[:stride]]`, plus the names
-`trigram`, `bigram`, `word-bigram`, `word-trigram` and the shorthand
-`:groups` for a stride equal to n:
-
-```bash
-go/bin/radixnet-count --model m.json --encoding char:3:1 train --data book.txt   # the default: trigrams
-go/bin/radixnet-count --model m.json --encoding char:5:1 train --data book.txt   # a sliding window of five
-go/bin/radixnet-count --model m.json --encoding char:4:4 train --data book.txt   # groups of four letters
-go/bin/radixnet-count --model m.json --encoding char:5:groups train --data book.txt   # ... and of five
-go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt   # word bigrams
-go/bin/radixnet-count --model m.json --encoding word:3:1 train --data book.txt   # word trigrams
-```
-
-Everything downstream is then measured in that unit rather than in characters:
-a node's label, `--length` and `--max-length`, the `chars` of a score, and the
-spans a correction blames. On a word model, `predict --prefix "the cat sat"`
-walks whole words and `--length 3` means three more words. `info` and
-`GET /api/status` say which encoding a model is in; over HTTP,
-`POST /api/reset` takes `{"encoding": "word:2:1"}` or
-`{"unit": "word", "ngram": 2, "stride": 1}`.
-
-The encoding is fixed for the model's life - every label in the graph is
-written in it - so the flags apply to a **new** model, and the CLI refuses
-them (rather than ignoring them) when they disagree with the model it loaded.
-A model that is not `char:3:1` writes an `encoding` block into its file and is
-read by the Go implementation only; `python -m radixnet` turns such a file away
-by name instead of misreading it as trigrams.
 
 ### Massive ZIP archives: streaming, chunking and memory
 

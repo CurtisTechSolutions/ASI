@@ -1443,3 +1443,80 @@ class TestGoServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGoEncodingParity(unittest.TestCase):
+    """The encoding dial is the same dial on both sides.
+
+    Every encoding the two implementations offer - n-grams of any size, groups
+    of letters, word grams - must build the same graph from the same corpus,
+    write the same file, and read each other's.
+    """
+
+    ENCODINGS = ["char:3:1", "char:5:1", "char:4:4", "char:5:5", "char:6:3",
+                 "word:1:1", "word:2:1", "word:3:1", "word:2:2"]
+
+    def test_the_same_graph_from_the_same_corpus(self):
+        for spec in self.ENCODINGS:
+            with self.subTest(encoding=spec):
+                tag = spec.replace(":", "-")
+                py_model = os.path.join(TMP.name, f"enc-py-{tag}.json")
+                go_model = os.path.join(TMP.name, f"enc-go-{tag}.json")
+                py("--kind", "count", "--seed", 1, "--encoding", spec, "train",
+                   "--data", CORPUS, "--epochs", 2, model=py_model)
+                go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+                   "--workers", 4, model=go_model)
+                p, g = load_json(py_model)["graph"], load_json(go_model)["graph"]
+                self.assertEqual(p.get("encoding"), g.get("encoding"), "the written encoding block")
+                self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+                self.assertEqual(p["nodes"]["count"], g["nodes"]["count"])
+                self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+                self.assertEqual(p["edges"]["count"], g["edges"]["count"])
+                assert_close(self, p["edges"]["w"], g["edges"]["w"], 1e-12)
+                self.assertEqual(p["rng_state"], g["rng_state"])
+                # only a non-default encoding is written at all
+                self.assertEqual("encoding" in p, spec != "char:3:1", spec)
+
+    def test_each_side_reads_the_other(self):
+        spec = "word:2:1"
+        py_model = os.path.join(TMP.name, "enc-cross-py.json")
+        go_model = os.path.join(TMP.name, "enc-cross-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 1,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 1, model=go_model)
+        # each side reports the other's file as the word bigram it is
+        for reader, path in ((go, py_model), (py, go_model)):
+            info = reader("info", model=path)
+            self.assertEqual(info["stats"]["encoding"], spec)
+            self.assertEqual((info["stats"]["ngram"], info["stats"]["stride"]), (2, 1))
+        # and continues it: one more epoch on either side leaves the same graph
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 1, model=go_model)
+        go("train", "--data", CORPUS, "--epochs", 1, model=py_model)
+        a, b = load_json(py_model)["graph"], load_json(go_model)["graph"]
+        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
+        self.assertEqual(a["nodes"]["count"], b["nodes"]["count"])
+        self.assertEqual(a["encoding"], b["encoding"])
+
+    def test_the_same_prediction_in_words(self):
+        spec = "word:2:1"
+        py_model = os.path.join(TMP.name, "enc-pred-py.json")
+        go_model = os.path.join(TMP.name, "enc-pred-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=go_model)
+        a = py("predict", "--prefix", "the cat", "--k", 3, "--length", 4, model=py_model)
+        b = go("predict", "--prefix", "the cat", "--k", 3, "--length", 4, model=go_model)
+        self.assertEqual(a["continuation"], b["continuation"])
+        self.assertEqual(a["full_text"], b["full_text"])
+        self.assertEqual([r["full_text"] for r in a["top"]], [r["full_text"] for r in b["top"]])
+        assert_close(self, [r["cost"] for r in a["top"]], [r["cost"] for r in b["top"]])
+        # the words come back whole, with the space the prefix needs
+        self.assertTrue(a["full_text"].startswith("the cat "), a["full_text"])
+        self.assertEqual(a["continuation"], " ".join(a["continuation"].split()))
+
+    def test_both_refuse_the_same_nonsense(self):
+        model = os.path.join(TMP.name, "enc-bad.json")
+        for spec in ("rune:3", "char:2:3", "char:0"):
+            with self.subTest(spec=spec):
+                self.assertTrue(py("--encoding", spec, "info", model=model, expect=1)["error"])
+                self.assertTrue(go("--encoding", spec, "info", model=model, expect=1)["error"])
