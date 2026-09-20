@@ -12,10 +12,11 @@ PY         ?= python3
 EXPERIMENT ?= $(PY) experiment.py
 SEEDS      ?= 0 1 2
 RESULTS    ?= results
+QUICKDIR   ?= results-quick
 
-COMMON = --seeds $(SEEDS)
+COMMON = --seeds $(SEEDS) --out-dir $(RESULTS)
 
-.PHONY: help check test test-full quick all rules phi phase layout multi twonrl summary show clean
+.PHONY: help check test test-full quick all rules phi mix phase layout multi twonrl summary readme show clean
 
 help: ## Show this help
 	@echo "Universal game encoding  (override variables like: make phi SEEDS=\"0 1\")"
@@ -42,6 +43,9 @@ rules: ## Six games, one encoder: how far above guessing does the tape get the n
 phi: ## The abstraction dial, from a move-only tape to an injective one
 	$(EXPERIMENT) phi $(COMMON)
 
+mix: ## One token, split between a hash of the position and a summary of the last move
+	$(EXPERIMENT) mix $(COMMON)
+
 phase: ## Does a trigram belonging to two window phases matter?  (plain vs disjoint)
 	$(EXPERIMENT) phase $(COMMON)
 
@@ -56,14 +60,18 @@ twonrl: ## 2NRL on the refused moves, against a matched positive control
 
 ##@ Runs
 quick: ## Every arm at a tenth of the corpus and one seed - for checking it runs
-	$(EXPERIMENT) all --quick --seeds 0
+	@echo "writing to $(QUICKDIR)/ so the three-seed numbers in README.md survive"
+	$(EXPERIMENT) all --quick --seeds 0 --out-dir $(QUICKDIR)
 
 all: ## Every arm at full size, every seed - this is what README.md quotes
 	$(EXPERIMENT) all $(COMMON)
 
 ##@ Output
 summary: ## Turn results/*.json into the markdown tables in README.md
-	@$(EXPERIMENT) summary
+	@$(EXPERIMENT) summary --out-dir $(RESULTS)
+
+readme: ## The same, spliced into README.md between its <!--NAME--> markers
+	@$(EXPERIMENT) summary --out-dir $(RESULTS) --into-readme
 
 show: ## Print one encoded tape per game, decoded back, to see the format
 	@$(PY) -c "import sys; sys.path.insert(0, '.'); \
@@ -73,5 +81,5 @@ from uge.corpus import self_play; from uge.teachers import make_policy; \
 (c := self_play(uge.get_game(n), sp, 1, make_policy('random'), seed=1)).tapes[0][:120], \
 decode(uge.get_game(n), sp, c.tapes[0]).to_dict(), sep='\n') for n in uge.game_names()]"
 
-clean: ## Remove the results and the bytecode
-	rm -rf $(RESULTS)/*.json uge/__pycache__ __pycache__
+clean: ## Remove the quick-run results and the bytecode (never $(RESULTS))
+	rm -rf $(QUICKDIR) uge/__pycache__ __pycache__

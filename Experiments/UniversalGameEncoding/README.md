@@ -606,15 +606,21 @@ set `RADIXNET_PATH` if this directory has moved.
 ```bash
 make test          # perft to depth 3, the codebooks, the partition, round trips, the referee
 make test-full     # plus perft to depth 4 and every spec combination
-make quick         # every arm at a tenth of the corpus, one seed - a few minutes
+make quick         # every arm at a tenth of the corpus, one seed - under two minutes
 make all           # every arm, three seeds - this is what the tables above quote
-make summary       # regenerate the tables from results/*.json
+make summary       # print the tables from results/*.json
+make readme        # splice them into this file between its <!--NAME--> markers
 make show          # print one encoded tape per game, and its decode
 ```
 
+`make quick` writes into `results-quick/` rather than `results/`, so checking
+that the code runs cannot overwrite the three-seed numbers this file quotes;
+`make clean` removes only that directory. `make all` takes roughly forty
+minutes, most of it generating Othello corpora.
+
 One arm at a time: `make rules`, `make phi`, `make mix`, `make phase`,
 `make layout`, `make multi`, `make twonrl` - or
-`python3 experiment.py <arm> --seeds 0 1 2 3`.
+`python3 experiment.py <arm> --seeds 0 1 2 3 --out-dir somewhere/`.
 
 ### Adding a game
 

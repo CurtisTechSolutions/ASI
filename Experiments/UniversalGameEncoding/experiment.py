@@ -53,7 +53,11 @@ from uge.net import TRAIN_DEFAULTS, new_net
 from uge.tape import DISJOINT, PLAIN, TapeSpec, phase_ambiguity
 from uge.teachers import make_policy
 
-RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+HERE = os.path.dirname(os.path.abspath(__file__))
+RESULTS = os.path.join(HERE, "results")
+"""Where an arm writes its JSON.  ``--out-dir`` moves it, and ``make quick``
+uses that to write into ``results-quick/`` - a quick run is a check that the
+code works, and it must not overwrite the three-seed numbers README.md quotes."""
 
 GAMES = ["chess", "othello", "connect4", "tictactoe", "nim", "pig"]
 
@@ -929,7 +933,13 @@ def main(argv=None) -> int:
     p.add_argument("--epochs", type=int, default=None, help="training epochs")
     p.add_argument("--into-readme", action="store_true",
                    help="with 'summary': splice the tables into README.md instead of printing them")
+    p.add_argument("--out-dir", default=None,
+                   help="where to read and write the JSON (default: results/)")
     args = p.parse_args(argv)
+
+    if args.out_dir:
+        global RESULTS  # noqa: PLW0603 - one setting, read by write() and summarise()
+        RESULTS = os.path.abspath(args.out_dir)
 
     if args.arm == "summary":
         summarise(args.into_readme)
