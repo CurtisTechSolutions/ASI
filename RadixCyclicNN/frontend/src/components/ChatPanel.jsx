@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber } from "../util.js";
+import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -132,7 +132,7 @@ export default function ChatPanel({ status }) {
           <NumberField label="Conversations" hint="0 = until you stop it" value={conversations}
                        onChange={setConversations} min={0} step={1} disabled={running} />
           <NumberField label="Replies each" value={turns} onChange={setTurns} min={1} step={1} disabled={running} />
-          <NumberField label="Context" hint="characters a reply picks up" value={context} onChange={setContext}
+          <NumberField label="Context" hint={`${unitName(status)} a reply picks up`} value={context} onChange={setContext}
                        min={0} step={1} disabled={running} />
           <NumberField label="Max length" value={maxLength} onChange={setMaxLength} min={1} step={1} disabled={running} />
         </div>

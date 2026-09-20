@@ -254,6 +254,24 @@ class RadixCyclicGraph:
         """Distinct trigrams stored in the graph."""
         return len(self.trigram_index)
 
+    def symbols_of(self, text: str) -> str:
+        """Text as *this graph's symbols*, the inverse of :meth:`text_of`, for anything that looks a label up.
+
+        The identity here, and the word model's encoder in a word graph; an
+        unread word comes back as the unknown symbol.
+        """
+        return text
+
+    def text_of(self, label: str) -> str:
+        """A label as *text*, for anything that reports one.
+
+        The identity here: a character model's symbols are the text.  A word
+        model's symbols are code points standing for words
+        (``../SPEC-WordNGrams.md``), and its graph decodes them back before a
+        label is shown to anyone.
+        """
+        return label
+
     def compression_ratio(self) -> float:
         """Trigrams per real (non-sentinel) node."""
         return len(self.trigram_index) / max(1, self._n_alive_nodes - FIRST)

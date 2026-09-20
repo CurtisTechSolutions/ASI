@@ -5,7 +5,7 @@
 //! (`../../../tests/test_rust_parity.py` does exactly that).
 //!
 //! ```text
-//! radixnet [--model PATH] [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
+//! radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
 //!
 //!   train      count one traversal of every text's path per epoch
 //!   predict    continue a prefix: the K likeliest and the K least likely
@@ -18,6 +18,7 @@
 //!   weights    read or change the weight function's scales and window
 //!   paths      what the judged walks did, per context
 //!   nodes      one node against its neighbours
+//!   words      the word model's alphabet, most read first
 //!   info       the model's statistics
 //!   version    the port's version
 //! ```
@@ -31,8 +32,13 @@ use radixnet::report::{node_rows, path_rows, split_texts, stats};
 use radixnet::search::{parse_traversal, PathResult};
 use radixnet::{Graph, GraphOptions};
 
-const USAGE: &str = "usage: radixnet [--model PATH] [--json] [--seed N] [--workers N] [--out PATH] <command>\n\
-     commands: train predict generate score feedback 2nrl invert compress weights paths nodes info version";
+const USAGE: &str = "usage: radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] \
+     [--out PATH] <command>\n\
+     commands: train predict generate score feedback 2nrl invert compress weights paths nodes words info version";
+
+/// The default `--model` per kind, so one kind never overwrites another's file.
+const DEFAULT_COUNT_MODEL: &str = "model.count.json";
+const DEFAULT_WORD_MODEL: &str = "model.word.json";
 
 fn main() -> ExitCode {
     match run() {
@@ -142,7 +148,20 @@ fn run() -> Result<(), String> {
     }
     let (command, args) = parse_args(&argv)?;
     let json_mode = args.on("json");
-    let model_path = args.str("model", "model.count.json");
+    // the symbols of a NEW model: characters, or words (`../../../SPEC-WordNGrams.md`)
+    let kind = match args.str("kind", "count").as_str() {
+        "" | "count" => "count",
+        "word" => "word",
+        other => return Err(format!("unknown model kind {other:?}; expected one of: count, word")),
+    };
+    let model_path = args.str(
+        "model",
+        if kind == "word" {
+            DEFAULT_WORD_MODEL
+        } else {
+            DEFAULT_COUNT_MODEL
+        },
+    );
     let out_path = args.get("out").map(str::to_string);
     let seed = args.int("seed", 0)?;
     let workers = args.usize("workers", 0)?;
@@ -157,7 +176,13 @@ fn run() -> Result<(), String> {
         if must_exist {
             return Err(format!("no model at {model_path}"));
         }
-        let mut m = Model::new(seed, GraphOptions::default())?;
+        let mut m = Model::new(
+            seed,
+            GraphOptions {
+                words: kind == "word",
+                ..Default::default()
+            },
+        )?;
         m.workers = workers;
         m.g.workers = workers;
         Ok(m)
@@ -410,6 +435,36 @@ fn run() -> Result<(), String> {
             let node = args.get("node").map(|n| n.parse::<usize>().unwrap_or(usize::MAX));
             emit(Json::obj([
                 ("nodes", node_rows(&model.g, args.usize("limit", 20)?, node)),
+                ("stats", stats(&model)),
+            ]));
+        }
+        "words" => {
+            let mut model = open(true)?;
+            if !model.is_words() {
+                return Err(format!(
+                    "{model_path} holds a {} model; a vocabulary belongs to the word model (--kind word)",
+                    model.kind()
+                ));
+            }
+            let rows = model.top_words(args.usize("limit", 20)?);
+            let vocabulary = model.g.vocab.as_ref().map(|v| v.len()).unwrap_or(0);
+            emit(Json::obj([
+                (
+                    "words",
+                    Json::Arr(
+                        rows.iter()
+                            .map(|r| {
+                                Json::obj([
+                                    ("word", Json::str(r.word.clone())),
+                                    ("id", Json::Int(r.id as i64)),
+                                    ("trigrams", Json::Int(r.trigrams as i64)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+                ("vocabulary", Json::Int(vocabulary as i64)),
+                ("units", Json::str(model.units())),
                 ("stats", stats(&model)),
             ]));
         }

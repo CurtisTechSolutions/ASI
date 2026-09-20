@@ -368,7 +368,7 @@ class CountRewardGraph(RadixCyclicGraph):
             reward = float(self.edge_reward[e])
             rows.append({
                 "node": n,
-                "label": self.labels[n] if 0 <= n < len(self.labels) else "",
+                "label": self.text_of(self.labels[n]) if 0 <= n < len(self.labels) else "",
                 "edge": e,
                 "seen": self.edge_count[e],
                 "seen_resets": self.edge_count_resets.get(e, 0),
@@ -407,7 +407,7 @@ class CountRewardGraph(RadixCyclicGraph):
         rows_out = self._side_rows(list(self.children[node].items()))
         return {
             "node": node,
-            "label": self.labels[node],
+            "label": self.text_of(self.labels[node]),
             "visits": self.count[node],
             "visit_resets": self.count_resets.get(node, 0),
             "from": rows_in,
@@ -828,6 +828,9 @@ class CountRewardNet(GraphModel):
 
     kind = "count"
     format = COUNT_MODEL_FORMAT
+    graph_class = CountRewardGraph
+    """The graph this kind builds and loads; a kind over another alphabet names its own."""
+
     label = "Count / reward"
     description = (
         "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, "
@@ -846,7 +849,7 @@ class CountRewardNet(GraphModel):
         window: int = 10_000,
     ) -> None:
         self.seed = int(seed)
-        self.graph = CountRewardGraph(
+        self.graph = self.graph_class(
             seed=self.seed, count_scale=count_scale, reward_scale=reward_scale, global_scale=global_scale,
             window_scale=window_scale, window=window,
         )
@@ -1348,7 +1351,7 @@ class CountRewardNet(GraphModel):
 
     def to_dict(self) -> dict:
         return {
-            "format": COUNT_MODEL_FORMAT,
+            "format": self.format,
             "version": MODEL_FORMAT_VERSION,
             "saved_at": _utc_now(),
             "kind": self.kind,
@@ -1359,12 +1362,12 @@ class CountRewardNet(GraphModel):
 
     @classmethod
     def from_dict(cls, d: dict, backend: str = "auto", device: str | None = None) -> "CountRewardNet":
-        if not isinstance(d, dict) or d.get("format") != COUNT_MODEL_FORMAT:
-            raise ValueError(f"not a {COUNT_MODEL_FORMAT} model document")
+        if not isinstance(d, dict) or d.get("format") != cls.format:
+            raise ValueError(f"not a {cls.format} model document")
         version = int(d.get("version", 1))
         if version > MODEL_FORMAT_VERSION:
-            raise ValueError(f"unsupported {COUNT_MODEL_FORMAT} model version {version}")
-        graph = CountRewardGraph.from_dict(d["graph"])
+            raise ValueError(f"unsupported {cls.format} model version {version}")
+        graph = cls.graph_class.from_dict(d["graph"])
         model = cls(seed=graph.seed, backend=backend, device=device)
         model.graph = graph
         model.history = [dict(r) for r in d.get("history", [])]

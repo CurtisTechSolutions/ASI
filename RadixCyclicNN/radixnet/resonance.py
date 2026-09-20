@@ -1256,7 +1256,7 @@ class ResonantNet(GraphModel):
             prefix, length=0, mode="kbest", k=count, to_end=True, max_length=max_length,
             step_penalty=step_penalty,
         )
-        return [_whole_text(result, prefix) for result in found.top]
+        return [_whole_text(result) for result in found.top]
 
     def score(self, text: str) -> dict:
         """Log-probability of ``text`` under the model, phase included.

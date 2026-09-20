@@ -29,9 +29,13 @@ use crate::graph::{Graph, GraphOptions, Loc, BACK, END, FIRST, START};
 use crate::json::{parse, Json};
 use crate::model::{EpochRecord, Model};
 use crate::weights::SMOOTHING;
+use crate::words::Vocabulary;
 
 /// The model file format shared with the Python and Go implementations.
 pub const MODEL_FORMAT: &str = "radixnet-count";
+/// The word model's own format, so that every reader written before it existed
+/// refuses the file by the check it already makes (`../../SPEC-WordNGrams.md`).
+pub const WORD_MODEL_FORMAT: &str = "radixnet-word";
 /// The model document version this port writes.
 pub const MODEL_FORMAT_VERSION: i64 = 1;
 /// The graph document format.
@@ -165,7 +169,7 @@ impl Graph {
             ("incorrect", Json::ints(rows.iter().map(|r| r.4))),
         ]);
 
-        Json::obj([
+        let graph = Json::obj([
             ("format", Json::str(GRAPH_FORMAT)),
             ("format_version", Json::Int(GRAPH_FORMAT_VERSION)),
             ("seed", Json::Int(self.seed)),
@@ -181,7 +185,19 @@ impl Graph {
             ("rng_state", rng_state),
             ("weights", weights),
             ("paths", paths),
-        ])
+        ]);
+        let Some(vocab) = &self.vocab else { return graph };
+        // the alphabet rides at the end of the block, where Python and Go write it
+        let mut pairs = match graph {
+            Json::Obj(pairs) => pairs,
+            other => return other,
+        };
+        pairs.push(("units".to_string(), Json::str(crate::words::WORD_UNITS)));
+        pairs.push((
+            "vocabulary".to_string(),
+            Json::Arr(vocab.words().iter().map(|w| Json::str(w.clone())).collect()),
+        ));
+        Json::Obj(pairs)
     }
 
     /// Rebuilds a graph from a `radixnet-graph` document, upgrading one written
@@ -224,8 +240,17 @@ impl Graph {
                 .unwrap_or(if legacy { 0.0 } else { 0.5 }),
             path_scale: weights.at("path_scale").as_f64().unwrap_or(1.0),
             window,
+            words: match doc.at("units").as_str() {
+                Some(crate::words::WORD_UNITS) => true,
+                Some(other) => return Err(format!("unknown graph units {other:?}")),
+                None => doc.get("vocabulary").is_some(),
+            },
         };
+        let words = opts.words;
         let mut g = Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?;
+        if words {
+            g.vocab = Some(Vocabulary::from_list(&doc.at("vocabulary").to_strings())?);
+        }
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
 
         // the three sentinels are already there; the rest of the file's nodes follow
@@ -310,6 +335,7 @@ impl Graph {
         g.carry_counters(true); // normalise whatever the file carried, however it was written
         g.invalidate();
         g.recompute_weights();
+        g.check_vocabulary()?;
         Ok(g)
     }
 }
@@ -385,7 +411,7 @@ impl Model {
     /// The model as a `radixnet-count` document.
     pub fn to_doc(&mut self) -> Json {
         Json::obj([
-            ("format", Json::str(MODEL_FORMAT)),
+            ("format", Json::str(self.format())),
             ("version", Json::Int(MODEL_FORMAT_VERSION)),
             ("saved_at", Json::str(utc_now())),
             ("kind", Json::str(self.kind())),
@@ -400,14 +426,22 @@ impl Model {
 
     /// Rebuilds a model from a `radixnet-count` document.
     pub fn from_doc(doc: &Json) -> Result<Model, String> {
-        if doc.at("format").as_str() != Some(MODEL_FORMAT) {
-            return Err(format!("not a {MODEL_FORMAT} model document"));
+        let format = doc.at("format").as_str().unwrap_or("");
+        if format != MODEL_FORMAT && format != WORD_MODEL_FORMAT {
+            return Err(format!("not a {MODEL_FORMAT} or {WORD_MODEL_FORMAT} model document"));
         }
         let version = doc.at("version").as_i64().unwrap_or(1);
         if version > MODEL_FORMAT_VERSION {
-            return Err(format!("unsupported {MODEL_FORMAT} model version {version}"));
+            return Err(format!("unsupported {format} model version {version}"));
         }
         let g = Graph::from_doc(doc.get("graph").ok_or("model document has no graph")?)?;
+        if g.is_words() != (format == WORD_MODEL_FORMAT) {
+            return Err(if format == WORD_MODEL_FORMAT {
+                format!("{WORD_MODEL_FORMAT} document without a word graph")
+            } else {
+                format!("a word graph belongs to a {WORD_MODEL_FORMAT} document, not {format}")
+            });
+        }
         let mut model = Model::from_graph(g);
         model.history = doc
             .at("history")

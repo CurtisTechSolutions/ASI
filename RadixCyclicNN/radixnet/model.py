@@ -205,9 +205,13 @@ def _takes_traversal(model) -> bool:
     return "traversal" in inspect.signature(type(model).predict).parameters
 
 
-def _whole_text(result: PathResult, prefix: str) -> PathResult:
-    """A generated result is a whole text: ``text`` becomes ``prefix + continuation`` (``full_text`` already is)."""
-    result.full_text = prefix + result.text
+def _whole_text(result: PathResult) -> PathResult:
+    """A generated result is a whole text: ``text`` becomes the whole of it, which ``full_text`` already holds.
+
+    The search is what joined the prefix to the continuation, in whatever the
+    model's symbols are; a generated text never re-joins them here, because
+    only the search knows the alphabet (``../SPEC-WordNGrams.md``).
+    """
     result.text = result.full_text
     return result
 
@@ -342,6 +346,9 @@ class GraphModel:
     kind = "graph"
     label = "graph model"
     description = ""
+    units = "chars"
+    """What this kind counts in: its symbols, as a reader of ``length``, ``max_length`` or ``per_char`` needs
+    them named.  Characters everywhere but the word model (``../SPEC-WordNGrams.md``)."""
 
     graph: RadixCyclicGraph
     encoder: Encoder
@@ -696,19 +703,19 @@ class GraphModel:
                 walk = self._search(
                     prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng, **extra
                 )
-                results.append(_whole_text(walk, prefix))
+                results.append(_whole_text(walk))
             return results
         if mode == "dijkstra":
             best = self.predict(
                 prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length,
                 step_penalty=step_penalty, **extra,
             )
-            return [_whole_text(best, prefix)]
+            return [_whole_text(best)]
         found = self.predict(
             prefix, length=0, mode="beam", k=count, beam=beam, to_end=True, max_length=max_length,
             step_penalty=step_penalty, **extra,
         )
-        return [_whole_text(result, prefix) for result in found.top]
+        return [_whole_text(result) for result in found.top]
 
     def converse(self, opening: str = "", turns: int = 6, **options):
         """The model converses with itself: two voices, each reply the prediction search picking up the end of
@@ -1333,22 +1340,27 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"negative"`` and ``"resonant"``)."""
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"word"``, ``"negative"``, ``"resonant"``)."""
     from .countnet import CountRewardNet  # local imports: they all build on this module
     from .negative import NegativeNet
     from .resonance import ResonantNet
+    from .wordnet import WordNGramNet
 
     return {
         RadixNet.kind: RadixNet,
         CountRewardNet.kind: CountRewardNet,
+        WordNGramNet.kind: WordNGramNet,
         NegativeNet.kind: NegativeNet,
         ResonantNet.kind: ResonantNet,
     }
 
 
 def model_kinds() -> list[dict]:
-    """``[{"kind", "label", "description"}]`` for menus and help texts."""
-    return [{"kind": c.kind, "label": c.label, "description": c.description} for c in model_classes().values()]
+    """``[{"kind", "label", "description", "units"}]`` for menus and help texts."""
+    return [
+        {"kind": c.kind, "label": c.label, "description": c.description, "units": c.units}
+        for c in model_classes().values()
+    ]
 
 
 def model_class(kind: str | None) -> type[GraphModel]:

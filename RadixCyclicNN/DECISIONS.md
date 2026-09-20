@@ -77,7 +77,7 @@ D-068 the BACK sentinel: where it goes round, learned
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
 **Part XV — A second way through, and a third implementation** ·
-D-069 the least-punished traversal · D-070 the Rust port
+D-069 the least-punished traversal · D-070 the Rust port · D-071 words as symbols
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2540,6 +2540,80 @@ table for "Rust is 4x faster than Go" has been misled by it.
   both sides, because a benchmark of a deliberate data race measures the race.
 
 **Lives in** `rust/`, `bench/`, `Makefile` (`rust-build`, `rust-test`, `bench-compare`)
+
+---
+
+### D-071 — A word n-gram model is this model over an alphabet of words
+
+**Status** Accepted · 2026-09-20 · **Layer** input · **Beside** D-006
+
+**Context** *"What about word n-grams?"* The obvious reading of that question is
+that it asks for a second model. It does not. D-006 decides what a **symbol**
+is - characters, window 3, stride 1 - and every structural rule in the graph is
+stated in terms of that window and nothing else: a label is a sequence of
+symbols, an edge exists where the last `WINDOW - 1` symbols of one label are the
+first `WINDOW - 1` of another, the index maps a `WINDOW`-symbol key to
+`(node, offset)`, compression merges a unary chain at that seam. Not one of
+those rules mentions a character.
+
+**Decision** Add one model kind, `word`, which is the count / reward model
+(D-021, D-022) with the encoder and the decoder replaced: **a word is a
+symbol**, carried as one code point (`id 0 -> U+0100` is `<unk>`, `id i ->
+U+0100 + i`, the surrogate block skipped, 1 111 808 words). Text becomes symbols
+on the way in and symbols become text on the way out; between those two points
+the graph, the weight function, the counters, the paths, both traversals and the
+search are untouched, in all three implementations. The file is a format of its
+own, `radixnet-word`, carrying `units: "words"` and the `vocabulary` in id
+order.
+
+**Rationale** The alternative - making the graph generic over a sequence of
+symbols - is what a type system would prefer, and it changes every structural
+routine in three implementations to buy what a code-point alphabet already
+buys. The current design *already* proves the graph is alphabet-agnostic; this
+decision only names what was always true. The vocabulary grows as training reads
+new words and is never frozen, pruned or learned, which is the part of D-006
+that matters: there is no tokeniser, no merge table and no training run before
+the training run. Tokenising is `text.split()` and nothing else, because every
+refinement of that rule is a step towards a vocabulary that has to be designed,
+versioned and defended.
+
+**What it costs, stated plainly**
+* **Whitespace is normalised.** `decode(encode(t))` joins the words with single
+  spaces, so a corpus whose whitespace carries meaning - source code, base64, a
+  waveform (D-036) - must stay on the character model. A word model cannot eat
+  the corpora the character model was chosen to be able to eat, and that is why
+  both kinds stay.
+* **Two unread words are one symbol.** At prediction and scoring time an unread
+  word is `<unk>`, so `"the qux sat"` and `"the quux sat"` score identically. It
+  is visible in `unknown_transitions`, and it is why the character model remains
+  the default.
+* **N stays 3.** The overlap is two words and the pivot is the middle one -
+  D-006's argument word for word. Word *bigrams* need `WINDOW = 2`, which
+  collapses the pivot and the context that D-006 rejected collapsing, and in
+  Rust additionally needs the packed-trigram representation rewritten. Out of
+  scope; nothing here prevents it later.
+
+**Consequences**
+* Everything counted in symbols is counted in **words**: `--length 6` emits six
+  words, `--max-length` caps words, `Score.chars` counts words and `per_char` is
+  per word. `stats()["units"]` says which, because a number whose unit depends
+  on the model is a number that will be read wrong; the CLI's score columns, the
+  frontend's length fields and the API's status carry it too.
+* Compression does to word chains what it already did to character chains: a
+  repeated phrase becomes **one node whose label is that phrase**
+  (`'sat on the mat'`), and the search walks phrases.
+* Interchange is the contract the count model has: Python, Go and Rust read and
+  write the file, and the parity tests require the same structure, the same
+  counts, the same vocabulary **in the same order** and the same predictions.
+  The Rust word document is Python's byte for byte, as the count one is.
+* Three small seams were opened in shared code to make the alphabet a model's
+  own business rather than the search's: `graph.text_of` / `graph.symbols_of`
+  (a label as text, and back), a model-level `units`, and `_whole_text` no
+  longer re-joining a prefix the search already joined.
+
+**Lives in** `radixnet/wordnet.py`, `radixnet/encoding.py` (the alphabet),
+`go/radixnet/words.go`, `rust/src/words.rs`, `SPEC-WordNGrams.md`,
+`Makefile` (`word-*`)
 
 ---
 

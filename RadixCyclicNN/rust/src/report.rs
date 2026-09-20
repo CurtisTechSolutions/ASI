@@ -62,6 +62,11 @@ pub fn stats(model: &Model) -> Json {
         ),
         ("window_traversals".to_string(), Json::Int(g.window_traversals() as i64)),
     ]);
+    if let Some(vocab) = &g.vocab {
+        // what the numbers above are counted in, and how large the alphabet has grown
+        pairs.push(("units".to_string(), Json::str(model.units())));
+        pairs.push(("vocabulary".to_string(), Json::Int(vocab.len() as i64)));
+    }
     Json::Obj(pairs)
 }
 
@@ -137,7 +142,7 @@ fn side_rows(g: &Graph, pairs: &[(usize, usize)]) -> Vec<Json> {
         let seen = g.edge_traversals(e);
         let row = Json::obj([
             ("node", Json::Int(n as i64)),
-            ("label", Json::str(g.label(n))),
+            ("label", Json::str(g.text_of(g.label(n)))),
             ("edge", Json::Int(e as i64)),
             ("seen", Json::Int(seen.value)),
             ("seen_resets", Json::Int(seen.resets)),
@@ -207,7 +212,7 @@ pub fn node_ratios(g: &Graph, node: usize) -> Option<Json> {
     let count = g.node_count(node);
     Some(Json::obj([
         ("node", Json::Int(node as i64)),
-        ("label", Json::str(g.label(node))),
+        ("label", Json::str(g.text_of(g.label(node)))),
         ("visits", Json::Int(count.value)),
         ("visit_resets", Json::Int(count.resets)),
         ("in_totals", side_totals(&rows_in)),

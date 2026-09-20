@@ -36,6 +36,7 @@ takes a write lock.**
 | file | what it is |
 |---|---|
 | `encoding.go` | the trigram encoding and its inverse — and the package doc |
+| `words.go` | the word alphabet (`--kind word`): a word is one code point, a `Vocabulary` maps between them, and the graph, the weights and the search do not know the difference (`../../SPEC-WordNGrams.md`) |
 | `graph.go` | the self-compressing cyclic graph: split, merge, the invariants |
 | `nodes.go` | a node against its neighbours — how much of the node's traffic went each way, counted per side rather than per visit |
 | `weights.go` | the dual frequency weight function over counts and rewards |
@@ -43,7 +44,7 @@ takes a write lock.**
 | `model.go` | `CountRewardNet` — train, predict, generate, score, feedback / 2NRL, invert, compress |
 | `search.go`, `beam.go`, `paths.go` | shortest-path prediction, the two beams, paths judged per caller - and the second traversal, which ranks a walk by the blame on its worst step instead of by its cost (`../../SPEC-LeastPunished.md`) |
 | `source.go`, `pipeline.go` | `TextSource` streams a corpus in order; `PartSource` splits it into parts each goroutine can stream on its own, including entries of a ZIP opened once |
-| `json.go` | the model file format, written to match Python byte for byte |
+| `json.go` | the model file formats (`radixnet-count`, `radixnet-word`, `radixnet-negative`), written to match Python byte for byte |
 | `mt19937.go`, `blake2b.go` | the RNG and the hash, ported so both sides agree |
 | `calc.go` | the calculator tool's expression language. Python evaluates these with `ast` and a whitelist; Go has no `eval`, so this is a parser written to match Python's arithmetic where the two differ |
 

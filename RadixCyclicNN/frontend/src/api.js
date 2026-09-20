@@ -138,6 +138,9 @@ export const api = {
   /** Count model: the judged paths - what each step did in the context it was taken from. */
   paths: (limit = 50) => get(`/api/paths?limit=${encodeURIComponent(limit)}`),
 
+  /** Word model: its alphabet - the words it has read, most read first. */
+  words: (limit = 50) => get(`/api/words?limit=${encodeURIComponent(limit)}`),
+
   /** Count model: one node (or the most visited ones) against the nodes around it. */
   nodeRatios: (node = null, limit = 20) =>
     get(`/api/nodes?limit=${encodeURIComponent(limit)}${node === null ? "" : `&node=${encodeURIComponent(node)}`}`),

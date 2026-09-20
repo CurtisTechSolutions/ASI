@@ -59,6 +59,7 @@ pub mod paths;
 pub mod report;
 pub mod search;
 pub mod weights;
+pub mod words;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;
@@ -70,3 +71,4 @@ pub use model::{EpochRecord, GenerateOptions, Meta, Model, PredictOptions, Score
 pub use paths::{PathKey, PathOutcome, PathRow};
 pub use search::{least_punished, onward, parse_traversal, PathResult, Traversal};
 pub use weights::ChildCost;
+pub use words::{split_words, symbol_word, word_symbol, Vocabulary, WordRow, MAX_WORDS, UNKNOWN_WORD};

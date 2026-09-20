@@ -5,9 +5,15 @@ A Go port of the **count / reward model** (`CountRewardNet`) and of the
 `../radixnet/` stays exactly as it is.
 
 **Model files are interchangeable.** Both sides read and write the
-`radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
-Twister state, so a model trained here continues in Python and vice versa with
-identical numbers. `../tests/test_go_parity.py` enforces that in both directions.
+`radixnet-count`, `radixnet-word` and `radixnet-negative` JSON formats, including
+the Mersenne Twister state, so a model trained here continues in Python and vice
+versa with identical numbers. `../tests/test_go_parity.py` enforces that in both
+directions.
+
+`--kind word` is the same model over an alphabet whose symbols are **words**
+rather than characters (`../SPEC-WordNGrams.md`): a word is one code point, the
+window is still three, and the vocabulary is handed out in corpus order - which
+is what makes a Go vocabulary the same vocabulary as a Python one.
 
 Why Go: goroutines. Training fans out over the texts of a file, weights and edge
 costs recompute in parallel over the nodes, and the two beams of a prediction run
@@ -33,6 +39,8 @@ make go-test                                    # cd go && go test -race ./...
 
 go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
 go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
+go/bin/radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
+go/bin/radixnet-count --kind word words --limit 20            # the alphabet it has read
 go/bin/radixnet-count --model model.count.json serve          # the API and the frontend
 python -m radixnet --model model.count.json info              # the Python side reads the same file
 ```

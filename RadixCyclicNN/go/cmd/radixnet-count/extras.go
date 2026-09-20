@@ -28,7 +28,7 @@ func cmdCompress(args []string) {
 	merged := m.G.Compress()
 	target := *out
 	if target == "" {
-		target = modelPath
+		target = modelFile()
 	}
 	if err := m.Save(target); err != nil {
 		fail("cannot save %s: %v", target, err)
@@ -98,7 +98,7 @@ func cmdCheckpoints(args []string) {
 	}
 	target := *out
 	if target == "" {
-		target = modelPath
+		target = modelFile()
 	}
 	if err := m.Save(target); err != nil {
 		fail("cannot save %s: %v", target, err)

@@ -449,6 +449,112 @@ class TestGoParity(unittest.TestCase):
         go("train", model=path, expect=1)  # --data is required
 
 
+class TestGoWordParity(unittest.TestCase):
+    """The word model over the same graph: same vocabulary, same structure, same predictions.
+
+    ``../SPEC-WordNGrams.md`` §8 - interchange is the contract the count model
+    has, and the vocabulary has to come back in the same order on both sides,
+    because a word's id is what the graph is made of.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.py_model = os.path.join(TMP.name, "py.word.json")
+        cls.go_model = os.path.join(TMP.name, "go.word.json")
+        py("--kind", "word", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=cls.py_model)
+        go("--kind", "word", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, "--workers", 4, model=cls.go_model)
+        cls.py_doc = load_json(cls.py_model)
+        cls.go_doc = load_json(cls.go_model)
+
+    def test_the_same_alphabet_in_the_same_order(self):
+        p, g = self.py_doc["graph"], self.go_doc["graph"]
+        self.assertEqual(p["units"], "words")
+        self.assertEqual(g["units"], "words")
+        self.assertEqual(p["vocabulary"], g["vocabulary"])
+        self.assertEqual(p["vocabulary"][0], "<unk>")
+        self.assertGreater(len(p["vocabulary"]), 100)
+        self.assertEqual(self.py_doc["format"], "radixnet-word")
+        self.assertEqual(self.go_doc["format"], "radixnet-word")
+        self.assertEqual((self.py_doc["kind"], self.go_doc["kind"]), ("word", "word"))
+
+    def test_the_same_graph_over_words(self):
+        p, g = self.py_doc["graph"], self.go_doc["graph"]
+        self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+        self.assertEqual(p["nodes"]["count"], g["nodes"]["count"])
+        self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+        self.assertEqual(p["edges"]["count"], g["edges"]["count"])
+        self.assertEqual(p["edges"]["reward"], g["edges"]["reward"])
+        assert_close(self, p["edges"]["w"], g["edges"]["w"], 1e-12)
+        self.assertEqual(p["rng_state"], g["rng_state"])
+        self.assertEqual(p["weights"]["window_events"], g["weights"]["window_events"])
+        for key in ("epochs_total", "trained_texts", "trained_chars"):
+            self.assertEqual(self.py_doc["meta"][key], self.go_doc["meta"][key], key)
+        # every label is made of word symbols, and no label is text
+        for label in p["nodes"]["labels"][3:]:
+            self.assertTrue(all(ord(ch) >= 0x0100 for ch in label), label)
+
+    def test_the_same_words_are_the_most_read(self):
+        a = py("--kind", "word", "words", "--limit", 10, model=self.py_model)
+        b = go("--kind", "word", "words", "--limit", 10, model=self.go_model)
+        self.assertEqual(a["vocabulary"], b["vocabulary"])
+        self.assertEqual(a["units"], "words")
+        self.assertEqual(b["units"], "words")
+        self.assertEqual([(r["word"], r["id"], r["trigrams"]) for r in a["words"]],
+                         [(r["word"], r["id"], r["trigrams"]) for r in b["words"]])
+
+    def test_the_same_predictions_scores_and_texts(self):
+        for prefix in ("the cat sat on", "the", "water boils at", "qqzz never read", ""):
+            with self.subTest(prefix=prefix):
+                a = py("--kind", "word", "predict", "--prefix", prefix, "--length", 4, "--k", 3, "--mode", "beam",
+                       model=self.py_model)
+                b = go("--kind", "word", "predict", "--prefix", prefix, "--length", 4, "--k", 3, "--mode", "beam",
+                       model=self.go_model)
+                self.assertEqual(a["continuation"], b["continuation"])
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+                self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+                self.assertEqual(a["path"], b["path"])  # the labels are words on both sides
+        for text in ("the cat sat on the mat", "water boils at 100 degrees celsius", "qqzz never read this"):
+            with self.subTest(text=text):
+                a = py("--kind", "word", "score", "--text", text, model=self.py_model)["results"][0]
+                b = go("--kind", "word", "score", "--text", text, model=self.go_model)["results"][0]
+                self.assertLessEqual(abs(a["log_prob"] - b["log_prob"]), 1e-9)
+                self.assertEqual(a["chars"], b["chars"])  # words, here
+                self.assertEqual(a["unknown_transitions"], b["unknown_transitions"])
+        a = py("--kind", "word", "generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.py_model)
+        b = go("--kind", "word", "generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.go_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        assert_close(self, [s["cost"] for s in a["samples"]], [s["cost"] for s in b["samples"]])
+
+    def test_each_side_reads_the_other_s_word_model(self):
+        loaded = load_model(self.go_model)  # Python reads the Go file
+        self.assertEqual(loaded.kind, "word")
+        self.assertEqual(loaded.vocabulary.to_list(), self.py_doc["graph"]["vocabulary"])
+        self.assertEqual(loaded.predict("the cat sat on", length=4, k=3).text,
+                         py("--kind", "word", "predict", "--prefix", "the cat sat on", "--length", 4, "--k", 3,
+                            model=self.py_model)["continuation"])
+        # and Go reads the Python file, continues it, and Python reads that back
+        crossed = os.path.join(TMP.name, "crossed.word.json")
+        shutil.copyfile(self.py_model, crossed)
+        go("--kind", "word", "train", "--data", CORPUS, "--epochs", 1, model=crossed)
+        again = load_model(crossed)
+        self.assertEqual(again.kind, "word")
+        self.assertEqual(again.stats()["epochs_total"], 3)
+        self.assertEqual(again.vocabulary.to_list(), self.py_doc["graph"]["vocabulary"])
+
+    def test_a_count_reader_refuses_a_word_file_on_both_sides(self):
+        with self.assertRaises(ValueError):
+            CountRewardNet.from_dict(self.py_doc)
+        # the Go CLI refuses it the same way: the format is the check
+        wrong = os.path.join(TMP.name, "mislabelled.count.json")
+        doc = load_json(self.go_model)
+        doc["format"] = "radixnet-count"
+        with open(wrong, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        out = go("info", model=wrong, expect=1)
+        self.assertIn("word", out["error"])
+
+
 class TestGoTutorParity(unittest.TestCase):
     """One fake teacher, both tutors: the same prompts, the same marks, the same model afterwards."""
 

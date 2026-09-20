@@ -18,6 +18,7 @@ nothing in it but this crate.
 | file | what it is |
 |---|---|
 | `src/encoding.rs` | the trigram encoding and its inverse — three code points packed into one `u64` |
+| `src/words.rs` | the word alphabet: a word is one code point, and a vocabulary maps between them (`--kind word`) |
 | `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants |
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
@@ -27,21 +28,26 @@ nothing in it but this crate.
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
 | `src/parallel.rs` | the worker pool, and the one `unsafe` in the crate (with its contract) |
 | `src/fsum.rs`, `src/mt19937.rs`, `src/hash.rs` | the exact sum, the RNG and the hash, written out |
-| `src/file.rs` | the `radixnet-count` model file: what Python and Go read and write |
+| `src/file.rs` | the `radixnet-count` and `radixnet-word` model files: what Python and Go read and write |
 | `src/json.rs` | JSON as Python writes it - compact, UTF-8, and floats rendered as `repr(float)` renders them |
 | `src/gzip.rs` | the gzip container, written out: inflate for reading, a stored-block writer for writing |
 | `src/clock.rs` | the one timestamp a model file carries |
 | `src/report.rs` | the statistics, the judged paths, and a node against its neighbours |
-| `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, info |
+| `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, words, info |
 | `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark and its binary |
 | `tests/model.rs` | the model end to end, and both traversals |
+| `tests/words.rs` | the word model: the alphabet, the phrases compression makes of it, and its file |
 
 ## What is here, and what is not
 
 The model is: the graph and its structural operations, the weight function, the
 path contexts, both traversals, training, prediction, generation, scoring,
 reward / punish / 2NRL, the `radixnet-count` **model file** and the CLI over all
-of it. A model trained here continues in Python or in Go and back again.
+of it — and, with `--kind word`, the same model over an alphabet whose symbols
+are words (`radixnet-word`, `../SPEC-WordNGrams.md`; a `Trigram` already packs
+three code points of 21 bits, which is every code point there is, so the
+representation needed no change). A model trained here continues in Python or in
+Go and back again.
 
 Not ported: the HTTP server, the negative network, the tutors, the agent and the
 LLM clients. That is a gap of the *undone* kind, not the deliberate kind.

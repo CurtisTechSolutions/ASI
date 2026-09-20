@@ -63,7 +63,7 @@ func cmdEvolve(args []string) {
 	if *generations == 0 {
 		generationsText = "until interrupted"
 	}
-	say("generator      %s", modelPath)
+	say("generator      %s", modelFile())
 	say("discriminator  %s", discFile)
 	say("corpus         %d text(s)", len(corpus))
 	say("generations    %s x %d fake(s), %d real", generationsText, cfg.Samples, cfg.RealPerGeneration)
@@ -87,7 +87,7 @@ func cmdEvolve(args []string) {
 	}
 	target := *out
 	if target == "" {
-		target = modelPath
+		target = modelFile()
 	}
 	if err := generator.Save(target); err != nil {
 		fail("cannot save %s: %v", target, err)
@@ -121,8 +121,8 @@ func openDiscriminator(given string) (*radixnet.Model, string) {
 	path := given
 	if strings.TrimSpace(path) == "" {
 		dir := "."
-		if at := strings.LastIndexAny(modelPath, "/\\"); at >= 0 {
-			dir = modelPath[:at]
+		if at := strings.LastIndexAny(modelFile(), "/\\"); at >= 0 {
+			dir = modelFile()[:at]
 		}
 		path = dir + "/discriminator.json"
 		if dir == "." {

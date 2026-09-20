@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
-import { fmtBytes, fmtCounter, fmtInt, fmtNum, yesNo } from "../util.js";
+import { fmtBytes, fmtCounter, fmtInt, fmtNum, wordKind, yesNo } from "../util.js";
 
 const POLL_MS = 2000;
 
@@ -62,6 +62,8 @@ export default function StatusBar({ onStatus }) {
   const job = s.job && typeof s.job === "object" ? s.job : null;
   const backends = s.backends && typeof s.backends === "object" ? s.backends : {};
   const jobState = job && job.state ? String(job.state) : "idle";
+  // the word model *is* the count model, over an alphabet of words: it keeps every one of these numbers
+  const counts = s.kind === "count" || s.kind === "word";
   const progress = progressSummary(job);
   const mark = (flag) => (flag ? "✓" : "✗");
 
@@ -117,12 +119,20 @@ export default function StatusBar({ onStatus }) {
         <b>{fmtCounter(s.twonrl_runs, s.twonrl_runs_resets)}</b> · last loss{" "}
         <b>{fmtNum(s.last_loss, 4)}</b>
       </span>
-      {s.kind === "count" ? (
+      {wordKind(s) ? (
+        <span
+          className="stat"
+          title="A word model's alphabet: the words it has read, in the order it first read them. It grows with training and is never frozen or pruned; a word it has never read is <unk>."
+        >
+          vocabulary <b>{fmtInt(s.vocabulary)}</b> words
+        </span>
+      ) : null}
+      {counts ? (
         <span className="stat" title="Sum of rewards and penalties applied to edges">
           rewards <b>+{fmtNum(s.edge_reward_positive, 1)}</b> / <b>{fmtNum(s.edge_reward_negative, 1)}</b>
         </span>
       ) : null}
-      {s.kind === "count" ? (
+      {counts ? (
         <span
           className="stat"
           title={
@@ -135,7 +145,7 @@ export default function StatusBar({ onStatus }) {
           window <b>{fmtInt(s.window_traversals)}</b> / {fmtInt(s.window)}
         </span>
       ) : null}
-      {s.kind === "count" && s.path_contexts !== undefined ? (
+      {counts && s.path_contexts !== undefined ? (
         <span
           className="stat"
           title="Judged paths: a step counted in the company it kept, so the same edge can be right after one word and wrong after another"

@@ -277,7 +277,104 @@ impl Model {
 
     /// The model kind shared with the Python and Go implementations.
     pub fn kind(&self) -> &'static str {
-        "count"
+        if self.g.is_words() {
+            "word"
+        } else {
+            "count"
+        }
+    }
+
+    /// The file format of this kind (`../../SPEC-WordNGrams.md` §8).
+    pub fn format(&self) -> &'static str {
+        if self.g.is_words() {
+            crate::file::WORD_MODEL_FORMAT
+        } else {
+            crate::file::MODEL_FORMAT
+        }
+    }
+
+    /// What the model counts in: lengths, caps and per-symbol scores are in
+    /// these (`"words"` on a word model, `"chars"` everywhere else).
+    pub fn units(&self) -> &'static str {
+        self.g.units()
+    }
+
+    /// Whether this model's symbols are words.
+    pub fn is_words(&self) -> bool {
+        self.g.is_words()
+    }
+
+    /// `text` as the graph's symbols; `grow` gives an unread word the next id.
+    pub fn symbols(&mut self, text: &str, grow: bool) -> String {
+        match &mut self.g.vocab {
+            Some(vocab) => vocab.encode(text, grow),
+            None => text.to_string(),
+        }
+    }
+
+    /// The text a symbol string stands for (the identity off a word model).
+    pub fn words(&self, symbols: &str) -> String {
+        match &self.g.vocab {
+            Some(vocab) => vocab.decode(symbols),
+            None => symbols.to_string(),
+        }
+    }
+
+    /// `text` as a word model can represent it: its words joined by single
+    /// spaces.  A word model's round trip costs the original whitespace and
+    /// nothing else, and this is what it costs.
+    pub fn normalise(&self, text: &str) -> String {
+        if !self.is_words() {
+            return text.to_string();
+        }
+        crate::words::split_words(text).collect::<Vec<_>>().join(" ")
+    }
+
+    /// One walk's texts and labels, back in words.
+    fn decode_result(&self, r: &mut PathResult) {
+        if !self.is_words() {
+            return;
+        }
+        r.text = self.words(&r.text);
+        r.full_text = self.words(&r.full_text);
+        for label in r.labels.iter_mut() {
+            *label = self.g.text_of(label);
+        }
+    }
+
+    /// The most read words: `trigrams` is how many of the graph's windows the
+    /// word appears in - what the graph actually knows about it, and the one
+    /// count that survives compression.  Ties keep id order; `limit` 0 is all.
+    pub fn top_words(&mut self, limit: usize) -> Vec<crate::words::WordRow> {
+        self.g.prepare();
+        let Some(vocab) = &self.g.vocab else { return Vec::new() };
+        let mut counts = vec![0usize; vocab.len()];
+        let trigrams: Vec<crate::Trigram> = self.g.trigrams().collect();
+        for trigram in trigrams {
+            for symbol in trigram.chars() {
+                if let Ok(id) = crate::words::symbol_word(symbol) {
+                    if id < counts.len() {
+                        counts[id] += 1;
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<crate::words::WordRow> = vocab
+            .words()
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| *id != crate::words::UNKNOWN_ID || counts[*id] > 0)
+            .map(|(id, word)| crate::words::WordRow {
+                word: word.clone(),
+                id,
+                trigrams: counts[id],
+            })
+            .collect();
+        rows.sort_by(|a, b| b.trigrams.cmp(&a.trigrams).then(a.id.cmp(&b.id)));
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        rows
     }
 
     fn workers(&self) -> usize {
@@ -355,6 +452,16 @@ impl Model {
         };
         let workers = self.workers();
         let mut skipped_short = 0;
+        // A word model reads its texts as words: every one is mapped to the graph's
+        // symbols here, in corpus order, which is what makes a Rust vocabulary the
+        // same vocabulary as a Python one - a word's id is the order it was first
+        // read in (`../../SPEC-WordNGrams.md` §3).
+        let encoded: Option<Vec<String>> = if self.is_words() {
+            Some(texts.iter().map(|t| self.symbols(t, true)).collect())
+        } else {
+            None
+        };
+        let texts: &[String] = encoded.as_deref().unwrap_or(texts);
         let usable: Vec<&String> = texts
             .iter()
             .filter(|t| {
@@ -661,6 +768,15 @@ impl Model {
         rng: Option<&mut Mt19937>,
         traversal: Traversal,
     ) -> Result<Prediction, String> {
+        // a word model's prefix arrives as text and its results leave as text;
+        // everything between is the graph's own symbols, and length / max_length are
+        // counted in them - words, there (`../../SPEC-WordNGrams.md` §9)
+        let encoded = if self.is_words() {
+            Some(self.symbols(prefix, false))
+        } else {
+            None
+        };
+        let prefix: &str = encoded.as_deref().unwrap_or(prefix);
         let (node, offset, lead) = self.prefix_start(prefix);
         let lead_len = char_len(&lead);
         let want = length.saturating_sub(lead_len);
@@ -731,7 +847,7 @@ impl Model {
                 }
             }
         };
-        Ok(Prediction {
+        let mut found = Prediction {
             best,
             top,
             bottom,
@@ -740,7 +856,14 @@ impl Model {
             mode: mode.to_string(),
             traversal,
             expanded,
-        })
+        };
+        if self.is_words() {
+            for r in found.top.iter_mut().chain(found.bottom.iter_mut()) {
+                self.decode_result(r);
+            }
+            self.decode_result(&mut found.best);
+        }
+        Ok(found)
     }
 
     /// Generates whole texts with the prediction search, from `START` or
@@ -755,10 +878,10 @@ impl Model {
         if o.count == 0 {
             return Ok(Vec::new());
         }
-        let whole = |r: &mut PathResult, prefix: &str| {
-            r.full_text = format!("{prefix}{}", r.text);
-            r.text = r.full_text.clone();
-        };
+        // the search is what joined the prefix to the continuation, in the model's own
+        // symbols; a generated text never re-joins them here, because only the search
+        // knows the alphabet (`../../SPEC-WordNGrams.md`)
+        let whole = |r: &mut PathResult| r.text = r.full_text.clone();
         if mode == "sample" {
             let mut rng = o.seed.map(Mt19937::new);
             let mut results = Vec::with_capacity(o.count);
@@ -776,7 +899,7 @@ impl Model {
                     rng.as_mut(),
                     o.traversal,
                 )?;
-                whole(&mut found.best, &o.prefix);
+                whole(&mut found.best);
                 results.push(found.best);
             }
             return Ok(results);
@@ -796,7 +919,7 @@ impl Model {
             o.traversal,
         )?;
         let mut results = found.top;
-        results.iter_mut().for_each(|r| whole(r, &o.prefix));
+        results.iter_mut().for_each(whole);
         if mode == "dijkstra" {
             results.truncate(1);
         }
@@ -817,8 +940,12 @@ impl Model {
     /// transitions that would need a split cost `log(UNKNOWN_PROB)`.
     pub fn score(&mut self, text: &str) -> Score {
         self.g.prepare();
-        let grams = encode(text);
-        let chars = char_len(text);
+        // on a word model the text is walked as its words, so `chars` counts words,
+        // `per_char` is per word, and a word it has never read is <unk>: an unknown
+        // transition, charged exactly what any unknown transition is charged
+        let symbols = self.symbols(text, false);
+        let grams = encode(&symbols);
+        let chars = char_len(&symbols);
         if grams.is_empty() {
             return Score {
                 chars,
@@ -992,6 +1119,11 @@ pub fn stats(model: &Model) -> Vec<(String, String)> {
     put("trained_texts", model.meta.trained_texts.value.to_string());
     put("total_traversals", g.total_traversals().value.to_string());
     put("window_traversals", g.window_traversals().to_string());
+    if let Some(vocab) = &g.vocab {
+        // what the numbers above are counted in, and how large the alphabet has grown
+        put("units", model.units().to_string());
+        put("vocabulary", vocab.len().to_string());
+    }
     out
 }
 
