@@ -67,6 +67,7 @@ pub mod gzip;
 pub mod hash;
 pub mod http;
 pub mod json;
+pub mod log;
 pub mod model;
 pub mod mt19937;
 pub mod parallel;

@@ -29,6 +29,9 @@ use crate::GraphOptions;
 /// What this server can be asked for and what it answers with.
 pub const ENGINE: &str = "rust";
 
+/// What the service's own lines are filed under.
+const LOG: &str = "model";
+
 /// A background job: one training run at a time, polled by the frontend.
 #[derive(Default)]
 pub struct Job {
@@ -130,6 +133,7 @@ impl Service {
             ..Default::default()
         });
         self.stop.store(false, Ordering::Relaxed);
+        crate::log_info!(LOG, "{id} started");
         id
     }
 
@@ -140,10 +144,12 @@ impl Service {
         job.finished_at = Some(utc_now());
         match outcome {
             Ok(records) => {
+                crate::log_info!(LOG, "{} finished, {} record(s)", job.id, records.len());
                 job.state = "finished".to_string();
                 job.records = records;
             }
             Err(message) => {
+                crate::log_error!(LOG, "{} failed: {message}", job.id);
                 job.state = "failed".to_string();
                 job.error = Some(message);
             }
@@ -153,7 +159,19 @@ impl Service {
     /// Saves the active kind to its own file, and says whether it landed.
     fn autosave(&self) -> bool {
         let path = self.model_path_for(self.active_encoding());
-        !path.is_empty() && self.with_model(|m| m.save(&path)).is_ok()
+        if path.is_empty() {
+            return false;
+        }
+        match self.with_model(|m| m.save(&path)) {
+            Ok(()) => {
+                crate::log_info!(LOG, "saved {path}");
+                true
+            }
+            Err(why) => {
+                crate::log_error!(LOG, "cannot save {path}: {why}");
+                false
+            }
+        }
     }
 
     /// Refuses a second job while one is running, the way the Python service does.
@@ -317,6 +335,7 @@ impl Service {
         wanted.workers = model.workers;
         wanted.g.workers = model.workers;
         let previous = std::mem::replace(&mut *model, wanted);
+        crate::log_info!(LOG, "encoding {active} -> {encoding} ({origin}); {active} parked");
         parked.push((active.to_string(), previous));
         Ok(origin)
     }

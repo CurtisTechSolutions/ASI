@@ -29,6 +29,7 @@ use std::process::ExitCode;
 use radixnet::encoding::{parse_encoding, Unit};
 use radixnet::file::read_document;
 use radixnet::json::Json;
+use radixnet::log::{self, Level};
 use radixnet::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
 use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
 use radixnet::report::{node_rows, path_rows, split_texts, stats};
@@ -47,7 +48,12 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--encoding SPEC] [--json] [
      letters, word:2:1 the word bigram, word:3:1 the word trigram; the names trigram | bigram | word-bigram | \
      word-trigram work too.\n\
      --units / --ngram / --stride set the three dials separately.  A loaded file's own encoding always wins, and \
-     is fixed for its life.";
+     is fixed for its life.\n\
+     --log SPEC (or $RADIXNET_LOG) sets what is written to stderr: a level (error | warn | info | debug | trace | \
+     off), optionally\n\
+     per target - 'info', 'warn,http=debug', 'info,train=trace'.  --verbose is --log debug and --quiet is --log \
+     off.  Nothing is ever\n\
+     written to stdout, which is where --json puts its document.  Targets: http, model, train.";
 
 /// The default `--model` per unit, so a word model never overwrites a
 /// character model's file.
@@ -107,12 +113,13 @@ impl Args {
 }
 
 /// Flags that take no value.
-const SWITCHES: [&str; 8] = [
+const SWITCHES: [&str; 9] = [
     "json",
     "no-compress",
     "to-end",
     "seeded",
     "quiet",
+    "verbose",
     "resume",
     "exact",
     "no-guard",
@@ -162,6 +169,19 @@ fn run() -> Result<(), String> {
     }
     let (command, args) = parse_args(&argv)?;
     let json_mode = args.on("json");
+    // stderr only, so --json keeps one document on stdout and `serve` keeps the
+    // protocol there; a server defaults to info because one that says nothing
+    // while it runs cannot be debugged
+    log::init(if command == "serve" { Level::Info } else { Level::Warn });
+    if args.on("verbose") {
+        log::set_level(Level::Debug);
+    }
+    if args.on("quiet") {
+        log::set_level(Level::Off);
+    }
+    if let Some(spec) = args.get("log") {
+        log::configure(spec)?;
+    }
     // the kind is the one this port has; the *encoding* is the dial - what one
     // unit is, how many units a gram holds, and how far apart grams start
     match args.str("kind", "count").as_str() {
@@ -513,10 +533,12 @@ fn run() -> Result<(), String> {
             } else {
                 None
             };
-            eprintln!(
-                "radixnet: serving the API on http://{host}:{port} ({})",
+            // through the logger, so a run has one channel rather than two
+            radixnet::log_info!(
+                "http",
+                "{}",
                 match &frontend {
-                    Some(dir) => format!("frontend from {dir}"),
+                    Some(dir) => format!("serving the frontend from {dir}"),
                     None => "no frontend directory: the API alone".to_string(),
                 }
             );

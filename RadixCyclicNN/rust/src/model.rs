@@ -244,6 +244,9 @@ impl Default for TrainOptions {
     }
 }
 
+/// What the model's own lines are filed under.
+const LOG: &str = "train";
+
 /// The count / reward model: a [`Graph`] plus its training history.
 ///
 /// Training fans threads out over the texts of a chunk for encoding, tracing
@@ -555,8 +558,38 @@ impl Model {
                 phase: opts.phase.clone(),
                 extra: Vec::new(),
             };
+            crate::log_debug!(
+                LOG,
+                "epoch {} {}: loss {:.4}, {} nodes, {} edges, {} merge(s), {:.2}s",
+                record.epoch,
+                opts.phase.as_deref().unwrap_or("train"),
+                record.loss,
+                record.nodes,
+                record.edges,
+                record.merges,
+                record.seconds
+            );
             self.history.push(record.clone());
             records.push(record);
+        }
+        crate::log_info!(
+            LOG,
+            "{} over {} text(s): loss {:.4} -> {:.4}, {} nodes",
+            match opts.phase.as_deref() {
+                Some(phase) => format!("{} pass(es), {phase}", records.len()),
+                None => format!("{} epoch(s)", records.len()),
+            },
+            usable.len(),
+            records.first().map(|r| r.loss).unwrap_or(0.0),
+            records.last().map(|r| r.loss).unwrap_or(0.0),
+            self.g.num_nodes()
+        );
+        if skipped_short > 0 {
+            crate::log_warn!(
+                LOG,
+                "{skipped_short} text(s) skipped: shorter than one gram of {}",
+                self.g.enc
+            );
         }
         Ok(records)
     }

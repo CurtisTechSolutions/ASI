@@ -35,6 +35,7 @@ nothing in it but this crate.
 | `src/json.rs` | JSON as Python writes it - compact, UTF-8, and floats rendered as `repr(float)` renders them |
 | `src/gzip.rs` | the gzip container, written out: inflate for reading, a stored-block writer for writing |
 | `src/clock.rs` | the one timestamp a model file carries |
+| `src/log.rs` | logging, written out: levels, targets, timestamps, and never a byte on stdout |
 | `src/report.rs` | the statistics, the judged paths, a node against its neighbours, and the weight knobs |
 | `src/http.rs` | HTTP/1.1 written out: the requests, the routes, the static files and the SPA fallback |
 | `src/service.rs` | the API the frontend talks to — the same JSON contract as the Python and Go servers |
@@ -77,6 +78,26 @@ make rust-serve        # serve frontend/dist from the Rust model on http://HOST:
 make rust-parity       # the contract with Python
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
 ```
+
+## Logging
+
+`RADIXNET_LOG` (or `--log`) takes a level, optionally per target:
+
+```bash
+radixnet --log info train --data corpus.txt      # what the run did
+radixnet --verbose train --data corpus.txt       # ... and every epoch
+radixnet --log warn,http=debug serve             # one line per request
+RADIXNET_LOG=info,train=trace radixnet train ...
+radixnet --quiet ...                             # nothing at all
+```
+
+The default is `warn`, so a CLI run says nothing unless something is wrong;
+`serve` raises its own default to `info`, because a server that says nothing
+while it runs cannot be debugged. Targets are `http`, `model` and `train`.
+
+**Every line goes to stderr**, and there is no way to configure one onto
+stdout. That is not a style choice: `--json` puts one document there, so a log
+line landing in it corrupts the document.
 
 `make help` lists the rest of the `rust-*` targets — predict, generate, score,
 feedback, 2nrl, invert, compress, weights, paths, nodes, words and info — each

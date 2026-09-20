@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::json::{parse, Json};
+use crate::log::Level;
 
 /// How much of a request body the server will read (16 MiB): an uploaded corpus
 /// arrives this way, and the cap is what keeps a bad `Content-Length` from
@@ -129,6 +130,9 @@ impl From<String> for ApiError {
     }
 }
 
+/// What the server's own lines are filed under.
+const LOG: &str = "http";
+
 /// What a route hands back.
 ///
 /// A route that answers 200 returns the document alone; one that answers with
@@ -202,45 +206,73 @@ impl<S: Send + Sync + 'static> Server<S> {
     /// Serves until the process is stopped; returns the address it bound to.
     pub fn serve(self, host: &str, port: u16) -> Result<(), String> {
         let listener = TcpListener::bind((host, port)).map_err(|err| format!("cannot bind {host}:{port}: {err}"))?;
+        crate::log_info!(LOG, "listening on http://{host}:{port} ({} routes)", self.routes.len());
         let shared = Arc::new(self);
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let server = Arc::clone(&shared);
                     std::thread::spawn(move || {
-                        let _ = server.handle(stream);
+                        if let Err(err) = server.handle(stream) {
+                            // the client hung up, or the socket went away mid-answer
+                            crate::log_debug!(LOG, "connection ended: {err}");
+                        }
                     });
                 }
                 // one refused connection is not the end of the server
-                Err(_) => continue,
+                Err(err) => {
+                    crate::log_warn!(LOG, "refused connection: {err}");
+                    continue;
+                }
             }
         }
         Ok(())
     }
 
     fn handle(&self, mut stream: TcpStream) -> std::io::Result<()> {
+        let started = std::time::Instant::now();
         let request = match read_request(&mut stream) {
             Ok(Some(request)) => request,
             Ok(None) => return Ok(()),
-            Err(message) => return write_json(&mut stream, 400, &error_doc(&message)),
+            Err(message) => {
+                crate::log_warn!(LOG, "400 (unreadable request): {message}");
+                return write_json(&mut stream, 400, &error_doc(&message));
+            }
         };
         // an API route, the prebuilt frontend, or a 404 that says which
         if let Some(handler) = self.match_route(&request) {
-            return match handler(&self.state, &request) {
-                Ok(doc) => {
-                    let (status, doc) = status_of(doc);
-                    write_json(&mut stream, status, &doc)
-                }
-                Err(err) => write_json(&mut stream, err.status, &error_doc(&err.message)),
+            let answer = handler(&self.state, &request);
+            let (status, doc) = match answer {
+                Ok(doc) => status_of(doc),
+                Err(err) => (err.status, error_doc(&err.message)),
             };
+            // one line per request, with what it cost: a 4xx or 5xx is worth a
+            // warning because it is the server refusing, and a 2xx is the
+            // ordinary traffic that only a debug run wants to see
+            let level = if status >= 400 { Level::Warn } else { Level::Debug };
+            crate::log_at!(
+                LOG,
+                level,
+                "{} {} -> {status} in {:.1}ms{}",
+                request.method,
+                request.path,
+                started.elapsed().as_secs_f64() * 1000.0,
+                match doc.at("error").as_str() {
+                    Some(why) => format!(": {why}"),
+                    None => String::new(),
+                }
+            );
+            return write_json(&mut stream, status, &doc);
         }
         if request.path.starts_with("/api/") {
+            crate::log_warn!(LOG, "404 no route {} {}", request.method, request.path);
             return write_json(
                 &mut stream,
                 404,
                 &error_doc(&format!("no route {} {}", request.method, request.path)),
             );
         }
+        crate::log_trace!(LOG, "{} {} (static)", request.method, request.path);
         self.serve_static(&mut stream, &request)
     }
 
