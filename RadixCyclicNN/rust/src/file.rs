@@ -24,18 +24,14 @@ use std::sync::atomic::Ordering;
 
 use crate::clock::utc_now;
 use crate::counter::Counter;
-use crate::encoding::{char_len, Encoding, BACK_LABEL, END_LABEL, START_LABEL, WINDOW};
+use crate::encoding::{Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL, WINDOW};
 use crate::graph::{Graph, GraphOptions, Loc, BACK, END, FIRST, START};
 use crate::json::{parse, Json};
 use crate::model::{EpochRecord, Model};
 use crate::weights::SMOOTHING;
-use crate::words::Vocabulary;
 
 /// The model file format shared with the Python and Go implementations.
 pub const MODEL_FORMAT: &str = "radixnet-count";
-/// The word model's own format, so that every reader written before it existed
-/// refuses the file by the check it already makes (`../../SPEC-WordNGrams.md`).
-pub const WORD_MODEL_FORMAT: &str = "radixnet-word";
 /// The model document version this port writes.
 pub const MODEL_FORMAT_VERSION: i64 = 1;
 /// The graph document format.
@@ -186,32 +182,22 @@ impl Graph {
             ("weights", weights),
             ("paths", paths),
         ]);
-        if self.vocab.is_none() && self.enc.is_default() {
-            return graph;
+        if self.enc.is_default() {
+            return graph; // an ordinary file is byte for byte what it always was
         }
-        // the alphabet and the dial ride at the end of the block, where Python
-        // and Go write them
+        // the dial rides at the end of the block, as the Go implementation
+        // writes it; a reader takes the key, not its place
         let mut pairs = match graph {
             Json::Obj(pairs) => pairs,
             other => return other,
         };
-        if !self.enc.is_default() {
-            pairs.push((
-                "encoding".to_string(),
-                Json::obj([
-                    ("unit", Json::str(if self.vocab.is_some() { "word" } else { "char" })),
-                    ("n", Json::Int(self.enc.n as i64)),
-                    ("stride", Json::Int(self.enc.stride as i64)),
-                ]),
-            ));
-        }
-        let Some(vocab) = &self.vocab else {
-            return Json::Obj(pairs);
-        };
-        pairs.push(("units".to_string(), Json::str(crate::words::WORD_UNITS)));
         pairs.push((
-            "vocabulary".to_string(),
-            Json::Arr(vocab.words().iter().map(|w| Json::str(w.clone())).collect()),
+            "encoding".to_string(),
+            Json::obj([
+                ("unit", Json::str(self.enc.unit.name())),
+                ("n", Json::Int(self.enc.n as i64)),
+                ("stride", Json::Int(self.enc.stride as i64)),
+            ]),
         ));
         Json::Obj(pairs)
     }
@@ -256,14 +242,14 @@ impl Graph {
                 .unwrap_or(if legacy { 0.0 } else { 0.5 }),
             path_scale: weights.at("path_scale").as_f64().unwrap_or(1.0),
             window,
-            words: match doc.at("units").as_str() {
-                Some(crate::words::WORD_UNITS) => true,
-                Some(other) => return Err(format!("unknown graph units {other:?}")),
-                None => doc.get("vocabulary").is_some(),
-            },
             encoding: {
                 let block = doc.at("encoding");
                 let enc = Encoding {
+                    unit: match block.at("unit").as_str() {
+                        None | Some("char") => Unit::Chars,
+                        Some("word") => Unit::Words,
+                        Some(other) => return Err(format!("unknown encoding unit {other:?}")),
+                    },
                     n: block.at("n").as_i64().unwrap_or(WINDOW as i64).max(1) as usize,
                     stride: block.at("stride").as_i64().unwrap_or(1).max(1) as usize,
                 };
@@ -271,11 +257,7 @@ impl Graph {
                 enc
             },
         };
-        let words = opts.words;
         let mut g = Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?;
-        if words {
-            g.vocab = Some(Vocabulary::from_list(&doc.at("vocabulary").to_strings())?);
-        }
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
 
         // the three sentinels are already there; the rest of the file's nodes follow
@@ -360,7 +342,6 @@ impl Graph {
         g.carry_counters(true); // normalise whatever the file carried, however it was written
         g.invalidate();
         g.recompute_weights();
-        g.check_vocabulary()?;
         Ok(g)
     }
 }
@@ -452,21 +433,16 @@ impl Model {
     /// Rebuilds a model from a `radixnet-count` document.
     pub fn from_doc(doc: &Json) -> Result<Model, String> {
         let format = doc.at("format").as_str().unwrap_or("");
-        if format != MODEL_FORMAT && format != WORD_MODEL_FORMAT {
-            return Err(format!("not a {MODEL_FORMAT} or {WORD_MODEL_FORMAT} model document"));
+        if format != MODEL_FORMAT {
+            return Err(format!("not a {MODEL_FORMAT} model document"));
         }
         let version = doc.at("version").as_i64().unwrap_or(1);
         if version > MODEL_FORMAT_VERSION {
             return Err(format!("unsupported {format} model version {version}"));
         }
+        // one format whatever the encoding: the dial is a property of the
+        // graph, written in its `encoding` block, not a kind of file
         let g = Graph::from_doc(doc.get("graph").ok_or("model document has no graph")?)?;
-        if g.is_words() != (format == WORD_MODEL_FORMAT) {
-            return Err(if format == WORD_MODEL_FORMAT {
-                format!("{WORD_MODEL_FORMAT} document without a word graph")
-            } else {
-                format!("a word graph belongs to a {WORD_MODEL_FORMAT} document, not {format}")
-            });
-        }
         let mut model = Model::from_graph(g);
         model.history = doc
             .at("history")
@@ -535,7 +511,7 @@ impl Graph {
         self.index.clear();
         self.n_alive_nodes = 0;
         for (i, label) in labels.iter().enumerate() {
-            if i >= FIRST && char_len(label) < self.enc.n {
+            if i >= FIRST && self.enc.len(label) < self.enc.n {
                 return Err(format!("node {i} label {label:?} is shorter than {}", self.enc.n));
             }
             self.new_node(label.clone(), counts[i], resets.get(i).copied().unwrap_or(0));

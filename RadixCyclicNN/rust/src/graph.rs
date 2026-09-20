@@ -9,12 +9,11 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::counter::{carry, Counter, COUNTER_LIMIT, INVALID_STAMP};
-use crate::encoding::{Encoding, Gram, BACK_LABEL, END_LABEL, START_LABEL};
+use crate::encoding::{Encoding, Gram, Unit, BACK_LABEL, END_LABEL, START_LABEL};
 use crate::hash::{map, Map, Set};
 use crate::mt19937::Mt19937;
 use crate::paths::{PathKey, PathRow};
 use crate::weights::ChildCost;
-use crate::words::{symbol_word, Vocabulary, CHAR_UNITS, WORD_UNITS};
 
 /// Node ids of the sentinels.  `START` and `END` are where a text begins and
 /// ends - observed in the corpus, like everything else.  `BACK` is where the
@@ -144,12 +143,10 @@ pub struct GraphOptions {
     /// The size of the sliding *count* window, not the n of the n-gram - that
     /// is `encoding.n`.
     pub window: usize,
-    /// Makes the graph's symbols words rather than characters: the same graph
-    /// over a different alphabet (`../../SPEC-WordNGrams.md`).  It says what a
-    /// *symbol* is; `encoding` says how many of them a gram holds.
-    pub words: bool,
-    /// How many symbols a gram holds and how far apart consecutive grams
-    /// start; the default is the trigram of stride 1.
+    /// What one unit of text is, how many units a gram holds and how far
+    /// apart consecutive grams start; the default is the character trigram of
+    /// stride 1.  `Unit::Words` makes it a word n-gram
+    /// (`../../SPEC-WordNGrams.md`).
     pub encoding: Encoding,
 }
 
@@ -163,7 +160,6 @@ impl Default for GraphOptions {
             window_scale: 0.5,
             path_scale: 1.0,
             window: 10_000,
-            words: false,
             encoding: Encoding::default(),
         }
     }
@@ -238,10 +234,6 @@ pub struct Graph {
 
     /// The fan-out cap of the recomputes (0 = the machine).
     pub workers: usize,
-
-    /// The alphabet of a word model - words to code points - and `None` on a
-    /// character graph, which is every other kind (see [`crate::words`]).
-    pub vocab: Option<Vocabulary>,
 }
 
 impl Graph {
@@ -297,7 +289,6 @@ impl Graph {
             edge_punish: Vec::new(),
             costs_version: INVALID_STAMP,
             workers: 0,
-            vocab: if opts.words { Some(Vocabulary::new()) } else { None },
         };
         g.new_node(START_LABEL.to_string(), 0, 0);
         g.new_node(END_LABEL.to_string(), 0, 0);
@@ -307,60 +298,24 @@ impl Graph {
 
     // -- the alphabet -------------------------------------------------------
 
-    /// Whether this graph's symbols are words rather than characters.
+    /// Whether this graph's units are words rather than characters.
     pub fn is_words(&self) -> bool {
-        self.vocab.is_some()
+        self.enc.unit == Unit::Words
     }
 
-    /// What the graph counts in: `"words"` on a word graph, `"chars"` everywhere else.
+    /// What the graph counts in: `"words"` under a word encoding, `"chars"`
+    /// everywhere else.
     pub fn units(&self) -> &'static str {
-        if self.is_words() {
-            WORD_UNITS
-        } else {
-            CHAR_UNITS
-        }
+        self.enc.units_name()
     }
 
-    /// A label as text, for anything that reports one: the identity on a
-    /// character graph, and the words the code points stand for on a word
-    /// graph.  A sentinel label is not made of words and comes back as it is.
-    pub fn text_of(&self, label: &str) -> String {
-        match &self.vocab {
-            Some(vocab) if label != START_LABEL && label != END_LABEL && label != BACK_LABEL => vocab.decode(label),
-            _ => label.to_string(),
-        }
-    }
-
-    /// Text as this graph's symbols, the inverse of [`Graph::text_of`], for
-    /// anything that looks a label up.  An unread word comes back as the
-    /// unknown symbol: the vocabulary only grows while training.
-    pub fn symbols_of(&self, text: &str) -> String {
-        match &self.vocab {
-            Some(vocab) => vocab.encode_known(text),
-            None => text.to_string(),
-        }
-    }
-
-    /// Every symbol every label carries has to be a word this graph's
-    /// vocabulary holds - the check that turns a corrupt file into an error
-    /// instead of a decoding surprise much later.
-    pub fn check_vocabulary(&self) -> Result<(), String> {
-        let Some(vocab) = &self.vocab else { return Ok(()) };
-        for node in FIRST..self.labels.len() {
-            if !self.alive[node] {
-                continue;
-            }
-            for symbol in self.labels[node].chars() {
-                let id = symbol_word(symbol).map_err(|e| format!("node {node} label holds {e}"))?;
-                if id >= vocab.len() {
-                    return Err(format!(
-                        "node {node} holds word {id}, past the end of a vocabulary of {}",
-                        vocab.len()
-                    ));
-                }
-            }
-        }
-        Ok(())
+    /// Every gram the graph holds, in one order whatever the map's is - the
+    /// alphabet a word encoding has read is derived from these
+    /// ([`crate::words::word_rows`]).
+    pub fn gram_index(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.index.keys().map(|g| g.to_string()).collect();
+        out.sort_unstable();
+        out
     }
 
     // -- counters -----------------------------------------------------------
@@ -699,7 +654,7 @@ impl Graph {
             );
             j += enc.stride;
         }
-        self.labels[p] = format!("{}{}", lp.text(), lc.slice(ov, None));
+        self.labels[p] = enc.join(&[lp.text(), lc.slice(ov, None)]);
         self.label_len[p] = lp.len() + lc.len() - ov;
         self.labels[c] = String::new();
         self.label_len[c] = 0;

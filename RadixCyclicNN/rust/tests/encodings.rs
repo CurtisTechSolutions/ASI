@@ -1,23 +1,31 @@
 //! Every encoding, end to end: the graph, the model, and the walk back out.
 //!
-//! Two dials compose here, and the point of these tests is that they do:
+//! Three dials compose here, and the point of these tests is that they do:
 //!
-//! * `GraphOptions::words` says what one **symbol** is - a character, or a
-//!   word given a code point of its own (`SPEC-WordNGrams.md`);
-//! * `Encoding { n, stride }` says how many symbols a **gram** holds and how
-//!   far apart consecutive grams start.
+//! * `Encoding::unit` says what one **unit** of text is - a character, or a
+//!   whitespace word (`SPEC-WordNGrams.md`);
+//! * `n` says how many units a **gram** holds;
+//! * `stride` says how far apart consecutive grams start.
 //!
-//! So a word bigram is `words: true` with `n: 2`, groups of five letters are
-//! `words: false` with `n: 5, stride: 5`, and neither dial has to know about
-//! the other.
+//! So a word bigram is `unit: Words, n: 2`, groups of five letters are
+//! `unit: Chars, n: 5, stride: 5`, and the graph below them never has to know
+//! which it is holding.
 
 use radixnet::model::PredictOptions;
-use radixnet::{Encoding, GraphOptions, Model, TrainOptions, Traversal};
+use radixnet::{Encoding, GraphOptions, Model, TrainOptions, Unit};
 
-/// `(words, encoding)`: every combination the tests drive end to end.
-fn every_encoding() -> Vec<(bool, Encoding)> {
-    let chars = |n: usize, stride: usize| (false, Encoding { n, stride });
-    let words = |n: usize, stride: usize| (true, Encoding { n, stride });
+/// Every combination the tests drive end to end.
+fn every_encoding() -> Vec<Encoding> {
+    let chars = |n: usize, stride: usize| Encoding {
+        unit: Unit::Chars,
+        n,
+        stride,
+    };
+    let words = |n: usize, stride: usize| Encoding {
+        unit: Unit::Words,
+        n,
+        stride,
+    };
     vec![
         chars(3, 1), // the trigram: the default
         chars(1, 1),
@@ -44,12 +52,11 @@ fn texts() -> Vec<String> {
     CORPUS.iter().map(|s| s.to_string()).collect()
 }
 
-fn trained(words: bool, enc: Encoding, epochs: usize) -> Model {
+fn trained(enc: Encoding, epochs: usize) -> Model {
     let mut model = Model::new(
         1,
         GraphOptions {
             encoding: enc,
-            words,
             ..Default::default()
         },
     )
@@ -68,25 +75,28 @@ fn trained(words: bool, enc: Encoding, epochs: usize) -> Model {
     model
 }
 
-/// The symbols a model walks a text as: its characters, or its words.
-fn symbols(model: &mut Model, text: &str) -> String {
-    if model.is_words() {
-        model.symbols(text, false)
-    } else {
-        text.to_string()
-    }
-}
-
 #[test]
 fn the_defaults_and_what_does_not_validate() {
     assert!(Encoding::default().is_default());
     assert_eq!(Encoding::default().overlap(), radixnet::OVERLAP);
-    assert_eq!(Encoding { n: 4, stride: 4 }.overlap(), 0);
-    assert!(!Encoding { n: 4, stride: 4 }.sliding());
+    assert_eq!(Encoding::parse("char:4:4").unwrap().overlap(), 0);
+    assert!(!Encoding::parse("char:4:4").unwrap().sliding());
     for bad in [
-        Encoding { n: 0, stride: 1 },
-        Encoding { n: 3, stride: 0 },
-        Encoding { n: 2, stride: 3 },
+        Encoding {
+            unit: Unit::Chars,
+            n: 0,
+            stride: 1,
+        },
+        Encoding {
+            unit: Unit::Chars,
+            n: 3,
+            stride: 0,
+        },
+        Encoding {
+            unit: Unit::Words,
+            n: 2,
+            stride: 3,
+        },
     ] {
         assert!(bad.validate().is_err(), "{bad} must not validate");
         assert!(
@@ -101,52 +111,52 @@ fn the_defaults_and_what_does_not_validate() {
             "{bad} must not build a model"
         );
     }
-    for (_, enc) in every_encoding() {
+    for enc in every_encoding() {
         assert!(enc.validate().is_ok(), "{enc}");
     }
 }
 
 #[test]
-fn a_spec_parses_into_the_two_dials_and_prints_back() {
+fn a_spec_parses_into_the_three_dials_and_prints_back() {
     let cases = [
-        ("", false, "char:3:1"),
-        ("trigram", false, "char:3:1"),
-        ("char:4", false, "char:4:1"),
-        ("chars:4:4", false, "char:4:4"),
-        ("char:5:groups", false, "char:5:5"),
-        ("letters:7:2", false, "char:7:2"),
-        ("word", true, "word:1:1"),
-        ("word:2", true, "word:2:1"),
-        ("word-trigram", true, "word:3:1"),
-        ("WORD:2:2", true, "word:2:2"),
+        ("", "char:3:1"),
+        ("trigram", "char:3:1"),
+        ("char:4", "char:4:1"),
+        ("chars:4:4", "char:4:4"),
+        ("char:5:groups", "char:5:5"),
+        ("letters:7:2", "char:7:2"),
+        ("word", "word:1:1"),
+        ("word:2", "word:2:1"),
+        ("word-trigram", "word:3:1"),
+        ("WORD:2:2", "word:2:2"),
     ];
-    for (spec, want_words, want) in cases {
-        let (words, enc) = Encoding::parse_spec(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
-        assert_eq!(words, want_words, "{spec}: what a symbol is");
-        assert_eq!(enc.spec(words), want, "{spec}");
-        // and the printed spec parses back to the same pair
-        assert_eq!(
-            Encoding::parse_spec(&enc.spec(words)).unwrap(),
-            (words, enc),
-            "{spec} round trip"
-        );
+    for (spec, want) in cases {
+        let enc = Encoding::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
+        assert_eq!(enc.to_string(), want, "{spec}");
+        // and the printed spec parses back to the same encoding
+        assert_eq!(Encoding::parse(&enc.to_string()).unwrap(), enc, "{spec} round trip");
     }
     for bad in ["rune:3", "char:x", "char:3:y", "char:2:3", "char:0", "a:b:c:d"] {
-        assert!(Encoding::parse_spec(bad).is_err(), "{bad} must not parse");
+        assert!(Encoding::parse(bad).is_err(), "{bad} must not parse");
     }
 }
 
 #[test]
 fn a_text_encodes_into_the_grams_it_should() {
-    let cases: Vec<(Encoding, &str, Vec<&str>)> = vec![
-        (Encoding { n: 3, stride: 1 }, "hello", vec!["hel", "ell", "llo"]),
-        (Encoding { n: 1, stride: 1 }, "abc", vec!["a", "b", "c"]),
-        (Encoding { n: 4, stride: 4 }, "abcdefghij", vec!["abcd", "efgh"]),
-        (Encoding { n: 5, stride: 5 }, "abcdefghij", vec!["abcde", "fghij"]),
-        (Encoding { n: 4, stride: 2 }, "abcdef", vec!["abcd", "cdef"]),
-        (Encoding { n: 3, stride: 1 }, "hi", vec![]),
+    let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+        ("char:3:1", "hello", vec!["hel", "ell", "llo"]),
+        ("char:1:1", "abc", vec!["a", "b", "c"]),
+        ("char:4:4", "abcdefghij", vec!["abcd", "efgh"]),
+        ("char:5:5", "abcdefghij", vec!["abcde", "fghij"]),
+        ("char:4:2", "abcdef", vec!["abcd", "cdef"]),
+        ("char:3:1", "hi", vec![]),
+        ("word:2:1", "the cat sat on", vec!["the cat", "cat sat", "sat on"]),
+        ("word:2:2", "the cat sat on", vec!["the cat", "sat on"]),
+        ("word:3:1", "the  cat\tsat", vec!["the cat sat"]),
+        ("word:2:1", "alone", vec![]),
     ];
-    for (enc, text, want) in cases {
+    for (spec, text, want) in cases {
+        let enc = Encoding::parse(spec).unwrap();
         let got: Vec<String> = enc.encode(text).iter().map(|g| g.to_string()).collect();
         assert_eq!(got, want, "{enc}.encode({text:?})");
     }
@@ -154,24 +164,29 @@ fn a_text_encodes_into_the_grams_it_should() {
 
 #[test]
 fn a_word_model_encodes_whole_words() {
-    let mut model = trained(true, Encoding { n: 2, stride: 1 }, 1);
-    // the symbols are code points, one per word, so the grams are word pairs
+    let model = trained(Encoding::parse("word:2").unwrap(), 1);
+    // a gram is text like any other, made of two whole words
+    let enc = model.g.enc;
     let text = "the cat sat";
-    let syms = symbols(&mut model, text);
-    assert_eq!(syms.chars().count(), 3, "three words, three symbols");
-    let grams = model.g.enc.encode(&syms);
+    assert_eq!(enc.len(text), 3, "three words, three units");
+    let grams = enc.encode(text);
     assert_eq!(grams.len(), 2, "three words make two bigrams");
-    assert_eq!(model.words(&grams[0].to_string()), "the cat");
-    assert_eq!(model.words(&grams[1].to_string()), "cat sat");
+    assert_eq!(grams[0].to_string(), "the cat");
+    assert_eq!(grams[1].to_string(), "cat sat");
 }
 
 #[test]
 fn normalize_is_what_comes_back() {
-    for (enc, text, want) in [
-        (Encoding { n: 3, stride: 1 }, "hello", "hello"),
-        (Encoding { n: 4, stride: 4 }, "abcdefghij", "abcdefgh"),
-        (Encoding { n: 4, stride: 4 }, "abc", ""),
+    for (spec, text, want) in [
+        ("char:3:1", "hello", "hello"),
+        ("char:4:4", "abcdefghij", "abcdefgh"),
+        ("char:4:4", "abc", ""),
+        // a word encoding's round trip costs the original whitespace and
+        // nothing else, and drops the tail no whole gram covers
+        ("word:2:1", "the  cat\tsat", "the cat sat"),
+        ("word:2:2", "the cat sat", "the cat"),
     ] {
+        let enc = Encoding::parse(spec).unwrap();
         assert_eq!(enc.normalize(text), want, "{enc}.normalize({text:?})");
         let grams = enc.encode(text);
         if !grams.is_empty() {
@@ -182,18 +197,18 @@ fn normalize_is_what_comes_back() {
 
 #[test]
 fn the_graph_round_trips_under_every_encoding() {
-    for (words, enc) in every_encoding() {
-        let mut model = trained(words, enc, 2);
-        let walked: Vec<String> = texts().iter().map(|t| symbols(&mut model, t)).collect();
+    for enc in every_encoding() {
+        let mut model = trained(enc, 2);
+        let walked = texts();
         model
             .g
             .check_invariants(&walked, false)
-            .unwrap_or_else(|e| panic!("{enc} words={words}: invariants: {e}"));
+            .unwrap_or_else(|e| panic!("{enc}: invariants: {e}"));
         model.g.compress();
         model
             .g
             .check_invariants(&walked, true)
-            .unwrap_or_else(|e| panic!("{enc} words={words}: invariants after compression: {e}"));
+            .unwrap_or_else(|e| panic!("{enc}: invariants after compression: {e}"));
         for text in &walked {
             let grams = enc.encode(text);
             if grams.is_empty() {
@@ -202,48 +217,45 @@ fn the_graph_round_trips_under_every_encoding() {
             let path = model
                 .g
                 .node_path(&grams)
-                .unwrap_or_else(|| panic!("{enc} words={words}: {text:?} does not walk"));
+                .unwrap_or_else(|| panic!("{enc}: {text:?} does not walk"));
             let labels: Vec<&str> = path[1..path.len() - 1].iter().map(|&id| model.g.label(id)).collect();
-            assert_eq!(
-                enc.decode_path(&labels, 0, true),
-                enc.normalize(text),
-                "{enc} words={words}"
-            );
+            assert_eq!(enc.decode_path(&labels, 0, true), enc.normalize(text), "{enc}");
         }
     }
 }
 
 #[test]
 fn training_predicting_and_scoring_work_under_every_encoding() {
-    for (words, enc) in every_encoding() {
-        let mut model = trained(words, enc, 2);
-        assert!(model.g.num_trigrams() > 0, "{enc} words={words}: nothing was learned");
+    for enc in every_encoding() {
+        let mut model = trained(enc, 2);
+        assert!(model.g.num_trigrams() > 0, "{enc}: nothing was learned");
         assert_eq!(model.g.enc, enc);
-        assert_eq!(model.is_words(), words);
+        assert_eq!(model.is_words(), enc.unit == Unit::Words);
+        assert_eq!(model.units(), enc.units_name());
         let found = model
             .predict(
                 "the cat sat",
                 &PredictOptions {
                     length: 3,
                     k: 2,
-                    traversal: Traversal::Reward,
+                    traversal: "reward".to_string(),
                     ..Default::default()
                 },
             )
-            .unwrap_or_else(|e| panic!("{enc} words={words}: predict: {e}"));
-        assert!(!found.top.is_empty(), "{enc} words={words}: no continuation");
+            .unwrap_or_else(|e| panic!("{enc}: predict: {e}"));
+        assert!(!found.top.is_empty(), "{enc}: no continuation");
         let known = model.score(CORPUS[0]);
         let noise = model.score("qzx wqzj vbn qzx wqzj vbn");
         assert!(
             known.unknown_transitions <= noise.unknown_transitions,
-            "{enc} words={words}: a trained text is stranger than noise"
+            "{enc}: a trained text is stranger than noise"
         );
     }
 }
 
 #[test]
 fn a_word_model_walks_in_whole_words() {
-    let mut model = trained(true, Encoding { n: 2, stride: 1 }, 3);
+    let mut model = trained(Encoding::parse("word:2").unwrap(), 3);
     let corpus = CORPUS.join(" ");
     let found = model
         .predict(
@@ -251,7 +263,7 @@ fn a_word_model_walks_in_whole_words() {
             &PredictOptions {
                 length: 3,
                 k: 3,
-                traversal: Traversal::Reward,
+                traversal: "reward".to_string(),
                 ..Default::default()
             },
         )
@@ -271,7 +283,7 @@ fn a_word_model_walks_in_whole_words() {
 
 #[test]
 fn a_group_encoding_has_no_overlap() {
-    let enc = Encoding { n: 4, stride: 4 };
+    let enc = Encoding::parse("char:4:groups").unwrap();
     assert_eq!(enc.overlap(), 0);
     let lines = vec!["abcdefghijkl".to_string(), "abcdmnopijkl".to_string()];
     let mut model = Model::new(
@@ -326,12 +338,11 @@ fn the_structure_is_the_one_the_other_two_build() {
         ("word:2:2", 77, 141, 155),
     ];
     for (spec, nodes, edges, grams) in expected {
-        let (words, enc) = Encoding::parse_spec(spec).unwrap();
+        let enc = Encoding::parse(spec).unwrap();
         let mut model = Model::new(
             1,
             GraphOptions {
                 encoding: enc,
-                words,
                 ..Default::default()
             },
         )

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::clock::utc_now;
-use crate::encoding::{char_len, decode_path, encode, BACK_LABEL, END_LABEL, OVERLAP, START_LABEL, WINDOW};
+use crate::encoding::{Encoding, BACK_LABEL, END_LABEL, START_LABEL};
 use crate::graph::{END, FIRST, START};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
@@ -24,7 +24,7 @@ use crate::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
 use crate::penalty::{resolve_traversal, DEFAULT_TRAVERSAL, TRAVERSALS};
 use crate::report::{configure_weight, node_rows, path_rows, split_texts, stats, weight_config};
 use crate::search::PathResult;
-use crate::{GraphOptions, Trigram};
+use crate::GraphOptions;
 
 /// What this server can be asked for and what it answers with.
 pub const ENGINE: &str = "rust";
@@ -75,12 +75,6 @@ impl Job {
 /// The service: one model behind one lock, plus where its files live.
 pub struct Service {
     model: Mutex<Model>,
-    /// The kinds that were active earlier, kept as they were left.
-    ///
-    /// Switching kind parks the model that was running rather than dropping it,
-    /// so a switch away and back does not lose unsaved training - which is what
-    /// the Python service does (`ModelService._parked`).
-    parked: Mutex<Vec<(String, Model)>>,
     job: Mutex<Option<Job>>,
     stop: AtomicBool,
     jobs: AtomicUsize,
@@ -96,7 +90,6 @@ impl Service {
     pub fn new(model: Model, model_path: String, seed: i64, workers: usize) -> Service {
         Service {
             model: Mutex::new(model),
-            parked: Mutex::new(Vec::new()),
             job: Mutex::new(None),
             stop: AtomicBool::new(false),
             jobs: AtomicUsize::new(0),
@@ -145,9 +138,9 @@ impl Service {
         }
     }
 
-    /// Saves the active kind to its own file, and says whether it landed.
+    /// Saves the model to its file, and says whether it landed.
     fn autosave(&self) -> bool {
-        let path = self.model_path_for(self.active_kind().0);
+        let path = self.model_path.clone();
         !path.is_empty() && self.with_model(|m| m.save(&path)).is_ok()
     }
 
@@ -171,134 +164,37 @@ impl Service {
         }
     }
 
-    /// The kinds this server offers: the count model, and the same model over words.
-    fn kinds(&self) -> Json {
-        Json::Arr(vec![
-            Json::obj([
-                ("kind", Json::str("count")),
-                ("label", Json::str("Count / reward (Rust)")),
-                ("units", Json::str("chars")),
-                ("description", Json::str(
-                    "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, \
-                     plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K \
-                     continuations (Rust implementation)",
-                )),
-            ]),
-            Json::obj([
-                ("kind", Json::str("word")),
-                ("label", Json::str("Word n-gram (Rust)")),
-                ("units", Json::str("words")),
-                ("description", Json::str(
-                    "the count / reward model over an alphabet whose symbols are words: the same graph, weights and \
-                     search, with a whitespace split for an encoder - lengths, counts and scores are per word \
-                     (Rust implementation)",
-                )),
-            ]),
-        ])
-    }
-
-    fn active_kind(&self) -> (&'static str, &'static str, &'static str) {
-        let words = self.with_model(|m| m.is_words());
-        if words {
-            KIND_WORD
-        } else {
-            KIND_COUNT
-        }
-    }
-
-    /// Where a kind is saved by default: `model_path` for the kind it names,
-    /// `<stem>.<kind><ext>` otherwise - the rule the Python service follows, so
-    /// the two servers look for the same file.
-    fn model_path_for(&self, kind: &str) -> String {
-        let path = self.model_path.as_str();
-        if path.is_empty() {
-            return String::new();
-        }
-        let (stem, ext) = split_extension(path);
-        // model.count.json, model.word.json: the kind is already in the name
-        if stem.ends_with(&format!(".{kind}")) {
-            return path.to_string();
-        }
-        let stem = match stem.rsplit_once('.') {
-            // .count / .word in the name is the *other* kind's; swap it
-            Some((head, tail)) if tail == "count" || tail == "word" => head,
-            _ => stem,
-        };
-        format!("{stem}.{kind}{ext}")
-    }
-
-    /// The kinds this server has a model for right now, active one first.
-    fn in_memory(&self) -> Vec<String> {
-        let mut kinds = vec![self.active_kind().0.to_string()];
-        let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
-        kinds.extend(parked.iter().map(|(kind, _)| kind.clone()));
-        kinds
-    }
-
-    /// Makes `kind` the active model and says where it came from.
+    /// The kind this server offers: one, because there is one model.
     ///
-    /// The one that was running is parked with its unsaved work; the new one is
-    /// whichever comes first of the parked model of that kind, its file, and a
-    /// fresh one. Same order, same words, as the Python service's `select_kind`.
-    fn select_kind(&self, kind: &str) -> Result<&'static str, ApiError> {
-        self.ensure_idle()?;
-        let (active, ..) = self.active_kind();
-        if kind == active {
-            return Ok("active");
-        }
-        let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
-        let (origin, mut wanted) = match parked.iter().position(|(name, _)| name == kind) {
-            Some(at) => ("memory", parked.remove(at).1),
-            None => {
-                let path = self.model_path_for(kind);
-                if !path.is_empty() && std::path::Path::new(&path).is_file() {
-                    let found = Model::load(&path)?;
-                    let holds = if found.is_words() { "word" } else { "count" };
-                    if holds != kind {
-                        return Err(ApiError::bad_request(format!(
-                            "{path} holds a {holds} model, not a {kind} one"
-                        )));
-                    }
-                    ("file", found)
-                } else {
-                    (
-                        "new",
-                        Model::new(
-                            self.seed,
-                            GraphOptions {
-                                words: kind == "word",
-                                ..Default::default()
-                            },
-                        )?,
-                    )
-                }
-            }
-        };
-        let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
-        wanted.workers = model.workers;
-        wanted.g.workers = model.workers;
-        let previous = std::mem::replace(&mut *model, wanted);
-        parked.push((active.to_string(), previous));
-        Ok(origin)
+    /// A word n-gram model is this same model under a word encoding, not a
+    /// kind of its own - which is why the `units` a kind reports follow the
+    /// running model's encoding (`../../SPEC-WordNGrams.md`).
+    fn kinds(&self) -> Json {
+        Json::Arr(vec![Json::obj([
+            ("kind", Json::str(KIND_COUNT.0)),
+            ("label", Json::str(KIND_COUNT.1)),
+            ("units", Json::str(self.units())),
+            (
+                "description",
+                Json::str(
+                    "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, \
+                 plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K \
+                 continuations (Rust implementation)",
+                ),
+            ),
+        ])])
+    }
+
+    /// What the running model counts in: `"chars"`, or `"words"` under a word
+    /// encoding.
+    fn units(&self) -> &'static str {
+        self.with_model(|m| m.units())
     }
 }
 
-/// A kind as the API names it: the id, the label and the unit it counts in.
-const KIND_COUNT: (&str, &str, &str) = ("count", "Count / reward (Rust)", "chars");
-const KIND_WORD: (&str, &str, &str) = ("word", "Word n-gram (Rust)", "words");
-
-/// `("model.count", ".json")`, with `.json.gz` kept whole.
-fn split_extension(path: &str) -> (&str, &str) {
-    let Some(dot) = path.rfind('.') else {
-        return (path, "");
-    };
-    if &path[dot..] == ".gz" {
-        if let Some(inner) = path[..dot].rfind('.') {
-            return (&path[..inner], &path[inner..]);
-        }
-    }
-    (&path[..dot], &path[dot..])
-}
+/// The kind as the API names it: the id and the label.  The unit is not here -
+/// it is the encoding's, and a model chooses that when it is made.
+const KIND_COUNT: (&str, &str) = ("count", "Count / reward (Rust)");
 
 impl Service {
     /// The texts of a request field, the way the Python service reads them
@@ -360,7 +256,8 @@ fn health(svc: &Arc<Service>, _r: &Request) -> Answer {
 }
 
 fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
-    let (kind, label, units) = svc.active_kind();
+    let (kind, label) = KIND_COUNT;
+    let units = svc.units();
     let mut doc = svc.with_model(|m| stats(m));
     let pairs = match &mut doc {
         Json::Obj(pairs) => pairs,
@@ -404,45 +301,39 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
 }
 
 fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
-    let (kind, label, units) = svc.active_kind();
+    let (kind, label) = KIND_COUNT;
     let weights = svc.with_model(|m| weight_config(&m.g));
     Ok(Json::obj([
         ("kind", Json::str(kind)),
         ("label", Json::str(label)),
-        ("units", Json::str(units)),
+        ("units", Json::str(svc.units())),
         ("kinds", svc.kinds()),
-        ("model_path", Json::str(svc.model_path_for(kind))),
-        (
-            "paths",
-            Json::Obj(
-                [KIND_COUNT.0, KIND_WORD.0]
-                    .iter()
-                    .map(|name| (name.to_string(), Json::str(svc.model_path_for(name))))
-                    .collect(),
-            ),
-        ),
-        ("in_memory", Json::strs(svc.in_memory())),
+        ("model_path", Json::str(svc.model_path.clone())),
+        ("paths", Json::obj([(kind, Json::str(svc.model_path.clone()))])),
+        ("in_memory", Json::strs(vec![kind.to_string()])),
         ("weights", weights),
         ("engine", Json::str(ENGINE)),
     ]))
 }
 
 fn model_select(svc: &Arc<Service>, r: &Request) -> Answer {
-    let (active, ..) = svc.active_kind();
+    let active = KIND_COUNT.0;
     let wanted = r.text("kind", active).to_ascii_lowercase();
     if wanted.is_empty() {
         return Err(ApiError::bad_request("'kind' must not be empty"));
     }
-    if wanted != KIND_COUNT.0 && wanted != KIND_WORD.0 {
+    if wanted != active {
+        // characters or words is the encoding, chosen when a model is made
+        // (POST /api/reset), not a kind to switch between
         return Err(ApiError::bad_request(format!(
             "the Rust server runs the count / reward model only, over characters or over words \
-             (kind {wanted:?} is served by the Python server)"
+             (kind {wanted:?} is served by the Python server); a word model is this one under \
+             --encoding word:3:1"
         )));
     }
-    let origin = svc.select_kind(&wanted)?;
     let mut doc = model_info(svc, r)?;
     if let Json::Obj(pairs) = &mut doc {
-        pairs.push(("origin".to_string(), Json::str(origin)));
+        pairs.push(("origin".to_string(), Json::str("active")));
         pairs.push(("stats".to_string(), svc.with_model(|m| stats(m))));
     }
     Ok(doc)
@@ -516,7 +407,7 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         merit_scale,
     };
     let prefix = r.text("prefix", "");
-    let (kind, ..) = svc.active_kind();
+    let kind = KIND_COUNT.0;
     let found = svc.with_model(|m| m.predict(&prefix, &opts))?;
     Ok(Json::obj([
         ("prefix", Json::str(prefix)),
@@ -731,7 +622,7 @@ fn graph_view(svc: &Arc<Service>, r: &Request) -> Answer {
             .map(|&i| {
                 Json::obj([
                     ("id", Json::Int(i as i64)),
-                    ("label", Json::str(m.g.text_of(m.g.label(i)))),
+                    ("label", Json::str(m.g.label(i).to_string())),
                     ("count", Json::Int(m.g.node_count(i).value)),
                     ("count_resets", Json::Int(m.g.node_count(i).resets)),
                     ("activation", Json::Num(1.0)),
@@ -796,10 +687,12 @@ fn nodes(svc: &Arc<Service>, r: &Request) -> Answer {
         let node = match &wanted {
             None => None,
             Some(text) => {
-                let key = m.g.symbols_of(text);
+                // a label is written in the encoding's units, so a word
+                // model is asked for whole words, single-spaced
+                let key = m.g.enc.units(text).text().to_string();
                 let found = (0..m.g.num_node_ids())
                     .find(|&i| m.g.is_alive(i) && m.g.label(i) == key)
-                    .or_else(|| Trigram::parse(&key).and_then(|t| m.g.lookup(t)).map(|loc| loc.node));
+                    .or_else(|| m.g.enc.gram_of(&key).and_then(|t| m.g.lookup(&t)).map(|loc| loc.node));
                 Some(found.ok_or_else(|| {
                     ApiError::not_found(format!(
                         "no node labelled {text:?}: give a node label, or one of its trigrams"
@@ -837,15 +730,18 @@ fn nodes(svc: &Arc<Service>, r: &Request) -> Answer {
 fn words(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
+        let enc = m.g.enc;
         if !m.is_words() {
             return Err(ApiError::bad_request(format!(
-                "the {} model has no vocabulary; it counts in {}",
-                m.kind(),
-                m.units()
+                "this model counts in {}, so it has no words to list; a word alphabet needs a word encoding \
+                 (--encoding word:{}:{})",
+                enc.units_name(),
+                enc.n,
+                enc.stride
             )));
         }
+        let vocabulary = enc.vocabulary(m.g.gram_index().iter().map(String::as_str)).len();
         let rows = m.top_words(limit);
-        let vocabulary = m.g.vocab.as_ref().map(|v| v.len()).unwrap_or(0);
         Ok(Json::obj([
             (
                 "words",
@@ -855,6 +751,7 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
                             Json::obj([
                                 ("word", Json::str(row.word.clone())),
                                 ("id", Json::Int(row.id as i64)),
+                                ("grams", Json::Int(row.grams as i64)),
                                 ("trigrams", Json::Int(row.trigrams as i64)),
                             ])
                         })
@@ -863,55 +760,56 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
             ),
             ("limit", Json::Int(limit as i64)),
             ("vocabulary", Json::Int(vocabulary as i64)),
-            ("units", Json::str(m.units())),
+            ("units", Json::str(enc.units_name())),
+            ("encoding", Json::str(enc.to_string())),
         ]))
     })?;
     Ok(out)
 }
 
 fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
-    let _ = svc;
-    Ok(Json::obj([
-        ("window", Json::Int(WINDOW as i64)),
-        ("stride", Json::Int(1)),
-        ("overlap", Json::Int(OVERLAP as i64)),
+    let enc = svc.with_model(|m| m.g.enc);
+    Ok(encoding_doc(&enc))
+}
+
+/// The running model's dial, as `GET /api/encoding` reports it and the preview
+/// repeats it.  It is fixed for a model's life - every label is written in it -
+/// so it is chosen when a model is made, which is what `configurable` says.
+fn encoding_doc(enc: &Encoding) -> Json {
+    Json::obj([
+        ("encoding", Json::str(enc.to_string())),
+        ("unit", Json::str(enc.unit.name())),
+        ("window", Json::Int(enc.n as i64)),
+        ("ngram", Json::Int(enc.n as i64)),
+        ("stride", Json::Int(enc.stride as i64)),
+        ("overlap", Json::Int(enc.overlap() as i64)),
         ("start_label", Json::str(START_LABEL)),
         ("end_label", Json::str(END_LABEL)),
         ("back_label", Json::str(BACK_LABEL)),
-        ("configurable", Json::Bool(false)),
+        ("configurable", Json::Bool(true)),
         (
             "note",
             Json::str(format!(
-                "Text goes in as overlapping windows of {WINDOW} symbols, stride 1, and comes back out of the \
-             (possibly compressed) node labels along a path. The window is part of the model format, not a setting."
+                "Text goes in as {}, and comes back out of the (possibly compressed) node labels along a path. \
+                 The encoding is fixed for a model's life - every label is written in it - so it is chosen when a \
+                 model is made: POST /api/reset with {{\"encoding\": \"word:2:1\"}}, or {{unit, ngram, stride}}.",
+                enc.describe()
             )),
         ),
-    ]))
+    ])
 }
 
 fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
     let text = r.text("text", "");
-    let (kind, _, units) = svc.active_kind();
     Ok(svc.with_model(|m| {
-        let symbols = m.symbols(&text, false);
-        let windows: Vec<String> = encode(&symbols).iter().map(|t| m.words(&t.to_string())).collect();
-        let raw = encode(&symbols);
-        let decoded = {
-            let mut text = String::new();
-            for (i, t) in raw.iter().enumerate() {
-                let chars = t.chars();
-                if i == 0 {
-                    text.extend(chars);
-                } else {
-                    text.push(chars[WINDOW - 1]);
-                }
-            }
-            m.words(&text)
-        };
+        let enc = m.g.enc;
+        let raw = enc.encode(&text);
+        let windows: Vec<String> = raw.iter().map(|g| g.to_string()).collect();
+        let decoded = enc.decode_grams(&raw);
         let unknown: Vec<String> = raw
             .iter()
-            .filter(|t| m.g.lookup(**t).is_none())
-            .map(|t| m.words(&t.to_string()))
+            .filter(|g| m.g.lookup(g).is_none())
+            .map(|g| g.to_string())
             .collect();
         let walked = if raw.is_empty() { None } else { m.g.node_path(&raw) };
         let path = match walked {
@@ -920,7 +818,7 @@ fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
                 (
                     "reason",
                     Json::str(if raw.is_empty() {
-                        format!("the text is shorter than one window ({WINDOW} symbols)")
+                        format!("the text is shorter than one gram ({} {})", enc.n, enc.units_name())
                     } else if !unknown.is_empty() {
                         format!("{} of the {} windows have never been seen", unknown.len(), raw.len())
                     } else {
@@ -936,49 +834,49 @@ fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
                 ("compressed", Json::Int(0)),
             ]),
             Some(walked) => {
-                let labels: Vec<String> = walked.iter().map(|&n| m.g.text_of(m.g.label(n))).collect();
+                let labels: Vec<String> = walked.iter().map(|&n| m.g.label(n).to_string()).collect();
                 let real: Vec<String> = walked
                     .iter()
                     .filter(|&&n| n != START && n != END)
                     .map(|&n| m.g.label(n).to_string())
                     .collect();
-                let compressed = real.iter().filter(|l| char_len(l) > WINDOW).count();
+                let compressed = real.iter().filter(|l| enc.len(l) > enc.n).count();
                 let borrowed: Vec<&str> = real.iter().map(|s| s.as_str()).collect();
                 Json::obj([
                     ("known", Json::Bool(true)),
                     ("reason", Json::Null),
                     ("labels", Json::strs(labels)),
                     ("node_ids", Json::ints(walked.iter().map(|&n| n as i64))),
-                    ("decoded", Json::str(m.words(&decode_path(&borrowed, 0, true)))),
+                    ("decoded", Json::str(enc.decode_path(&borrowed, 0, true))),
                     ("nodes", Json::Int(real.len() as i64)),
                     ("compressed", Json::Int(compressed as i64)),
                 ])
             }
         };
-        Json::obj([
-            ("window", Json::Int(WINDOW as i64)),
-            ("stride", Json::Int(1)),
-            ("overlap", Json::Int(OVERLAP as i64)),
-            ("configurable", Json::Bool(false)),
-            ("units", Json::str(units)),
-            ("kind", Json::str(kind)),
-            ("text", Json::str(text.clone())),
-            ("chars", Json::Int(char_len(&symbols) as i64)),
-            ("windows", Json::strs(windows)),
-            ("count", Json::Int(raw.len() as i64)),
-            ("decoded", Json::str(decoded.clone())),
-            ("round_trip", Json::Bool(decoded == m.normalise(&text))),
-            ("unknown_windows", Json::strs(unknown)),
-            ("path", path),
-        ])
+        let mut doc = match encoding_doc(&enc) {
+            Json::Obj(pairs) => pairs,
+            other => return other,
+        };
+        let mut put = |key: &str, value: Json| doc.push((key.to_string(), value));
+        put("units", Json::str(enc.units_name()));
+        put("kind", Json::str(KIND_COUNT.0));
+        put("text", Json::str(text.clone()));
+        put("chars", Json::Int(enc.len(&text) as i64));
+        put("windows", Json::strs(windows));
+        put("count", Json::Int(raw.len() as i64));
+        put("decoded", Json::str(decoded.clone()));
+        // what comes back is what the encoding can represent: the text itself
+        // under a sliding character window, its words under a word encoding
+        put("round_trip", Json::Bool(decoded == enc.normalize(&text)));
+        put("unknown_windows", Json::strs(unknown));
+        put("path", path);
+        Json::Obj(doc)
     }))
 }
 
 fn save(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    // the active kind's own file, so saving a word model never lands on the
-    // count model's - the rule the Python service saves by
-    let path = r.text("path", &svc.model_path_for(svc.active_kind().0));
+    let path = r.text("path", &svc.model_path);
     svc.with_model(|m| m.save(&path))?;
     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     Ok(Json::obj([
@@ -989,7 +887,7 @@ fn save(svc: &Arc<Service>, r: &Request) -> Answer {
 
 fn load(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let path = r.text("path", &svc.model_path_for(svc.active_kind().0));
+    let path = r.text("path", &svc.model_path);
     let loaded = Model::load(&path)?;
     svc.with_model(|m| {
         let workers = m.workers;
@@ -1006,11 +904,20 @@ fn load(svc: &Arc<Service>, r: &Request) -> Answer {
 fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     let seed = r.body.at("seed").as_i64().unwrap_or(svc.seed);
-    let kind = r.text("kind", svc.active_kind().0);
+    let kind = r.text("kind", KIND_COUNT.0);
+    if !kind.eq_ignore_ascii_case(KIND_COUNT.0) {
+        return Err(ApiError::bad_request(format!(
+            "the Rust server runs the count / reward model only (kind {kind:?} is served by the Python server)"
+        )));
+    }
+    // the encoding a new model is to be built in: `encoding` as a spec, or the
+    // three dials on their own.  It is fixed for the model's life, which is
+    // why this is the one place it can be chosen.
+    let encoding = encoding_option(r)?;
     let fresh = Model::new(
         seed,
         GraphOptions {
-            words: kind == "word",
+            encoding,
             ..Default::default()
         },
     )?;
@@ -1023,8 +930,32 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(Json::obj([
         ("reset", Json::Bool(true)),
         ("kind", Json::str(kind)),
+        ("encoding", Json::str(encoding.to_string())),
         ("stats", svc.with_model(|m| stats(m))),
     ]))
+}
+
+/// The encoding a `POST /api/reset` asks for: `"encoding"` as a spec
+/// (`"word:2:1"`), or `unit` / `ngram` / `stride` on their own, which the Go
+/// server reads the same way.
+fn encoding_option(r: &Request) -> Result<Encoding, ApiError> {
+    let mut enc = Encoding::parse(&r.text("encoding", "")).map_err(ApiError::bad_request)?;
+    let unit = r.text("unit", "");
+    if !unit.is_empty() {
+        enc.unit = Encoding::parse(&unit).map_err(ApiError::bad_request)?.unit;
+    }
+    if let Some(n) = r.body.at("ngram").as_i64() {
+        let n = usize::try_from(n).map_err(|_| ApiError::bad_request("ngram must be >= 1"))?;
+        if !enc.sliding() {
+            enc.stride = n; // groups stay groups when n changes
+        }
+        enc.n = n;
+    }
+    if let Some(stride) = r.body.at("stride").as_i64() {
+        enc.stride = usize::try_from(stride).map_err(|_| ApiError::bad_request("stride must be >= 1"))?;
+    }
+    enc.validate().map_err(ApiError::bad_request)?;
+    Ok(enc)
 }
 
 fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {

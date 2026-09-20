@@ -184,12 +184,11 @@ pub struct BenchOptions {
     /// least-punished traversal would have nothing to do and both searches
     /// would measure the same thing.
     pub punish_every: usize,
-    /// How many symbols a gram holds and how far apart grams start.  The
-    /// default is the trigram of stride 1 the other two implementations
-    /// benchmark, so a run is comparable with theirs unless this is changed.
+    /// What one unit of text is, how many units a gram holds and how far
+    /// apart grams start.  The default is the character trigram of stride 1
+    /// the other two implementations benchmark, so a run is comparable with
+    /// theirs unless this is changed.
     pub encoding: Encoding,
-    /// Whether one symbol is a word rather than a character.
-    pub words: bool,
 }
 
 impl Default for BenchOptions {
@@ -207,7 +206,6 @@ impl Default for BenchOptions {
             dump: String::new(),
             punish_every: 0,
             encoding: Encoding::default(),
-            words: false,
         }
     }
 }
@@ -239,7 +237,6 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
         o.seed,
         GraphOptions {
             encoding: o.encoding,
-            words: o.words,
             ..GraphOptions::default()
         },
     )?;

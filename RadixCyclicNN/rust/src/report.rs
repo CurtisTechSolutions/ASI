@@ -21,6 +21,13 @@ pub fn stats(model: &Model) -> Json {
         ("nodes".to_string(), Json::Int(g.num_nodes() as i64)),
         ("edges".to_string(), Json::Int(g.num_edges() as i64)),
         ("trigrams".to_string(), Json::Int(g.num_trigrams() as i64)),
+        ("grams".to_string(), Json::Int(g.num_trigrams() as i64)),
+        // the dial the labels above are written in: every length and count of
+        // this block is in its units
+        ("encoding".to_string(), Json::str(g.enc.to_string())),
+        ("unit".to_string(), Json::str(g.enc.unit.name())),
+        ("ngram".to_string(), Json::Int(g.enc.n as i64)),
+        ("stride".to_string(), Json::Int(g.enc.stride as i64)),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),
@@ -62,10 +69,12 @@ pub fn stats(model: &Model) -> Json {
         ),
         ("window_traversals".to_string(), Json::Int(g.window_traversals() as i64)),
     ]);
-    if let Some(vocab) = &g.vocab {
-        // what the numbers above are counted in, and how large the alphabet has grown
-        pairs.push(("units".to_string(), Json::str(model.units())));
-        pairs.push(("vocabulary".to_string(), Json::Int(vocab.len() as i64)));
+    // what every number above is counted in; a per-word number read as
+    // per-character is read wrong
+    pairs.push(("units".to_string(), Json::str(model.units())));
+    if g.is_words() {
+        let alphabet = g.enc.vocabulary(g.gram_index().iter().map(String::as_str));
+        pairs.push(("vocabulary".to_string(), Json::Int(alphabet.len() as i64)));
     }
     Json::Obj(pairs)
 }
@@ -179,7 +188,7 @@ fn side_rows(g: &Graph, pairs: &[(usize, usize)]) -> Vec<Json> {
         let seen = g.edge_traversals(e);
         let row = Json::obj([
             ("node", Json::Int(n as i64)),
-            ("label", Json::str(g.text_of(g.label(n)))),
+            ("label", Json::str(g.label(n).to_string())),
             ("edge", Json::Int(e as i64)),
             ("seen", Json::Int(seen.value)),
             ("seen_resets", Json::Int(seen.resets)),
@@ -249,7 +258,7 @@ pub fn node_ratios(g: &Graph, node: usize) -> Option<Json> {
     let count = g.node_count(node);
     Some(Json::obj([
         ("node", Json::Int(node as i64)),
-        ("label", Json::str(g.text_of(g.label(node)))),
+        ("label", Json::str(g.label(node).to_string())),
         ("visits", Json::Int(count.value)),
         ("visit_resets", Json::Int(count.resets)),
         ("in_totals", side_totals(&rows_in)),

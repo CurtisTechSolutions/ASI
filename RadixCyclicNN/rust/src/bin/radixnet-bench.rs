@@ -85,12 +85,8 @@ fn run() -> Result<(), String> {
             "--seed" => o.seed = value(&mut i)?.parse().map_err(|_| "seed must be a number")?,
             "--workers" => o.workers = value(&mut i)?.parse().map_err(|_| "workers must be a number")?,
             "--traversal" => o.traversal = parse_traversal(&value(&mut i)?)?,
-            "--encoding" => {
-                let (words, enc) = Encoding::parse_spec(&value(&mut i)?)?;
-                o.words = words;
-                o.encoding = enc;
-            }
-            "--units" => o.words = Encoding::parse_spec(&value(&mut i)?)?.0,
+            "--encoding" => o.encoding = Encoding::parse(&value(&mut i)?)?,
+            "--units" => o.encoding.unit = Encoding::parse(&value(&mut i)?)?.unit,
             "--ngram" => {
                 let n = value(&mut i)?.parse().map_err(|_| "ngram must be a number")?;
                 // a bare --ngram keeps a sliding encoding sliding, and grows a group
@@ -99,7 +95,11 @@ fn run() -> Result<(), String> {
                 } else {
                     n
                 };
-                o.encoding = Encoding { n, stride };
+                o.encoding = Encoding {
+                    n,
+                    stride,
+                    ..o.encoding
+                };
                 o.encoding.validate()?;
             }
             "--stride" => {

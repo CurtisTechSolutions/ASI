@@ -4,12 +4,12 @@
 //! sliding window) plus rewards, with beam-search prediction (top-K **and**
 //! bottom-K continuations), generation, scoring and 2NRL feedback.
 //!
-//! How a text becomes those grams is two dials that compose: [`Encoding`] says
-//! how many symbols a gram holds (`n`) and how far apart grams start
-//! (`stride`), and `GraphOptions::words` says whether one symbol is a
-//! character or a whole word ([`words`], `../SPEC-WordNGrams.md`).  So
-//! character trigrams are the default, `n: 5, stride: 5` is groups of five
-//! letters, and `words: true, n: 2` is the word bigram.
+//! How a text becomes those grams is one dial of three, [`Encoding`]: what a
+//! *unit* of text is (a character, or a whitespace word - [`Unit`],
+//! `../SPEC-WordNGrams.md`), how many units a gram holds (`n`), and how far
+//! apart consecutive grams start (`stride`).  So character trigrams are the
+//! default, `n: 5, stride: 5` is groups of five letters, and
+//! `unit: Words, n: 2` is the word bigram.
 //!
 //! It is the same model as `radixnet/` (Python) and `go/radixnet` (Go), built
 //! to answer one question - *how fast is this in Rust?* - and it answers to all
@@ -29,7 +29,7 @@
 //!
 //! The model itself is here in full: the graph and its structural operations,
 //! the weight function, the path contexts, all three traversals, training,
-//! prediction, generation, scoring, the character and **word** alphabets, the
+//! prediction, generation, scoring, every encoding of the dial, the
 //! JSON model file (byte for byte what Python and Go read and write), the
 //! benchmark, the CLI (`src/bin/radixnet.rs`) and the HTTP API the frontend talks to
 //! ([`http`], [`service`]).
@@ -54,13 +54,13 @@
 //!     .unwrap();
 //! assert!(found.best.full_text.starts_with("the cat"));
 //!
-//! // the same corpus in word bigrams: `words` says a symbol is a word,
+//! // the same corpus in word bigrams: `unit` says a unit is a word,
 //! // `n` says a gram holds two of them
-//! use radixnet::Encoding;
-//! let opts = GraphOptions { words: true, encoding: Encoding { n: 2, stride: 1 }, ..Default::default() };
-//! let mut model = Model::new(0, opts).unwrap();
+//! use radixnet::{Encoding, Unit};
+//! let encoding = Encoding { unit: Unit::Words, n: 2, stride: 1 };
+//! let mut model = Model::new(0, GraphOptions { encoding, ..Default::default() }).unwrap();
 //! model.train(&texts, &TrainOptions { epochs: 2, ..Default::default() }).unwrap();
-//! assert_eq!(model.g.enc.spec(model.is_words()), "word:2:1");
+//! assert_eq!(model.g.enc.to_string(), "word:2:1");
 //! ```
 
 pub mod beam;
@@ -88,7 +88,7 @@ pub mod words;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;
-pub use encoding::{encode, Encoding, Gram, Trigram, OVERLAP, WINDOW};
+pub use encoding::{encode, Encoding, Gram, Trigram, Unit, OVERLAP, WINDOW};
 pub use file::{MODEL_FORMAT, MODEL_FORMAT_VERSION};
 pub use graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
 pub use json::Json;
@@ -99,4 +99,4 @@ pub use penalty::{
 };
 pub use search::{least_punished, onward, parse_traversal, PathResult, Traversal};
 pub use weights::ChildCost;
-pub use words::{split_words, symbol_word, word_symbol, Vocabulary, WordRow, MAX_WORDS, UNKNOWN_WORD};
+pub use words::{split_words, word_rows, WordRow, CHAR_UNITS, WORD_UNITS};

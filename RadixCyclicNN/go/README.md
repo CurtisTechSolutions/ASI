@@ -52,8 +52,8 @@ make go-test                                    # cd go && go test -race ./...
 
 go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
 go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
-go/bin/radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
-go/bin/radixnet-count --kind word words --limit 20            # the alphabet it has read
+go/bin/radixnet-count --model model.word.json --encoding word:3:1 train --data data/sample_corpus.txt --epochs 5
+go/bin/radixnet-count --model model.word.json words --limit 20   # the alphabet it has read
 go/bin/radixnet-count --model model.count.json serve          # the API and the frontend
 go/bin/radixnet-count --model model.count.json mcp            # MCP on stdin / stdout, for any client
 python -m radixnet --model model.count.json info              # the Python side reads the same file

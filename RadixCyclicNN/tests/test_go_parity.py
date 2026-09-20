@@ -1711,6 +1711,28 @@ class TestGoEncodingParity(unittest.TestCase):
         self.assertTrue(a["full_text"].startswith("the cat "), a["full_text"])
         self.assertEqual(a["continuation"], " ".join(a["continuation"].split()))
 
+    def test_the_same_words_out_of_the_same_text(self):
+        """The tokeniser is the Unicode ``White_Space`` property on both sides.
+
+        Python calls U+001C..U+001F whitespace and the property does not, so a
+        text holding one is where the two rules would disagree - and a word a
+        model splits differently is a different node.
+        """
+        spec = "word:2:1"
+        py_model = os.path.join(TMP.name, "enc-split-py.json")
+        go_model = os.path.join(TMP.name, "enc-split-go.json")
+        odd = os.path.join(TMP.name, "separators.txt")
+        with open(odd, "w", encoding="utf-8") as fh:
+            fh.write("a\x1cb c d\n" * 4)
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", odd, "--epochs", 1,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", odd, "--epochs", 1, model=go_model)
+        a, b = load_json(py_model)["graph"], load_json(go_model)["graph"]
+        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
+        # three words, not four: the separator is not whitespace here
+        self.assertEqual(py("score", "--text", "a\x1cb c d", model=py_model)["results"][0]["chars"], 3)
+        self.assertEqual(go("score", "--text", "a\x1cb c d", model=go_model)["results"][0]["chars"], 3)
+
     def test_both_refuse_the_same_nonsense(self):
         model = os.path.join(TMP.name, "enc-bad.json")
         for spec in ("rune:3", "char:2:3", "char:0"):

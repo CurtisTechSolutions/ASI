@@ -5,7 +5,8 @@
 //! (`../../../tests/test_rust_parity.py` does exactly that).
 //!
 //! ```text
-//! radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
+//! radixnet [--model PATH] [--kind count|word] [--encoding SPEC] [--units char|word] [--ngram N] [--stride N]
+//!          [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
 //!
 //!   train      count one traversal of every text's path per epoch
 //!   predict    continue a prefix: the K likeliest and the K least likely
@@ -18,7 +19,7 @@
 //!   weights    read or change the weight function's scales and window
 //!   paths      what the judged walks did, per context
 //!   nodes      one node against its neighbours
-//!   words      the word model's alphabet, most read first
+//!   words      a word encoding's alphabet, most read first
 //!   info       the model's statistics
 //!   serve      the HTTP API and the prebuilt frontend
 //!   version    the port's version
@@ -33,14 +34,18 @@ use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
 use radixnet::report::{node_rows, path_rows, split_texts, stats};
 use radixnet::search::PathResult;
 use radixnet::service::Service;
-use radixnet::{Graph, GraphOptions};
+use radixnet::{Encoding, Graph, GraphOptions};
 
-const USAGE: &str = "usage: radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] \
-     [--out PATH] <command>\n\
+const USAGE: &str = "usage: radixnet [--model PATH] [--kind count|word] [--encoding SPEC] [--units char|word] \
+     [--ngram N] [--stride N] [--json] [--seed N] [--workers N] [--out PATH] <command>\n\
      commands: train predict generate score feedback 2nrl invert compress weights paths nodes words info serve \
-     version";
+     version\n\
+     the encoding of a NEW model is unit[:n[:stride]] - what one unit of text is (char | word), how many units a \
+     gram holds, and how far apart grams start (1 = sliding window, n = non-overlapping groups of n); it is fixed \
+     for the model's life";
 
-/// The default `--model` per kind, so one kind never overwrites another's file.
+/// The default `--model` per kind, so a word model never overwrites a
+/// character one.
 const DEFAULT_COUNT_MODEL: &str = "model.count.json";
 const DEFAULT_WORD_MODEL: &str = "model.word.json";
 
@@ -152,11 +157,37 @@ fn run() -> Result<(), String> {
     }
     let (command, args) = parse_args(&argv)?;
     let json_mode = args.on("json");
-    // the symbols of a NEW model: characters, or words (`../../../SPEC-WordNGrams.md`)
+    // `--kind word` names the word model's own file; what actually makes a
+    // model a word model is its encoding, which is one dial of three
+    // (`../../../SPEC-WordNGrams.md`)
     let kind = match args.str("kind", "count").as_str() {
         "" | "count" => "count",
         "word" => "word",
         other => return Err(format!("unknown model kind {other:?}; expected one of: count, word")),
+    };
+    // how a NEW model reads text; `--encoding` sets all three dials at once and
+    // `--units` / `--ngram` / `--stride` override it one at a time
+    let (encoding, encoding_given) = {
+        let mut enc = Encoding::parse(&args.str("encoding", if kind == "word" { "word" } else { "" }))?;
+        let mut given = args.get("encoding").is_some() || kind == "word";
+        if let Some(units) = args.get("units") {
+            enc.unit = Encoding::parse(units)?.unit;
+            given = true;
+        }
+        if let Some(n) = args.get("ngram") {
+            let n: usize = n.parse().map_err(|_| "ngram must be a number")?;
+            if !enc.sliding() {
+                enc.stride = n; // groups stay groups when n changes
+            }
+            enc.n = n;
+            given = true;
+        }
+        if let Some(stride) = args.get("stride") {
+            enc.stride = stride.parse().map_err(|_| "stride must be a number")?;
+            given = true;
+        }
+        enc.validate()?;
+        (enc, given)
     };
     let model_path = args.str(
         "model",
@@ -173,6 +204,16 @@ fn run() -> Result<(), String> {
     let open = |must_exist: bool| -> Result<Model, String> {
         if std::path::Path::new(&model_path).exists() {
             let mut m = Model::load(&model_path)?;
+            // the encoding is fixed when a model is created - every label is
+            // written in it - so ignoring the flags would train a trigram
+            // model and call it a word model
+            if encoding_given && m.g.enc != encoding {
+                return Err(format!(
+                    "{model_path} is {}; --encoding / --units / --ngram / --stride only apply to a NEW model \
+                     (train one to a new --model path)",
+                    m.g.enc.describe()
+                ));
+            }
             m.workers = workers;
             m.g.workers = workers;
             return Ok(m);
@@ -183,7 +224,7 @@ fn run() -> Result<(), String> {
         let mut m = Model::new(
             seed,
             GraphOptions {
-                words: kind == "word",
+                encoding,
                 ..Default::default()
             },
         )?;
@@ -446,14 +487,18 @@ fn run() -> Result<(), String> {
         }
         "words" => {
             let mut model = open(true)?;
+            let enc = model.g.enc;
             if !model.is_words() {
                 return Err(format!(
-                    "{model_path} holds a {} model; a vocabulary belongs to the word model (--kind word)",
-                    model.kind()
+                    "{model_path} counts in {}, so it has no words to list; a word alphabet needs a word encoding \
+                     (--encoding word:{}:{})",
+                    enc.units_name(),
+                    enc.n,
+                    enc.stride
                 ));
             }
+            let vocabulary = enc.vocabulary(model.g.gram_index().iter().map(String::as_str)).len();
             let rows = model.top_words(args.usize("limit", 20)?);
-            let vocabulary = model.g.vocab.as_ref().map(|v| v.len()).unwrap_or(0);
             emit(Json::obj([
                 (
                     "words",
@@ -463,6 +508,7 @@ fn run() -> Result<(), String> {
                                 Json::obj([
                                     ("word", Json::str(r.word.clone())),
                                     ("id", Json::Int(r.id as i64)),
+                                    ("grams", Json::Int(r.grams as i64)),
                                     ("trigrams", Json::Int(r.trigrams as i64)),
                                 ])
                             })
@@ -470,7 +516,8 @@ fn run() -> Result<(), String> {
                     ),
                 ),
                 ("vocabulary", Json::Int(vocabulary as i64)),
-                ("units", Json::str(model.units())),
+                ("units", Json::str(enc.units_name())),
+                ("encoding", Json::str(enc.to_string())),
                 ("stats", stats(&model)),
             ]));
         }

@@ -252,7 +252,10 @@ class RadixCyclicGraph:
     def label_len(self, node: int) -> int:
         """The length of a node's label in the encoding's units (characters by default)."""
         label = self.labels[node]
-        return len(label) if self._n_is_chars else len(label.split())
+        # the encoding's own split, not ``str.split()``: the two disagree about
+        # four separators, and a length that disagrees with the units view is a
+        # split index the graph cannot honour
+        return len(label) if self._n_is_chars else self.encoding.length(label)
 
     def _create_trigram_node(self, trigram: str) -> int:
         """Create the node for an unknown gram and index it."""

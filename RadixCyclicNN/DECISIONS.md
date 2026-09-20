@@ -79,9 +79,10 @@ D-068 the BACK sentinel: where it goes round, learned
 **Part XV — The traversal** · D-069 what a search looks for is an option · D-070 one home for a network setting ·
 D-071 the least-punished traversal
 
-**Part XVI — A third implementation, and a second alphabet** · D-072 the Rust port · D-073 words as symbols
+**Part XVI — A third implementation, and a second alphabet** · D-072 the Rust port ·
+D-073 words as symbols (superseded) · D-074 a port is finished when a client cannot tell
 
-**Part XVI — The encoding** · D-071 the encoding is a dial, and it belongs to the model
+**Part XVII — The encoding** · D-075 the encoding is a dial, and it belongs to the model
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2702,7 +2703,16 @@ table for "Rust is 4x faster than Go" has been misled by it.
 
 ### D-073 — A word n-gram model is this model over an alphabet of words
 
-**Status** Accepted · 2026-09-20 · **Layer** input · **Beside** D-006
+**Status** Superseded by D-075 · 2026-09-20 · **Layer** input · **Beside** D-006
+
+**Superseded** The claim below - that the graph is alphabet-agnostic and a word
+n-gram model is this model over an alphabet of words - is what D-075 builds on
+and is not in question. What D-075 replaces is the *mechanism*: a word is a
+**unit of the encoding**, and a gram of words is text, so there is no `word`
+model kind, no `radixnet-word` format, no code-point mapping and no vocabulary
+to freeze, prune or check. The two designs were reached independently, at the
+same time; this is the one that lost, and it is kept here because the argument
+in it is the argument D-075 rests on.
 
 **Context** *"What about word n-grams?"* The obvious reading of that question is
 that it asks for a second model. It does not. D-006 decides what a **symbol**
@@ -2768,9 +2778,11 @@ versioned and defended.
   (a label as text, and back), a model-level `units`, and `_whole_text` no
   longer re-joining a prefix the search already joined.
 
-**Lives in** `radixnet/wordnet.py`, `radixnet/encoding.py` (the alphabet),
-`go/radixnet/words.go`, `rust/src/words.rs`, `SPEC-WordNGrams.md`,
-`Makefile` (`word-*`)
+**Lived in** `radixnet/wordnet.py`, `go/radixnet/wordnet.go`,
+`rust/src/words.rs` (the `Vocabulary`) - all removed by D-075.  What survives
+of it is the *reporting* side: `Encoding.units_name` and the alphabet a graph's
+grams are made of (`radixnet/encoding.py`, `go/radixnet/words.go`,
+`rust/src/words.rs`) and `SPEC-WordNGrams.md`, whose §1 argument D-075 keeps
 
 ---
 
@@ -2824,12 +2836,12 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
 
 ---
 
-# Part XVI — The encoding
+# Part XVII — The encoding
 
-### D-071 — The encoding is a dial of the model, not a constant of the package
+### D-075 — The encoding is a dial of the model, not a constant of the package
 
 **Status** Accepted · 2026-09-20 · **Layer** representation ·
-**Extends** D-006, which stays the default
+**Extends** D-006, which stays the default · **Supersedes** D-073
 
 **Context** D-006 fixed the input at three characters with stride 1 and gave the
 reason: the shared character is a *pivot*, and three is the smallest window that
@@ -2893,8 +2905,23 @@ is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
   it: its index key was three code points packed into a `u64`, which four
   characters do not fit and a word does not fit at all. It becomes an enum -
   packed for character grams of up to three, the text itself otherwise - and
-  the port's own tests pin the structure Python and Go build under nine
-  encodings, since it writes no model file to compare.
+  its tests pin the structure Python and Go build under nine encodings.
+* **The word alphabet (D-073) is gone from all three.** The two designs were
+  reached independently and at the same time, and this one is more general: any
+  n, any stride, letter groups as well as words, and no vocabulary at all. So
+  `radixnet/wordnet.py` and its Go and Rust twins, the `word` model kind, the
+  `radixnet-word` format and the `Vocabulary` type were removed. What survived
+  is the part that was never about the mechanism: what a model counts in
+  (`Encoding.units_name`, carried beside every number a report prints), and the
+  alphabet listing, now derived from the gram index - the one count compression
+  cannot change - and ordered most-read-first, ties alphabetically, so the
+  three ports hand back the same rows. A word's `id` is its rank in that
+  listing, because nothing records the order words were first read any more.
+* **One kind, one file, one server.** A word model is not a kind, so the Rust
+  server stopped offering two and parking the one it was not running; like the
+  Go server it runs the count / reward model, and `POST /api/reset` is where an
+  encoding is chosen. `GET /api/encoding` reports the running model's dial and
+  says `configurable: true`.
 * **The units leak into the vocabulary of the API.** `--length`, `--max-length`
   and `Score.chars` count units, so on a word model they count words. That is
   the honest reading - a "40-character" cap on a model that thinks in words is
@@ -2907,7 +2934,8 @@ is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
   disagrees with the model it loaded rather than ignoring it.
 
 **Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
-`go/radixnet/graph.go`, `rust/src/encoding.rs`, `DESIGN.md` § 23.1
+`go/radixnet/graph.go`, `rust/src/encoding.rs`, `rust/src/words.rs`,
+`SPEC-WordNGrams.md`, `DESIGN.md` § 23.1
 
 ---
 
