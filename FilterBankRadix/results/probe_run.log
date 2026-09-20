@@ -1,0 +1,15 @@
+# probe: where the routing gap is
+  1. the target layer 2 hands back: nmi=1.000 purity=1.000
+  2. sign code, supervised, best of 24 assignments: purity=0.693 nmi=0.478 dead=3
+     argmax code, supervised, sine               : accuracy=0.723 +- 0.041 nmi=0.542 | median |u| 0.28 -> 0.41, 13.0% past the first peak, mean b 0.176
+     argmax code, supervised, sine-fixedwave     : accuracy=0.243 +- 0.029 nmi=0.008 | median |u| 0.28 -> 143.54, 100.0% past the first peak, mean b 0.333
+     argmax code, supervised, monotone           : accuracy=0.707 +- 0.044 nmi=0.524 | median |u| 0.28 -> 1.05, 37.2% past the first peak, mean b 0.295
+     argmax code, supervised, monotone-fixedwave : accuracy=0.716 +- 0.059 nmi=0.535 | median |u| 0.28 -> 3.12, 75.6% past the first peak, mean b 0.333
+  3. go + json          vs the rest: sine=0.711 monotone=0.711
+  3. go + prose         vs the rest: sine=0.797 monotone=0.816
+  3. go + python        vs the rest: sine=0.636 monotone=0.733
+  4. go                 vs the rest: 0.667
+  4. json               vs the rest: 0.967
+  4. prose              vs the rest: 0.783
+  4. python             vs the rest: 0.803
+
