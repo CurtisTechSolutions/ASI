@@ -76,7 +76,7 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
-**Part XV — The traversal** · D-069 what a search looks for is an option
+**Part XV — The traversal** · D-069 what a search looks for is an option · D-070 one home for a network setting
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2500,6 +2500,64 @@ against the edge — splits the same way.
   who does not want it pays for it.
 
 **Lives in** `radixnet/penalty.py`, `radixnet/graph.py`, `go/radixnet/penalty.go`
+
+### D-070 — A setting of the network gets one home and one value, wherever it is edited
+
+**Status** Accepted · 2026-09-20 · **Layer** frontend
+
+**Context** D-069 gave every search a traversal, and the frontend had nowhere
+to put it. It went on the two tabs that use it, Predict and Generate, as a copy
+each. That was already wrong in a way worth naming: the traversal is a property
+of *the network's behaviour*, not an option of one prediction, and two copies of
+one setting is two answers to the same question. The frontend had the same shape
+elsewhere - the count model's weight function was a fieldset on the **Train**
+tab, which is a training form, and it was missing `path_scale`.
+
+**Decision** A **Network settings** tab: the settings of the network itself, as
+opposed to the options of one run. The traversal, the score function of whichever
+kind is active, and the encoder / decoder.
+
+A setting several panels use lives **once** and is read through a provider
+(`useNetworkSettings`), so the Network settings, Predict and Generate tabs show
+one control in three places rather than three controls. `useStoredState`, which
+every other field uses, cannot do this: two mounted components under one name
+share the stored value and not the state, and every panel here stays mounted
+while hidden, so two copies would drift apart within a session and only agree
+again after a reload.
+
+The score function left the Train tab for the same reason - two forms over one
+server-side value, whichever is not touched showing what the function used to be.
+
+**What the encoder card does *not* do** The window (3) is the one number on the
+page that looks like a setting and is not: the graph's labels, the split and
+merge rules, the model file and the Go port all assume it, so a model trained at
+one window could not be read at another. `GET /api/encoding` reports
+`configurable: false` and the card says why, then spends its space making the
+encoding **visible** instead - `POST /api/encoding/preview` runs a text through
+the encoder, back through the decoder, and through the graph's own node labels,
+where a label longer than the window is a merged radix chain. Saying "this is
+fixed, and here is what it does" is worth more than a disabled input.
+
+**Alternatives rejected**
+* **A modal or a header menu.** Settings that take a paragraph each to explain
+  are not a menu; the tab strip already is the app's navigation.
+* **Leaving the traversal only on Predict and Generate.** It would have kept two
+  values for one thing and left the score function homeless.
+* **Making the window settable** by re-encoding on change. It is a model-format
+  change, not a setting, and pretending otherwise would break a saved file and
+  the cross-language contract at once.
+* **Mirroring the negative network's blame function here too.** It belongs
+  beside the failures it weighs; the card links to the Negative tab instead of
+  opening a second door onto a third value.
+
+**Consequences** The frontend now distinguishes the two kinds of control it has
+always had and never separated: what the network *is* (this tab, saved with the
+model or remembered in the browser) and what one run *asks for* (the action
+tabs). The traversal is the first setting to be shared rather than copied, and
+`useNetworkSettings` is the pattern for the next one.
+
+**Lives in** `frontend/src/components/NetworkSettingsPanel.jsx`,
+`frontend/src/hooks/useNetworkSettings.jsx`, `radixnet/api.py`, `go/server/`
 
 ---
 

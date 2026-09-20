@@ -229,6 +229,10 @@ func init() {
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
+	route("GET", "/api/encoding", rEncoding)
+	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, configurable: false (the window is part of the model format, not a setting), note}")
+	route("POST", "/api/encoding/preview", rEncodingPreview)
+	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
 	route("POST", "/api/train", rTrain)
 	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
@@ -338,6 +342,19 @@ func weightOptions(f fields) (map[string]float64, error) {
 		opts["window"] = float64(w)
 	}
 	return opts, nil
+}
+
+func rEncoding(rq *request) (int, any, error) {
+	return 200, rq.svc.Encoding(), nil
+}
+
+func rEncodingPreview(rq *request) (int, any, error) {
+	text, err := rq.f.optText("text", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.EncodingPreview(text)
+	return 200, out, err
 }
 
 func rModelWeights(rq *request) (int, any, error) {

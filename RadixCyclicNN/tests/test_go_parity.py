@@ -1393,6 +1393,26 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(NODE_KEYS <= set(graph["nodes"][0]))
         self.assertTrue((EDGE_KEYS | {"reward", "share", "recent_share", "recent_count"}) <= set(graph["edges"][0]))
+        # the Network settings tab: the encoder / decoder, identical on both sides
+        status, enc, _ = self.client.get("/api/encoding")
+        self.assertEqual(status, 200)
+        from radixnet.api import ModelService  # the Python service answers the same document
+
+        mine_enc = ModelService(saved["path"], backend="python")
+        self.assertEqual(enc, mine_enc.encoding())
+        for text in (CORPUS[0], CORPUS[0][:-4], "qqzzxx qqzz", "ab", ""):
+            with self.subTest(text=text):
+                status, prev, _ = self.client.post("/api/encoding/preview", {"text": text})
+                self.assertEqual(status, 200, prev)
+                theirs = mine_enc.encoding_preview(text)
+                for key in ("windows", "count", "decoded", "round_trip", "chars", "unknown_windows"):
+                    self.assertEqual(prev[key], theirs[key], key)
+                self.assertEqual(prev["path"]["known"], theirs["path"]["known"])
+                self.assertEqual(prev["path"]["labels"], theirs["path"]["labels"])
+                self.assertEqual(prev["path"]["decoded"], theirs["path"]["decoded"])
+                self.assertEqual(prev["path"]["nodes"], theirs["path"]["nodes"])
+                self.assertEqual(prev["path"]["compressed"], theirs["path"]["compressed"])
+                self.assertEqual(prev["path"]["reason"], theirs["path"]["reason"])
         # model selector: the one kind, other kinds refused
         status, m, _ = self.client.get("/api/model")
         self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))

@@ -241,6 +241,8 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/status` | model statistics (with the active `kind`), current job, available backends, model path; the resonant model adds `buckets`, `coherence_mean` / `coherence_max`, `cycles_seen` and `meta` (the metacognitive layer) |
 | `GET /api/model` | `{"kind", "label", "kinds": [{"kind","label","description"}], "model_path", "paths", "in_memory"}` |
 | `POST /api/model/select` | `{"kind": "radix"\|"count"\|"resonant"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
+| `GET /api/encoding` | the text encoding every kind shares: `{"window", "stride", "overlap", "start_label", "end_label", "back_label", "configurable": false, "note"}`. The window is part of the model format, not a setting |
+| `POST /api/encoding/preview` | `{"text"}` -> the same document plus `{"chars", "windows", "count", "decoded", "round_trip", "unknown_windows", "kind", "path": {"known", "reason", "labels", "node_ids", "decoded", "nodes", "compressed"}}`: one text through the encoder, back through the decoder, and through the graph's own (possibly merged) node labels. `path.known` is false with the reason - a window never seen, or a text that cannot be walked from START to END as it stands |
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
@@ -318,9 +320,18 @@ curl -X POST localhost:8000/api/evolve/stop
 
 `frontend/` is a Vite + React app (React, ReactDOM, Vite only). The prebuilt
 `frontend/dist` is committed and served by the API, so nothing needs npm to use
-it. The Predict and Generate tabs each carry a **Traversal** selector - follow the
-rewards, or avoid the punishments (with the two scales when the second is
-chosen); everything else on them is unchanged.
+it. The **Network settings** tab holds the settings of the network itself, as
+opposed to the options of one run: the **traversal** every search uses, the
+**score function** of whichever kind is active (the count model's dual
+frequency scales and sliding window, the resonant model's phase and resonance
+settings; the sine model has none and says why, and the negative network's
+blame function stays on the Negative tab), and the **encoder / decoder** - the
+window, the stride and the sentinels, read-only because the window is part of
+the model format, with a live preview that encodes a text, decodes it back and
+walks it through the graph's own node labels so the radix compression is
+visible. The Predict and Generate tabs each carry the same **Traversal**
+selector - follow the rewards, or avoid the punishments - and it is one
+setting: changing it on any of the three changes it on all of them.
 
 Panels: status bar (live statistics and job progress), Train (texts and/or
 uploaded files), Predict (path with per-step costs and a Like button that
@@ -362,8 +373,9 @@ filling the brief and the step up into the form as it goes), Code (code
 generation with the sandbox and the judge),
 Speech (record the microphone, the browser writes down what it hears, teach
 the words and the waveform),
-Checkpoints (save / restore / load / reset) and a Graph view of the most
-visited nodes.  The Images and Speech tabs each end with a **What does it
+Checkpoints (save / restore / load / reset), Network settings (the traversal,
+the score function and the encoder / decoder - see above) and a Graph view of
+the most visited nodes.  The Images and Speech tabs each end with a **What does it
 remember?** card - the recall tutor: ask the network for the picture or the
 utterance back, see the mark out of 10, the agreement and the reason each
 failure failed, and (with "blame it" ticked) hand those failures to the
@@ -1299,6 +1311,10 @@ merit_scale=1.0)` on every kind, the same three arguments on `generate` and on
 saying which one ran. The Go port has the same option on `PredictOptions` /
 `GenerateOptions` and the cross-language parity suite requires both sides to
 walk the same least-punished paths at the same costs.
+
+In the frontend it lives on the **Network settings** tab, and the Predict and
+Generate tabs show the same control: it is one setting, shared, so changing it
+on any of the three changes it on all of them.
 
 ## Learning-rate schedules (graph functions)
 

@@ -1,9 +1,9 @@
 import { NumberField, SelectField } from "./Fields.jsx";
-import { parseNumber } from "../util.js";
+import { TRAVERSALS, useNetworkSettings } from "../hooks/useNetworkSettings.jsx";
 
 /**
- * The traversal option: *what* a search looks for, as opposed to the mode,
- * which is how it looks for it.
+ * The traversal the searches run: *what* they look for, as opposed to the
+ * mode, which is how they look for it.
  *
  * **reward** is the model's own distribution - the count / reward model's
  * probability carries `exp(reward_scale * reward)`, so the search follows the
@@ -12,63 +12,70 @@ import { parseNumber } from "../util.js";
  * accumulated the least punishment. The two scales say how heavily a
  * punishment counts and how heavily what the corpus did counts; a merit scale
  * of 0 is the pure form, where nothing but the punishments decides.
+ *
+ * The setting is shared (`useNetworkSettings`), so this control is the same
+ * control wherever it appears: the Network settings tab, Predict and Generate
+ * all read and write one value. `compact` is the version for the action tabs -
+ * the fields and one line, without the explanation.
  */
-
-export const TRAVERSALS = [
-  ["reward", "reward (follow what was rewarded)"],
-  ["punishment", "punishment (avoid what was punished)"],
-];
-
-/** The request fields for a traversal; `{}` for the default, so an old server is unaffected. */
-export function traversalBody(traversal, penaltyScale, meritScale) {
-  if (traversal !== "punishment") return {};
-  return {
-    traversal,
-    penalty_scale: parseNumber(penaltyScale, 1),
-    merit_scale: parseNumber(meritScale, 1),
-  };
-}
-
-export default function TraversalFields({
-  traversal,
-  onTraversal,
-  penaltyScale,
-  onPenaltyScale,
-  meritScale,
-  onMeritScale,
-}) {
+export default function TraversalFields({ compact = false }) {
+  const { traversal, penaltyScale, meritScale, set } = useNetworkSettings();
   const punishing = traversal === "punishment";
   return (
     <>
       <div className="row">
-        <SelectField label="Traversal" value={traversal} onChange={onTraversal} options={TRAVERSALS} />
+        <SelectField
+          label="Traversal"
+          hint={compact ? "shared with Network settings" : undefined}
+          value={traversal}
+          onChange={(value) => set("traversal", value)}
+          options={TRAVERSALS}
+        />
         {punishing ? (
           <NumberField
             label="Penalty scale"
             hint="how heavily a punishment counts"
             value={penaltyScale}
-            onChange={onPenaltyScale}
+            onChange={(value) => set("penaltyScale", value)}
+            min={0}
+          />
+        ) : null}
+        {punishing ? (
+          <NumberField
+            label="Merit scale"
+            hint="0 = nothing but the punishments decides"
+            value={meritScale}
+            onChange={(value) => set("meritScale", value)}
             min={0}
           />
         ) : null}
       </div>
-      {punishing ? (
-        <div className="row">
-          <NumberField
-            label="Merit scale"
-            hint="how heavily what the corpus did counts; 0 = nothing but the punishments decides"
-            value={meritScale}
-            onChange={onMeritScale}
-            min={0}
-          />
-        </div>
-      ) : null}
-      {punishing ? (
+      {punishing && compact ? (
         <p className="muted">
           The rewards leave the score: only the punishments price a step, so the cheapest path is the one that
-          accumulated the <b>least punishment</b>. On the negative network it walks the least blamed way through
-          the failures instead of the likeliest one.
+          accumulated the <b>least punishment</b>.
         </p>
+      ) : null}
+      {!compact ? (
+        <>
+          <p className="muted">
+            <b>reward</b> is what the model believes. The count / reward model's probability carries{" "}
+            <code>exp(reward_scale · reward)</code>, so a path the tutor rewarded is cheap and the search follows
+            the rewards. This is what every search did before the option existed, and still does by default.
+          </p>
+          <p className="muted">
+            <b>punishment</b> is what the model was punished for. The rewards leave the score altogether and only
+            the penalties price the step, so the cheapest path is the one that accumulated the{" "}
+            <b>least punishment</b>. Nothing the network was praised for makes a step cheaper here; only what it
+            was corrected for makes one dearer. On the negative network it walks the least <i>blamed</i> way
+            through the failures instead of the likeliest one.
+          </p>
+          <p className="muted">
+            The traversal is <i>what</i> a search looks for; the mode (dijkstra / k-best / beam / sample) is{" "}
+            <i>how</i> it looks. They are independent - every mode can run either traversal. The setting is used
+            by the <b>Predict</b> and <b>Generate</b> tabs, which show the same control.
+          </p>
+        </>
       ) : null}
     </>
   );
