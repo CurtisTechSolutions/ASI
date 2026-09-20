@@ -1,0 +1,176 @@
+{
+ "meta": {
+  "bits": 2,
+  "depth": 5,
+  "epochs": 3,
+  "per_source": 200,
+  "quick": false,
+  "rounds": 3,
+  "seconds": 65.80724239349365,
+  "seeds": [
+   0,
+   1,
+   2
+  ]
+ },
+ "probe": {
+  "bits": 2,
+  "ceiling": {
+   "argmax_monotone": {
+    "accuracy": 0.7067708333333332,
+    "accuracy_sd": 0.044237119515804335,
+    "dead_units": 0,
+    "mean_b": 0.29519465727568184,
+    "nmi": 0.5240743056475147,
+    "past_first_peak": 0.372265625,
+    "per_seed": [
+     0.6625,
+     0.7671875,
+     0.690625
+    ],
+    "purity": 0.7067708333333332,
+    "wave_u_after": 1.0471211379574261,
+    "wave_u_before": 0.28410524131507625
+   },
+   "argmax_monotone-fixedwave": {
+    "accuracy": 0.7161458333333334,
+    "accuracy_sd": 0.0590497303950003,
+    "dead_units": 0,
+    "mean_b": 0.3333333333333333,
+    "nmi": 0.5347016051575862,
+    "past_first_peak": 0.755859375,
+    "per_seed": [
+     0.7625,
+     0.753125,
+     0.6328125
+    ],
+    "purity": 0.7161458333333334,
+    "wave_u_after": 3.1233000276082734,
+    "wave_u_before": 0.28410524131507625
+   },
+   "argmax_sine": {
+    "accuracy": 0.7234375000000001,
+    "accuracy_sd": 0.041122751964899756,
+    "dead_units": 0,
+    "mean_b": 0.17614979910589476,
+    "nmi": 0.541633223204833,
+    "past_first_peak": 0.1299479166666667,
+    "per_seed": [
+     0.7,
+     0.6890625,
+     0.78125
+    ],
+    "purity": 0.7234375000000001,
+    "wave_u_after": 0.4125641244356338,
+    "wave_u_before": 0.28410524131507625
+   },
+   "argmax_sine-fixedwave": {
+    "accuracy": 0.2427083333333333,
+    "accuracy_sd": 0.029017475577466905,
+    "dead_units": 0,
+    "mean_b": 0.3333333333333333,
+    "nmi": 0.008370381766842095,
+    "past_first_peak": 0.999609375,
+    "per_seed": [
+     0.271875,
+     0.203125,
+     0.253125
+    ],
+    "purity": 0.29218750000000004,
+    "wave_u_after": 143.5352391161057,
+    "wave_u_before": 0.28410524131507625
+   },
+   "sign": {
+    "accuracy": 0.6932291666666667,
+    "accuracy_sd": 0.04732996797015136,
+    "assignment": [
+     0,
+     3,
+     2,
+     1
+    ],
+    "dead_units": 3,
+    "mean_b": 0.2301846848636179,
+    "nmi": 0.4775281664903564,
+    "past_first_peak": 0.3,
+    "per_seed": [
+     0.75625,
+     0.68125,
+     0.6421875
+    ],
+    "purity": 0.6932291666666667,
+    "wave_u_after": 0.6291882826636023,
+    "wave_u_before": 0.3766675420555789
+   }
+  },
+  "corpus": {
+   "alphabet": 101,
+   "chars": 58389,
+   "per_source": {
+    "go": {
+     "chars": 14991,
+     "segments": 200
+    },
+    "json": {
+     "chars": 12682,
+     "segments": 200
+    },
+    "prose": {
+     "chars": 15898,
+     "segments": 200
+    },
+    "python": {
+     "chars": 14818,
+     "segments": 200
+    }
+   },
+   "segments": 800,
+   "sha256": "89fc446fbb883a4904387275411999f77dc493736ba175a958a9f658814c2c07"
+  },
+  "depth": 5,
+  "dichotomies": {
+   "go + json": {
+    "monotone": 0.7114583333333333,
+    "sine": 0.7109375
+   },
+   "go + prose": {
+    "monotone": 0.8156249999999999,
+    "sine": 0.7973958333333334
+   },
+   "go + python": {
+    "monotone": 0.7328125,
+    "sine": 0.6359374999999999
+   }
+  },
+  "one_vs_rest": {
+   "go": 0.6666666666666666,
+   "json": 0.9671875,
+   "prose": 0.7833333333333333,
+   "python": 0.803125
+  },
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "signal": {
+   "contingency": {
+    "0": {
+     "go": 160
+    },
+    "1": {
+     "json": 160
+    },
+    "2": {
+     "prose": 160
+    },
+    "3": {
+     "python": 160
+    }
+   },
+   "nmi": 1.0,
+   "purity": 1.0
+  },
+  "sup_epochs": 100
+ }
+}

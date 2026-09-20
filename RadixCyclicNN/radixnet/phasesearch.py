@@ -28,6 +28,13 @@ closing the loop takes the layer's ``ride`` cost, every other child takes its
 to ride, one it never rides becomes expensive, and neither is forbidden.
 :func:`phase_dijkstra` keeps its exactness instead: it prices the phase but not
 the path's history, so it runs without the layer.
+
+Every search here takes an optional ``costs`` - ``(node, bucket) -> [(child,
+edge, cost)]`` - in place of :meth:`ResonantGraph.child_costs_at`.  That is the
+traversal option: the punishment traversal
+(:class:`radixnet.penalty.PhasePenaltyCosts`) hands in phase-aware costs built
+from the punishments alone, and the phase, the cycles and the metacognitive
+handoff carry on exactly as they are.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ from .beam import default_beam
 from .encoding import WINDOW
 from .graph import BACK, END, FIRST
 from .metacog import ABORT, ESCAPE, RIDE, cycle_signature
-from .search import PathResult, _build_result, _start_emission, onward
+from .search import CostFn, PathResult, _build_result, _start_emission, onward
 
 __all__ = ["phase_beam", "phase_dijkstra", "phase_kbest", "phase_walk", "start_bucket"]
 
@@ -81,6 +88,7 @@ def phase_dijkstra(
     to_end: bool = False,
     max_expansions: int = 200_000,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
 ) -> PathResult:
     """Cheapest path over ``(node, chars, phase)`` emitting at least ``min_chars``.
 
@@ -88,6 +96,8 @@ def phase_dijkstra(
     fallback and ``include_context`` all behave identically - with the phase
     added to the state and to the costs.  No metacognition: this is the exact
     mode, and an exact search cannot depend on which path reached a state.
+    ``costs`` replaces the graph's own phase-aware cost function
+    (:mod:`radixnet.penalty`).
     """
     if step_penalty < 0:
         raise ValueError("step_penalty must be >= 0 (Dijkstra needs non-negative costs)")
@@ -97,7 +107,7 @@ def phase_dijkstra(
     overlap = graph.encoding.overlap
     advance = graph.advance
     buckets = graph.buckets
-    child_costs_at = graph.child_costs_at
+    child_costs_at = graph.child_costs_at if costs is None else costs
     inf = math.inf
     start_chars = _start_emission(graph, start_node, start_offset)
     start_key = (start_node, start_chars, start_phase % buckets)
@@ -163,6 +173,7 @@ def phase_kbest(
     to_end: bool = False,
     max_expansions: int = 200_000,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
 ) -> tuple[list[PathResult], int]:
     """The ``k`` cheapest walks, exactly - Dijkstra with ``k`` labels per state instead of one.
 
@@ -191,7 +202,8 @@ def phase_kbest(
     ``k``-labels-per-state bound; the bound is per state rather than per
     frontier, so it degrades where the graph branches instead of wherever the
     cheapest region happens to be.  Returns ``(paths, expansions)``; the goal,
-    cap and fallback rules are :func:`phase_dijkstra`'s.
+    cap and fallback rules are :func:`phase_dijkstra`'s.  ``costs`` replaces
+    the graph's own phase-aware cost function (:mod:`radixnet.penalty`).
     """
     if step_penalty < 0:
         raise ValueError("step_penalty must be >= 0 (a k-best search needs non-negative costs)")
@@ -251,7 +263,7 @@ def phase_kbest(
         if max_chars is not None and chars >= max_chars:
             continue
         depth = walk_back(idx)[2] if meta is not None else {}
-        for c, _e, step, nphase, _action in _expand(graph, meta, node, phase, depth, step_penalty):
+        for c, _e, step, nphase, _action in _expand(graph, meta, node, phase, depth, step_penalty, costs):
             nchars = chars if c < FIRST else chars + graph.label_len(c) - overlap
             if max_chars is not None and nchars > max_chars and c >= FIRST:
                 continue
@@ -304,7 +316,7 @@ def _back_probability(costs) -> float:
     return 0.0
 
 
-def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float):
+def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float, costs=None):
     """Children of one partial path as ``(child, edge, step_cost, phase, action)``.
 
     ``depth`` maps every ``(node, phase)`` already on the path to where it first
@@ -323,12 +335,14 @@ def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float
     probability enters the layer's policy as evidence against riding, and a
     hand-over is overruled only when the layer has actually seen this cycle and
     says to ride it.
+
+    ``costs`` replaces the graph's own phase-aware cost function, so the layer
+    prices the cycles of whichever traversal is running (:mod:`radixnet.penalty`).
     """
     advance = graph.advance
     buckets = graph.buckets
     labels = graph.labels
-    overlap = graph.encoding.overlap
-    every = graph.child_costs_at(node, phase)
+    every = (graph.child_costs_at if costs is None else costs)(node, phase)
     raw = onward(every)  # a node the model expects to go round offers nothing
     extra: dict[str, float] | None = None
     loops: dict[int, int] = {}
@@ -376,6 +390,7 @@ def phase_beam(
     to_end: bool = False,
     max_steps: int = 4_000,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
 ) -> tuple[list[PathResult], list[PathResult], int]:
     """The ``k`` cheapest and the ``k`` dearest complete paths, with metacognition on cycles.
 
@@ -383,7 +398,8 @@ def phase_beam(
     partial paths and a bottom beam of the dearest, both bounded by ``beam`` -
     over the phase-unrolled graph.  Every entry carries the ``(node, phase)``
     states already on its path, so a cycle is detected per path and priced by
-    ``meta``.
+    ``meta``.  ``costs`` replaces the graph's own phase-aware cost function
+    (:mod:`radixnet.penalty`).
     """
     width = default_beam(k) if beam is None else int(beam)
     if width < 1:
@@ -417,7 +433,7 @@ def phase_beam(
                     continue
                 expanded += 1
                 for c, _e, step, nphase, _action in _expand(
-                    graph, meta, entry.node, entry.phase, entry.depth, step_penalty
+                    graph, meta, entry.node, entry.phase, entry.depth, step_penalty, costs
                 ):
                     nchars = entry.chars if c < FIRST else entry.chars + graph.label_len(c) - overlap
                     if cap_chars is not None and nchars > cap_chars and c >= FIRST:
@@ -478,12 +494,14 @@ def phase_walk(
     rng: random.Random | None = None,
     stop_at_end: bool = True,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
 ) -> PathResult:
     """A stochastic walk over the phase-unrolled graph, metacognition included.
 
     Samples each child from ``softmax(-cost / temperature)`` where the cost is
     the phase-aware one plus, at a phase-locked cycle, the layer's price for
-    riding, escaping or aborting.  ``temperature == 0`` is greedy.
+    riding, escaping or aborting.  ``temperature == 0`` is greedy.  ``costs``
+    replaces the graph's own phase-aware cost function (:mod:`radixnet.penalty`).
     """
     if temperature < 0:
         raise ValueError("temperature must be >= 0")
@@ -501,7 +519,7 @@ def phase_walk(
     while True:
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
-        options = _expand(graph, meta, entry.node, entry.phase, entry.depth, 0.0)
+        options = _expand(graph, meta, entry.node, entry.phase, entry.depth, 0.0, costs)
         if not options:
             break
         if temperature == 0 or len(options) == 1:

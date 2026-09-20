@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from .encoding import WINDOW
 from .graph import END, START, RadixCyclicGraph
-from .search import PathResult, _build_result, _start_emission, onward
+from .search import CostFn, PathResult, _build_result, _start_emission, onward
 
 __all__ = ["Prediction", "beam_predict", "default_beam", "path_probability"]
 
@@ -35,6 +35,8 @@ class Prediction(PathResult):
     k: int = 0
     beam: int = 0
     mode: str = "beam"
+    traversal: str = "reward"
+    """Which traversal priced the steps: ``"reward"`` or ``"punishment"`` (:mod:`radixnet.penalty`)."""
 
     def to_dict(self) -> dict:
         d = PathResult.to_dict(self)
@@ -44,6 +46,7 @@ class Prediction(PathResult):
             k=self.k,
             beam=self.beam,
             mode=self.mode,
+            traversal=self.traversal,
         )
         return d
 
@@ -71,10 +74,11 @@ def _run_beam(
     max_steps: int,
     max_expansions: int,
     worst: bool,
+    costs: CostFn | None = None,
 ) -> tuple[list[tuple[float, list[int], list[float]]], int]:
     """One beam: the ``k`` cheapest (or, with ``worst``, dearest) complete paths as ``(cost, node_ids, step_costs)``."""
     labels = graph.labels
-    child_costs = graph.child_costs
+    child_costs = graph.child_costs if costs is None else costs
     overlap = graph.encoding.overlap
     entries: list[tuple[int, int, float]] = [(start_node, -1, 0.0)]  # entry -> (node, parent, step cost)
     sign = -1.0 if worst else 1.0  # heap keys: the k-th best finished path sits at the heap top
@@ -171,6 +175,7 @@ def beam_predict(
     max_steps: int | None = None,
     max_expansions: int = 200_000,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
 ) -> tuple[list[PathResult], list[PathResult], int]:
     """``(top, bottom, expanded)``: the ``k`` cheapest and the ``k`` most expensive complete paths.
 
@@ -182,6 +187,9 @@ def beam_predict(
     50``, or 500 with ``to_end``) or ``max_expansions``, the surviving partial
     paths are returned instead (``reached_end`` is ``False`` on them).  A start
     that already satisfies the goal gives one complete path (the start itself).
+    ``costs`` replaces the graph's own cost function: with the punishment
+    traversal's (:mod:`radixnet.penalty`) ``top`` is the ``k`` *least punished*
+    continuations and ``bottom`` the ``k`` most punished ones.
     """
     if k < 0:
         raise ValueError(f"k must be >= 0, got {k}")
@@ -199,7 +207,7 @@ def beam_predict(
         return [], [], 0
     common = (graph, start_node, start_chars, min_chars)
     limits = (k, width, step_penalty, to_end, max_steps, max_expansions)
-    best, expanded = _run_beam(*common, max_chars, *limits, False)
+    best, expanded = _run_beam(*common, max_chars, *limits, False, costs)
     bottom_cap = max_chars
     if bottom_cap is None and to_end:
         longest = max((graph.label_len(n) for _, ids, _ in best for n in ids[1:]), default=0)
@@ -208,7 +216,7 @@ def beam_predict(
             (sum(graph.label_len(n) - overlap for n in ids[1:] if n != END) for _, ids, _ in best), default=0
         )
         bottom_cap = max(2 * emitted + longest + 8, min_chars, 16)
-    worst, expanded_worst = _run_beam(*common, bottom_cap, *limits, True)
+    worst, expanded_worst = _run_beam(*common, bottom_cap, *limits, True, costs)
     expanded += expanded_worst
     seen = {tuple(ids) for _, ids, _ in best}
     top = [_build_result(graph, ids, steps, start_offset, max_chars, expanded, include_context) for _, ids, steps in best]

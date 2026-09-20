@@ -294,13 +294,13 @@ func (m *Model) usable(context string) bool {
 
 func (m *Model) candidates(context, mode string, k, beam, maxLength int, stepPenalty, temperature float64, rng *MT19937) ([]*PathResult, error) {
 	if mode == "sample" {
-		walk, err := m.search(context, 0, "sample", 0, 0, stepPenalty, temperature, false, maxLength, rng)
+		walk, err := m.search(context, 0, "sample", 0, 0, stepPenalty, temperature, false, maxLength, rng, rewardWalk)
 		if err != nil {
 			return nil, err
 		}
 		return []*PathResult{&walk.PathResult}, nil
 	}
-	found, err := m.search(context, 0, "beam", k, beam, stepPenalty, 1.0, true, maxLength, nil)
+	found, err := m.search(context, 0, "beam", k, beam, stepPenalty, 1.0, true, maxLength, rngNone, rewardWalk)
 	if err != nil {
 		return nil, err
 	}

@@ -527,6 +527,11 @@ func runeSlice(s string, from, to int) string {
 	return s[start:end]
 }
 
+// DecodeTrigrams is the inverse of Encode under the default encoding: the
+// first gram in full, then the part of each following one past the overlap.
+// A graph decodes with its own encoding (Encoding.DecodeGrams).
+func DecodeTrigrams(grams []string) string { return DefaultEncoding().DecodeGrams(grams) }
+
 // truncateRunes returns the first n characters of s.
 func truncateRunes(s string, n int) string {
 	if n < 0 {

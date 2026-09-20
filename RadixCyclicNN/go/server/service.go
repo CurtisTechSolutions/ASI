@@ -555,6 +555,113 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	}, nil
 }
 
+// Encoding is GET /api/encoding: the text encoding every kind shares.
+//
+// Read-only, and "configurable" says so.  The window is not a setting but part
+// of the model format: the graph's labels, its splits and merges, the saved
+// file and the Python implementation all assume the same number, so a model
+// trained at one window could not be read at another.
+func (s *Service) Encoding() map[string]any {
+	enc := s.model.Encoding()
+	return map[string]any{
+		"encoding": enc.String(), "unit": string(enc.Unit),
+		"window": enc.N, "ngram": enc.N, "stride": enc.Stride, "overlap": enc.Overlap(),
+		"start_label": radixnet.StartLabel, "end_label": radixnet.EndLabel, "back_label": radixnet.BackLabel,
+		"configurable": true,
+		"note": fmt.Sprintf(
+			"Text goes in as %s, and comes back out of the (possibly compressed) node labels along a "+
+				"path. The encoding is fixed for a model's life - every label is written in it - so it is "+
+				"chosen when a model is made: POST /api/reset with {\"encoding\": \"word:2:1\"}, or "+
+				"{unit, ngram, stride}.", enc.Describe()),
+	}
+}
+
+// EncodingPreview is POST /api/encoding/preview: one text through the encoder
+// and back through both decoders, and through the graph's own labels.
+func (s *Service) EncodingPreview(text string) (map[string]any, error) {
+	enc := s.model.Encoding()
+	windows := enc.Encode(text)
+	if windows == nil {
+		windows = []string{}
+	}
+	decoded := enc.DecodeGrams(windows)
+	info := s.Encoding()
+	info["text"] = text
+	info["chars"] = enc.Len(text)
+	info["windows"] = windows
+	info["count"] = len(windows)
+	info["decoded"] = decoded
+	// what comes back is what the encoding can represent: the text itself under a
+	// sliding character window, its words under a word encoding
+	info["round_trip"] = decoded == enc.Normalize(text)
+	info["kind"] = "count"
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		unknown := []string{}
+		for _, w := range windows {
+			if _, _, ok := g.Lookup(w); !ok {
+				unknown = append(unknown, w)
+			}
+		}
+		info["unknown_windows"] = unknown
+		walked, ok := []int(nil), false
+		if len(windows) > 0 {
+			walked, ok = g.NodePath(windows)
+		}
+		if !ok {
+			return map[string]any{
+				"known": false, "reason": encodingReason(enc, len(windows), unknown),
+				"labels": []string{}, "node_ids": []int{}, "decoded": "", "nodes": 0, "compressed": 0,
+			}, nil
+		}
+		labels := make([]string, len(walked))
+		real := make([]string, 0, len(walked))
+		compressed := 0
+		for i, n := range walked {
+			labels[i] = g.Labels[n]
+			if n != radixnet.Start && n != radixnet.End {
+				real = append(real, labels[i])
+				if enc.Len(labels[i]) > enc.N {
+					compressed++
+				}
+			}
+		}
+		return map[string]any{
+			"known": true, "reason": nil, "labels": labels, "node_ids": walked,
+			"decoded": enc.DecodePath(real, 0, true), "nodes": len(real), "compressed": compressed,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	info["path"] = out
+	return info, nil
+}
+
+// encodingReason says why a text cannot be walked: windows never seen, or a
+// text whose windows are all known that still does not run from START to END.
+func encodingReason(enc radixnet.Encoding, windows int, unknown []string) string {
+	if windows == 0 {
+		return fmt.Sprintf("the text is shorter than one window (%d %ss)", enc.N, enc.Unit)
+	}
+	if len(unknown) > 0 {
+		shown := unknown
+		suffix := ""
+		if len(shown) > 5 {
+			shown, suffix = shown[:5], "..."
+		}
+		quoted := make([]string, len(shown))
+		for i, w := range shown {
+			quoted[i] = fmt.Sprintf("%q", w)
+		}
+		return fmt.Sprintf("%d of the %d windows have never been seen: %s%s",
+			len(unknown), windows, strings.Join(quoted, ", "), suffix)
+	}
+	return "every window is known, but the structure cannot walk the whole text from START to END as it " +
+		"stands - a missing edge, a step into the middle of a merged node, or a text that is only part of " +
+		"one it was trained on (the walk has to reach the end of a text)"
+}
+
 // SelectKind is POST /api/model/select: only the count kind exists here.
 func (s *Service) SelectKind(kind string) (map[string]any, error) {
 	if strings.ToLower(strings.TrimSpace(kind)) != "count" {

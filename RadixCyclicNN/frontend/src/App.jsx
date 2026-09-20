@@ -19,7 +19,9 @@ import AgentPanel from "./components/AgentPanel.jsx";
 import ImagesPanel from "./components/ImagesPanel.jsx";
 import SpeechPanel from "./components/SpeechPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
+import NetworkSettingsPanel from "./components/NetworkSettingsPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
+import { NetworkSettingsProvider } from "./hooks/useNetworkSettings.jsx";
 
 // Both servers now run every tab: the lessons, the evolve loop, the Ollama corpus and review, code
 // generation, tool use and the image and speech encoders. The Go side's images use a thumbnail rather than
@@ -43,6 +45,7 @@ const TABS = [
   { id: "images", label: "Images", Component: ImagesPanel },
   { id: "speech", label: "Speech", Component: SpeechPanel },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
+  { id: "network", label: "Network settings", Component: NetworkSettingsPanel },
   { id: "graph", label: "Graph", Component: GraphView, single: true },
 ];
 
@@ -137,64 +140,66 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="app-header-row">
-          <h1>RadixCyclicNN</h1>
-          <ModelSelector status={status} onStatus={setStatus} />
-          {engine === "go" ? (
-            <span
-              className="badge engine"
-              title="This API is served by the Go implementation of the count / reward model (radixnet-count serve): a goroutine per text, counters bumped without locks (racy by default, --exact for reproducible counts)"
+    <NetworkSettingsProvider>
+      <div className="app">
+        <header className="app-header">
+          <div className="app-header-row">
+            <h1>RadixCyclicNN</h1>
+            <ModelSelector status={status} onStatus={setStatus} />
+            {engine === "go" ? (
+              <span
+                className="badge engine"
+                title="This API is served by the Go implementation of the count / reward model (radixnet-count serve): a goroutine per text, counters bumped without locks (racy by default, --exact for reproducible counts)"
+              >
+                Go engine · {status && status.workers ? `${status.workers} goroutines` : "one goroutine per text"}
+                {status && status.counting === "racy" ? " · racy counting" : ""}
+              </span>
+            ) : null}
+          </div>
+          <p className="tagline">
+            self-compressing cyclic graph · sine activation or count / reward edges · Dijkstra and top-K / bottom-K
+            prediction · 2NRL · GAN-style evolution · a negative network that filters the output
+          </p>
+        </header>
+
+        <StatusBar onStatus={setStatus} />
+
+        <nav className="tabs" role="tablist" aria-label="Panels">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === t.id}
+              aria-controls={`panel-${t.id}`}
+              className={activeTab === t.id ? "active" : ""}
+              onClick={() => selectTab(t.id)}
             >
-              Go engine · {status && status.workers ? `${status.workers} goroutines` : "one goroutine per text"}
-              {status && status.counting === "racy" ? " · racy counting" : ""}
-            </span>
-          ) : null}
-        </div>
-        <p className="tagline">
-          self-compressing cyclic graph · sine activation or count / reward edges · Dijkstra and top-K / bottom-K
-          prediction · 2NRL · GAN-style evolution · a negative network that filters the output
-        </p>
-      </header>
+              {t.label}
+            </button>
+          ))}
+        </nav>
 
-      <StatusBar onStatus={setStatus} />
+        <main>
+          {tabs.map(({ id, Component, single }) => (
+            <section
+              key={id}
+              id={`panel-${id}`}
+              role="tabpanel"
+              hidden={activeTab !== id}
+              className={`panel${single ? " single" : ""}`}
+            >
+              <Component status={status} />
+            </section>
+          ))}
+        </main>
 
-      <nav className="tabs" role="tablist" aria-label="Panels">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === t.id}
-            aria-controls={`panel-${t.id}`}
-            className={activeTab === t.id ? "active" : ""}
-            onClick={() => selectTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      <main>
-        {tabs.map(({ id, Component, single }) => (
-          <section
-            key={id}
-            id={`panel-${id}`}
-            role="tabpanel"
-            hidden={activeTab !== id}
-            className={`panel${single ? " single" : ""}`}
-          >
-            <Component status={status} />
-          </section>
-        ))}
-      </main>
-
-      <footer className="app-footer">
-        RadixCyclicNN{version ? ` v${version}` : ""} · API {status ? "connected" : "unreachable"}
-        {engine === "go" ? " (Go server)" : ""} · built with Vite + React, no other dependencies
-        <SettingsReset />
-      </footer>
-    </div>
+        <footer className="app-footer">
+          RadixCyclicNN{version ? ` v${version}` : ""} · API {status ? "connected" : "unreachable"}
+          {engine === "go" ? " (Go server)" : ""} · built with Vite + React, no other dependencies
+          <SettingsReset />
+        </footer>
+      </div>
+    </NetworkSettingsProvider>
   );
 }

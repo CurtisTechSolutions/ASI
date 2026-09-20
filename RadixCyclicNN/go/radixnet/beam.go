@@ -14,6 +14,8 @@ type Prediction struct {
 	K      int           `json:"k"`
 	Beam   int           `json:"beam"`
 	Mode   string        `json:"mode"`
+	// Traversal says which cost function priced the steps: "reward" or "punishment" (penalty.go).
+	Traversal string `json:"traversal"`
 }
 
 // DefaultBeam is the beam width used when none is given.
@@ -59,7 +61,8 @@ func lessState(a, b beamState) bool {
 }
 
 // runBeam is one beam: the k cheapest (or, with worst, dearest) complete paths.
-func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepPenalty float64, toEnd bool, maxSteps, maxExpansions int, worst bool) ([]finished, int) {
+func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepPenalty float64, toEnd bool, maxSteps, maxExpansions int, worst bool, costs CostFn) ([]finished, int) {
+	childCosts := g.costsOrDefault(costs)
 	entries := []beamEntry{{startNode, -1, 0}}
 	sign := 1.0
 	if worst {
@@ -123,7 +126,7 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 			} else if st.node == Start {
 				prev = Start
 			}
-			for _, cc := range Onward(g.ChildCostsFrom(st.node, prev)) {
+			for _, cc := range Onward(childCosts(st.node, prev)) {
 				nchars := st.chars
 				if cc.Child != End {
 					nchars += g.labelLen[cc.Child] - g.Enc.Overlap()
@@ -235,6 +238,10 @@ type BeamOptions struct {
 	ToEnd         bool
 	MaxSteps      int // 0 = default (500 with ToEnd, else MinChars + 50)
 	MaxExpansions int // 0 = 200000
+	// Costs replaces the graph's own cost function: with the punishment
+	// traversal's (penalty.go) the top beam is the k *least punished*
+	// continuations and the bottom one the k most punished.
+	Costs CostFn
 }
 
 // BeamPredict returns the k cheapest complete paths (rising cost) and the k
@@ -283,7 +290,7 @@ func (g *Graph) BeamPredict(startNode, startOffset, minChars int, opts BeamOptio
 	bottomCap := maxChars
 	if bottomCap < 0 && opts.ToEnd {
 		// the bottom cap depends on the best side: run the two beams in turn
-		best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false)
+		best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false, opts.Costs)
 		longest, emitted := 0, 0
 		for _, f := range best {
 			sum := 0
@@ -306,17 +313,17 @@ func (g *Graph) BeamPredict(startNode, startOffset, minChars int, opts BeamOptio
 		if bottomCap < 16 {
 			bottomCap = 16
 		}
-		worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true)
+		worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true, opts.Costs)
 	} else {
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false)
+			best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false, opts.Costs)
 		}()
 		go func() {
 			defer wg.Done()
-			worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true)
+			worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true, opts.Costs)
 		}()
 		wg.Wait()
 	}

@@ -568,6 +568,12 @@ dl.kv dd {
   font-style: italic;
 }
 
+/* a window the model has never seen (the encoder preview on the Network settings tab) */
+.chip.unknown {
+  border-style: dashed;
+  color: var(--muted);
+}
+
 .chip-arrow {
   color: var(--muted);
 }

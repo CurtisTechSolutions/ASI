@@ -943,3 +943,109 @@ func TestTrainAndPredictInWords(t *testing.T) {
 		}
 	}
 }
+
+// The encoding endpoints: what a text becomes before the graph ever sees it,
+// and what comes back out of it (the Network settings tab reads both).
+func TestEncodingAndItsPreview(t *testing.T) {
+	e := newEnv(t, false)
+	status, info := e.get("/api/encoding")
+	if status != 200 {
+		t.Fatalf("encoding: %d", status)
+	}
+	hasKeys(t, info, "encoding", "unit", "window", "stride", "overlap", "start_label", "end_label", "back_label",
+		"configurable", "note")
+	if info["window"] != float64(radixnet.Window) || info["stride"] != 1.0 || info["overlap"] != float64(radixnet.Overlap) {
+		t.Fatalf("encoding facts: %v", info)
+	}
+	if info["start_label"] != radixnet.StartLabel || info["end_label"] != radixnet.EndLabel || info["back_label"] != radixnet.BackLabel {
+		t.Fatalf("sentinels: %v", info)
+	}
+	if info["encoding"] != "char:3:1" || info["unit"] != "char" {
+		t.Fatalf("a fresh server is the trigram: %v", info)
+	}
+	if info["configurable"] != true { // it is fixed for a model's life, and chosen when one is made
+		t.Fatalf("the encoding is a choice now: %v", info["configurable"])
+	}
+
+	status, doc := e.post("/api/train", map[string]any{"texts": corpus, "epochs": 2})
+	if status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	e.waitJob()
+
+	text := corpus[0]
+	status, preview := e.post("/api/encoding/preview", map[string]any{"text": text})
+	if status != 200 {
+		t.Fatalf("preview: %d %v", status, preview)
+	}
+	if preview["text"] != text || preview["decoded"] != text || preview["round_trip"] != true {
+		t.Fatalf("round trip: %v", preview)
+	}
+	windows := preview["windows"].([]any)
+	if len(windows) != len([]rune(text))-radixnet.Window+1 || preview["count"] != float64(len(windows)) {
+		t.Fatalf("windows: %d for %q", len(windows), text)
+	}
+	if len(preview["unknown_windows"].([]any)) != 0 {
+		t.Fatalf("a trained text has no unknown windows: %v", preview["unknown_windows"])
+	}
+	path := preview["path"].(map[string]any)
+	if path["known"] != true {
+		t.Fatalf("a trained text must walk: %v", path["reason"])
+	}
+	if path["decoded"] != text {
+		t.Fatalf("the labels must decode back to the text: %q", path["decoded"])
+	}
+	labels := path["labels"].([]any)
+	if labels[0] != radixnet.StartLabel || labels[len(labels)-1] != radixnet.EndLabel {
+		t.Fatalf("the path runs between the sentinels: %v", labels)
+	}
+	if path["nodes"] != float64(len(labels)-2) {
+		t.Fatalf("nodes counts what is between the sentinels: %v of %d", path["nodes"], len(labels))
+	}
+	if compressed, _ := path["compressed"].(float64); compressed <= 0 {
+		t.Fatalf("the corpus compresses, so some labels are merged chains: %v", path["compressed"])
+	}
+
+	// and it reports whatever encoding the model was made with
+	if status, doc := e.post("/api/reset", map[string]any{"encoding": "word:2:1"}); status != 200 {
+		t.Fatalf("reset: %d %v", status, doc)
+	}
+	_, info = e.get("/api/encoding")
+	if info["encoding"] != "word:2:1" || info["unit"] != "word" || info["window"] != 2.0 || info["overlap"] != 1.0 {
+		t.Fatalf("after a reset to word bigrams: %v", info)
+	}
+	_, words := e.post("/api/encoding/preview", map[string]any{"text": "the cat sat on the mat"})
+	if got := words["windows"].([]any); len(got) != 5 || got[0] != "the cat" {
+		t.Fatalf("word bigrams: %v", words["windows"])
+	}
+}
+
+// Why a text does not walk: too short, windows never seen, or known windows
+// that still do not run from START to END.
+func TestEncodingPreviewSaysWhyATextDoesNotWalk(t *testing.T) {
+	e := newEnv(t, false)
+	e.post("/api/train", map[string]any{"texts": corpus, "epochs": 2})
+	e.waitJob()
+
+	for _, tc := range []struct{ text, want string }{
+		{"ab", "shorter than one window"},
+		{"qqzzxx qqzz", "never been seen"},
+		{corpus[0][:len(corpus[0])-4], "every window is known"},
+	} {
+		status, preview := e.post("/api/encoding/preview", map[string]any{"text": tc.text})
+		if status != 200 {
+			t.Fatalf("%q: %d", tc.text, status)
+		}
+		path := preview["path"].(map[string]any)
+		if path["known"] != false {
+			t.Fatalf("%q should not walk", tc.text)
+		}
+		if reason, _ := path["reason"].(string); !strings.Contains(reason, tc.want) {
+			t.Fatalf("%q: reason %q does not mention %q", tc.text, reason, tc.want)
+		}
+	}
+	// no text at all is not an error
+	if status, preview := e.post("/api/encoding/preview", map[string]any{}); status != 200 || preview["text"] != "" {
+		t.Fatalf("empty preview: %d %v", status, preview)
+	}
+}

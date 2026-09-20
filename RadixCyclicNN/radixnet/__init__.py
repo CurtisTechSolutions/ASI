@@ -40,6 +40,15 @@ from .duo import FilterConfig, NegativeFilter
 from .metacog import MetaLayer
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeGraph, NegativeNet
+from .penalty import (
+    DEFAULT_TRAVERSAL,
+    TRAVERSALS,
+    PenaltyCosts,
+    PhasePenaltyCosts,
+    phase_traversal_costs,
+    resolve_traversal,
+    traversal_costs,
+)
 from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .resonance import ResonantGraph, ResonantNet, trigram_phase
 from .search import PathResult, dijkstra_predict, sample_walk
@@ -75,4 +84,6 @@ __all__ = [
     "END", "START", "RadixCyclicGraph",
     "PathResult", "dijkstra_predict", "sample_walk",
     "phase_beam", "phase_dijkstra", "phase_walk",
+    "TRAVERSALS", "DEFAULT_TRAVERSAL", "PenaltyCosts", "PhasePenaltyCosts",
+    "traversal_costs", "phase_traversal_costs", "resolve_traversal",
 ]

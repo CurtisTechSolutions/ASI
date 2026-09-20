@@ -1,0 +1,14 @@
+# passes: hinge passes per refilter step, depth 5
+  passes= 1 seed=0 bits/char=2.8742 live=3 nmi=0.159 124s
+  passes= 1 seed=1 bits/char=2.8986 live=3 nmi=0.344 121s
+  passes= 1 seed=2 bits/char=2.9197 live=4 nmi=0.079 132s
+  passes= 2 seed=0 bits/char=2.7770 live=2 nmi=0.152 143s
+  passes= 2 seed=1 bits/char=2.8639 live=4 nmi=0.359 122s
+  passes= 2 seed=2 bits/char=2.7956 live=1 nmi=0.000 142s
+  passes= 4 seed=0 bits/char=2.8977 live=4 nmi=0.105 125s
+  passes= 4 seed=1 bits/char=2.9098 live=3 nmi=0.297 118s
+  passes= 4 seed=2 bits/char=2.9151 live=4 nmi=0.100 127s
+  passes= 8 seed=0 bits/char=2.9290 live=2 nmi=0.145 127s
+  passes= 8 seed=1 bits/char=2.8172 live=3 nmi=0.365 127s
+  passes= 8 seed=2 bits/char=3.1182 live=4 nmi=0.193 112s
+
