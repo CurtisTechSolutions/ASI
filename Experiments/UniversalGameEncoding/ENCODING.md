@@ -88,13 +88,13 @@ the same three characters are *one node*, whose children mix "the rest of this
 token" with "the start of the next one". A walk that enters in one phase leaves
 in another, and the three characters it emits are not a token.
 
-Measured on this directory's corpora, only 1–4 % of *distinct* trigrams are
+Measured on this directory's corpora, only 1–9 % of *distinct* trigrams are
 ambiguous — and it still wrecks the small games, because the ambiguity is
 concentrated on the hot path. A seven-action game pads two of its digits with a
 constant, every token ends in the same character, and the seams then collide
-systematically rather than by accident. By **occurrence**, 23–40 % of the
-corpus is ambiguous. The first version of this encoder measured `nim` proposing
-a syntactically impossible move as its *top* choice, from exactly this.
+systematically rather than by accident. By **occurrence** the same corpora run
+to **45 %**. The first version of this encoder measured `nim` proposing a
+syntactically impossible move as its *top* choice, from exactly this.
 
 ### The fix: make the phase readable from the trigram
 
@@ -116,8 +116,12 @@ largest such split of 64 symbols, so the cost is
   slots and 64 > 43, so under the disjoint codebook chess falls back to a flat
   code and loses the seams that meant "where did the last move land".
 
-Whether that trade is worth it is `experiment.py phase`, and the answer is in
-the README.
+Whether that trade is worth it is `experiment.py phase`, and the answer turns
+out to depend on the game: Connect Four's refusals fall from 10.65 a move to
+0.34 and Nim's legality goes from 0.81 to 0.999, while chess is unchanged to
+three decimal places — its tokens already use the whole code space, so its
+occurrence-weighted ambiguity is 3–7 % rather than 45 % and there is little
+there to remove.
 
 ---
 
