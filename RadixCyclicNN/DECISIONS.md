@@ -76,6 +76,8 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
+**Part XV — The traversal** · D-069 what a search looks for is an option · D-070 one home for a network setting
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -2413,6 +2415,149 @@ honest accounting of *deliberate* versus *undone* is itself the decision: a gap
 recorded with its reason is a design statement, an unrecorded one is debt.
 
 **Lives in** `go/`, `DESIGN.md`
+
+---
+
+# Part XV — The traversal
+
+### D-069 — What a search *looks for* is an option, separate from how it looks
+
+**Status** Accepted · 2026-09-20 (`dc154c8`) · **Layer** search
+
+**Context** Every reward the system hands out is also, implicitly, a
+navigational instruction. The count / reward model's probability carries
+`exp(reward_scale * reward)` (D-026), so once a path is rewarded the search
+follows it: prediction, generation, conversation, the tutor's completions, the
+agent's attempts. That is the intended behaviour and it is also the whole of
+the behaviour — a network with a thousand corrections and a handful of thumbs
+up still navigates by the handful, because the corrections only enter as the
+same number with a minus sign in front, competing on the rewards' terms.
+
+Rewards and penalties are not symmetric evidence, though. A reward says *this
+was good once*; a penalty says *this was wrong, and here is the correction*.
+The first is an invitation to repeat a success; the second is a boundary. A
+walk that respects every boundary it has been taught is not the walk that
+chases every reward it has been given, and there was no way to ask for it.
+
+**Decision** The cost function a search reads the graph through is an option,
+the **traversal**, beside the existing **mode**:
+
+* `reward` (the default) — the model's own distribution, rewards and all.
+  Exactly the previous behaviour, at exactly the previous cost: the option
+  resolves to `None` and the searches call `graph.child_costs` as before.
+* `punishment` — the rewards leave the score altogether and the penalties
+  price every step, so the cheapest path is the one that accumulated the
+  **least punishment**.
+
+**What was rejected**
+
+* **A fifth mode** (`dijkstra | kbest | beam | sample | punishment`). The
+  wrong axis: it would have had to be written once for Dijkstra, once for each
+  beam, once for the sampler and again for all four phase searches, and it
+  would have made "least punished" and "top-K / bottom-K" mutually exclusive
+  when they are orthogonal. Every search already reads the graph through one
+  funnel — `[(child, edge, cost)]` for a node — so the option replaces the
+  funnel instead. No search changed.
+* **A second graph** holding the punishments. That already exists and is the
+  negative network (D-045); this is about *navigating the model you have*, not
+  about modelling failure.
+* **Flipping the sign of the rewards.** `invert` (D-009) does that, and it is
+  not the same thing: it makes the punished path *attractive*, whereas this
+  makes it expensive and leaves everything else alone.
+* **A lexicographic cost** (total punishment first, the model's own cost as a
+  tie-break). Exact and tempting, but it would have made the cost a tuple
+  through every heap in the package, and it forbids the trade-off that
+  `penalty_scale` exists to express. A blended score with a knob says more.
+
+**How the two currencies are separated** One hook,
+`RadixCyclicGraph.child_evidence`, splits an edge's evidence into **merit** —
+what speaks for the step with every reward taken out of it — and **penalty**
+`>= 0`. Each kind implements it in its own currency: the count / reward model
+and the phase model split `edge_reward` in half, the negative network weighs
+net blame against cleared text, and the sine model reads the negative part of
+`w · f_p · f_c`, because 2NRL trains a failure in and then inverts it, so what
+a punishment leaves behind *is* a negative score on that path. A judged path
+context — a verdict filed against the caller that reached the edge rather than
+against the edge — splits the same way.
+
+**Consequences**
+* `score = merit_scale * merit − penalty_scale * penalty` and
+  `cost = -log softmax(score)`, so costs stay `>= 0`, Dijkstra stays a true
+  shortest path, `exp(-cost)` is still a probability and the two traversals'
+  numbers are comparable. `merit_scale = 0` is the pure form.
+* Every mode of every kind gains the traversal at once, in both languages, and
+  the parity suite requires the same least-punished paths at the same costs.
+* On the sine model the two traversals coincide at the default scales, because
+  there the punishment *is* the negative score; they part company as soon as
+  `penalty_scale` is raised. That is honest rather than convenient: a model
+  that keeps no separate ledger of its punishments cannot be made to pretend
+  it does.
+* On the negative network the option reverses the network's purpose — the
+  least blamed way through the failures rather than the likeliest one — which
+  is a use nobody had before and falls out for free.
+* **The cost:** a second cost cache per graph while a punishment search runs,
+  and one more thing to choose. The default is unchanged behaviour, so nobody
+  who does not want it pays for it.
+
+**Lives in** `radixnet/penalty.py`, `radixnet/graph.py`, `go/radixnet/penalty.go`
+
+### D-070 — A setting of the network gets one home and one value, wherever it is edited
+
+**Status** Accepted · 2026-09-20 · **Layer** frontend
+
+**Context** D-069 gave every search a traversal, and the frontend had nowhere
+to put it. It went on the two tabs that use it, Predict and Generate, as a copy
+each. That was already wrong in a way worth naming: the traversal is a property
+of *the network's behaviour*, not an option of one prediction, and two copies of
+one setting is two answers to the same question. The frontend had the same shape
+elsewhere - the count model's weight function was a fieldset on the **Train**
+tab, which is a training form, and it was missing `path_scale`.
+
+**Decision** A **Network settings** tab: the settings of the network itself, as
+opposed to the options of one run. The traversal, the score function of whichever
+kind is active, and the encoder / decoder.
+
+A setting several panels use lives **once** and is read through a provider
+(`useNetworkSettings`), so the Network settings, Predict and Generate tabs show
+one control in three places rather than three controls. `useStoredState`, which
+every other field uses, cannot do this: two mounted components under one name
+share the stored value and not the state, and every panel here stays mounted
+while hidden, so two copies would drift apart within a session and only agree
+again after a reload.
+
+The score function left the Train tab for the same reason - two forms over one
+server-side value, whichever is not touched showing what the function used to be.
+
+**What the encoder card does *not* do** The window (3) is the one number on the
+page that looks like a setting and is not: the graph's labels, the split and
+merge rules, the model file and the Go port all assume it, so a model trained at
+one window could not be read at another. `GET /api/encoding` reports
+`configurable: false` and the card says why, then spends its space making the
+encoding **visible** instead - `POST /api/encoding/preview` runs a text through
+the encoder, back through the decoder, and through the graph's own node labels,
+where a label longer than the window is a merged radix chain. Saying "this is
+fixed, and here is what it does" is worth more than a disabled input.
+
+**Alternatives rejected**
+* **A modal or a header menu.** Settings that take a paragraph each to explain
+  are not a menu; the tab strip already is the app's navigation.
+* **Leaving the traversal only on Predict and Generate.** It would have kept two
+  values for one thing and left the score function homeless.
+* **Making the window settable** by re-encoding on change. It is a model-format
+  change, not a setting, and pretending otherwise would break a saved file and
+  the cross-language contract at once.
+* **Mirroring the negative network's blame function here too.** It belongs
+  beside the failures it weighs; the card links to the Negative tab instead of
+  opening a second door onto a third value.
+
+**Consequences** The frontend now distinguishes the two kinds of control it has
+always had and never separated: what the network *is* (this tab, saved with the
+model or remembered in the browser) and what one run *asks for* (the action
+tabs). The traversal is the first setting to be shared rather than copied, and
+`useNetworkSettings` is the pattern for the next one.
+
+**Lives in** `frontend/src/components/NetworkSettingsPanel.jsx`,
+`frontend/src/hooks/useNetworkSettings.jsx`, `radixnet/api.py`, `go/server/`
 
 ---
 

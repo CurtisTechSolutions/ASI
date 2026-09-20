@@ -51,6 +51,9 @@ RadixCyclicNN/
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
+    penalty.py              the punishment traversal: the merit / penalty split of an edge's evidence, and the
+                            cost function that prices a step by the punishment it carries (section 31)
+                            (ported to Go as go/radixnet/penalty.go)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
@@ -413,6 +416,11 @@ def sample_walk(graph, start_node: int, start_offset: int, max_chars: int | None
     # Stops at END, at max_chars (None = no limit), or at a node without children.
 ```
 
+Both take an optional `costs: CostFn` - `(parent[, prev]) -> [(child, edge, cost)]` - in place of
+`graph.child_costs`, and so do `beam.beam_predict` and the four phase searches of `phasesearch.py`.  That one
+parameter is the **traversal** option of section 31: `None` is the model's own cost function and nothing about
+any search changes; the punishment traversal hands in a cost function built from the penalties alone.
+
 ---
 
 ## 8. `model.py` — RadixNet
@@ -650,6 +658,8 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
 | POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
 | POST `/api/score` | `{"text"}` | score dict |
+| GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
+| POST `/api/encoding/preview` | `{"text"}` | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
 | POST `/api/invert` | | `stats()` |
@@ -702,6 +712,8 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
+* `NetworkSettingsPanel.jsx` — **Network settings** (section 31.4): the settings of the network itself, as opposed to the options of one run. Three cards: the **traversal** every search uses (`TraversalFields.jsx` over the shared `useNetworkSettings`), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), and the **encoder / decoder** (`GET /api/encoding` for the window, stride, overlap and sentinels, `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the windows the model has never seen marked and a label longer than the window shown as the merged chain it is).
+* `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Network settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any).
 * `ScorePanel.jsx` — score a text.
 * `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
@@ -733,6 +745,15 @@ writeSetting(storage, name, value)     // -> stored?  (unserialisable, too large
 removeSetting / settingNames / clearSettings(storage)   // only this app's keys
 browserStorage()                       // localStorage probed once with a real write, else null
 ```
+
+A setting that belongs to the **network** rather than to a panel - the traversal and its two scales - is the one
+exception, and it is why `src/hooks/useNetworkSettings.jsx` exists: `NetworkSettingsProvider` holds it once at the
+top of `App.jsx` (persisted with `useStoredState` under `network.*`) and every panel reads it through
+`useNetworkSettings()`, which also hands back `body`, the request fields a `/api/predict` or `/api/generate` call
+needs for it. Two panels cannot share a `useStoredState` name - they would share the stored value but not the
+state, and every panel here stays mounted while hidden, so they would drift apart within a session - so a shared
+setting has to live in one place with several doors into it. Outside the provider the hook returns the defaults
+with no-op setters.
 
 `useStoredState(name, initialValue)` is `useState` with that store behind it: the initial value is the stored
 one when a value of the same shape exists, every later change is written back 250 ms after the last keystroke,
@@ -3043,3 +3064,128 @@ invert, prior fallback, round trip), the net (records, falling loss, the three p
 cycle learning, the layer moving the beam while Dijkstra ignores it, reward / punish / decohere, 2NRL with weights,
 `invert_paths`, stats, argument validation), persistence (file, gzip, wrong kind, checkpoints), the kind registry,
 the evolver and `converse`, the CLI and the HTTP API.
+
+---
+
+## 31. The traversal (`penalty.py`, `go/radixnet/penalty.go`) — follow the rewards, or avoid the punishments
+
+Every search in the package reads the graph through one funnel: `[(child, edge, cost)]` for a node, with
+`cost = -log P(child | parent)`.  `search.dijkstra_predict`, `search.sample_walk`, `beam.beam_predict` and the four
+phase searches of `phasesearch.py` all call `graph.child_costs(p[, prev])` (or `child_costs_at(p, bucket)`) and
+nothing else.  **Which cost function fills that list is the traversal**, and it is an option:
+
+| traversal | what the search looks for |
+|---|---|
+| `"reward"` (the default) | what the model believes.  The count / reward model's weight carries `reward_scale * reward`, so a path the tutor rewarded is cheap and the search follows the rewards.  Every release before this option behaved this way, and `traversal_costs` returns `None` for it — the searches call `graph.child_costs` exactly as they always did, at no cost at all. |
+| `"punishment"` | what the model was punished for.  The rewards leave the score altogether and only the penalties price the step, so the cheapest path is the one that accumulated the **least punishment**. |
+
+The traversal is *what* a search looks for; the mode (`dijkstra` / `kbest` / `beam` / `sample`) is *how* it looks.
+They are independent by construction: the option replaces the funnel instead of adding a fifth mode, so every mode
+of every kind gains it at once and no search code changes.
+
+### 31.1 The split: `child_evidence`
+
+```python
+class RadixCyclicGraph:
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]
+        # [(child, edge, merit, penalty)] over p's out-edges.
+        #   merit    - what speaks FOR the step, with every reward taken out of it
+        #   penalty  - what speaks AGAINST it, >= 0
+        # prev is the node the walk arrived from, which a model that counts paths prices the step by.
+```
+
+| graph | merit | penalty |
+|---|---|---|
+| `RadixCyclicGraph` (the sine model) | `max(0, w * f_p * f_c)` | `max(0, -(w * f_p * f_c))` |
+| `CountRewardGraph` | `edge_w[e] - reward_scale * reward` (the dual frequency function, rewards out) | `reward_scale * max(0, -reward)` |
+| `ResonantGraph` | `edge_w[e] - reward_scale * reward`; `child_evidence_at(p, bucket)` adds the resonance | `reward_scale * max(0, -reward)` |
+| `NegativeGraph` | `log1p(edge_clear[e])` | `log1p(evidence(e))` |
+
+The sine model keeps no separate ledger of its punishments — 2NRL trains a failure in and then inverts it, so what
+a punishment leaves behind *is* a negative score on that path's edges — which is why its penalty is read straight
+off the score, and why at the default scales its two traversals coincide and part company as soon as
+`penalty_scale` is raised.  A judged path context (`CountRewardGraph.path_term`) splits the same way: the part of
+the term that says the step was right here is merit, the part that says it was wrong here is penalty.  On the
+negative network the option reverses the network's purpose, which is the point: its ordinary traversal predicts the
+likeliest way a prefix goes wrong, the punishment traversal walks the least blamed way through the same structure.
+
+### 31.2 The cost function
+
+```python
+TRAVERSALS = ("reward", "punishment")
+DEFAULT_TRAVERSAL = "reward"
+
+def resolve_traversal(traversal: str | None) -> str          # None / "" -> the default; ValueError otherwise
+
+class PenaltyCosts:                                          # a drop-in for graph.child_costs
+    def __init__(self, graph, penalty_scale: float = 1.0, merit_scale: float = 1.0)
+    def __call__(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]
+
+class PhasePenaltyCosts:                                     # a drop-in for graph.child_costs_at
+    def __call__(self, p: int, bucket: int) -> list[tuple[int, int, float]]
+
+def traversal_costs(graph, traversal, penalty_scale=1.0, merit_scale=1.0)        # None for "reward"
+def phase_traversal_costs(graph, traversal, penalty_scale=1.0, merit_scale=1.0)  # None for "reward"
+```
+
+`score(child) = merit_scale * merit - penalty_scale * penalty`, and the cost is `-log softmax(score)` over the
+parent's children.  That keeps every invariant the searches rely on: costs are `>= 0` (Dijkstra stays a true
+shortest path, `step_penalty >= 0` still holds), `exp(-cost)` is still a path's probability, the children still sum
+to 1, and `onward()` can still compare a `BACK` edge against the real children.  The result is cached per
+`(parent, prev)` until `graph.version` changes, exactly like the graph's own cost cache; the Go port instead prices
+every edge once into a table before the search starts, because its two beams run in parallel goroutines.
+
+`merit_scale = 0` is the pure form: nothing but the punishment decides, and among equally unpunished children the
+walk is indifferent.  Both scales must be `>= 0`.
+
+### 31.3 Where it is reachable
+
+* Python: `predict(..., traversal=, penalty_scale=, merit_scale=)` and `generate(...)` on all four kinds, and the
+  same three on `NegativeFilter.predict` / `.generate`.  A `Prediction` carries `traversal`, so a result says
+  which one ran.
+* CLI: `--traversal reward|punishment`, `--penalty-scale`, `--merit-scale` on `predict` and `generate`
+  (`add_traversal_flags`), and the `--json` document carries `traversal`.
+* HTTP API: `traversal`, `penalty_scale`, `merit_scale` on `POST /api/predict` and `POST /api/generate`
+  (`_traversal_fields`), both servers.
+* Frontend: the **Network settings** tab (section 31.4) and, as the same control, the Predict and Generate tabs
+  (`frontend/src/components/TraversalFields.jsx` over the shared `useNetworkSettings`), with the two scales shown
+  only when the punishment traversal is chosen; the Result card reports the traversal that ran.
+* Go: `Graph.ChildEvidence`, `Graph.PenaltyCosts`, `Graph.TraversalCosts`, a `CostFn` on `SampleWalk` and
+  `BeamOptions`, and `Traversal` / `PenaltyScale` / `MeritScale` on `PredictOptions` and `GenerateOptions`.
+
+Tests: `tests/test_penalty.py` (the split per kind, that the rewards really do leave the score, the cheapest path
+being the least punished one, the distribution invariant, the cache, every mode of every kind, the CLI and the HTTP
+API), `go/radixnet/penalty_test.go` (the same contract in Go) and
+`tests/test_go_parity.py::TestGoParity::test_the_punishment_traversal_matches` (both sides walk the same
+least-punished paths at the same costs, under three settings of the scales, for `predict` and `generate`).
+
+### 31.4 The Network settings tab
+
+The traversal is a setting of the **network**, not an option of one run, and it was the first of those the
+frontend had nowhere to put. `frontend/src/components/NetworkSettingsPanel.jsx` is that place, and it collects
+the three settings of the network itself:
+
+| card | what it sets | how |
+|---|---|---|
+| **Traversal** | the traversal every search runs, and its penalty / merit scales | the shared `useNetworkSettings` store, remembered in this browser; `TraversalFields.jsx` renders it here in full and on the Predict and Generate tabs in its `compact` form |
+| **Score function** | the active kind's weight function | `GET /api/model` → `weights` on mount and after every change, `POST /api/model/weights` to apply. The count model's `global_scale / window_scale / reward_scale / count_scale / path_scale / window`, the resonant model's `buckets / period / kick_scale / resonance_scale / amp_scale / reward_scale / concentration`. A kind without one - the sine model, whose score is learned rather than set, and the negative network, whose blame function is on its own tab - gets the sentence saying so and where to look instead |
+| **Encoder / decoder** | nothing: it is read-only, and says so | `GET /api/encoding` for the window, stride, overlap and the three sentinels; `POST /api/encoding/preview` for a text the user types - the windows it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than the window is a merged radix chain and `decode_path` reads the text back out of it |
+
+Two decisions are worth stating.
+
+**One setting, several doors.** The traversal is edited in three places and is one value
+(`src/hooks/useNetworkSettings.jsx`, section 13.1): a provider at the top of `App.jsx` holds it, every panel reads
+it through `useNetworkSettings()`, and changing it anywhere changes it everywhere at once. Two `useStoredState`
+calls under one name would have shared the *stored* value and not the state, and every panel here stays mounted
+while hidden, so they would have disagreed until a reload.
+
+**The score function moved off the Train tab.** It was a fieldset there, count-model-only and missing
+`path_scale`; the Train tab now carries one line pointing at this one. How an edge is scored is a property of the
+model that is saved with it, not a setting of a training run, and having it in two places would have had the same
+drift problem - the form that was not touched would keep showing what the function used to be.
+
+**The encoder is read-only on purpose.** The window is the one number here that *looks* like a setting and is
+not: the graph's labels, the split and merge rules, the saved file and the Go port all assume 3, so a model
+trained at one window could not be read at another. Rather than leave that unsaid, the card reports
+`configurable: false` from the server and explains why, and spends its space on making the encoding *visible*
+instead - which is also the clearest demonstration of the radix compression anywhere in the frontend.

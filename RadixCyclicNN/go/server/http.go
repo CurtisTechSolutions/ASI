@@ -229,6 +229,10 @@ func init() {
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
+	route("GET", "/api/encoding", rEncoding)
+	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, configurable: false (the window is part of the model format, not a setting), note}")
+	route("POST", "/api/encoding/preview", rEncodingPreview)
+	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
 	route("POST", "/api/train", rTrain)
 	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
 	route("GET", "/api/job", rJob)
@@ -236,9 +240,9 @@ func init() {
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, guard (default on: the negative network vetoes the continuations it recognises as failures)}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), guard (default on: the negative network vetoes the continuations it recognises as failures)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
 	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
@@ -338,6 +342,19 @@ func weightOptions(f fields) (map[string]float64, error) {
 		opts["window"] = float64(w)
 	}
 	return opts, nil
+}
+
+func rEncoding(rq *request) (int, any, error) {
+	return 200, rq.svc.Encoding(), nil
+}
+
+func rEncodingPreview(rq *request) (int, any, error) {
+	text, err := rq.f.optText("text", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.EncodingPreview(text)
+	return 200, out, err
 }
 
 func rModelWeights(rq *request) (int, any, error) {
@@ -535,6 +552,24 @@ func pathDict(r *radixnet.PathResult) map[string]any {
 	}
 }
 
+// traversalFields reads the traversal option and its two scales, shared by
+// /api/predict and /api/generate (see radixnet/penalty.go).
+func traversalFields(f fields) (name string, penaltyScale, meritScale float64, err error) {
+	if name, err = f.optText("traversal", radixnet.DefaultTraversal); err != nil {
+		return "", 0, 0, err
+	}
+	if name, err = radixnet.ResolveTraversal(name); err != nil {
+		return "", 0, 0, err
+	}
+	if penaltyScale, _, err = f.number("penalty_scale", 1, floatp(0)); err != nil {
+		return "", 0, 0, err
+	}
+	if meritScale, _, err = f.number("merit_scale", 1, floatp(0)); err != nil {
+		return "", 0, 0, err
+	}
+	return name, penaltyScale, meritScale, nil
+}
+
 func rPredict(rq *request) (int, any, error) {
 	f := rq.f
 	prefix, err := f.text("prefix", nil)
@@ -566,6 +601,9 @@ func rPredict(rq *request) (int, any, error) {
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
 		return 0, nil, err
 	}
+	if o.Traversal, o.PenaltyScale, o.MeritScale, err = traversalFields(f); err != nil {
+		return 0, nil, err
+	}
 	guard, err := f.flag("guard", true)
 	if err != nil {
 		return 0, nil, err
@@ -585,8 +623,8 @@ func rPredict(rq *request) (int, any, error) {
 	return 200, map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
-		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
-		"top": top, "bottom": bottom, "guard": report,
+		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal,
+		"k": p.K, "beam": p.Beam, "top": top, "bottom": bottom, "guard": report,
 	}, nil
 }
 
@@ -628,6 +666,9 @@ func rGenerate(rq *request) (int, any, error) {
 		return 0, nil, err
 	}
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
+		return 0, nil, err
+	}
+	if o.Traversal, o.PenaltyScale, o.MeritScale, err = traversalFields(f); err != nil {
 		return 0, nil, err
 	}
 	guard, err := f.flag("guard", true)

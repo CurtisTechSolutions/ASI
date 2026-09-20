@@ -46,6 +46,7 @@ from .beam import Prediction
 from .encoding import WINDOW
 from .model import GraphModel
 from .negative import NegativeNet
+from .penalty import DEFAULT_TRAVERSAL
 from .search import PathResult
 from . import blame
 
@@ -256,6 +257,9 @@ class NegativeFilter:
         seed: int | None = None,
         step_penalty: float = 0.0,
         beam: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> dict:
         """Generate through the pair: over-sample from the positive model, keep what the negative one allows.
 
@@ -279,7 +283,8 @@ class NegativeFilter:
         asked = count * factor
         results = self.positive.generate(
             max_length=max_length, mode=mode, temperature=temperature, count=asked, seed=seed, prefix=prefix,
-            step_penalty=step_penalty, beam=beam,
+            step_penalty=step_penalty, beam=beam, traversal=traversal, penalty_scale=penalty_scale,
+            merit_scale=merit_scale,
         )
         candidates: list[str] = []
         paths: dict[str, Any] = {}
@@ -313,6 +318,9 @@ class NegativeFilter:
         step_penalty: float = 0.0,
         to_end: bool = False,
         max_length: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> dict:
         """Continue ``prefix`` through the pair: the positive model's top-K continuations, minus the vetoed ones.
 
@@ -320,11 +328,13 @@ class NegativeFilter:
         "candidates", "warning"}``; ``text`` is the best surviving
         continuation (``None`` when every one of them was rejected) and
         ``warning`` is what the negative network predicts goes wrong from
-        here, whether or not anything was rejected.
+        here, whether or not anything was rejected.  ``traversal`` is the
+        positive model's (:mod:`radixnet.penalty`); the warning always comes
+        from the negative network's own distribution.
         """
         found = self.positive.predict(
             prefix, length=length, mode="beam", k=k, beam=beam, step_penalty=step_penalty, to_end=to_end,
-            max_length=max_length,
+            max_length=max_length, traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
         )
         candidates: list[str] = []
         for result in getattr(found, "top", None) or [found]:

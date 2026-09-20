@@ -36,6 +36,7 @@ from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
+from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
 from .search import PathResult, dijkstra_predict, sample_walk
 from .schedule import preview_points
 
@@ -576,11 +577,17 @@ class GraphModel:
         to_end: bool,
         max_length: int | None,
         rng: random.Random | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
         continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
-        ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`."""
+        ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`.  ``traversal``
+        picks the cost function the search reads the graph through (:mod:`radixnet.penalty`)."""
         graph = self.graph
+        traversal = resolve_traversal(traversal)
+        costs = traversal_costs(graph, traversal, penalty_scale, merit_scale)
         node, offset, lead = self._prefix_start(prefix)
         want = max(0, length - len(lead))
         cap: int | None
@@ -594,12 +601,15 @@ class GraphModel:
                 max_chars = max(want, cap - len(lead))
             top, bottom, expanded = beam_predict(
                 graph, node, offset, min_chars=want, k=k, beam=beam, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end,
+                step_penalty=step_penalty, to_end=to_end, costs=costs,
             )
             width = default_beam(k) if beam is None else int(beam)
         else:
             cap = max_length if max_length is not None else length
-            walk = sample_walk(graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng)
+            walk = sample_walk(
+                graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng,
+                costs=costs,
+            )
             top, bottom, expanded, width = [walk], [], walk.expanded, 0
         for result in top + bottom:
             if lead:
@@ -611,7 +621,7 @@ class GraphModel:
         return Prediction(
             text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
             step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end, full_text=best.full_text,
-            top=top, bottom=bottom, k=k, beam=width, mode=mode,
+            top=top, bottom=bottom, k=k, beam=width, mode=mode, traversal=traversal,
         )
 
     # -- generation and scoring ----------------------------------------------
@@ -626,6 +636,9 @@ class GraphModel:
         prefix: str = "",
         step_penalty: float = 0.0,
         beam: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> list[PathResult]:
         """Generate whole texts with the prediction search, from START or continuing ``prefix``.
 
@@ -639,7 +652,9 @@ class GraphModel:
         * ``"dijkstra"`` - the single cheapest complete text (one entry).
 
         Every result's ``text`` (and ``full_text``) is the whole text, prefix
-        included; ``probability`` is ``exp(-cost)``.
+        included; ``probability`` is ``exp(-cost)``.  ``traversal`` picks what
+        the search is looking for - ``"reward"`` or ``"punishment"``, the text
+        that accumulated the least punishment (:meth:`predict`).
         """
         if max_length < 0:
             raise ValueError(f"max_length must be >= 0, got {max_length}")
@@ -652,19 +667,26 @@ class GraphModel:
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
         if count == 0:
             return []
+        walk_options = {"traversal": traversal, "penalty_scale": penalty_scale, "merit_scale": merit_scale}
         if mode == "sample":
             rng = random.Random(seed) if seed is not None else None
             results: list[PathResult] = []
             for _ in range(count):
-                walk = self._search(prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng)
+                walk = self._search(
+                    prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng,
+                    **walk_options,
+                )
                 results.append(_whole_text(walk, prefix))
             return results
         if mode == "dijkstra":
-            best = self.predict(prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length, step_penalty=step_penalty)
+            best = self.predict(
+                prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length,
+                step_penalty=step_penalty, **walk_options,
+            )
             return [_whole_text(best, prefix)]
         found = self.predict(
             prefix, length=0, mode="beam", k=count, beam=beam, to_end=True, max_length=max_length,
-            step_penalty=step_penalty,
+            step_penalty=step_penalty, **walk_options,
         )
         return [_whole_text(result, prefix) for result in found.top]
 
@@ -932,6 +954,9 @@ class RadixNet(GraphModel):
         max_length: int | None = None,
         k: int = 5,
         beam: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> PathResult:
         """Continue ``prefix``.
 
@@ -949,13 +974,27 @@ class RadixNet(GraphModel):
         matched, the unmatched remainder of that trigram opens the
         continuation; a cap, when given, applies to the continuation as a
         whole (lead included).
+
+        ``traversal`` is *what* the search is looking for, as opposed to
+        ``mode``, which is how it looks: ``"reward"`` (the default) walks the
+        model's own distribution, rewards and all, and ``"punishment"`` prices
+        every step by the punishment it carries instead, so the cheapest path
+        is the one that accumulated the **least punishment**
+        (:mod:`radixnet.penalty`).  ``penalty_scale`` weighs the punishments
+        and ``merit_scale`` what the corpus did; ``merit_scale = 0`` is the
+        pure form, where nothing but the punishments decides.  Both are
+        ignored by the reward traversal.
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "dijkstra").lower()
         if mode not in ("dijkstra", "beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'dijkstra', 'beam' or 'sample'")
+        traversal = resolve_traversal(traversal)
         if mode != "dijkstra":
-            return self._search(prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length)
+            return self._search(
+                prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
+                traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+            )
         graph = self.graph
         node, offset, lead = self._prefix_start(prefix)
         want = max(0, length - len(lead))
@@ -972,6 +1011,7 @@ class RadixNet(GraphModel):
         result = dijkstra_predict(
             graph, node, offset, min_chars=want, max_chars=max_chars,
             step_penalty=step_penalty, to_end=to_end,
+            costs=traversal_costs(graph, traversal, penalty_scale, merit_scale),
         )
         if lead:
             result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
