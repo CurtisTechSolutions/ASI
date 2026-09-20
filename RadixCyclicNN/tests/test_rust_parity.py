@@ -418,142 +418,105 @@ class TestRustParity(unittest.TestCase):
         self.assertEqual(version["backend"], "rust")
 
 
-class TestRustEncodingParity(unittest.TestCase):
-    """The encoding dial is the same dial on both sides.
+class TestRustWordParity(unittest.TestCase):
+    """A word encoding over the same graph: same grams, same file, same predictions.
 
-    Every encoding the two implementations offer - n-grams of any size, groups
-    of letters, word grams - must build the same graph from the same corpus,
-    write the same file, and read each other's.  The Go twin of this class is
-    ``test_go_parity.TestGoEncodingParity``, and the three ports are held to
-    one table.
+    Words are not a kind - they are an encoding (``--encoding word:3:1``), so
+    what has to agree is everything the dial touches: the grams, the graph, the
+    alphabet those grams are made of, and every prediction and score.
     """
 
-    ENCODINGS = ["char:3:1", "char:5:1", "char:4:4", "char:5:5", "char:6:3",
-                 "word:1:1", "word:2:1", "word:3:1", "word:2:2"]
+    ENCODING = "word:3:1"
 
-    def test_the_same_graph_from_the_same_corpus(self):
-        for spec in self.ENCODINGS:
-            with self.subTest(encoding=spec):
-                tag = spec.replace(":", "-")
-                py_model = os.path.join(TMP.name, f"enc-py-{tag}.json")
-                rs_model = os.path.join(TMP.name, f"enc-rs-{tag}.json")
-                py("--kind", "count", "--seed", 1, "--encoding", spec, "train",
-                   "--data", CORPUS, "--epochs", 2, model=py_model)
-                rust("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
-                     "--workers", 4, model=rs_model)
-                p, r = load_json(py_model)["graph"], load_json(rs_model)["graph"]
-                self.assertEqual(p.get("encoding"), r.get("encoding"), "the written encoding block")
-                self.assertEqual(p["nodes"]["labels"], r["nodes"]["labels"])
-                self.assertEqual(p["nodes"]["count"], r["nodes"]["count"])
-                self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (r["edges"]["src"], r["edges"]["dst"]))
-                self.assertEqual(p["edges"]["count"], r["edges"]["count"])
-                assert_close(self, p["edges"]["w"], r["edges"]["w"], 1e-12)
-                self.assertEqual(p["rng_state"], r["rng_state"])
-                # only a non-default encoding is written at all, so an ordinary
-                # file is byte for byte what it always was
-                self.assertEqual("encoding" in p, spec != "char:3:1", spec)
-                # one format whatever the encoding: a word model is this model
-                # under a word encoding, not a kind of file
-                self.assertEqual(load_json(rs_model)["format"], "radixnet-count")
+    @classmethod
+    def setUpClass(cls):
+        cls.py_model = os.path.join(TMP.name, "py.word.json")
+        cls.rs_model = os.path.join(TMP.name, "rs.word.json")
+        # --kind count: Python's default kind is the sine network, and the Rust
+        # port only has this one; the encoding is the dial on top of it
+        py("--kind", "count", "--encoding", cls.ENCODING, "--seed", 1, "train", "--data", CORPUS, "--epochs", 2,
+           model=cls.py_model)
+        rust("--encoding", cls.ENCODING, "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, "--workers", 4,
+             model=cls.rs_model)
+        cls.py_doc = load_json(cls.py_model)
+        cls.rs_doc = load_json(cls.rs_model)
 
-    def test_each_side_reads_the_other(self):
-        spec = "word:2:1"
-        py_model = os.path.join(TMP.name, "enc-cross-py.json")
-        rs_model = os.path.join(TMP.name, "enc-cross-rs.json")
-        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 1,
-           model=py_model)
-        rust("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 1, model=rs_model)
-        # each side reports the other's file as the word bigram it is
-        for reader, path in ((rust, py_model), (py, rs_model)):
-            info = reader("info", model=path)
-            self.assertEqual(info["stats"]["encoding"], spec)
-            self.assertEqual((info["stats"]["ngram"], info["stats"]["stride"]), (2, 1))
-            self.assertEqual(info["stats"]["units"], "words")
-        # and continues it: one more epoch on either side leaves the same graph
-        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 1, model=rs_model)
-        rust("train", "--data", CORPUS, "--epochs", 1, model=py_model)
-        a, b = load_json(py_model)["graph"], load_json(rs_model)["graph"]
-        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
-        self.assertEqual(a["nodes"]["count"], b["nodes"]["count"])
-        self.assertEqual(a["encoding"], b["encoding"])
+    def test_the_word_document_is_pythons_byte_for_byte(self):
+        """The same bar the character model is held to, the encoding block included."""
+        strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
+        self.assertEqual(strip(self.py_doc), strip(self.rs_doc))
+        # a word model is still the count format: the encoding is what changed
+        self.assertEqual(self.py_doc["format"], "radixnet-count")
+        self.assertEqual(self.rs_doc["format"], "radixnet-count")
+        self.assertEqual(self.rs_doc["kind"], "count")
+        for doc, side in ((self.py_doc, "python"), (self.rs_doc, "rust")):
+            self.assertEqual(doc["graph"]["encoding"], {"unit": "word", "n": 3, "stride": 1}, side)
+        for key in ("epochs_total", "trained_texts", "trained_chars"):
+            self.assertEqual(self.py_doc["meta"][key], self.rs_doc["meta"][key], key)
+        # every label is words, written with single spaces
+        for label in self.py_doc["graph"]["nodes"]["labels"][3:]:
+            self.assertNotIn("  ", label)
+            self.assertEqual(label, " ".join(label.split()), label)
 
-    def test_the_same_prediction_in_words(self):
-        spec = "word:2:1"
-        py_model = os.path.join(TMP.name, "enc-pred-py.json")
-        rs_model = os.path.join(TMP.name, "enc-pred-rs.json")
-        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
-           model=py_model)
-        rust("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=rs_model)
-        a = py("predict", "--prefix", "the cat", "--k", 3, "--length", 4, model=py_model)
-        b = rust("predict", "--prefix", "the cat", "--k", 3, "--length", 4, model=rs_model)
-        self.assertEqual(a["continuation"], b["continuation"])
-        self.assertEqual(a["full_text"], b["full_text"])
-        self.assertEqual([r["full_text"] for r in a["top"]], [r["full_text"] for r in b["top"]])
-        self.assertEqual([r["full_text"] for r in a["bottom"]], [r["full_text"] for r in b["bottom"]])
-        assert_close(self, [r["cost"] for r in a["top"]], [r["cost"] for r in b["top"]])
-        # the words come back whole, with the space the prefix needs
-        self.assertTrue(a["full_text"].startswith("the cat "), a["full_text"])
-        self.assertEqual(a["continuation"], " ".join(a["continuation"].split()))
-        # and a score counts in words, not characters
-        for text in ("the cat sat on the mat", "qqzz never read this"):
+    def test_the_same_predictions_scores_and_texts(self):
+        for prefix in ("the cat sat on", "the", "water boils at", "qqzz never read", ""):
+            with self.subTest(prefix=prefix):
+                a = py("predict", "--prefix", prefix, "--length", 4, "--k", 3, model=self.py_model)
+                b = rust("predict", "--prefix", prefix, "--length", 4, "--k", 3, model=self.rs_model)
+                self.assertEqual(a["continuation"], b["continuation"])
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-12)
+                self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+                self.assertEqual([t["full_text"] for t in a["bottom"]], [t["full_text"] for t in b["bottom"]])
+                self.assertEqual(a["path"], b["path"])  # the labels are words on both sides
+        for text in ("the cat sat on the mat", "water boils at 100 degrees celsius", "qqzz never read this"):
             with self.subTest(text=text):
-                x = py("score", "--text", text, model=py_model)["results"][0]
-                y = rust("score", "--text", text, model=rs_model)["results"][0]
-                self.assertEqual(x["chars"], y["chars"])
-                self.assertEqual(x["chars"], len(text.split()), "a score counts in words here")
-                self.assertEqual(x["unknown_transitions"], y["unknown_transitions"])
-                self.assertAlmostEqual(x["log_prob"], y["log_prob"], places=9)
+                a = py("score", "--text", text, model=self.py_model)["results"][0]
+                b = rust("score", "--text", text, model=self.rs_model)["results"][0]
+                self.assertLessEqual(abs(a["log_prob"] - b["log_prob"]), 1e-12)
+                self.assertEqual(a["chars"], b["chars"])  # words, here
+                self.assertEqual(a["unknown_transitions"], b["unknown_transitions"])
+        a = py("generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.py_model)
+        b = rust("generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.rs_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        assert_close(self, [s["cost"] for s in a["samples"]], [s["cost"] for s in b["samples"]], 1e-12)
 
     def test_the_same_alphabet_in_the_same_order(self):
-        spec = "word:3:1"
-        py_model = os.path.join(TMP.name, "enc-words-py.json")
-        rs_model = os.path.join(TMP.name, "enc-words-rs.json")
-        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
-           model=py_model)
-        rust("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=rs_model)
-        a = py("words", "--limit", 10, model=py_model)
-        b = rust("words", "--limit", 10, model=rs_model)
+        a = py("words", "--limit", 10, model=self.py_model)
+        b = rust("words", "--limit", 10, model=self.rs_model)
         self.assertEqual(a["vocabulary"], b["vocabulary"])
+        self.assertGreater(a["vocabulary"], 100)
         self.assertEqual((a["units"], b["units"]), ("words", "words"))
-        # the id is the row's rank: the graph has no vocabulary to number from
-        self.assertEqual([(r["word"], r["id"], r["trigrams"]) for r in a["words"]],
-                         [(r["word"], r["id"], r["trigrams"]) for r in b["words"]])
-        self.assertEqual([r["id"] for r in b["words"]], list(range(len(b["words"]))))
+        self.assertEqual((a["encoding"], b["encoding"]), (self.ENCODING, self.ENCODING))
+        self.assertEqual([(r["word"], r["id"], r["grams"]) for r in a["words"]],
+                         [(r["word"], r["id"], r["grams"]) for r in b["words"]])
 
-    def test_the_same_words_out_of_the_same_text(self):
-        """The tokeniser is the Unicode ``White_Space`` property on both sides.
+    def test_each_side_reads_the_other_s_word_model(self):
+        loaded = load_model(self.rs_model)  # Python reads the Rust file
+        self.assertEqual(str(loaded.encoding), self.ENCODING)
+        self.assertEqual(loaded.predict("the cat sat on", length=4, k=3).text,
+                         py("predict", "--prefix", "the cat sat on", "--length", 4, "--k", 3,
+                            model=self.py_model)["continuation"])
+        # and Rust reads the Python file, continues it, and Python reads that back
+        crossed = os.path.join(TMP.name, "crossed.word.json")
+        shutil.copyfile(self.py_model, crossed)
+        rust("train", "--data", CORPUS, "--epochs", 1, model=crossed)
+        again = load_model(crossed)
+        self.assertEqual(str(again.encoding), self.ENCODING)
+        self.assertEqual(again.stats()["epochs_total"], 3)
 
-        Python calls U+001C..U+001F whitespace and the property does not, so a
-        text holding one is where the two rules would disagree - and a word a
-        model splits differently is a different node.
-        """
-        spec = "word:2:1"
-        py_model = os.path.join(TMP.name, "enc-split-py.json")
-        rs_model = os.path.join(TMP.name, "enc-split-rs.json")
-        odd = os.path.join(TMP.name, "separators.txt")
-        with open(odd, "w", encoding="utf-8") as fh:
-            fh.write("a\x1cb c d\n" * 4)
-        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", odd, "--epochs", 1,
-           model=py_model)
-        rust("--seed", 1, "--encoding", spec, "train", "--data", odd, "--epochs", 1, model=rs_model)
-        a, b = load_json(py_model)["graph"], load_json(rs_model)["graph"]
-        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
-        # three words, not four: the separator is not whitespace here
-        self.assertEqual(py("score", "--text", "a\x1cb c d", model=py_model)["results"][0]["chars"], 3)
-        self.assertEqual(rust("score", "--text", "a\x1cb c d", model=rs_model)["results"][0]["chars"], 3)
-
-    def test_both_refuse_the_same_nonsense(self):
-        model = os.path.join(TMP.name, "enc-bad.json")
-        for spec in ("rune:3", "char:2:3", "char:0"):
-            with self.subTest(spec=spec):
-                self.assertTrue(py("--encoding", spec, "info", model=model, expect=1)["error"])
-                self.assertTrue(rust("--encoding", spec, "info", model=model, expect=1)["error"])
-        # and a character model has no alphabet of words to list
-        chars = os.path.join(TMP.name, "enc-chars.json")
-        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 1, model=chars)
-        for runner in (py, rust):
-            out = runner("words", model=chars, expect=1)
-            self.assertIn("word encoding", out["error"])
+    def test_the_other_dials_agree_too(self):
+        """Any n, any stride: the two sides build the same graph from the same grams."""
+        for spec in ("char:5:1", "char:4:4", "word:2:1"):
+            with self.subTest(encoding=spec):
+                pym = os.path.join(TMP.name, f"py.{spec.replace(':', '-')}.json")
+                rsm = os.path.join(TMP.name, f"rs.{spec.replace(':', '-')}.json")
+                py("--kind", "count", "--encoding", spec, "--seed", 3, "train", "--data", CORPUS, "--epochs", 1,
+                   model=pym)
+                rust("--encoding", spec, "--seed", 3, "train", "--data", CORPUS, "--epochs", 1, model=rsm)
+                a, b = load_json(pym), load_json(rsm)
+                strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
+                self.assertEqual(strip(a), strip(b), spec)
 
 
 class TestRustFileFormat(unittest.TestCase):

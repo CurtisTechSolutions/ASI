@@ -21,13 +21,8 @@ pub fn stats(model: &Model) -> Json {
         ("nodes".to_string(), Json::Int(g.num_nodes() as i64)),
         ("edges".to_string(), Json::Int(g.num_edges() as i64)),
         ("trigrams".to_string(), Json::Int(g.num_trigrams() as i64)),
+        // `grams` is `trigrams` under the name that survives an encoding of any n
         ("grams".to_string(), Json::Int(g.num_trigrams() as i64)),
-        // the dial the labels above are written in: every length and count of
-        // this block is in its units
-        ("encoding".to_string(), Json::str(g.enc.to_string())),
-        ("unit".to_string(), Json::str(g.enc.unit.name())),
-        ("ngram".to_string(), Json::Int(g.enc.n as i64)),
-        ("stride".to_string(), Json::Int(g.enc.stride as i64)),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),
@@ -69,12 +64,16 @@ pub fn stats(model: &Model) -> Json {
         ),
         ("window_traversals".to_string(), Json::Int(g.window_traversals() as i64)),
     ]);
-    // what every number above is counted in; a per-word number read as
-    // per-character is read wrong
+    // what every number above is counted in, and the dial it was read with;
+    // a per-word number read as per-character is read wrong
     pairs.push(("units".to_string(), Json::str(model.units())));
-    if g.is_words() {
-        let alphabet = g.enc.vocabulary(g.gram_index().iter().map(String::as_str));
-        pairs.push(("vocabulary".to_string(), Json::Int(alphabet.len() as i64)));
+    pairs.push(("encoding".to_string(), Json::str(g.enc.to_string())));
+    pairs.push(("unit".to_string(), Json::str(g.enc.unit.name())));
+    pairs.push(("ngram".to_string(), Json::Int(g.enc.n as i64)));
+    pairs.push(("stride".to_string(), Json::Int(g.enc.stride as i64)));
+    if g.enc.unit == crate::encoding::Unit::Words {
+        let words = crate::encoding::vocabulary(&g.enc, g.gram_index());
+        pairs.push(("vocabulary".to_string(), Json::Int(words.len() as i64)));
     }
     Json::Obj(pairs)
 }

@@ -37,17 +37,14 @@ radixnet-count --model model.count.json negative filter --count 3   # write, the
 radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame
 radixnet-count --seed 1 bench --chars 200000
 radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished
-radixnet-count --model model.word.json --encoding word:3:1 train --data data/sample_corpus.txt --epochs 5
-radixnet-count --model model.word.json words --limit 20   # the alphabet it has read
+radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
+radixnet-count --kind word words --limit 20            # the alphabet it has read
 ```
 
-`--encoding word:3:1` builds the same model over an alphabet whose symbols are
-**words** (`../../../SPEC-WordNGrams.md`): every length, count and score is then
-per word, `words` lists the alphabet the graph's grams are made of, and a node
-is addressed in words (`nodes --node "sat on the mat"`). `--units`, `--ngram`
-and `--stride` set the three dials one at a time. The encoding is fixed when a
-model is created, so those flags apply to a new model and a loaded file's own
-encoding always wins; `--kind word` only picks the default file name.
+`--kind word` builds the same model over an alphabet whose symbols are **words**
+(`../../../SPEC-WordNGrams.md`): every length, count and score is then per word,
+`words` lists the vocabulary, and a node is addressed in words
+(`nodes --node "sat on the mat"`). A loaded file's own kind always wins.
 
 `--traversal least-punished` on `predict`, `generate` and `bench` walks by the
 blame on a step rather than by its cost (`../../../SPEC-LeastPunished.md`); the

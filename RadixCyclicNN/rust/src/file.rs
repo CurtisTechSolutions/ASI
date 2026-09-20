@@ -24,7 +24,7 @@ use std::sync::atomic::Ordering;
 
 use crate::clock::utc_now;
 use crate::counter::Counter;
-use crate::encoding::{Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL, WINDOW};
+use crate::encoding::{Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
 use crate::graph::{Graph, GraphOptions, Loc, BACK, END, FIRST, START};
 use crate::json::{parse, Json};
 use crate::model::{EpochRecord, Model};
@@ -34,6 +34,25 @@ use crate::weights::SMOOTHING;
 pub const MODEL_FORMAT: &str = "radixnet-count";
 /// The model document version this port writes.
 pub const MODEL_FORMAT_VERSION: i64 = 1;
+/// The encoding a graph document carries.
+///
+/// A document without an `encoding` block is the character trigram of stride 1,
+/// which is what every file was before the encoding became a choice, so an old
+/// file reads exactly as it always did.
+fn read_encoding(doc: &Json) -> Result<Encoding, String> {
+    let Some(block) = doc.get("encoding") else {
+        return Ok(Encoding::default());
+    };
+    let name = block.at("unit").as_str().unwrap_or("char");
+    let unit = Unit::parse(name).ok_or_else(|| format!("unknown graph unit {name:?}"))?;
+    let n = block.at("n").as_i64().unwrap_or(crate::encoding::WINDOW as i64);
+    let stride = block.at("stride").as_i64().unwrap_or(1);
+    if n < 1 || stride < 1 {
+        return Err(format!("graph encoding {name}:{n}:{stride} is not usable"));
+    }
+    Encoding::new(unit, n as usize, stride as usize)
+}
+
 /// The graph document format.
 pub const GRAPH_FORMAT: &str = "radixnet-graph";
 /// 3 added the `BACK` sentinel; older documents gain an unvisited one on load.
@@ -185,20 +204,23 @@ impl Graph {
         if self.enc.is_default() {
             return graph; // an ordinary file is byte for byte what it always was
         }
-        // the dial rides at the end of the block, as the Go implementation
-        // writes it; a reader takes the key, not its place
+        // the encoding sits third, right after format_version, which is exactly
+        // where Python and Go write it: the document is one document
         let mut pairs = match graph {
             Json::Obj(pairs) => pairs,
             other => return other,
         };
-        pairs.push((
-            "encoding".to_string(),
-            Json::obj([
-                ("unit", Json::str(self.enc.unit.name())),
-                ("n", Json::Int(self.enc.n as i64)),
-                ("stride", Json::Int(self.enc.stride as i64)),
-            ]),
-        ));
+        pairs.insert(
+            2,
+            (
+                "encoding".to_string(),
+                Json::obj([
+                    ("unit", Json::str(self.enc.unit.name())),
+                    ("n", Json::Int(self.enc.n as i64)),
+                    ("stride", Json::Int(self.enc.stride as i64)),
+                ]),
+            ),
+        );
         Json::Obj(pairs)
     }
 
@@ -242,20 +264,7 @@ impl Graph {
                 .unwrap_or(if legacy { 0.0 } else { 0.5 }),
             path_scale: weights.at("path_scale").as_f64().unwrap_or(1.0),
             window,
-            encoding: {
-                let block = doc.at("encoding");
-                let enc = Encoding {
-                    unit: match block.at("unit").as_str() {
-                        None | Some("char") => Unit::Chars,
-                        Some("word") => Unit::Words,
-                        Some(other) => return Err(format!("unknown encoding unit {other:?}")),
-                    },
-                    n: block.at("n").as_i64().unwrap_or(WINDOW as i64).max(1) as usize,
-                    stride: block.at("stride").as_i64().unwrap_or(1).max(1) as usize,
-                };
-                enc.validate()?;
-                enc
-            },
+            encoding: read_encoding(doc)?,
         };
         let mut g = Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?;
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
@@ -440,8 +449,6 @@ impl Model {
         if version > MODEL_FORMAT_VERSION {
             return Err(format!("unsupported {format} model version {version}"));
         }
-        // one format whatever the encoding: the dial is a property of the
-        // graph, written in its `encoding` block, not a kind of file
         let g = Graph::from_doc(doc.get("graph").ok_or("model document has no graph")?)?;
         let mut model = Model::from_graph(g);
         model.history = doc
@@ -510,29 +517,22 @@ impl Graph {
         self.count_resets.clear();
         self.index.clear();
         self.n_alive_nodes = 0;
+        let enc = self.enc;
         for (i, label) in labels.iter().enumerate() {
-            if i >= FIRST && self.enc.len(label) < self.enc.n {
-                return Err(format!("node {i} label {label:?} is shorter than {}", self.enc.n));
+            if i >= FIRST && enc.len(label) < enc.n {
+                return Err(format!("node {i} label {label:?} is shorter than {}", enc.n));
             }
             self.new_node(label.clone(), counts[i], resets.get(i).copied().unwrap_or(0));
         }
-        let enc = self.enc;
         for (nid, label) in labels.iter().enumerate().skip(FIRST) {
-            let owned = label.clone();
-            let units = enc.units(&owned);
+            let u = enc.units(label);
             let mut o = 0;
-            while o + enc.n <= units.len() {
-                let t = enc.gram(&units, o);
-                if self.index.insert(t.clone(), Loc { node: nid, off: o }).is_some() {
-                    return Err(format!("gram {t} appears in two nodes"));
+            while o + enc.n <= u.len() {
+                let gram = u.slice(o, o + enc.n);
+                if self.index.insert(gram.clone(), Loc { node: nid, off: o }).is_some() {
+                    return Err(format!("gram {gram:?} appears in two nodes"));
                 }
                 o += enc.stride;
-            }
-            if (units.len() - enc.n) % enc.stride != 0 {
-                return Err(format!(
-                    "node {nid} label {owned:?} holds {} symbols, past its last whole gram",
-                    units.len()
-                ));
             }
         }
         Ok(())

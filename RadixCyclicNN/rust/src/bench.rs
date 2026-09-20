@@ -14,7 +14,6 @@
 
 use std::time::Instant;
 
-use crate::encoding::{char_len, Encoding};
 use crate::graph::GraphOptions;
 use crate::json::Json;
 use crate::model::{Model, PredictOptions, TrainOptions};
@@ -72,7 +71,7 @@ pub fn bench_lines(path: &str) -> Vec<String> {
         .map(|data| {
             data.lines()
                 .map(|line| line.trim().to_string())
-                .filter(|line| char_len(line) >= 3)
+                .filter(|line| line.chars().count() >= 3)
                 .collect()
         })
         .unwrap_or_default();
@@ -84,7 +83,7 @@ pub fn bench_lines(path: &str) -> Vec<String> {
 
 /// Builds deterministic training texts totalling at least `chars` characters.
 pub fn synthetic_corpus(chars: usize, seed: i64, base: &[String]) -> Result<Vec<String>, String> {
-    let lines: Vec<&String> = base.iter().filter(|line| char_len(line) >= 3).collect();
+    let lines: Vec<&String> = base.iter().filter(|line| line.chars().count() >= 3).collect();
     if lines.is_empty() {
         return Err("need at least one base line of >= 3 characters".to_string());
     }
@@ -116,10 +115,10 @@ pub fn synthetic_corpus(chars: usize, seed: i64, base: &[String]) -> Result<Vec<
             }
             parts.join(" ")
         };
-        if char_len(&text) < 3 {
+        if text.chars().count() < 3 {
             text = lines[rng.below(lines.len())].to_string();
         }
-        total += char_len(&text);
+        total += text.chars().count();
         texts.push(text);
     }
     Ok(texts)
@@ -184,11 +183,6 @@ pub struct BenchOptions {
     /// least-punished traversal would have nothing to do and both searches
     /// would measure the same thing.
     pub punish_every: usize,
-    /// What one unit of text is, how many units a gram holds and how far
-    /// apart grams start.  The default is the character trigram of stride 1
-    /// the other two implementations benchmark, so a run is comparable with
-    /// theirs unless this is changed.
-    pub encoding: Encoding,
 }
 
 impl Default for BenchOptions {
@@ -205,7 +199,6 @@ impl Default for BenchOptions {
             traversal: Traversal::Reward,
             dump: String::new(),
             punish_every: 0,
-            encoding: Encoding::default(),
         }
     }
 }
@@ -231,15 +224,9 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
     } else {
         o.texts.clone()
     };
-    let total_chars: usize = texts.iter().map(|t| char_len(t)).sum();
+    let total_chars: usize = texts.iter().map(|t| t.chars().count()).sum();
 
-    let mut model = Model::new(
-        o.seed,
-        GraphOptions {
-            encoding: o.encoding,
-            ..GraphOptions::default()
-        },
-    )?;
+    let mut model = Model::new(o.seed, GraphOptions::default())?;
     model.workers = o.workers;
     model.g.workers = o.workers;
     let started = Instant::now();

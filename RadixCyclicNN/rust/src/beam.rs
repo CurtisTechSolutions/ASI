@@ -221,6 +221,9 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             for &cc in children.iter() {
                 let mut nchars = st.chars;
                 if cc.child != END {
+                    // the graph's own overlap, not the trigram's: a grouping
+                    // encoding shares nothing, and a label can be shorter than
+                    // the default overlap
                     nchars += g.label_len(cc.child) - g.enc.overlap();
                 }
                 let step = cc.cost + o.step_penalty;

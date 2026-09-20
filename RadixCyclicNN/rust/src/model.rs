@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::beam::{default_beam, BeamOptions, Prediction};
 use crate::counter::Counter;
-use crate::encoding::{Encoding, Gram};
+use crate::encoding::Encoding;
 use crate::graph::{Graph, GraphOptions, Loc, Transition, END, FIRST, START};
 use crate::hash::Map;
 use crate::json::Json;
@@ -277,47 +277,53 @@ impl Model {
 
     /// The model kind shared with the Python and Go implementations.
     ///
-    /// One kind whatever the encoding: a word n-gram model is this model under
-    /// `Unit::Words`, not a kind of its own (`../../SPEC-WordNGrams.md`).
+    /// Words are not a kind: they are an encoding, so a word model is this
+    /// model with `unit = word` and nothing else changed.
     pub fn kind(&self) -> &'static str {
         "count"
     }
 
-    /// The file format, which is one format for the same reason.
+    /// The file format, which the encoding never changes.
     pub fn format(&self) -> &'static str {
         crate::file::MODEL_FORMAT
     }
 
+    /// How this model reads a text and writes one back.
+    pub fn encoding(&self) -> Encoding {
+        self.g.enc
+    }
+
     /// What the model counts in: lengths, caps and per-unit scores are in
-    /// these (`"words"` under a word encoding, `"chars"` everywhere else).
+    /// these (`"words"` under a word encoding, else `"chars"`).
     pub fn units(&self) -> &'static str {
         self.g.units()
     }
 
-    /// Whether this model's units are words.
-    pub fn is_words(&self) -> bool {
-        self.g.is_words()
-    }
-
-    /// `text` as this model can represent it: under a word encoding its words
-    /// joined by single spaces, and the identity otherwise.  A word model's
-    /// round trip costs the original whitespace and nothing else, and this is
-    /// what it costs.
+    /// `text` as this model can represent it - what a round trip returns.
+    ///
+    /// The default encoding returns it unchanged; a word encoding writes single
+    /// spaces, and a grouping one drops the tail that fills no group.
     pub fn normalise(&self, text: &str) -> String {
-        if !self.is_words() {
-            return text.to_string();
-        }
-        crate::words::split_words(text).collect::<Vec<_>>().join(" ")
+        self.g.enc.normalize(text)
     }
 
-    /// The most read words: `grams` is how many of the graph's grams the word
-    /// appears in - what the graph actually knows about it, and the one count
-    /// that survives compression.  Most read first, ties alphabetically;
-    /// `limit` 0 is all of them.
+    /// The alphabet of a word encoding: every word the graph's grams are made
+    /// of, most read first, ties alphabetically.  `limit` 0 is all of them.
+    ///
+    /// A model that does not count in words has none.  The order is the Python
+    /// and Go one, word for word, so three implementations list one alphabet.
     pub fn top_words(&mut self, limit: usize) -> Vec<crate::words::WordRow> {
         self.g.prepare();
+        if self.g.enc.unit != crate::encoding::Unit::Words {
+            return Vec::new();
+        }
         let grams = self.g.gram_index();
-        let mut rows = crate::words::word_rows(&self.g.enc, grams.iter().map(String::as_str));
+        let counted = crate::encoding::vocabulary(&self.g.enc, grams.iter().copied());
+        let mut rows: Vec<crate::words::WordRow> = counted
+            .into_iter()
+            .enumerate()
+            .map(|(id, (word, grams))| crate::words::WordRow { word, id, grams })
+            .collect();
         if limit > 0 {
             rows.truncate(limit);
         }
@@ -399,13 +405,12 @@ impl Model {
         };
         let workers = self.workers();
         let mut skipped_short = 0;
-        // A word encoding reads its texts as words, which the encoding itself
-        // does: a gram is n words of text, so there is nothing to map first
-        // (`../../SPEC-WordNGrams.md`).
+        // a text too short to hold one gram of this encoding is skipped
+        let enc = self.g.enc;
         let usable: Vec<&String> = texts
             .iter()
             .filter(|t| {
-                let ok = self.g.enc.len(t) >= self.g.enc.n;
+                let ok = enc.len(t) >= enc.n;
                 if !ok {
                     skipped_short += 1;
                 }
@@ -424,7 +429,7 @@ impl Model {
                 parallel_fill(&mut novel, workers, |i, slot| *slot = g.trace(&grams[i]).is_none());
             }
             for (i, &is_novel) in novel.iter().enumerate() {
-                chars += self.g.enc.len(chunk[i]) as i64;
+                chars += enc.len(chunk[i]) as i64;
                 if is_novel {
                     self.g.observe(&grams[i], false)?;
                 }
@@ -557,16 +562,11 @@ impl Model {
     }
 
     /// Encodes a chunk of texts on the worker threads.
-    fn encode_all(&self, texts: &[&String]) -> Vec<Vec<Gram>> {
+    fn encode_all(&self, texts: &[&String]) -> Vec<Vec<String>> {
         let enc = self.g.enc;
         let mut grams = vec![Vec::new(); texts.len()];
         parallel_fill(&mut grams, self.workers(), |i, slot| *slot = enc.encode(texts[i]));
         grams
-    }
-
-    /// How this model turns text into grams and back - its graph's encoding.
-    pub fn encoding(&self) -> Encoding {
-        self.g.enc
     }
 
     /// The mean cost of the pass's traversals: every edge's cost times how
@@ -590,37 +590,32 @@ impl Model {
 
     // -- prediction ---------------------------------------------------------
 
-    /// Where `prefix` ends in the graph: `(node, offset, matched units of the
-    /// located gram)`.
+    /// Where `prefix` ends in the graph: `(node, offset, units of the located
+    /// gram that the prefix matched)`.
     fn locate(&self, prefix: &str) -> (usize, usize, usize) {
         let enc = self.g.enc;
-        let n = enc.len(prefix);
+        let u = enc.units(prefix);
+        let n = u.len();
         if n == 0 {
             return (START, 0, 0);
         }
         if n >= enc.n {
             // the gram the prefix ends on, then - when the stride skips it -
             // the last gram of the prefix's own grid
-            let units = enc.units(prefix);
-            let mut found = enc
-                .gram_of(units.slice(n - enc.n, Some(n)))
-                .and_then(|g| self.g.lookup(&g));
-            if found.is_none() {
-                let aligned = (n - enc.n) / enc.stride * enc.stride;
-                if aligned != n - enc.n {
-                    found = enc
-                        .gram_of(units.slice(aligned, Some(aligned + enc.n)))
-                        .and_then(|g| self.g.lookup(&g));
-                }
-            }
-            if let Some(l) = found {
+            if let Some(l) = self.g.lookup(&u.slice(n - enc.n, n)) {
                 return (l.node, l.off, enc.n);
             }
-            for k in [enc.n.saturating_sub(1), 1] {
+            let aligned = (n - enc.n) / enc.stride * enc.stride;
+            if aligned != n - enc.n {
+                if let Some(l) = self.g.lookup(&u.slice(aligned, aligned + enc.n)) {
+                    return (l.node, l.off, enc.n);
+                }
+            }
+            for k in [enc.n - 1, 1] {
                 if k < 1 || k >= enc.n {
                     continue;
                 }
-                if let Some(l) = self.best_trigram(units.slice(n - k, Some(n))) {
+                if let Some(l) = self.best_gram(&u.slice(n - k, n)) {
                     return (l.node, l.off, k);
                 }
             }
@@ -632,13 +627,12 @@ impl Model {
         (START, 0, 0)
     }
 
-    /// The most visited `(node, offset)` holding a gram that starts with `key`
-    /// (whole units: `"the ca"` is not a prefix of `"the cat sat"` in words).
-    fn best_trigram(&self, key: &str) -> Option<Loc> {
-        let mut best: Option<(i64, usize, usize, Loc)> = None;
+    /// The most visited `(node, offset)` holding a gram that starts with `key`.
+    fn best_gram(&self, key: &str) -> Option<Loc> {
         let enc = self.g.enc;
+        let mut best: Option<(i64, usize, usize, Loc)> = None;
         for (t, l) in self.g.index_entries() {
-            if !enc.has_unit_prefix(&t.to_string(), key) {
+            if !enc.has_unit_prefix(t, key) {
                 continue;
             }
             let rank = (-(self.g.node_count(l.node).float() as i64), l.node, l.off);
@@ -658,6 +652,8 @@ impl Model {
         let mut best: Option<usize> = None;
         let mut best_count = Counter { value: -1, resets: 0 };
         for node in (START + 2)..self.g.num_node_ids() {
+            // on a unit boundary: "the" is a prefix of "the cat sat", not of
+            // "there is a" - a word encoding matches whole words
             if !self.g.is_alive(node) || !self.g.enc.has_unit_prefix(self.g.label(node), prefix) {
                 continue;
             }
@@ -676,8 +672,7 @@ impl Model {
         let (node, offset, matched) = self.locate(prefix);
         let enc = self.g.enc;
         let lead = if node != START && matched < enc.n {
-            enc.slice(self.g.label(node), offset + matched, Some(offset + enc.n))
-                .to_string()
+            enc.slice(self.g.label(node), offset + matched, offset + enc.n)
         } else {
             String::new()
         };
@@ -737,15 +732,15 @@ impl Model {
         penalty_scale: f64,
         merit_scale: f64,
     ) -> Result<Prediction, String> {
-        let enc = self.g.enc;
         // the traversal is two independent things: a cost function (the punishment
         // one prices a step) and a ranking (the least-punished one orders the walks)
         let name = crate::penalty::resolve_traversal(traversal)?;
         let priced = crate::penalty::traversal_costs(name, penalty_scale, merit_scale)?;
         let costs = priced.as_ref();
         let traversal = parse_traversal(name)?;
-        // under a word encoding the prefix is read as words and `length` /
-        // `max_length` are counted in them (`../../SPEC-WordNGrams.md`)
+        // lengths are counted in the encoding's units all the way through:
+        // characters by default, words under a word encoding
+        let enc = self.g.enc;
         let (node, offset, lead) = self.prefix_start(prefix);
         let lead_len = enc.len(&lead);
         let want = length.saturating_sub(lead_len);
@@ -907,10 +902,9 @@ impl Model {
     /// transitions that would need a split cost `log(UNKNOWN_PROB)`.
     pub fn score(&mut self, text: &str) -> Score {
         self.g.prepare();
-        // under a word encoding the text is walked as its words, so `chars`
-        // counts words and `per_char` is per word; a word the graph has never
-        // read has no gram in the index, and is charged what any unknown
-        // transition is charged
+        // `chars` and `per_char` are in the encoding's units: characters by
+        // default, words under a word encoding, where a word the model has never
+        // read is an unknown transition charged what any unknown one is charged
         let enc = self.g.enc;
         let grams = enc.encode(text);
         let chars = enc.len(text);
@@ -933,7 +927,7 @@ impl Model {
                 lost = true;
                 continue;
             };
-            if !lost && l.node == node && l.off == offset + enc.stride {
+            if !lost && l.node == node && l.off == offset + 1 {
                 offset = l.off;
                 continue;
             }
@@ -1088,10 +1082,6 @@ pub fn stats(model: &Model) -> Vec<(String, String)> {
     put("nodes", g.num_nodes().to_string());
     put("edges", g.num_edges().to_string());
     put("trigrams", g.num_trigrams().to_string());
-    put("grams", g.num_trigrams().to_string());
-    put("encoding", g.enc.to_string());
-    put("ngram", g.enc.n.to_string());
-    put("stride", g.enc.stride.to_string());
     put("compression_ratio", format!("{:.6}", g.compression_ratio()));
     put("inverted", g.inverted.to_string());
     put("history_len", model.history.len().to_string());
@@ -1109,13 +1099,14 @@ pub fn stats(model: &Model) -> Vec<(String, String)> {
     // what every number above is counted in; a per-word number read as
     // per-character is read wrong
     put("units", model.units().to_string());
-    if g.is_words() {
+    put("encoding", g.enc.to_string());
+    put("unit", g.enc.unit.name().to_string());
+    put("ngram", g.enc.n.to_string());
+    put("stride", g.enc.stride.to_string());
+    if g.enc.unit == crate::encoding::Unit::Words {
         put(
             "vocabulary",
-            g.enc
-                .vocabulary(g.gram_index().iter().map(String::as_str))
-                .len()
-                .to_string(),
+            crate::encoding::vocabulary(&g.enc, g.gram_index()).len().to_string(),
         );
     }
     out

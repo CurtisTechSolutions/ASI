@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::clock::utc_now;
-use crate::encoding::{Encoding, BACK_LABEL, END_LABEL, START_LABEL};
+use crate::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
 use crate::graph::{END, FIRST, START};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
@@ -75,6 +75,15 @@ impl Job {
 /// The service: one model behind one lock, plus where its files live.
 pub struct Service {
     model: Mutex<Model>,
+    /// The encodings that were running earlier, kept as they were left.
+    ///
+    /// Changing encoding parks the model that was running rather than dropping
+    /// it, so a switch away and back does not lose unsaved training - which is
+    /// what the Python service does for a kind (`ModelService._parked`).
+    parked: Mutex<Vec<(String, Model)>>,
+    /// The encoding this server was started on: the one whose file is
+    /// `model_path` rather than a name derived from it.
+    born_with: Encoding,
     job: Mutex<Option<Job>>,
     stop: AtomicBool,
     jobs: AtomicUsize,
@@ -88,8 +97,11 @@ pub struct Service {
 impl Service {
     /// The service around a model already loaded (or created).
     pub fn new(model: Model, model_path: String, seed: i64, workers: usize) -> Service {
+        let born_with = model.encoding();
         Service {
             model: Mutex::new(model),
+            parked: Mutex::new(Vec::new()),
+            born_with,
             job: Mutex::new(None),
             stop: AtomicBool::new(false),
             jobs: AtomicUsize::new(0),
@@ -138,9 +150,9 @@ impl Service {
         }
     }
 
-    /// Saves the model to its file, and says whether it landed.
+    /// Saves the active kind to its own file, and says whether it landed.
     fn autosave(&self) -> bool {
-        let path = self.model_path.clone();
+        let path = self.model_path_for(self.active_encoding());
         !path.is_empty() && self.with_model(|m| m.save(&path)).is_ok()
     }
 
@@ -164,37 +176,168 @@ impl Service {
         }
     }
 
-    /// The kind this server offers: one, because there is one model.
-    ///
-    /// A word n-gram model is this same model under a word encoding, not a
-    /// kind of its own - which is why the `units` a kind reports follow the
-    /// running model's encoding (`../../SPEC-WordNGrams.md`).
+    /// The kinds this server offers: the count model, and the same model over words.
     fn kinds(&self) -> Json {
         Json::Arr(vec![Json::obj([
-            ("kind", Json::str(KIND_COUNT.0)),
-            ("label", Json::str(KIND_COUNT.1)),
-            ("units", Json::str(self.units())),
+            ("kind", Json::str("count")),
+            ("label", Json::str("Count / reward (Rust)")),
+            ("units", Json::str("chars")),
             (
                 "description",
                 Json::str(
                     "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, \
-                 plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K \
-                 continuations (Rust implementation)",
+                     plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K \
+                     continuations (Rust implementation)",
                 ),
             ),
         ])])
     }
 
-    /// What the running model counts in: `"chars"`, or `"words"` under a word
-    /// encoding.
-    fn units(&self) -> &'static str {
-        self.with_model(|m| m.units())
+    /// The one kind this server runs, with what the running model counts in.
+    ///
+    /// Words are not a kind - they are an encoding - so the units follow the
+    /// encoding while the kind stays `count`.
+    fn active_kind(&self) -> (&'static str, &'static str, &'static str) {
+        let words = self.with_model(|m| m.encoding().unit == Unit::Words);
+        if words {
+            (KIND_COUNT.0, KIND_COUNT.1, "words")
+        } else {
+            KIND_COUNT
+        }
+    }
+
+    /// The encoding the running model was built with.
+    fn active_encoding(&self) -> Encoding {
+        self.with_model(|m| m.encoding())
+    }
+
+    /// The encoding a bare unit name asks for.
+    ///
+    /// `{"kind": "word"}` names a unit and not the other two dials, so they
+    /// come from the model that unit last had - a parked one, else the one the
+    /// server was started on, else the default n and stride.  Which is what
+    /// makes selecting `word`, then `count`, then `word` again come back to
+    /// the same model rather than to a third one.
+    fn encoding_for_unit(&self, unit: Unit) -> Encoding {
+        let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, _) in parked.iter() {
+            if let Ok(enc) = parse_encoding(name) {
+                if enc.unit == unit {
+                    return enc;
+                }
+            }
+        }
+        if self.born_with.unit == unit {
+            return self.born_with;
+        }
+        let default = Encoding::default();
+        Encoding {
+            unit,
+            n: default.n,
+            stride: default.stride,
+        }
+    }
+
+    /// Where a model of `encoding` is saved by default.
+    ///
+    /// The server's own path for the encoding it was started on, and
+    /// `<stem>.<unit><ext>` for the other - so switching to words and saving
+    /// does not land on the character model's file.
+    fn model_path_for(&self, encoding: Encoding) -> String {
+        let path = self.model_path.as_str();
+        if path.is_empty() {
+            return String::new();
+        }
+        if encoding == self.born_with {
+            return path.to_string();
+        }
+        let (stem, ext) = split_extension(path);
+        let stem = match stem.rsplit_once('.') {
+            // .count / .word in the name is the other encoding's; swap it
+            Some((head, tail)) if tail == "count" || tail == "word" => head,
+            _ => stem,
+        };
+        let tag = if encoding.unit == Unit::Words { "word" } else { "count" };
+        format!("{stem}.{tag}{ext}")
+    }
+
+    /// The encodings this server has a model for right now, active one first.
+    fn in_memory(&self) -> Vec<String> {
+        let mut out = vec![self.active_encoding().to_string()];
+        let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        out.extend(parked.iter().map(|(enc, _)| enc.clone()));
+        out
+    }
+
+    /// Makes `encoding` the running model and says where it came from.
+    ///
+    /// An encoding is fixed for a model's life, so *changing* it means a
+    /// different model.  The one that was running is parked with its unsaved
+    /// work rather than dropped, and the new one is whichever comes first of
+    /// the parked model of that encoding, its own file, and a fresh one -
+    /// which is what lets the frontend switch to words and back without losing
+    /// a training run.
+    fn select_encoding(&self, encoding: Encoding, seed: i64) -> Result<&'static str, ApiError> {
+        self.ensure_idle()?;
+        let active = self.active_encoding();
+        if encoding == active {
+            return Ok("active");
+        }
+        let key = encoding.to_string();
+        let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        let (origin, mut wanted) = match parked.iter().position(|(name, _)| *name == key) {
+            Some(at) => ("memory", parked.remove(at).1),
+            None => {
+                // the default path is a convention, not a claim: a file there
+                // built under another encoding is simply not this one's, so it
+                // is left alone rather than refused
+                let path = self.model_path_for(encoding);
+                let on_disk = if path.is_empty() || !std::path::Path::new(&path).is_file() {
+                    None
+                } else {
+                    Model::load(&path).ok().filter(|m| m.encoding() == encoding)
+                };
+                if let Some(found) = on_disk {
+                    ("file", found)
+                } else {
+                    (
+                        "new",
+                        Model::new(
+                            seed,
+                            GraphOptions {
+                                encoding,
+                                ..Default::default()
+                            },
+                        )?,
+                    )
+                }
+            }
+        };
+        let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        wanted.workers = model.workers;
+        wanted.g.workers = model.workers;
+        let previous = std::mem::replace(&mut *model, wanted);
+        parked.push((active.to_string(), previous));
+        Ok(origin)
     }
 }
 
-/// The kind as the API names it: the id and the label.  The unit is not here -
-/// it is the encoding's, and a model chooses that when it is made.
-const KIND_COUNT: (&str, &str) = ("count", "Count / reward (Rust)");
+/// The one kind this server runs: the id, the label and what it counts in by
+/// default.  The units follow the running model's encoding.
+const KIND_COUNT: (&str, &str, &str) = ("count", "Count / reward (Rust)", "chars");
+
+/// `("model.count", ".json")`, with `.json.gz` kept whole.
+fn split_extension(path: &str) -> (&str, &str) {
+    let Some(dot) = path.rfind('.') else {
+        return (path, "");
+    };
+    if &path[dot..] == ".gz" {
+        if let Some(inner) = path[..dot].rfind('.') {
+            return (&path[..inner], &path[inner..]);
+        }
+    }
+    (&path[..dot], &path[dot..])
+}
 
 impl Service {
     /// The texts of a request field, the way the Python service reads them
@@ -256,8 +399,7 @@ fn health(svc: &Arc<Service>, _r: &Request) -> Answer {
 }
 
 fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
-    let (kind, label) = KIND_COUNT;
-    let units = svc.units();
+    let (kind, label, units) = svc.active_kind();
     let mut doc = svc.with_model(|m| stats(m));
     let pairs = match &mut doc {
         Json::Obj(pairs) => pairs,
@@ -301,39 +443,64 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
 }
 
 fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
-    let (kind, label) = KIND_COUNT;
+    let (kind, label, units) = svc.active_kind();
     let weights = svc.with_model(|m| weight_config(&m.g));
+    let enc = svc.active_encoding();
+    let chars = Encoding::default();
+    let words = Encoding::new(Unit::Words, enc.n, enc.stride).expect("a valid word encoding");
     Ok(Json::obj([
         ("kind", Json::str(kind)),
         ("label", Json::str(label)),
-        ("units", Json::str(svc.units())),
+        ("units", Json::str(units)),
         ("kinds", svc.kinds()),
-        ("model_path", Json::str(svc.model_path.clone())),
-        ("paths", Json::obj([(kind, Json::str(svc.model_path.clone()))])),
-        ("in_memory", Json::strs(vec![kind.to_string()])),
+        ("encoding", Json::str(enc.to_string())),
+        ("unit", Json::str(enc.unit.name())),
+        ("ngram", Json::Int(enc.n as i64)),
+        ("stride", Json::Int(enc.stride as i64)),
+        ("model_path", Json::str(svc.model_path_for(enc))),
+        (
+            "paths",
+            Json::obj([
+                ("count", Json::str(svc.model_path_for(chars))),
+                ("word", Json::str(svc.model_path_for(words))),
+            ]),
+        ),
+        ("in_memory", Json::strs(svc.in_memory())),
         ("weights", weights),
         ("engine", Json::str(ENGINE)),
     ]))
 }
 
+/// `POST /api/model/select`: the kind, and - the dial being what words are now
+/// - the encoding.
+///
+/// Words are not a kind, so `{"kind": "word"}` is read as a request for a word
+/// *encoding* and answered by switching to one; the model that was running is
+/// parked with its unsaved work. `{"encoding": "word:2:1"}` says it directly.
 fn model_select(svc: &Arc<Service>, r: &Request) -> Answer {
-    let active = KIND_COUNT.0;
-    let wanted = r.text("kind", active).to_ascii_lowercase();
-    if wanted.is_empty() {
-        return Err(ApiError::bad_request("'kind' must not be empty"));
-    }
-    if wanted != active {
-        // characters or words is the encoding, chosen when a model is made
-        // (POST /api/reset), not a kind to switch between
-        return Err(ApiError::bad_request(format!(
-            "the Rust server runs the count / reward model only, over characters or over words \
-             (kind {wanted:?} is served by the Python server); a word model is this one under \
-             --encoding word:3:1"
-        )));
-    }
+    let spec = r.text("encoding", "");
+    let wanted = if !spec.is_empty() {
+        parse_encoding(&spec)?
+    } else {
+        let kind = r.text("kind", KIND_COUNT.0).to_ascii_lowercase();
+        if kind.is_empty() {
+            return Err(ApiError::bad_request("'kind' must not be empty"));
+        }
+        match kind.as_str() {
+            "count" | "char" | "chars" => svc.encoding_for_unit(Unit::Chars),
+            "word" | "words" => svc.encoding_for_unit(Unit::Words),
+            other => {
+                return Err(ApiError::bad_request(format!(
+                    "the Rust server runs the count / reward model only, over any encoding \
+                     (kind {other:?} is served by the Python server)"
+                )))
+            }
+        }
+    };
+    let origin = svc.select_encoding(wanted, svc.seed)?;
     let mut doc = model_info(svc, r)?;
     if let Json::Obj(pairs) = &mut doc {
-        pairs.push(("origin".to_string(), Json::str("active")));
+        pairs.push(("origin".to_string(), Json::str(origin)));
         pairs.push(("stats".to_string(), svc.with_model(|m| stats(m))));
     }
     Ok(doc)
@@ -407,7 +574,7 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         merit_scale,
     };
     let prefix = r.text("prefix", "");
-    let kind = KIND_COUNT.0;
+    let (kind, ..) = svc.active_kind();
     let found = svc.with_model(|m| m.predict(&prefix, &opts))?;
     Ok(Json::obj([
         ("prefix", Json::str(prefix)),
@@ -687,15 +854,13 @@ fn nodes(svc: &Arc<Service>, r: &Request) -> Answer {
         let node = match &wanted {
             None => None,
             Some(text) => {
-                // a label is written in the encoding's units, so a word
-                // model is asked for whole words, single-spaced
-                let key = m.g.enc.units(text).text().to_string();
+                // a label is text on every encoding: the node itself, or a gram it holds
                 let found = (0..m.g.num_node_ids())
-                    .find(|&i| m.g.is_alive(i) && m.g.label(i) == key)
-                    .or_else(|| m.g.enc.gram_of(&key).and_then(|t| m.g.lookup(&t)).map(|loc| loc.node));
+                    .find(|&i| m.g.is_alive(i) && m.g.label(i) == text)
+                    .or_else(|| m.g.lookup(text).map(|loc| loc.node));
                 Some(found.ok_or_else(|| {
                     ApiError::not_found(format!(
-                        "no node labelled {text:?}: give a node label, or one of its trigrams"
+                        "no node labelled {text:?}: give a node label, or one of its grams"
                     ))
                 })?)
             }
@@ -730,8 +895,8 @@ fn nodes(svc: &Arc<Service>, r: &Request) -> Answer {
 fn words(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
-        let enc = m.g.enc;
-        if !m.is_words() {
+        let enc = m.encoding();
+        if enc.unit != Unit::Words {
             return Err(ApiError::bad_request(format!(
                 "this model counts in {}, so it has no words to list; a word alphabet needs a word encoding \
                  (--encoding word:{}:{})",
@@ -740,27 +905,18 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
                 enc.stride
             )));
         }
-        let vocabulary = enc.vocabulary(m.g.gram_index().iter().map(String::as_str)).len();
-        let rows = m.top_words(limit);
+        let all = m.top_words(0);
+        let vocabulary = all.len();
+        let rows = if limit > 0 {
+            &all[..limit.min(all.len())]
+        } else {
+            &all[..]
+        };
         Ok(Json::obj([
-            (
-                "words",
-                Json::Arr(
-                    rows.iter()
-                        .map(|row| {
-                            Json::obj([
-                                ("word", Json::str(row.word.clone())),
-                                ("id", Json::Int(row.id as i64)),
-                                ("grams", Json::Int(row.grams as i64)),
-                                ("trigrams", Json::Int(row.trigrams as i64)),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
+            ("words", Json::Arr(rows.iter().map(|row| row.to_json()).collect())),
             ("limit", Json::Int(limit as i64)),
             ("vocabulary", Json::Int(vocabulary as i64)),
-            ("units", Json::str(enc.units_name())),
+            ("units", Json::str(m.units())),
             ("encoding", Json::str(enc.to_string())),
         ]))
     })?;
@@ -768,61 +924,58 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
 }
 
 fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
-    let enc = svc.with_model(|m| m.g.enc);
-    Ok(encoding_doc(&enc))
-}
-
-/// The running model's dial, as `GET /api/encoding` reports it and the preview
-/// repeats it.  It is fixed for a model's life - every label is written in it -
-/// so it is chosen when a model is made, which is what `configurable` says.
-fn encoding_doc(enc: &Encoding) -> Json {
-    Json::obj([
+    let enc = svc.active_encoding();
+    Ok(Json::obj([
         ("encoding", Json::str(enc.to_string())),
         ("unit", Json::str(enc.unit.name())),
+        ("units", Json::str(enc.units_name())),
         ("window", Json::Int(enc.n as i64)),
         ("ngram", Json::Int(enc.n as i64)),
         ("stride", Json::Int(enc.stride as i64)),
         ("overlap", Json::Int(enc.overlap() as i64)),
+        ("sliding", Json::Bool(enc.sliding())),
         ("start_label", Json::str(START_LABEL)),
         ("end_label", Json::str(END_LABEL)),
         ("back_label", Json::str(BACK_LABEL)),
+        // the dial is chosen when a model is created and fixed for its life:
+        // changing it means a different model, which POST /api/reset makes
         ("configurable", Json::Bool(true)),
+        ("fixed_for_life", Json::Bool(true)),
         (
             "note",
             Json::str(format!(
-                "Text goes in as {}, and comes back out of the (possibly compressed) node labels along a path. \
-                 The encoding is fixed for a model's life - every label is written in it - so it is chosen when a \
-                 model is made: POST /api/reset with {{\"encoding\": \"word:2:1\"}}, or {{unit, ngram, stride}}.",
-                enc.describe()
+                "Text goes in as {} of {} {}, stride {}, and comes back out of the (possibly compressed) node \
+                 labels along a path. The encoding is part of the model - fixed when it is created - so changing \
+                 it means a new model (POST /api/reset with an encoding).",
+                if enc.sliding() { "overlapping windows" } else { "groups" },
+                enc.n,
+                enc.units_name(),
+                enc.stride,
             )),
         ),
-    ])
+    ]))
 }
 
 fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
     let text = r.text("text", "");
+    let (kind, _, units) = svc.active_kind();
     Ok(svc.with_model(|m| {
-        let enc = m.g.enc;
-        let raw = enc.encode(&text);
-        let windows: Vec<String> = raw.iter().map(|g| g.to_string()).collect();
-        let decoded = enc.decode_grams(&raw);
-        let unknown: Vec<String> = raw
-            .iter()
-            .filter(|g| m.g.lookup(g).is_none())
-            .map(|g| g.to_string())
-            .collect();
-        let walked = if raw.is_empty() { None } else { m.g.node_path(&raw) };
+        let enc = m.encoding();
+        let grams = enc.encode(&text);
+        let decoded = enc.decode_grams(grams.iter().map(|g| g.as_str()));
+        let unknown: Vec<String> = grams.iter().filter(|g| m.g.lookup(g).is_none()).cloned().collect();
+        let walked = if grams.is_empty() { None } else { m.g.node_path(&grams) };
         let path = match walked {
             None => Json::obj([
                 ("known", Json::Bool(false)),
                 (
                     "reason",
-                    Json::str(if raw.is_empty() {
+                    Json::str(if grams.is_empty() {
                         format!("the text is shorter than one gram ({} {})", enc.n, enc.units_name())
                     } else if !unknown.is_empty() {
-                        format!("{} of the {} windows have never been seen", unknown.len(), raw.len())
+                        format!("{} of the {} grams have never been seen", unknown.len(), grams.len())
                     } else {
-                        "every window is known, but the structure cannot walk the whole text from START to END as it \
+                        "every gram is known, but the structure cannot walk the whole text from START to END as it \
                      stands"
                             .to_string()
                     }),
@@ -853,30 +1006,34 @@ fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
                 ])
             }
         };
-        let mut doc = match encoding_doc(&enc) {
-            Json::Obj(pairs) => pairs,
-            other => return other,
-        };
-        let mut put = |key: &str, value: Json| doc.push((key.to_string(), value));
-        put("units", Json::str(enc.units_name()));
-        put("kind", Json::str(KIND_COUNT.0));
-        put("text", Json::str(text.clone()));
-        put("chars", Json::Int(enc.len(&text) as i64));
-        put("windows", Json::strs(windows));
-        put("count", Json::Int(raw.len() as i64));
-        put("decoded", Json::str(decoded.clone()));
-        // what comes back is what the encoding can represent: the text itself
-        // under a sliding character window, its words under a word encoding
-        put("round_trip", Json::Bool(decoded == enc.normalize(&text)));
-        put("unknown_windows", Json::strs(unknown));
-        put("path", path);
-        Json::Obj(doc)
+        Json::obj([
+            ("encoding", Json::str(enc.to_string())),
+            ("window", Json::Int(enc.n as i64)),
+            ("ngram", Json::Int(enc.n as i64)),
+            ("stride", Json::Int(enc.stride as i64)),
+            ("overlap", Json::Int(enc.overlap() as i64)),
+            ("configurable", Json::Bool(true)),
+            ("units", Json::str(units)),
+            ("kind", Json::str(kind)),
+            ("text", Json::str(text.clone())),
+            ("chars", Json::Int(enc.len(&text) as i64)),
+            ("windows", Json::strs(grams.clone())),
+            ("grams", Json::strs(grams.clone())),
+            ("count", Json::Int(grams.len() as i64)),
+            ("decoded", Json::str(decoded.clone())),
+            ("round_trip", Json::Bool(decoded == enc.normalize(&text))),
+            ("unknown_windows", Json::strs(unknown.clone())),
+            ("unknown_grams", Json::strs(unknown)),
+            ("path", path),
+        ])
     }))
 }
 
 fn save(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let path = r.text("path", &svc.model_path);
+    // the active kind's own file, so saving a word model never lands on the
+    // count model's - the rule the Python service saves by
+    let path = r.text("path", &svc.model_path_for(svc.active_encoding()));
     svc.with_model(|m| m.save(&path))?;
     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     Ok(Json::obj([
@@ -887,7 +1044,7 @@ fn save(svc: &Arc<Service>, r: &Request) -> Answer {
 
 fn load(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let path = r.text("path", &svc.model_path);
+    let path = r.text("path", &svc.model_path_for(svc.active_encoding()));
     let loaded = Model::load(&path)?;
     svc.with_model(|m| {
         let workers = m.workers;
@@ -901,19 +1058,32 @@ fn load(svc: &Arc<Service>, r: &Request) -> Answer {
     ]))
 }
 
+/// `POST /api/reset`: a fresh model, optionally under a different encoding.
+///
+/// The encoding is fixed for a model's life, so this is where it is chosen -
+/// the same place the Python and Go servers choose it.  `{"encoding":
+/// "word:3:1"}`, or the three dials separately as `unit` / `ngram` / `stride`.
 fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     let seed = r.body.at("seed").as_i64().unwrap_or(svc.seed);
-    let kind = r.text("kind", KIND_COUNT.0);
-    if !kind.eq_ignore_ascii_case(KIND_COUNT.0) {
-        return Err(ApiError::bad_request(format!(
-            "the Rust server runs the count / reward model only (kind {kind:?} is served by the Python server)"
-        )));
+    let active = svc.active_encoding();
+    let spec = r.text("encoding", "");
+    let mut encoding = if spec.is_empty() {
+        active
+    } else {
+        parse_encoding(&spec)?
+    };
+    if let Some(name) = r.body.get("unit").and_then(|v| v.as_str()) {
+        encoding.unit = Unit::parse(name)
+            .ok_or_else(|| ApiError::bad_request(format!("unit must be char or word, got {name:?}")))?;
     }
-    // the encoding a new model is to be built in: `encoding` as a spec, or the
-    // three dials on their own.  It is fixed for the model's life, which is
-    // why this is the one place it can be chosen.
-    let encoding = encoding_option(r)?;
+    if let Some(n) = r.body.get("ngram").and_then(|v| v.as_i64()) {
+        encoding.n = n.max(0) as usize;
+    }
+    if let Some(stride) = r.body.get("stride").and_then(|v| v.as_i64()) {
+        encoding.stride = stride.max(0) as usize;
+    }
+    encoding.validate()?;
     let fresh = Model::new(
         seed,
         GraphOptions {
@@ -927,35 +1097,14 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
         m.workers = workers;
         m.g.workers = workers;
     });
+    let (kind, _, units) = svc.active_kind();
     Ok(Json::obj([
         ("reset", Json::Bool(true)),
         ("kind", Json::str(kind)),
+        ("units", Json::str(units)),
         ("encoding", Json::str(encoding.to_string())),
         ("stats", svc.with_model(|m| stats(m))),
     ]))
-}
-
-/// The encoding a `POST /api/reset` asks for: `"encoding"` as a spec
-/// (`"word:2:1"`), or `unit` / `ngram` / `stride` on their own, which the Go
-/// server reads the same way.
-fn encoding_option(r: &Request) -> Result<Encoding, ApiError> {
-    let mut enc = Encoding::parse(&r.text("encoding", "")).map_err(ApiError::bad_request)?;
-    let unit = r.text("unit", "");
-    if !unit.is_empty() {
-        enc.unit = Encoding::parse(&unit).map_err(ApiError::bad_request)?.unit;
-    }
-    if let Some(n) = r.body.at("ngram").as_i64() {
-        let n = usize::try_from(n).map_err(|_| ApiError::bad_request("ngram must be >= 1"))?;
-        if !enc.sliding() {
-            enc.stride = n; // groups stay groups when n changes
-        }
-        enc.n = n;
-    }
-    if let Some(stride) = r.body.at("stride").as_i64() {
-        enc.stride = usize::try_from(stride).map_err(|_| ApiError::bad_request("stride must be >= 1"))?;
-    }
-    enc.validate().map_err(ApiError::bad_request)?;
-    Ok(enc)
 }
 
 fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {

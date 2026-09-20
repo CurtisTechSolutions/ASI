@@ -204,7 +204,7 @@ pub(crate) fn build_result(
         .collect();
     let mut text = g.enc.decode_path(&real, offset, ctx);
     if let Some(cap) = max_chars {
-        text = g.enc.truncate(&text, cap).to_string();
+        text = g.enc.truncate(&text, cap);
     }
     let cost = fsum(&step_costs);
     let reached_end = *node_ids.last().unwrap() == END;

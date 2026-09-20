@@ -3,31 +3,34 @@
 //! [`Encoding`] is three dials - what one *unit* of text is, how many units a
 //! gram holds, and how far apart consecutive grams start:
 //!
-//! * `Encoding::default()` is the one the model was born with: character
-//!   trigrams, stride 1 (`"hello"` -> `["hel", "ell", "llo"]`).
-//! * `Encoding { n: 5, .. }` is a sliding window of five characters, and any n
-//!   works.
-//! * `Encoding { n: 4, stride: 4, .. }` is *tokenisation*: non-overlapping
-//!   groups of four letters.
-//! * `Encoding { unit: Unit::Words, n: 2, stride: 1 }` is the word bigram.
+//! * `Encoding::default()` is the character trigram of stride 1, the one every
+//!   model was born with (`"hello"` -> `["hel", "ell", "llo"]`);
+//! * `n = 5` is a sliding window of five characters, and any n works;
+//! * `n = 4, stride = 4` is *tokenisation*: non-overlapping groups of four
+//!   letters;
+//! * `unit = Words, n = 2` is the word bigram, `n = 3` the word trigram.
 //!
-//! A gram is a [`Gram`]: up to three characters packed into one `u64` - the
-//! representation choice this port makes and the reason the default encoding's
-//! pass allocates nothing at all - or, for anything longer and for words, the
-//! text itself.  The other two implementations carry every gram as a string.
+//! Two consecutive grams share [`Encoding::overlap`] units, which is what lets
+//! the graph chain them: node A ends with the units node B starts with.  With
+//! `stride == n` nothing is shared and the graph is a plain chain of groups.
+//!
+//! This mirrors `radixnet/encoding.py` and `go/radixnet/encoding.go` exactly,
+//! down to the spec strings `parse_encoding` reads and the names it accepts.
+//!
+//! # A gram is text
+//!
+//! Earlier releases of this port packed a trigram into a `u64` - three code
+//! points of 21 bits - which is why its encoding pass allocated nothing.  A
+//! gram of *any* n over *any* unit does not fit in an integer, so the index is
+//! keyed by the gram itself, as the other two implementations key it.  What
+//! that costs is measured rather than guessed: `bench/RESULTS.md`.
 
-use std::borrow::Cow;
+use std::fmt;
 
-/// The default n of the n-gram: the trigram the model was born with.
+/// The sliding-window length of the default encoding.
 pub const WINDOW: usize = 3;
-/// The overlap that goes with it (stride 1).  A graph's own overlap is
-/// `graph.enc.overlap()`.
+/// The number of units two consecutive labels of the default encoding share.
 pub const OVERLAP: usize = WINDOW - 1;
-
-/// Bits one code point takes in a packed gram: Unicode ends at `U+10FFFF`.
-const BITS: u32 = 21;
-/// The most characters that fit in one `u64` at [`BITS`] each.
-pub const MAX_PACKED: usize = 3;
 
 /// The labels of the three sentinel nodes.
 pub const START_LABEL: &str = "<s>";
@@ -35,70 +38,19 @@ pub const END_LABEL: &str = "</s>";
 /// The third sentinel: where the graph has learned a walk goes round.
 pub const BACK_LABEL: &str = "<back>";
 
-/// A window of [`WINDOW`] characters, packed 21 bits per code point.
-///
-/// Unicode ends at `U+10FFFF`, which is 21 bits, so three characters fit in 63
-/// bits: a trigram is one `Copy` integer - hashable, comparable and free of any
-/// allocation - rather than a string.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
-pub struct Trigram(pub u64);
-
-impl Trigram {
-    /// Packs three characters.
-    #[inline]
-    pub fn pack(a: char, b: char, c: char) -> Trigram {
-        Trigram(a as u64 | (b as u64) << 21 | (c as u64) << 42)
-    }
-
-    /// Packs the first three characters of `s`, or `None` when it is shorter.
-    pub fn parse(s: &str) -> Option<Trigram> {
-        let mut it = s.chars();
-        let (a, b, c) = (it.next()?, it.next()?, it.next()?);
-        Some(Trigram::pack(a, b, c))
-    }
-
-    /// The three characters back out.
-    #[inline]
-    pub fn chars(self) -> [char; 3] {
-        let one = |shift: u32| char::from_u32(((self.0 >> shift) & 0x1f_ffff) as u32).unwrap_or('\u{fffd}');
-        [one(0), one(21), one(42)]
-    }
-
-    /// Appends the trigram to a string.
-    pub fn write_to(self, out: &mut String) {
-        for ch in self.chars() {
-            out.push(ch);
-        }
-    }
-}
-
-impl std::fmt::Display for Trigram {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = String::with_capacity(3);
-        self.write_to(&mut s);
-        f.write_str(&s)
-    }
-}
-
-// -- what a unit is ------------------------------------------------------------
-
-/// What one position of a text is: a character, or a whitespace word.
-///
-/// It is the atom everything downstream counts in - the n of the n-gram, the
-/// stride, a node's label length, the length of a prediction.
+/// What one position of a text is.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Unit {
-    /// One unit is one character (one code point).  `"hello"` is 5 units.
+    /// One Unicode code point: the encoding the model was born with.
     #[default]
     Chars,
-    /// One unit is one whitespace-delimited word; the text is normalised to
-    /// single spaces on the way in - a word encoding keeps the words, not the
-    /// layout.
+    /// One whitespace-delimited word.  The layout is not kept - a word
+    /// encoding keeps the words, and a round trip writes single spaces.
     Words,
 }
 
 impl Unit {
-    /// The name the other two implementations write into a model file.
+    /// The name the spec strings and the model file use.
     pub fn name(self) -> &'static str {
         match self {
             Unit::Chars => "char",
@@ -106,40 +58,49 @@ impl Unit {
         }
     }
 
-    /// Bytes written between two units of a label.
-    fn sep(self) -> usize {
+    /// What a model under this unit counts in.
+    ///
+    /// Every length, count and score is in these, so the CLI, the API and the
+    /// frontend carry it beside the number: a per-word number read as
+    /// per-character is read wrong.
+    pub fn units_name(self) -> &'static str {
         match self {
-            Unit::Chars => 0,
-            Unit::Words => 1,
+            Unit::Chars => "chars",
+            Unit::Words => "words",
+        }
+    }
+
+    /// The unit a name means, or `None`.
+    pub fn parse(name: &str) -> Option<Unit> {
+        match name {
+            "char" | "chars" | "character" | "characters" | "letter" | "letters" => Some(Unit::Chars),
+            "word" | "words" => Some(Unit::Words),
+            _ => None,
         }
     }
 }
 
-impl std::fmt::Display for Unit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Unit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
-// -- the encoding ---------------------------------------------------------------
-
-/// How a text becomes grams, and how the labels of a walk become text again.
-///
-/// Fixed for a graph's life: every label, every index key and every offset is
-/// measured in the units of the encoding that built it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// How a text becomes grams, and how a walk's labels become text again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Encoding {
     pub unit: Unit,
-    /// Units per gram: the n of the n-gram, any `n >= 1`.
+    /// Units per gram: the n of the n-gram.  Always `>= 1`.
     pub n: usize,
-    /// Units between two consecutive grams.  `1` slides the window, so grams
-    /// share `n - 1` units - which is what lets the graph chain them; `n` cuts
-    /// the text into groups that share nothing.
+    /// Units between two consecutive grams: 1 slides the window, `n` cuts the
+    /// text into non-overlapping groups.  Always `1 ..= n`.
     pub stride: usize,
 }
 
 impl Default for Encoding {
-    fn default() -> Self {
+    /// The character trigram with stride 1: what every model used before the
+    /// encoding became a choice, and the only encoding a file leaves unwritten.
+    fn default() -> Encoding {
         Encoding {
             unit: Unit::Chars,
             n: WINDOW,
@@ -149,7 +110,14 @@ impl Default for Encoding {
 }
 
 impl Encoding {
-    /// Fails with what is wrong, if anything.
+    /// An encoding, checked.
+    pub fn new(unit: Unit, n: usize, stride: usize) -> Result<Encoding, String> {
+        let e = Encoding { unit, n, stride };
+        e.validate()?;
+        Ok(e)
+    }
+
+    /// What is wrong with this encoding, if anything.
     pub fn validate(&self) -> Result<(), String> {
         if self.n < 1 {
             return Err(format!("n must be >= 1, got {}", self.n));
@@ -166,167 +134,44 @@ impl Encoding {
         Ok(())
     }
 
-    /// Units two consecutive grams share: `n - stride`.
+    /// How many units two consecutive grams share: `n - stride`.
     pub fn overlap(&self) -> usize {
         self.n - self.stride
     }
 
-    /// Do consecutive grams overlap at all?
-    pub fn sliding(&self) -> bool {
-        self.stride < self.n
-    }
-
-    /// The character trigram of stride 1 - what a model file leaves unwritten.
+    /// Whether this is the character trigram of stride 1 - the encoding a model
+    /// file leaves unwritten.
     pub fn is_default(&self) -> bool {
         *self == Encoding::default()
     }
 
-    /// Can a gram of this encoding be packed into a `u64`?
-    fn packs(&self) -> bool {
-        self.unit == Unit::Chars && self.n <= MAX_PACKED
+    /// Whether consecutive grams overlap at all.
+    pub fn sliding(&self) -> bool {
+        self.stride < self.n
     }
 
-    /// The human form: `"2-word grams, stride 1 (sliding)"`.
+    /// What a model under this encoding counts in.
+    pub fn units_name(&self) -> &'static str {
+        self.unit.units_name()
+    }
+
+    /// The human form: `3-character grams, stride 1 (sliding)`.
     pub fn describe(&self) -> String {
-        let unit = if self.unit == Unit::Words { "word" } else { "character" };
+        let unit = match self.unit {
+            Unit::Chars => "character",
+            Unit::Words => "word",
+        };
         let kind = if self.sliding() { "sliding" } else { "groups" };
         format!("{}-{unit} grams, stride {} ({kind})", self.n, self.stride)
     }
 
-    /// What this encoding counts in: `"chars"`, or `"words"` under a word
-    /// encoding.
-    ///
-    /// Every length, count and score of a model is in these, so the CLI, the
-    /// API and the frontend all carry it beside the number - a per-word number
-    /// read as per-character is read wrong.
-    pub fn units_name(&self) -> &'static str {
+    // -- units ---------------------------------------------------------------
+
+    /// The text cut into units, indexed so that slicing by unit is O(1).
+    pub fn units(&self, text: &str) -> Units {
         match self.unit {
-            Unit::Chars => crate::words::CHAR_UNITS,
-            Unit::Words => crate::words::WORD_UNITS,
-        }
-    }
-
-    /// The units of a word encoding's grams and how many grams hold each.
-    ///
-    /// `grams` is the graph's gram index, which is the one count that survives
-    /// compression: a phrase merged into one node is still made of the grams
-    /// that built it.  There is no vocabulary to consult, and that is the
-    /// point of the design - a gram is text, so the alphabet a graph knows is
-    /// whatever its grams are made of.
-    pub fn vocabulary<'a, I: IntoIterator<Item = &'a str>>(
-        &self,
-        grams: I,
-    ) -> std::collections::HashMap<String, usize> {
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for gram in grams {
-            let units = self.units(gram);
-            for i in 0..units.len() {
-                *counts.entry(units.slice(i, Some(i + 1)).to_string()).or_insert(0) += 1;
-            }
-        }
-        counts
-    }
-
-    /// Reads a spec: `unit[:n[:stride]]`, or one of the names below.
-    ///
-    /// `"char:3:1"` is the default, `"char:5:groups"` (or `"char:5:5"`)
-    /// non-overlapping groups of five letters, `"word:2"` the word bigram.
-    pub fn parse(spec: &str) -> Result<Encoding, String> {
-        let text = spec.trim().to_lowercase();
-        match text.as_str() {
-            "" | "default" | "trigram" | "trigrams" => return Ok(Encoding::default()),
-            "bigram" | "bigrams" => {
-                return Ok(Encoding {
-                    n: 2,
-                    ..Encoding::default()
-                })
-            }
-            "word" | "words" | "word-unigram" => {
-                return Ok(Encoding {
-                    unit: Unit::Words,
-                    n: 1,
-                    stride: 1,
-                })
-            }
-            "word-bigram" | "word-bigrams" => {
-                return Ok(Encoding {
-                    unit: Unit::Words,
-                    n: 2,
-                    stride: 1,
-                })
-            }
-            "word-trigram" | "word-trigrams" => {
-                return Ok(Encoding {
-                    unit: Unit::Words,
-                    n: 3,
-                    stride: 1,
-                })
-            }
-            _ => {}
-        }
-        let parts: Vec<&str> = text.split(':').collect();
-        if parts.len() > 3 {
-            return Err(format!("encoding {spec:?}: expected unit[:n[:stride]]"));
-        }
-        let unit = match parts[0] {
-            "char" | "chars" | "character" | "characters" | "letter" | "letters" => Unit::Chars,
-            "word" | "words" => Unit::Words,
-            other => return Err(format!("encoding {spec:?}: unit must be char or word, got {other:?}")),
-        };
-        let mut n = WINDOW;
-        if parts.len() > 1 && !parts[1].is_empty() {
-            n = parts[1]
-                .parse()
-                .map_err(|_| format!("encoding {spec:?}: n must be a number, got {:?}", parts[1]))?;
-        }
-        let mut stride = 1;
-        if parts.len() > 2 && !parts[2].is_empty() {
-            stride = match parts[2] {
-                "groups" | "group" | "blocks" | "block" => n,
-                "sliding" | "slide" => 1,
-                other => other
-                    .parse()
-                    .map_err(|_| format!("encoding {spec:?}: stride must be a number, got {other:?}"))?,
-            };
-        }
-        let enc = Encoding { unit, n, stride };
-        enc.validate().map_err(|e| format!("encoding {spec:?}: {e}"))?;
-        Ok(enc)
-    }
-
-    // -- units -------------------------------------------------------------
-
-    /// The text cut into this encoding's units, indexed so that slicing by
-    /// unit is O(1) - which is what the graph does all day.
-    pub fn units<'a>(&self, text: &'a str) -> Units<'a> {
-        match self.unit {
-            Unit::Chars => {
-                let mut starts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-                starts.push(text.len());
-                Units {
-                    text: Cow::Borrowed(text),
-                    starts,
-                    sep: Unit::Chars.sep(),
-                }
-            }
-            Unit::Words => {
-                let fields: Vec<&str> = text.split_whitespace().collect();
-                let mut joined = String::with_capacity(text.len());
-                let mut starts = Vec::with_capacity(fields.len() + 1);
-                for (i, field) in fields.iter().enumerate() {
-                    if i > 0 {
-                        joined.push(' ');
-                    }
-                    starts.push(joined.len());
-                    joined.push_str(field);
-                }
-                starts.push(joined.len());
-                Units {
-                    text: Cow::Owned(joined),
-                    starts,
-                    sep: Unit::Words.sep(),
-                }
-            }
+            Unit::Chars => Units::chars(text),
+            Unit::Words => Units::words(text),
         }
     }
 
@@ -338,32 +183,45 @@ impl Encoding {
         }
     }
 
-    /// Units `[from, to)` of a text; `to = None` means "to the end".
-    pub fn slice(&self, text: &str, from: usize, to: Option<usize>) -> String {
-        match self.unit {
-            Unit::Chars => char_slice(text, from, to).to_string(),
-            Unit::Words => self.units(text).slice(from, to).to_string(),
-        }
+    /// Whether a text holds no units at all.
+    pub fn is_empty(&self, text: &str) -> bool {
+        self.len(text) == 0
     }
 
-    /// Glues unit-aligned pieces: nothing between characters, one space
-    /// between words.  Empty pieces are dropped, so a label contributing no
-    /// unit adds no separator.
-    pub fn join(&self, parts: &[&str]) -> String {
-        if self.unit != Unit::Words {
-            return parts.concat();
-        }
-        let kept: Vec<&str> = parts.iter().copied().filter(|p| !p.is_empty()).collect();
-        kept.join(" ")
+    /// Units `[from, to)` of a text.
+    pub fn slice(&self, text: &str, from: usize, to: usize) -> String {
+        self.units(text).slice(from, to)
     }
 
     /// The first `n` units of a text.
     pub fn truncate(&self, text: &str, n: usize) -> String {
-        self.slice(text, 0, Some(n))
+        self.units(text).slice(0, n)
     }
 
-    /// Does `text` start with `prefix` *on a unit boundary*?  For words that
-    /// means whole words: `"the ca"` is not a prefix of `"the cat sat"`.
+    /// Glues unit-aligned pieces: nothing between characters, one space between
+    /// words.  Empty pieces are dropped, so a label contributing no unit adds
+    /// no separator.
+    pub fn join(&self, parts: &[&str]) -> String {
+        if self.unit != Unit::Words {
+            return parts.concat();
+        }
+        let mut out = String::new();
+        for part in parts {
+            if part.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(part);
+        }
+        out
+    }
+
+    /// Whether `text` starts with `prefix` **on a unit boundary**.
+    ///
+    /// For words that means whole words: `"the ca"` is not a prefix of
+    /// `"the cat sat"`, `"the cat"` is.
     pub fn has_unit_prefix(&self, text: &str, prefix: &str) -> bool {
         if prefix.is_empty() {
             return true;
@@ -374,32 +232,30 @@ impl Encoding {
         text == prefix || (text.starts_with(prefix) && text.as_bytes().get(prefix.len()) == Some(&b' '))
     }
 
-    // -- grams ---------------------------------------------------------------
+    // -- encoder -------------------------------------------------------------
 
-    /// The gram at unit offset `at` of an already-cut text.
-    pub fn gram(&self, units: &Units<'_>, at: usize) -> Gram {
-        let text = units.slice(at, Some(at + self.n));
-        if self.packs() {
-            Gram::packed(text)
-        } else {
-            Gram::Text(Box::new(text.to_string()))
-        }
+    /// The grams of a text: `n` units each, `stride` units apart; empty when it
+    /// holds fewer than `n` units.
+    ///
+    /// The tail that does not fill a whole gram is dropped, exactly as the
+    /// trigram encoding drops the last two characters of a text.
+    pub fn encode(&self, text: &str) -> Vec<String> {
+        self.encode_units(&self.units(text))
     }
 
-    /// A gram read from text, or `None` when it is not `n` units long.
-    pub fn gram_of(&self, text: &str) -> Option<Gram> {
-        if self.len(text) != self.n {
-            return None;
+    /// [`Encoding::encode`] over an already-cut text.
+    pub fn encode_units(&self, u: &Units) -> Vec<String> {
+        let n = u.len();
+        if n < self.n {
+            return Vec::new();
         }
-        Some(if self.packs() {
-            Gram::packed(text)
-        } else {
-            Gram::Text(Box::new(text.to_string()))
-        })
+        let count = (n - self.n) / self.stride + 1;
+        (0..count)
+            .map(|i| u.slice(i * self.stride, i * self.stride + self.n))
+            .collect()
     }
 
-    /// How many units of a text its grams cover: everything for a sliding
-    /// window, everything but the ragged tail for groups.
+    /// How many units of a text its grams actually cover.
     pub fn covered(&self, units: usize) -> usize {
         if units < self.n {
             return 0;
@@ -407,182 +263,174 @@ impl Encoding {
         (units - self.n) / self.stride * self.stride + self.n
     }
 
-    /// Does gram `x` overlap gram `y` - do the last `n - stride` units of the
-    /// one open the other?  Free of any allocation where both are packed,
-    /// which is where a training pass asks it.
-    pub fn overlaps(&self, x: &Gram, y: &Gram) -> bool {
-        let ov = self.overlap();
-        if ov == 0 {
-            return true; // groups share nothing: any two chain
-        }
-        if let (Gram::Packed { bits: xb, .. }, Gram::Packed { bits: yb, .. }) = (x, y) {
-            // the units above the stride of one against the units below the
-            // overlap of the other, as plain integers
-            return (xb >> (BITS * self.stride as u32)) == (yb & mask(ov));
-        }
-        let (xs, ys) = (x.to_string(), y.to_string());
-        self.slice(&xs, self.stride, None) == self.slice(&ys, 0, Some(ov))
-    }
-
-    /// The grams of a text: `n` units each, `stride` units apart.  Empty when
-    /// the text holds fewer than `n` units.
+    /// The text this encoding can represent - what a round trip returns.
     ///
-    /// The tail that does not fill a whole gram is dropped, exactly as the
-    /// trigram encoding drops the last two characters; [`Encoding::normalize`]
-    /// says what is left.
-    pub fn encode(&self, text: &str) -> Vec<Gram> {
-        if self.packs() {
-            // the hot path of a training pass: a ring of characters packed
-            // straight into the gram, so the pass allocates nothing at all
-            let mut window = ['\0'; MAX_PACKED];
-            let mut filled = 0usize;
-            let mut since = 0usize;
-            let mut out = Vec::new();
-            for ch in text.chars() {
-                if filled < self.n {
-                    window[filled] = ch;
-                    filled += 1;
-                } else {
-                    window.copy_within(1..self.n, 0);
-                    window[self.n - 1] = ch;
-                }
-                if filled == self.n {
-                    if since == 0 {
-                        out.push(Gram::of_chars(&window[..self.n]));
-                        since = self.stride;
-                    }
-                    since -= 1;
-                }
-            }
-            return out;
-        }
-        if self.unit == Unit::Chars {
-            // more characters than fit in a `u64`: a ring of byte offsets, so
-            // only the gram itself is allocated
-            let mut offsets: Vec<usize> = vec![0; self.n];
-            let (mut filled, mut since) = (0usize, 0usize);
-            let mut out = Vec::new();
-            for (bi, ch) in text.char_indices() {
-                if filled < self.n {
-                    offsets[filled] = bi;
-                    filled += 1;
-                } else {
-                    offsets.copy_within(1..self.n, 0);
-                    offsets[self.n - 1] = bi;
-                }
-                if filled == self.n {
-                    if since == 0 {
-                        out.push(Gram::Text(Box::new(text[offsets[0]..bi + ch.len_utf8()].to_string())));
-                        since = self.stride;
-                    }
-                    since -= 1;
-                }
-            }
-            return out;
-        }
-        let units = self.units(text);
-        let n = units.len();
-        if n < self.n {
-            return Vec::new();
-        }
-        let mut out = Vec::with_capacity((n - self.n) / self.stride + 1);
-        let mut at = 0;
-        while at + self.n <= n {
-            out.push(self.gram(&units, at));
-            at += self.stride;
-        }
-        out
-    }
-
-    /// The text this encoding can represent - what a round trip through the
-    /// graph returns, and so what a round trip is checked against.
+    /// For the default encoding that is the text itself; a word encoding loses
+    /// the original spacing, and a grouping one the tail that does not fill a
+    /// group.
     pub fn normalize(&self, text: &str) -> String {
-        let units = self.units(text);
-        let covered = self.covered(units.len());
+        let u = self.units(text);
+        let covered = self.covered(u.len());
         if covered == 0 {
             return String::new();
         }
-        units.slice(0, Some(covered)).to_string()
+        u.slice(0, covered)
     }
 
-    // -- decoder --------------------------------------------------------------
+    // -- decoder -------------------------------------------------------------
 
-    /// Decodes node labels in path order into text.  Every label after the
-    /// first contributes its part beyond the overlap; the first contributes
-    /// `label[start_offset..]` when `include_context`, else
-    /// `label[start_offset + n..]` (the deterministic remainder of a
-    /// compressed node after the matched gram).  Offsets are in units.
+    /// Decodes node labels in path order into text.
+    ///
+    /// Every label after the first contributes the units beyond the overlap;
+    /// the first contributes `label[start_offset..]` when `include_context`,
+    /// else `label[start_offset + n..]` - the deterministic remainder of a
+    /// compressed node after the matched gram.
     pub fn decode_path(&self, labels: &[&str], start_offset: usize, include_context: bool) -> String {
         let first_cut = if include_context {
             start_offset
         } else {
             start_offset + self.n
         };
-        if self.unit == Unit::Chars {
-            let mut out = String::new();
-            for (i, label) in labels.iter().enumerate() {
-                let cut = if i == 0 { first_cut } else { self.overlap() };
-                out.push_str(char_slice(label, cut, None));
-            }
-            return out;
+        let mut pieces: Vec<String> = Vec::with_capacity(labels.len());
+        for (i, label) in labels.iter().enumerate() {
+            let u = self.units(label);
+            let cut = if i == 0 { first_cut } else { self.overlap() };
+            pieces.push(u.slice(cut, u.len()));
         }
-        let parts: Vec<String> = labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| {
-                let cut = if i == 0 { first_cut } else { self.overlap() };
-                self.slice(label, cut, None)
-            })
-            .collect();
-        self.join(&parts.iter().map(String::as_str).collect::<Vec<_>>())
+        let refs: Vec<&str> = pieces.iter().map(|s| s.as_str()).collect();
+        self.join(&refs)
     }
 
-    /// Decodes raw grams in order - the inverse of [`Encoding::encode`], up to
-    /// the tail it dropped.
-    pub fn decode_grams(&self, grams: &[Gram]) -> String {
-        let texts: Vec<String> = grams.iter().map(Gram::to_string).collect();
-        let parts: Vec<String> = texts
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                if i == 0 {
-                    t.clone()
-                } else {
-                    self.slice(t, self.overlap(), None)
-                }
-            })
-            .collect();
-        self.join(&parts.iter().map(String::as_str).collect::<Vec<_>>())
+    /// The text a run of consecutive grams spells.
+    ///
+    /// Each gram after the first contributes the `stride` units the previous
+    /// one did not.
+    pub fn decode_grams<'a>(&self, grams: impl IntoIterator<Item = &'a str>) -> String {
+        let mut pieces: Vec<String> = Vec::new();
+        for (i, gram) in grams.into_iter().enumerate() {
+            if i == 0 {
+                pieces.push(gram.to_string());
+            } else {
+                let u = self.units(gram);
+                pieces.push(u.slice(self.overlap(), u.len()));
+            }
+        }
+        let refs: Vec<&str> = pieces.iter().map(|s| s.as_str()).collect();
+        self.join(&refs)
     }
 }
 
-impl std::fmt::Display for Encoding {
-    /// The compact spec [`Encoding::parse`] reads back: `"char:3:1"`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Encoding {
+    /// The compact spec [`parse_encoding`] reads back: `char:3:1`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}:{}", self.unit, self.n, self.stride)
     }
 }
 
-// -- units ----------------------------------------------------------------------
+/// Reads a spec: `unit[:n[:stride]]`.
+///
+/// `unit` is char / chars / character / word / words, `n` defaults to
+/// [`WINDOW`] and `stride` to 1 (a sliding window); `unit:n:n` and the
+/// shorthand `unit:n:groups` are the non-overlapping form.  A few names for the
+/// common ones are accepted too: `trigram`, `bigram`, `word-bigram`,
+/// `word-trigram`.
+pub fn parse_encoding(spec: &str) -> Result<Encoding, String> {
+    let s = spec.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return Ok(Encoding::default());
+    }
+    match s.as_str() {
+        "default" | "trigram" | "trigrams" => return Ok(Encoding::default()),
+        "bigram" | "bigrams" => return Encoding::new(Unit::Chars, 2, 1),
+        "word" | "words" | "unigram-words" | "word-unigram" => return Encoding::new(Unit::Words, 1, 1),
+        "word-bigram" | "word-bigrams" | "bigram-words" => return Encoding::new(Unit::Words, 2, 1),
+        "word-trigram" | "word-trigrams" | "trigram-words" => return Encoding::new(Unit::Words, 3, 1),
+        _ => {}
+    }
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() > 3 {
+        return Err(format!("encoding {spec:?}: expected unit[:n[:stride]]"));
+    }
+    let unit = Unit::parse(parts[0])
+        .ok_or_else(|| format!("encoding {spec:?}: unit must be char or word, got {:?}", parts[0]))?;
+    let mut n = WINDOW;
+    if let Some(text) = parts.get(1).filter(|p| !p.is_empty()) {
+        n = text
+            .parse()
+            .map_err(|_| format!("encoding {spec:?}: n must be a number, got {text:?}"))?;
+    }
+    let mut stride = 1;
+    if let Some(text) = parts.get(2).filter(|p| !p.is_empty()) {
+        stride = match *text {
+            "groups" | "group" | "blocks" | "block" => n,
+            "sliding" | "slide" => 1,
+            other => other
+                .parse()
+                .map_err(|_| format!("encoding {spec:?}: stride must be a number, got {other:?}"))?,
+        };
+    }
+    Encoding::new(unit, n, stride).map_err(|why| format!("encoding {spec:?}: {why}"))
+}
 
 /// A text cut into units, indexed so that slicing by unit is O(1).
 ///
-/// `starts` holds the byte offset of every unit plus the end of the text.  For
-/// words the text is the normalised (single-spaced) form, which is why it may
-/// be owned.
-pub struct Units<'a> {
-    text: Cow<'a, str>,
+/// That is what the graph does all day - every split, every merge, every
+/// re-index of a label walks its grams - so the text is cut once and sliced
+/// many times.  `starts` holds the byte offset of every unit plus the end.
+#[derive(Clone, Debug)]
+pub struct Units {
+    text: String,
     starts: Vec<usize>,
+    /// The bytes between two units: 0 for characters, 1 for the space between words.
     sep: usize,
 }
 
-impl<'a> Units<'a> {
+impl Units {
+    /// One unit per code point; the text is kept as it is.
+    fn chars(text: &str) -> Units {
+        let mut starts: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+        starts.push(text.len());
+        Units {
+            text: text.to_string(),
+            starts,
+            sep: 0,
+        }
+    }
+
+    /// One unit per whitespace-delimited word; the text is rewritten with
+    /// single spaces, which is the layout a word encoding keeps.
+    fn words(text: &str) -> Units {
+        let fields: Vec<&str> = text.split_whitespace().collect();
+        if fields.is_empty() {
+            return Units {
+                text: String::new(),
+                starts: vec![0],
+                sep: 1,
+            };
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut starts = Vec::with_capacity(fields.len() + 1);
+        for (i, field) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            starts.push(out.len());
+            out.push_str(field);
+        }
+        starts.push(out.len());
+        Units {
+            text: out,
+            starts,
+            sep: 1,
+        }
+    }
+
     /// The number of units.
     pub fn len(&self) -> usize {
         self.starts.len() - 1
     }
 
-    /// Is the text empty of units?
+    /// Whether the text holds no units.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -592,179 +440,47 @@ impl<'a> Units<'a> {
         &self.text
     }
 
-    /// Units `[from, to)` as text; `to = None` means "to the end".  Bounds are
-    /// clamped and an empty range is `""`.
-    pub fn slice(&self, from: usize, to: Option<usize>) -> &str {
+    /// Units `[from, to)` as text; out-of-range bounds are clamped and an empty
+    /// range is `""`.
+    pub fn slice(&self, from: usize, to: usize) -> String {
         let n = self.len();
-        let to = to.map_or(n, |t| t.min(n));
+        let to = to.min(n);
         if from >= to {
-            return "";
+            return String::new();
         }
-        // the separator before unit `to` belongs to neither side
-        let end = if to < n {
-            self.starts[to] - self.sep
-        } else {
-            self.starts[to]
-        };
-        &self.text[self.starts[from]..end]
+        let mut end = self.starts[to];
+        if to < n {
+            end -= self.sep; // the separator before unit `to` belongs to neither side
+        }
+        self.text[self.starts[from]..end].to_string()
+    }
+
+    /// One unit.
+    pub fn at(&self, i: usize) -> String {
+        self.slice(i, i + 1)
     }
 }
 
-// -- a gram ---------------------------------------------------------------------
-
-/// One gram: the key the graph's index is built on.
+/// The alphabet of a word encoding: every word its grams are made of, and how
+/// many grams hold each.
 ///
-/// Up to [`MAX_PACKED`] characters live in a `u64` at [`BITS`] each - `Copy`,
-/// hashable and free of any allocation, which is what keeps the default
-/// encoding's pass allocation-free.  Anything longer, and every word gram, is
-/// the text itself.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Gram {
-    /// `n` characters packed [`BITS`] bits each.  `n` rides along so that two
-    /// grams of different lengths never collide, which costs nothing: the
-    /// variant is padded to the pointer either way.
-    Packed { bits: u64, n: u8 },
-    /// The gram as text: more than [`MAX_PACKED`] characters, or words.  The
-    /// string is behind one thin pointer rather than a fat one, so a `Gram` is
-    /// 16 bytes and not 24 - the index holds one per gram in the corpus, and
-    /// a training pass walks the whole of it.
-    Text(Box<String>),
-}
-
-/// The low `n` units of a packed gram.
-#[inline]
-fn mask(n: usize) -> u64 {
-    if n == 0 {
-        0
-    } else {
-        (1u64 << (BITS * n as u32)) - 1
-    }
-}
-
-/// Hashing a packed gram writes the one `u64` and nothing else - what hashing
-/// the index key cost before it could also be a string.  A packed gram and a
-/// text one may collide, which is what `Eq` is for; inside one graph only one
-/// of the two ever occurs, because the encoding is fixed.
-impl std::hash::Hash for Gram {
-    #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            Gram::Packed { bits, .. } => state.write_u64(*bits),
-            Gram::Text(s) => s.hash(state),
+/// A word encoding has no vocabulary object to consult - a gram is text - so
+/// the alphabet the graph has read is whatever its grams are made of.  The gram
+/// index is the one count that survives compression, so that is what is counted.
+pub fn vocabulary<'a>(encoding: &Encoding, grams: impl IntoIterator<Item = &'a str>) -> Vec<(String, usize)> {
+    use crate::hash::{map, Map};
+    let mut counts: Map<String, usize> = map();
+    for gram in grams {
+        let u = encoding.units(gram);
+        for i in 0..u.len() {
+            *counts.entry(u.at(i)).or_insert(0) += 1;
         }
     }
-}
-
-impl Gram {
-    /// Packs a text of at most [`MAX_PACKED`] characters.
-    fn packed(text: &str) -> Gram {
-        let mut bits = 0u64;
-        let mut n = 0u8;
-        for (i, ch) in text.chars().enumerate() {
-            bits |= (ch as u64) << (BITS * i as u32);
-            n = i as u8 + 1;
-        }
-        Gram::Packed { bits, n }
-    }
-
-    /// Packs characters straight, without going through a string.
-    #[inline]
-    fn of_chars(chars: &[char]) -> Gram {
-        let mut bits = 0u64;
-        for (i, ch) in chars.iter().enumerate() {
-            bits |= (*ch as u64) << (BITS * i as u32);
-        }
-        Gram::Packed {
-            bits,
-            n: chars.len() as u8,
-        }
-    }
-
-    /// The characters back out of a packed gram.
-    pub fn chars(&self) -> Vec<char> {
-        match self {
-            Gram::Packed { bits, n } => (0..*n as u32)
-                .map(|i| char::from_u32(((bits >> (BITS * i)) & 0x1f_ffff) as u32).unwrap_or('\u{fffd}'))
-                .collect(),
-            Gram::Text(s) => s.chars().collect(),
-        }
-    }
-
-    /// Appends the gram to a string.
-    pub fn write_to(&self, out: &mut String) {
-        match self {
-            Gram::Packed { .. } => out.extend(self.chars()),
-            Gram::Text(s) => out.push_str(s),
-        }
-    }
-}
-
-impl std::fmt::Display for Gram {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Gram::Packed { .. } => {
-                let mut s = String::with_capacity(MAX_PACKED);
-                self.write_to(&mut s);
-                f.write_str(&s)
-            }
-            Gram::Text(s) => f.write_str(s),
-        }
-    }
-}
-
-impl From<Trigram> for Gram {
-    fn from(t: Trigram) -> Gram {
-        Gram::Packed {
-            bits: t.0,
-            n: MAX_PACKED as u8,
-        }
-    }
-}
-
-/// The overlapping trigrams of `text` under the default encoding.
-pub fn encode(text: &str) -> Vec<Gram> {
-    Encoding::default().encode(text)
-}
-
-/// Decodes node labels under the default encoding.
-pub fn decode_path(labels: &[&str], start_offset: usize, include_context: bool) -> String {
-    Encoding::default().decode_path(labels, start_offset, include_context)
-}
-
-/// The character (code point) length of a string - the unit the model measures
-/// text in, on all three implementations.
-#[inline]
-pub fn char_len(s: &str) -> usize {
-    s.chars().count()
-}
-
-/// `s[from..to]` in characters; `to = None` means "to the end".
-pub fn char_slice(s: &str, from: usize, to: Option<usize>) -> &str {
-    let mut start = s.len();
-    let mut end = s.len();
-    for (i, (bi, _)) in s.char_indices().enumerate() {
-        if i == from {
-            start = bi;
-        }
-        if let Some(to) = to {
-            if i == to {
-                end = bi;
-                break;
-            }
-        }
-    }
-    if from == 0 {
-        start = 0;
-    }
-    if start > end {
-        return "";
-    }
-    &s[start..end]
-}
-
-/// The first `n` characters of `s`.
-pub fn truncate_chars(s: &str, n: usize) -> &str {
-    char_slice(s, 0, Some(n))
+    let mut rows: Vec<(String, usize)> = counts.into_iter().collect();
+    // most read first, ties alphabetically - the Python and Go order, word for
+    // word, so three implementations list one alphabet
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
 }
 
 #[cfg(test)]
@@ -772,26 +488,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_of_three() {
-        let grams = encode("hello");
-        let words: Vec<String> = grams.iter().map(|t| t.to_string()).collect();
-        assert_eq!(words, vec!["hel", "ell", "llo"]);
-        assert!(encode("hi").is_empty());
+    fn the_default_is_the_character_trigram() {
+        let e = Encoding::default();
+        assert_eq!(e.to_string(), "char:3:1");
+        assert!(e.is_default());
+        assert!(e.sliding());
+        assert_eq!(e.overlap(), OVERLAP);
+        assert_eq!(e.units_name(), "chars");
+        assert_eq!(e.encode("hello"), vec!["hel", "ell", "llo"]);
+        assert_eq!(e.normalize("hello"), "hello");
     }
 
     #[test]
-    fn trigrams_survive_the_packing() {
-        for text in ["abc", "  a", "é€語", "\u{10ffff}ab"] {
-            let t = Trigram::parse(text).unwrap();
-            assert_eq!(t.to_string(), text);
+    fn any_n_and_any_stride() {
+        let five = Encoding::new(Unit::Chars, 5, 1).unwrap();
+        assert_eq!(five.encode("hello!"), vec!["hello", "ello!"]);
+        let groups = Encoding::new(Unit::Chars, 4, 4).unwrap();
+        assert_eq!(groups.encode("hello there"), vec!["hell", "o th"]);
+        assert!(!groups.sliding());
+        assert_eq!(groups.overlap(), 0);
+        // the tail that does not fill a group is dropped, and normalize says so
+        assert_eq!(groups.normalize("hello there"), "hello th");
+        // a stride larger than n would skip units
+        assert!(Encoding::new(Unit::Chars, 3, 4).is_err());
+        assert!(Encoding::new(Unit::Chars, 0, 1).is_err());
+    }
+
+    #[test]
+    fn a_word_encoding_counts_words() {
+        let e = Encoding::new(Unit::Words, 2, 1).unwrap();
+        assert_eq!(e.to_string(), "word:2:1");
+        assert_eq!(e.units_name(), "words");
+        assert_eq!(e.encode("the cat sat"), vec!["the cat", "cat sat"]);
+        assert_eq!(e.len("the cat sat"), 3);
+        // the layout is not kept: a round trip writes single spaces
+        assert_eq!(e.normalize("the   cat\tsat"), "the cat sat");
+        assert_eq!(e.join(&["the cat", "sat"]), "the cat sat");
+        assert_eq!(e.join(&["", "sat"]), "sat");
+        // a prefix is whole words
+        assert!(e.has_unit_prefix("the cat sat", "the cat"));
+        assert!(!e.has_unit_prefix("the cat sat", "the ca"));
+        assert!(Encoding::default().has_unit_prefix("the cat sat", "the ca"));
+    }
+
+    #[test]
+    fn the_specs_it_reads() {
+        for (spec, want) in [
+            ("", Encoding::default()),
+            ("trigram", Encoding::default()),
+            ("char:3:1", Encoding::default()),
+            ("CHAR", Encoding::default()),
+            ("char:5", Encoding::new(Unit::Chars, 5, 1).unwrap()),
+            ("char:4:groups", Encoding::new(Unit::Chars, 4, 4).unwrap()),
+            ("word:2:1", Encoding::new(Unit::Words, 2, 1).unwrap()),
+            ("word-trigram", Encoding::new(Unit::Words, 3, 1).unwrap()),
+            ("words", Encoding::new(Unit::Words, 1, 1).unwrap()),
+        ] {
+            assert_eq!(parse_encoding(spec).unwrap(), want, "{spec}");
+        }
+        for spec in ["sideways", "char:x", "char:3:x", "a:b:c:d", "char:3:9"] {
+            assert!(parse_encoding(spec).is_err(), "{spec} was accepted");
+        }
+        // every spec round-trips through its own string form
+        for e in [Encoding::default(), Encoding::new(Unit::Words, 2, 1).unwrap()] {
+            assert_eq!(parse_encoding(&e.to_string()).unwrap(), e);
         }
     }
 
     #[test]
-    fn a_path_decodes_back_to_its_text() {
-        assert_eq!(decode_path(&["hel", "ell", "llo"], 0, true), "hello");
-        assert_eq!(decode_path(&["hello"], 0, false), "lo");
-        assert_eq!(char_slice("héllo", 1, Some(3)), "él");
-        assert_eq!(truncate_chars("héllo", 2), "hé");
+    fn units_slice_by_unit() {
+        let e = Encoding::new(Unit::Words, 3, 1).unwrap();
+        let u = e.units("the  cat   sat on");
+        assert_eq!(u.len(), 4);
+        assert_eq!(u.text(), "the cat sat on");
+        assert_eq!(u.slice(1, 3), "cat sat");
+        assert_eq!(u.at(0), "the");
+        assert_eq!(u.slice(2, 99), "sat on"); // clamped
+        assert_eq!(u.slice(3, 1), ""); // empty
+        let c = Encoding::default().units("héllo");
+        assert_eq!(c.len(), 5); // code points, not bytes
+        assert_eq!(c.at(1), "é");
+    }
+
+    #[test]
+    fn the_grams_spell_the_text_again() {
+        for (e, text) in [
+            (Encoding::default(), "hello there"),
+            (Encoding::new(Unit::Chars, 5, 1).unwrap(), "hello there"),
+            (Encoding::new(Unit::Words, 2, 1).unwrap(), "the cat sat on the mat"),
+            (Encoding::new(Unit::Words, 3, 1).unwrap(), "the cat sat on the mat"),
+        ] {
+            let grams = e.encode(text);
+            let back = e.decode_grams(grams.iter().map(|s| s.as_str()));
+            assert_eq!(back, e.normalize(text), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_alphabet_is_what_the_grams_are_made_of() {
+        let e = Encoding::new(Unit::Words, 3, 1).unwrap();
+        let rows = vocabulary(&e, ["the cat sat", "cat sat on"]);
+        assert_eq!(
+            rows,
+            vec![
+                ("cat".to_string(), 2),
+                ("sat".to_string(), 2),
+                ("on".to_string(), 1),
+                ("the".to_string(), 1),
+            ]
+        );
     }
 }

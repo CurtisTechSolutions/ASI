@@ -12,7 +12,7 @@
 //! which it is holding.
 
 use radixnet::model::PredictOptions;
-use radixnet::{Encoding, GraphOptions, Model, TrainOptions, Unit};
+use radixnet::{parse_encoding, Encoding, GraphOptions, Model, TrainOptions, Unit};
 
 /// Every combination the tests drive end to end.
 fn every_encoding() -> Vec<Encoding> {
@@ -79,8 +79,8 @@ fn trained(enc: Encoding, epochs: usize) -> Model {
 fn the_defaults_and_what_does_not_validate() {
     assert!(Encoding::default().is_default());
     assert_eq!(Encoding::default().overlap(), radixnet::OVERLAP);
-    assert_eq!(Encoding::parse("char:4:4").unwrap().overlap(), 0);
-    assert!(!Encoding::parse("char:4:4").unwrap().sliding());
+    assert_eq!(parse_encoding("char:4:4").unwrap().overlap(), 0);
+    assert!(!parse_encoding("char:4:4").unwrap().sliding());
     for bad in [
         Encoding {
             unit: Unit::Chars,
@@ -131,13 +131,13 @@ fn a_spec_parses_into_the_three_dials_and_prints_back() {
         ("WORD:2:2", "word:2:2"),
     ];
     for (spec, want) in cases {
-        let enc = Encoding::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
+        let enc = parse_encoding(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
         assert_eq!(enc.to_string(), want, "{spec}");
         // and the printed spec parses back to the same encoding
-        assert_eq!(Encoding::parse(&enc.to_string()).unwrap(), enc, "{spec} round trip");
+        assert_eq!(parse_encoding(&enc.to_string()).unwrap(), enc, "{spec} round trip");
     }
     for bad in ["rune:3", "char:x", "char:3:y", "char:2:3", "char:0", "a:b:c:d"] {
-        assert!(Encoding::parse(bad).is_err(), "{bad} must not parse");
+        assert!(parse_encoding(bad).is_err(), "{bad} must not parse");
     }
 }
 
@@ -156,7 +156,7 @@ fn a_text_encodes_into_the_grams_it_should() {
         ("word:2:1", "alone", vec![]),
     ];
     for (spec, text, want) in cases {
-        let enc = Encoding::parse(spec).unwrap();
+        let enc = parse_encoding(spec).unwrap();
         let got: Vec<String> = enc.encode(text).iter().map(|g| g.to_string()).collect();
         assert_eq!(got, want, "{enc}.encode({text:?})");
     }
@@ -164,7 +164,7 @@ fn a_text_encodes_into_the_grams_it_should() {
 
 #[test]
 fn a_word_model_encodes_whole_words() {
-    let model = trained(Encoding::parse("word:2").unwrap(), 1);
+    let model = trained(parse_encoding("word:2").unwrap(), 1);
     // a gram is text like any other, made of two whole words
     let enc = model.g.enc;
     let text = "the cat sat";
@@ -186,11 +186,15 @@ fn normalize_is_what_comes_back() {
         ("word:2:1", "the  cat\tsat", "the cat sat"),
         ("word:2:2", "the cat sat", "the cat"),
     ] {
-        let enc = Encoding::parse(spec).unwrap();
+        let enc = parse_encoding(spec).unwrap();
         assert_eq!(enc.normalize(text), want, "{enc}.normalize({text:?})");
         let grams = enc.encode(text);
         if !grams.is_empty() {
-            assert_eq!(enc.decode_grams(&grams), want, "{enc} decode_grams");
+            assert_eq!(
+                enc.decode_grams(grams.iter().map(String::as_str)),
+                want,
+                "{enc} decode_grams"
+            );
         }
     }
 }
@@ -230,7 +234,6 @@ fn training_predicting_and_scoring_work_under_every_encoding() {
         let mut model = trained(enc, 2);
         assert!(model.g.num_trigrams() > 0, "{enc}: nothing was learned");
         assert_eq!(model.g.enc, enc);
-        assert_eq!(model.is_words(), enc.unit == Unit::Words);
         assert_eq!(model.units(), enc.units_name());
         let found = model
             .predict(
@@ -255,7 +258,7 @@ fn training_predicting_and_scoring_work_under_every_encoding() {
 
 #[test]
 fn a_word_model_walks_in_whole_words() {
-    let mut model = trained(Encoding::parse("word:2").unwrap(), 3);
+    let mut model = trained(parse_encoding("word:2").unwrap(), 3);
     let corpus = CORPUS.join(" ");
     let found = model
         .predict(
@@ -283,7 +286,7 @@ fn a_word_model_walks_in_whole_words() {
 
 #[test]
 fn a_group_encoding_has_no_overlap() {
-    let enc = Encoding::parse("char:4:groups").unwrap();
+    let enc = parse_encoding("char:4:groups").unwrap();
     assert_eq!(enc.overlap(), 0);
     let lines = vec!["abcdefghijkl".to_string(), "abcdmnopijkl".to_string()];
     let mut model = Model::new(
@@ -338,7 +341,7 @@ fn the_structure_is_the_one_the_other_two_build() {
         ("word:2:2", 77, 141, 155),
     ];
     for (spec, nodes, edges, grams) in expected {
-        let enc = Encoding::parse(spec).unwrap();
+        let enc = parse_encoding(spec).unwrap();
         let mut model = Model::new(
             1,
             GraphOptions {

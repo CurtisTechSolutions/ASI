@@ -9,9 +9,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 
+use radixnet::encoding::{Encoding, Unit};
 use radixnet::json::{parse, Json};
 use radixnet::service::{build, Service};
-use radixnet::{Encoding, GraphOptions, Model, TrainOptions, Unit};
+use radixnet::{GraphOptions, Model, TrainOptions};
 
 /// A port nothing is listening on, taken and released so the server can have it.
 fn free_port() -> u16 {
@@ -21,9 +22,7 @@ fn free_port() -> u16 {
     port
 }
 
-/// A trained model in the given encoding: `Unit::Chars` is the character
-/// trigram every other test uses, `Unit::Words` the word trigram.
-fn trained(unit: Unit) -> Model {
+fn trained(words: bool) -> Model {
     let texts: Vec<String> = [
         "the cat sat on the mat",
         "the cat sat on the log",
@@ -33,13 +32,15 @@ fn trained(unit: Unit) -> Model {
     .iter()
     .map(|s| s.to_string())
     .collect();
+    let encoding = if words {
+        Encoding::new(Unit::Words, 3, 1).expect("a word encoding")
+    } else {
+        Encoding::default()
+    };
     let mut model = Model::new(
         0,
         GraphOptions {
-            encoding: Encoding {
-                unit,
-                ..Default::default()
-            },
+            encoding,
             ..Default::default()
         },
     )
@@ -122,10 +123,7 @@ fn post(port: u16, path: &str, body: &str) -> (u16, Json) {
 
 #[test]
 fn the_model_endpoints_answer_the_same_contract() {
-    let port = serve(
-        trained(Unit::Chars),
-        &format!("{}/model.count.json", temp_dir("server")),
-    );
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("server")));
 
     let (status, health) = get(port, "/api/health");
     assert_eq!(status, 200);
@@ -138,9 +136,11 @@ fn the_model_endpoints_answer_the_same_contract() {
     assert_eq!(stats.at("units").as_str(), Some("chars"));
     assert_eq!(stats.at("engine").as_str(), Some("rust"));
     assert!(stats.at("nodes").as_i64().unwrap_or(0) > 3);
-    // one kind, because a word model is this same model under a word
-    // encoding and not a kind of its own
-    assert_eq!(stats.at("kinds").as_array().len(), 1);
+    assert_eq!(
+        stats.at("kinds").as_array().len(),
+        1,
+        "words are an encoding, not a second kind"
+    );
 
     let (status, model) = get(port, "/api/model");
     assert_eq!(status, 200);
@@ -174,10 +174,7 @@ fn the_model_endpoints_answer_the_same_contract() {
 
 #[test]
 fn the_traversals_are_all_three_and_each_one_answers() {
-    let port = serve(
-        trained(Unit::Chars),
-        &format!("{}/model.count.json", temp_dir("traversals")),
-    );
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("traversals")));
     let (_, named) = get(port, "/api/traversals");
     assert_eq!(
         named.at("traversals").to_strings(),
@@ -207,43 +204,40 @@ fn the_traversals_are_all_three_and_each_one_answers() {
     assert_eq!(costs[0], costs[2], "the least-punished traversal changed a price");
 }
 
-/// Characters or words is the encoding, chosen when a model is made, not a
-/// kind to switch between: `POST /api/reset` is where the frontend picks it,
-/// and `GET /api/encoding` is where it reads it back.
+/// Switching to a word encoding is what the frontend's model selector does, and
+/// it has to be reachable from a server started on characters - otherwise the
+/// Words tab can never appear. An encoding is fixed for a model's life, so the
+/// switch is to a *different* model; the one that was running is parked with
+/// its unsaved work rather than dropped, which is what the Python service does
+/// for a kind.
 #[test]
-fn the_encoding_is_chosen_when_a_model_is_made() {
-    let dir = temp_dir("encoding");
-    let port = serve(trained(Unit::Chars), &format!("{dir}/model.count.json"));
+fn the_server_switches_between_the_two_encodings() {
+    let dir = temp_dir("switch");
+    let port = serve(trained(false), &format!("{dir}/model.count.json"));
 
-    let (status, dial) = get(port, "/api/encoding");
+    let (status, chosen) = post(port, "/api/model/select", r#"{"kind":"word"}"#);
     assert_eq!(status, 200);
-    assert_eq!(dial.at("encoding").as_str(), Some("char:3:1"));
-    assert_eq!(dial.at("unit").as_str(), Some("char"));
-    assert_eq!(dial.at("ngram").as_i64(), Some(3));
-    assert_eq!(dial.at("stride").as_i64(), Some(1));
-    assert_eq!(dial.at("configurable").as_bool(), Some(true));
+    assert_eq!(chosen.at("kind").as_str(), Some("count"), "the kind never changes");
+    assert_eq!(chosen.at("units").as_str(), Some("words"));
+    assert_eq!(chosen.at("encoding").as_str(), Some("word:3:1"));
+    // nothing was saved under that name yet, so it is a fresh model
+    assert_eq!(chosen.at("origin").as_str(), Some("new"));
+    assert_eq!(chosen.at("in_memory").to_strings(), vec!["word:3:1", "char:3:1"]);
+    // each encoding has its own default file, derived from the one the server was given
+    assert!(chosen
+        .at("paths")
+        .at("word")
+        .as_str()
+        .unwrap_or("")
+        .ends_with("model.word.json"));
+    assert!(chosen
+        .at("paths")
+        .at("count")
+        .as_str()
+        .unwrap_or("")
+        .ends_with("model.count.json"));
 
-    // a fresh model in any encoding the dial can name
-    let (status, reset) = post(port, "/api/reset", r#"{"encoding":"word:2:1"}"#);
-    assert_eq!(status, 200);
-    assert_eq!(reset.at("encoding").as_str(), Some("word:2:1"));
-    assert_eq!(reset.at("stats").at("units").as_str(), Some("words"));
-
-    let (_, dial) = get(port, "/api/encoding");
-    assert_eq!(dial.at("unit").as_str(), Some("word"));
-    assert_eq!(dial.at("overlap").as_i64(), Some(1));
-
-    // the three dials on their own do the same job
-    let (status, reset) = post(port, "/api/reset", r#"{"unit":"char","ngram":4,"stride":4}"#);
-    assert_eq!(status, 200);
-    assert_eq!(reset.at("encoding").as_str(), Some("char:4:4"));
-    let (_, dial) = get(port, "/api/encoding");
-    assert_eq!(dial.at("overlap").as_i64(), Some(0), "groups share nothing");
-
-    // and it is a working model: trainable, and counted in its own units
-    let (status, reset) = post(port, "/api/reset", r#"{"encoding":"word:3:1"}"#);
-    assert_eq!(status, 200);
-    assert_eq!(reset.at("stats").at("units").as_str(), Some("words"));
+    // and it is a working model: trainable, and counted in words
     let (status, _) = post(
         port,
         "/api/train",
@@ -258,17 +252,29 @@ fn the_encoding_is_chosen_when_a_model_is_made() {
     }
     let (_, stats) = get(port, "/api/status");
     assert_eq!(stats.at("units").as_str(), Some("words"));
+    let trained_words = stats.at("nodes").as_i64().unwrap_or(0);
     assert!(
-        stats.at("nodes").as_i64().unwrap_or(0) > 3,
-        "the word model was not trained"
+        trained_words > 3,
+        "the word model was not trained: {trained_words} nodes"
     );
-    // the kind the server runs never changes with the encoding
-    assert_eq!(stats.at("kind").as_str(), Some("count"));
 
-    // one model, one file: saving lands on the path the server was given
+    // the character model comes back as it was left, and so does the word one
+    let (_, back) = post(port, "/api/model/select", r#"{"kind":"count"}"#);
+    assert_eq!(back.at("encoding").as_str(), Some("char:3:1"));
+    assert_eq!(back.at("origin").as_str(), Some("memory"));
+    assert_eq!(back.at("units").as_str(), Some("chars"));
+    let (_, again) = post(port, "/api/model/select", r#"{"kind":"word"}"#);
+    assert_eq!(again.at("origin").as_str(), Some("memory"));
+    assert_eq!(
+        again.at("stats").at("nodes").as_i64(),
+        Some(trained_words),
+        "the parked word model lost its training"
+    );
+
+    // saving follows the active kind, so a word model never lands on the count model's file
     let (status, saved) = post(port, "/api/save", "{}");
     assert_eq!(status, 200);
-    assert!(saved.at("saved").as_str().unwrap_or("").ends_with("model.count.json"));
+    assert!(saved.at("saved").as_str().unwrap_or("").ends_with("model.word.json"));
 }
 
 /// Every way the Python contract lets a client name its texts: a list, one text
@@ -276,7 +282,7 @@ fn the_encoding_is_chosen_when_a_model_is_made() {
 #[test]
 fn the_texts_of_a_request_may_come_three_ways() {
     let dir = temp_dir("texts");
-    let port = serve(trained(Unit::Chars), &format!("{dir}/model.count.json"));
+    let port = serve(trained(false), &format!("{dir}/model.count.json"));
 
     let (status, _) = post(
         port,
@@ -329,24 +335,20 @@ the cat ate the rat","epochs":1}"#,
 
 #[test]
 fn a_word_model_serves_its_alphabet() {
-    let port = serve(trained(Unit::Words), &format!("{}/model.word.json", temp_dir("words")));
+    let port = serve(trained(true), &format!("{}/model.word.json", temp_dir("words")));
     let (status, stats) = get(port, "/api/status");
     assert_eq!(status, 200);
     assert_eq!(stats.at("kind").as_str(), Some("count"));
     assert_eq!(stats.at("units").as_str(), Some("words"));
+    assert_eq!(stats.at("encoding").as_str(), Some("word:3:1"));
 
     let (status, words) = get(port, "/api/words?limit=3");
     assert_eq!(status, 200);
     assert_eq!(words.at("units").as_str(), Some("words"));
-    assert_eq!(words.at("encoding").as_str(), Some("word:3:1"));
     assert!(words.at("vocabulary").as_i64().unwrap_or(0) > 3);
     let rows = words.at("words").as_array();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].at("word").as_str(), Some("the"));
-    // the id is the rank, most read first, because nothing records the order
-    // the words were first read
-    assert_eq!(rows[0].at("id").as_i64(), Some(0));
-    assert_eq!(rows[0].at("grams").as_i64(), rows[0].at("trigrams").as_i64());
 
     let (status, found) = post(port, "/api/predict", r#"{"prefix":"the cat sat on","length":2}"#);
     assert_eq!(status, 200);
@@ -356,14 +358,15 @@ fn a_word_model_serves_its_alphabet() {
 
 #[test]
 fn what_it_does_not_serve_says_so() {
-    let port = serve(
-        trained(Unit::Chars),
-        &format!("{}/model.count.json", temp_dir("refusals")),
-    );
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("refusals")));
     // a word alphabet on a character model
     let (status, error) = get(port, "/api/words");
     assert_eq!(status, 400);
-    assert!(error.at("error").as_str().unwrap_or("").contains("word encoding"));
+    let says = error.at("error").as_str().unwrap_or("");
+    assert!(
+        says.contains("counts in chars") && says.contains("word encoding"),
+        "{says}"
+    );
 
     // a kind no Rust server runs
     let (status, error) = post(port, "/api/model/select", r#"{"kind":"resonant"}"#);

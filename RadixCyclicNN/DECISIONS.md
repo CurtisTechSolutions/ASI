@@ -77,12 +77,12 @@ D-068 the BACK sentinel: where it goes round, learned
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
 **Part XV — The traversal** · D-069 what a search looks for is an option · D-070 one home for a network setting ·
-D-071 the least-punished traversal
+D-075 the least-punished traversal
 
-**Part XVI — A third implementation, and a second alphabet** · D-072 the Rust port ·
-D-073 words as symbols (superseded) · D-074 a port is finished when a client cannot tell
+**Part XVI — The encoding** · D-071 the encoding is a dial, and it belongs to the model ·
+D-073 words as symbols (superseded by it)
 
-**Part XVII — The encoding** · D-075 the encoding is a dial, and it belongs to the model
+**Part XVII — A third implementation** · D-072 the Rust port · D-074 how parity is measured
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2564,7 +2564,7 @@ tabs). The traversal is the first setting to be shared rather than copied, and
 
 **Lives in** `frontend/src/components/NetworkSettingsPanel.jsx`,
 `frontend/src/hooks/useNetworkSettings.jsx`, `radixnet/api.py`, `go/server/`
-### D-071 — A walk can be ranked by what went **wrong** on it, and blame is not for sale
+### D-075 — A walk can be ranked by what went **wrong** on it, and blame is not for sale
 
 **Status** Accepted · 2026-09-20 · **Layer** search · **Extends** D-008, D-058 ·
 **Specified in** `SPEC-LeastPunished.md`
@@ -2628,91 +2628,118 @@ the first term of the punishment is a stand-in for until then.
 
 ---
 
-# Part XVI — A third implementation, and a second alphabet
+# Part XVI — The encoding
 
-### D-072 — A third implementation, to price the language rather than the model
+### D-071 — The encoding is a dial of the model, not a constant of the package
 
-**Status** Accepted · 2026-09-20 · **Layer** platform · **Beside** D-038
+**Status** Accepted · 2026-09-20 · **Layer** representation ·
+**Extends** D-006, which stays the default
 
-**Context** D-038 ported the count model to Go because pure Python topped out
-near 100k transitions/s. Go now runs the same model at ~6M. How much of what is
-left is the model, and how much is the runtime? Nothing in the repository could
-answer that, because nothing had ever run this model twice.
+**Context** D-006 fixed the input at three characters with stride 1 and gave the
+reason: the shared character is a *pivot*, and three is the smallest window that
+gives a pivot with context either side. That argument says what the **default**
+should be. It does not say the number should be a constant - and in both
+implementations it was one: `WINDOW = 3` / `Window = 3`, read directly by the
+graph, the models, the beams, the diff and the loader, with the overlap beside
+it. Anyone wanting to ask "what does this corpus look like in fives?" had to
+edit two constants, and nothing in a model file said how to read its labels.
 
-**Decision** Port the count model to Rust (`rust/`), with no dependencies, and
-build the cross-language benchmark (`bench/`) that runs it against Go **over one
-corpus** and refuses to report a timing until the two agree on the graph, the
-transitions, the loss, the expansions and the prediction - to the bit, on the
-cost of the path.
+**Decision** The encoding becomes a value - `Encoding(unit, n, stride)` - owned
+by the graph, fixed when the graph is created, written into the model file and
+read back from it, **in every implementation**. Three dials:
 
-**Rationale** A speed comparison between two programs that computed different
-things is not a comparison, and a port that quietly drifts is the normal failure
-mode of having three implementations (D-038's "two implementations of one model,
-which must stay in step"). Making the parity check a precondition of the
-benchmark, rather than a separate test someone remembers to run, is the whole
-design of `bench/compare.py`.
+| dial | what it is | the default |
+|---|---|---|
+| `Unit` | what one position of a text is: a character, or a whitespace word | `char` |
+| `N` | how many units one gram holds - the *n* of the n-gram | 3 |
+| `Stride` | how far apart consecutive grams start | 1 |
 
-**What it measured** (4-core Xeon, 2M characters, 3 epochs; `bench/RESULTS.md`)
+`Stride` is the dial that makes the other two useful. At 1 the grams slide and
+overlap by `N - 1`, which is D-006's pivot generalised. At `N` they do not
+overlap at all, which is *tokenisation*: `char:4:4` cuts text into groups of
+four letters, and the graph becomes a chain of groups that meet only at their
+ends. `word:2:1` is the word bigram, `word:3:1` the word trigram.
 
-| | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
-|---|--:|--:|--:|--:|
-| training | 6.6M transitions/s | **14.3M** | 7.4M | **20.6M** |
-| prediction | 4.2k/s | **16.1k** | 3.8k | **16.1k** |
+Everything the graph measures is now measured in **units**, not characters: a
+node's label length, the offset of a gram inside a label, the length of a
+prediction, the spans of the correction diff. Under the default encoding a unit
+*is* a character, so every one of those quantities is what it always was - which
+is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
 
-2.2-2.8x at counting, 3.8-6.2x at predicting (the wide end of the second range is
-the least-punished traversal, where the search is small and the constant factors
-are most of it). Three representation choices carry
-most of it and none of them is algorithmic: a trigram is a packed `u64` rather
-than a fresh string, a node's children are read into a buffer the search reuses
-rather than a fresh slice per expansion, and the trigram index hashes with
-`FxHasher`. They are listed in `rust/README.md` because a reader who takes the
-table for "Rust is 4x faster than Go" has been misled by it.
+**Alternatives rejected**
+* **A package-level variable instead of a field.** One process, one encoding -
+  and a model loaded from a file could silently disagree with it. The encoding
+  belongs to the graph because the graph's labels are written in it.
+* **Keeping the label a `[]rune` and special-casing words.** Words are not
+  characters of a different width; the split, the merge and the index all walk
+  *positions*. A `Units` view (an index of byte offsets, sliced in O(1)) makes
+  one code path serve both.
+* **A learned sub-word vocabulary.** Still rejected, for D-006's reason: it
+  needs a corpus before training can start, and freezes what the model can read.
+  `word` is not a vocabulary - an unseen word is a new node, exactly as an
+  unseen trigram is.
+* **Writing the encoding into every file.** A file that says `char:3:1` is a
+  file the Python loader would have to be taught to ignore. It is written only
+  when it is *not* the default, so an ordinary model file is byte for byte what
+  it always was.
 
 **Consequences**
-* Three implementations to keep in step, not two. The benchmark is the check for
-  the third; `tests/test_go_parity.py` remains the check for the second.
-* Go's `--workers 1` now runs the two beams of a prediction in turn rather than
-  on two goroutines, so a one-worker row means the same thing on both sides.
-* The Rust port reads and writes the `radixnet-count` model file, gzipped or
-  not, and `tests/test_rust_parity.py` holds it to Python's: the same structure,
-  counts, rewards, window, RNG state, judged paths and node ratios, the same
-  predictions, generated texts and scores, and each side continuing the other's
-  file. Its graph document is Python's **byte for byte** but for the `version`
-  cache stamp - which the Go port's is not, because Go renders floats and orders
-  keys its own way.
-* The port carries **all three traversals** (D-071, and the punishment traversal
-  of D-069 in `rust/src/penalty.rs`) and **both alphabets** (D-073), so a
-  traversal or a kind added to one implementation is now added to three.
-* The port serves the frontend: `rust/src/http.rs` is HTTP/1.1 written out over
-  `TcpListener` and `rust/src/service.rs` answers the same JSON contract the
-  Python and Go servers answer, so `frontend/dist` runs against
-  `radixnet serve` unmodified. What a Rust server cannot fill, the frontend
-  hides on `engine == "rust"`, and what it will not serve says so with a 400.
-* What the port still does **not** have: the negative network, the tutors and
-  the other teaching loops, the agent and its tools, images and speech, and MCP.
-  Undone, not deliberate. **One gap is deliberate**: the LLM clients need HTTPS,
-  and a crate with no dependencies cannot speak it. Porting them is not a task,
-  it is a proposal to drop the no-dependency rule above - which would also drop
-  what that rule buys, a `Cargo.lock` with nothing in it but this crate.
-* Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
-  both sides, because a benchmark of a deliberate data race measures the race.
+* **D-039's bit-identical interchange now covers every encoding.** Both sides
+  write the same `encoding` block and read each other's, and
+  `TestGoEncodingParity` holds them to the same graph, the same file and the
+  same prediction under nine of them. A word model trained in Python continues
+  in Go and back.
+* **The dial reaches all four Python kinds.** RadixNet, the count model, the
+  negative network and the resonant model share one graph, so none of them
+  could have it alone. The sine model trains on word bigrams because the graph
+  it trains on does.
+* **The Rust port carries it too**, on its own branch, and paid the most for
+  it: its index key was three code points packed into a `u64`, which four
+  characters do not fit and a word does not fit at all. It becomes an enum -
+  packed for character grams of up to three, the text itself otherwise - and
+  the port's own tests pin the structure Python and Go build under nine
+  encodings, since it writes no model file to compare.
+* **The units leak into the vocabulary of the API.** `--length`, `--max-length`
+  and `Score.chars` count units, so on a word model they count words. That is
+  the honest reading - a "40-character" cap on a model that thinks in words is
+  meaningless - but it does mean two models answer the same flag differently.
+* **Compression means something different per encoding.** With no overlap there
+  is no shared context for two nodes to be merged *through*; a grouping
+  encoding compresses only the unary chains its corpus actually repeats.
+* **A model cannot change its mind.** The encoding is fixed at creation: every
+  label in the graph is written in it. The CLI refuses an encoding flag that
+  disagrees with the model it loaded rather than ignoring it.
 
-**Lives in** `rust/`, `bench/`, `Makefile` (the `rust-*` targets, `bench-compare`)
+**Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
+`go/radixnet/graph.go`, `rust/src/encoding.rs`, `DESIGN.md` § 23.1
 
 ---
 
-### D-073 — A word n-gram model is this model over an alphabet of words
+### D-073 — Superseded by the encoding dial: a word n-gram model is this model over an alphabet of words
 
-**Status** Superseded by D-075 · 2026-09-20 · **Layer** input · **Beside** D-006
+**Status** Superseded 2026-09-20 by D-069's encoding dial · **Layer** input · **Beside** D-006
 
-**Superseded** The claim below - that the graph is alphabet-agnostic and a word
-n-gram model is this model over an alphabet of words - is what D-075 builds on
-and is not in question. What D-075 replaces is the *mechanism*: a word is a
-**unit of the encoding**, and a gram of words is text, so there is no `word`
-model kind, no `radixnet-word` format, no code-point mapping and no vocabulary
-to freeze, prune or check. The two designs were reached independently, at the
-same time; this is the one that lost, and it is kept here because the argument
-in it is the argument D-075 rests on.
+**How it was superseded** This decision and D-069's dial reached word n-grams
+independently and differently, and one of them had to go. The reasoning below
+is unchanged and still right about the *model*: not one structural rule of the
+graph mentions a character, so a word n-gram model is this model over a
+different alphabet rather than a different model. What is superseded is the
+*mechanism*. This decision made words a **kind** — `WordNGramNet`, the format
+`radixnet-word`, and a vocabulary mapping each word to one code point so a word
+would fit the packed trigram. The dial makes them a **unit**, one of three
+settings on the ordinary count model, and needs no vocabulary at all: a gram is
+text, so the alphabet a graph has read is whatever its grams are made of.
+
+The dial is strictly more general — any n, any stride, and groups of letters as
+well as words — and it costs less: no second format, no second kind, no
+vocabulary to keep in corpus order across three implementations. What was kept
+from here is the part the dial had not built: `units` following the encoding
+rather than the model class, every length and score counted in those units, and
+the alphabet listing (`radixnet words`, `GET /api/words`, the Words tab) rebuilt
+on the gram index. What was dropped is `radixnet/wordnet.py`, its Go and Rust
+twins, `--kind word` and the `radixnet-word` format. The costs stated at the end
+of this decision — normalised whitespace, and two unread words being one symbol
+— are the dial's costs too, unchanged.
 
 **Context** *"What about word n-grams?"* The obvious reading of that question is
 that it asks for a second model. It does not. D-006 decides what a **symbol**
@@ -2778,11 +2805,88 @@ versioned and defended.
   (a label as text, and back), a model-level `units`, and `_whole_text` no
   longer re-joining a prefix the search already joined.
 
-**Lived in** `radixnet/wordnet.py`, `go/radixnet/wordnet.go`,
-`rust/src/words.rs` (the `Vocabulary`) - all removed by D-075.  What survives
-of it is the *reporting* side: `Encoding.units_name` and the alphabet a graph's
-grams are made of (`radixnet/encoding.py`, `go/radixnet/words.go`,
-`rust/src/words.rs`) and `SPEC-WordNGrams.md`, whose §1 argument D-075 keeps
+**Lives in** `radixnet/wordnet.py`, `radixnet/encoding.py` (the alphabet),
+`go/radixnet/words.go`, `rust/src/words.rs`, `SPEC-WordNGrams.md`,
+`Makefile` (`word-*`)
+
+---
+
+# Part XVII — A third implementation
+
+### D-072 — A third implementation, to price the language rather than the model
+
+**Status** Accepted · 2026-09-20 · **Layer** platform · **Beside** D-038
+
+**Context** D-038 ported the count model to Go because pure Python topped out
+near 100k transitions/s. Go now runs the same model at ~6M. How much of what is
+left is the model, and how much is the runtime? Nothing in the repository could
+answer that, because nothing had ever run this model twice.
+
+**Decision** Port the count model to Rust (`rust/`), with no dependencies, and
+build the cross-language benchmark (`bench/`) that runs it against Go **over one
+corpus** and refuses to report a timing until the two agree on the graph, the
+transitions, the loss, the expansions and the prediction - to the bit, on the
+cost of the path.
+
+**Rationale** A speed comparison between two programs that computed different
+things is not a comparison, and a port that quietly drifts is the normal failure
+mode of having three implementations (D-038's "two implementations of one model,
+which must stay in step"). Making the parity check a precondition of the
+benchmark, rather than a separate test someone remembers to run, is the whole
+design of `bench/compare.py`.
+
+**What it measured** (4-core Xeon, 2M characters, 3 epochs; `bench/RESULTS.md`)
+
+| | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
+|---|--:|--:|--:|--:|
+| training | 6.6M transitions/s | **14.3M** | 7.4M | **20.6M** |
+| prediction | 4.2k/s | **16.1k** | 3.8k | **16.1k** |
+
+2.2-2.8x at counting, 3.8-6.2x at predicting (the wide end of the second range is
+the least-punished traversal, where the search is small and the constant factors
+are most of it). Three representation choices carry
+most of it and none of them is algorithmic: a trigram is a packed `u64` rather
+than a fresh string, a node's children are read into a buffer the search reuses
+rather than a fresh slice per expansion, and the trigram index hashes with
+`FxHasher`. They are listed in `rust/README.md` because a reader who takes the
+table for "Rust is 4x faster than Go" has been misled by it.
+
+**Consequences**
+* Three implementations to keep in step, not two. The benchmark is the check for
+  the third; `tests/test_go_parity.py` remains the check for the second.
+* Go's `--workers 1` now runs the two beams of a prediction in turn rather than
+  on two goroutines, so a one-worker row means the same thing on both sides.
+* The Rust port reads and writes the `radixnet-count` model file, gzipped or
+  not, and `tests/test_rust_parity.py` holds it to Python's: the same structure,
+  counts, rewards, window, RNG state, judged paths and node ratios, the same
+  predictions, generated texts and scores, and each side continuing the other's
+  file. Its graph document is Python's **byte for byte** but for the `version`
+  cache stamp - which the Go port's is not, because Go renders floats and orders
+  keys its own way.
+* The port carries **all three traversals** (D-075, and the punishment traversal
+  of D-069 in `rust/src/penalty.rs`) and the **encoding dial** (D-073), so a
+  traversal or a dial added to one implementation is now added to three.
+* The dial cost the port one of the three representations this decision measured
+  it on. A trigram was three code points packed into a `u64` - `Copy`, hashable,
+  no allocation - and a gram of any n over any unit is arbitrary text, so the
+  index is keyed by the gram as the other two key it. That is the honest trade:
+  the packing was only ever possible because the window was fixed at three
+  characters, and `bench/RESULTS.md` says what giving it up cost.
+* The port serves the frontend: `rust/src/http.rs` is HTTP/1.1 written out over
+  `TcpListener` and `rust/src/service.rs` answers the same JSON contract the
+  Python and Go servers answer, so `frontend/dist` runs against
+  `radixnet serve` unmodified. What a Rust server cannot fill, the frontend
+  hides on `engine == "rust"`, and what it will not serve says so with a 400.
+* What the port still does **not** have: the negative network, the tutors and
+  the other teaching loops, the agent and its tools, images and speech, and MCP.
+  Undone, not deliberate. **One gap is deliberate**: the LLM clients need HTTPS,
+  and a crate with no dependencies cannot speak it. Porting them is not a task,
+  it is a proposal to drop the no-dependency rule above - which would also drop
+  what that rule buys, a `Cargo.lock` with nothing in it but this crate.
+* Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
+  both sides, because a benchmark of a deliberate data race measures the race.
+
+**Lives in** `rust/`, `bench/`, `Makefile` (the `rust-*` targets, `bench-compare`)
 
 ---
 
@@ -2833,109 +2937,6 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
 
 **Lives in** `go/radixnet/mcp.go`, `go/cmd/radixnet-count/mcp.go`,
 `rust/src/service.rs`, `rust/src/http.rs`, `Makefile` (`go-mcp`)
-
----
-
-# Part XVII — The encoding
-
-### D-075 — The encoding is a dial of the model, not a constant of the package
-
-**Status** Accepted · 2026-09-20 · **Layer** representation ·
-**Extends** D-006, which stays the default · **Supersedes** D-073
-
-**Context** D-006 fixed the input at three characters with stride 1 and gave the
-reason: the shared character is a *pivot*, and three is the smallest window that
-gives a pivot with context either side. That argument says what the **default**
-should be. It does not say the number should be a constant - and in both
-implementations it was one: `WINDOW = 3` / `Window = 3`, read directly by the
-graph, the models, the beams, the diff and the loader, with the overlap beside
-it. Anyone wanting to ask "what does this corpus look like in fives?" had to
-edit two constants, and nothing in a model file said how to read its labels.
-
-**Decision** The encoding becomes a value - `Encoding(unit, n, stride)` - owned
-by the graph, fixed when the graph is created, written into the model file and
-read back from it, **in every implementation**. Three dials:
-
-| dial | what it is | the default |
-|---|---|---|
-| `Unit` | what one position of a text is: a character, or a whitespace word | `char` |
-| `N` | how many units one gram holds - the *n* of the n-gram | 3 |
-| `Stride` | how far apart consecutive grams start | 1 |
-
-`Stride` is the dial that makes the other two useful. At 1 the grams slide and
-overlap by `N - 1`, which is D-006's pivot generalised. At `N` they do not
-overlap at all, which is *tokenisation*: `char:4:4` cuts text into groups of
-four letters, and the graph becomes a chain of groups that meet only at their
-ends. `word:2:1` is the word bigram, `word:3:1` the word trigram.
-
-Everything the graph measures is now measured in **units**, not characters: a
-node's label length, the offset of a gram inside a label, the length of a
-prediction, the spans of the correction diff. Under the default encoding a unit
-*is* a character, so every one of those quantities is what it always was - which
-is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
-
-**Alternatives rejected**
-* **A package-level variable instead of a field.** One process, one encoding -
-  and a model loaded from a file could silently disagree with it. The encoding
-  belongs to the graph because the graph's labels are written in it.
-* **Keeping the label a `[]rune` and special-casing words.** Words are not
-  characters of a different width; the split, the merge and the index all walk
-  *positions*. A `Units` view (an index of byte offsets, sliced in O(1)) makes
-  one code path serve both.
-* **A learned sub-word vocabulary.** Still rejected, for D-006's reason: it
-  needs a corpus before training can start, and freezes what the model can read.
-  `word` is not a vocabulary - an unseen word is a new node, exactly as an
-  unseen trigram is.
-* **Writing the encoding into every file.** A file that says `char:3:1` is a
-  file the Python loader would have to be taught to ignore. It is written only
-  when it is *not* the default, so an ordinary model file is byte for byte what
-  it always was.
-
-**Consequences**
-* **D-039's bit-identical interchange now covers every encoding.** Both sides
-  write the same `encoding` block and read each other's, and
-  `TestGoEncodingParity` holds them to the same graph, the same file and the
-  same prediction under nine of them. A word model trained in Python continues
-  in Go and back.
-* **The dial reaches all four Python kinds.** RadixNet, the count model, the
-  negative network and the resonant model share one graph, so none of them
-  could have it alone. The sine model trains on word bigrams because the graph
-  it trains on does.
-* **The Rust port carries it too**, on its own branch, and paid the most for
-  it: its index key was three code points packed into a `u64`, which four
-  characters do not fit and a word does not fit at all. It becomes an enum -
-  packed for character grams of up to three, the text itself otherwise - and
-  its tests pin the structure Python and Go build under nine encodings.
-* **The word alphabet (D-073) is gone from all three.** The two designs were
-  reached independently and at the same time, and this one is more general: any
-  n, any stride, letter groups as well as words, and no vocabulary at all. So
-  `radixnet/wordnet.py` and its Go and Rust twins, the `word` model kind, the
-  `radixnet-word` format and the `Vocabulary` type were removed. What survived
-  is the part that was never about the mechanism: what a model counts in
-  (`Encoding.units_name`, carried beside every number a report prints), and the
-  alphabet listing, now derived from the gram index - the one count compression
-  cannot change - and ordered most-read-first, ties alphabetically, so the
-  three ports hand back the same rows. A word's `id` is its rank in that
-  listing, because nothing records the order words were first read any more.
-* **One kind, one file, one server.** A word model is not a kind, so the Rust
-  server stopped offering two and parking the one it was not running; like the
-  Go server it runs the count / reward model, and `POST /api/reset` is where an
-  encoding is chosen. `GET /api/encoding` reports the running model's dial and
-  says `configurable: true`.
-* **The units leak into the vocabulary of the API.** `--length`, `--max-length`
-  and `Score.chars` count units, so on a word model they count words. That is
-  the honest reading - a "40-character" cap on a model that thinks in words is
-  meaningless - but it does mean two models answer the same flag differently.
-* **Compression means something different per encoding.** With no overlap there
-  is no shared context for two nodes to be merged *through*; a grouping
-  encoding compresses only the unary chains its corpus actually repeats.
-* **A model cannot change its mind.** The encoding is fixed at creation: every
-  label in the graph is written in it. The CLI refuses an encoding flag that
-  disagrees with the model it loaded rather than ignoring it.
-
-**Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
-`go/radixnet/graph.go`, `rust/src/encoding.rs`, `rust/src/words.rs`,
-`SPEC-WordNGrams.md`, `DESIGN.md` § 23.1
 
 ---
 

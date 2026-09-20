@@ -56,6 +56,7 @@ RadixCyclicNN/
                             (ported to Go as go/radixnet/penalty.go)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
+    wordnet.py              WordGraph, WordNGramNet - the same model over an alphabet of words (section 34)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
                             (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
@@ -167,21 +168,22 @@ class Decoder:
 Round-trip property: `Decoder().decode_trigrams(Encoder().encode(t)) == t` for all `len(t) >= 3`.
 
 ```python
-def split_words(text: str) -> list[str]   # the whole tokeniser: the Unicode White_Space property
+WORD_BASE = 0x0100          # the first word symbol; MAX_WORDS = 1_111_808, UNKNOWN_WORD = "<unk>"
 
-class Encoding:                           # the dial (section 23.1)
-    def units(self, text) -> str | list[str]      # the text as something that slices by unit
-    def units_name(self) -> str                   # "chars", or "words" under a word encoding
-    def vocabulary(self, grams) -> dict[str, int] # the words the grams are made of, and how many hold each
+def word_symbol(word_id: int) -> str    # id -> the code point that carries it (the surrogates skipped)
+def symbol_word(symbol: str) -> int     # and back
+def split_words(text: str) -> list[str] # the whole tokeniser: the Unicode White_Space property
 
-def word_rows(encoding, grams) -> list[dict]  # that alphabet as the CLI and the API list it
+class Vocabulary:                       # the alphabet of a word model (section 34)
+    def id(self, word) -> int           # 0 = <unk>: a word it has never read
+    def add(self, word) -> int          # the next id, in first-read order
+    def encode(self, text, grow=False) -> str   # text -> the graph's symbols, one code point per word
+    def decode(self, symbols) -> str            # and back, words joined by single spaces
 ```
 
-The word side of the encoding: there is no vocabulary object, because a gram is
-text, so the alphabet a graph knows is whatever its grams are made of. The split
-is the Unicode property rather than `str.split()`, which the three
-implementations have to agree on down to the four separators they disagree
-about. Section 34 and `SPEC-WordNGrams.md` are the whole of it.
+The word alphabet, used only by `wordnet.py`: it turns text into the symbols the
+same `Encoder` then cuts into windows of three, so the graph never learns what a
+symbol stands for. Section 34 and `SPEC-WordNGrams.md` are the whole of it.
 
 ```python
 def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired)
@@ -816,7 +818,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
-* `test_encodings_end_to_end.py` — the encoding dial (sections 23.1 and 34): every unit x n x stride combination through the graph and all four model kinds, the round trip that normalises whitespace under a word encoding, a repeated phrase compressed into one node, predictions and lengths counted in units, a correction aligned word by word, save and load carrying the dial, and the `encoding` block written only when it is not the default. The cross-language half is `test_go_parity.py::TestGoEncodingParity` and `test_rust_parity.py::TestRustEncodingParity`, with `go/radixnet/words_test.go`, `rust/tests/words.rs` and `rust/tests/encodings.rs` on their own sides.
+* `test_wordnet.py` — word n-grams (section 34): the alphabet (every id round-trips, the surrogate block skipped, the cap), the whitespace split and the round trip that normalises whitespace, an unread word as a new id while training and `<unk>` after, the graph invariants over words, a repeated phrase compressed into one node, predictions and lengths counted in words, a correction aligned word by word, the `radixnet-word` file (the vocabulary back in order, a count reader refusing it, a truncated vocabulary refused) and the kind registry. The cross-language half is `test_go_parity.py::TestGoWordParity` and `test_rust_parity.py::TestRustWordParity`, with `go/radixnet/words_test.go` and `rust/tests/words.rs` on their own sides.
 * `test_counter.py` — the cyclic counters of section 28: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
@@ -3292,11 +3294,15 @@ while hidden, so they would have disagreed until a reload.
 model that is saved with it, not a setting of a training run, and having it in two places would have had the same
 drift problem - the form that was not touched would keep showing what the function used to be.
 
-**The encoder is read-only on purpose.** The window is the one number here that *looks* like a setting and is
-not: the graph's labels, the split and merge rules, the saved file and the Go port all assume 3, so a model
-trained at one window could not be read at another. Rather than leave that unsaid, the card reports
-`configurable: false` from the server and explains why, and spends its space on making the encoding *visible*
-instead - which is also the clearest demonstration of the radix compression anywhere in the frontend.
+**The encoder is chosen once, not edited.** The encoding *is* a setting now (§34's dial: the unit, the n and the
+stride), but it is one a model is *born* with rather than one it can be moved between: the labels, the split and
+merge rules and the saved file are all measured in its units, so a graph built at `char:3:1` could not be read at
+`word:2:1`. The card therefore reports `configurable: true` with `fixed_for_life: true` and points at
+`POST /api/reset`, which is where a new model under a new encoding is made; changing the dial on a trained model
+would mean silently throwing the training away, and a server that does that without saying so is worse than one
+that refuses. What the card spends its space on is making the encoding *visible* - the grams a text becomes, the
+ones this model has never seen, and the walk through the graph's own labels - which is also the clearest
+demonstration of the radix compression anywhere in the frontend.
 ## 32. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
 
 The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
@@ -3367,7 +3373,14 @@ model answers the two searches differently somewhere, so neither can pass by the
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
 graph and its structural operations, the dual frequency weight function, the judged path contexts, **all three
 traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished one in `src/search.rs`), training,
-prediction, generation, scoring, reward / punish / 2NRL, both alphabets (§34) and **the model file**.  Its binaries
+prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file**.
+
+The dial is the one place the port paid a representation for generality.  A trigram used to be three code points
+packed into a `u64` - `Copy`, hashable, no allocation - which is why its encoding pass allocated nothing and is one
+of the three reasons D-072 measured it faster than Go.  A gram of *any* n over *any* unit is arbitrary text, so the
+index is keyed by the gram as Python and Go key it, and what that costs is measured rather than argued
+(`bench/RESULTS.md`).  `src/encoding.rs` carries `Encoding{unit, n, stride}` and a `Units` view that indexes a text
+once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  Its binaries
 are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes,
 words, info, serve) and `radixnet-bench`.
 
@@ -3381,10 +3394,14 @@ a half answer (`/api/words` on a character model, `/api/model/select` for a kind
 Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
 of the port:
 
-* **`/api/model/select` switches kind**, between `count` and `word`, the way the Python service does: the model
-  that was running is *parked* with its unsaved work rather than dropped, and the one selected is whichever comes
-  first of the parked model of that kind, its own file (`<stem>.<kind><ext>`) and a fresh one - which the answer
-  says in `origin`.  Without it a server started on the count model could never reach the Words tab.
+* **`/api/model/select` switches encoding**, between characters and words, the way the Python service switches
+  kind: an encoding is fixed for a model's life, so changing it means a *different* model, and the one that was
+  running is *parked* with its unsaved work rather than dropped.  The one selected is whichever comes first of the
+  parked model of that encoding, its own file (`<stem>.<unit><ext>`) and a fresh one - which the answer says in
+  `origin`.  A bare `{"kind": "word"}` names a unit and not the other two dials, so they come from the model that
+  unit last had, which is what makes select-word, select-count, select-word come back to the same model rather than
+  to a third.  `POST /api/reset` is where an encoding is *chosen*, as on the other two servers.  Without any of
+  this a server started on characters could never reach the Words tab.
 * **A job answers 202 and runs on its own thread.**  `train` and `2nrl` open the job, hand the model to a worker
   and reply at once, so the frontend follows the run on `/api/job` rather than waiting out a long training run on
   one blocked request.  The model lock is what makes a second request wait, and `ensure_idle` is what refuses a
@@ -3442,44 +3459,46 @@ nothing was ever punished for gives the two traversals nothing to disagree about
 
 ---
 
-## 34. Word n-grams (`radixnet/encoding.py`, `go/radixnet/words.go`, `rust/src/words.rs`) — the same graph over an alphabet of words
+## 34. Word n-grams (`radixnet/wordnet.py`, `go/radixnet/words.go`, `rust/src/words.rs`) — the same graph over an alphabet of words
 
-`SPEC-WordNGrams.md` and D-075.  D-006's input decision is about what a **symbol** is; every structural rule in
+`SPEC-WordNGrams.md` and D-073.  D-006's input decision is about what a **symbol** is; every structural rule in
 section 5's graph is stated in terms of a window of symbols and nothing else - a label is a sequence of them, an edge
-exists where two labels overlap by `n - stride` of them, the index maps an `n`-unit key to `(node, offset)`,
+exists where two labels overlap by `WINDOW - 1` of them, the index maps a `WINDOW`-symbol key to `(node, offset)`,
 compression merges a unary chain at that seam.  Not one of those rules mentions a character.  So a word n-gram model
 is not a different model: it is the count / reward model (section 19) over an alphabet whose symbols are **words**.
 
-**It is one setting of the encoding dial** (section 23.1), not a kind: `Encoding.unit` says whether a unit is a
-character or a whitespace word, `n` how many units a gram holds and `stride` how far apart grams start.  So
-`word:3:1` is the word trigram, `word:2:1` the word bigram, and a gram of words is *text* like any other - the graph
-is handed labels exactly as it always was.  The alternative reached at the same time, a `word` model kind carrying a
-vocabulary that maps each word to one code point, is D-073, and D-075 says why the dial replaced it.
+**The alphabet** (`encoding.Vocabulary`).  A label is a string and its length is counted in code points on all three
+implementations, so a symbol is one code point:
 
-**There is no vocabulary, and that is the point.**  A gram is text, so the alphabet a graph knows is whatever its
-grams are made of: it grows as training reads new words and there is nothing to freeze, prune, learn, version or
-check on load.  A *listing* of it is derived - `Encoding.vocabulary(grams)` counts the units of the graph's gram
-index, which is the one count compression cannot change, since a phrase merged into one node is still made of the
-grams that built it.  The order is written down once (most read first, ties alphabetically) so Python, Go and Rust
-hand back the same rows, and a word's `id` is its **rank** in that listing, because nothing records the order words
-were first read.
+```
+id 0            -> U+0100          the unknown word, <unk>
+id i (i >= 1)   -> U+0100 + i      skipping the surrogate block D800..DFFF
+```
+
+Starting past Latin-1 keeps every label out of the range text, sentinels (`<s>`, `</s>`, `<back>`) and punctuation
+live in; skipping the surrogates keeps every label a string all three languages can hold and write (Go replaces a
+lone surrogate with `U+FFFD`, which would silently corrupt a model).  The cap is **1 111 808 words**: every code
+point above Latin-1 that is not a surrogate.  A `Trigram` in Rust packs three code points of 21 bits, which is
+every one of them, so the fastest representation needed no change at all.
 
 **Tokenising is the whitespace split and nothing else.**  Punctuation stays attached to the word it touches
 (`"mat."` and `"mat"` are two words) and case is kept (`"The"` and `"the"` are two words).  The rule is the Unicode
 `White_Space` property, so the three implementations cut a text into the *same* words - Python calls U+001C..U+001F
-whitespace and the property does not, which `split_words` subtracts.
+whitespace and the property does not, which `split_words` subtracts.  The vocabulary grows as training reads new
+words and is never frozen, pruned or learned: a word is in it because it was seen.
 
-**What a round trip costs.**  `decode(encode(t))` joins the words with single spaces, so a word encoding
-**normalises whitespace** and a corpus whose whitespace carries meaning - source code, base64, a waveform (D-036) -
-belongs on a character encoding.  At prediction and scoring time a gram holding a word the graph has never read is
-not in the index, so it is charged what any unknown transition is charged and counted in `unknown_transitions`.
-`char:3:1` stays the default for that reason.
+**What a round trip costs.**  `decode(encode(t))` joins the words with single spaces, so a word model **normalises
+whitespace** and a corpus whose whitespace carries meaning - source code, base64, a waveform (D-036) - belongs
+on the character model.  At prediction and scoring time a word the model has never read is `<unk>`, whose windows are
+not in the index, so it is charged what any unknown transition is charged and counted in `unknown_transitions`; two
+different unread words are therefore one symbol and score identically.  Both kinds stay; neither replaces the other.
 
-**Where the translation lives.**  Nowhere: there is nothing to translate.  A label is text, a gram is text, and the
-only thing that knows a unit is a word is the encoding - `enc.units(text)` indexes a text by unit so slicing it is
-O(1), and `enc.join(parts)` puts a space between units where a character encoding puts nothing.  That last one is
-the whole of what a word encoding changes downstream: a prefix and its continuation, and a parent label and its
-merged child, are joined with `join` rather than concatenated.
+**Where the translation lives.**  Text becomes symbols at the model's own boundary - `_clean_texts` on the way in,
+the search and `score` around their own calls - and symbols become text on the way out of the search.  Between those
+two points the graph, the weights, the counters, the path contexts, both traversals and the beam are the count
+model's, unchanged.  Three seams in shared code make the alphabet a model's business rather than the search's:
+`graph.text_of(label)` (a label as text) and `graph.symbols_of(text)` (its inverse, for looking a node up by what a
+user typed), a model-level `units`, and `_whole_text` no longer re-joining a prefix the search already joined.
 
 **What it looks like.**  Compression does to word chains what it already did to character chains, so a repeated
 phrase becomes one node whose label *is* that phrase:
@@ -3493,23 +3512,19 @@ prefix        "the cat sat on"
 continuation  "the mat"
 ```
 
-**The file** is the count model's, `radixnet-count`, whatever the encoding: the dial rides in the graph block as
-`encoding: {unit, n, stride}` and is written **only when it is not `char:3:1`**, so an ordinary model file is byte
-for byte what it always was and a reader written before the dial never meets a file it would misread.  Interchange
-is the contract the count model has: Python, Go and Rust read and write it, and
-`tests/test_go_parity.py::TestGoEncodingParity` and `tests/test_rust_parity.py::TestRustEncodingParity` hold the
-three ports to the same graph, the same file, the same alphabet in the same order and the same predictions under
-nine encodings.
+**The file** is a format of its own, `radixnet-word`, so every reader written before it existed refuses it by the
+check it already makes; the graph block gains `units: "words"` and `vocabulary` in id order, and a load checks that
+every symbol every label carries is a word the vocabulary holds.  Interchange is the contract the count model has:
+Python, Go and Rust read and write it, `tests/test_go_parity.py` and `tests/test_rust_parity.py` train a word model
+on both sides of each pair and require the same structure, the same counts, the same vocabulary **in the same
+order** and the same predictions, and the Rust word document is Python's byte for byte.
 
-**Everything counted in units is counted in words**: `--length 6` emits six words, `--max-length` caps words,
+**Everything counted in symbols is counted in words**: `--length 6` emits six words, `--max-length` caps words,
 `Score.chars` counts words and `per_char` is per word, and `trained_chars` counts words.  `stats()["units"]` says
 which, and so do the CLI's score columns (`per_word words`), the API's status and the frontend's length hints,
-because a number whose unit depends on the model is a number that will be read wrong.  `--encoding word:3:1` makes
-one in all three CLIs (`--units`, `--ngram` and `--stride` set the dials one at a time), `radixnet words` lists the
-alphabet, `GET /api/words` serves it and the frontend's **Words** tab shows it whenever the active model counts in
-words.
+because a number whose unit depends on the model is a number that will be read wrong.  The kind is `--kind word`
+(default file `model.word.json`) in all three CLIs, `radixnet --kind word words` lists the alphabet, `GET
+/api/words` serves it and the frontend's **Words** tab shows it whenever the active model counts in words.
 
-**n is a dial, and 3 is its default**: at 3 the overlap is two words and the pivot is the middle one, which is
-D-006's argument word for word.  `word:2:1` - the word bigram - is now reachable and is a real change to what the
-graph is, since a one-unit overlap collapses the pivot and the context D-006 rejected collapsing.  It is offered,
-not recommended.
+**N stays 3**: the overlap is two words and the pivot is the middle one, which is D-006's argument word for
+word.  Word bigrams need `WINDOW = 2`, a separate change with its own costs, and nothing here prevents it later.

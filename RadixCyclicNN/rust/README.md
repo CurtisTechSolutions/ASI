@@ -19,8 +19,8 @@ nothing in it but this crate.
 
 | file | what it is |
 |---|---|
-| `src/encoding.rs` | the dial — what a unit of text is, how many units a gram holds, how far apart grams start — and the packed gram |
-| `src/words.rs` | the word view of a word encoding: what it counts in, and the alphabet its grams are made of |
+| `src/encoding.rs` | the encoding dial: what one unit is, how many units a gram holds, how far apart grams start |
+| `src/words.rs` | the word view of a word encoding: the alphabet its grams are made of (`radixnet words`) |
 | `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants |
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
@@ -31,7 +31,7 @@ nothing in it but this crate.
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
 | `src/parallel.rs` | the worker pool, and the one `unsafe` in the crate (with its contract) |
 | `src/fsum.rs`, `src/mt19937.rs`, `src/hash.rs` | the exact sum, the RNG and the hash, written out |
-| `src/file.rs` | the `radixnet-count` model file: what Python and Go read and write, whatever the encoding |
+| `src/file.rs` | the `radixnet-count` and `radixnet-word` model files: what Python and Go read and write |
 | `src/json.rs` | JSON as Python writes it - compact, UTF-8, and floats rendered as `repr(float)` renders them |
 | `src/gzip.rs` | the gzip container, written out: inflate for reading, a stored-block writer for writing |
 | `src/clock.rs` | the one timestamp a model file carries |
@@ -41,40 +41,7 @@ nothing in it but this crate.
 | `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, words, info, serve |
 | `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark and its binary |
 | `tests/model.rs` | the model end to end, and all three traversals |
-| `tests/encodings.rs` | every encoding end to end: any n, groups of letters, words |
-
-## One dial, three settings
-
-How a text becomes grams is one type, `Encoding`, and three questions:
-
-| setting | what it is | the default |
-|---|---|---|
-| `unit` | what one **unit** of text is: a character, or a whitespace word (`../SPEC-WordNGrams.md`) | `Unit::Chars` |
-| `n` | how many units a **gram** holds: the n of the n-gram, any `n >= 1` | `3` |
-| `stride` | how far apart consecutive grams start: **1** slides the window (they overlap by n−1), **n** cuts the text into non-overlapping groups | `1` |
-
-A word gram is text like any other, so the graph below the dial never learns
-what a word is: it splits, merges and indexes labels made of units, and only
-the encoding knows whether a unit is a letter or a word. There is no
-vocabulary, nothing to freeze or prune, and the alphabet a graph knows is
-whatever its grams are made of (`Encoding::vocabulary`).
-
-```rust
-use radixnet::{Encoding, GraphOptions, Model, Unit};
-
-let bigrams = Encoding { unit: Unit::Words, n: 2, stride: 1 };       // the word bigram
-let groups = Encoding { unit: Unit::Chars, n: 5, stride: 5 };        // groups of five letters
-let enc = Encoding::parse("word:2:1")?;                              // or from a spec
-let mut model = Model::new(0, GraphOptions { encoding: bigrams, ..Default::default() })?;
-```
-
-and on the CLI and the benchmark binary: `--encoding word:2:1`, or `--units`,
-`--ngram` and `--stride` one at a time. The encoding is fixed for a model's
-life — every label is written in it — so those flags apply to a *new* model and
-a loaded file's own encoding always wins. Lengths, offsets and the `chars` of a
-score are then counted in units, which every report names beside the number.
-
-| `tests/words.rs` | a word encoding: the alphabet, the phrases compression makes of it, and its file |
+| `tests/words.rs` | the word model: the alphabet, the phrases compression makes of it, and its file |
 | `tests/server.rs` | the HTTP API end to end: a real server on a real port, answering the JSON contract |
 
 ## What is here, and what is not
@@ -82,13 +49,14 @@ score are then counted in units, which every report names beside the number.
 The model is here in full: the graph and its structural operations, the weight
 function, the path contexts, all three traversals, training, prediction,
 generation, scoring, reward / punish / 2NRL, the `radixnet-count` **model file**,
-the CLI over all of it, and the **HTTP server** the frontend talks to — in every
-encoding of the dial, word n-grams included (`../SPEC-WordNGrams.md`). A model
-trained here continues in Python or in Go and back again, whatever its
-encoding, and `frontend/dist` runs against `radixnet serve` the same way it
-runs against the other two. Like the Go server, this one runs the count /
-reward model and nothing else: characters or words is the encoding, chosen when
-a model is made (`POST /api/reset`), not a kind to switch between.
+the CLI over all of it, and the **HTTP server** the frontend talks to — and, with
+`--encoding`, the same model over any n-gram of characters *or* words
+(`char:3:1` is the default, `char:5:5` groups of five letters, `word:3:1` the
+word trigram; `../SPEC-WordNGrams.md`). A model trained here continues in Python
+or in Go and back again, and `frontend/dist` runs against `radixnet serve` the
+same way it runs against the other two — including switching between a character
+and a word encoding from the model selector, which parks the model that was
+running rather than dropping it.
 
 Not ported: the negative network, the tutors and the other teaching loops, the
 agent and its tools, the LLM clients, images and speech, and MCP. The first
@@ -104,7 +72,7 @@ From `..`:
 ```bash
 make rust-build        # cargo build --release -> rust/target/release/radixnet{,-bench}
 make rust-test         # cargo test, cargo clippy, cargo fmt --check
-make rust-train        # train the Rust model on DATA (RUST_KIND=count|word names the file)
+make rust-train        # train the Rust model on DATA (RUST_KIND=count|word)
 make rust-serve        # serve frontend/dist from the Rust model on http://HOST:PORT
 make rust-parity       # the contract with Python
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
@@ -123,6 +91,8 @@ cargo run --release --bin radixnet -- --model model.count.json train --data ../d
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --k 5
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal least-punished
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal punishment --merit-scale 0
+cargo run --release --bin radixnet -- --encoding word:3:1 --model model.word.json train --data ../data/sample_corpus.txt
+cargo run --release --bin radixnet -- --model model.word.json words --limit 20    # the alphabet its grams are made of
 cargo run --release --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../frontend/dist
 python3 -m radixnet --model rust/model.count.json info     # ... and Python reads the same file
 cargo run --release --bin radixnet-bench -- --chars 200000 --epochs 3
@@ -169,13 +139,17 @@ race measures the race.
 
 ## Where the two implementations genuinely differ
 
-Three representation choices, none of them algorithmic. They are why the port is
+Two representation choices, none of them algorithmic. They are why the port is
 faster than a line-by-line translation would be, and they are the first place to
-look before reading the numbers as a language comparison:
+look before reading the numbers as a language comparison. A third one is gone:
+this port used to pack a trigram into a `u64` (three code points of 21 bits),
+which is what made its encoding pass allocate nothing — the encoding dial's
+grams are arbitrary text, so the index is keyed by the gram as the other two key
+it, and `bench/RESULTS.md` says what that cost:
 
 | | Go | Rust |
 |---|---|---|
-| a gram | a freshly allocated `string` per window | up to three code points packed into a `u64`, no allocation; longer grams and word grams carry their text |
+| a gram | a freshly allocated `string` per window | the same: a gram of any n over any unit does not fit in an integer |
 | a node's children during a search | a fresh `[]ChildCost` per expansion | filled into a buffer the search reuses |
 | the hash behind the trigram index | the runtime's (AES-assisted on amd64) | `FxHasher`, written out in `src/hash.rs` |
 
@@ -187,29 +161,6 @@ one worker as well as at their own default parallelism:
 * **The two beams.** Go runs the top and the bottom beam on two goroutines; here
   they run in turn on the calling thread. Go's `--workers 1` runs them in turn
   too, which is the row to read for a like-for-like comparison.
-
-## What the dial costs
-
-Making the index key hold *any* gram rather than exactly three characters is not
-free: the key went from an 8-byte `u64` to a 16-byte enum, which the training
-pass carries one of per gram of the corpus and hashes on every step. Measured
-against the same build with the trigram hard-coded, six runs of each
-interleaved:
-
-| workload | before the dial | on its default encoding |
-|---|--:|--:|
-| `bench-compare`'s corpus (62,757 short texts, 3 epochs) | 19.65 M transitions/s | 19.58 M (no measurable difference) |
-| `radixnet-bench --chars 2000000` (synthesised sentences) | 19.6 M | 17.8 M (91 %) |
-
-So it is free where the graph is small and the per-text work dominates, and
-costs about 9 % where the key itself is the hot thing. Two choices keep it to
-that: a packed gram hashes as the one `u64` it always was, and the text variant
-sits behind a thin pointer so the key is 16 bytes and not 24. A *word* gram is
-always the text variant — a word is not one code point here — and so is any
-gram of more than three characters; both pay the allocation the other two ports
-pay for every gram. Closing the rest would mean making the graph generic over
-its key type, so that a trigram graph is keyed on a `u64` again — a change to
-every signature in the crate.
 
 ## The one `unsafe`
 
