@@ -1,0 +1,3922 @@
+{
+ "main": {
+  "bits": 2,
+  "corpus": {
+   "alphabet": 101,
+   "chars": 58389,
+   "per_source": {
+    "go": {
+     "chars": 14991,
+     "segments": 200
+    },
+    "json": {
+     "chars": 12682,
+     "segments": 200
+    },
+    "prose": {
+     "chars": 15898,
+     "segments": 200
+    },
+    "python": {
+     "chars": 14818,
+     "segments": 200
+    }
+   },
+   "segments": 800,
+   "sha256": "89fc446fbb883a4904387275411999f77dc493736ba175a958a9f658814c2c07"
+  },
+  "depth": 5,
+  "runs": [
+   {
+    "arm": "single",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 9114,
+    "contingency": {
+     "0": {
+      "go": 40,
+      "json": 40,
+      "prose": 40,
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 34316,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 9114,
+      "decision_loss": 2.3347416979395645,
+      "edges": 34316,
+      "live_experts": 1,
+      "load": [
+       640
+      ],
+      "nodes": 34317,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 68388,
+      "test_bits": 2.772043553473982,
+      "train_bits": 1.0168702190106178
+     }
+    ],
+    "live_experts": 1,
+    "load": [
+     640
+    ],
+    "nmi": 0.0,
+    "nodes": 34317,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.25,
+    "rounds": 1,
+    "router": "constant",
+    "seconds": 43.68666958808899,
+    "seed": 0,
+    "stored_chars": 68388,
+    "test_bits_per_char": 2.772043553473982,
+    "test_chars": 11935,
+    "train_bits_per_char": 1.0168702190106178
+   },
+   {
+    "arm": "single",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 9114,
+    "contingency": {
+     "0": {
+      "go": 40,
+      "json": 40,
+      "prose": 40,
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 34316,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 9114,
+      "decision_loss": 2.339400850722046,
+      "edges": 34316,
+      "live_experts": 1,
+      "load": [
+       640
+      ],
+      "nodes": 34317,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 68388,
+      "test_bits": 2.7841613063787163,
+      "train_bits": 1.0179847649178526
+     }
+    ],
+    "live_experts": 1,
+    "load": [
+     640
+    ],
+    "nmi": 0.0,
+    "nodes": 34317,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.25,
+    "rounds": 1,
+    "router": "constant",
+    "seconds": 45.45254945755005,
+    "seed": 1,
+    "stored_chars": 68388,
+    "test_bits_per_char": 2.7841613063787163,
+    "test_chars": 11935,
+    "train_bits_per_char": 1.0179847649178526
+   },
+   {
+    "arm": "single",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 9114,
+    "contingency": {
+     "0": {
+      "go": 40,
+      "json": 40,
+      "prose": 40,
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 34316,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 9114,
+      "decision_loss": 2.342486887152516,
+      "edges": 34316,
+      "live_experts": 1,
+      "load": [
+       640
+      ],
+      "nodes": 34317,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 68388,
+      "test_bits": 2.8017038028690413,
+      "train_bits": 1.0310249769529254
+     }
+    ],
+    "live_experts": 1,
+    "load": [
+     640
+    ],
+    "nmi": 0.0,
+    "nodes": 34317,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.25,
+    "rounds": 1,
+    "router": "constant",
+    "seconds": 43.10951375961304,
+    "seed": 2,
+    "stored_chars": 68388,
+    "test_bits_per_char": 2.8017038028690413,
+    "test_chars": 11935,
+    "train_bits_per_char": 1.0310249769529254
+   },
+   {
+    "arm": "roundrobin",
+    "balance": 0.9998238743065502,
+    "bits": 2,
+    "branches": 12007,
+    "contingency": {
+     "0": {
+      "go": 10,
+      "json": 7,
+      "prose": 13,
+      "python": 10
+     },
+     "1": {
+      "go": 7,
+      "json": 11,
+      "prose": 8,
+      "python": 12
+     },
+     "2": {
+      "go": 15,
+      "json": 12,
+      "prose": 6,
+      "python": 10
+     },
+     "3": {
+      "go": 8,
+      "json": 10,
+      "prose": 13,
+      "python": 8
+     }
+    },
+    "depth": 5,
+    "edges": 43911,
+    "history": [
+     {
+      "balance": 0.9998238743065502,
+      "branches": 12007,
+      "decision_loss": 2.3362964157104633,
+      "edges": 43911,
+      "live_experts": 4,
+      "load": [
+       157,
+       156,
+       164,
+       163
+      ],
+      "nodes": 43915,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 100057,
+      "test_bits": 3.343819275168086,
+      "train_bits": 0.819246120044277
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     157,
+     156,
+     164,
+     163
+    ],
+    "nmi": 0.021380433781354784,
+    "nodes": 43915,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.33125,
+    "rounds": 1,
+    "router": "roundrobin",
+    "seconds": 31.07210636138916,
+    "seed": 0,
+    "stored_chars": 100057,
+    "test_bits_per_char": 3.343819275168086,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.819246120044277
+   },
+   {
+    "arm": "roundrobin",
+    "balance": 0.9998238743065502,
+    "bits": 2,
+    "branches": 12007,
+    "contingency": {
+     "0": {
+      "go": 10,
+      "json": 7,
+      "prose": 13,
+      "python": 10
+     },
+     "1": {
+      "go": 7,
+      "json": 11,
+      "prose": 8,
+      "python": 12
+     },
+     "2": {
+      "go": 15,
+      "json": 12,
+      "prose": 6,
+      "python": 10
+     },
+     "3": {
+      "go": 8,
+      "json": 10,
+      "prose": 13,
+      "python": 8
+     }
+    },
+    "depth": 5,
+    "edges": 43911,
+    "history": [
+     {
+      "balance": 0.9998238743065502,
+      "branches": 12007,
+      "decision_loss": 2.3394587211954025,
+      "edges": 43911,
+      "live_experts": 4,
+      "load": [
+       157,
+       156,
+       164,
+       163
+      ],
+      "nodes": 43915,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 100057,
+      "test_bits": 3.349871060495585,
+      "train_bits": 0.8229829667293009
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     157,
+     156,
+     164,
+     163
+    ],
+    "nmi": 0.021380433781354784,
+    "nodes": 43915,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.33125,
+    "rounds": 1,
+    "router": "roundrobin",
+    "seconds": 29.909417152404785,
+    "seed": 1,
+    "stored_chars": 100057,
+    "test_bits_per_char": 3.349871060495585,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8229829667293009
+   },
+   {
+    "arm": "roundrobin",
+    "balance": 0.9998238743065502,
+    "bits": 2,
+    "branches": 12007,
+    "contingency": {
+     "0": {
+      "go": 10,
+      "json": 7,
+      "prose": 13,
+      "python": 10
+     },
+     "1": {
+      "go": 7,
+      "json": 11,
+      "prose": 8,
+      "python": 12
+     },
+     "2": {
+      "go": 15,
+      "json": 12,
+      "prose": 6,
+      "python": 10
+     },
+     "3": {
+      "go": 8,
+      "json": 10,
+      "prose": 13,
+      "python": 8
+     }
+    },
+    "depth": 5,
+    "edges": 43911,
+    "history": [
+     {
+      "balance": 0.9998238743065502,
+      "branches": 12007,
+      "decision_loss": 2.32978566858486,
+      "edges": 43911,
+      "live_experts": 4,
+      "load": [
+       157,
+       156,
+       164,
+       163
+      ],
+      "nodes": 43915,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 100057,
+      "test_bits": 3.344200281045712,
+      "train_bits": 0.825371670215255
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     157,
+     156,
+     164,
+     163
+    ],
+    "nmi": 0.021380433781354784,
+    "nodes": 43915,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.33125,
+    "rounds": 1,
+    "router": "roundrobin",
+    "seconds": 29.899598121643066,
+    "seed": 2,
+    "stored_chars": 100057,
+    "test_bits_per_char": 3.344200281045712,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.825371670215255
+   },
+   {
+    "arm": "oracle",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 10569,
+    "contingency": {
+     "0": {
+      "go": 40
+     },
+     "1": {
+      "json": 40
+     },
+     "2": {
+      "prose": 40
+     },
+     "3": {
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 38138,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 10569,
+      "decision_loss": 2.1840487516011025,
+      "edges": 38138,
+      "live_experts": 4,
+      "load": [
+       160,
+       160,
+       160,
+       160
+      ],
+      "nodes": 38142,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 82537,
+      "test_bits": 2.867108915236158,
+      "train_bits": 0.833418685960712
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     160,
+     160,
+     160,
+     160
+    ],
+    "nmi": 1.0,
+    "nodes": 38142,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 1.0,
+    "rounds": 1,
+    "router": "oracle",
+    "seconds": 27.53083562850952,
+    "seed": 0,
+    "stored_chars": 82537,
+    "test_bits_per_char": 2.867108915236158,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.833418685960712
+   },
+   {
+    "arm": "oracle",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 10569,
+    "contingency": {
+     "0": {
+      "go": 40
+     },
+     "1": {
+      "json": 40
+     },
+     "2": {
+      "prose": 40
+     },
+     "3": {
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 38138,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 10569,
+      "decision_loss": 2.192637717744812,
+      "edges": 38138,
+      "live_experts": 4,
+      "load": [
+       160,
+       160,
+       160,
+       160
+      ],
+      "nodes": 38142,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 82537,
+      "test_bits": 2.8729136559170523,
+      "train_bits": 0.8411019031916805
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     160,
+     160,
+     160,
+     160
+    ],
+    "nmi": 1.0,
+    "nodes": 38142,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 1.0,
+    "rounds": 1,
+    "router": "oracle",
+    "seconds": 28.542617321014404,
+    "seed": 1,
+    "stored_chars": 82537,
+    "test_bits_per_char": 2.8729136559170523,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8411019031916805
+   },
+   {
+    "arm": "oracle",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 10569,
+    "contingency": {
+     "0": {
+      "go": 40
+     },
+     "1": {
+      "json": 40
+     },
+     "2": {
+      "prose": 40
+     },
+     "3": {
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 38138,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 10569,
+      "decision_loss": 2.1831553251491247,
+      "edges": 38138,
+      "live_experts": 4,
+      "load": [
+       160,
+       160,
+       160,
+       160
+      ],
+      "nodes": 38142,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 82537,
+      "test_bits": 2.8800425627268016,
+      "train_bits": 0.8413175417615452
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     160,
+     160,
+     160,
+     160
+    ],
+    "nmi": 1.0,
+    "nodes": 38142,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 1.0,
+    "rounds": 1,
+    "router": "oracle",
+    "seconds": 28.822476863861084,
+    "seed": 2,
+    "stored_chars": 82537,
+    "test_bits_per_char": 2.8800425627268016,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8413175417615452
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.3333,
+     0.3333
+    ],
+    "arm": "frozen",
+    "balance": 0.9627077658532108,
+    "bits": 2,
+    "branches": 11343,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 12,
+      "json": 4,
+      "prose": 8,
+      "python": 6
+     },
+     "1": {
+      "go": 15,
+      "json": 9,
+      "prose": 18,
+      "python": 24
+     },
+     "2": {
+      "go": 9,
+      "json": 15,
+      "prose": 11,
+      "python": 7
+     },
+     "3": {
+      "go": 4,
+      "json": 12,
+      "prose": 3,
+      "python": 3
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 41630,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     109,
+     211,
+     211,
+     109
+    ],
+    "nmi": 0.05607541667790601,
+    "nodes": 41634,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.39375,
+    "rounds": 1,
+    "router": "frozen-sine-sign",
+    "seconds": 33.09829926490784,
+    "seed": 0,
+    "stored_chars": 93908,
+    "test_bits_per_char": 3.2252543983385262,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.830317316645567
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.3333,
+     0.3333
+    ],
+    "arm": "frozen",
+    "balance": 0.848106130062573,
+    "bits": 2,
+    "branches": 10723,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 12,
+      "json": 38,
+      "prose": 1,
+      "python": 11
+     },
+     "1": {
+      "go": 1,
+      "prose": 2,
+      "python": 6
+     },
+     "2": {
+      "go": 9,
+      "json": 2,
+      "prose": 9,
+      "python": 3
+     },
+     "3": {
+      "go": 18,
+      "prose": 28,
+      "python": 20
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 39131,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     260,
+     60,
+     60,
+     260
+    ],
+    "nmi": 0.26152139000318275,
+    "nodes": 39135,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.50625,
+    "rounds": 1,
+    "router": "frozen-sine-sign",
+    "seconds": 31.731237411499023,
+    "seed": 1,
+    "stored_chars": 86708,
+    "test_bits_per_char": 3.067876994674245,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8815164618905516
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.3333,
+     0.3333
+    ],
+    "arm": "frozen",
+    "balance": 0.999985911089516,
+    "bits": 2,
+    "branches": 10976,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 13,
+      "json": 14,
+      "prose": 3,
+      "python": 4
+     },
+     "1": {
+      "go": 18,
+      "json": 2,
+      "prose": 13,
+      "python": 9
+     },
+     "2": {
+      "go": 3,
+      "json": 24,
+      "prose": 1,
+      "python": 13
+     },
+     "3": {
+      "go": 6,
+      "prose": 23,
+      "python": 14
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 40186,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     161,
+     159,
+     159,
+     161
+    ],
+    "nmi": 0.22273531517039596,
+    "nodes": 40190,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.49375,
+    "rounds": 1,
+    "router": "frozen-sine-sign",
+    "seconds": 29.077243328094482,
+    "seed": 2,
+    "stored_chars": 89964,
+    "test_bits_per_char": 3.1032707735863996,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8501344396264998
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.3333,
+     0.3333,
+     0.3333,
+     0.3333
+    ],
+    "arm": "frozen-argmax",
+    "balance": 0.997939955288633,
+    "bits": 4,
+    "branches": 11261,
+    "code": "argmax",
+    "contingency": {
+     "0": {
+      "go": 1,
+      "json": 16,
+      "prose": 7,
+      "python": 20
+     },
+     "1": {
+      "go": 3,
+      "json": 16,
+      "prose": 5,
+      "python": 10
+     },
+     "2": {
+      "go": 9,
+      "json": 8,
+      "prose": 18,
+      "python": 6
+     },
+     "3": {
+      "go": 27,
+      "prose": 10,
+      "python": 4
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 41151,
+    "history": [
+     {
+      "balance": 0.997939955288633,
+      "branches": 11261,
+      "decision_loss": 2.286446092025568,
+      "edges": 41151,
+      "live_experts": 4,
+      "load": [
+       176,
+       154,
+       144,
+       166
+      ],
+      "nodes": 41155,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 92664,
+      "test_bits": 3.143972543599835,
+      "train_bits": 0.8236633787742373
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     176,
+     154,
+     144,
+     166
+    ],
+    "nmi": 0.19988984775140384,
+    "nodes": 41155,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.50625,
+    "rounds": 1,
+    "router": "frozen-sine-argmax",
+    "seconds": 29.161237716674805,
+    "seed": 0,
+    "stored_chars": 92664,
+    "test_bits_per_char": 3.143972543599835,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8236633787742373
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.3333,
+     0.3333,
+     0.3333,
+     0.3333
+    ],
+    "arm": "frozen-argmax",
+    "balance": 0.9869167179917596,
+    "bits": 4,
+    "branches": 11062,
+    "code": "argmax",
+    "contingency": {
+     "0": {
+      "go": 7,
+      "prose": 17,
+      "python": 13
+     },
+     "1": {
+      "go": 11,
+      "json": 2,
+      "prose": 18,
+      "python": 13
+     },
+     "2": {
+      "go": 17,
+      "json": 19,
+      "prose": 2,
+      "python": 11
+     },
+     "3": {
+      "go": 5,
+      "json": 19,
+      "prose": 3,
+      "python": 3
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 40388,
+    "history": [
+     {
+      "balance": 0.9869167179917596,
+      "branches": 11062,
+      "decision_loss": 2.256126808611951,
+      "edges": 40388,
+      "live_experts": 4,
+      "load": [
+       159,
+       157,
+       205,
+       119
+      ],
+      "nodes": 40392,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 90296,
+      "test_bits": 3.1541893809525754,
+      "train_bits": 0.8361964386520654
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     159,
+     157,
+     205,
+     119
+    ],
+    "nmi": 0.1799740143303893,
+    "nodes": 40392,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.45625,
+    "rounds": 1,
+    "router": "frozen-sine-argmax",
+    "seconds": 31.25763750076294,
+    "seed": 1,
+    "stored_chars": 90296,
+    "test_bits_per_char": 3.1541893809525754,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8361964386520654
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.3333,
+     0.3333,
+     0.3333,
+     0.3333
+    ],
+    "arm": "frozen-argmax",
+    "balance": 0.9849836995208415,
+    "bits": 4,
+    "branches": 10818,
+    "code": "argmax",
+    "contingency": {
+     "0": {
+      "go": 7,
+      "json": 4,
+      "prose": 16,
+      "python": 12
+     },
+     "1": {
+      "json": 34,
+      "prose": 1,
+      "python": 12
+     },
+     "2": {
+      "go": 15,
+      "json": 1,
+      "prose": 2,
+      "python": 5
+     },
+     "3": {
+      "go": 18,
+      "json": 1,
+      "prose": 21,
+      "python": 11
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 39793,
+    "history": [
+     {
+      "balance": 0.9849836995208415,
+      "branches": 10818,
+      "decision_loss": 2.2601294022409073,
+      "edges": 39793,
+      "live_experts": 4,
+      "load": [
+       170,
+       196,
+       109,
+       165
+      ],
+      "nodes": 39797,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89280,
+      "test_bits": 3.1322734788823254,
+      "train_bits": 0.8530140208176847
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     170,
+     196,
+     109,
+     165
+    ],
+    "nmi": 0.27797042231183217,
+    "nodes": 39797,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5375,
+    "rounds": 1,
+    "router": "frozen-sine-argmax",
+    "seconds": 32.14839792251587,
+    "seed": 2,
+    "stored_chars": 89280,
+    "test_bits_per_char": 3.1322734788823254,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8530140208176847
+   },
+   {
+    "arm": "deep-oracle",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 10569,
+    "contingency": {
+     "0": {
+      "go": 40
+     },
+     "1": {
+      "json": 40
+     },
+     "2": {
+      "prose": 40
+     },
+     "3": {
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 38138,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 10569,
+      "decision_loss": 2.1840487516011025,
+      "edges": 38138,
+      "live_experts": 4,
+      "load": [
+       160,
+       160,
+       160,
+       160
+      ],
+      "nodes": 38142,
+      "prior_nodes": 34317,
+      "round": 0,
+      "stored_chars": 82537,
+      "test_bits": 2.867098309424685,
+      "train_bits": 0.8334184115542659
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     160,
+     160,
+     160,
+     160
+    ],
+    "nmi": 1.0,
+    "nodes": 38142,
+    "prior_depth": 5,
+    "prior_nodes": 34317,
+    "purity": 1.0,
+    "rounds": 1,
+    "router": "oracle",
+    "seconds": 43.91391468048096,
+    "seed": 0,
+    "stored_chars": 82537,
+    "test_bits_per_char": 2.867098309424685,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8334184115542659
+   },
+   {
+    "arm": "deep-oracle",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 10569,
+    "contingency": {
+     "0": {
+      "go": 40
+     },
+     "1": {
+      "json": 40
+     },
+     "2": {
+      "prose": 40
+     },
+     "3": {
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 38138,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 10569,
+      "decision_loss": 2.192637717744812,
+      "edges": 38138,
+      "live_experts": 4,
+      "load": [
+       160,
+       160,
+       160,
+       160
+      ],
+      "nodes": 38142,
+      "prior_nodes": 34317,
+      "round": 0,
+      "stored_chars": 82537,
+      "test_bits": 2.872902539014611,
+      "train_bits": 0.8411015903334047
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     160,
+     160,
+     160,
+     160
+    ],
+    "nmi": 1.0,
+    "nodes": 38142,
+    "prior_depth": 5,
+    "prior_nodes": 34317,
+    "purity": 1.0,
+    "rounds": 1,
+    "router": "oracle",
+    "seconds": 41.64383506774902,
+    "seed": 1,
+    "stored_chars": 82537,
+    "test_bits_per_char": 2.872902539014611,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8411015903334047
+   },
+   {
+    "arm": "deep-oracle",
+    "balance": 1.0,
+    "bits": 2,
+    "branches": 10569,
+    "contingency": {
+     "0": {
+      "go": 40
+     },
+     "1": {
+      "json": 40
+     },
+     "2": {
+      "prose": 40
+     },
+     "3": {
+      "python": 40
+     }
+    },
+    "depth": 5,
+    "edges": 38138,
+    "history": [
+     {
+      "balance": 1.0,
+      "branches": 10569,
+      "decision_loss": 2.1831553251491247,
+      "edges": 38138,
+      "live_experts": 4,
+      "load": [
+       160,
+       160,
+       160,
+       160
+      ],
+      "nodes": 38142,
+      "prior_nodes": 34317,
+      "round": 0,
+      "stored_chars": 82537,
+      "test_bits": 2.8800309626358875,
+      "train_bits": 0.8413172876946713
+     }
+    ],
+    "live_experts": 4,
+    "load": [
+     160,
+     160,
+     160,
+     160
+    ],
+    "nmi": 1.0,
+    "nodes": 38142,
+    "prior_depth": 5,
+    "prior_nodes": 34317,
+    "purity": 1.0,
+    "rounds": 1,
+    "router": "oracle",
+    "seconds": 42.83101558685303,
+    "seed": 2,
+    "stored_chars": 82537,
+    "test_bits_per_char": 2.8800309626358875,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8413172876946713
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0275,
+     0.0669
+    ],
+    "arm": "learned",
+    "balance": 0.5662789800931544,
+    "bits": 2,
+    "branches": 10230,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 5,
+      "json": 17,
+      "prose": 16,
+      "python": 5
+     },
+     "1": {
+      "go": 35,
+      "json": 17,
+      "prose": 23,
+      "python": 35
+     },
+     "2": {
+      "json": 6,
+      "prose": 1
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 37836,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 1012,
+       "amp_freq": [
+        0.0045,
+        0.1099
+       ],
+       "considered": 2560,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5600411279724462,
+       "moved": 1998,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.6545246030887715,
+      "branches": 10479,
+      "decision_loss": 2.3133661010090734,
+      "edges": 38584,
+      "filter": {
+       "agreed": 1667,
+       "amp_freq": [
+        0.0275,
+        0.0669
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.2625317908461763,
+       "moved": 919,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       275,
+       324,
+       36,
+       5
+      ],
+      "nodes": 38588,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 82916,
+      "test_bits": 2.9714511264755163,
+      "train_bits": 0.9111725404918123
+     },
+     {
+      "balance": 0.5662789800931544,
+      "branches": 10230,
+      "decision_loss": 2.3201323560638873,
+      "edges": 37836,
+      "live_experts": 4,
+      "load": [
+       202,
+       415,
+       17,
+       6
+      ],
+      "nodes": 37840,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 80302,
+      "test_bits": 2.8976828914607435,
+      "train_bits": 0.9214021605439866
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     202,
+     415,
+     17,
+     6
+    ],
+    "nmi": 0.10501519882160029,
+    "nodes": 37840,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.3625,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 131.0595600605011,
+    "seed": 0,
+    "stored_chars": 80302,
+    "test_bits_per_char": 2.8976828914607435,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9214021605439866
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0262,
+     0.0339
+    ],
+    "arm": "learned",
+    "balance": 0.775035806852354,
+    "bits": 2,
+    "branches": 10462,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 11,
+      "json": 40,
+      "prose": 2,
+      "python": 12
+     },
+     "2": {
+      "go": 14,
+      "prose": 7,
+      "python": 16
+     },
+     "3": {
+      "go": 15,
+      "prose": 31,
+      "python": 12
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 38252,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 1764,
+       "amp_freq": [
+        0.0326,
+        0.0225
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.33767543820522816,
+       "moved": 996,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.7642151994471321,
+      "branches": 10607,
+      "decision_loss": 2.2529058203471,
+      "edges": 38832,
+      "filter": {
+       "agreed": 1681,
+       "amp_freq": [
+        0.0262,
+        0.0339
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 3,
+       "mean_advantage": 0.24166802901893725,
+       "moved": 1002,
+       "passes": 4
+      },
+      "live_experts": 3,
+      "load": [
+       300,
+       0,
+       170,
+       170
+      ],
+      "nodes": 38836,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 84742,
+      "test_bits": 3.0115505600834487,
+      "train_bits": 0.8876038834940042
+     },
+     {
+      "balance": 0.775035806852354,
+      "branches": 10462,
+      "decision_loss": 2.21955564592407,
+      "edges": 38252,
+      "live_experts": 3,
+      "load": [
+       256,
+       0,
+       150,
+       234
+      ],
+      "nodes": 38256,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 82864,
+      "test_bits": 2.909772605702845,
+      "train_bits": 0.8799322212517041
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     256,
+     0,
+     150,
+     234
+    ],
+    "nmi": 0.29651127857705656,
+    "nodes": 38256,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.54375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 119.96794557571411,
+    "seed": 1,
+    "stored_chars": 82864,
+    "test_bits_per_char": 2.909772605702845,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8799322212517041
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0182,
+     0.0576
+    ],
+    "arm": "learned",
+    "balance": 0.3712227751009666,
+    "bits": 2,
+    "branches": 9676,
+    "code": "sign",
+    "contingency": {
+     "1": {
+      "go": 1,
+      "python": 1
+     },
+     "2": {
+      "go": 38,
+      "json": 26,
+      "prose": 39,
+      "python": 28
+     },
+     "3": {
+      "go": 1,
+      "json": 14,
+      "prose": 1,
+      "python": 11
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36273,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 943,
+       "amp_freq": [
+        0.0074,
+        0.111
+       ],
+       "considered": 2560,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.996864077409602,
+       "moved": 2012,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.6643719694485241,
+      "branches": 10497,
+      "decision_loss": 2.331350290378784,
+      "edges": 38813,
+      "filter": {
+       "agreed": 1630,
+       "amp_freq": [
+        0.0182,
+        0.0576
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.29945929537623,
+       "moved": 980,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       37,
+       17,
+       394,
+       192
+      ],
+      "nodes": 38817,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 84310,
+      "test_bits": 3.0284579808342094,
+      "train_bits": 0.9024423950033124
+     },
+     {
+      "balance": 0.3712227751009666,
+      "branches": 9676,
+      "decision_loss": 2.318756906591561,
+      "edges": 36273,
+      "live_experts": 4,
+      "load": [
+       4,
+       3,
+       527,
+       106
+      ],
+      "nodes": 36277,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 75449,
+      "test_bits": 2.915067897536828,
+      "train_bits": 0.9751784165354326
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     4,
+     3,
+     527,
+     106
+    ],
+    "nmi": 0.09990102297026679,
+    "nodes": 36277,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.3375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 133.74189352989197,
+    "seed": 2,
+    "stored_chars": 75449,
+    "test_bits_per_char": 2.915067897536828,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9751784165354326
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0303,
+     0.043,
+     0.0877,
+     0.0333
+    ],
+    "arm": "argmax",
+    "balance": 0.7178973088113653,
+    "bits": 4,
+    "branches": 10397,
+    "code": "argmax",
+    "contingency": {
+     "0": {
+      "json": 12,
+      "prose": 1,
+      "python": 8
+     },
+     "1": {
+      "json": 5,
+      "prose": 1
+     },
+     "2": {
+      "go": 13,
+      "prose": 26,
+      "python": 11
+     },
+     "3": {
+      "go": 27,
+      "json": 23,
+      "prose": 12,
+      "python": 21
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 38377,
+    "history": [
+     {
+      "balance": 0.997939955288633,
+      "branches": 11261,
+      "decision_loss": 2.286446092025568,
+      "edges": 41151,
+      "filter": {
+       "agreed": 1171,
+       "amp_freq": [
+        0.0713,
+        0.0355,
+        0.141,
+        0.014
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5306441868755579,
+       "moved": 1389,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       176,
+       154,
+       144,
+       166
+      ],
+      "nodes": 41155,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 92664,
+      "test_bits": 3.143972543599835,
+      "train_bits": 0.8236633787742373
+     },
+     {
+      "balance": 0.9054025772490455,
+      "branches": 10692,
+      "decision_loss": 2.243938831399795,
+      "edges": 39083,
+      "filter": {
+       "agreed": 1656,
+       "amp_freq": [
+        0.0303,
+        0.043,
+        0.0877,
+        0.0333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.34874012206655075,
+       "moved": 904,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       171,
+       39,
+       204,
+       226
+      ],
+      "nodes": 39087,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 85377,
+      "test_bits": 3.0386616761188843,
+      "train_bits": 0.866374974184513
+     },
+     {
+      "balance": 0.7178973088113653,
+      "branches": 10397,
+      "decision_loss": 2.268195851090492,
+      "edges": 38377,
+      "live_experts": 4,
+      "load": [
+       77,
+       9,
+       189,
+       365
+      ],
+      "nodes": 38381,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 82412,
+      "test_bits": 2.9604549117167855,
+      "train_bits": 0.8900283848893156
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     77,
+     9,
+     189,
+     365
+    ],
+    "nmi": 0.19430077362473078,
+    "nodes": 38381,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.4375,
+    "rounds": 3,
+    "router": "sine-argmax",
+    "seconds": 113.70984959602356,
+    "seed": 0,
+    "stored_chars": 82412,
+    "test_bits_per_char": 2.9604549117167855,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8900283848893156
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.1006,
+     0.109,
+     0.0484,
+     0.0811
+    ],
+    "arm": "argmax",
+    "balance": 0.6978178491453837,
+    "bits": 4,
+    "branches": 9950,
+    "code": "argmax",
+    "contingency": {
+     "1": {
+      "go": 22,
+      "json": 1,
+      "prose": 38,
+      "python": 22
+     },
+     "2": {
+      "go": 18,
+      "json": 22,
+      "prose": 1,
+      "python": 18
+     },
+     "3": {
+      "json": 17,
+      "prose": 1
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36802,
+    "history": [
+     {
+      "balance": 0.9869167179917596,
+      "branches": 11062,
+      "decision_loss": 2.256126808611951,
+      "edges": 40388,
+      "filter": {
+       "agreed": 1392,
+       "amp_freq": [
+        0.1206,
+        0.1321,
+        0.0575,
+        0.0927
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.44113264486495646,
+       "moved": 1168,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       159,
+       157,
+       205,
+       119
+      ],
+      "nodes": 40392,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 90296,
+      "test_bits": 3.1541893809525754,
+      "train_bits": 0.8361964386520654
+     },
+     {
+      "balance": 0.7274301931967935,
+      "branches": 10247,
+      "decision_loss": 2.2517932511539547,
+      "edges": 37711,
+      "filter": {
+       "agreed": 1945,
+       "amp_freq": [
+        0.1006,
+        0.109,
+        0.0484,
+        0.0811
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.23448720456809014,
+       "moved": 615,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       10,
+       225,
+       337,
+       68
+      ],
+      "nodes": 37715,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 81267,
+      "test_bits": 2.976088671491797,
+      "train_bits": 0.8986505181303623
+     },
+     {
+      "balance": 0.6978178491453837,
+      "branches": 9950,
+      "decision_loss": 2.242741061741569,
+      "edges": 36802,
+      "live_experts": 3,
+      "load": [
+       0,
+       309,
+       257,
+       74
+      ],
+      "nodes": 36806,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 77755,
+      "test_bits": 2.8791729243723534,
+      "train_bits": 0.9583291612884476
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     0,
+     309,
+     257,
+     74
+    ],
+    "nmi": 0.303880431510286,
+    "nodes": 36806,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.48125,
+    "rounds": 3,
+    "router": "sine-argmax",
+    "seconds": 115.91641855239868,
+    "seed": 1,
+    "stored_chars": 77755,
+    "test_bits_per_char": 2.8791729243723534,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9583291612884476
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0499,
+     0.0064,
+     0.0375,
+     0.0428
+    ],
+    "arm": "argmax",
+    "balance": 0.5181776167864697,
+    "bits": 4,
+    "branches": 9440,
+    "code": "argmax",
+    "contingency": {
+     "0": {
+      "python": 2
+     },
+     "1": {
+      "json": 37,
+      "prose": 2,
+      "python": 2
+     },
+     "2": {
+      "go": 3
+     },
+     "3": {
+      "go": 37,
+      "json": 3,
+      "prose": 38,
+      "python": 36
+     }
+    },
+    "dead_units": [
+     1
+    ],
+    "depth": 5,
+    "edges": 35347,
+    "history": [
+     {
+      "balance": 0.9849836995208415,
+      "branches": 10818,
+      "decision_loss": 2.2601294022409073,
+      "edges": 39793,
+      "filter": {
+       "agreed": 1453,
+       "amp_freq": [
+        0.0414,
+        0.0006,
+        0.0452,
+        0.0242
+       ],
+       "considered": 2560,
+       "dead_units": [
+        1
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.444087649870613,
+       "moved": 1107,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       170,
+       196,
+       109,
+       165
+      ],
+      "nodes": 39797,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89280,
+      "test_bits": 3.1322734788823254,
+      "train_bits": 0.8530140208176847
+     },
+     {
+      "balance": 0.6952803771596245,
+      "branches": 9740,
+      "decision_loss": 2.2324606601427526,
+      "edges": 36273,
+      "filter": {
+       "agreed": 2146,
+       "amp_freq": [
+        0.0499,
+        0.0064,
+        0.0375,
+        0.0428
+       ],
+       "considered": 2560,
+       "dead_units": [
+        1
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.23354468032343317,
+       "moved": 414,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       33,
+       176,
+       35,
+       396
+      ],
+      "nodes": 36277,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 77014,
+      "test_bits": 2.8430025985379284,
+      "train_bits": 0.9330151871596356
+     },
+     {
+      "balance": 0.5181776167864697,
+      "branches": 9440,
+      "decision_loss": 2.241912897544126,
+      "edges": 35347,
+      "live_experts": 4,
+      "load": [
+       2,
+       155,
+       23,
+       460
+      ],
+      "nodes": 35351,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 72810,
+      "test_bits": 2.8212151274833595,
+      "train_bits": 0.9654671398827657
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     2,
+     155,
+     23,
+     460
+    ],
+    "nmi": 0.416270822479079,
+    "nodes": 35351,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5,
+    "rounds": 3,
+    "router": "sine-argmax",
+    "seconds": 127.43398571014404,
+    "seed": 2,
+    "stored_chars": 72810,
+    "test_bits_per_char": 2.8212151274833595,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9654671398827657
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0194,
+     0.2428
+    ],
+    "arm": "monotone",
+    "balance": 0.008408980814673816,
+    "bits": 2,
+    "branches": 9118,
+    "code": "sign",
+    "contingency": {
+     "2": {
+      "go": 40,
+      "json": 40,
+      "prose": 40,
+      "python": 39
+     },
+     "3": {
+      "python": 1
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 34330,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 1053,
+       "amp_freq": [
+        0.0148,
+        0.2727
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5166443015864005,
+       "moved": 1938,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.44684354288030614,
+      "branches": 10248,
+      "decision_loss": 2.3139516420377566,
+      "edges": 37742,
+      "filter": {
+       "agreed": 1921,
+       "amp_freq": [
+        0.0194,
+        0.2428
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 3,
+       "mean_advantage": 0.17109622657517853,
+       "moved": 640,
+       "passes": 4
+      },
+      "live_experts": 3,
+      "load": [
+       178,
+       0,
+       459,
+       3
+      ],
+      "nodes": 37746,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 79448,
+      "test_bits": 2.9894610220459956,
+      "train_bits": 0.9177260891811633
+     },
+     {
+      "balance": 0.008408980814673816,
+      "branches": 9118,
+      "decision_loss": 2.3409650710992933,
+      "edges": 34330,
+      "live_experts": 2,
+      "load": [
+       0,
+       0,
+       639,
+       1
+      ],
+      "nodes": 34334,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 68433,
+      "test_bits": 2.834950292185368,
+      "train_bits": 1.0319120951523233
+     }
+    ],
+    "kind": "monotone",
+    "live_experts": 2,
+    "load": [
+     0,
+     0,
+     639,
+     1
+    ],
+    "nmi": 0.012250075355777067,
+    "nodes": 34334,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.25625,
+    "rounds": 3,
+    "router": "monotone-sign",
+    "seconds": 136.37484097480774,
+    "seed": 0,
+    "stored_chars": 68433,
+    "test_bits_per_char": 2.834950292185368,
+    "test_chars": 11935,
+    "train_bits_per_char": 1.0319120951523233
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0324,
+     0.026
+    ],
+    "arm": "monotone",
+    "balance": 0.5334799134783113,
+    "bits": 2,
+    "branches": 9524,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 3,
+      "json": 39,
+      "prose": 2,
+      "python": 3
+     },
+     "1": {
+      "go": 3,
+      "python": 4
+     },
+     "2": {
+      "json": 1
+     },
+     "3": {
+      "go": 34,
+      "prose": 38,
+      "python": 33
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 35750,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 1773,
+       "amp_freq": [
+        0.0338,
+        0.0265
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.3276177532543244,
+       "moved": 995,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.6754326187801514,
+      "branches": 9951,
+      "decision_loss": 2.235553021583488,
+      "edges": 36865,
+      "filter": {
+       "agreed": 2082,
+       "amp_freq": [
+        0.0324,
+        0.026
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.2190798197735612,
+       "moved": 545,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       227,
+       57,
+       3,
+       353
+      ],
+      "nodes": 36869,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 78683,
+      "test_bits": 2.8588026138367204,
+      "train_bits": 0.9235903784157292
+     },
+     {
+      "balance": 0.5334799134783113,
+      "branches": 9524,
+      "decision_loss": 2.2532873575980084,
+      "edges": 35750,
+      "live_experts": 3,
+      "load": [
+       182,
+       23,
+       0,
+       435
+      ],
+      "nodes": 35754,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 74376,
+      "test_bits": 2.8185205068981283,
+      "train_bits": 0.9645977215282094
+     }
+    ],
+    "kind": "monotone",
+    "live_experts": 3,
+    "load": [
+     182,
+     23,
+     0,
+     435
+    ],
+    "nmi": 0.4094239111521781,
+    "nodes": 35754,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5125,
+    "rounds": 3,
+    "router": "monotone-sign",
+    "seconds": 131.1869456768036,
+    "seed": 1,
+    "stored_chars": 74376,
+    "test_bits_per_char": 2.8185205068981283,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9645977215282094
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.1025,
+     0.2977
+    ],
+    "arm": "monotone",
+    "balance": 0.5985891335936925,
+    "bits": 2,
+    "branches": 9639,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 5,
+      "prose": 1
+     },
+     "1": {
+      "go": 2,
+      "python": 1
+     },
+     "2": {
+      "go": 2,
+      "json": 40,
+      "prose": 1,
+      "python": 8
+     },
+     "3": {
+      "go": 31,
+      "prose": 38,
+      "python": 31
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 35945,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 1386,
+       "amp_freq": [
+        0.1086,
+        0.2811
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.42535724911532957,
+       "moved": 1339,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.7811988473508016,
+      "branches": 10150,
+      "decision_loss": 2.230527232896861,
+      "edges": 37299,
+      "filter": {
+       "agreed": 1983,
+       "amp_freq": [
+        0.1025,
+        0.2977
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.2890185296762468,
+       "moved": 659,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       76,
+       25,
+       204,
+       335
+      ],
+      "nodes": 37303,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 80793,
+      "test_bits": 2.886377757332217,
+      "train_bits": 0.9185382366275414
+     },
+     {
+      "balance": 0.5985891335936925,
+      "branches": 9639,
+      "decision_loss": 2.2382460507743263,
+      "edges": 35945,
+      "live_experts": 4,
+      "load": [
+       30,
+       7,
+       185,
+       418
+      ],
+      "nodes": 35949,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 75427,
+      "test_bits": 2.8400701264960317,
+      "train_bits": 0.9505753357091261
+     }
+    ],
+    "kind": "monotone",
+    "live_experts": 4,
+    "load": [
+     30,
+     7,
+     185,
+     418
+    ],
+    "nmi": 0.40622648107662446,
+    "nodes": 35949,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.53125,
+    "rounds": 3,
+    "router": "monotone-sign",
+    "seconds": 121.26261591911316,
+    "seed": 2,
+    "stored_chars": 75427,
+    "test_bits_per_char": 2.8400701264960317,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9505753357091261
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0226,
+     0.0718
+    ],
+    "arm": "unbalanced",
+    "balance": 0.5154665285444736,
+    "bits": 2,
+    "branches": 9455,
+    "code": "sign",
+    "contingency": {
+     "1": {
+      "go": 38,
+      "json": 1,
+      "prose": 38,
+      "python": 37
+     },
+     "2": {
+      "json": 14,
+      "prose": 1
+     },
+     "3": {
+      "go": 2,
+      "json": 25,
+      "prose": 1,
+      "python": 3
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 35512,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 1008,
+       "amp_freq": [
+        0.018,
+        0.1041
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5685853342026456,
+       "moved": 2048,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.852156850583195,
+      "branches": 10744,
+      "decision_loss": 2.2857945174060803,
+      "edges": 39666,
+      "filter": {
+       "agreed": 1526,
+       "amp_freq": [
+        0.0226,
+        0.0718
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.3549924049309664,
+       "moved": 1185,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       158,
+       324,
+       114,
+       44
+      ],
+      "nodes": 39670,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 87147,
+      "test_bits": 3.078316327790031,
+      "train_bits": 0.8704584507626049
+     },
+     {
+      "balance": 0.5154665285444736,
+      "branches": 9455,
+      "decision_loss": 2.253665560782297,
+      "edges": 35512,
+      "live_experts": 3,
+      "load": [
+       0,
+       486,
+       63,
+       91
+      ],
+      "nodes": 35516,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 72794,
+      "test_bits": 2.7993953087595953,
+      "train_bits": 0.9697996642833527
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     0,
+     486,
+     63,
+     91
+    ],
+    "nmi": 0.386164403924515,
+    "nodes": 35516,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.48125,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 123.86171913146973,
+    "seed": 0,
+    "stored_chars": 72794,
+    "test_bits_per_char": 2.7993953087595953,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9697996642833527
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0211,
+     0.0193
+    ],
+    "arm": "unbalanced",
+    "balance": 0.7602199302982122,
+    "bits": 2,
+    "branches": 9965,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 2,
+      "json": 39,
+      "prose": 2,
+      "python": 2
+     },
+     "2": {
+      "go": 15,
+      "json": 1,
+      "prose": 1,
+      "python": 18
+     },
+     "3": {
+      "go": 23,
+      "prose": 37,
+      "python": 20
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36906,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 1802,
+       "amp_freq": [
+        0.0494,
+        0.031
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.33420156799172485,
+       "moved": 977,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.7654749284670268,
+      "branches": 10103,
+      "decision_loss": 2.2178839787155438,
+      "edges": 37371,
+      "filter": {
+       "agreed": 1866,
+       "amp_freq": [
+        0.0211,
+        0.0193
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 3,
+       "mean_advantage": 0.2634909937453808,
+       "moved": 737,
+       "passes": 4
+      },
+      "live_experts": 3,
+      "load": [
+       200,
+       0,
+       149,
+       291
+      ],
+      "nodes": 37375,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 80290,
+      "test_bits": 2.9077260768676085,
+      "train_bits": 0.9027003260076054
+     },
+     {
+      "balance": 0.7602199302982122,
+      "branches": 9965,
+      "decision_loss": 2.211461461139881,
+      "edges": 36906,
+      "live_experts": 3,
+      "load": [
+       165,
+       0,
+       169,
+       306
+      ],
+      "nodes": 36910,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 78539,
+      "test_bits": 2.8881247973418094,
+      "train_bits": 0.9109558730744425
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     165,
+     0,
+     169,
+     306
+    ],
+    "nmi": 0.41713918277072515,
+    "nodes": 36910,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5875,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 112.78002786636353,
+    "seed": 1,
+    "stored_chars": 78539,
+    "test_bits_per_char": 2.8881247973418094,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9109558730744425
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0135,
+     0.08
+    ],
+    "arm": "unbalanced",
+    "balance": 0.33356213982039795,
+    "bits": 2,
+    "branches": 9374,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 1
+     },
+     "2": {
+      "go": 2,
+      "json": 23,
+      "prose": 2,
+      "python": 1
+     },
+     "3": {
+      "go": 37,
+      "json": 17,
+      "prose": 38,
+      "python": 39
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 35155,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 1358,
+       "amp_freq": [
+        0.017,
+        0.1129
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.43263415450324877,
+       "moved": 1341,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.7566460677774977,
+      "branches": 10084,
+      "decision_loss": 2.236003084261428,
+      "edges": 37235,
+      "filter": {
+       "agreed": 2070,
+       "amp_freq": [
+        0.0135,
+        0.08
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.24827483288237132,
+       "moved": 576,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       86,
+       12,
+       208,
+       334
+      ],
+      "nodes": 37239,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 80636,
+      "test_bits": 2.8813764932995265,
+      "train_bits": 0.9249257974464505
+     },
+     {
+      "balance": 0.33356213982039795,
+      "branches": 9374,
+      "decision_loss": 2.286508030336263,
+      "edges": 35155,
+      "live_experts": 3,
+      "load": [
+       3,
+       0,
+       100,
+       537
+      ],
+      "nodes": 35159,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 71498,
+      "test_bits": 2.80656078601215,
+      "train_bits": 0.9838454418646636
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     3,
+     0,
+     100,
+     537
+    ],
+    "nmi": 0.182980206173801,
+    "nodes": 35159,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.39375,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 126.67936635017395,
+    "seed": 2,
+    "stored_chars": 71498,
+    "test_bits_per_char": 2.80656078601215,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9838454418646636
+   },
+   {
+    "act_rate": 0.0,
+    "amp_freq": [
+     0.3333,
+     0.3333
+    ],
+    "arm": "fixedwave",
+    "balance": 0.9226688846750708,
+    "bits": 2,
+    "branches": 10787,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 11,
+      "prose": 31,
+      "python": 15
+     },
+     "1": {
+      "go": 15,
+      "prose": 5,
+      "python": 3
+     },
+     "2": {
+      "go": 3,
+      "json": 11,
+      "python": 5
+     },
+     "3": {
+      "go": 11,
+      "json": 29,
+      "prose": 4,
+      "python": 17
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 39262,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 781,
+       "amp_freq": [
+        0.3333,
+        0.3333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.7297583687908256,
+       "moved": 2295,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2252543983385262,
+      "train_bits": 0.830317316645567
+     },
+     {
+      "balance": 0.9294889628097744,
+      "branches": 10807,
+      "decision_loss": 2.2703836951189738,
+      "edges": 39486,
+      "filter": {
+       "agreed": 1302,
+       "amp_freq": [
+        0.3333,
+        0.3333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5492301872820093,
+       "moved": 1476,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       62,
+       249,
+       183,
+       146
+      ],
+      "nodes": 39490,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 87958,
+      "test_bits": 3.090095320249104,
+      "train_bits": 0.8679816108433444
+     },
+     {
+      "balance": 0.9226688846750708,
+      "branches": 10787,
+      "decision_loss": 2.239136020394011,
+      "edges": 39262,
+      "live_experts": 4,
+      "load": [
+       224,
+       91,
+       84,
+       241
+      ],
+      "nodes": 39266,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 87250,
+      "test_bits": 3.0956451861940852,
+      "train_bits": 0.8708394052301951
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     224,
+     91,
+     84,
+     241
+    ],
+    "nmi": 0.25156695218618164,
+    "nodes": 39266,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.5375,
+    "rounds": 3,
+    "router": "sine-sign-fixedwave",
+    "seconds": 110.34414768218994,
+    "seed": 0,
+    "stored_chars": 87250,
+    "test_bits_per_char": 3.0956451861940852,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8708394052301951
+   },
+   {
+    "act_rate": 0.0,
+    "amp_freq": [
+     0.3333,
+     0.3333
+    ],
+    "arm": "fixedwave",
+    "balance": 0.981312676635426,
+    "bits": 2,
+    "branches": 11664,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 12,
+      "json": 11,
+      "prose": 14,
+      "python": 16
+     },
+     "1": {
+      "go": 9,
+      "json": 12,
+      "prose": 2,
+      "python": 8
+     },
+     "2": {
+      "go": 8,
+      "json": 9,
+      "prose": 6,
+      "python": 6
+     },
+     "3": {
+      "go": 11,
+      "json": 8,
+      "prose": 18,
+      "python": 10
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 42800,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 1748,
+       "amp_freq": [
+        0.3333,
+        0.3333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.3637395555885486,
+       "moved": 990,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.067876994674245,
+      "train_bits": 0.8815164618905516
+     },
+     {
+      "balance": 0.9049628983148305,
+      "branches": 11086,
+      "decision_loss": 2.299392269615614,
+      "edges": 40529,
+      "filter": {
+       "agreed": 722,
+       "amp_freq": [
+        0.3333,
+        0.3333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.9252630778650144,
+       "moved": 2437,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       70,
+       298,
+       148,
+       124
+      ],
+      "nodes": 40533,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 90943,
+      "test_bits": 3.0874048218631462,
+      "train_bits": 0.8558642883171785
+     },
+     {
+      "balance": 0.981312676635426,
+      "branches": 11664,
+      "decision_loss": 2.3372229309434664,
+      "edges": 42800,
+      "live_experts": 4,
+      "load": [
+       184,
+       123,
+       126,
+       207
+      ],
+      "nodes": 42804,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 97650,
+      "test_bits": 3.2525756873434055,
+      "train_bits": 0.8257652104482266
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     184,
+     123,
+     126,
+     207
+    ],
+    "nmi": 0.033835153567384466,
+    "nodes": 42804,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.34375,
+    "rounds": 3,
+    "router": "sine-sign-fixedwave",
+    "seconds": 115.93635654449463,
+    "seed": 1,
+    "stored_chars": 97650,
+    "test_bits_per_char": 3.2525756873434055,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.8257652104482266
+   },
+   {
+    "act_rate": 0.0,
+    "amp_freq": [
+     0.3333,
+     0.3333
+    ],
+    "arm": "fixedwave",
+    "balance": 0.403275456169474,
+    "bits": 2,
+    "branches": 9742,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 6,
+      "prose": 1,
+      "python": 2
+     },
+     "1": {
+      "go": 2,
+      "python": 1
+     },
+     "2": {
+      "go": 8,
+      "json": 2,
+      "python": 1
+     },
+     "3": {
+      "go": 24,
+      "json": 38,
+      "prose": 39,
+      "python": 36
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 36183,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 1165,
+       "amp_freq": [
+        0.3333,
+        0.3333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.6979838186336977,
+       "moved": 1664,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 1920,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032707735863996,
+      "train_bits": 0.8501344396264998
+     },
+     {
+      "balance": 0.8348225132904629,
+      "branches": 10291,
+      "decision_loss": 2.262948663575186,
+      "edges": 37927,
+      "filter": {
+       "agreed": 1486,
+       "amp_freq": [
+        0.3333,
+        0.3333
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.5876954877458209,
+       "moved": 1289,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       135,
+       53,
+       102,
+       350
+      ],
+      "nodes": 37931,
+      "prior_nodes": 1920,
+      "round": 1,
+      "stored_chars": 82343,
+      "test_bits": 2.9956843594781417,
+      "train_bits": 0.9161145399245463
+     },
+     {
+      "balance": 0.403275456169474,
+      "branches": 9742,
+      "decision_loss": 2.3404024619078037,
+      "edges": 36183,
+      "live_experts": 4,
+      "load": [
+       47,
+       6,
+       44,
+       543
+      ],
+      "nodes": 36187,
+      "prior_nodes": 1920,
+      "round": 2,
+      "stored_chars": 76390,
+      "test_bits": 2.9143239610980722,
+      "train_bits": 0.9593732720498785
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     47,
+     6,
+     44,
+     543
+    ],
+    "nmi": 0.10474714847178686,
+    "nodes": 36187,
+    "passes": 4,
+    "prior_depth": 1,
+    "prior_nodes": 1920,
+    "purity": 0.34375,
+    "rounds": 3,
+    "router": "sine-sign-fixedwave",
+    "seconds": 127.39972186088562,
+    "seed": 2,
+    "stored_chars": 76390,
+    "test_bits_per_char": 2.9143239610980722,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9593732720498785
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0055,
+     0.0748
+    ],
+    "arm": "deep",
+    "balance": 0.22697897706313114,
+    "bits": 2,
+    "branches": 9287,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 40,
+      "json": 28,
+      "prose": 39,
+      "python": 38
+     },
+     "1": {
+      "python": 1
+     },
+     "2": {
+      "json": 12,
+      "prose": 1,
+      "python": 1
+     }
+    },
+    "dead_units": [
+     0
+    ],
+    "depth": 5,
+    "edges": 34876,
+    "history": [
+     {
+      "balance": 0.9627077658532108,
+      "branches": 11343,
+      "decision_loss": 2.3173210369354234,
+      "edges": 41630,
+      "filter": {
+       "agreed": 871,
+       "amp_freq": [
+        0.0091,
+        0.0912
+       ],
+       "considered": 2560,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.657575183544761,
+       "moved": 2204,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       109,
+       211,
+       211,
+       109
+      ],
+      "nodes": 41634,
+      "prior_nodes": 34317,
+      "round": 0,
+      "stored_chars": 93908,
+      "test_bits": 3.2251258244491234,
+      "train_bits": 0.8303169319536544
+     },
+     {
+      "balance": 0.2620735891212727,
+      "branches": 9337,
+      "decision_loss": 2.312470843696558,
+      "edges": 34988,
+      "filter": {
+       "agreed": 2252,
+       "amp_freq": [
+        0.0055,
+        0.0748
+       ],
+       "considered": 2560,
+       "dead_units": [
+        0
+       ],
+       "folds": 2,
+       "live": 3,
+       "mean_advantage": 0.1511459125638158,
+       "moved": 321,
+       "passes": 4
+      },
+      "live_experts": 3,
+      "load": [
+       574,
+       6,
+       60,
+       0
+      ],
+      "nodes": 34992,
+      "prior_nodes": 34317,
+      "round": 1,
+      "stored_chars": 71076,
+      "test_bits": 2.833717300512175,
+      "train_bits": 0.999140869952324
+     },
+     {
+      "balance": 0.22697897706313114,
+      "branches": 9287,
+      "decision_loss": 2.3045131425913405,
+      "edges": 34876,
+      "live_experts": 2,
+      "load": [
+       579,
+       0,
+       61,
+       0
+      ],
+      "nodes": 34880,
+      "prior_nodes": 34317,
+      "round": 2,
+      "stored_chars": 70317,
+      "test_bits": 2.812233145900498,
+      "train_bits": 1.006221372361918
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 2,
+    "load": [
+     579,
+     0,
+     61,
+     0
+    ],
+    "nmi": 0.10910972592717189,
+    "nodes": 34880,
+    "passes": 4,
+    "prior_depth": 5,
+    "prior_nodes": 34317,
+    "purity": 0.33125,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 164.68983387947083,
+    "seed": 0,
+    "stored_chars": 70317,
+    "test_bits_per_char": 2.812233145900498,
+    "test_chars": 11935,
+    "train_bits_per_char": 1.006221372361918
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0253,
+     0.0219
+    ],
+    "arm": "deep",
+    "balance": 0.5422091516148271,
+    "bits": 2,
+    "branches": 9586,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 3,
+      "json": 39,
+      "prose": 2,
+      "python": 9
+     },
+     "1": {
+      "python": 1
+     },
+     "2": {
+      "go": 2,
+      "json": 1
+     },
+     "3": {
+      "go": 35,
+      "prose": 38,
+      "python": 30
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 35836,
+    "history": [
+     {
+      "balance": 0.848106130062573,
+      "branches": 10723,
+      "decision_loss": 2.2660127890027533,
+      "edges": 39131,
+      "filter": {
+       "agreed": 1784,
+       "amp_freq": [
+        0.0247,
+        0.0128
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.34468901925038625,
+       "moved": 964,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       260,
+       60,
+       60,
+       260
+      ],
+      "nodes": 39135,
+      "prior_nodes": 34317,
+      "round": 0,
+      "stored_chars": 86708,
+      "test_bits": 3.0678149395124197,
+      "train_bits": 0.8815149414310788
+     },
+     {
+      "balance": 0.6772687288913954,
+      "branches": 9963,
+      "decision_loss": 2.2435143137987934,
+      "edges": 36905,
+      "filter": {
+       "agreed": 2037,
+       "amp_freq": [
+        0.0253,
+        0.0219
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.2537202756685375,
+       "moved": 683,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       244,
+       12,
+       37,
+       347
+      ],
+      "nodes": 36909,
+      "prior_nodes": 34317,
+      "round": 1,
+      "stored_chars": 79138,
+      "test_bits": 2.888959949895001,
+      "train_bits": 0.9267084566331397
+     },
+     {
+      "balance": 0.5422091516148271,
+      "branches": 9586,
+      "decision_loss": 2.2364966022734896,
+      "edges": 35836,
+      "live_experts": 3,
+      "load": [
+       195,
+       0,
+       22,
+       423
+      ],
+      "nodes": 35840,
+      "prior_nodes": 34317,
+      "round": 2,
+      "stored_chars": 74580,
+      "test_bits": 2.8320113084462837,
+      "train_bits": 0.9537064828962286
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 3,
+    "load": [
+     195,
+     0,
+     22,
+     423
+    ],
+    "nmi": 0.3742375248358557,
+    "nodes": 35840,
+    "passes": 4,
+    "prior_depth": 5,
+    "prior_nodes": 34317,
+    "purity": 0.5,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 149.82782173156738,
+    "seed": 1,
+    "stored_chars": 74580,
+    "test_bits_per_char": 2.8320113084462837,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9537064828962286
+   },
+   {
+    "act_rate": 0.1,
+    "amp_freq": [
+     0.0279,
+     0.0829
+    ],
+    "arm": "deep",
+    "balance": 0.5055289331904885,
+    "bits": 2,
+    "branches": 10173,
+    "code": "sign",
+    "contingency": {
+     "0": {
+      "go": 3,
+      "prose": 1
+     },
+     "1": {
+      "go": 1,
+      "prose": 1,
+      "python": 1
+     },
+     "2": {
+      "go": 9,
+      "json": 12,
+      "prose": 4,
+      "python": 15
+     },
+     "3": {
+      "go": 27,
+      "json": 28,
+      "prose": 34,
+      "python": 24
+     }
+    },
+    "dead_units": [],
+    "depth": 5,
+    "edges": 37983,
+    "history": [
+     {
+      "balance": 0.999985911089516,
+      "branches": 10976,
+      "decision_loss": 2.267043379249159,
+      "edges": 40186,
+      "filter": {
+       "agreed": 807,
+       "amp_freq": [
+        0.013,
+        0.1117
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 1.108929108089892,
+       "moved": 2194,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       161,
+       159,
+       159,
+       161
+      ],
+      "nodes": 40190,
+      "prior_nodes": 34317,
+      "round": 0,
+      "stored_chars": 89964,
+      "test_bits": 3.1032285022582164,
+      "train_bits": 0.8501341664977079
+     },
+     {
+      "balance": 0.6798205010982591,
+      "branches": 10575,
+      "decision_loss": 2.3192151732721107,
+      "edges": 38902,
+      "filter": {
+       "agreed": 1623,
+       "amp_freq": [
+        0.0279,
+        0.0829
+       ],
+       "considered": 2560,
+       "dead_units": [],
+       "folds": 2,
+       "live": 4,
+       "mean_advantage": 0.28042803803663785,
+       "moved": 1013,
+       "passes": 4
+      },
+      "live_experts": 4,
+      "load": [
+       26,
+       63,
+       122,
+       429
+      ],
+      "nodes": 38906,
+      "prior_nodes": 34317,
+      "round": 1,
+      "stored_chars": 85293,
+      "test_bits": 3.10870414465487,
+      "train_bits": 0.8945292317603969
+     },
+     {
+      "balance": 0.5055289331904885,
+      "branches": 10173,
+      "decision_loss": 2.368422324619627,
+      "edges": 37983,
+      "live_experts": 4,
+      "load": [
+       9,
+       13,
+       146,
+       472
+      ],
+      "nodes": 37987,
+      "prior_nodes": 34317,
+      "round": 2,
+      "stored_chars": 81547,
+      "test_bits": 3.072998615264874,
+      "train_bits": 0.9998718638593594
+     }
+    ],
+    "kind": "sine",
+    "live_experts": 4,
+    "load": [
+     9,
+     13,
+     146,
+     472
+    ],
+    "nmi": 0.05087124193716503,
+    "nodes": 37987,
+    "passes": 4,
+    "prior_depth": 5,
+    "prior_nodes": 34317,
+    "purity": 0.33125,
+    "rounds": 3,
+    "router": "sine-sign",
+    "seconds": 151.16556453704834,
+    "seed": 2,
+    "stored_chars": 81547,
+    "test_bits_per_char": 3.072998615264874,
+    "test_chars": 11935,
+    "train_bits_per_char": 0.9998718638593594
+   }
+  ],
+  "sweep": "main"
+ },
+ "meta": {
+  "bits": 2,
+  "depth": 5,
+  "epochs": 3,
+  "per_source": 200,
+  "quick": false,
+  "rounds": 3,
+  "seconds": 378.02578711509705,
+  "seeds": [
+   0,
+   1,
+   2
+  ]
+ }
+}

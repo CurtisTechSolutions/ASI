@@ -4,7 +4,7 @@ Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
 Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
-Code, Agent, Images, Speech, Checkpoints, Graph.
+Code, Agent, Images, Speech, Checkpoints, Network settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
@@ -100,6 +100,30 @@ steps. From `RadixCyclicNN/`:
 
 Rebuild and recommit `dist` whenever `src/` changes.
 
+## Network settings
+
+The **Network settings** panel holds the settings of the network itself, as
+opposed to the options of one run:
+
+* the **traversal** every search uses - `reward` (the model's own distribution,
+  rewards and all) or `punishment` (the rewards leave the score and the
+  penalties price every step, so the cheapest path is the least punished one),
+  with a penalty and a merit scale. The Predict and Generate tabs show the same
+  control: it is one setting (`src/hooks/useNetworkSettings.jsx`), remembered in
+  this browser, and changing it anywhere changes it everywhere;
+* the **score function** of whichever kind is active - the count model's dual
+  frequency scales and sliding window, the resonant model's phase and
+  resonance settings (`GET /api/model` to read, `POST /api/model/weights` to
+  apply). The sine model has no score function to set and says why; the
+  negative network's blame function stays on the Negative tab beside the
+  failures it weighs;
+* the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
+  the sliding window, its stride and the three sentinels - read-only, because
+  the window is part of the model format rather than a setting - and a live
+  preview that encodes a text, decodes it back and walks it through the graph's
+  own node labels, where a label longer than the window is a radix chain the
+  graph merged into one node.
+
 ## Configuration
 
 * `VITE_API_BASE` (build time, default empty string) - prefix for API calls.
@@ -121,4 +145,5 @@ Rebuild and recommit `dist` whenever `src/` changes.
     src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
+    src/hooks/useNetworkSettings.jsx  the settings several panels share, held once (the traversal)
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

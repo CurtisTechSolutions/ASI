@@ -210,11 +210,17 @@ class WordNGramNet(CountRewardNet):
         max_length: int | None,
         rng=None,
         traversal: str = REWARD,
+        **options,
     ):
-        """The count model's search, run over symbols: words in, words out, ``length`` counted in words."""
+        """The count model's search, run over symbols: words in, words out, ``length`` counted in words.
+
+        ``options`` are the traversal's own (``penalty_scale`` / ``merit_scale``,
+        :mod:`radixnet.penalty`): they price a step and know nothing about what a
+        symbol stands for, so they ride through untouched.
+        """
         found = super()._search(
             self.symbols(prefix), length, mode, k, beam, step_penalty, temperature, to_end, max_length,
-            rng=rng, traversal=traversal,
+            rng=rng, traversal=traversal, **options,
         )
         for result in found.top + found.bottom:
             self._decode_result(result)

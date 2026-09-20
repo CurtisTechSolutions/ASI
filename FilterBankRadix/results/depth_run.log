@@ -1,0 +1,13 @@
+# resuming depth: 15 runs already measured
+# depth sweep: depths (5, 6), arms ('single', 'oracle', 'learned', 'argmax', 'frozen')
+  depth=5 single    bits/char=2.7720 nodes= 34317 nmi=0.000 47s
+  depth=5 oracle    bits/char=2.8671 nodes= 38142 nmi=1.000 28s
+  depth=5 learned   bits/char=2.8977 nodes= 37840 nmi=0.105 122s
+  depth=5 argmax    bits/char=2.9605 nodes= 38381 nmi=0.194 119s
+  depth=5 frozen    bits/char=3.2253 nodes= 41634 nmi=0.056 30s
+  depth=6 single    bits/char=2.7771 nodes= 39677 nmi=0.000 47s
+  depth=6 oracle    bits/char=2.9022 nodes= 42667 nmi=1.000 28s
+  depth=6 learned   bits/char=2.9300 nodes= 42729 nmi=0.110 129s
+  depth=6 argmax    bits/char=2.8930 nodes= 41555 nmi=0.383 119s
+  depth=6 frozen    bits/char=3.2372 nodes= 45729 nmi=0.056 33s
+

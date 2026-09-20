@@ -1,0 +1,26 @@
+# resuming main: 27 runs already measured
+# main: 640 train / 160 test segments, alphabet 101, 58389 chars, 4 addresses, depth 5
+  unbalanced    seed=0 bits/char=2.7994 nodes= 35516 live=3 purity=0.481 nmi=0.386 124s
+  unbalanced    seed=1 bits/char=2.8881 nodes= 36910 live=3 purity=0.588 nmi=0.417 113s
+  unbalanced    seed=2 bits/char=2.8066 nodes= 35159 live=3 purity=0.394 nmi=0.183 127s
+  fixedwave     seed=0 bits/char=3.0956 nodes= 39266 live=4 purity=0.537 nmi=0.252 110s
+  fixedwave     seed=1 bits/char=3.2526 nodes= 42804 live=4 purity=0.344 nmi=0.034 116s
+  fixedwave     seed=2 bits/char=2.9143 nodes= 36187 live=4 purity=0.344 nmi=0.105 127s
+  deep          seed=0 bits/char=2.8122 nodes= 34880 live=2 purity=0.331 nmi=0.109 165s
+  deep          seed=1 bits/char=2.8320 nodes= 35840 live=3 purity=0.500 nmi=0.374 150s
+  deep          seed=2 bits/char=3.0730 nodes= 37987 live=4 purity=0.331 nmi=0.051 151s
+
+  arm          bits/char      nodes  live  purity    nmi
+  single      2.7860 +- 0.0122    34317   1.0  0.250  0.000
+  roundrobin  3.3460 +- 0.0028    43915   4.0  0.331  0.021
+  oracle      2.8734 +- 0.0053    38142   4.0  1.000  1.000
+  frozen      3.1321 +- 0.0674    40320   4.0  0.465  0.180
+  learned     2.9075 +- 0.0073    37458   3.7  0.415  0.167
+  argmax      2.8869 +- 0.0571    36846   3.7  0.473  0.305
+  frozen-argmax 3.1435 +- 0.0090    40448   4.0  0.500  0.219
+  monotone    2.8312 +- 0.0092    35346   3.0  0.433  0.276
+  unbalanced  2.8314 +- 0.0402    35862   3.0  0.488  0.329
+  fixedwave   3.0875 +- 0.1382    39419   4.0  0.408  0.130
+  deep        2.9057 +- 0.1185    36236   3.0  0.388  0.178
+  deep-oracle 2.8733 +- 0.0053    38142   4.0  1.000  1.000
+

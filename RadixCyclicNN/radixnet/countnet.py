@@ -60,6 +60,7 @@ from .model import (
     meta_add,
     meta_stats,
 )
+from .penalty import DEFAULT_TRAVERSAL
 
 __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
 
@@ -501,6 +502,37 @@ class CountRewardGraph(RadixCyclicGraph):
             costs = []
         self._ctx_cache[(prev, p)] = costs
         return costs
+
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, merit, penalty)]``: the dual frequency function with the rewards taken out, and the
+        punishments on their own.
+
+        The weight of an edge here is ``frequency terms + reward_scale *
+        reward``, so the two halves come apart exactly: the **merit** is what
+        the corpus did - the all-time and windowed shares, and the count term
+        when it is on - with the whole reward subtracted back out, and the
+        **penalty** is ``reward_scale * max(0, -reward)``, the punishment half
+        of that reward and nothing else.  A judged context
+        (:meth:`path_term`) splits the same way: what says the step was right
+        here is merit, what says it was wrong here is penalty.  The punishment
+        traversal therefore never sees a reward at all
+        (:mod:`radixnet.penalty`).
+        """
+        rs = self.reward_scale
+        ps = self.path_scale
+        ew, er = self.edge_w, self.edge_reward
+        context = prev is not None and ps != 0.0 and p in self.nodes_with_paths()
+        out: list[tuple[int, int, float, float]] = []
+        for c, e in self.children[p].items():
+            reward = er[e]
+            merit = ew[e] - rs * reward
+            penalty = rs * max(0.0, -reward)
+            if context:
+                term = ps * self.path_term(prev, e)
+                merit += max(0.0, term)
+                penalty += max(0.0, -term)
+            out.append((c, e, merit, penalty))
+        return out
 
     # -- keeping the contexts honest through splits and merges ----------------
 
@@ -1283,7 +1315,9 @@ class CountRewardNet(GraphModel):
         temperature: float = 1.0,
         to_end: bool = False,
         max_length: int | None = None,
-        traversal: str = "reward",
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """Continue ``prefix``: the ``k`` most likely and the ``k`` least likely continuations in one search.
 
@@ -1291,12 +1325,18 @@ class CountRewardNet(GraphModel):
         search of :mod:`radixnet.beam`; the result *is* the best path (a
         :class:`~radixnet.search.PathResult`) and carries ``top`` / ``bottom``.
         ``"sample"`` draws one stochastic walk (``top = [it]``).  ``length``,
-        ``to_end``, ``max_length`` and ``step_penalty`` mean what they mean for
-        :meth:`RadixNet.predict`.  ``traversal="least-punished"`` ranks a walk by
-        the blame on its worst step before its cost and lets a node offer only
-        the children it has the least against; on a model nothing was ever
-        punished on it is the ordinary search, to the bit
-        (``../SPEC-LeastPunished.md``).
+        ``to_end``, ``max_length``, ``step_penalty`` and ``traversal`` mean
+        what they mean for :meth:`RadixNet.predict` - and this is the model both
+        punishment traversals were written for, because it is the one that keeps
+        a reward per edge and a record of what each path did.  With
+        ``traversal="punishment"`` the rewards leave the score altogether and
+        ``top`` becomes the ``k`` *least punished* continuations
+        (:mod:`radixnet.penalty`); with ``traversal="least-punished"`` the score
+        is untouched and the **ranking** changes instead - a walk goes by the
+        blame on its worst step before its cost, and a node offers only the
+        children it has the least against, so blame cannot be bought off with
+        rewards elsewhere.  On a model nothing was ever punished on, both are
+        the ordinary search, to the bit (``../SPEC-LeastPunished.md``).
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
@@ -1305,7 +1345,8 @@ class CountRewardNet(GraphModel):
         if mode not in ("beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
         return self._search(
-            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length, traversal=traversal
+            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
+            traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
         )
 
     # -- introspection -------------------------------------------------------

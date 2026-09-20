@@ -685,6 +685,28 @@ class RadixCyclicGraph:
         total = sum(v for _, v in exps)
         return [(c, v / total) for c, v in exps]
 
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, merit, penalty)]`` over ``p``'s out-edges: what speaks *for* each step and what against.
+
+        The split the punishment traversal walks on (:mod:`radixnet.penalty`).
+        ``merit`` is the evidence for the step with every reward taken out of
+        it; ``penalty >= 0`` is the punishment the edge carries.  The sine
+        model keeps no separate ledger of its punishments - 2NRL trains a
+        failure in and then inverts it, so what a punishment leaves behind *is*
+        a negative score on the edges of the path - which is why here the
+        negative part of the score ``w * f_p * f_c`` is the penalty and the
+        positive part the merit.  ``prev``, the node the walk arrived from, is
+        what a model that counts paths prices the step by; ignored here.
+        """
+        acts = self._activations()
+        fp = acts[p]
+        ew = self.edge_w
+        out: list[tuple[int, int, float, float]] = []
+        for c, e in self.children[p].items():
+            score = ew[e] * fp * acts[c]
+            out.append((c, e, max(0.0, score), max(0.0, -score)))
+        return out
+
     def nudge_edge(self, p: int, c: int, amount: float) -> bool:
         """Move the weight of ``p -> c`` so the transition gets ``amount`` *likelier* (negative: dearer).
 

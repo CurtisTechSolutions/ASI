@@ -1,7 +1,7 @@
 # Word n-grams — the same graph over a different alphabet
 
-**Status** Built, 2026-09-20. `DESIGN.md` §33 is what was built and
-`DECISIONS.md` D-071 is why; this document stays as the argument the two were
+**Status** Built, 2026-09-20. `DESIGN.md` §34 is what was built and
+`DECISIONS.md` D-073 is why; this document stays as the argument the two were
 written from, and §10's table is the test suite
 (`tests/test_wordnet.py`, `go/radixnet/words_test.go`, `rust/tests/words.rs`,
 and the word classes of the two parity suites).

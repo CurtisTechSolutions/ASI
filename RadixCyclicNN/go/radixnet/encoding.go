@@ -86,6 +86,22 @@ func Encode(text string) []string {
 	return grams
 }
 
+// DecodeTrigrams is the inverse of Encode: the first window in full, then the
+// last character of each following one ("" for no windows at all).
+func DecodeTrigrams(grams []string) string {
+	if len(grams) == 0 {
+		return ""
+	}
+	out := []rune(grams[0])
+	for _, g := range grams[1:] {
+		runes := []rune(g)
+		if len(runes) > 0 {
+			out = append(out, runes[len(runes)-1])
+		}
+	}
+	return string(out)
+}
+
 // DecodePath decodes node labels in path order into text.  Every label after
 // the first contributes its part beyond the overlap; the first contributes
 // label[startOffset:] when includeContext is true, else label[startOffset+Window:]

@@ -7,6 +7,8 @@ import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
+import TraversalFields from "./TraversalFields.jsx";
+import { useNetworkSettings } from "../hooks/useNetworkSettings.jsx";
 
 /**
  * Generate whole texts with the prediction search (beam: the K most likely
@@ -23,6 +25,7 @@ export default function GeneratePanel({ status }) {
   const [temperature, setTemperature] = useStoredState("generate.temperature", "1.0");
   const [mode, setMode] = useStoredState("generate.mode", "beam");
   const [prefix, setPrefix] = useStoredState("generate.prefix", "");
+  const network = useNetworkSettings();  // the traversal is shared with the Network settings tab
   const [guard, setGuard] = useStoredState("generate.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -45,6 +48,7 @@ export default function GeneratePanel({ status }) {
         mode,
         guard,
         ...(prefix ? { prefix } : {}),
+        ...network.body,
       });
       setSamples(asArray(data && data.samples));
       setGuarded((data && data.guard) || null);
@@ -99,6 +103,7 @@ export default function GeneratePanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <TraversalFields compact />
         <CheckField
           label="Filter with the negative network"
           hint="the pair: the model over-samples and the negative network vetoes what it knows to be a failure"

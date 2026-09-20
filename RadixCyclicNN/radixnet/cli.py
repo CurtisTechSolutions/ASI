@@ -32,10 +32,11 @@ from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
+from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
 from .encoding import WINDOW
 from .llm import DEFAULT_PROVIDER, PROVIDERS
-from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, traversal_option
+from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
 from .speech import ASR_BACKENDS as SPEECH_BACKENDS
 from .speech import DEFAULT_RATE as SPEECH_RATE
@@ -51,8 +52,6 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "kbest", "beam", "sample")
-#: what a walk is ranked by - the count model's second traversal (SPEC-LeastPunished.md)
-TRAVERSALS = ("reward", "least-punished")
 KINDS = ("radix", "count", "word", "negative", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
 DEFAULT_WORD_MODEL = "model.word.json"
@@ -790,8 +789,9 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     options = dict(
         length=args.length, mode=mode, step_penalty=args.step_penalty, temperature=args.temperature,
         to_end=args.to_end, max_length=args.max_length,
+        traversal=args.traversal, penalty_scale=args.penalty_scale, merit_scale=args.merit_scale,
     )
-    options.update(k=args.k, beam=args.beam, **traversal_option(model, args.traversal))
+    options.update(k=args.k, beam=args.beam)
     result = model.predict(args.prefix, **options)
     pair = open_guard(args, console, model)
     guard: dict | None = None
@@ -810,6 +810,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         ("reached end", result.reached_end),
         ("expanded", result.expanded),
         ("mode", mode),
+        ("traversal", args.traversal),
     ])
     console.say()
     console.say("path:")
@@ -832,6 +833,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         "expanded": result.expanded,
         "reached_end": result.reached_end,
         "mode": mode,
+        "traversal": args.traversal,
     }
     if args.traversal != "reward":
         doc["traversal"] = args.traversal
@@ -861,7 +863,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     options = dict(
         max_length=args.max_length, mode=args.mode, temperature=args.temperature, seed=args.seed,
         prefix=args.prefix, step_penalty=args.step_penalty, beam=args.beam,
-        **traversal_option(model, args.traversal),
+        traversal=args.traversal, penalty_scale=args.penalty_scale, merit_scale=args.merit_scale,
     )
     guard: dict | None = None
     if pair is None:
@@ -880,6 +882,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         "samples": [{**r.to_dict(), "probability": path_probability(r)} for r in results],
         "count": len(results),
         "mode": args.mode,
+        "traversal": args.traversal,
         "prefix": args.prefix,
         "max_length": args.max_length,
         "temperature": args.temperature,
@@ -1821,6 +1824,20 @@ def open_negative(args: argparse.Namespace, console: Console, *, required: bool)
         )
     seed = effective_seed(args)
     return NegativeNet(seed=seed), Origin("new", None, f"seed {seed}")
+
+
+def add_traversal_flags(parser: argparse.ArgumentParser) -> None:
+    """``--traversal`` and its two scales: *what* a search looks for, as opposed to how it looks for it."""
+    parser.add_argument("--traversal", choices=TRAVERSALS, default=DEFAULT_TRAVERSAL,
+                        help="what the search follows: reward = the model's own distribution, rewards included; "
+                             "punishment = the rewards leave the score and the punishments price every step, so "
+                             "the cheapest path is the least punished one; least-punished (count model) = a walk is "
+                             "ranked by the blame on its WORST step, cost only to break ties, so blame cannot be "
+                             "bought off with rewards elsewhere")
+    parser.add_argument("--penalty-scale", type=nonneg_float, default=1.0, metavar="X",
+                        help="punishment: how heavily a punishment counts (default 1)")
+    parser.add_argument("--merit-scale", type=nonneg_float, default=1.0, metavar="X",
+                        help="punishment: how heavily what the corpus did counts (0 = nothing but the punishments decides)")
 
 
 def add_guard_flags(p: argparse.ArgumentParser) -> None:
@@ -3711,9 +3728,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
-    p.add_argument("--traversal", choices=TRAVERSALS, default="reward",
-                   help="count model: what a walk is ranked by - reward (the cost) or least-punished (the blame "
-                        "on its worst step, cost only to break ties)")
+    add_traversal_flags(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_predict)
 
@@ -3732,8 +3747,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
     p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
-    p.add_argument("--traversal", choices=TRAVERSALS, default="reward",
-                   help="count model: what a walk is ranked by (see predict)")
+    add_traversal_flags(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_generate)
 

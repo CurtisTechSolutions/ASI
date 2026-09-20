@@ -289,5 +289,5 @@ be answered by default.
 
 **Let the sine model ignore the argument.** It would then accept
 `--traversal least-punished` and quietly do nothing, which is the failure mode
-the resonant model's `weights` command was built to avoid (D-070's "rejects
+the resonant model's `weights` command was built to avoid (D-070's one-home rule, "rejects
 another kind's options by name instead of ignoring them"). It refuses instead.

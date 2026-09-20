@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import __version__, api  # noqa: E402
 from radixnet.dialogue import stutter as dialogue_stutter  # noqa: E402
+from radixnet.encoding import WINDOW  # noqa: E402
 from radixnet.graph import FIRST  # noqa: E402
 from radixnet.model import RadixNet, TrainConfig  # noqa: E402
 
@@ -476,6 +477,66 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual(set(backends), {"python", "torch", "cuda", "mps", "default"})
         self.assertTrue(backends["python"])
         self.assertIn(backends["default"], ("python", "torch"))
+
+    def test_encoding_and_its_preview(self):
+        status, info, _ = self.client.get("/api/encoding")
+        self.assertEqual(status, 200)
+        self.assertEqual(info["window"], WINDOW)
+        self.assertEqual((info["stride"], info["overlap"]), (1, WINDOW - 1))
+        self.assertEqual((info["start_label"], info["end_label"]), ("<s>", "</s>"))
+        self.assertEqual(info["back_label"], "<back>")
+        self.assertFalse(info["configurable"])  # the window is part of the model format, not a setting
+        self.assertIn("window", info["note"])
+
+        text = CORPUS[0]
+        status, preview, _ = self.client.post("/api/encoding/preview", {"text": text})
+        self.assertEqual(status, 200)
+        self.assertEqual(preview["window"], WINDOW)  # the facts come back with every preview
+        self.assertEqual(preview["text"], text)
+        self.assertEqual(preview["chars"], len(text))
+        self.assertEqual(preview["count"], len(text) - WINDOW + 1)
+        self.assertEqual(preview["windows"], [text[i : i + WINDOW] for i in range(preview["count"])])
+        self.assertEqual(preview["decoded"], text)
+        self.assertTrue(preview["round_trip"])
+        self.assertEqual(preview["unknown_windows"], [])
+        self.assertEqual(preview["kind"], "radix")
+        # a text the model was trained on walks, and the labels decode back to it
+        path = preview["path"]
+        self.assertTrue(path["known"], path["reason"])
+        self.assertIsNone(path["reason"])
+        self.assertEqual(path["labels"][0], "<s>")
+        self.assertEqual(path["labels"][-1], "</s>")
+        self.assertEqual(len(path["labels"]), len(path["node_ids"]))
+        self.assertEqual(path["nodes"], len(path["labels"]) - 2)
+        self.assertEqual(path["decoded"], text)
+        self.assertGreater(path["compressed"], 0)  # the corpus compresses, so some labels are merged chains
+        self.assertEqual(path["compressed"], sum(1 for lab in path["labels"][1:-1] if len(lab) > WINDOW))
+
+    def test_encoding_preview_says_why_a_text_does_not_walk(self):
+        status, preview, _ = self.client.post("/api/encoding/preview", {"text": "ab"})
+        self.assertEqual(status, 200)
+        self.assertEqual((preview["windows"], preview["count"]), ([], 0))
+        self.assertFalse(preview["path"]["known"])
+        self.assertIn("shorter than one window", preview["path"]["reason"])
+
+        status, preview, _ = self.client.post("/api/encoding/preview", {"text": "qqzzxx qqzz"})
+        self.assertEqual(status, 200)
+        self.assertTrue(preview["unknown_windows"])
+        self.assertFalse(preview["path"]["known"])
+        self.assertIn("never been seen", preview["path"]["reason"])
+        self.assertIn('"qqz"', preview["path"]["reason"])
+
+        # every window known, but only part of a text it was trained on: the walk must reach the end
+        status, preview, _ = self.client.post("/api/encoding/preview", {"text": CORPUS[0][:-4]})
+        self.assertEqual(status, 200)
+        self.assertEqual(preview["unknown_windows"], [])
+        self.assertFalse(preview["path"]["known"])
+        self.assertIn("every window is known", preview["path"]["reason"])
+
+        # no text at all is not an error
+        status, preview, _ = self.client.post("/api/encoding/preview", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(preview["text"], "")
 
     def test_predict(self):
         body = {"prefix": "the quick br", "length": 8, "mode": "dijkstra", "to_end": False, "step_penalty": 0.0}

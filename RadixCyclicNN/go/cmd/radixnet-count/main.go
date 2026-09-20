@@ -448,7 +448,7 @@ func predictDoc(prefix string, p *radixnet.Prediction) map[string]any {
 	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
-		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
+		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal, "k": p.K, "beam": p.Beam,
 		"top": pathDicts(p.Top), "bottom": pathDicts(p.Bottom),
 	}
 	// what the walk was punished for, and which search wrote it: reported only
@@ -477,6 +477,19 @@ func pathDicts(paths []*radixnet.PathResult) []map[string]any {
 
 func quote(s string) string { return fmt.Sprintf("%q", s) }
 
+// traversalFlags adds --traversal and its two scales: *what* a search looks
+// for, as opposed to --mode, which is how it looks for it.
+func traversalFlags(fs *flag.FlagSet) (*string, *float64, *float64) {
+	traversal := fs.String("traversal", radixnet.DefaultTraversal,
+		"reward = the model's own distribution, rewards included; punishment = the rewards leave the score and the "+
+			"punishments price every step, so the cheapest path is the least punished one; least-punished = a walk "+
+			"is ranked by the blame on its WORST step, cost only to break ties, so blame cannot be bought off with "+
+			"rewards elsewhere")
+	penaltyScale := fs.Float64("penalty-scale", 1, "punishment: how heavily a punishment counts")
+	meritScale := fs.Float64("merit-scale", 1, "punishment: how heavily what the corpus did counts (0 = nothing but the punishments decides)")
+	return traversal, penaltyScale, meritScale
+}
+
 func cmdPredict(args []string) {
 	fs := subFlagSet("predict")
 	prefix := fs.String("prefix", "", "text to continue")
@@ -488,11 +501,12 @@ func cmdPredict(args []string) {
 	toEnd := fs.Bool("to-end", false, "run to the end of a text")
 	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
-	traversal := fs.String("traversal", "reward", "reward | least-punished (walk by the blame instead of the cost)")
+	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
-	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength, Traversal: *traversal}
+	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength,
+		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale}
 	p, err := m.Predict(*prefix, opts)
 	if err != nil {
 		fail("%v", err)
@@ -544,11 +558,12 @@ func cmdGenerate(args []string) {
 	stepPenalty := fs.Float64("step-penalty", 0, "beam / dijkstra: extra cost per edge")
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
-	traversal := fs.String("traversal", "reward", "reward | least-punished (walk by the blame instead of the cost)")
+	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
-	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam, Traversal: *traversal}
+	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam,
+		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale}
 	if *seeded {
 		s := seedFlag
 		opts.Seed = &s

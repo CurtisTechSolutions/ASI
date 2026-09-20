@@ -1,8 +1,8 @@
 # Experiments
 
 Every test of the ideas in this repository, in one place. The architectures —
-`RadixCyclicNN/`, `GREN/`, `GTMNN/`, `CyclicCortex/` — are where the ideas are
-*built*. The papers in `Research/` are where they are *argued*. This directory
+`RadixCyclicNN/`, `GREN/`, `GTMNN/`, `CyclicCortex/`, `FilterBankRadix/` — are
+where the ideas are *built*. The papers in `Research/` are where they are *argued*. This directory
 is where they are **measured**, and a claim that fails here is recorded as
 having failed.
 

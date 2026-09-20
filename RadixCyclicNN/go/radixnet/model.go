@@ -930,14 +930,23 @@ type PredictOptions struct {
 	Temperature float64
 	ToEnd       bool
 	MaxLength   int
-	// Traversal is "" / "reward" for the search by cost, or "least-punished"
-	// for the search that follows the blame (see search.go).
-	Traversal string
+	// Traversal is what the search looks for, as opposed to Mode, which is how
+	// it looks: "reward" (the default) the model's own distribution, rewards
+	// included, "punishment" the same graph priced by the punishments alone,
+	// where the cheapest path is the least punished one (penalty.go), or
+	// "least-punished", which leaves the prices alone and ranks a walk by the
+	// blame on its worst step instead (search.go, ../../SPEC-LeastPunished.md).
+	Traversal    string
+	PenaltyScale float64
+	MeritScale   float64
 }
 
 // DefaultPredictOptions mirror the Python defaults.
 func DefaultPredictOptions() PredictOptions {
-	return PredictOptions{Length: 20, Mode: "beam", K: 5, Temperature: 1.0, MaxLength: -1}
+	return PredictOptions{
+		Length: 20, Mode: "beam", K: 5, Temperature: 1.0, MaxLength: -1,
+		Traversal: DefaultTraversal, PenaltyScale: 1, MeritScale: 1,
+	}
 }
 
 func checkPredictArgs(o PredictOptions) error {
@@ -956,6 +965,15 @@ func checkPredictArgs(o PredictOptions) error {
 	if o.Temperature < 0 {
 		return fmt.Errorf("temperature must be >= 0")
 	}
+	if o.PenaltyScale < 0 {
+		return fmt.Errorf("penalty_scale must be >= 0")
+	}
+	if o.MeritScale < 0 {
+		return fmt.Errorf("merit_scale must be >= 0")
+	}
+	if _, err := ResolveTraversal(o.Traversal); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -973,36 +991,69 @@ func (m *Model) Predict(prefix string, o PredictOptions) (*Prediction, error) {
 	if mode != "beam" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
-	traversal, err := ParseTraversal(o.Traversal)
-	if err != nil {
-		return nil, err
+	return m.search(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, rngNone, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
+}
+
+// walkCosts is the traversal a search runs and its two scales (penalty.go).
+type walkCosts struct {
+	Traversal    string
+	PenaltyScale float64
+	MeritScale   float64
+}
+
+// rewardWalk is the default traversal: the model's own distribution, unchanged.
+var rewardWalk = walkCosts{DefaultTraversal, 1, 1}
+
+// rngNone reads as "no private generator" at a call site full of arguments.
+var rngNone *MT19937
+
+// resolve turns the traversal into the cost function the searches read the graph through (nil = the graph's own).
+func (w walkCosts) resolve(g *Graph) (CostFn, error) {
+	scale, merit := w.PenaltyScale, w.MeritScale
+	if w.Traversal == "" || w.Traversal == TraversalReward {
+		return nil, nil
 	}
-	return m.searchBy(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, nil, traversal)
+	if scale == 0 && merit == 0 {
+		// zero-valued options from a caller that never set them: the documented defaults
+		scale, merit = 1, 1
+	}
+	return g.TraversalCosts(w.Traversal, scale, merit)
 }
 
-// search is the prediction engine shared by Predict, Generate and Converse; it
-// walks by cost, the way the model always has.
-func (m *Model) search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937) (*Prediction, error) {
-	return m.searchBy(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, ByReward)
+// ranking is how the walks are *ordered*: by cost, or by the blame on a walk's
+// worst step (search.go).  The punishment traversal prices a step instead and
+// orders exactly as the reward one does, so it reads as ByReward here.
+func (w walkCosts) ranking() (Traversal, error) {
+	return ParseTraversal(w.Traversal)
 }
 
-// searchBy is search under a chosen traversal.  A word model's prefix arrives
-// as text and its results leave as text; everything between is the graph's own
-// symbols, and length / maxLength are counted in them - words, there.
-func (m *Model) searchBy(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
+// search is the prediction engine shared by Predict, Generate and Converse.  A
+// word model's prefix arrives as text and its results leave as text; everything
+// between is the graph's own symbols, and length / maxLength are counted in
+// them - words, there.
+func (m *Model) search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, walk walkCosts) (*Prediction, error) {
 	if m.IsWords() {
-		found, err := m.searchSymbols(m.Symbols(prefix, false), length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, traversal)
+		found, err := m.searchSymbols(m.Symbols(prefix, false), length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, walk)
 		if err != nil {
 			return nil, err
 		}
 		return m.decodePrediction(found), nil
 	}
-	return m.searchSymbols(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, traversal)
+	return m.searchSymbols(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, walk)
 }
 
 // searchSymbols is the search itself, over whatever the graph's symbols are.
-func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
+func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, walk walkCosts) (*Prediction, error) {
 	g := m.G
+	costs, err := walk.resolve(g)
+	if err != nil {
+		return nil, err
+	}
+	ranking, err := walk.ranking()
+	if err != nil {
+		return nil, err
+	}
+	traversal, _ := ResolveTraversal(walk.Traversal)
 	node, offset, lead := m.prefixStart(prefix)
 	leadLen := runeLen(lead)
 	want := length - leadLen
@@ -1012,7 +1063,6 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 	var top, bottom []*PathResult
 	var expanded, width int
 	cap := -1
-	var err error
 	if mode == "beam" {
 		maxChars := -1
 		if maxLength < 0 && length == 0 {
@@ -1027,7 +1077,7 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 				maxChars = want
 			}
 		}
-		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Traversal: traversal})
+		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Costs: costs, Traversal: ranking})
 		if err != nil {
 			return nil, err
 		}
@@ -1044,11 +1094,11 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 		if maxChars < 0 {
 			maxChars = 0
 		}
-		walk, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, traversal)
+		one, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, costs, ranking)
 		if err != nil {
 			return nil, err
 		}
-		top, bottom, expanded, width = []*PathResult{walk}, []*PathResult{}, walk.Expanded, 0
+		top, bottom, expanded, width = []*PathResult{one}, []*PathResult{}, one.Expanded, 0
 	}
 	fix := func(r *PathResult) {
 		if lead != "" {
@@ -1076,10 +1126,7 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 		best = &PathResult{Text: text, Labels: []string{g.Labels[node]}, NodeIDs: []int{node}, StepCosts: []float64{}}
 		best.FullText = prefix + best.Text
 	}
-	pred := &Prediction{PathResult: *best, Top: top, Bottom: bottom, K: k, Beam: width, Mode: mode}
-	if traversal != ByReward {
-		pred.Traversal = traversal.String()
-	}
+	pred := &Prediction{PathResult: *best, Top: top, Bottom: bottom, K: k, Beam: width, Mode: mode, Traversal: traversal}
 	pred.Expanded = expanded
 	pred.Labels = append([]string(nil), best.Labels...)
 	pred.NodeIDs = append([]int(nil), best.NodeIDs...)
@@ -1097,13 +1144,18 @@ type GenerateOptions struct {
 	Prefix      string
 	StepPenalty float64
 	Beam        int
-	// Traversal is "" / "reward" or "least-punished" (see PredictOptions).
-	Traversal string
+	// Traversal and its scales: see PredictOptions.
+	Traversal    string
+	PenaltyScale float64
+	MeritScale   float64
 }
 
 // DefaultGenerateOptions mirror the Python defaults.
 func DefaultGenerateOptions() GenerateOptions {
-	return GenerateOptions{MaxLength: 60, Mode: "sample", Temperature: 1.0, Count: 1}
+	return GenerateOptions{
+		MaxLength: 60, Mode: "sample", Temperature: 1.0, Count: 1,
+		Traversal: DefaultTraversal, PenaltyScale: 1, MeritScale: 1,
+	}
 }
 
 // Generate whole texts with the prediction search, from START or continuing a
@@ -1124,10 +1176,6 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode != "beam" && mode != "dijkstra" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
-	traversal, err := ParseTraversal(o.Traversal)
-	if err != nil {
-		return nil, err
-	}
 	// the search is what joined the prefix to the continuation, in the model's own
 	// symbols; a generated text never re-joins them here, because only the search
 	// knows the alphabet (../../SPEC-WordNGrams.md)
@@ -1145,7 +1193,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 		}
 		results := make([]*PathResult, 0, o.Count)
 		for i := 0; i < o.Count; i++ {
-			walk, err := m.searchBy(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, traversal)
+			walk, err := m.search(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
 			if err != nil {
 				return nil, err
 			}
@@ -1157,7 +1205,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode == "dijkstra" {
 		k = 1
 	}
-	found, err := m.searchBy(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, nil, traversal)
+	found, err := m.search(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, rngNone, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
 	if err != nil {
 		return nil, err
 	}

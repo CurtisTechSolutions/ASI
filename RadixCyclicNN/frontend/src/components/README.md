@@ -11,8 +11,8 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | file | tab | what it drives |
 |---|---|---|
 | `TrainPanel.jsx` | Train | corpora, epochs, the learning-rate schedule, uploads |
-| `PredictPanel.jsx` | Predict | a prefix in, the K best and K worst continuations out, with a Like button that rewards the result |
-| `GeneratePanel.jsx` | Generate | free generation, beam or sample, with 👍 / 👎 feeding 2NRL |
+| `PredictPanel.jsx` | Predict | a prefix in, the K best and K worst continuations out, with a Like button that rewards the result and a traversal to pick (follow the rewards, or avoid the punishments) |
+| `GeneratePanel.jsx` | Generate | free generation, beam or sample, either traversal, with 👍 / 👎 feeding 2NRL |
 | `ConversePanel.jsx` | Converse | the model talking to itself. Newest turn on top, stutter detection, and "Explore" to back out of a repetition |
 | `ChatPanel.jsx` | Chat | an LLM conversing with the model and marking every reply |
 | `ScorePanel.jsx` | Score | what the model makes of a piece of text (per character, or per **word** on a word model) |
@@ -27,6 +27,7 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `ImagesPanel.jsx` | Images | the Stable Diffusion encoder, base64, and what the model remembers of a picture |
 | `SpeechPanel.jsx` | Speech | teaching it by talking to it — microphone, dictation, and decoding an `aud:` text back to sound |
 | `CheckpointPanel.jsx` | Checkpoints | list, save, restore |
+| `NetworkSettingsPanel.jsx` | Network settings | the settings of the network itself, as opposed to the options of one run: the **traversal** every search uses (shared with Predict and Generate), the **score function** of whichever kind is active (`GET /api/model` → `POST /api/model/weights`; the sine model has none and says so), and the **encoder / decoder** — the window, the sentinels, and a live preview that encodes a text, decodes it back and walks it through the graph's own (possibly merged) node labels (`GET /api/encoding`, `POST /api/encoding/preview`) |
 | `GraphView.jsx` | Graph | the graph itself, drawn and navigable |
 
 ## The shared widgets
@@ -43,6 +44,7 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `RatingsCard.jsx` | 👍 / 👎 on an output, and training on the ratings collected |
 | `RecallCard.jsx` | what the model remembers of what it was shown |
 | `GuardNotice.jsx` | what the negative network stopped on the way out |
+| `TraversalFields.jsx` | the **traversal** the search runs — *what* it looks for, as opposed to the mode, which is how it looks. `reward` follows the model's own distribution, rewards and all; `punishment` takes the rewards out of the score and lets the penalties price every step, so the cheapest path is the least punished one. It reads and writes the shared setting (`../hooks/useNetworkSettings.jsx`), so the same control appears on the Network settings, Predict and Generate tabs and all three move together; `compact` is the version without the explanation |
 
 ## Adding a panel
 

@@ -33,17 +33,22 @@ func (t Traversal) String() string {
 	return "reward"
 }
 
-// ParseTraversal reads a traversal name: "", "reward" or "rewards" for the
-// original search, "least-punished" (also "least_punished", "punished",
-// "punish") for the one that follows the blame.
+// ParseTraversal reads a traversal name as a *ranking*: "", "reward" or
+// "rewards" for the original search and "least-punished" (also
+// "least_punished", "blame") for the one that follows the blame.
+//
+// "punishment" is the other punishment traversal (penalty.go), which prices a
+// step rather than ordering the walks: the beams rank it exactly as they rank a
+// rewarded one, so it reads as ByReward here and is never an alias of
+// ByLeastPunished - the two are different currencies.
 func ParseTraversal(name string) (Traversal, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "reward", "rewards", "cost":
+	case "", "reward", "rewards", "cost", TraversalPunishment, "penalty":
 		return ByReward, nil
-	case "least-punished", "least_punished", "leastpunished", "punished", "punish", "blame":
+	case "least-punished", "least_punished", "leastpunished", "blame":
 		return ByLeastPunished, nil
 	}
-	return ByReward, fmt.Errorf("unknown traversal %q; expected 'reward' or 'least-punished'", name)
+	return ByReward, fmt.Errorf("unknown traversal %q; expected 'reward', 'punishment' or 'least-punished'", name)
 }
 
 // PunishTolerance is how close two punishments have to be to count as equal:
@@ -199,16 +204,22 @@ func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxC
 
 // SampleWalk is a stochastic walk sampling each child from softmax(-cost /
 // temperature); temperature 0 is greedy.  maxChars < 0 means no limit; rng nil
-// uses the graph's own generator.
-func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool) (*PathResult, error) {
-	return g.SampleWalkBy(startNode, startOffset, maxChars, temperature, rng, includeContext, ByReward)
+// uses the graph's own generator; costs nil reads the graph's own cost
+// function, and the punishment traversal hands in its own (see penalty.go).
+func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn) (*PathResult, error) {
+	return g.SampleWalkBy(startNode, startOffset, maxChars, temperature, rng, includeContext, costs, ByReward)
 }
 
 // SampleWalkBy is SampleWalk under a chosen traversal.  ByLeastPunished keeps
 // only the least punished children at every node and then samples among them
 // exactly as before: punishment decides *what* may be walked, the cost decides
-// which of those it is.
-func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, traversal Traversal) (*PathResult, error) {
+// which of those it is.  It reads the blame off the graph itself, so a costs
+// handed in with it is ignored - the two are different currencies and are not
+// composed (../../SPEC-LeastPunished.md, penalty.go).
+func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn, traversal Traversal) (*PathResult, error) {
+	if traversal == ByLeastPunished {
+		costs = nil
+	}
 	if temperature < 0 {
 		return nil, fmt.Errorf("temperature must be >= 0")
 	}
@@ -216,6 +227,7 @@ func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature f
 		rng = g.rng
 	}
 	g.Prepare()
+	childCosts := g.costsOrDefault(costs)
 	chars, err := startEmission(g, startNode, startOffset)
 	if err != nil {
 		return nil, err
@@ -234,37 +246,37 @@ func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature f
 			break
 		}
 		// a node the model expects to go round offers nothing
-		costs := Onward(g.ChildCostsFrom(node, cameFrom))
+		options := Onward(childCosts(node, cameFrom))
 		if traversal == ByLeastPunished {
-			costs = LeastPunished(costs)
+			options = LeastPunished(options)
 		}
-		if len(costs) == 0 {
+		if len(options) == 0 {
 			break
 		}
 		var pick ChildCost
-		if temperature == 0 || len(costs) == 1 {
-			pick = costs[0]
-			for _, item := range costs[1:] {
+		if temperature == 0 || len(options) == 1 {
+			pick = options[0]
+			for _, item := range options[1:] {
 				if item.Cost < pick.Cost {
 					pick = item
 				}
 			}
 		} else {
 			invT := 1.0 / temperature
-			lowest := costs[0].Cost
-			for _, item := range costs[1:] {
+			lowest := options[0].Cost
+			for _, item := range options[1:] {
 				if item.Cost < lowest {
 					lowest = item.Cost
 				}
 			}
-			weights := make([]float64, len(costs))
-			for i, item := range costs {
+			weights := make([]float64, len(options))
+			for i, item := range options {
 				weights[i] = math.Exp(-(item.Cost - lowest) * invT)
 			}
 			r := rng.Float64() * fsum(weights)
-			pick = costs[len(costs)-1]
+			pick = options[len(options)-1]
 			acc := 0.0
-			for i, item := range costs {
+			for i, item := range options {
 				acc += weights[i]
 				if r < acc {
 					pick = item

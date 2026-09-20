@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
@@ -576,6 +577,107 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 		"kind": active, "label": label, "units": units, "kinds": s.kinds(), "model_path": modelPath,
 		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out, "engine": "go",
 	}, nil
+}
+
+// Encoding is GET /api/encoding: the text encoding every kind shares.
+//
+// Read-only, and "configurable" says so.  The window is not a setting but part
+// of the model format: the graph's labels, its splits and merges, the saved
+// file and the Python implementation all assume the same number, so a model
+// trained at one window could not be read at another.
+func (s *Service) Encoding() map[string]any {
+	return map[string]any{
+		"window": radixnet.Window, "stride": 1, "overlap": radixnet.Overlap,
+		"start_label": radixnet.StartLabel, "end_label": radixnet.EndLabel, "back_label": radixnet.BackLabel,
+		"configurable": false,
+		"note": fmt.Sprintf(
+			"Text goes in as overlapping windows of %d characters, stride 1, and comes back out of the "+
+				"(possibly compressed) node labels along a path. The window is part of the model format, "+
+				"not a setting.", radixnet.Window),
+	}
+}
+
+// EncodingPreview is POST /api/encoding/preview: one text through the encoder
+// and back through both decoders, and through the graph's own labels.
+func (s *Service) EncodingPreview(text string) (map[string]any, error) {
+	windows := radixnet.Encode(text)
+	if windows == nil {
+		windows = []string{}
+	}
+	decoded := radixnet.DecodeTrigrams(windows)
+	info := s.Encoding()
+	info["text"] = text
+	info["chars"] = utf8.RuneCountInString(text)
+	info["windows"] = windows
+	info["count"] = len(windows)
+	info["decoded"] = decoded
+	info["round_trip"] = decoded == text
+	info["kind"] = "count"
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		unknown := []string{}
+		for _, w := range windows {
+			if _, _, ok := g.Lookup(w); !ok {
+				unknown = append(unknown, w)
+			}
+		}
+		info["unknown_windows"] = unknown
+		walked, ok := []int(nil), false
+		if len(windows) > 0 {
+			walked, ok = g.NodePath(windows)
+		}
+		if !ok {
+			return map[string]any{
+				"known": false, "reason": encodingReason(len(windows), unknown),
+				"labels": []string{}, "node_ids": []int{}, "decoded": "", "nodes": 0, "compressed": 0,
+			}, nil
+		}
+		labels := make([]string, len(walked))
+		real := make([]string, 0, len(walked))
+		compressed := 0
+		for i, n := range walked {
+			labels[i] = g.Labels[n]
+			if n != radixnet.Start && n != radixnet.End {
+				real = append(real, labels[i])
+				if utf8.RuneCountInString(labels[i]) > radixnet.Window {
+					compressed++
+				}
+			}
+		}
+		return map[string]any{
+			"known": true, "reason": nil, "labels": labels, "node_ids": walked,
+			"decoded": radixnet.DecodePath(real, 0, true), "nodes": len(real), "compressed": compressed,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	info["path"] = out
+	return info, nil
+}
+
+// encodingReason says why a text cannot be walked: windows never seen, or a
+// text whose windows are all known that still does not run from START to END.
+func encodingReason(windows int, unknown []string) string {
+	if windows == 0 {
+		return fmt.Sprintf("the text is shorter than one window (%d characters)", radixnet.Window)
+	}
+	if len(unknown) > 0 {
+		shown := unknown
+		suffix := ""
+		if len(shown) > 5 {
+			shown, suffix = shown[:5], "..."
+		}
+		quoted := make([]string, len(shown))
+		for i, w := range shown {
+			quoted[i] = fmt.Sprintf("%q", w)
+		}
+		return fmt.Sprintf("%d of the %d windows have never been seen: %s%s",
+			len(unknown), windows, strings.Join(quoted, ", "), suffix)
+	}
+	return "every window is known, but the structure cannot walk the whole text from START to END as it " +
+		"stands - a missing edge, a step into the middle of a merged node, or a text that is only part of " +
+		"one it was trained on (the walk has to reach the end of a text)"
 }
 
 // SelectKind is POST /api/model/select: this server runs the model it was
