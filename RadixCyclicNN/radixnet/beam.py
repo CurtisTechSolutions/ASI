@@ -23,7 +23,7 @@ from .search import CostFn, PathResult, _build_result, _start_emission, onward
 
 __all__ = ["Prediction", "beam_predict", "default_beam", "path_probability"]
 
-_OV = WINDOW - 1
+_OV = WINDOW - 1  # the default overlap; a graph's own is graph.encoding.overlap
 
 
 @dataclass(slots=True)
@@ -79,6 +79,7 @@ def _run_beam(
     """One beam: the ``k`` cheapest (or, with ``worst``, dearest) complete paths as ``(cost, node_ids, step_costs)``."""
     labels = graph.labels
     child_costs = graph.child_costs if costs is None else costs
+    overlap = graph.encoding.overlap
     entries: list[tuple[int, int, float]] = [(start_node, -1, 0.0)]  # entry -> (node, parent, step cost)
     sign = -1.0 if worst else 1.0  # heap keys: the k-th best finished path sits at the heap top
 
@@ -118,7 +119,7 @@ def _run_beam(
             # where the walk came from: a model that counts paths prices the next step by it
             prev = entries[parent_entry][0] if parent_entry >= 0 else (START if node == START else None)
             for c, _e, ec in onward(child_costs(node, prev)):
-                nchars = chars if c == END else chars + len(labels[c]) - _OV
+                nchars = chars if c == END else chars + graph.label_len(c) - overlap
                 step = ec + step_penalty
                 ncost = cost + step
                 child_entry = len(entries)
@@ -209,8 +210,11 @@ def beam_predict(
     best, expanded = _run_beam(*common, max_chars, *limits, False, costs)
     bottom_cap = max_chars
     if bottom_cap is None and to_end:
-        longest = max((len(graph.labels[n]) for _, ids, _ in best for n in ids[1:]), default=0)
-        emitted = max((sum(len(graph.labels[n]) - _OV for n in ids[1:] if n != END) for _, ids, _ in best), default=0)
+        longest = max((graph.label_len(n) for _, ids, _ in best for n in ids[1:]), default=0)
+        overlap = graph.encoding.overlap
+        emitted = max(
+            (sum(graph.label_len(n) - overlap for n in ids[1:] if n != END) for _, ids, _ in best), default=0
+        )
         bottom_cap = max(2 * emitted + longest + 8, min_chars, 16)
     worst, expanded_worst = _run_beam(*common, bottom_cap, *limits, True, costs)
     expanded += expanded_worst

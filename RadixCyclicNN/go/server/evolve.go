@@ -32,7 +32,11 @@ func (s *Service) discriminatorModel(seed int64) (*radixnet.Model, error) {
 			return m, nil
 		}
 	}
-	fresh, err := radixnet.NewModel(seed+1, radixnet.DefaultGraphOptions())
+	// the discriminator reads the generator's texts: same encoding, or it
+	// would be judging grams the generator never writes
+	opts := radixnet.DefaultGraphOptions()
+	opts.Encoding = s.model.Encoding()
+	fresh, err := radixnet.NewModel(seed+1, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +47,7 @@ func (s *Service) discriminatorModel(seed int64) (*radixnet.Model, error) {
 
 // StartEvolve starts an `evolve` job over the given corpus.
 func (s *Service) StartEvolve(corpus []string, config radixnet.EvolveConfig, generations int, blame bool) (map[string]any, error) {
-	if err := config.Validate(); err != nil {
+	if err := config.Validate(s.model.Encoding()); err != nil {
 		return nil, badRequest("%v", err)
 	}
 	if generations < 0 {
@@ -147,7 +151,7 @@ func evolveConfigFrom(rq *request) (radixnet.EvolveConfig, error) {
 	} else if ok {
 		cfg.Seed = int64(seed)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.Validate(rq.svc.Model().Encoding()); err != nil {
 		return cfg, badRequest("%v", err)
 	}
 	return cfg, nil

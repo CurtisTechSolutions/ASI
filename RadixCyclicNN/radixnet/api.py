@@ -86,7 +86,9 @@ from .codegen import (
     parse_problem_file,
     parse_problems,
 )
-from .encoding import BACK_LABEL, END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
+from .encoding import (
+    BACK_LABEL, END_LABEL, START_LABEL, WINDOW, Decoder, Encoder, Encoding, parse_encoding,
+)
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
@@ -1205,8 +1207,14 @@ class ModelService:
         model = load_model(path, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
 
-    def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
+    def reset(
+        self, seed: int | None = None, kind: str | None = None, encoding: Encoding | None = None, **options: Any
+    ) -> dict:
         """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
+
+        ``encoding`` is how the new model reads text - the unit, the n of the
+        n-gram and the stride - and is fixed for its life; ``None`` is the
+        character trigram.
 
         ``options`` are the score-function settings of the kind that has them:
         ``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``
@@ -1220,7 +1228,10 @@ class ModelService:
         if extra and not hasattr(cls, "weight_config"):
             raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) do not apply to the {cls.kind} model")
         try:
-            model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
+            model = cls(
+                seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device,
+                encoding=encoding, **extra,
+            )
         except (TypeError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
         return self._replace_model(model)
@@ -1228,37 +1239,41 @@ class ModelService:
     # -- the encoding: what a text becomes before the graph ever sees it -----
 
     def encoding(self) -> dict:
-        """The text encoding every kind shares: the sliding window, its stride and the three sentinels.
+        """The encoding the active model reads in: the unit, the n of the n-gram, the stride, the sentinels.
 
-        Read-only, and ``configurable`` says so.  The window is not a setting
-        but part of the model format: the graph's labels, its splits and merges,
-        the saved file and the Go port all assume the same number, so a model
-        trained at one window could not be read at another.  What *is*
-        adjustable - the score function, and the traversal a search runs - has
-        its own settings.
+        It is a *choice*, and ``configurable`` says so - but one made when a
+        model is created and fixed for its life, because the graph's labels,
+        its splits and merges and its saved file are all written in it.
+        ``POST /api/reset`` is where it is chosen; a model trained at one
+        encoding cannot be read at another.
         """
+        enc = self.model.encoding
         return {
-            "window": WINDOW,
-            "stride": 1,
-            "overlap": WINDOW - 1,
+            "encoding": str(enc),
+            "unit": enc.unit,
+            "window": enc.n,
+            "ngram": enc.n,
+            "stride": enc.stride,
+            "overlap": enc.overlap,
             "start_label": START_LABEL,
             "end_label": END_LABEL,
             "back_label": BACK_LABEL,
-            "configurable": False,
+            "configurable": True,
             "note": (
-                "Text goes in as overlapping windows of "
-                f"{WINDOW} characters, stride 1, and comes back out of the (possibly compressed) node "
-                "labels along a path. The window is part of the model format, not a setting."
+                f"Text goes in as {enc.describe()}, and comes back out of the (possibly compressed) node "
+                "labels along a path. The encoding is fixed for a model's life - every label is written in "
+                'it - so it is chosen when a model is made: POST /api/reset with {"encoding": "word:2:1"}, '
+                "or {unit, ngram, stride}."
             ),
         }
 
     def encoding_preview(self, text: str) -> dict:
         """One text through the encoder and back through both decoders.
 
-        ``windows`` is what :class:`~radixnet.encoding.Encoder` makes of the
-        text and ``decoded`` what :meth:`Decoder.decode_trigrams` makes of
-        those again - ``round_trip`` is whether the two agree, which they do
-        for any text at least ``window`` characters long.  ``path`` is the same
+        ``windows`` is what the model's :class:`~radixnet.encoding.Encoding`
+        makes of the text and ``decoded`` what its decoder makes of those again
+        - ``round_trip`` is whether the two agree, which they do for any text
+        the encoding can represent (:meth:`Encoding.normalize`).  ``path`` is the same
         text through the *graph*: the nodes it walks and what
         :meth:`Decoder.decode_path` reads back off their labels, which is where
         the radix compression becomes visible - a node whose label is longer
@@ -1272,17 +1287,19 @@ class ModelService:
         """
         if not isinstance(text, str):
             raise ApiError(400, "'text' must be a string")
-        encoder, decoder = Encoder(WINDOW), Decoder(WINDOW)
+        enc = self.model.encoding
+        encoder, decoder = Encoder(encoding=enc), Decoder(encoding=enc)
         windows = encoder.encode(text)
         decoded = decoder.decode_trigrams(windows)
         info = {
             **self.encoding(),
             "text": text,
-            "chars": len(text),
+            "chars": enc.length(text),
             "windows": windows,
             "count": len(windows),
             "decoded": decoded,
-            "round_trip": decoded == text,
+            # what comes back is what the encoding can represent
+            "round_trip": decoded == enc.normalize(text),
         }
         with self.session() as model:
             graph = model.graph
@@ -1292,7 +1309,7 @@ class ModelService:
             walked = graph.node_path(windows) if windows else None
             if walked is None:
                 if not windows:
-                    reason = f"the text is shorter than one window ({WINDOW} characters)"
+                    reason = f"the text is shorter than one window ({enc.n} {enc.unit}s)"
                 elif unknown:
                     reason = (
                         f"{len(unknown)} of the {len(windows)} windows have never been seen: "
@@ -1319,7 +1336,7 @@ class ModelService:
                     "node_ids": list(walked),
                     "decoded": decoder.decode_path(real, 0, True, skip_sentinels=False),
                     "nodes": len(real),
-                    "compressed": sum(1 for label in real if len(label) > WINDOW),
+                    "compressed": sum(1 for label in real if enc.length(label) > enc.n),
                 }
             info["kind"] = model.kind
         return info
@@ -2590,8 +2607,32 @@ def _weight_options(f: Fields) -> dict:
     }
 
 
+def _encoding_option(f: Fields) -> Encoding | None:
+    """``encoding`` as a spec, or the three dials on their own; ``None`` when nothing was asked for."""
+    spec = f.text("encoding", None) or ""
+    unit = f.text("unit", None) or ""
+    n = f.integer("ngram", None)
+    stride = f.integer("stride", None)
+    if not (spec or unit or n is not None or stride is not None):
+        return None
+    try:
+        enc = parse_encoding(spec)
+        if unit:
+            enc = Encoding(unit=unit, n=enc.n, stride=enc.stride)
+        if n is not None:
+            enc = Encoding(unit=enc.unit, n=n, stride=min(enc.stride if enc.sliding else n, n))
+        if stride is not None:
+            enc = Encoding(unit=enc.unit, n=enc.n, stride=stride)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return enc
+
+
 def _r_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.reset(f.integer("seed", None), kind=f.text("kind", None) or None, **_weight_options(f))
+    return 200, svc.reset(
+        f.integer("seed", None), kind=f.text("kind", None) or None, encoding=_encoding_option(f),
+        **_weight_options(f),
+    )
 
 
 def _r_model_weights(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3864,12 +3905,16 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
     ("POST", "/api/reset", _r_reset,
-     "replace the model with a fresh one: {seed, kind, and the kind's score-function settings - count: "
-     "count_scale, global_scale, window_scale, reward_scale, window; resonant: buckets, period, kick_scale, "
-     "resonance_scale, amp_scale, reward_scale, concentration}"),
+     "replace the model with a fresh one: {seed, kind, encoding | unit + ngram + stride, and the kind's "
+     "score-function settings - count: count_scale, global_scale, window_scale, reward_scale, window; resonant: "
+     "buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, concentration}.  The encoding is how "
+     "text becomes grams and is fixed for the model's life: unit char | word, ngram the n of the n-gram, stride the "
+     "units between two grams (1 = sliding window, n = non-overlapping groups); \"encoding\" sets all three "
+     "(char:3:1 the default, char:5:5 groups of five letters, word:2:1 word bigrams, word:3:1 word trigrams)"),
     ("GET", "/api/encoding", _r_encoding,
-     "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, "
-     "configurable: false (the window is part of the model format, not a setting), note}"),
+     "the text encoding the active model reads in: {encoding, unit, window (the n of the n-gram), ngram, stride, "
+     "overlap, start_label, end_label, back_label, configurable: true (fixed for a model's life, chosen when one "
+     "is made - see POST /api/reset), note}"),
     ("POST", "/api/encoding/preview", _r_encoding_preview,
      "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, "
      "round_trip, kind, path: {known, reason, labels, node_ids, decoded, nodes, compressed}} - path is the text "

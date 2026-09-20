@@ -63,7 +63,10 @@ func (s *Service) negativeModel() (*radixnet.Model, error) {
 			return m, nil
 		}
 	}
-	m, err := radixnet.NewNegativeModel(s.seed, radixnet.DefaultNegativeOptions())
+	// the failure structure reads text the way the count model does
+	negOpts := radixnet.DefaultNegativeOptions()
+	negOpts.Encoding = s.model.Encoding()
+	m, err := radixnet.NewNegativeModel(s.seed, negOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +292,9 @@ func (s *Service) NegativeReset(seed *int64) (map[string]any, error) {
 	if seed != nil {
 		use = *seed
 	}
-	m, err := radixnet.NewNegativeModel(use, radixnet.DefaultNegativeOptions())
+	negOpts := radixnet.DefaultNegativeOptions()
+	negOpts.Encoding = s.model.Encoding()
+	m, err := radixnet.NewNegativeModel(use, negOpts)
 	if err != nil {
 		return nil, err
 	}

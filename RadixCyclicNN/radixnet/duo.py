@@ -52,7 +52,7 @@ from . import blame
 
 __all__ = ["FilterConfig", "NegativeFilter"]
 
-_W = WINDOW
+_W = WINDOW  # the default n; a net's own is net.encoding.n
 
 
 @dataclass
@@ -207,7 +207,8 @@ class NegativeFilter:
         rejected = [v["text"] for v in verdicts if v["decision"] == "reject"]
         if rejected and self.config.learn:
             self.negative.blame(
-                [t for t in rejected if len(t) >= _W], reason=self.config.reason, source="filter",
+                [t for t in rejected if self.negative.encoding.encode(t)], reason=self.config.reason,
+                source="filter",
                 note="rejected by the filter",
             )
         return {
@@ -233,7 +234,7 @@ class NegativeFilter:
         verdicts: list[dict] = []
         kept: list[PathResult] = []
         for candidate in offered:
-            verdict = self.judge(prefix + candidate.text)
+            verdict = self.judge(self.negative.encoding.join(prefix, candidate.text))
             verdicts.append(verdict)
             if verdict["decision"] != "reject":
                 kept.append(candidate)
@@ -341,7 +342,8 @@ class NegativeFilter:
             text = result.text
             if text and text not in candidates:
                 candidates.append(text)
-        outcome = self.filter([prefix + text for text in candidates])
+        join = self.negative.encoding.join
+        outcome = self.filter([join(prefix, text) for text in candidates])
         keepers = [v for v in outcome["verdicts"] if v["decision"] != "reject"]
         warning = self.negative.predict(prefix, length=length, k=1, max_length=max_length)
         return {
@@ -351,7 +353,7 @@ class NegativeFilter:
             "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
             "verdicts": outcome["verdicts"],
             "candidates": len(candidates),
-            "warning": (prefix + warning.text) if warning.text else None,
+            "warning": join(prefix, warning.text) if warning.text else None,
         }
 
     def converse(
@@ -388,7 +390,8 @@ class NegativeFilter:
         rejected = [v for v in verdicts if v["decision"] == "reject"]
         if rejected and self.config.learn:
             self.negative.blame(
-                [v["text"] for v in rejected if len(v["text"]) >= _W], reason=self.config.reason, source="filter",
+                [v["text"] for v in rejected if self.negative.encoding.encode(v["text"])],
+                reason=self.config.reason, source="filter",
                 note="vetoed in conversation",
             )
         return {

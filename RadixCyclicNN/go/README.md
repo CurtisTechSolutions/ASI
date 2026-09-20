@@ -8,6 +8,25 @@ A Go port of the **count / reward model** (`CountRewardNet`) and of the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained here continues in Python and vice versa with
 identical numbers. `../tests/test_go_parity.py` enforces that in both directions.
+That holds in every encoding: a model built with anything but the character
+trigram says so in its file, and the Python implementation reads it.
+
+**The encoding is a dial.** Python encodes one way; this implementation makes it
+a choice, fixed when a model is created and carried in its file:
+
+```bash
+go/bin/radixnet-count --model m.json --ngram 5 train --data book.txt              # 5-character sliding window
+go/bin/radixnet-count --model m.json --ngram 4 --stride 4 train --data book.txt   # groups of four letters
+go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt    # word bigrams
+go/bin/radixnet-count --model m.json --encoding word:3:1 train --data book.txt    # word trigrams
+```
+
+`--units char|word` says what one unit is, `--ngram N` how many units a gram
+holds, `--stride N` how far apart two grams start (1 = the sliding window, n =
+non-overlapping groups); `--encoding unit[:n[:stride]]` sets all three. Lengths,
+offsets and diff spans are then counted in that unit — on a word model,
+`--length 3` is three more words. Over HTTP it is `POST /api/reset` with
+`{"encoding": "word:2:1"}`, and `GET /api/status` reports it.
 
 Why Go: goroutines. Training fans out over the texts of a file, weights and edge
 costs recompute in parallel over the nodes, and the two beams of a prediction run

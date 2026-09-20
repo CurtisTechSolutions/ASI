@@ -78,6 +78,8 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XV — The traversal** · D-069 what a search looks for is an option · D-070 one home for a network setting
 
+**Part XVI — The encoding** · D-071 the encoding is a dial, and it belongs to the model
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -2558,6 +2560,93 @@ tabs). The traversal is the first setting to be shared rather than copied, and
 
 **Lives in** `frontend/src/components/NetworkSettingsPanel.jsx`,
 `frontend/src/hooks/useNetworkSettings.jsx`, `radixnet/api.py`, `go/server/`
+
+---
+
+# Part XVI — The encoding
+
+### D-071 — The encoding is a dial of the model, not a constant of the package
+
+**Status** Accepted · 2026-09-20 · **Layer** representation ·
+**Extends** D-006, which stays the default
+
+**Context** D-006 fixed the input at three characters with stride 1 and gave the
+reason: the shared character is a *pivot*, and three is the smallest window that
+gives a pivot with context either side. That argument says what the **default**
+should be. It does not say the number should be a constant - and in both
+implementations it was one: `WINDOW = 3` / `Window = 3`, read directly by the
+graph, the models, the beams, the diff and the loader, with the overlap beside
+it. Anyone wanting to ask "what does this corpus look like in fives?" had to
+edit two constants, and nothing in a model file said how to read its labels.
+
+**Decision** The encoding becomes a value - `Encoding(unit, n, stride)` - owned
+by the graph, fixed when the graph is created, written into the model file and
+read back from it, **in every implementation**. Three dials:
+
+| dial | what it is | the default |
+|---|---|---|
+| `Unit` | what one position of a text is: a character, or a whitespace word | `char` |
+| `N` | how many units one gram holds - the *n* of the n-gram | 3 |
+| `Stride` | how far apart consecutive grams start | 1 |
+
+`Stride` is the dial that makes the other two useful. At 1 the grams slide and
+overlap by `N - 1`, which is D-006's pivot generalised. At `N` they do not
+overlap at all, which is *tokenisation*: `char:4:4` cuts text into groups of
+four letters, and the graph becomes a chain of groups that meet only at their
+ends. `word:2:1` is the word bigram, `word:3:1` the word trigram.
+
+Everything the graph measures is now measured in **units**, not characters: a
+node's label length, the offset of a gram inside a label, the length of a
+prediction, the spans of the correction diff. Under the default encoding a unit
+*is* a character, so every one of those quantities is what it always was - which
+is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
+
+**Alternatives rejected**
+* **A package-level variable instead of a field.** One process, one encoding -
+  and a model loaded from a file could silently disagree with it. The encoding
+  belongs to the graph because the graph's labels are written in it.
+* **Keeping the label a `[]rune` and special-casing words.** Words are not
+  characters of a different width; the split, the merge and the index all walk
+  *positions*. A `Units` view (an index of byte offsets, sliced in O(1)) makes
+  one code path serve both.
+* **A learned sub-word vocabulary.** Still rejected, for D-006's reason: it
+  needs a corpus before training can start, and freezes what the model can read.
+  `word` is not a vocabulary - an unseen word is a new node, exactly as an
+  unseen trigram is.
+* **Writing the encoding into every file.** A file that says `char:3:1` is a
+  file the Python loader would have to be taught to ignore. It is written only
+  when it is *not* the default, so an ordinary model file is byte for byte what
+  it always was.
+
+**Consequences**
+* **D-039's bit-identical interchange now covers every encoding.** Both sides
+  write the same `encoding` block and read each other's, and
+  `TestGoEncodingParity` holds them to the same graph, the same file and the
+  same prediction under nine of them. A word model trained in Python continues
+  in Go and back.
+* **The dial reaches all four Python kinds.** RadixNet, the count model, the
+  negative network and the resonant model share one graph, so none of them
+  could have it alone. The sine model trains on word bigrams because the graph
+  it trains on does.
+* **The Rust port carries it too**, on its own branch, and paid the most for
+  it: its index key was three code points packed into a `u64`, which four
+  characters do not fit and a word does not fit at all. It becomes an enum -
+  packed for character grams of up to three, the text itself otherwise - and
+  the port's own tests pin the structure Python and Go build under nine
+  encodings, since it writes no model file to compare.
+* **The units leak into the vocabulary of the API.** `--length`, `--max-length`
+  and `Score.chars` count units, so on a word model they count words. That is
+  the honest reading - a "40-character" cap on a model that thinks in words is
+  meaningless - but it does mean two models answer the same flag differently.
+* **Compression means something different per encoding.** With no overlap there
+  is no shared context for two nodes to be merged *through*; a grouping
+  encoding compresses only the unary chains its corpus actually repeats.
+* **A model cannot change its mind.** The encoding is fixed at creation: every
+  label in the graph is written in it. The CLI refuses an encoding flag that
+  disagrees with the model it loaded rather than ignoring it.
+
+**Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
+`go/radixnet/graph.go`, `rust/src/encoding.rs`, `DESIGN.md` § 23.1
 
 ---
 

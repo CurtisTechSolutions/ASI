@@ -35,6 +35,12 @@ var (
 	memProfile string
 	memLimit   = ""
 	memory     radixnet.MemoryLimit
+
+	// how a NEW model reads text: the unit, the n of the n-gram and the stride
+	encSpec    string
+	unitsFlag  string
+	ngramFlag  int
+	strideFlag int
 )
 
 func addGlobalFlags(fs *flag.FlagSet) {
@@ -46,6 +52,61 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&memProfile, "memprofile", memProfile, "write a heap profile to this file when the command finishes")
 	fs.StringVar(&memLimit, "memlimit", memLimit, "soft memory limit, e.g. 2GiB (default: 80% of the container / machine memory; \"off\" to let the heap grow freely)")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
+	fs.StringVar(&encSpec, "encoding", encSpec, "encoding of a NEW model, unit[:n[:stride]] (default char:3:1); also trigram | bigram | word-bigram | word-trigram")
+	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word (default char)")
+	fs.IntVar(&ngramFlag, "ngram", ngramFlag, "units per gram of a NEW model: the n of the n-gram (default 3)")
+	fs.IntVar(&strideFlag, "stride", strideFlag, "units between consecutive grams of a NEW model: 1 = sliding window, n = groups of n (default 1)")
+}
+
+// encodingFlags is the encoding the flags ask for, and whether any of them was
+// given at all.  --encoding sets all three at once; --units / --ngram /
+// --stride override it one dial at a time.
+func encodingFlags() (radixnet.Encoding, bool) {
+	enc, err := radixnet.ParseEncoding(encSpec)
+	if err != nil {
+		fail("%v", err)
+	}
+	set := encSpec != ""
+	if unitsFlag != "" {
+		parsed, err := radixnet.ParseEncoding(unitsFlag)
+		if err != nil {
+			fail("%v", err)
+		}
+		enc.Unit, set = parsed.Unit, true
+	}
+	if ngramFlag != 0 {
+		// a bare --ngram on a sliding encoding keeps the sliding window; on
+		// groups (stride == n) it grows the group
+		if !enc.Sliding() {
+			enc.Stride = ngramFlag
+		}
+		enc.N, set = ngramFlag, true
+	}
+	if strideFlag != 0 {
+		enc.Stride, set = strideFlag, true
+	}
+	if err := enc.Validate(); err != nil {
+		fail("%v", err)
+	}
+	return enc, set
+}
+
+// newGraphOptions are the graph options a new model is created with.
+func newGraphOptions() radixnet.GraphOptions {
+	opts := radixnet.DefaultGraphOptions()
+	opts.Encoding, _ = encodingFlags()
+	return opts
+}
+
+// checkEncoding refuses to run when the encoding flags disagree with the model
+// that was loaded: the encoding is fixed when a model is created, so silently
+// ignoring them would train a trigram model and call it a word model.
+func checkEncoding(m *radixnet.Model, path string) *radixnet.Model {
+	if want, set := encodingFlags(); set && want != m.Encoding() {
+		fail("%s is %s; --encoding / --units / --ngram / --stride only apply to a NEW model (train one to a new --model path)",
+			path, m.Encoding().Describe())
+	}
+	return m
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -135,12 +196,12 @@ func openModel(required bool) *radixnet.Model {
 		if err != nil {
 			fail("%s: %v", modelPath, err)
 		}
-		return configure(m)
+		return configure(checkEncoding(m, modelPath))
 	}
 	if required {
 		fail("model file not found: %s (train one first with `radixnet-count train --data FILE`)", modelPath)
 	}
-	m, err := radixnet.NewModel(seedFlag, radixnet.DefaultGraphOptions())
+	m, err := radixnet.NewModel(seedFlag, newGraphOptions())
 	if err != nil {
 		fail("%v", err)
 	}
@@ -197,6 +258,13 @@ commands:
 
 global options (before or after the command): --model PATH --json --seed N --workers N --exact --out PATH
                                              --memlimit SIZE (soft heap limit, default 80%% of the machine / container) --memprofile PATH
+                                             --encoding SPEC / --units char|word / --ngram N / --stride N (a NEW model only)
+
+the encoding of a NEW model: --units says what one unit is (a character or a word), --ngram how many
+units a gram holds, --stride how far apart consecutive grams start (1 = the sliding window, n = groups
+of n).  --encoding SPEC sets all three: char:3:1 (the default), char:5:5 (groups of five letters),
+word:2:1 (word bigrams), word:3:1 (word trigrams).  It is fixed when the model is created and travels
+with the file; the Python implementation reads every one of them too.
 `, version)
 }
 
@@ -344,7 +412,7 @@ func cmdTrain(args []string) {
 	if _, err := os.Stat(modelPath); err == nil {
 		m = openModel(true)
 	} else {
-		opts := radixnet.DefaultGraphOptions()
+		opts := newGraphOptions()
 		if *window > 0 {
 			opts.Window = *window
 		}
@@ -372,7 +440,7 @@ func cmdTrain(args []string) {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
 	before := m.MetaInt("trained_texts")
-	say("training from %s (%s, chunks of %d texts): %s, %s counting, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), *epochs, memory)
+	say("training from %s (%s, chunks of %d texts): %s, %s counting, %s, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), m.Encoding().Describe(), *epochs, memory)
 	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %6s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "chunks", "seconds")
 	opts := radixnet.DefaultTrainOptions()
 	opts.Epochs = *epochs
@@ -943,7 +1011,7 @@ func cmdInfo(args []string) {
 		emit(map[string]any{"model": modelPath, "stats": stats, "history": hist, "meta": m.Meta})
 		return
 	}
-	fmt.Printf("model %s\n", modelPath)
+	fmt.Printf("model %s (%s)\n", modelPath, m.Encoding().Describe())
 	for _, k := range radixnet.SortedKeys(stats) {
 		fmt.Printf("%-22s %v\n", k, stats[k])
 	}
@@ -1395,7 +1463,8 @@ func cmdServe(args []string) {
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
-		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
+		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, Encoding: newGraphOptions().Encoding,
+		UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
 		ChatGPTURL: *chatgptURL, ChatGPTModel: *chatgptModel,
 		Offline: toolFlags.Offline, AllowPrivate: toolFlags.AllowPrivate, SearchURL: toolFlags.SearchURL,

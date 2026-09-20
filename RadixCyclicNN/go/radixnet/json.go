@@ -162,6 +162,13 @@ type GraphDoc struct {
 	RngState               []any       `json:"rng_state"`
 	Weights                *weightsDoc `json:"weights,omitempty"`
 	Paths                  *pathsDoc   `json:"paths,omitempty"`
+
+	// Encoding is how the labels below are to be read: the unit, the n of the
+	// n-gram and the stride.  Written only when it is not the character
+	// trigram of stride 1, so an ordinary file is byte for byte what it always
+	// was - and so the Python implementation, which only speaks that one,
+	// never meets a file it would misread.
+	Encoding *Encoding `json:"encoding,omitempty"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -182,6 +189,9 @@ func (g *Graph) ToDoc() *GraphDoc {
 		Version: g.Version.Value, VersionResets: g.Version.Resets,
 		StructureVersion: g.StructureVersion.Value, StructureVersionResets: g.StructureVersion.Resets,
 		Traversals: g.Traversals.Value, TraversalsResets: g.Traversals.Resets}
+	if enc := g.Enc.WithDefaults(); !enc.IsDefault() {
+		doc.Encoding = &enc
+	}
 	n := len(order)
 	doc.Nodes = nodesDoc{Labels: make([]string, n), Z: make([]float64, n), A: make([]float64, n), B: make([]float64, n),
 		H: make([]float64, n), K: make([]float64, n), Count: make([]int64, n)}
@@ -418,10 +428,14 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			opts.Window = 1
 		}
 	}
+	if d.Encoding != nil {
+		opts.Encoding = d.Encoding.WithDefaults()
+	}
 	g, err := NewGraph(d.Seed, opts)
 	if err != nil {
 		return nil, err
 	}
+	enc := g.Enc
 	g.Inverted = d.Inverted
 	g.Labels = make([]string, n)
 	copy(g.Labels, labels)
@@ -438,18 +452,19 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g.index = make(map[string]loc, n*2)
 	for nid := 0; nid < n; nid++ {
 		g.Alive[nid] = true
-		g.labelLen[nid] = runeLen(labels[nid])
 		if nid < First {
+			g.labelLen[nid] = enc.Len(labels[nid]) // the sentinels are labels, not grams
 			continue
 		}
-		label := []rune(labels[nid])
-		if len(label) < Window {
-			return nil, fmt.Errorf("node %d label %q is shorter than %d", nid, labels[nid], Window)
+		label := enc.Units(labels[nid])
+		g.labelLen[nid] = label.Len()
+		if label.Len() < enc.N {
+			return nil, fmt.Errorf("node %d label %q is shorter than %d %ss", nid, labels[nid], enc.N, enc.Unit)
 		}
-		for o := 0; o < len(label)-Overlap; o++ {
-			t := string(label[o : o+Window])
+		for o := 0; o <= label.Len()-enc.N; o += enc.Stride {
+			t := label.Slice(o, o+enc.N)
 			if _, dup := g.index[t]; dup {
-				return nil, fmt.Errorf("trigram %q appears in two nodes", t)
+				return nil, fmt.Errorf("gram %q appears in two nodes", t)
 			}
 			g.index[t] = loc{nid, o}
 		}

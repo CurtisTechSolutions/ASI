@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
-from .encoding import WINDOW, Decoder, Encoder
+from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
@@ -62,8 +62,8 @@ UNKNOWN_PROB = 1e-6
 """Probability charged by :meth:`RadixNet.score` for an unknown trigram or a missing edge."""
 
 _LOG_UNKNOWN = math.log(UNKNOWN_PROB)
-_W = WINDOW
-_OV = WINDOW - 1
+_W = WINDOW       # the default n of the n-gram; a model's own is self.encoding.n
+_OV = WINDOW - 1  # and its own overlap self.encoding.overlap
 _MAX_LOG_PPL = 700.0  # exp() overflows above ~709; a mean -log softmax never gets there
 
 ProgressFn = Callable[[dict], None]
@@ -177,9 +177,13 @@ class TrainConfig:
 _CONFIG_FIELDS = frozenset(f.name for f in dataclasses.fields(TrainConfig))
 
 
-def _whole_text(result: PathResult, prefix: str) -> PathResult:
-    """A generated result is a whole text: ``text`` becomes ``prefix + continuation`` (``full_text`` already is)."""
-    result.full_text = prefix + result.text
+def _whole_text(result: PathResult, prefix: str, encoding: Encoding | None = None) -> PathResult:
+    """A generated result is a whole text: ``text`` becomes prefix + continuation (``full_text`` already is).
+
+    The two are joined the way the encoding joins units - nothing between
+    characters, a space between words.
+    """
+    result.full_text = (encoding or Encoding()).join(prefix, result.text)
     result.text = result.full_text
     return result
 
@@ -389,8 +393,9 @@ class GraphModel:
             return []
         labels = graph.labels
         children = graph.children
+        overlap = graph.encoding.overlap
         out: list[tuple[int, int]] = []
-        position = 0  # trigram index of the node being entered
+        position = 0  # gram index of the node being entered
         for index in range(1, len(path)):
             node = path[index]
             prev = path[index - 2] if index >= 2 else START  # who called the step: START begins every walk
@@ -399,11 +404,11 @@ class GraphModel:
                 if edge is not None and _touches(length, length + 1, spans):
                     out.append((prev, edge))
                 break
-            size = len(labels[node])
-            lo = 0 if index == 1 else position + _OV
+            size = graph.label_len(node)
+            lo = 0 if index == 1 else position + overlap
             if edge is not None and _touches(lo, position + size, spans):
                 out.append((prev, edge))
-            position += size - _OV
+            position += size - overlap
         return out
 
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
@@ -434,16 +439,17 @@ class GraphModel:
 
     # -- texts and structure -------------------------------------------------
 
-    @staticmethod
-    def _clean_texts(texts: Iterable[str] | str) -> tuple[list[str], int]:
-        """Normalise the ``texts`` argument; returns ``(usable, skipped_short)``."""
+    def _clean_texts(self, texts: Iterable[str] | str) -> tuple[list[str], int]:
+        """Normalise the ``texts`` argument; returns ``(usable, skipped_short)``.
+
+        A text too short to hold one gram of this model's encoding is skipped."""
         items = [texts] if isinstance(texts, str) else list(texts)
         kept: list[str] = []
         skipped = 0
         for t in items:
             if not isinstance(t, str):
                 raise TypeError(f"texts must be strings, got {type(t).__name__}")
-            if len(t) < _W:
+            if self.encoding.length(t) < self.encoding.n:
                 skipped += 1
             else:
                 kept.append(t)
@@ -478,13 +484,30 @@ class GraphModel:
 
     # -- locating a prefix ---------------------------------------------------
 
+    @property
+    def encoding(self) -> Encoding:
+        """How this model turns text into grams and back - its graph's :class:`Encoding`."""
+        return self.graph.encoding
+
+    def _adopt(self, graph: RadixCyclicGraph) -> None:
+        """Take a loaded graph *and read text the way it does*.
+
+        A model built to hold a file's graph is constructed before the graph is
+        read, so its encoder and decoder are the default ones; a graph in any
+        other encoding would then be fed grams it has never seen.
+        """
+        self.graph = graph
+        self.encoder = Encoder(encoding=graph.encoding)
+        self.decoder = Decoder(encoding=graph.encoding)
+
     def _best_trigram(self, key: str) -> tuple[int, int] | None:
         """Most-visited ``(node, offset)`` holding a trigram that starts with ``key``."""
         count = self.graph.node_count
         best: tuple[int, int] | None = None
         best_rank: tuple[int, int, int] | None = None
+        prefixed = self.encoding.has_unit_prefix
         for t, (node, off) in self.graph.trigram_index.items():
-            if t.startswith(key):
+            if prefixed(t, key):
                 rank = (-count(node), node, off)
                 if best_rank is None or rank < best_rank:
                     best, best_rank = (node, off), rank
@@ -496,7 +519,7 @@ class GraphModel:
         best: int | None = None
         best_count = -1
         for node in range(FIRST, len(g.labels)):
-            if g.alive[node] and g.labels[node].startswith(prefix):
+            if g.alive[node] and self.encoding.has_unit_prefix(g.labels[node], prefix):
                 c = g.node_count(node)
                 if c > best_count:
                     best, best_count = node, c
@@ -510,15 +533,25 @@ class GraphModel:
         of that trigram is a guessed continuation.  ``(START, 0, 0)`` if
         nothing matches.
         """
-        n = len(prefix)
+        enc = self.encoding
+        view = enc.units(prefix)
+        n = len(view)
         if n == 0:
             return START, 0, 0
-        if n >= _W:
-            loc = self.graph.lookup(prefix[-_W:])
+        if n >= enc.n:
+            # the gram the prefix ends on, then - when the stride skips it - the
+            # last gram of the prefix's own grid
+            loc = self.graph.lookup(_piece(view, n - enc.n, n))
+            if loc is None:
+                aligned = (n - enc.n) // enc.stride * enc.stride
+                if aligned != n - enc.n:
+                    loc = self.graph.lookup(_piece(view, aligned, aligned + enc.n))
             if loc is not None:
-                return loc[0], loc[1], _W
-            for m in (_W - 1, 1):
-                found = self._best_trigram(prefix[-m:])
+                return loc[0], loc[1], enc.n
+            for m in (enc.n - 1, 1):
+                if not 1 <= m < enc.n:
+                    continue
+                found = self._best_trigram(_piece(view, n - m, n))
                 if found is not None:
                     return found[0], found[1], m
             return START, 0, 0
@@ -546,8 +579,11 @@ class GraphModel:
         the remainder of the located trigram - a guessed opening of the
         continuation that every predicted path starts with.
         """
+        enc = self.encoding
         node, offset, matched = self._locate(prefix)
-        lead = "" if node == START or matched >= _W else self.graph.labels[node][offset + matched : offset + _W]
+        lead = "" if node == START or matched >= enc.n else enc.piece(
+            self.graph.labels[node], offset + matched, offset + enc.n
+        )
         return node, offset, lead
 
     # -- the prediction search (shared by every kind) ------------------------
@@ -611,13 +647,17 @@ class GraphModel:
                 costs=costs,
             )
             top, bottom, expanded, width = [walk], [], walk.expanded, 0
+        enc = self.encoding
         for result in top + bottom:
             if lead:
-                result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
-            result.full_text = prefix + result.text
-        best = top[0] if top else PathResult(text=lead if cap is None else lead[: cap or 0], labels=[graph.labels[node]], node_ids=[node])
+                joined = enc.join(lead, result.text)
+                result.text = joined if cap is None else enc.truncate(joined, cap)
+            result.full_text = enc.join(prefix, result.text)
+        best = top[0] if top else PathResult(
+            text=lead if cap is None else enc.truncate(lead, cap or 0), labels=[graph.labels[node]], node_ids=[node]
+        )
         if not top:
-            best.full_text = prefix + best.text
+            best.full_text = enc.join(prefix, best.text)
         return Prediction(
             text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
             step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end, full_text=best.full_text,
@@ -676,19 +716,19 @@ class GraphModel:
                     prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng,
                     **walk_options,
                 )
-                results.append(_whole_text(walk, prefix))
+                results.append(_whole_text(walk, prefix, self.encoding))
             return results
         if mode == "dijkstra":
             best = self.predict(
                 prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length,
                 step_penalty=step_penalty, **walk_options,
             )
-            return [_whole_text(best, prefix)]
+            return [_whole_text(best, prefix, self.encoding)]
         found = self.predict(
             prefix, length=0, mode="beam", k=count, beam=beam, to_end=True, max_length=max_length,
             step_penalty=step_penalty, **walk_options,
         )
-        return [_whole_text(result, prefix) for result in found.top]
+        return [_whole_text(result, prefix, self.encoding) for result in found.top]
 
     def converse(self, opening: str = "", turns: int = 6, **options):
         """The model converses with itself: two voices, each reply the prediction search picking up the end of
@@ -705,7 +745,7 @@ class GraphModel:
         not exist.
         """
         g = self.graph
-        if p != START and offset + _W != len(g.labels[p]):
+        if p != START and offset + g.encoding.n != g.label_len(p):
             return None
         for child, _edge, cost in g.child_costs(p):
             if child == c:
@@ -812,11 +852,14 @@ class RadixNet(GraphModel):
         "2NRL inverts the network"
     )
 
-    def __init__(self, seed: int = 0, backend: str = "auto", device: str | None = None) -> None:
+    def __init__(
+        self, seed: int = 0, backend: str = "auto", device: str | None = None,
+        encoding: Encoding | None = None,
+    ) -> None:
         self.seed = int(seed)
-        self.graph = RadixCyclicGraph(seed=self.seed)
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
+        self.graph = RadixCyclicGraph(seed=self.seed, encoding=encoding)
+        self.encoder = Encoder(encoding=self.graph.encoding)
+        self.decoder = Decoder(encoding=self.graph.encoding)
         self.backend: Backend = get_backend(backend, device)
         self.history: list[dict] = []
         self.meta: dict = self._new_meta(self.seed)
@@ -1014,8 +1057,9 @@ class RadixNet(GraphModel):
             costs=traversal_costs(graph, traversal, penalty_scale, merit_scale),
         )
         if lead:
-            result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
-        result.full_text = prefix + result.text
+            joined = self.encoding.join(lead, result.text)
+            result.text = joined if cap is None else self.encoding.truncate(joined, cap)
+        result.full_text = self.encoding.join(prefix, result.text)
         return result
 
 
@@ -1265,6 +1309,11 @@ class RadixNet(GraphModel):
             "nodes": g.num_nodes(),
             "edges": g.num_edges(),
             "trigrams": g.num_trigrams(),
+            "grams": g.num_trigrams(),
+            "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "ngram": self.encoding.n,
+            "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
             "inverted": g.inverted,
             "backend": self.backend.name,
@@ -1298,7 +1347,7 @@ class RadixNet(GraphModel):
             raise ValueError(f"unsupported {MODEL_FORMAT} model version {version}")
         graph = RadixCyclicGraph.from_dict(d["graph"])
         model = cls(seed=graph.seed, backend=backend, device=device)
-        model.graph = graph
+        model._adopt(graph)
         model.history = [dict(r) for r in d.get("history", [])]
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
@@ -1347,9 +1396,12 @@ def model_class(kind: str | None) -> type[GraphModel]:
     return classes[key]
 
 
-def new_model(kind: str | None = None, seed: int = 0, backend: str = "auto", device: str | None = None) -> GraphModel:
-    """A fresh model of ``kind``."""
-    return model_class(kind)(seed=seed, backend=backend, device=device)
+def new_model(
+    kind: str | None = None, seed: int = 0, backend: str = "auto", device: str | None = None,
+    encoding: Encoding | None = None,
+) -> GraphModel:
+    """A fresh model of ``kind``, in ``encoding`` (the default is character trigrams)."""
+    return model_class(kind)(seed=seed, backend=backend, device=device, encoding=encoding)
 
 
 def model_from_dict(d: dict, backend: str = "auto", device: str | None = None) -> GraphModel:

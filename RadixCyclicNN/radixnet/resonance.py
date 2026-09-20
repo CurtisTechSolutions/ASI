@@ -93,7 +93,7 @@ from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
 from .counter import CyclicCounter
 from .beam import Prediction, default_beam
-from .encoding import WINDOW, Decoder, Encoder
+from .encoding import WINDOW, Decoder, Encoder, Encoding
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .metacog import ABORT, ESCAPE, RIDE, MetaLayer, cycle_signature
 from .model import (
@@ -114,8 +114,8 @@ __all__ = ["RESONANT_MODEL_FORMAT", "TAU", "ResonantGraph", "ResonantNet", "trig
 
 RESONANT_MODEL_FORMAT = "radixnet-resonant"
 TAU = 2.0 * math.pi
-_W = WINDOW
-_OV = WINDOW - 1
+_W = WINDOW       # the default n; a graph's own is graph.encoding.n
+_OV = WINDOW - 1  # and its own overlap graph.encoding.overlap
 _MAX_LOG_PPL = 700.0
 _LOG_UNKNOWN = math.log(1e-6)
 
@@ -164,6 +164,7 @@ class ResonantGraph(RadixCyclicGraph):
         amp_scale: float = 1.0,
         reward_scale: float = 1.0,
         concentration: float = 2.0,
+        encoding: Encoding | None = None,
     ) -> None:
         self.buckets = int(buckets)
         if self.buckets < 1:
@@ -187,7 +188,7 @@ class ResonantGraph(RadixCyclicGraph):
         self._adv_cache: dict[str, int] = {}
         self._phase_costs: dict[tuple[int, int], list[tuple[int, int, float]]] = {}
         self._phase_cache_version = -1
-        super().__init__(seed)
+        super().__init__(seed, encoding=encoding)
 
     # -- the phase -----------------------------------------------------------
 
@@ -209,10 +210,8 @@ class ResonantGraph(RadixCyclicGraph):
         change which trigrams exist - and makes a walk's phase equal
         :meth:`text_bucket` of the text it emitted.
         """
-        if len(label) < _W:
-            return 0
         adv = self.trigram_advance
-        return sum(adv(label[i : i + _W]) for i in range(len(label) - _OV)) % self.buckets
+        return sum(adv(g) for g in self.encoding.encode(label)) % self.buckets
 
     def node_advance(self, node: int, label: str) -> int:
         """:meth:`label_advance` of a real node; 0 for START and END.
@@ -225,10 +224,8 @@ class ResonantGraph(RadixCyclicGraph):
 
     def text_bucket(self, text: str, start: int = 0) -> int:
         """Phase of a piece of text - the bucket a walk that emitted it would carry."""
-        if len(text) < _W:
-            return start % self.buckets
         adv = self.trigram_advance
-        total = sum(adv(text[i : i + _W]) for i in range(len(text) - _OV))
+        total = sum(adv(g) for g in self.encoding.encode(text))
         return (start + total) % self.buckets
 
     def bucket_phase(self, bucket: int) -> float:
@@ -666,6 +663,7 @@ class ResonantNet(GraphModel):
         teach_back: bool = False,
         back_strength: float = 0.25,
         back_ceiling: float = 0.10,
+        encoding: Encoding | None = None,
     ) -> None:
         self.seed = int(seed)
         self.teach_back = bool(teach_back)
@@ -681,11 +679,11 @@ class ResonantNet(GraphModel):
         self.graph = ResonantGraph(
             seed=self.seed, buckets=buckets, period=period, kick_scale=kick_scale,
             resonance_scale=resonance_scale, amp_scale=amp_scale, reward_scale=reward_scale,
-            concentration=concentration,
+            concentration=concentration, encoding=encoding,
         )
         self.metacog = MetaLayer()
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
+        self.encoder = Encoder(encoding=self.graph.encoding)
+        self.decoder = Decoder(encoding=self.graph.encoding)
         # nothing numeric runs on a device; backend / device are accepted for interface parity with RadixNet
         self.backend = get_backend("python", None)
         self.history: list[dict] = []
@@ -1220,16 +1218,18 @@ class ResonantNet(GraphModel):
                 temperature=temperature, rng=rng, costs=costs,
             )
             top, bottom, expanded, best = [walk], [], walk.expanded, walk
+        enc = self.encoding
         for result in top + bottom:
             if lead:
-                result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
-            result.full_text = prefix + result.text
+                joined = enc.join(lead, result.text)
+                result.text = joined if cap is None else enc.truncate(joined, cap)
+            result.full_text = enc.join(prefix, result.text)
         if best is None:
             best = PathResult(
-                text=lead if cap is None else lead[: cap or 0],
+                text=lead if cap is None else enc.truncate(lead, cap or 0),
                 labels=[graph.labels[node]], node_ids=[node],
             )
-            best.full_text = prefix + best.text
+            best.full_text = enc.join(prefix, best.text)
         return Prediction(
             text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
             step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end,
@@ -1244,7 +1244,7 @@ class ResonantNet(GraphModel):
         out of the middle of a compressed node is impossible) or the edge does
         not exist - the phase-aware twin of :meth:`GraphModel._edge_log_prob`.
         """
-        if p != START and offset + _W != len(self.graph.labels[p]):
+        if p != START and offset + self.encoding.n != self.graph.label_len(p):
             return None
         for child, _edge, cost in self.graph.child_costs_at(p, bucket):
             if child == c:
@@ -1293,7 +1293,7 @@ class ResonantNet(GraphModel):
             step_penalty=step_penalty, traversal=traversal, penalty_scale=penalty_scale,
             merit_scale=merit_scale,
         )
-        return [_whole_text(result, prefix) for result in found.top]
+        return [_whole_text(result, prefix, self.encoding) for result in found.top]
 
     def score(self, text: str) -> dict:
         """Log-probability of ``text`` under the model, phase included.
@@ -1400,6 +1400,11 @@ class ResonantNet(GraphModel):
             "nodes": graph.num_nodes(),
             "edges": graph.num_edges(),
             "trigrams": graph.num_trigrams(),
+            "grams": graph.num_trigrams(),
+            "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "ngram": self.encoding.n,
+            "stride": self.encoding.stride,
             "compression_ratio": graph.compression_ratio(),
             "inverted": graph.inverted,
             "backend": self.backend.name,
@@ -1452,7 +1457,7 @@ class ResonantNet(GraphModel):
         if d.get("format") != RESONANT_MODEL_FORMAT:
             raise ValueError(f"not a {RESONANT_MODEL_FORMAT} model document")
         model = cls(seed=int(d.get("meta", {}).get("seed", 0)), backend=backend, device=device)
-        model.graph = ResonantGraph.from_dict(d["graph"])
+        model._adopt(ResonantGraph.from_dict(d["graph"]))
         model.metacog = MetaLayer.from_dict(d.get("metacog"))
         cycles = d.get("cycles") or {}
         model.teach_back = bool(cycles.get("teach_back", False))

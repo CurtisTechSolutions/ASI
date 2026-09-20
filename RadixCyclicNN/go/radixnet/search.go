@@ -64,8 +64,8 @@ func (r *PathResult) Probability() float64 {
 	return math.Exp(-r.Cost)
 }
 
-// startEmission is the number of characters the start node emits (its
-// remainder after the matched trigram); START and END emit nothing.
+// startEmission is the number of units the start node emits (its remainder
+// after the matched gram); START and END emit nothing.
 func startEmission(g *Graph, startNode, startOffset int) (int, error) {
 	if startNode < 0 || startNode >= len(g.Labels) || !g.Alive[startNode] {
 		return 0, fmt.Errorf("start node %d is not alive", startNode)
@@ -73,7 +73,7 @@ func startEmission(g *Graph, startNode, startOffset int) (int, error) {
 	if startNode == Start || startNode == End {
 		return 0, nil
 	}
-	remainder := g.labelLen[startNode] - (startOffset + Window)
+	remainder := g.labelLen[startNode] - (startOffset + g.Enc.N)
 	if startOffset < 0 || remainder < 0 {
 		return 0, fmt.Errorf("start_offset %d out of range for label %q", startOffset, g.Labels[startNode])
 	}
@@ -81,7 +81,8 @@ func startEmission(g *Graph, startNode, startOffset int) (int, error) {
 }
 
 // buildResult decodes a node path into a PathResult.  includeContext nil
-// defaults to "true from START, false otherwise"; maxChars < 0 means no cap.
+// defaults to "true from START, false otherwise"; maxChars < 0 means no cap
+// (and counts the encoding's units, so words under a word encoding).
 func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxChars, expanded int, includeContext *bool) *PathResult {
 	labels := make([]string, len(nodeIDs))
 	for i, n := range nodeIDs {
@@ -102,9 +103,9 @@ func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxC
 			real = append(real, labels[i])
 		}
 	}
-	text := DecodePath(real, offset, ctx)
+	text := g.DecodePath(real, offset, ctx)
 	if maxChars >= 0 {
-		text = truncateRunes(text, maxChars)
+		text = g.Enc.Truncate(text, maxChars)
 	}
 	if stepCosts == nil {
 		stepCosts = []float64{}
@@ -116,9 +117,10 @@ func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxC
 }
 
 // SampleWalk is a stochastic walk sampling each child from softmax(-cost /
-// temperature); temperature 0 is greedy.  maxChars < 0 means no limit; rng nil
-// uses the graph's own generator; costs nil reads the graph's own cost
-// function, and the punishment traversal hands in its own (see penalty.go).
+// temperature); temperature 0 is greedy.  maxChars < 0 means no limit (in the
+// encoding's units); rng nil uses the graph's own generator; costs nil reads
+// the graph's own cost function, and the punishment traversal hands in its own
+// (see penalty.go).
 func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn) (*PathResult, error) {
 	if temperature < 0 {
 		return nil, fmt.Errorf("temperature must be >= 0")
@@ -183,7 +185,7 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 		stepCosts = append(stepCosts, pick.Cost)
 		nodeIDs = append(nodeIDs, pick.Child)
 		if pick.Child != End {
-			chars += g.labelLen[pick.Child] - Overlap
+			chars += g.labelLen[pick.Child] - g.Enc.Overlap()
 		}
 		cameFrom = node
 		node = pick.Child

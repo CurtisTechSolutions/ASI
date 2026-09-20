@@ -1,9 +1,15 @@
 # radixnet
 
 The Python package: a **self-compressing cyclic-graph neural network**. Nodes
-hold character labels, edges hold weights, prediction is a shortest path, and a
-unary chain of nodes merges itself back into one — so the structure compresses
-as it learns.
+hold labels, edges hold weights, prediction is a shortest path, and a unary
+chain of nodes merges itself back into one — so the structure compresses as it
+learns.
+
+A graph reads text in its own `Encoding` (`radixnet.Encoding`), fixed when it is
+created and carried in its file: character trigrams by default, and any n, any
+stride (groups of four or five letters) or whole words instead —
+`new_model("count", encoding=Encoding(unit=WORDS, n=2))`, or `--encoding
+word:2:1` on the CLI. All four model kinds share the graph, so all four have it.
 
 **Standard library only.** `torch` accelerates it if installed and is never
 required; Pillow, diffusers and a speech-to-text package are optional extras for
@@ -19,7 +25,7 @@ does what.
 |---|---|
 | `graph.py` | `RadixCyclicGraph` — the self-compressing cyclic graph: split, merge, the invariants |
 | `activation.py` | the parametric sine `f(x) = a·sin(b(x−h)) + k`, all four parameters learnable per node |
-| `encoding.py` | the sliding-window character encoding (trigrams) and its inverse |
+| `encoding.py` | `Encoding` — how a text becomes grams and comes back: the unit (characters or words), the n of the n-gram and the stride (1 = the sliding window, n = non-overlapping groups), with the encoder and decoder halves |
 | `counter.py` | cyclic counters — the odometer every growing integer in the model runs on, wrapping at `10^15` and counting the reset |
 | `backend.py` | the training backends and the one-hop learning rule |
 | `backend_torch.py` | the same rule fully vectorised over a mini-batch, on `cuda` / `mps` / `cpu`. Optional |

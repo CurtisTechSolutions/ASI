@@ -231,10 +231,10 @@ type streamStats struct {
 // waiting for their turn at the sequencer, which is what keeps a corpus of any
 // size from piling up in memory ahead of the counting.  The parts themselves
 // stream in corpus order on one reader, or all at once on a goroutine each
-// with parallelParts.  Texts shorter than a trigram are dropped and counted.
-// Returns once every reader and every chunk goroutine finished; the first
-// error wins.
-func runParts(parts Parts, chunkSize, workers, inflight int, parallelParts bool, stats *streamStats, seq *sequencer, fn func(part, idx int, chunk []string) error) error {
+// with parallelParts.  Texts too short to hold one gram of enc are dropped and
+// counted.  Returns once every reader and every chunk goroutine finished; the
+// first error wins.
+func runParts(parts Parts, enc Encoding, chunkSize, workers, inflight int, parallelParts bool, stats *streamStats, seq *sequencer, fn func(part, idx int, chunk []string) error) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -305,14 +305,14 @@ func runParts(parts Parts, chunkSize, workers, inflight int, parallelParts bool,
 			readers.Add(1)
 			go func(part int) {
 				defer readers.Done()
-				streamPart(parts, part, chunkSize, stats, seq, &wg, &firstErr, setErr, acquireFor, fn)
+				streamPart(parts, enc, part, chunkSize, stats, seq, &wg, &firstErr, setErr, acquireFor, fn)
 			}(part)
 			if firstErr.Load() != nil {
 				break
 			}
 			continue
 		}
-		streamPart(parts, part, chunkSize, stats, seq, &wg, &firstErr, setErr, acquireFor, fn)
+		streamPart(parts, enc, part, chunkSize, stats, seq, &wg, &firstErr, setErr, acquireFor, fn)
 		if firstErr.Load() != nil {
 			break
 		}
@@ -329,7 +329,7 @@ func runParts(parts Parts, chunkSize, workers, inflight int, parallelParts bool,
 func DefaultInflight() int { return 2 * NumCPU }
 
 // streamPart reads one part into chunks, spawning a goroutine per chunk.
-func streamPart(parts Parts, part, chunkSize int, stats *streamStats, seq *sequencer, wg *sync.WaitGroup, firstErr *atomic.Value, setErr func(error), acquire func(part int), fn func(part, idx int, chunk []string) error) {
+func streamPart(parts Parts, enc Encoding, part, chunkSize int, stats *streamStats, seq *sequencer, wg *sync.WaitGroup, firstErr *atomic.Value, setErr func(error), acquire func(part int), fn func(part, idx int, chunk []string) error) {
 	idx := 0
 	chunk := make([]string, 0, chunkSize)
 	flush := func() {
@@ -354,12 +354,12 @@ func streamPart(parts Parts, part, chunkSize int, stats *streamStats, seq *seque
 		if firstErr.Load() != nil {
 			return errStop
 		}
-		if runeLen(t) < Window {
+		if enc.Len(t) < enc.N {
 			atomic.AddInt64(&stats.skippedShort, 1)
 			return nil
 		}
 		atomic.AddInt64(&stats.texts, 1)
-		atomic.AddInt64(&stats.chars, int64(runeLen(t)))
+		atomic.AddInt64(&stats.chars, int64(enc.Len(t)))
 		chunk = append(chunk, t)
 		if len(chunk) >= chunkSize {
 			flush()

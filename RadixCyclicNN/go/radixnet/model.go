@@ -138,12 +138,23 @@ func (m *Model) metaAddFloat(key string, delta float64) { m.Meta[key] = toFloat(
 
 // -- text helpers ---------------------------------------------------------------------------
 
-// cleanTexts drops texts shorter than a trigram; returns (usable, skipped).
-func cleanTexts(texts []string) ([]string, int) {
+// Encoding is how this model turns text into grams and back (Graph.Enc).
+func (m *Model) Encoding() Encoding {
+	if m.G == nil {
+		return DefaultEncoding()
+	}
+	return m.G.Enc
+}
+
+// Encode cuts a text into this model's grams.
+func (m *Model) Encode(text string) []string { return m.Encoding().Encode(text) }
+
+// cleanTexts drops texts too short to hold a single gram; returns (usable, skipped).
+func cleanTexts(enc Encoding, texts []string) ([]string, int) {
 	kept := make([]string, 0, len(texts))
 	skipped := 0
 	for _, t := range texts {
-		if runeLen(t) < Window {
+		if enc.Len(t) < enc.N {
 			skipped++
 		} else {
 			kept = append(kept, t)
@@ -154,8 +165,9 @@ func cleanTexts(texts []string) ([]string, int) {
 
 // encodeAll encodes texts on the worker goroutines.
 func (m *Model) encodeAll(texts []string) [][]string {
+	enc := m.Encoding()
 	grams := make([][]string, len(texts))
-	parallelFor(len(texts), m.workers(), func(i int) { grams[i] = Encode(texts[i]) })
+	parallelFor(len(texts), m.workers(), func(i int) { grams[i] = enc.Encode(texts[i]) })
 	return grams
 }
 
@@ -474,7 +486,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 	// the first included - walks the same transitions
 	var stats streamStats
 	seq := newSequencer(parts.Len())
-	err = runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &stats, seq, func(part, idx int, chunk []string) error {
+	err = runParts(parts, m.Encoding(), chunkSize, workers, opts.Inflight, opts.ParallelParts, &stats, seq, func(part, idx int, chunk []string) error {
 		grams := m.encodeAll(chunk)
 		novel := make([]bool, len(chunk))
 		parallelFor(len(chunk), workers, func(i int) {
@@ -513,7 +525,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		var chunks int64
 		var passStats streamStats
 		seq := newSequencer(parts.Len())
-		err := runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
+		err := runParts(parts, m.Encoding(), chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
 			atomic.AddInt64(&chunks, 1)
 			grams := m.encodeAll(chunk)
 			perText := make([][]Transition, len(chunk))
@@ -726,7 +738,7 @@ func (m *Model) pathsOf(texts []string) ([][]int, error) {
 	g := m.G
 	paths := make([][]int, 0, len(texts))
 	for _, text := range texts {
-		grams := Encode(text)
+		grams := g.Encode(text)
 		if grams == nil {
 			continue
 		}
@@ -756,7 +768,7 @@ type InvertPathsResult struct {
 // InvertPaths (failures): every edge of a text's path loses strength * 2 *
 // amount reward; amounts nil means 1 for every text.
 func (m *Model) InvertPaths(texts []string, amounts []float64, strength float64) (*InvertPathsResult, error) {
-	texts, _ = cleanTexts(texts)
+	texts, _ = cleanTexts(m.Encoding(), texts)
 	if amounts == nil {
 		amounts = make([]float64, len(texts))
 		for i := range amounts {
@@ -821,20 +833,32 @@ func (m *Model) InvertPaths(texts []string, amounts []float64, strength float64)
 
 // -- prediction ------------------------------------------------------------------------------------
 
-// locate finds where prefix ends in the graph: (node, offset, matched characters of the located trigram).
+// locate finds where prefix ends in the graph: (node, offset, matched units of
+// the located gram).
 func (m *Model) locate(prefix string) (node, offset, matched int) {
 	g := m.G
-	runes := []rune(prefix)
-	n := len(runes)
+	enc := g.Enc
+	u := enc.Units(prefix)
+	n := u.Len()
 	if n == 0 {
 		return Start, 0, 0
 	}
-	if n >= Window {
-		if nd, off, ok := g.Lookup(string(runes[n-Window:])); ok {
-			return nd, off, Window
+	if n >= enc.N {
+		// the gram the prefix ends on, then - when the stride skips it - the
+		// last gram of the prefix's own grid
+		if nd, off, ok := g.Lookup(u.Slice(n-enc.N, n)); ok {
+			return nd, off, enc.N
 		}
-		for _, k := range []int{Window - 1, 1} {
-			if nd, off, ok := m.bestTrigram(string(runes[n-k:])); ok {
+		if aligned := (n - enc.N) / enc.Stride * enc.Stride; aligned != n-enc.N {
+			if nd, off, ok := g.Lookup(u.Slice(aligned, aligned+enc.N)); ok {
+				return nd, off, enc.N
+			}
+		}
+		for _, k := range []int{enc.N - 1, 1} {
+			if k < 1 || k >= enc.N {
+				continue
+			}
+			if nd, off, ok := m.bestGram(u.Slice(n-k, n)); ok {
 				return nd, off, k
 			}
 		}
@@ -846,14 +870,14 @@ func (m *Model) locate(prefix string) (node, offset, matched int) {
 	return Start, 0, 0
 }
 
-// bestTrigram is the most visited (node, offset) holding a trigram that starts with key.
-func (m *Model) bestTrigram(key string) (int, int, bool) {
+// bestGram is the most visited (node, offset) holding a gram that starts with key.
+func (m *Model) bestGram(key string) (int, int, bool) {
 	g := m.G
 	found := false
 	var best loc
 	var bestRank [3]int64
 	for t, l := range g.index {
-		if len(t) >= len(key) && t[:len(key)] == key {
+		if g.Enc.HasUnitPrefix(t, key) {
 			rank := [3]int64{-int64(g.NodeCount(l.node).Float()), int64(l.node), int64(l.off)}
 			if !found || rank[0] < bestRank[0] || (rank[0] == bestRank[0] && (rank[1] < bestRank[1] || (rank[1] == bestRank[1] && rank[2] < bestRank[2]))) {
 				best, bestRank, found = l, rank, true
@@ -868,7 +892,7 @@ func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 	g := m.G
 	best, bestCount := -1, Counter{Value: -1}
 	for node := 2; node < len(g.Labels); node++ {
-		if g.Alive[node] && len(g.Labels[node]) >= len(prefix) && g.Labels[node][:len(prefix)] == prefix {
+		if g.Alive[node] && g.Enc.HasUnitPrefix(g.Labels[node], prefix) {
 			if c := g.NodeCount(node); bestCount.Less(c) {
 				best, bestCount = node, c
 			}
@@ -878,12 +902,12 @@ func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 }
 
 // prefixStart is (node, offset, lead): where the prefix ends and the unmatched
-// remainder of the located trigram, which every predicted path starts with.
+// remainder of the located gram, which every predicted path starts with.
 func (m *Model) prefixStart(prefix string) (int, int, string) {
 	node, offset, matched := m.locate(prefix)
 	lead := ""
-	if node != Start && matched < Window {
-		lead = runeSlice(m.G.Labels[node], offset+matched, offset+Window)
+	if node != Start && matched < m.G.Enc.N {
+		lead = m.G.Enc.Slice(m.G.Labels[node], offset+matched, offset+m.G.Enc.N)
 	}
 	return node, offset, lead
 }
@@ -1040,14 +1064,15 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 		}
 		top, bottom, expanded, width = []*PathResult{one}, []*PathResult{}, one.Expanded, 0
 	}
+	enc := g.Enc
 	fix := func(r *PathResult) {
 		if lead != "" {
-			r.Text = lead + r.Text
+			r.Text = enc.Join(lead, r.Text)
 			if cap >= 0 {
-				r.Text = truncateRunes(r.Text, cap)
+				r.Text = enc.Truncate(r.Text, cap)
 			}
 		}
-		r.FullText = prefix + r.Text
+		r.FullText = enc.Join(prefix, r.Text)
 	}
 	for _, r := range top {
 		fix(r)
@@ -1061,10 +1086,10 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 	} else {
 		text := lead
 		if cap >= 0 {
-			text = truncateRunes(lead, cap)
+			text = enc.Truncate(lead, cap)
 		}
 		best = &PathResult{Text: text, Labels: []string{g.Labels[node]}, NodeIDs: []int{node}, StepCosts: []float64{}}
-		best.FullText = prefix + best.Text
+		best.FullText = enc.Join(prefix, best.Text)
 	}
 	pred := &Prediction{PathResult: *best, Top: top, Bottom: bottom, K: k, Beam: width, Mode: mode, Traversal: traversal}
 	pred.Expanded = expanded
@@ -1117,7 +1142,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
 	whole := func(r *PathResult) *PathResult {
-		r.FullText = o.Prefix + r.Text
+		r.FullText = m.Encoding().Join(o.Prefix, r.Text)
 		r.Text = r.FullText
 		return r
 	}
@@ -1168,11 +1193,11 @@ type Score struct {
 	UnknownTransitions int     `json:"unknown_transitions"`
 }
 
-// edgeLogProb is log P(c | p) for the edge taken from p's trigram at offset,
-// or ok=false when p is not positioned at its last trigram or the edge is missing.
+// edgeLogProb is log P(c | p) for the edge taken from p's gram at offset,
+// or ok=false when p is not positioned at its last gram or the edge is missing.
 func (m *Model) edgeLogProb(p, offset, c int) (float64, bool) {
 	g := m.G
-	if p != Start && offset+Window != g.labelLen[p] {
+	if p != Start && offset+g.Enc.N != g.labelLen[p] {
 		return 0, false
 	}
 	e, ok := g.Edge(p, c)
@@ -1182,13 +1207,14 @@ func (m *Model) edgeLogProb(p, offset, c int) (float64, bool) {
 	return -g.EdgeCost(e), true
 }
 
-// Score walks the text START -> ... -> END; unknown trigrams, missing edges and
-// transitions that would need a split cost log(UnknownProb).
+// Score walks the text START -> ... -> END; unknown grams, missing edges and
+// transitions that would need a split cost log(UnknownProb).  Chars is the
+// length in the encoding's units - characters, or words under a word encoding.
 func (m *Model) Score(text string) Score {
 	g := m.G
 	g.Prepare()
-	grams := Encode(text)
-	chars := runeLen(text)
+	grams := g.Encode(text)
+	chars := g.Enc.Len(text)
 	if grams == nil {
 		return Score{Chars: chars}
 	}
@@ -1205,7 +1231,7 @@ func (m *Model) Score(text string) Score {
 			lost = true
 			continue
 		}
-		if !lost && l.node == node && l.off == offset+1 {
+		if !lost && l.node == node && l.off == offset+g.Enc.Stride {
 			offset = l.off
 			continue
 		}
@@ -1270,6 +1296,11 @@ func (m *Model) Stats() map[string]any {
 		"nodes":                   g.NumNodes(),
 		"edges":                   g.NumEdges(),
 		"trigrams":                g.NumTrigrams(),
+		"grams":                   g.NumGrams(),
+		"encoding":                g.Enc.String(),
+		"unit":                    string(g.Enc.Unit),
+		"ngram":                   g.Enc.N,
+		"stride":                  g.Enc.Stride,
 		"compression_ratio":       g.CompressionRatio(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",

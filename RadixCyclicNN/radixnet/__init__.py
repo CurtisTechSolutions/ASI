@@ -29,7 +29,9 @@ from .backend import (
     torch_available,
 )
 from .checkpoint import CheckpointManager
-from .encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
+from .encoding import (
+    CHARS, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
+)
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict
@@ -76,7 +78,7 @@ __all__ = [
     "DEFAULT_A", "DEFAULT_B", "DEFAULT_H", "DEFAULT_K",
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
-    "END_LABEL", "START_LABEL", "WINDOW",
+    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "Encoding", "parse_encoding",
     "SPEECH_TOKEN", "SPEECH_CODECS", "SPEECH_RATE", "ASR_BACKENDS", "Audio", "SpeechError",
     "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",

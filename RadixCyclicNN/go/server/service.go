@@ -12,7 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
@@ -114,11 +113,14 @@ func (j *Job) ToDict() map[string]any {
 
 // Options configure a Service.
 type Options struct {
-	ModelPath     string
-	Seed          int64
-	Workers       int
-	Exact         bool
-	UploadDir     string
+	ModelPath string
+	Seed      int64
+	Workers   int
+	Exact     bool
+	UploadDir string
+	// Encoding is how a model created here reads text (a model loaded from
+	// ModelPath brings its own); the zero value is the character trigram.
+	Encoding      radixnet.Encoding
 	CheckpointDir string
 	Keep          int
 	Quiet         bool
@@ -205,7 +207,12 @@ func NewService(opts Options) (*Service, error) {
 		}
 	}
 	if m == nil {
-		fresh, err := radixnet.NewModel(opts.Seed, radixnet.DefaultGraphOptions())
+		graph := radixnet.DefaultGraphOptions()
+		graph.Encoding = opts.Encoding.WithDefaults()
+		if err := graph.Encoding.Validate(); err != nil {
+			return nil, err
+		}
+		fresh, err := radixnet.NewModel(opts.Seed, graph)
 		if err != nil {
 			return nil, err
 		}
@@ -555,32 +562,38 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 // file and the Python implementation all assume the same number, so a model
 // trained at one window could not be read at another.
 func (s *Service) Encoding() map[string]any {
+	enc := s.model.Encoding()
 	return map[string]any{
-		"window": radixnet.Window, "stride": 1, "overlap": radixnet.Overlap,
+		"encoding": enc.String(), "unit": string(enc.Unit),
+		"window": enc.N, "ngram": enc.N, "stride": enc.Stride, "overlap": enc.Overlap(),
 		"start_label": radixnet.StartLabel, "end_label": radixnet.EndLabel, "back_label": radixnet.BackLabel,
-		"configurable": false,
+		"configurable": true,
 		"note": fmt.Sprintf(
-			"Text goes in as overlapping windows of %d characters, stride 1, and comes back out of the "+
-				"(possibly compressed) node labels along a path. The window is part of the model format, "+
-				"not a setting.", radixnet.Window),
+			"Text goes in as %s, and comes back out of the (possibly compressed) node labels along a "+
+				"path. The encoding is fixed for a model's life - every label is written in it - so it is "+
+				"chosen when a model is made: POST /api/reset with {\"encoding\": \"word:2:1\"}, or "+
+				"{unit, ngram, stride}.", enc.Describe()),
 	}
 }
 
 // EncodingPreview is POST /api/encoding/preview: one text through the encoder
 // and back through both decoders, and through the graph's own labels.
 func (s *Service) EncodingPreview(text string) (map[string]any, error) {
-	windows := radixnet.Encode(text)
+	enc := s.model.Encoding()
+	windows := enc.Encode(text)
 	if windows == nil {
 		windows = []string{}
 	}
-	decoded := radixnet.DecodeTrigrams(windows)
+	decoded := enc.DecodeGrams(windows)
 	info := s.Encoding()
 	info["text"] = text
-	info["chars"] = utf8.RuneCountInString(text)
+	info["chars"] = enc.Len(text)
 	info["windows"] = windows
 	info["count"] = len(windows)
 	info["decoded"] = decoded
-	info["round_trip"] = decoded == text
+	// what comes back is what the encoding can represent: the text itself under a
+	// sliding character window, its words under a word encoding
+	info["round_trip"] = decoded == enc.Normalize(text)
 	info["kind"] = "count"
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		g := m.G
@@ -597,7 +610,7 @@ func (s *Service) EncodingPreview(text string) (map[string]any, error) {
 		}
 		if !ok {
 			return map[string]any{
-				"known": false, "reason": encodingReason(len(windows), unknown),
+				"known": false, "reason": encodingReason(enc, len(windows), unknown),
 				"labels": []string{}, "node_ids": []int{}, "decoded": "", "nodes": 0, "compressed": 0,
 			}, nil
 		}
@@ -608,14 +621,14 @@ func (s *Service) EncodingPreview(text string) (map[string]any, error) {
 			labels[i] = g.Labels[n]
 			if n != radixnet.Start && n != radixnet.End {
 				real = append(real, labels[i])
-				if utf8.RuneCountInString(labels[i]) > radixnet.Window {
+				if enc.Len(labels[i]) > enc.N {
 					compressed++
 				}
 			}
 		}
 		return map[string]any{
 			"known": true, "reason": nil, "labels": labels, "node_ids": walked,
-			"decoded": radixnet.DecodePath(real, 0, true), "nodes": len(real), "compressed": compressed,
+			"decoded": enc.DecodePath(real, 0, true), "nodes": len(real), "compressed": compressed,
 		}, nil
 	})
 	if err != nil {
@@ -627,9 +640,9 @@ func (s *Service) EncodingPreview(text string) (map[string]any, error) {
 
 // encodingReason says why a text cannot be walked: windows never seen, or a
 // text whose windows are all known that still does not run from START to END.
-func encodingReason(windows int, unknown []string) string {
+func encodingReason(enc radixnet.Encoding, windows int, unknown []string) string {
 	if windows == 0 {
-		return fmt.Sprintf("the text is shorter than one window (%d characters)", radixnet.Window)
+		return fmt.Sprintf("the text is shorter than one window (%d %ss)", enc.N, enc.Unit)
 	}
 	if len(unknown) > 0 {
 		shown := unknown
@@ -766,8 +779,9 @@ func (s *Service) Load(path string) (map[string]any, error) {
 	return s.replaceModel(m)
 }
 
-// Reset replaces the model with a fresh one.
-func (s *Service) Reset(seed *int64, kind string, opts map[string]float64) (map[string]any, error) {
+// Reset replaces the model with a fresh one, in the encoding given (the zero
+// Encoding is the default one: character trigrams).
+func (s *Service) Reset(seed *int64, kind string, opts map[string]float64, enc radixnet.Encoding) (map[string]any, error) {
 	if kind != "" && strings.ToLower(kind) != "count" {
 		return nil, badRequest("the Go server runs the count / reward model only (kind %q is served by the Python server)", kind)
 	}
@@ -775,6 +789,10 @@ func (s *Service) Reset(seed *int64, kind string, opts map[string]float64) (map[
 		return nil, err
 	}
 	g := radixnet.DefaultGraphOptions()
+	g.Encoding = enc.WithDefaults()
+	if err := g.Encoding.Validate(); err != nil {
+		return nil, badRequest("%v", err)
+	}
 	for name, v := range opts {
 		switch name {
 		case "count_scale":
