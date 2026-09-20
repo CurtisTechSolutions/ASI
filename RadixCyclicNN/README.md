@@ -1033,12 +1033,21 @@ and the uploaded files) *and* the network itself:
 python -m radixnet --model model.json mcp        # tools + the network
 python -m radixnet mcp --no-model --offline      # the calculator alone
 python -m radixnet mcp --browser                 # browsing in a real Chrome
+make go-mcp                                      # the Go server, same protocol
 ```
 
-Point a client at it the usual way:
+The **Go port speaks it too** (`go/radixnet/mcp.go`, `radixnet-count mcp`): the
+same protocol revision, the same tool names and schemas, and the same answers
+down to the error text, so a client cannot tell which one it is connected to.
+It offers `radixnet_solve` only when an LLM is reachable, and `radixnet_judge`
+only when the negative network is there — the same rule the Python server
+follows. The Rust port does not speak it.
+
+Point a client at either the usual way:
 
 ```json
 {"mcpServers": {"radixnet": {"command": "python", "args": ["-m", "radixnet", "--model", "model.json", "mcp"]}}}
+{"mcpServers": {"radixnet": {"command": "go/bin/radixnet-count", "args": ["--model", "model.count.json", "mcp"]}}}
 ```
 
 MCP is JSON-RPC 2.0 over a stream, so this is the standard library and nothing

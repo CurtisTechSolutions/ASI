@@ -23,7 +23,7 @@ import (
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/server"
 )
 
-const version = "0.1.0"
+const version = radixnet.Version
 
 // DefaultCountModel and DefaultWordModel are the default --model per kind, so
 // one kind never overwrites another's file.
@@ -234,6 +234,7 @@ commands:
   ollama     a corpus written to order, and the adversarial review (models | corpus | review)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
+  mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client
   version    print the version
 
 global options (before or after the command): --model PATH --kind count|word --json --seed N --workers N --exact --out PATH
@@ -343,6 +344,8 @@ func main() {
 		cmdExplore(rest)
 	case "serve":
 		cmdServe(rest)
+	case "mcp":
+		cmdMCP(rest)
 	case "version":
 		if jsonMode {
 			emit(map[string]any{"version": version, "go": runtime.Version()})

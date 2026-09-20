@@ -24,7 +24,7 @@ split or a merge) takes a write lock.
 
 | directory | what it is |
 |---|---|
-| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools and the LLM clients |
+| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients and the MCP server (`mcp.go`) |
 | `server/` | the HTTP API — the same JSON contract as the Python server, so the prebuilt React frontend runs unchanged against it |
 | `cmd/radixnet-count/` | the CLI binary |
 | `go.mod` | the module — `github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, **no dependencies** |
@@ -42,6 +42,7 @@ go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
 go/bin/radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
 go/bin/radixnet-count --kind word words --limit 20            # the alphabet it has read
 go/bin/radixnet-count --model model.count.json serve          # the API and the frontend
+go/bin/radixnet-count --model model.count.json mcp            # MCP on stdin / stdout, for any client
 python -m radixnet --model model.count.json info              # the Python side reads the same file
 ```
 

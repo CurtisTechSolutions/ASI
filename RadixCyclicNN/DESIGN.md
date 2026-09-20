@@ -3288,7 +3288,22 @@ line, the headers, `Content-Length`, the static files of `frontend/dist` with th
 connection - under the same 30-route JSON contract §12 defines and the Python and Go servers answer, down to
 `engine` naming which one is replying.  `frontend/dist` runs against `radixnet serve` unmodified; the tabs a Rust
 server cannot fill hide themselves on `engine == "rust"`, and what it will not serve says so with a 400 rather than
-a half answer (`/api/model/select` for a kind this binary was not started with, `/api/words` on a character model).
+a half answer (`/api/words` on a character model, `/api/model/select` for a kind no Rust server runs).
+
+Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
+of the port:
+
+* **`/api/model/select` switches kind**, between `count` and `word`, the way the Python service does: the model
+  that was running is *parked* with its unsaved work rather than dropped, and the one selected is whichever comes
+  first of the parked model of that kind, its own file (`<stem>.<kind><ext>`) and a fresh one - which the answer
+  says in `origin`.  Without it a server started on the count model could never reach the Words tab.
+* **A job answers 202 and runs on its own thread.**  `train` and `2nrl` open the job, hand the model to a worker
+  and reply at once, so the frontend follows the run on `/api/job` rather than waiting out a long training run on
+  one blocked request.  The model lock is what makes a second request wait, and `ensure_idle` is what refuses a
+  second job.
+* **The texts of a request may come three ways** - `texts` as a list, `text` as one per line, `files` as the
+  uploads to read, added together (`good` / `good_text` / `good_files` and their `bad` twins for the feedback
+  routes).  A server that reads only the first of the three silently ignores the uploads a client ticked.
 
 Not ported, and **undone** rather than deliberate: the negative network, the tutors and the other teaching loops,
 the agent and its tools, images and speech, and MCP.  One gap is **deliberate**: the LLM clients (Ollama, ChatGPT)

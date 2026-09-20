@@ -55,7 +55,8 @@ the CLI over all of it, and the **HTTP server** the frontend talks to — and, w
 points of 21 bits, which is every code point there is, so the representation
 needed no change). A model trained here continues in Python or in Go and back
 again, and `frontend/dist` runs against `radixnet serve` the same way it runs
-against the other two.
+against the other two — including switching between the two kinds from the
+model selector, which parks the model that was running rather than dropping it.
 
 Not ported: the negative network, the tutors and the other teaching loops, the
 agent and its tools, the LLM clients, images and speech, and MCP. The first

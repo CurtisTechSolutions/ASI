@@ -112,7 +112,12 @@ contract (`../DESIGN.md` §12) and `/api/status` says which one is replying in
 |---|---|
 | `python` | everything: every panel in the list above |
 | `go` | the model, the negative network, the tutor, code, the agent and the LLM clients; no scheduler and no MCP |
-| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Network settings and Graph |
+| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Network settings and Graph, over both kinds |
+
+All three switch model kind from the selector in Network settings: the model
+that was running is kept as it was left, so switching to the word model, back,
+and forward again does not lose unsaved training. Each kind has its own file
+(`model.count.json`, `model.word.json`), and saving follows whichever is active.
 
 A panel whose API the running server does not have **hides itself** rather than
 failing: `App.jsx` reads `engine` from `/api/status` and drops the tabs that

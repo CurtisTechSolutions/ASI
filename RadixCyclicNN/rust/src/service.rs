@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::clock::utc_now;
 use crate::encoding::{char_len, decode_path, encode, BACK_LABEL, END_LABEL, OVERLAP, START_LABEL, WINDOW};
 use crate::graph::{END, FIRST, START};
-use crate::http::{Answer, ApiError, Request, Server};
+use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
 use crate::penalty::{resolve_traversal, DEFAULT_TRAVERSAL, TRAVERSALS};
@@ -75,6 +75,12 @@ impl Job {
 /// The service: one model behind one lock, plus where its files live.
 pub struct Service {
     model: Mutex<Model>,
+    /// The kinds that were active earlier, kept as they were left.
+    ///
+    /// Switching kind parks the model that was running rather than dropping it,
+    /// so a switch away and back does not lose unsaved training - which is what
+    /// the Python service does (`ModelService._parked`).
+    parked: Mutex<Vec<(String, Model)>>,
     job: Mutex<Option<Job>>,
     stop: AtomicBool,
     jobs: AtomicUsize,
@@ -90,6 +96,7 @@ impl Service {
     pub fn new(model: Model, model_path: String, seed: i64, workers: usize) -> Service {
         Service {
             model: Mutex::new(model),
+            parked: Mutex::new(Vec::new()),
             job: Mutex::new(None),
             stop: AtomicBool::new(false),
             jobs: AtomicUsize::new(0),
@@ -104,6 +111,44 @@ impl Service {
     fn with_model<T>(&self, f: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut model)
+    }
+
+    /// Opens a job of `kind` and hands back its id; the caller finishes it.
+    fn start_job(&self, kind: &str) -> String {
+        let id = format!("{kind}-{}", self.jobs.fetch_add(1, Ordering::Relaxed) + 1);
+        let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        *job = Some(Job {
+            id: id.clone(),
+            kind: kind.to_string(),
+            state: "running".to_string(),
+            started_at: utc_now(),
+            ..Default::default()
+        });
+        self.stop.store(false, Ordering::Relaxed);
+        id
+    }
+
+    /// Closes the running job with what the work came back with.
+    fn finish_job(&self, outcome: Result<Vec<Json>, String>) {
+        let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = job.as_mut() else { return };
+        job.finished_at = Some(utc_now());
+        match outcome {
+            Ok(records) => {
+                job.state = "finished".to_string();
+                job.records = records;
+            }
+            Err(message) => {
+                job.state = "failed".to_string();
+                job.error = Some(message);
+            }
+        }
+    }
+
+    /// Saves the active kind to its own file, and says whether it landed.
+    fn autosave(&self) -> bool {
+        let path = self.model_path_for(self.active_kind().0);
+        !path.is_empty() && self.with_model(|m| m.save(&path)).is_ok()
     }
 
     /// Refuses a second job while one is running, the way the Python service does.
@@ -155,16 +200,157 @@ impl Service {
     fn active_kind(&self) -> (&'static str, &'static str, &'static str) {
         let words = self.with_model(|m| m.is_words());
         if words {
-            ("word", "Word n-gram (Rust)", "words")
+            KIND_WORD
         } else {
-            ("count", "Count / reward (Rust)", "chars")
+            KIND_COUNT
         }
     }
+
+    /// Where a kind is saved by default: `model_path` for the kind it names,
+    /// `<stem>.<kind><ext>` otherwise - the rule the Python service follows, so
+    /// the two servers look for the same file.
+    fn model_path_for(&self, kind: &str) -> String {
+        let path = self.model_path.as_str();
+        if path.is_empty() {
+            return String::new();
+        }
+        let (stem, ext) = split_extension(path);
+        // model.count.json, model.word.json: the kind is already in the name
+        if stem.ends_with(&format!(".{kind}")) {
+            return path.to_string();
+        }
+        let stem = match stem.rsplit_once('.') {
+            // .count / .word in the name is the *other* kind's; swap it
+            Some((head, tail)) if tail == "count" || tail == "word" => head,
+            _ => stem,
+        };
+        format!("{stem}.{kind}{ext}")
+    }
+
+    /// The kinds this server has a model for right now, active one first.
+    fn in_memory(&self) -> Vec<String> {
+        let mut kinds = vec![self.active_kind().0.to_string()];
+        let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        kinds.extend(parked.iter().map(|(kind, _)| kind.clone()));
+        kinds
+    }
+
+    /// Makes `kind` the active model and says where it came from.
+    ///
+    /// The one that was running is parked with its unsaved work; the new one is
+    /// whichever comes first of the parked model of that kind, its file, and a
+    /// fresh one. Same order, same words, as the Python service's `select_kind`.
+    fn select_kind(&self, kind: &str) -> Result<&'static str, ApiError> {
+        self.ensure_idle()?;
+        let (active, ..) = self.active_kind();
+        if kind == active {
+            return Ok("active");
+        }
+        let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        let (origin, mut wanted) = match parked.iter().position(|(name, _)| name == kind) {
+            Some(at) => ("memory", parked.remove(at).1),
+            None => {
+                let path = self.model_path_for(kind);
+                if !path.is_empty() && std::path::Path::new(&path).is_file() {
+                    let found = Model::load(&path)?;
+                    let holds = if found.is_words() { "word" } else { "count" };
+                    if holds != kind {
+                        return Err(ApiError::bad_request(format!(
+                            "{path} holds a {holds} model, not a {kind} one"
+                        )));
+                    }
+                    ("file", found)
+                } else {
+                    (
+                        "new",
+                        Model::new(
+                            self.seed,
+                            GraphOptions {
+                                words: kind == "word",
+                                ..Default::default()
+                            },
+                        )?,
+                    )
+                }
+            }
+        };
+        let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        wanted.workers = model.workers;
+        wanted.g.workers = model.workers;
+        let previous = std::mem::replace(&mut *model, wanted);
+        parked.push((active.to_string(), previous));
+        Ok(origin)
+    }
+}
+
+/// A kind as the API names it: the id, the label and the unit it counts in.
+const KIND_COUNT: (&str, &str, &str) = ("count", "Count / reward (Rust)", "chars");
+const KIND_WORD: (&str, &str, &str) = ("word", "Word n-gram (Rust)", "words");
+
+/// `("model.count", ".json")`, with `.json.gz` kept whole.
+fn split_extension(path: &str) -> (&str, &str) {
+    let Some(dot) = path.rfind('.') else {
+        return (path, "");
+    };
+    if &path[dot..] == ".gz" {
+        if let Some(inner) = path[..dot].rfind('.') {
+            return (&path[..inner], &path[inner..]);
+        }
+    }
+    (&path[..dot], &path[dot..])
+}
+
+impl Service {
+    /// The texts of a request field, the way the Python service reads them
+    /// (`api._texts_and_files`): `<name>` as a list, `<name>_text` as one text
+    /// per line, and `<name>_files` as the uploads to read - all three added
+    /// together, because a client may give any combination.
+    ///
+    /// `train` names its three `texts` / `text` / `files`, which is the one
+    /// place the pattern is spelt differently; `one` and `files` say so.
+    fn texts_of(&self, r: &Request, list: &str, one: &str, files: &str) -> Result<Vec<String>, ApiError> {
+        let mut texts = r.texts(list);
+        texts.extend(r.texts(one));
+        for name in r.texts(files) {
+            texts.extend(self.upload_texts(&name, r.flag("whole_file", false))?);
+        }
+        Ok(texts)
+    }
+
+    /// One upload as training texts: the whole file as a single text, or a text
+    /// per non-empty line.
+    fn upload_texts(&self, name: &str, whole: bool) -> Result<Vec<String>, ApiError> {
+        let dir = self
+            .upload_dir
+            .as_ref()
+            .ok_or_else(|| ApiError::bad_request("no upload directory is configured"))?;
+        let path = safe_upload(dir, name)?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|err| ApiError::bad_request(format!("cannot read upload {name:?}: {err}")))?;
+        if whole {
+            return Ok(vec![content]);
+        }
+        Ok(split_texts(&content, "lines", 0))
+    }
+}
+
+/// An upload's path, with a name that tries to leave the directory refused -
+/// the same plain-name rule the upload and delete routes write by.
+fn safe_upload(dir: &str, name: &str) -> Result<std::path::PathBuf, ApiError> {
+    if !plain_name(name) {
+        return Err(ApiError::bad_request(format!("{name:?} is not an upload name")));
+    }
+    Ok(std::path::Path::new(dir).join(name))
+}
+
+/// A bare file name: no directory, no climbing out of one.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
 }
 
 // -- the routes ---------------------------------------------------------------------------------
 
-fn health(svc: &Service, _r: &Request) -> Answer {
+fn health(svc: &Arc<Service>, _r: &Request) -> Answer {
     let _ = svc;
     Ok(Json::obj([
         ("status", Json::str("ok")),
@@ -173,7 +359,7 @@ fn health(svc: &Service, _r: &Request) -> Answer {
     ]))
 }
 
-fn status(svc: &Service, _r: &Request) -> Answer {
+fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
     let (kind, label, units) = svc.active_kind();
     let mut doc = svc.with_model(|m| stats(m));
     let pairs = match &mut doc {
@@ -217,7 +403,7 @@ fn status(svc: &Service, _r: &Request) -> Answer {
     Ok(doc)
 }
 
-fn model_info(svc: &Service, _r: &Request) -> Answer {
+fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
     let (kind, label, units) = svc.active_kind();
     let weights = svc.with_model(|m| weight_config(&m.g));
     Ok(Json::obj([
@@ -225,37 +411,44 @@ fn model_info(svc: &Service, _r: &Request) -> Answer {
         ("label", Json::str(label)),
         ("units", Json::str(units)),
         ("kinds", svc.kinds()),
-        ("model_path", Json::str(svc.model_path.clone())),
-        ("paths", Json::obj([(kind, Json::str(svc.model_path.clone()))])),
-        ("in_memory", Json::strs([kind])),
+        ("model_path", Json::str(svc.model_path_for(kind))),
+        (
+            "paths",
+            Json::Obj(
+                [KIND_COUNT.0, KIND_WORD.0]
+                    .iter()
+                    .map(|name| (name.to_string(), Json::str(svc.model_path_for(name))))
+                    .collect(),
+            ),
+        ),
+        ("in_memory", Json::strs(svc.in_memory())),
         ("weights", weights),
         ("engine", Json::str(ENGINE)),
     ]))
 }
 
-fn model_select(svc: &Service, r: &Request) -> Answer {
+fn model_select(svc: &Arc<Service>, r: &Request) -> Answer {
     let (active, ..) = svc.active_kind();
     let wanted = r.text("kind", active).to_ascii_lowercase();
-    if wanted != active {
-        if wanted == "count" || wanted == "word" {
-            return Err(ApiError::bad_request(format!(
-                "this Rust server runs the {active} model; the {wanted} model needs `radixnet --kind {wanted} serve`"
-            )));
-        }
+    if wanted.is_empty() {
+        return Err(ApiError::bad_request("'kind' must not be empty"));
+    }
+    if wanted != KIND_COUNT.0 && wanted != KIND_WORD.0 {
         return Err(ApiError::bad_request(format!(
             "the Rust server runs the count / reward model only, over characters or over words \
              (kind {wanted:?} is served by the Python server)"
         )));
     }
+    let origin = svc.select_kind(&wanted)?;
     let mut doc = model_info(svc, r)?;
     if let Json::Obj(pairs) = &mut doc {
-        pairs.push(("origin".to_string(), Json::str("active")));
+        pairs.push(("origin".to_string(), Json::str(origin)));
         pairs.push(("stats".to_string(), svc.with_model(|m| stats(m))));
     }
     Ok(doc)
 }
 
-fn model_weights(svc: &Service, r: &Request) -> Answer {
+fn model_weights(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     let mut options: Vec<(String, f64)> = Vec::new();
     if let Json::Obj(pairs) = &r.body {
@@ -306,7 +499,7 @@ fn path_json(result: &PathResult) -> Json {
     Json::Obj(pairs)
 }
 
-fn predict(svc: &Service, r: &Request) -> Answer {
+fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     let (traversal, penalty_scale, merit_scale) = traversal_of(r)?;
     let max_length = r.body.at("max_length").as_i64();
     let opts = PredictOptions {
@@ -347,7 +540,7 @@ fn predict(svc: &Service, r: &Request) -> Answer {
     ]))
 }
 
-fn generate(svc: &Service, r: &Request) -> Answer {
+fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     let (traversal, penalty_scale, merit_scale) = traversal_of(r)?;
     let seeded = r.body.get("seed").and_then(|v| v.as_i64());
     let opts = GenerateOptions {
@@ -370,8 +563,10 @@ fn generate(svc: &Service, r: &Request) -> Answer {
     ]))
 }
 
-fn score(svc: &Service, r: &Request) -> Answer {
+fn score(svc: &Arc<Service>, r: &Request) -> Answer {
     let texts = match r.body.get("text").and_then(|v| v.as_str()) {
+        // one text is scored whole, newlines and all: `text` is the text here,
+        // not a list of them (the Python server scores it the same way)
         Some(one) => vec![one.to_string()],
         None => r.texts("texts"),
     };
@@ -409,10 +604,10 @@ fn score(svc: &Service, r: &Request) -> Answer {
     Ok(Json::Obj(doc))
 }
 
-fn feedback(svc: &Service, r: &Request) -> Answer {
+fn feedback(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let good = r.texts("good");
-    let bad = r.texts("bad");
+    let good = svc.texts_of(r, "good", "good_text", "good_files")?;
+    let bad = svc.texts_of(r, "bad", "bad_text", "bad_files")?;
     if good.is_empty() && bad.is_empty() {
         return Err(ApiError::bad_request(
             "nothing to learn from: give 'good' (thumbs up) and / or 'bad' (thumbs down)",
@@ -439,29 +634,30 @@ fn feedback(svc: &Service, r: &Request) -> Answer {
     Ok(out)
 }
 
-fn two_nrl(svc: &Service, r: &Request) -> Answer {
+fn two_nrl(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let bad = r.texts("bad");
-    let good = r.texts("good");
+    let bad = svc.texts_of(r, "bad", "bad_text", "bad_files")?;
+    let good = svc.texts_of(r, "good", "good_text", "good_files")?;
     if bad.is_empty() && good.is_empty() {
         return Err(ApiError::bad_request("2NRL needs 'bad' and / or 'good' texts"));
     }
     let strength = r.number("strength", 1.0)?;
     let neg_epochs = r.usize("neg_epochs", 2)?;
     let pos_epochs = r.usize("pos_epochs", 3)?;
-    let out = svc.with_model(|m| -> Result<Json, String> {
-        let (negative, positive) = m.two_nrl(&bad, &good, neg_epochs, pos_epochs, strength)?;
-        Ok(Json::obj([
-            ("negative", Json::Arr(negative.iter().map(|r| r.to_json()).collect())),
-            ("positive", Json::Arr(positive.iter().map(|r| r.to_json()).collect())),
-            ("inverted", Json::Bool(m.g.inverted)),
-            ("stats", stats(m)),
-        ]))
-    })?;
-    Ok(out)
+    svc.start_job("two_nrl");
+    let worker = Arc::clone(svc);
+    std::thread::spawn(move || {
+        let outcome = worker.with_model(|m| m.two_nrl(&bad, &good, neg_epochs, pos_epochs, strength));
+        worker.finish_job(outcome.map(|(negative, positive)| {
+            // one list, the negative phase first, because a job's records are a
+            // list of epochs and 2NRL is two phases of them
+            negative.iter().chain(positive.iter()).map(|r| r.to_json()).collect()
+        }));
+    });
+    Ok(accepted(Json::obj([("job", svc.job_json())])))
 }
 
-fn invert(svc: &Service, _r: &Request) -> Answer {
+fn invert(svc: &Arc<Service>, _r: &Request) -> Answer {
     svc.ensure_idle()?;
     Ok(svc.with_model(|m| {
         m.invert();
@@ -469,7 +665,7 @@ fn invert(svc: &Service, _r: &Request) -> Answer {
     }))
 }
 
-fn compress(svc: &Service, _r: &Request) -> Answer {
+fn compress(svc: &Arc<Service>, _r: &Request) -> Answer {
     svc.ensure_idle()?;
     Ok(svc.with_model(|m| {
         let merges = m.g.compress();
@@ -477,23 +673,14 @@ fn compress(svc: &Service, _r: &Request) -> Answer {
     }))
 }
 
-fn train(svc: &Service, r: &Request) -> Answer {
+fn train(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let mut texts = r.texts("texts");
+    let texts = svc.texts_of(r, "texts", "text", "files")?;
     if texts.is_empty() {
-        for name in r.texts("uploads") {
-            let dir = svc
-                .upload_dir
-                .as_ref()
-                .ok_or_else(|| ApiError::bad_request("no upload directory is configured"))?;
-            let path = std::path::Path::new(dir).join(&name);
-            let content = std::fs::read_to_string(&path)
-                .map_err(|err| ApiError::bad_request(format!("cannot read upload {name:?}: {err}")))?;
-            texts.extend(split_texts(&content, "lines", 0));
-        }
-    }
-    if texts.is_empty() {
-        return Err(ApiError::bad_request("nothing to train on: give 'texts' or 'uploads'"));
+        return Err(ApiError::bad_request(
+            "missing field 'texts' (list of strings), 'text' (string, one text per line) \
+             or 'files' (list of upload names)",
+        ));
     }
     let opts = TrainOptions {
         epochs: r.usize("epochs", 5)?,
@@ -501,64 +688,35 @@ fn train(svc: &Service, r: &Request) -> Answer {
         chunk_size: r.usize("chunk", 0)?,
         phase: None,
     };
-    let id = svc.jobs.fetch_add(1, Ordering::Relaxed) + 1;
-    {
-        let mut job = svc.job.lock().unwrap_or_else(|e| e.into_inner());
-        *job = Some(Job {
-            id: format!("train-{id}"),
-            kind: "train".to_string(),
-            state: "running".to_string(),
-            started_at: utc_now(),
-            ..Default::default()
-        });
-    }
-    svc.stop.store(false, Ordering::Relaxed);
-    // the model is held for the whole run, which is what makes a second request wait
-    let outcome = svc.with_model(|m| m.train(&texts, &opts));
-    let saved = match &outcome {
-        Ok(_) => svc.with_model(|m| m.save(&svc.model_path)).is_ok(),
-        Err(_) => false,
-    };
-    {
-        let mut job = svc.job.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(job) = job.as_mut() {
-            job.finished_at = Some(utc_now());
-            match &outcome {
-                Ok(records) => {
-                    job.state = "finished".to_string();
-                    job.records = records.iter().map(|r| r.to_json()).collect();
-                }
-                Err(message) => {
-                    job.state = "failed".to_string();
-                    job.error = Some(message.clone());
-                }
-            }
+    svc.start_job("train");
+    // the run holds the model for as long as it takes, which is what makes a
+    // second request wait; the answer goes out now, and the frontend follows the
+    // run on /api/job - the same 202 the Python and Go servers answer with
+    let worker = Arc::clone(svc);
+    std::thread::spawn(move || {
+        let outcome = worker.with_model(|m| m.train(&texts, &opts));
+        if outcome.is_ok() {
+            worker.autosave();
         }
-    }
-    let records = outcome?;
-    Ok(Json::obj([
-        ("job", svc.job_json()),
-        ("texts", Json::Int(texts.len() as i64)),
-        ("saved", Json::Bool(saved)),
-        ("records", Json::Arr(records.iter().map(|r| r.to_json()).collect())),
-        ("stats", svc.with_model(|m| stats(m))),
-    ]))
+        worker.finish_job(outcome.map(|records| records.iter().map(|r| r.to_json()).collect()));
+    });
+    Ok(accepted(Json::obj([("job", svc.job_json())])))
 }
 
-fn job(svc: &Service, _r: &Request) -> Answer {
+fn job(svc: &Arc<Service>, _r: &Request) -> Answer {
     Ok(svc.job_json())
 }
 
-fn job_stop(svc: &Service, _r: &Request) -> Answer {
+fn job_stop(svc: &Arc<Service>, _r: &Request) -> Answer {
     svc.stop.store(true, Ordering::Relaxed);
     Ok(svc.job_json())
 }
 
-fn history(svc: &Service, _r: &Request) -> Answer {
+fn history(svc: &Arc<Service>, _r: &Request) -> Answer {
     Ok(svc.with_model(|m| Json::obj([("history", Json::Arr(m.history.iter().map(|r| r.to_json()).collect()))])))
 }
 
-fn graph_view(svc: &Service, r: &Request) -> Answer {
+fn graph_view(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 150)?;
     Ok(svc.with_model(|m| {
         m.g.prepare();
@@ -608,7 +766,7 @@ fn graph_view(svc: &Service, r: &Request) -> Answer {
     }))
 }
 
-fn paths(svc: &Service, r: &Request) -> Answer {
+fn paths(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
     Ok(svc.with_model(|m| {
         let totals = m.g.path_totals();
@@ -630,7 +788,7 @@ fn paths(svc: &Service, r: &Request) -> Answer {
     }))
 }
 
-fn nodes(svc: &Service, r: &Request) -> Answer {
+fn nodes(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 20)?;
     let wanted = r.query("node").map(|s| s.to_string());
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
@@ -676,7 +834,7 @@ fn nodes(svc: &Service, r: &Request) -> Answer {
     Ok(out)
 }
 
-fn words(svc: &Service, r: &Request) -> Answer {
+fn words(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
         if !m.is_words() {
@@ -711,7 +869,7 @@ fn words(svc: &Service, r: &Request) -> Answer {
     Ok(out)
 }
 
-fn encoding(svc: &Service, _r: &Request) -> Answer {
+fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
     let _ = svc;
     Ok(Json::obj([
         ("window", Json::Int(WINDOW as i64)),
@@ -731,7 +889,7 @@ fn encoding(svc: &Service, _r: &Request) -> Answer {
     ]))
 }
 
-fn encoding_preview(svc: &Service, r: &Request) -> Answer {
+fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
     let text = r.text("text", "");
     let (kind, _, units) = svc.active_kind();
     Ok(svc.with_model(|m| {
@@ -816,9 +974,11 @@ fn encoding_preview(svc: &Service, r: &Request) -> Answer {
     }))
 }
 
-fn save(svc: &Service, r: &Request) -> Answer {
+fn save(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let path = r.text("path", &svc.model_path);
+    // the active kind's own file, so saving a word model never lands on the
+    // count model's - the rule the Python service saves by
+    let path = r.text("path", &svc.model_path_for(svc.active_kind().0));
     svc.with_model(|m| m.save(&path))?;
     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     Ok(Json::obj([
@@ -827,9 +987,9 @@ fn save(svc: &Service, r: &Request) -> Answer {
     ]))
 }
 
-fn load(svc: &Service, r: &Request) -> Answer {
+fn load(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let path = r.text("path", &svc.model_path);
+    let path = r.text("path", &svc.model_path_for(svc.active_kind().0));
     let loaded = Model::load(&path)?;
     svc.with_model(|m| {
         let workers = m.workers;
@@ -843,7 +1003,7 @@ fn load(svc: &Service, r: &Request) -> Answer {
     ]))
 }
 
-fn reset(svc: &Service, r: &Request) -> Answer {
+fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     let seed = r.body.at("seed").as_i64().unwrap_or(svc.seed);
     let kind = r.text("kind", svc.active_kind().0);
@@ -867,7 +1027,7 @@ fn reset(svc: &Service, r: &Request) -> Answer {
     ]))
 }
 
-fn uploads(svc: &Service, _r: &Request) -> Answer {
+fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
     let Some(dir) = &svc.upload_dir else {
         return Ok(Json::obj([("uploads", Json::Arr(Vec::new()))]));
     };
@@ -893,13 +1053,13 @@ fn uploads(svc: &Service, _r: &Request) -> Answer {
     Ok(Json::obj([("uploads", Json::Arr(rows))]))
 }
 
-fn upload(svc: &Service, r: &Request) -> Answer {
+fn upload(svc: &Arc<Service>, r: &Request) -> Answer {
     let Some(dir) = &svc.upload_dir else {
         return Err(ApiError::bad_request("no upload directory is configured"));
     };
     let name = r.text("name", "");
     let content = r.text("content", "");
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+    if !plain_name(&name) {
         return Err(ApiError::bad_request("give a plain file name for the upload"));
     }
     std::fs::create_dir_all(dir).map_err(|err| ApiError::bad_request(err.to_string()))?;
@@ -908,19 +1068,19 @@ fn upload(svc: &Service, r: &Request) -> Answer {
     uploads(svc, r)
 }
 
-fn upload_delete(svc: &Service, r: &Request) -> Answer {
+fn upload_delete(svc: &Arc<Service>, r: &Request) -> Answer {
     let Some(dir) = &svc.upload_dir else {
         return Err(ApiError::bad_request("no upload directory is configured"));
     };
     let name = r.text("name", "");
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+    if !plain_name(&name) {
         return Err(ApiError::bad_request("give a plain file name"));
     }
     let _ = std::fs::remove_file(std::path::Path::new(dir).join(&name));
     uploads(svc, r)
 }
 
-fn schedule(svc: &Service, _r: &Request) -> Answer {
+fn schedule(svc: &Arc<Service>, _r: &Request) -> Answer {
     let _ = svc;
     // the count model has no learning rate to schedule, and says so rather than 404ing
     Ok(Json::obj([
@@ -932,7 +1092,7 @@ fn schedule(svc: &Service, _r: &Request) -> Answer {
     ]))
 }
 
-fn traversals(svc: &Service, _r: &Request) -> Answer {
+fn traversals(svc: &Arc<Service>, _r: &Request) -> Answer {
     let _ = svc;
     Ok(Json::obj([
         ("traversals", Json::strs(TRAVERSALS)),

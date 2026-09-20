@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// Version is this implementation's version, kept equal to the Python
+// package's __version__ so a client that asks either one gets the same answer.
+const Version = "0.1.0"
+
 // UnknownProb is the probability charged for a transition the structure does not know.
 const UnknownProb = 1e-6
 

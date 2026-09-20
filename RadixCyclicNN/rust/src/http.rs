@@ -130,10 +130,45 @@ impl From<String> for ApiError {
 }
 
 /// What a route hands back.
+///
+/// A route that answers 200 returns the document alone; one that answers with
+/// another success code (202 for a job that was accepted and is still running,
+/// as the Python and Go servers answer) wraps it with [`accepted`].
 pub type Answer = Result<Json, ApiError>;
 
+/// A successful answer that is not a plain 200: the document and its status.
+///
+/// Only the two job routes use it, and only to say 202 - the code the Python
+/// and Go servers answer `train` and `2nrl` with, because the work has been
+/// accepted rather than finished.
+pub fn accepted(doc: Json) -> Json {
+    Json::Obj(vec![
+        (STATUS_KEY.to_string(), Json::Int(202)),
+        ("body".to_string(), doc),
+    ])
+}
+
+/// The key [`accepted`] marks a status with; no API document has a key like it.
+const STATUS_KEY: &str = "__status";
+
+/// Splits a route's answer into the status and the document it should be sent with.
+fn status_of(doc: Json) -> (u16, Json) {
+    if let Json::Obj(pairs) = &doc {
+        if pairs.len() == 2 && pairs[0].0 == STATUS_KEY {
+            if let (Some(status), body) = (pairs[0].1.as_i64(), pairs[1].1.clone()) {
+                return (status as u16, body);
+            }
+        }
+    }
+    (200, doc)
+}
+
 /// What answers one route: a plain function of the server's state and the request.
-pub type Handler<S> = fn(&S, &Request) -> Answer;
+///
+/// The state arrives as the `Arc` the server holds rather than a borrow of it,
+/// so a route that starts background work can clone it and hand it to a thread
+/// (which is how `train` and `2nrl` answer before the work is done).
+pub type Handler<S> = fn(&Arc<S>, &Request) -> Answer;
 
 /// A server: the routes, and where the prebuilt frontend lives.
 pub struct Server<S> {
@@ -192,7 +227,10 @@ impl<S: Send + Sync + 'static> Server<S> {
         // an API route, the prebuilt frontend, or a 404 that says which
         if let Some(handler) = self.match_route(&request) {
             return match handler(&self.state, &request) {
-                Ok(doc) => write_json(&mut stream, 200, &doc),
+                Ok(doc) => {
+                    let (status, doc) = status_of(doc);
+                    write_json(&mut stream, status, &doc)
+                }
                 Err(err) => write_json(&mut stream, err.status, &error_doc(&err.message)),
             };
         }

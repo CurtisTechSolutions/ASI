@@ -2772,6 +2772,56 @@ versioned and defended.
 
 ---
 
+### D-074 — A port is finished when a client cannot tell which one answered
+
+**Status** Accepted · 2026-09-20 · **Layer** platform · **Beside** D-038, D-072
+
+**Context** "Is everything ported?" had no answer anyone could check. Each
+implementation's README listed what it had, in prose, written when it was
+written. Two gaps found by walking the three surfaces rather than the prose:
+Go had every HTTP route and every CLI command but `mcp` and
+`speech transcribe`; the Rust server had thirty routes that each answered
+*something*, but refused to switch model kind, read only the first of the three
+ways the contract lets a client name its texts, answered a job 200 where the
+other two answer 202, and saved whichever kind was active to the file of the
+kind the binary had started on.
+
+**Decision** Parity is measured against the **surfaces**, not the prose: the
+route list, the CLI command list, and the fields and status code of each route.
+A gap is either closed or named in the decision that owns it, with which of the
+two kinds it is:
+
+* **undone** — portable, not yet done (Rust's negative network, the teaching
+  loops, the agent);
+* **deliberate** — cannot or should not be ported, with the reason (the LLM
+  clients need HTTPS, which D-072's no-dependency rule rules out; learning-rate
+  schedules belong to the sine-activation model, which neither port has, so
+  `radixnet schedule` is a command about a model Go and Rust do not run).
+
+**Rationale** A port that answers every route with *something* looks finished
+from the outside and is not. The three surfaces are enumerable and can be
+diffed in a shell one-liner, which is the only reason the four Rust gaps above
+were found at all — every one of them returned a 200 and a plausible document.
+The distinction between undone and deliberate is what makes the remaining list
+readable: a reader who cannot tell them apart reads every gap as neglect.
+
+**Consequences**
+* Go speaks MCP (`go/radixnet/mcp.go`, `radixnet-count mcp`): the same protocol
+  revision, tool names and schemas as `radixnet/mcp.py`, and the same answers
+  down to the error text — asserted by running both over one message stream.
+  `/api/speech/transcribe` stays Python's, because local Whisper is not a thing
+  a Go binary carries.
+* The Rust server switches kind, parking the model that was running; reads
+  `texts` / `text` / `files` (and the `good_*` / `bad_*` twins); answers 202 for
+  a job it has started on a worker thread; and saves each kind to its own file.
+* The gap lists in `rust/README.md`, `go/README.md` and DESIGN §33 say which
+  kind of gap each remaining item is.
+
+**Lives in** `go/radixnet/mcp.go`, `go/cmd/radixnet-count/mcp.go`,
+`rust/src/service.rs`, `rust/src/http.rs`, `Makefile` (`go-mcp`)
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.

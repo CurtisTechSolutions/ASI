@@ -142,6 +142,9 @@ MODEL_COUNT ?= model.count.json
 go-serve: go-build ## Serve the frontend from the Go count / reward model on http://HOST:PORT (uploads / checkpoints as for `serve`)
 	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
 
+go-mcp: go-build ## The Go MCP server on stdin / stdout: the tools and the network, for any MCP client
+	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) mcp --upload-dir $(UPLOAD_DIR)
+
 ##@ Rust port and the cross-language benchmark
 CARGO ?= cargo
 LIMIT         ?= 10

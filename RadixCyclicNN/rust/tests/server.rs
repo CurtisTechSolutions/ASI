@@ -51,10 +51,27 @@ fn trained(words: bool) -> Model {
     model
 }
 
+/// A directory of this test's own, made fresh: the model files a server writes
+/// and the uploads it reads live here, so no two tests tread on each other.
+fn temp_dir(name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("radixnet-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a test directory");
+    dir.to_string_lossy().into_owned()
+}
+
 /// Starts a server on its own thread and hands back the port it answers on.
 fn serve(model: Model, path: &str) -> u16 {
     let port = free_port();
-    let service = Arc::new(Service::new(model, path.to_string(), 0, 1));
+    let mut service = Service::new(model, path.to_string(), 0, 1);
+    // the uploads live beside the model, so `files` has something to read
+    let uploads = std::path::Path::new(path)
+        .parent()
+        .map(|dir| dir.join("uploads"))
+        .unwrap_or_else(|| std::path::PathBuf::from("uploads"));
+    let _ = std::fs::create_dir_all(&uploads);
+    service.upload_dir = Some(uploads.to_string_lossy().into_owned());
+    let service = Arc::new(service);
     std::thread::spawn(move || {
         let _ = build(service, None).serve("127.0.0.1", port);
     });
@@ -100,7 +117,7 @@ fn post(port: u16, path: &str, body: &str) -> (u16, Json) {
 
 #[test]
 fn the_model_endpoints_answer_the_same_contract() {
-    let port = serve(trained(false), "/tmp/radixnet-test-server.json");
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("server")));
 
     let (status, health) = get(port, "/api/health");
     assert_eq!(status, 200);
@@ -147,7 +164,7 @@ fn the_model_endpoints_answer_the_same_contract() {
 
 #[test]
 fn the_traversals_are_all_three_and_each_one_answers() {
-    let port = serve(trained(false), "/tmp/radixnet-test-traversals.json");
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("traversals")));
     let (_, named) = get(port, "/api/traversals");
     assert_eq!(
         named.at("traversals").to_strings(),
@@ -177,9 +194,135 @@ fn the_traversals_are_all_three_and_each_one_answers() {
     assert_eq!(costs[0], costs[2], "the least-punished traversal changed a price");
 }
 
+/// Switching kind is what the frontend's model selector does, and the word
+/// model has to be reachable from a server started on the count one - otherwise
+/// the Words tab can never appear. The model that was running is kept as it was
+/// left, which is what the Python service does.
+#[test]
+fn the_server_switches_between_the_two_kinds() {
+    let dir = temp_dir("switch");
+    let port = serve(trained(false), &format!("{dir}/model.count.json"));
+
+    let (status, chosen) = post(port, "/api/model/select", r#"{"kind":"word"}"#);
+    assert_eq!(status, 200);
+    assert_eq!(chosen.at("kind").as_str(), Some("word"));
+    assert_eq!(chosen.at("units").as_str(), Some("words"));
+    // nothing was saved under that name yet, so it is a fresh model
+    assert_eq!(chosen.at("origin").as_str(), Some("new"));
+    assert_eq!(chosen.at("in_memory").to_strings(), vec!["word", "count"]);
+    // each kind has its own default file, derived from the one the server was given
+    assert!(chosen
+        .at("paths")
+        .at("word")
+        .as_str()
+        .unwrap_or("")
+        .ends_with("model.word.json"));
+    assert!(chosen
+        .at("paths")
+        .at("count")
+        .as_str()
+        .unwrap_or("")
+        .ends_with("model.count.json"));
+
+    // and it is a working model: trainable, and counted in words
+    let (status, _) = post(
+        port,
+        "/api/train",
+        r#"{"texts":["the cat sat on the mat","the cat sat on the log"],"epochs":3}"#,
+    );
+    assert_eq!(status, 202, "training the word model");
+    for _ in 0..200 {
+        if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let (_, stats) = get(port, "/api/status");
+    assert_eq!(stats.at("units").as_str(), Some("words"));
+    let trained_words = stats.at("nodes").as_i64().unwrap_or(0);
+    assert!(
+        trained_words > 3,
+        "the word model was not trained: {trained_words} nodes"
+    );
+
+    // the character model comes back as it was left, and so does the word one
+    let (_, back) = post(port, "/api/model/select", r#"{"kind":"count"}"#);
+    assert_eq!(back.at("kind").as_str(), Some("count"));
+    assert_eq!(back.at("origin").as_str(), Some("memory"));
+    assert_eq!(back.at("units").as_str(), Some("chars"));
+    let (_, again) = post(port, "/api/model/select", r#"{"kind":"word"}"#);
+    assert_eq!(again.at("origin").as_str(), Some("memory"));
+    assert_eq!(
+        again.at("stats").at("nodes").as_i64(),
+        Some(trained_words),
+        "the parked word model lost its training"
+    );
+
+    // saving follows the active kind, so a word model never lands on the count model's file
+    let (status, saved) = post(port, "/api/save", "{}");
+    assert_eq!(status, 200);
+    assert!(saved.at("saved").as_str().unwrap_or("").ends_with("model.word.json"));
+}
+
+/// Every way the Python contract lets a client name its texts: a list, one text
+/// per line, and the uploads to read - all three, added together.
+#[test]
+fn the_texts_of_a_request_may_come_three_ways() {
+    let dir = temp_dir("texts");
+    let port = serve(trained(false), &format!("{dir}/model.count.json"));
+
+    let (status, _) = post(
+        port,
+        "/api/uploads",
+        r#"{"name":"corpus.txt","content":"the owl flew over the hill
+the fox ran up the hill"}"#,
+    );
+    assert_eq!(status, 200);
+
+    for body in [
+        r#"{"texts":["the cat sat on the mat"],"epochs":1}"#,
+        r#"{"text":"the cat sat on the mat
+the cat ate the rat","epochs":1}"#,
+        r#"{"files":["corpus.txt"],"epochs":1}"#,
+    ] {
+        let (status, _) = post(port, "/api/train", body);
+        assert_eq!(status, 202, "{body}");
+        for _ in 0..200 {
+            if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"), "{body}");
+    }
+
+    // feedback names its three good / good_text / good_files, and reads them the same way
+    let (status, learned) = post(
+        port,
+        "/api/feedback",
+        r#"{"good_text":"the cat sat on the mat","bad_text":"the cat ate the rat","strength":2}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(learned.at("good").as_i64(), Some(1));
+    assert_eq!(learned.at("bad").as_i64(), Some(1));
+
+    // an upload name that tries to leave the directory is refused
+    let (status, error) = post(port, "/api/train", r#"{"files":["../secrets.txt"],"epochs":1}"#);
+    assert_eq!(status, 400);
+    assert!(error.at("error").as_str().unwrap_or("").contains("upload name"));
+
+    // and a request naming none of the three says which three
+    let (status, error) = post(port, "/api/train", r#"{"epochs":1}"#);
+    assert_eq!(status, 400);
+    let says = error.at("error").as_str().unwrap_or("");
+    for field in ["'texts'", "'text'", "'files'"] {
+        assert!(says.contains(field), "{says}");
+    }
+}
+
 #[test]
 fn a_word_model_serves_its_alphabet() {
-    let port = serve(trained(true), "/tmp/radixnet-test-words.json");
+    let port = serve(trained(true), &format!("{}/model.word.json", temp_dir("words")));
     let (status, stats) = get(port, "/api/status");
     assert_eq!(status, 200);
     assert_eq!(stats.at("kind").as_str(), Some("word"));
@@ -201,16 +344,11 @@ fn a_word_model_serves_its_alphabet() {
 
 #[test]
 fn what_it_does_not_serve_says_so() {
-    let port = serve(trained(false), "/tmp/radixnet-test-refusals.json");
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("refusals")));
     // a word model's vocabulary on a character model
     let (status, error) = get(port, "/api/words");
     assert_eq!(status, 400);
     assert!(error.at("error").as_str().unwrap_or("").contains("vocabulary"));
-
-    // a kind this server was not started with
-    let (status, error) = post(port, "/api/model/select", r#"{"kind":"word"}"#);
-    assert_eq!(status, 400);
-    assert!(error.at("error").as_str().unwrap_or("").contains("--kind word"));
 
     // a kind no Rust server runs
     let (status, error) = post(port, "/api/model/select", r#"{"kind":"resonant"}"#);
