@@ -3294,11 +3294,15 @@ while hidden, so they would have disagreed until a reload.
 model that is saved with it, not a setting of a training run, and having it in two places would have had the same
 drift problem - the form that was not touched would keep showing what the function used to be.
 
-**The encoder is read-only on purpose.** The window is the one number here that *looks* like a setting and is
-not: the graph's labels, the split and merge rules, the saved file and the Go port all assume 3, so a model
-trained at one window could not be read at another. Rather than leave that unsaid, the card reports
-`configurable: false` from the server and explains why, and spends its space on making the encoding *visible*
-instead - which is also the clearest demonstration of the radix compression anywhere in the frontend.
+**The encoder is chosen once, not edited.** The encoding *is* a setting now (§34's dial: the unit, the n and the
+stride), but it is one a model is *born* with rather than one it can be moved between: the labels, the split and
+merge rules and the saved file are all measured in its units, so a graph built at `char:3:1` could not be read at
+`word:2:1`. The card therefore reports `configurable: true` with `fixed_for_life: true` and points at
+`POST /api/reset`, which is where a new model under a new encoding is made; changing the dial on a trained model
+would mean silently throwing the training away, and a server that does that without saying so is worse than one
+that refuses. What the card spends its space on is making the encoding *visible* - the grams a text becomes, the
+ones this model has never seen, and the walk through the graph's own labels - which is also the clearest
+demonstration of the radix compression anywhere in the frontend.
 ## 32. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
 
 The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
@@ -3369,7 +3373,14 @@ model answers the two searches differently somewhere, so neither can pass by the
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
 graph and its structural operations, the dual frequency weight function, the judged path contexts, **all three
 traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished one in `src/search.rs`), training,
-prediction, generation, scoring, reward / punish / 2NRL, both alphabets (§34) and **the model file**.  Its binaries
+prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file**.
+
+The dial is the one place the port paid a representation for generality.  A trigram used to be three code points
+packed into a `u64` - `Copy`, hashable, no allocation - which is why its encoding pass allocated nothing and is one
+of the three reasons D-072 measured it faster than Go.  A gram of *any* n over *any* unit is arbitrary text, so the
+index is keyed by the gram as Python and Go key it, and what that costs is measured rather than argued
+(`bench/RESULTS.md`).  `src/encoding.rs` carries `Encoding{unit, n, stride}` and a `Units` view that indexes a text
+once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  Its binaries
 are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes,
 words, info, serve) and `radixnet-bench`.
 
@@ -3383,10 +3394,14 @@ a half answer (`/api/words` on a character model, `/api/model/select` for a kind
 Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
 of the port:
 
-* **`/api/model/select` switches kind**, between `count` and `word`, the way the Python service does: the model
-  that was running is *parked* with its unsaved work rather than dropped, and the one selected is whichever comes
-  first of the parked model of that kind, its own file (`<stem>.<kind><ext>`) and a fresh one - which the answer
-  says in `origin`.  Without it a server started on the count model could never reach the Words tab.
+* **`/api/model/select` switches encoding**, between characters and words, the way the Python service switches
+  kind: an encoding is fixed for a model's life, so changing it means a *different* model, and the one that was
+  running is *parked* with its unsaved work rather than dropped.  The one selected is whichever comes first of the
+  parked model of that encoding, its own file (`<stem>.<unit><ext>`) and a fresh one - which the answer says in
+  `origin`.  A bare `{"kind": "word"}` names a unit and not the other two dials, so they come from the model that
+  unit last had, which is what makes select-word, select-count, select-word come back to the same model rather than
+  to a third.  `POST /api/reset` is where an encoding is *chosen*, as on the other two servers.  Without any of
+  this a server started on characters could never reach the Words tab.
 * **A job answers 202 and runs on its own thread.**  `train` and `2nrl` open the job, hand the model to a worker
   and reply at once, so the frontend follows the run on `/api/job` rather than waiting out a long training run on
   one blocked request.  The model lock is what makes a second request wait, and `ensure_idle` is what refuses a

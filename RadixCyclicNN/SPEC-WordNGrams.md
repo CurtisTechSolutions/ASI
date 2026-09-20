@@ -1,10 +1,23 @@
 # Word n-grams — the same graph over a different alphabet
 
+> **Status: built, by the encoding dial rather than by a kind.** The argument
+> below is unchanged and still right about the model: not one structural rule of
+> the graph mentions a character, so a word n-gram model is this model over a
+> different alphabet. What was built is the *dial* (D-071): `unit` is one of
+> three settings on the ordinary count model (`--encoding word:3:1`), not a kind
+> of its own. So wherever this document says `--kind word`, the format
+> `radixnet-word`, or a vocabulary mapping words to code points, read
+> `--encoding word:3:1`, the ordinary `radixnet-count` format, and *no
+> vocabulary at all* - a gram is text, so the alphabet is whatever the grams are
+> made of. D-073 records why the two designs met and which one was kept. Every
+> cost this document states - normalised whitespace, an unread word - is the
+> dial's cost too.
+
 **Status** Built, 2026-09-20. `DESIGN.md` §34 is what was built and
-`DECISIONS.md` D-073 is why; this document stays as the argument the two were
+`DECISIONS.md` D-071 is why; this document stays as the argument they were
 written from, and §10's table is the test suite
-(`tests/test_wordnet.py`, `go/radixnet/words_test.go`, `rust/tests/words.rs`,
-and the word classes of the two parity suites).
+(`tests/test_encodings_end_to_end.py`, `go/radixnet/words_test.go`,
+`rust/tests/words.rs`, and the word classes of the two parity suites).
 
 **Answers** *"what about word n-grams?"* — and answers it without touching the
 graph, the weight function, the search or any of the three ports' structural

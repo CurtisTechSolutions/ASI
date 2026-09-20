@@ -14,7 +14,6 @@
 
 use std::time::Instant;
 
-use crate::encoding::char_len;
 use crate::graph::GraphOptions;
 use crate::json::Json;
 use crate::model::{Model, PredictOptions, TrainOptions};
@@ -72,7 +71,7 @@ pub fn bench_lines(path: &str) -> Vec<String> {
         .map(|data| {
             data.lines()
                 .map(|line| line.trim().to_string())
-                .filter(|line| char_len(line) >= 3)
+                .filter(|line| line.chars().count() >= 3)
                 .collect()
         })
         .unwrap_or_default();
@@ -84,7 +83,7 @@ pub fn bench_lines(path: &str) -> Vec<String> {
 
 /// Builds deterministic training texts totalling at least `chars` characters.
 pub fn synthetic_corpus(chars: usize, seed: i64, base: &[String]) -> Result<Vec<String>, String> {
-    let lines: Vec<&String> = base.iter().filter(|line| char_len(line) >= 3).collect();
+    let lines: Vec<&String> = base.iter().filter(|line| line.chars().count() >= 3).collect();
     if lines.is_empty() {
         return Err("need at least one base line of >= 3 characters".to_string());
     }
@@ -116,10 +115,10 @@ pub fn synthetic_corpus(chars: usize, seed: i64, base: &[String]) -> Result<Vec<
             }
             parts.join(" ")
         };
-        if char_len(&text) < 3 {
+        if text.chars().count() < 3 {
             text = lines[rng.below(lines.len())].to_string();
         }
-        total += char_len(&text);
+        total += text.chars().count();
         texts.push(text);
     }
     Ok(texts)
@@ -225,7 +224,7 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
     } else {
         o.texts.clone()
     };
-    let total_chars: usize = texts.iter().map(|t| char_len(t)).sum();
+    let total_chars: usize = texts.iter().map(|t| t.chars().count()).sum();
 
     let mut model = Model::new(o.seed, GraphOptions::default())?;
     model.workers = o.workers;

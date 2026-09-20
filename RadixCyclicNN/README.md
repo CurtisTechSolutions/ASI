@@ -42,10 +42,10 @@ and an optional GPU backend (torch) are built in.
 | External tools, browsing, exploring on its own | `agent` / `explore` and the Agent tab: the network calls tools by *writing* them (`<tool>web_fetch {"url": "..."}</tool>`) and reads the answer back as `<result>...</result>`, so a whole attempt is one training text. Ollama writes the acceptance criteria before anything is attempted, repairs the calls the network cannot write yet, judges the answer against those criteria and demonstrates with the same real tools when it failed; then 2NRL trains on the failures — the harder the worse they were — inverts, and fine-tunes on what was right. `explore` lets the network choose every task itself and follow what it finds. |
 | A real browser, and MCP | `--browser` draws each page in a headless **Chrome** over the WebDriver protocol (no driver library: `chromedriver` is started and spoken to with the standard library), so a page that renders itself with JavaScript is readable. `radixnet mcp` serves the tools **and** the network — predict, generate, score, judge against the negative network, solve a task through the agent loop — over the Model Context Protocol, so any MCP client can use this instance. |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
-| Word n-grams | the same count / reward model over an alphabet whose symbols are **words** (`--kind word`, the Words tab): a word is one code point, the window is still three, and compression turns a repeated phrase into one node. The vocabulary grows as training reads new words and is never frozen or learned; lengths, counts and scores are per word, and an unread word is `<unk>`. |
+| Word n-grams | the same count / reward model over an alphabet of **words** (`--encoding word:3:1`, the Words tab): the encoding's `unit` dial, not a second model, so a gram is three words and compression turns a repeated phrase into one node. There is no vocabulary to freeze or learn - a gram is text, so the alphabet is whatever the grams are made of; lengths, counts and scores are per word. |
 | Resonant model | a fourth algorithm on the same graph (`--kind resonant`): a walk carries an analog **phase** advanced by every trigram (a position clock plus a hash kick), edges learn the phase at which they fire and how **coherently**, and the score adds `resonance_scale · coherence · cos(phase − mu)` to the edge's share of its node. Prediction searches `(node, chars, phase)`. A **phase-locked** cycle - back to the same node at the same phase - hands the decision to a metacognitive layer that learned from the corpus whether to ride the loop, escape it or stop. |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. The punishment traversal is ported as well, and the parity suite requires both sides to walk the same least-punished paths at the same costs. |
-| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, all three traversals, both alphabets, training, prediction, generation, scoring, 2NRL, **the model file** (`radixnet-count` / `radixnet-word`, gzipped or not: byte for byte what Python writes, but for the `version` cache stamp), the CLI and **the HTTP server the frontend runs against** - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. What it does not have yet: the negative network, the teaching loops, the agent and the LLM clients (those last need HTTPS, which the no-dependency rule rules out). `tests/test_rust_parity.py` holds it to Python the way `test_go_parity.py` holds Go, and it is 2.2-2.8x faster than Go at counting and 3.8-6.2x at predicting on the same corpus (`bench/RESULTS.md`, `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). |
+| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, all three traversals, the encoding dial, training, prediction, generation, scoring, 2NRL, **the model file** (`radixnet-count`, gzipped or not: byte for byte what Python writes on every dial setting, but for the `version` cache stamp), the CLI and **the HTTP server the frontend runs against** - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. What it does not have yet: the negative network, the teaching loops, the agent and the LLM clients (those last need HTTPS, which the no-dependency rule rules out). `tests/test_rust_parity.py` holds it to Python the way `test_go_parity.py` holds Go, and it is 2.2-2.8x faster than Go at counting and 3.8-6.2x at predicting on the same corpus (`bench/RESULTS.md`, `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). |
 | Judgements follow the path, not the edge | An edge is right in one sentence and wrong in the next, so a verdict is not filed against the edge but against the **caller that reached it**: the key is the node *before* the edge's parent, so `the cat -> sat` and `a cat -> sat` are counted apart (`paths`, `GET /api/paths`). A correction only rewards a path when the whole answer was right - one wrong word and nothing on that walk is rewarded - and each context keeps `correct`, `incorrect` and how often it has been walked since (`seen`). The search pays for what it learns there: `path_scale · log((correct + ½) / (incorrect + ½))` joins the edge weight before the softmax, so a step that was right *from here* is cheaper here and nowhere else. |
 | A node sees itself from where it stands | An edge's counters say what that step did, not what it did *here*, among the other ways out of the same node. `nodes` / `GET /api/nodes` / clicking a node in the Graph tab shares a node out both ways: a row per previous node and a row per next node, each with its share of that side's traffic, its **signed** share of that side's reward - a penalty reads as a negative share of the pressure on the node - and what the judged paths on it came to. The denominators are the side's own, not the node's visits: a node is entered without an in-edge whenever a text starts on it. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -1082,33 +1082,35 @@ python -m radixnet --model model.count.json feedback --good-text 'the quick brow
 
 ### Word n-grams: the same model over an alphabet of words
 
-`--kind word` (`model.word.json`, the **Words** tab in the frontend,
-`SPEC-WordNGrams.md`, D-073) keeps every one of those rules and changes only
-what a *symbol* is.  Not one of the graph's structural rules mentions a
-character, so a word n-gram model is not a different model: a word is a symbol,
-carried as one code point (`<unk>` is `U+0100`, the surrogates skipped, up to
-1 111 808 words), and the same sliding window of three walks words instead of
-characters.  Compression then does to word chains what it does to character
-chains - a repeated phrase becomes **one node whose label is that phrase**.
+`--encoding word:3:1` (the **Words** tab in the frontend, `SPEC-WordNGrams.md`,
+D-071 and D-073) keeps every one of those rules and changes only what a *unit*
+is.  Not one of the graph's structural rules mentions a character, so a word
+n-gram model is not a different model - it is the same one with the encoding's
+`unit` dial turned: a gram is three words rather than three characters, and a
+label is text either way.  Compression then does to word chains what it does to
+character chains - a repeated phrase becomes **one node whose label is that
+phrase**.
 
 ```bash
-python -m radixnet --kind word train --data data/sample_corpus.txt --epochs 3   # -> model.word.json
-python -m radixnet --kind word predict --prefix 'the cat sat on' --length 6
-python -m radixnet --kind word words --limit 20        # the alphabet it has read, most read first
-make word-demo                                          # train, predict, generate, list the alphabet
+python -m radixnet --kind count --encoding word:3:1 --model model.word.json train \
+    --data data/sample_corpus.txt --epochs 3
+python -m radixnet --model model.word.json predict --prefix 'the cat sat on' --length 6
+python -m radixnet --model model.word.json words --limit 20   # the alphabet its grams are made of
+make word-demo                                                # train, predict, generate, list it
 ```
 
-The vocabulary grows as training reads new words and is never frozen, pruned or
-learned: a word is in it because it was seen, and tokenising is the whitespace
-split and nothing else (punctuation stays attached, case is kept).  Two things
-that costs, both deliberate: a word model **normalises whitespace**, so a corpus
-whose whitespace carries meaning (source code, base64, a waveform) belongs on
-the character model; and a word it has never read is `<unk>`, so two unread
-words score identically and show up in `unknown_transitions`.  Everything
-counted in symbols is counted in **words** - `--length 6` emits six words,
-`score`'s `per_char` is per word - and `units` in `stats`, the API and the
-frontend says which.  Go (`--kind word`) and Rust (`--kind word`) read and write
-the same `radixnet-word` file, with the same vocabulary in the same order.
+There is **no vocabulary**: a gram is text, so the alphabet a graph has read is
+whatever its grams are made of, and there is nothing to freeze, prune or learn.
+Tokenising is the whitespace split and nothing else (punctuation stays attached,
+case is kept).  Two things that costs, both deliberate: a word encoding
+**normalises whitespace**, so a corpus whose whitespace carries meaning (source
+code, base64, a waveform) belongs on the character encoding; and a word it has
+never read makes a gram it has never seen, which shows up in
+`unknown_transitions`.  Everything counted in units is counted in **words** -
+`--length 6` emits six words, `score`'s `per_char` is per word - and `units` in
+`stats`, the API and the frontend says which.  Python, Go and Rust read and
+write the same file: the format never changed, and the encoding rides in the
+graph document as a three-key block written only when it is not the default.
 
 **The count model's weight function** keeps several numbers per edge - its
 all-time traversals, its traversals inside a sliding window of the last

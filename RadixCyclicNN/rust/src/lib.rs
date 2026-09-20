@@ -1,5 +1,5 @@
 //! `radixnet` - the Rust port of the **count / reward model** of
-//! RadixCyclicNN: a self-compressing cyclic trigram graph whose edge weights
+//! RadixCyclicNN: a self-compressing cyclic n-gram graph whose edge weights
 //! are a dual frequency function of traversal counts (all time and inside a
 //! sliding window) plus rewards, with beam-search prediction (top-K **and**
 //! bottom-K continuations), generation, scoring and 2NRL feedback.
@@ -17,6 +17,13 @@
 //! The standard library only, like the other two implementations: the hash
 //! ([`hash`]), the Mersenne Twister ([`mt19937`]), the exact float sum
 //! ([`fsum`]) and the worker pool ([`parallel`]) are written out here.
+//!
+//! # A gram is text
+//!
+//! Earlier releases packed a trigram into a `u64` - three code points of 21
+//! bits - which is why the encoding pass allocated nothing.  A gram of any n
+//! over any unit does not fit in an integer, so the index is keyed by the gram
+//! itself, as the other two key it.  `bench/RESULTS.md` says what that cost.
 //!
 //! # What is here, and what is not
 //!
@@ -73,7 +80,7 @@ pub mod words;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;
-pub use encoding::{encode, Trigram, OVERLAP, WINDOW};
+pub use encoding::{parse_encoding, Encoding, Unit, Units, OVERLAP, WINDOW};
 pub use file::{MODEL_FORMAT, MODEL_FORMAT_VERSION};
 pub use graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
 pub use json::Json;
@@ -84,4 +91,4 @@ pub use penalty::{
 };
 pub use search::{least_punished, onward, parse_traversal, PathResult, Traversal};
 pub use weights::ChildCost;
-pub use words::{split_words, symbol_word, word_symbol, Vocabulary, WordRow, MAX_WORDS, UNKNOWN_WORD};
+pub use words::WordRow;

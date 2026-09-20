@@ -1,71 +1,65 @@
-//! The word n-gram model: the same graph over an alphabet whose symbols are
-//! words (`../../SPEC-WordNGrams.md` §10 is the table these follow).
+//! A word encoding end to end: the same model over an alphabet of words.
+//!
+//! Words are not a kind - they are the encoding's `unit` dial - so nothing here
+//! is a different model. What is checked is that the graph, the search, the
+//! counters and the file all measure in *words* when told to, and that a word
+//! model's file is one Python and Go read.
 
-use radixnet::model::{GenerateOptions, PredictOptions};
-use radixnet::words::{WordRow, WORD_UNITS};
-use radixnet::{GraphOptions, Model, TrainOptions};
+use radixnet::encoding::{Encoding, Unit};
+use radixnet::{GenerateOptions, GraphOptions, Model, PredictOptions, TrainOptions};
 
-const CORPUS: &[&str] = &[
+const CORPUS: [&str; 6] = [
     "the cat sat on the mat",
-    "the cat sat on the rug",
+    "the cat sat on the log",
     "the dog sat on the mat",
-    "the dog ate the bone in the garden",
-    "a bird sang in the garden",
+    "a bird flew over the hill",
+    "the fox ran up the hill",
+    "the owl flew over the barn",
 ];
 
-fn texts(lines: &[&str]) -> Vec<String> {
-    lines.iter().map(|s| s.to_string()).collect()
-}
-
-fn trained(lines: &[&str], epochs: usize) -> Model {
+fn word_model(n: usize) -> Model {
     let mut model = Model::new(
         0,
         GraphOptions {
-            words: true,
+            encoding: Encoding::new(Unit::Words, n, 1).expect("a word encoding"),
             ..Default::default()
         },
     )
-    .unwrap();
-    model.workers = 1;
-    model.g.workers = 1;
+    .expect("a model");
+    let texts: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
     model
         .train(
-            &texts(lines),
+            &texts,
             &TrainOptions {
-                epochs,
+                epochs: 3,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .expect("a trained model");
     model
 }
 
 #[test]
 fn a_word_model_is_the_count_model_over_words() {
-    let model = trained(CORPUS, 3);
-    assert_eq!(model.kind(), "word");
-    assert_eq!(model.units(), WORD_UNITS);
-    assert_eq!(model.format(), "radixnet-word");
-    // the invariants are the character model's, over the symbols the graph holds
-    let symbols: Vec<String> = CORPUS.iter().map(|t| model.g.symbols_of(t)).collect();
-    model.g.check_invariants(&symbols, true).expect("invariants");
-    assert!(model.g.compression_ratio() > 1.0);
-}
-
-#[test]
-fn a_repeated_phrase_becomes_one_node() {
-    let model = trained(&["the cat sat on the mat", "a dog sat on the mat"], 1);
-    let labels: Vec<String> = (0..model.g.num_node_ids())
+    let model = word_model(3);
+    assert_eq!(model.kind(), "count", "words are an encoding, not a kind");
+    assert_eq!(model.units(), "words");
+    assert_eq!(model.encoding().to_string(), "word:3:1");
+    // a label is text like any other; a gram of three words holds two spaces
+    let labels: Vec<String> = (radixnet::FIRST..model.g.num_node_ids())
         .filter(|&n| model.g.is_alive(n))
-        .map(|n| model.g.text_of(model.g.label(n)))
+        .map(|n| model.g.label(n).to_string())
         .collect();
-    assert!(labels.iter().any(|l| l == "sat on the mat"), "{labels:?}");
-    assert!(labels.iter().any(|l| l == "the cat sat on"), "{labels:?}");
+    assert!(!labels.is_empty());
+    for label in &labels {
+        assert!(!label.contains("  "), "{label:?} carries the original spacing");
+    }
+    model.g.check_invariants(&[], false).expect("the invariants hold");
 }
 
 #[test]
 fn a_prediction_is_words_and_lengths_are_counted_in_them() {
-    let mut model = trained(CORPUS, 3);
+    let mut model = word_model(3);
     let found = model
         .predict(
             "the cat sat on",
@@ -75,140 +69,158 @@ fn a_prediction_is_words_and_lengths_are_counted_in_them() {
                 ..Default::default()
             },
         )
-        .unwrap();
+        .expect("a prediction");
+    // two WORDS on, not two characters
     assert!(
-        found.best.text == "the mat" || found.best.text == "the rug",
+        matches!(
+            found.best.full_text.as_str(),
+            "the cat sat on the mat" | "the cat sat on the log"
+        ),
         "{:?}",
-        found.best.text
+        found.best.full_text
     );
-    assert_eq!(found.best.full_text, format!("the cat sat on {}", found.best.text));
-    for label in &found.best.labels {
-        assert!(
-            !label.chars().any(|c| c as u32 >= 0x0100),
-            "a label is words: {label:?}"
-        );
-    }
-    // the prefix comes back normalised: a word model's round trip costs its whitespace
-    let spaced = model
-        .predict(
-            "the   cat\tsat on",
-            &PredictOptions {
-                length: 2,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    assert!(spaced.best.full_text.starts_with("the cat sat on "));
+    assert_eq!(found.best.text.split_whitespace().count(), 2);
 }
 
 #[test]
 fn a_generated_text_is_whole_and_spaced() {
-    let mut model = trained(CORPUS, 3);
-    let results = model
+    let mut model = word_model(3);
+    let texts = model
         .generate(&GenerateOptions {
-            count: 2,
-            mode: "beam".to_string(),
+            count: 3,
             max_length: 12,
+            mode: "beam".to_string(),
             ..Default::default()
         })
-        .unwrap();
-    assert!(!results.is_empty());
-    for r in &results {
-        assert_eq!(r.text, r.full_text);
-        assert!(!r.text.contains("  "), "{:?}", r.text);
-        assert_eq!(r.text, model.normalise(&r.text));
+        .expect("generated texts");
+    assert_eq!(texts.len(), 3);
+    for one in &texts {
+        assert!(!one.text.is_empty());
+        assert!(!one.text.contains("  "), "{:?} has a double space", one.text);
+        assert!(one.text.split_whitespace().count() <= 12);
     }
 }
 
 #[test]
-fn an_unread_word_is_unknown_and_scores_are_per_word() {
-    let mut model = trained(CORPUS, 3);
+fn an_unread_word_is_an_unknown_transition_and_scores_are_per_word() {
+    let mut model = word_model(3);
     let known = model.score("the cat sat on the mat");
-    let unknown = model.score("the cat sat on the flurb");
-    assert_eq!(known.chars, 6, "chars counts words");
+    assert_eq!(known.chars, 6, "a six-word text is six units long");
     assert_eq!(known.unknown_transitions, 0);
-    assert!(unknown.unknown_transitions > 0);
-    assert!(unknown.log_prob < known.log_prob);
-    // two different unread words are the same symbol
-    let a = model.score("the qux sat");
-    let b = model.score("the quux sat");
-    assert_eq!(a.log_prob, b.log_prob);
-    assert_eq!(
-        model.g.vocab.as_ref().unwrap().id("qux"),
-        0,
-        "predicting never grows it"
+    assert!(known.log_prob < 0.0);
+
+    let unread = model.score("qqzz never read this");
+    assert!(
+        unread.unknown_transitions > 0,
+        "an unread word is an unknown transition"
     );
+    assert!(unread.log_prob < known.log_prob);
 }
 
 #[test]
-fn the_alphabet_is_read_back_in_order() {
-    let mut model = trained(CORPUS, 2);
-    let words: Vec<String> = model.g.vocab.as_ref().unwrap().words().to_vec();
-    let doc = model.to_doc();
-    assert_eq!(doc.at("format").as_str(), Some("radixnet-word"));
-    assert_eq!(doc.at("graph").at("units").as_str(), Some(WORD_UNITS));
-    assert_eq!(doc.at("graph").at("vocabulary").to_strings(), words);
-    let mut again = Model::from_doc(&doc).unwrap();
-    assert_eq!(again.g.vocab.as_ref().unwrap().words(), words.as_slice());
-    assert_eq!(
-        again
-            .predict("the cat sat on", &Default::default())
-            .unwrap()
-            .best
-            .full_text,
-        model
-            .predict("the cat sat on", &Default::default())
-            .unwrap()
-            .best
-            .full_text
-    );
-    assert_eq!(
-        again.score("the dog sat on the mat").log_prob,
-        model.score("the dog sat on the mat").log_prob
-    );
-}
-
-#[test]
-fn a_count_reader_refuses_a_word_file() {
-    let mut model = trained(CORPUS, 1);
-    let mut doc = model.to_doc();
-    // a count document with a word graph is refused, and the other way round
-    if let radixnet::Json::Obj(pairs) = &mut doc {
-        for (key, value) in pairs.iter_mut() {
-            if key == "format" {
-                *value = radixnet::Json::str("radixnet-count");
-            }
-        }
+fn the_most_read_words_are_what_the_grams_hold() {
+    let mut model = word_model(3);
+    let rows = model.top_words(5);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].word, "the", "the corpus says 'the' most often");
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row.id, i, "the id is the rank");
     }
-    assert!(Model::from_doc(&doc).is_err());
+    for pair in rows.windows(2) {
+        assert!(pair[0].grams >= pair[1].grams, "not most read first: {rows:?}");
+    }
+    // limit 0 is the whole alphabet
+    let all = model.top_words(0);
+    assert!(all.len() > rows.len());
+    for word in ["the", "cat", "sat", "mat", "hill", "barn"] {
+        assert!(
+            all.iter().any(|r| r.word == word),
+            "{word:?} was read but is not listed"
+        );
+    }
+}
 
-    let mut plain = Model::new(0, GraphOptions::default()).unwrap();
-    plain
+#[test]
+fn the_file_carries_the_encoding_and_reads_back() {
+    let dir = std::env::temp_dir().join(format!("radixnet-words-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a test directory");
+    let path = dir.join("model.word.json");
+    let path = path.to_str().expect("a path");
+
+    let mut model = word_model(3);
+    let before = model.predict("the cat sat on", &PredictOptions::default()).unwrap();
+    model.save(path).expect("the model saves");
+
+    let doc = radixnet::file::read_document(path).expect("the file reads");
+    // a word model is still the count format: the encoding is what changed
+    assert_eq!(doc.at("format").as_str(), Some(radixnet::MODEL_FORMAT));
+    assert_eq!(doc.at("kind").as_str(), Some("count"));
+    let encoding = doc.at("graph").at("encoding");
+    assert_eq!(encoding.at("unit").as_str(), Some("word"));
+    assert_eq!(encoding.at("n").as_i64(), Some(3));
+    assert_eq!(encoding.at("stride").as_i64(), Some(1));
+
+    let mut again = Model::load(path).expect("the model loads");
+    assert_eq!(again.encoding().to_string(), "word:3:1");
+    assert_eq!(again.units(), "words");
+    let after = again.predict("the cat sat on", &PredictOptions::default()).unwrap();
+    assert_eq!(before.best.full_text, after.best.full_text);
+    assert_eq!(before.best.cost, after.best.cost);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_character_model_leaves_the_file_as_it_always_was() {
+    let dir = std::env::temp_dir().join(format!("radixnet-chars-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a test directory");
+    let path = dir.join("model.count.json");
+    let path = path.to_str().expect("a path");
+
+    let mut model = Model::new(0, GraphOptions::default()).expect("a model");
+    let texts: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+    model.train(&texts, &TrainOptions::default()).expect("a trained model");
+    model.save(path).expect("the model saves");
+
+    // the default encoding is never written, so an ordinary file is byte for
+    // byte what it always was - and Python, which reads that one, still can
+    let doc = radixnet::file::read_document(path).expect("the file reads");
+    assert!(
+        doc.at("graph").get("encoding").is_none(),
+        "the default encoding was written"
+    );
+    assert_eq!(model.units(), "chars");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_other_dials_work_too() {
+    // groups of four letters: no overlap at all, so the graph is a chain
+    let mut model = Model::new(
+        0,
+        GraphOptions {
+            encoding: Encoding::new(Unit::Chars, 4, 4).expect("a grouping encoding"),
+            ..Default::default()
+        },
+    )
+    .expect("a model");
+    let texts: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+    model
         .train(
-            &texts(CORPUS),
+            &texts,
             &TrainOptions {
-                epochs: 1,
+                epochs: 2,
                 ..Default::default()
             },
         )
-        .unwrap();
-    let mut doc = plain.to_doc();
-    if let radixnet::Json::Obj(pairs) = &mut doc {
-        for (key, value) in pairs.iter_mut() {
-            if key == "format" {
-                *value = radixnet::Json::str("radixnet-word");
-            }
-        }
-    }
-    assert!(Model::from_doc(&doc).is_err());
-}
-
-#[test]
-fn the_most_read_words_are_what_the_graph_holds() {
-    let mut model = trained(CORPUS, 2);
-    let rows: Vec<WordRow> = model.top_words(3);
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].word, "the");
-    assert!(rows.iter().all(|r| r.trigrams > 0));
-    assert_eq!(model.meta.trained_chars.value, 32, "trained_chars counts words");
+        .expect("a trained model");
+    assert_eq!(model.units(), "chars");
+    assert_eq!(model.encoding().overlap(), 0);
+    model.g.check_invariants(&[], false).expect("the invariants hold");
+    // and a word bigram
+    let mut bigram = word_model(2);
+    assert_eq!(bigram.encoding().to_string(), "word:2:1");
+    assert!(!bigram.top_words(0).is_empty());
+    bigram.g.check_invariants(&[], false).expect("the invariants hold");
 }

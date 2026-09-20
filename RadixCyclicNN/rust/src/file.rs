@@ -24,20 +24,35 @@ use std::sync::atomic::Ordering;
 
 use crate::clock::utc_now;
 use crate::counter::Counter;
-use crate::encoding::{char_len, BACK_LABEL, END_LABEL, OVERLAP, START_LABEL, WINDOW};
+use crate::encoding::{Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
 use crate::graph::{Graph, GraphOptions, Loc, BACK, END, FIRST, START};
 use crate::json::{parse, Json};
 use crate::model::{EpochRecord, Model};
 use crate::weights::SMOOTHING;
-use crate::words::Vocabulary;
 
 /// The model file format shared with the Python and Go implementations.
 pub const MODEL_FORMAT: &str = "radixnet-count";
-/// The word model's own format, so that every reader written before it existed
-/// refuses the file by the check it already makes (`../../SPEC-WordNGrams.md`).
-pub const WORD_MODEL_FORMAT: &str = "radixnet-word";
 /// The model document version this port writes.
 pub const MODEL_FORMAT_VERSION: i64 = 1;
+/// The encoding a graph document carries.
+///
+/// A document without an `encoding` block is the character trigram of stride 1,
+/// which is what every file was before the encoding became a choice, so an old
+/// file reads exactly as it always did.
+fn read_encoding(doc: &Json) -> Result<Encoding, String> {
+    let Some(block) = doc.get("encoding") else {
+        return Ok(Encoding::default());
+    };
+    let name = block.at("unit").as_str().unwrap_or("char");
+    let unit = Unit::parse(name).ok_or_else(|| format!("unknown graph unit {name:?}"))?;
+    let n = block.at("n").as_i64().unwrap_or(crate::encoding::WINDOW as i64);
+    let stride = block.at("stride").as_i64().unwrap_or(1);
+    if n < 1 || stride < 1 {
+        return Err(format!("graph encoding {name}:{n}:{stride} is not usable"));
+    }
+    Encoding::new(unit, n as usize, stride as usize)
+}
+
 /// The graph document format.
 pub const GRAPH_FORMAT: &str = "radixnet-graph";
 /// 3 added the `BACK` sentinel; older documents gain an unvisited one on load.
@@ -186,17 +201,26 @@ impl Graph {
             ("weights", weights),
             ("paths", paths),
         ]);
-        let Some(vocab) = &self.vocab else { return graph };
-        // the alphabet rides at the end of the block, where Python and Go write it
+        if self.enc.is_default() {
+            return graph; // an ordinary file is byte for byte what it always was
+        }
+        // the encoding sits third, right after format_version, which is exactly
+        // where Python and Go write it: the document is one document
         let mut pairs = match graph {
             Json::Obj(pairs) => pairs,
             other => return other,
         };
-        pairs.push(("units".to_string(), Json::str(crate::words::WORD_UNITS)));
-        pairs.push((
-            "vocabulary".to_string(),
-            Json::Arr(vocab.words().iter().map(|w| Json::str(w.clone())).collect()),
-        ));
+        pairs.insert(
+            2,
+            (
+                "encoding".to_string(),
+                Json::obj([
+                    ("unit", Json::str(self.enc.unit.name())),
+                    ("n", Json::Int(self.enc.n as i64)),
+                    ("stride", Json::Int(self.enc.stride as i64)),
+                ]),
+            ),
+        );
         Json::Obj(pairs)
     }
 
@@ -240,17 +264,9 @@ impl Graph {
                 .unwrap_or(if legacy { 0.0 } else { 0.5 }),
             path_scale: weights.at("path_scale").as_f64().unwrap_or(1.0),
             window,
-            words: match doc.at("units").as_str() {
-                Some(crate::words::WORD_UNITS) => true,
-                Some(other) => return Err(format!("unknown graph units {other:?}")),
-                None => doc.get("vocabulary").is_some(),
-            },
+            encoding: read_encoding(doc)?,
         };
-        let words = opts.words;
         let mut g = Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?;
-        if words {
-            g.vocab = Some(Vocabulary::from_list(&doc.at("vocabulary").to_strings())?);
-        }
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
 
         // the three sentinels are already there; the rest of the file's nodes follow
@@ -335,7 +351,6 @@ impl Graph {
         g.carry_counters(true); // normalise whatever the file carried, however it was written
         g.invalidate();
         g.recompute_weights();
-        g.check_vocabulary()?;
         Ok(g)
     }
 }
@@ -427,21 +442,14 @@ impl Model {
     /// Rebuilds a model from a `radixnet-count` document.
     pub fn from_doc(doc: &Json) -> Result<Model, String> {
         let format = doc.at("format").as_str().unwrap_or("");
-        if format != MODEL_FORMAT && format != WORD_MODEL_FORMAT {
-            return Err(format!("not a {MODEL_FORMAT} or {WORD_MODEL_FORMAT} model document"));
+        if format != MODEL_FORMAT {
+            return Err(format!("not a {MODEL_FORMAT} model document"));
         }
         let version = doc.at("version").as_i64().unwrap_or(1);
         if version > MODEL_FORMAT_VERSION {
             return Err(format!("unsupported {format} model version {version}"));
         }
         let g = Graph::from_doc(doc.get("graph").ok_or("model document has no graph")?)?;
-        if g.is_words() != (format == WORD_MODEL_FORMAT) {
-            return Err(if format == WORD_MODEL_FORMAT {
-                format!("{WORD_MODEL_FORMAT} document without a word graph")
-            } else {
-                format!("a word graph belongs to a {WORD_MODEL_FORMAT} document, not {format}")
-            });
-        }
         let mut model = Model::from_graph(g);
         model.history = doc
             .at("history")
@@ -509,19 +517,22 @@ impl Graph {
         self.count_resets.clear();
         self.index.clear();
         self.n_alive_nodes = 0;
+        let enc = self.enc;
         for (i, label) in labels.iter().enumerate() {
-            if i >= FIRST && char_len(label) < WINDOW {
-                return Err(format!("node {i} label {label:?} is shorter than {WINDOW}"));
+            if i >= FIRST && enc.len(label) < enc.n {
+                return Err(format!("node {i} label {label:?} is shorter than {}", enc.n));
             }
             self.new_node(label.clone(), counts[i], resets.get(i).copied().unwrap_or(0));
         }
         for (nid, label) in labels.iter().enumerate().skip(FIRST) {
-            let chars: Vec<char> = label.chars().collect();
-            for o in 0..chars.len() - OVERLAP {
-                let t = crate::encoding::Trigram::pack(chars[o], chars[o + 1], chars[o + 2]);
-                if self.index.insert(t, Loc { node: nid, off: o }).is_some() {
-                    return Err(format!("trigram {t} appears in two nodes"));
+            let u = enc.units(label);
+            let mut o = 0;
+            while o + enc.n <= u.len() {
+                let gram = u.slice(o, o + enc.n);
+                if self.index.insert(gram.clone(), Loc { node: nid, off: o }).is_some() {
+                    return Err(format!("gram {gram:?} appears in two nodes"));
                 }
+                o += enc.stride;
             }
         }
         Ok(())

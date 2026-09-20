@@ -19,8 +19,8 @@ nothing in it but this crate.
 
 | file | what it is |
 |---|---|
-| `src/encoding.rs` | the trigram encoding and its inverse — three code points packed into one `u64` |
-| `src/words.rs` | the word alphabet: a word is one code point, and a vocabulary maps between them (`--kind word`) |
+| `src/encoding.rs` | the encoding dial: what one unit is, how many units a gram holds, how far apart grams start |
+| `src/words.rs` | the word view of a word encoding: the alphabet its grams are made of (`radixnet words`) |
 | `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants |
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
@@ -50,13 +50,13 @@ The model is here in full: the graph and its structural operations, the weight
 function, the path contexts, all three traversals, training, prediction,
 generation, scoring, reward / punish / 2NRL, the `radixnet-count` **model file**,
 the CLI over all of it, and the **HTTP server** the frontend talks to — and, with
-`--kind word`, the same model over an alphabet whose symbols are words
-(`radixnet-word`, `../SPEC-WordNGrams.md`; a `Trigram` already packs three code
-points of 21 bits, which is every code point there is, so the representation
-needed no change). A model trained here continues in Python or in Go and back
-again, and `frontend/dist` runs against `radixnet serve` the same way it runs
-against the other two — including switching between the two kinds from the
-model selector, which parks the model that was running rather than dropping it.
+`--encoding`, the same model over any n-gram of characters *or* words
+(`char:3:1` is the default, `char:5:5` groups of five letters, `word:3:1` the
+word trigram; `../SPEC-WordNGrams.md`). A model trained here continues in Python
+or in Go and back again, and `frontend/dist` runs against `radixnet serve` the
+same way it runs against the other two — including switching between a character
+and a word encoding from the model selector, which parks the model that was
+running rather than dropping it.
 
 Not ported: the negative network, the tutors and the other teaching loops, the
 agent and its tools, the LLM clients, images and speech, and MCP. The first
@@ -91,6 +91,8 @@ cargo run --release --bin radixnet -- --model model.count.json train --data ../d
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --k 5
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal least-punished
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal punishment --merit-scale 0
+cargo run --release --bin radixnet -- --encoding word:3:1 --model model.word.json train --data ../data/sample_corpus.txt
+cargo run --release --bin radixnet -- --model model.word.json words --limit 20    # the alphabet its grams are made of
 cargo run --release --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../frontend/dist
 python3 -m radixnet --model rust/model.count.json info     # ... and Python reads the same file
 cargo run --release --bin radixnet-bench -- --chars 200000 --epochs 3
@@ -137,13 +139,17 @@ race measures the race.
 
 ## Where the two implementations genuinely differ
 
-Three representation choices, none of them algorithmic. They are why the port is
+Two representation choices, none of them algorithmic. They are why the port is
 faster than a line-by-line translation would be, and they are the first place to
-look before reading the numbers as a language comparison:
+look before reading the numbers as a language comparison. A third one is gone:
+this port used to pack a trigram into a `u64` (three code points of 21 bits),
+which is what made its encoding pass allocate nothing — the encoding dial's
+grams are arbitrary text, so the index is keyed by the gram as the other two key
+it, and `bench/RESULTS.md` says what that cost:
 
 | | Go | Rust |
 |---|---|---|
-| a trigram | a freshly allocated `string` per window | three code points packed into a `u64`, `Copy`, no allocation |
+| a gram | a freshly allocated `string` per window | the same: a gram of any n over any unit does not fit in an integer |
 | a node's children during a search | a fresh `[]ChildCost` per expansion | filled into a buffer the search reuses |
 | the hash behind the trigram index | the runtime's (AES-assisted on amd64) | `FxHasher`, written out in `src/hash.rs` |
 

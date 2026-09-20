@@ -5,7 +5,7 @@
 //! (`../../../tests/test_rust_parity.py` does exactly that).
 //!
 //! ```text
-//! radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
+//! radixnet [--model PATH] [--encoding SPEC] [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
 //!
 //!   train      count one traversal of every text's path per epoch
 //!   predict    continue a prefix: the K likeliest and the K least likely
@@ -26,6 +26,7 @@
 
 use std::process::ExitCode;
 
+use radixnet::encoding::{parse_encoding, Unit};
 use radixnet::file::read_document;
 use radixnet::json::Json;
 use radixnet::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
@@ -35,12 +36,21 @@ use radixnet::search::PathResult;
 use radixnet::service::Service;
 use radixnet::{Graph, GraphOptions};
 
-const USAGE: &str = "usage: radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] \
+const USAGE: &str = "usage: radixnet [--model PATH] [--encoding SPEC] [--json] [--seed N] [--workers N] \
      [--out PATH] <command>\n\
      commands: train predict generate score feedback 2nrl invert compress weights paths nodes words info serve \
-     version";
+     version\n\
+     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word), how many units a gram holds \
+     and how far apart\n\
+     consecutive grams start (1 = the sliding window, n = non-overlapping groups).  char:3:1 is the default, \
+     char:5:5 groups of five\n\
+     letters, word:2:1 the word bigram, word:3:1 the word trigram; the names trigram | bigram | word-bigram | \
+     word-trigram work too.\n\
+     --units / --ngram / --stride set the three dials separately.  A loaded file's own encoding always wins, and \
+     is fixed for its life.";
 
-/// The default `--model` per kind, so one kind never overwrites another's file.
+/// The default `--model` per unit, so a word model never overwrites a
+/// character model's file.
 const DEFAULT_COUNT_MODEL: &str = "model.count.json";
 const DEFAULT_WORD_MODEL: &str = "model.word.json";
 
@@ -152,15 +162,32 @@ fn run() -> Result<(), String> {
     }
     let (command, args) = parse_args(&argv)?;
     let json_mode = args.on("json");
-    // the symbols of a NEW model: characters, or words (`../../../SPEC-WordNGrams.md`)
-    let kind = match args.str("kind", "count").as_str() {
-        "" | "count" => "count",
-        "word" => "word",
-        other => return Err(format!("unknown model kind {other:?}; expected one of: count, word")),
-    };
+    // the kind is the one this port has; the *encoding* is the dial - what one
+    // unit is, how many units a gram holds, and how far apart grams start
+    match args.str("kind", "count").as_str() {
+        "" | "count" => {}
+        "word" => {
+            return Err(
+                "words are an encoding, not a kind: use --encoding word:3:1 (or --units word) instead of --kind word"
+                    .to_string(),
+            )
+        }
+        other => return Err(format!("unknown model kind {other:?}; this port has 'count'")),
+    }
+    let mut encoding = parse_encoding(&args.str("encoding", ""))?;
+    if let Some(name) = args.get("units") {
+        encoding.unit = Unit::parse(name).ok_or_else(|| format!("--units must be char or word, got {name:?}"))?;
+    }
+    if args.get("ngram").is_some() {
+        encoding.n = args.usize("ngram", encoding.n)?;
+    }
+    if args.get("stride").is_some() {
+        encoding.stride = args.usize("stride", encoding.stride)?;
+    }
+    encoding.validate()?;
     let model_path = args.str(
         "model",
-        if kind == "word" {
+        if encoding.unit == Unit::Words {
             DEFAULT_WORD_MODEL
         } else {
             DEFAULT_COUNT_MODEL
@@ -183,7 +210,7 @@ fn run() -> Result<(), String> {
         let mut m = Model::new(
             seed,
             GraphOptions {
-                words: kind == "word",
+                encoding,
                 ..Default::default()
             },
         )?;
@@ -446,31 +473,29 @@ fn run() -> Result<(), String> {
         }
         "words" => {
             let mut model = open(true)?;
-            if !model.is_words() {
+            let enc = model.encoding();
+            if enc.unit != Unit::Words {
                 return Err(format!(
-                    "{model_path} holds a {} model; a vocabulary belongs to the word model (--kind word)",
-                    model.kind()
+                    "{model_path} counts in {}, so it has no words to list; a word alphabet needs a word encoding \
+                     (train a new model with --encoding word:{}:{})",
+                    enc.units_name(),
+                    enc.n,
+                    enc.stride
                 ));
             }
-            let rows = model.top_words(args.usize("limit", 20)?);
-            let vocabulary = model.g.vocab.as_ref().map(|v| v.len()).unwrap_or(0);
+            let all = model.top_words(0);
+            let vocabulary = all.len();
+            let limit = args.usize("limit", 20)?;
+            let rows = if limit > 0 {
+                &all[..limit.min(all.len())]
+            } else {
+                &all[..]
+            };
             emit(Json::obj([
-                (
-                    "words",
-                    Json::Arr(
-                        rows.iter()
-                            .map(|r| {
-                                Json::obj([
-                                    ("word", Json::str(r.word.clone())),
-                                    ("id", Json::Int(r.id as i64)),
-                                    ("trigrams", Json::Int(r.trigrams as i64)),
-                                ])
-                            })
-                            .collect(),
-                    ),
-                ),
+                ("words", Json::Arr(rows.iter().map(|r| r.to_json()).collect())),
                 ("vocabulary", Json::Int(vocabulary as i64)),
                 ("units", Json::str(model.units())),
+                ("encoding", Json::str(enc.to_string())),
                 ("stats", stats(&model)),
             ]));
         }
