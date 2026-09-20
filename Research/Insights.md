@@ -342,7 +342,23 @@ when `x` is small, so the gradient that would fix the frequency is suppressed by
 the same condition that makes it wrong. **The initialisation is the trap, not the
 parameterisation.** The rule is `b ≈ π / (2·E|z|)`.
 
-*Where:* `Research/SineWaveActivationFunction.md`, FINDINGS §5 · **refined**
+*And in the other direction — as a **gate** it fails, for the same reason.*
+`FilterBankRadix/` reads the wave for its *sign* and uses it to route: a hinge
+raises a unit's response by pushing its projection, and the address is the sign
+pattern. Held at `b = 1/3` with `a, b, h, k` frozen, that push carries the
+wave's argument `|u| = |b(x−h)|` from a median of 0.28 to **100.1** — 98.3% of
+units end up past their first peak, where a sine is coming *back down* — and the
+filter scores **0.245 against a chance of 0.25**: it cannot be fitted at all. A
+tanh under the identical rule ends up past its own first peak just as often
+(73.8%) and does not care, because saturation preserves an ordering and
+periodicity does not; it is the best router measured (0.736). With the wave
+learnable the sine recovers to 0.697, and the parameter that recovers it is `b`,
+which falls from 0.333 to **0.177** — *learning the wave, here, means flattening
+it*. Same frequency, two opposite failures: too linear for a deep network, too
+periodic for a gate.
+
+*Where:* `Research/SineWaveActivationFunction.md`, FINDINGS §5,
+`FilterBankRadix/README.md` · **refined**
 
 ### 25. Cycles are a feature, not a bug
 Reached independently from the other direction by the game theory. At inference

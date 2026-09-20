@@ -175,6 +175,14 @@ The children of `p` are scored `w_c · f_p(z_p) · f_c(z_c)` and normalised by a
 softmax over the siblings — *the activation of the child times the activation
 of the parent*, and the same rule as `radixnet`.
 
+Worth noticing what that scoring can express. The parent's activation `f_p`
+multiplies every sibling equally, so it acts as an **inverse temperature** on
+the node's distribution, while `w_c · f_c` is a free per-child logit: setting
+`w_c f_c = (log p_c) / f_p` reproduces any distribution `p` exactly. The rule
+therefore has no representational disadvantage against counting the traversals,
+and whatever gap the `baseline` sweep measures between them is **optimisation,
+not capacity** — which is what the `epochs` sweep is for.
+
 ### 5.3 Prediction: every context length, folded longest-last
 
 ```

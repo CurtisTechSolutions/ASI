@@ -44,6 +44,7 @@ it. Read any one first; each says where it depends on the others.
 | the activation comparison on CartPole | `Experiments/ActivationFunctionTest/` |
 | depth-counted gradient normalisation | `Experiments/DepthCountedNormalisation/depth_counted_normalisation.py` |
 | a learnable activation inside a conventional RNN | `Experiments/SBNN_RNN_ActivationFunction/main.py` |
+| the sine as a *gate* rather than an activation, and what that costs | `FilterBankRadix/fbradix/filter.py` |
 
 `RadixCyclicNN/DESIGN.md` is the full specification of the implementation and
 `RadixCyclicNN/DECISIONS.md` the record of why it is that way. These papers are

@@ -402,202 +402,202 @@
 {"source": "prose", "text": "# A Sine Wave Activation Function\n**Replacing the sigmoid with `f(x) = a·sin(b(x − h)) + k`, default `−sin(x/3)`**"}
 {"source": "prose", "text": "# The Vanishing Gradient Is a Feature\n**Count the multiplications, and the decay stops being a loss and becomes a reading**"}
 {"source": "prose", "text": "# 2NRL: Learning by Inverting Consistent Failure"}
-{"source": "prose", "text": "# Insights — index\nA record of the ideas driving this repository, each with where it is specified,"}
+{"source": "prose", "text": "# Edge decay — a node's edges fade on the graph's own clock"}
 {"source": "prose", "text": "*when we encounter a cycle, we use metacognition or another part of the brain"}
 {"source": "prose", "text": "per unit. In a CartPole control task, swapping this in for sigmoid or ReLU and"}
 {"source": "prose", "text": "number. The gradient is carrying a message about its own depth, written in an"}
 {"source": "prose", "text": "sentence when I looked at it properly. The load-bearing word is **consistently**."}
-{"source": "prose", "text": "> To solve a game you must understand it. To understand it you must explore it."}
+{"source": "prose", "text": "learn to hand over, whether it should ever unlearn, and what a wrongly taught"}
 {"source": "prose", "text": "> feature, not a bug. When we encounter a cycle, we use metacognition or another"}
 {"source": "prose", "text": "> Hence, we assume sine waves are the standard of information"}
 {"source": "prose", "text": "against two controls built to sink the claim: a count-free per-layer"}
 {"source": "prose", "text": "I learned by going at something, getting it wrong, going at it again the same way"}
-{"source": "prose", "text": "> answer is the equilibrium of that game.\n*Where:* `GTMNN/DESIGN.md` · **held**"}
+{"source": "prose", "text": "branch that arrives there: the walk does not go through `p`, it goes round it."}
 {"source": "prose", "text": "areas outnumbering the ascending fibres. Cortex and thalamus are wired in closed"}
 {"source": "prose", "text": "noise is expensive. A brain makes the opposite choice. Neurons do not resolve"}
 {"source": "prose", "text": "> The vanishing gradient is a feature of gradient descent. Keep track of the"}
 {"source": "prose", "text": "purpose**, over and over, to work out its rules — and once I had the rules I"}
-{"source": "prose", "text": "the suite's strongest assertion.\n### 4. Everything can be gamified"}
+{"source": "prose", "text": "learns that it has no mechanism to unlearn.\nThe same is true, less dramatically, of every other opinion a node holds. A"}
 {"source": "prose", "text": "that cannot possibly loop, you have also built a mind that has no use for"}
 {"source": "prose", "text": "This is the geometric observation the whole idea rests on, and it is exact."}
 {"source": "prose", "text": "`W[p,c] · f_p(z_p) · f_c(z_c)` — a weight times the activation of the parent"}
 {"source": "prose", "text": "fail well before I make it succeed.\n### 3.1 The name"}
-{"source": "prose", "text": "probing.\n*Where:* `GREN/DESIGN.md` §5 · **refined**"}
+{"source": "prose", "text": "Two lessons close a node. Nothing reopens it.\n## 2. What is being specified"}
 {"source": "prose", "text": "def test_self_loop(self):\n    g = RadixCyclicGraph(seed=4)"}
 {"source": "prose", "text": "wave survives as an activation function, and at that limit the curve looks like"}
 {"source": "prose", "text": "the one here: **if the problem is that `n` is large, what happens if you just"}
 {"source": "prose", "text": "  Mine is, and exactly: flipping the sign of a sine unit's amplitude *and* its"}
-{"source": "prose", "text": "### 6. The failure rate should be about 50%\nNot a setting — a consequence. Choosing probes by expected information gain is"}
+{"source": "prose", "text": "node* cannot fix the trap in §1, because the trap is precisely that the walks"}
 {"source": "prose", "text": "\"this can repeat\".\nThat is generalisation, and it did not come from a training procedure, a"}
 {"source": "prose", "text": "                                   *|\n                   **************** |"}
 {"source": "prose", "text": "For the logistic sigmoid, `max |f'| = 0.25`, at `x = 0`, and it is smaller"}
 {"source": "prose", "text": "goes wherever the model's inductive bias happens to send it, and in a large"}
-{"source": "prose", "text": "> The compiler will tell you: this ain't working, bro."}
+{"source": "prose", "text": "## 3. The algorithm\n### 3.1 The clock\n`graph.traversals` — the cyclic counter that already bounds every other counter"}
 {"source": "prose", "text": "```\nTwo nodes, one 2-cycle, and the structure covers `\"abcabc\"`, `\"abcabcabc\"`, and"}
 {"source": "prose", "text": "                                    |      *****************************"}
 {"source": "prose", "text": "would have been without the decay — the part you actually want."}
 {"source": "prose", "text": "and my architecture happens to satisfy it. That is not luck; I built the two"}
-{"source": "prose", "text": "---\n## Finding which game you are in\n### 8. Identify the game by finding similar games"}
+{"source": "prose", "text": "`counter.total`, so a model with no hand-overs carries no stamps at all."}
 {"source": "prose", "text": "infinitely many strings with a finite pattern, and the same reason a `for` loop"}
 {"source": "prose", "text": "              the logistic sigmoid (scaled to [−1, 1])"}
 {"source": "prose", "text": "> decided to interpret as damage.\nRead `log||g|| / log(c) ≈ n` and the gradient tells you where it came from. We"}
 {"source": "prose", "text": "involutive. A signed bilinear score gives me one. Put ReLU activations and"}
-{"source": "prose", "text": "similarity numbers in §11 below)\n### 9. Information clustering — chess and checkers are closer than chess and a difficult conversation"}
+{"source": "prose", "text": "default says *an opinion is worth half what it was once the model has read a"}
 {"source": "prose", "text": "algorithm. In a cyclic graph it is an infinite loop."}
 {"source": "prose", "text": "wave with 99% of itself deleted. The question is no longer \"why a sine instead"}
 {"source": "prose", "text": "every deep layer just looks small and they all look alike. The vanishing gradient"}
 {"source": "prose", "text": "### 5.1 The claim\nLet `q` be the distribution of the model's failures. Phase 1 fits `θ` to `q`."}
-{"source": "prose", "text": "and they split into **declared** (free — you read the box before you play) and"}
+{"source": "prose", "text": "> all until much later, gives the same weights."}
 {"source": "prose", "text": "stylistic preference for log-probabilities. **The decision to allow cycles is"}
 {"source": "prose", "text": "```\nFour parameters, one wave:\n| Param | Name | What it does | Default | Meaning for the unit |"}
 {"source": "prose", "text": "```\nvalue  ->  (mantissa in [-1,1],  count n)\nmultiply: mantissa *= other, renormalise, n += 1"}
 {"source": "prose", "text": "of the task, not of the model, not of the data."}
-{"source": "prose", "text": "*set*, and set overlap is symmetric and order-free. The chess/go pathology (an"}
+{"source": "prose", "text": "| resonant graph (`ResonantGraph`) | `edge_reward[e]`, `(edge_cx, edge_cy)` | **0**, **no preferred phase** | `edge_cw`, `edge_count` |"}
 {"source": "prose", "text": "is identical to its behaviour on the first, and therefore so is the third, and"}
 {"source": "prose", "text": "                      **        *   |                  **        **"}
 {"source": "prose", "text": "> counting the multiplications — every float does — we just never let the"}
 {"source": "prose", "text": "  reasoning. That is a coherent error mode, not corruption."}
-{"source": "prose", "text": "### 12. An n-dimensional trie, with the game encoded into each path"}
+{"source": "prose", "text": "has stopped having an opinion\" means. It needs no new constant, and — this is"}
 {"source": "prose", "text": "In `search.py`, the search state is not a node. It is a pair:"}
 {"source": "prose", "text": "      **      **                    |   **     **"}
 {"source": "prose", "text": "regression target. Take the per-layer gradient norms at initialisation, and fit"}
 {"source": "prose", "text": "### 6.1 What it is not\n\"Once I found a thread to pull on, I would pull hard\" reads like a weighting:"}
-{"source": "prose", "text": "Their interaction is one rule: *a terminal node is never merged away.*"}
+{"source": "prose", "text": "`recompute_weights()` at the end of the sweep. The counts are **not** scaled:"}
 {"source": "prose", "text": "partial answer it found rather than raising. Two guards, and they are the two"}
 {"source": "prose", "text": "```\n`4.5 < 4.712`. **Every unit in a fresh network starts somewhere on the monotone"}
 {"source": "prose", "text": "grows — it *sharpens*. That is the opposite of how approximations usually behave,"}
 {"source": "prose", "text": "a 0 is skipped. Every judge in the system — LLM grader, sandbox, discriminator,"}
-{"source": "prose", "text": "---\n## Compression\n### 15. Neural compression: split the output range, plus a selector"}
+{"source": "prose", "text": "the ~40 the count alone needed.\n*Resonant.* Two things, for the same reason: the reward fades toward 0 as in the"}
 {"source": "prose", "text": "copies of a model settle into a loop within a handful of turns, agreeing with"}
 {"source": "prose", "text": "wrapped around the wave several times before it has learned anything, and the"}
 {"source": "prose", "text": "decay. Whatever else is true, the claim that *the decay is predictable from the"}
 {"source": "prose", "text": "about what to do once you have looked.\n### 6.3 The gap"}
-{"source": "prose", "text": "*and* better accuracy. **But the output partition is not what compresses.** Plain"}
+{"source": "prose", "text": "fade. `observe_back` there already counts the hand-over **without a phase**, so"}
 {"source": "prose", "text": "    \"the **the** west\", \"say morning **morning**\", \"**the cat** the cat sat\" - the shape a"}
 {"source": "prose", "text": "```\na = −1:  f(−3.3) = +0.891207        a = +1:  f(−3.3) = −0.891207"}
 {"source": "prose", "text": "can leave the decay alone, or you can equalise everything with some count-free"}
 {"source": "prose", "text": "  back it goes. That is deliberately the opposite direction, and correctly so:"}
-{"source": "prose", "text": "coordinate degrades 8%, and the partitioned version does not degrade at all."}
+{"source": "prose", "text": "| scope | what decays | swept set |\n|---|---|---|"}
 {"source": "prose", "text": "balances and rhymes. The monitor has to distinguish *going round* from *coming"}
 {"source": "prose", "text": "weight and every unit's activation — amplitude `a` and offset `k` together, since"}
 {"source": "prose", "text": "  single-scalar constraint is what keeps this honest: it can only remove the"}
 {"source": "prose", "text": "  earlier run finished in. Not \"this looks promising\" but \"this is a place I have"}
-{"source": "prose", "text": "diverging** (9.7× with sine). Ordered, the target is a smooth function of the"}
+{"source": "prose", "text": "are suspect, so all of them fade** — the hand-over, the penalty on the step it"}
 {"source": "prose", "text": "repeat is not a bug in it — it is the generator working correctly on a graph"}
 {"source": "prose", "text": "`h` slides the unit along the wave, `k` lifts its resting level. There is a"}
 {"source": "prose", "text": "```\nreallocate the step across layers        (this is where the arms differ)"}
 {"source": "prose", "text": "> I failed on purpose at games to understand the rules, and then figured out the"}
-{"source": "prose", "text": "are: 50% dust costs **3.1×**, 75% costs **4.5×**. Padding 17 games into 32 slots"}
+{"source": "prose", "text": "parent's last trigram shifted one character, so distinct children mean distinct"}
 {"source": "prose", "text": "and punished, so the loop is removed from the model rather than merely dodged."}
 {"source": "prose", "text": "| 4.5 | −0.9975 | −0.0236 | 0.989013057 | 1.09e−02 | 1 |"}
 {"source": "prose", "text": "architecture. If `normalised` matches the best `alpha`, then the count bought"}
 {"source": "prose", "text": "all the way into the failure, because the failure is where the information is."}
-{"source": "prose", "text": "*Where:* `Experiments/NeuralCompression/FINDINGS.md` §6–7 · **confirmed**"}
+{"source": "prose", "text": "opinion a node formed.\n`\"all\"` is classic weight decay and **changes what training produces** — at the"}
 {"source": "prose", "text": "   once and is worth keeping.\n3. **Explore from the cut.** Re-run the search with that longer prefix."}
 {"source": "prose", "text": "nothing downstream can tell the difference between an input of 20 and an input"}
 {"source": "prose", "text": "| counted `alpha=0.50` | 0.1265 | 0.0424 | 1.12 |"}
 {"source": "prose", "text": "method: the flat part is not wasted, it is buying the collapse."}
-{"source": "prose", "text": "mechanism added on top.** Width chosen by measurement: 0.177 mean error at 32"}
+{"source": "prose", "text": "fact about the corpus; removing it would break `trace`, `node_path` and"}
 {"source": "prose", "text": "up to `explore` times (default 3). Cheap and narrow first, expensive and broad"}
 {"source": "prose", "text": "|---|---:|---:|---:|\n| `[−10, 10]` | 54.2% | **1.8%** | 50.0% |"}
 {"source": "prose", "text": "monotonically, with the total step size held fixed. Whatever else is arguable,"}
 {"source": "prose", "text": "     -> judge against the criteria (LLM)\n     -> teach with the same real tools when it failed (LLM)"}
-{"source": "prose", "text": "which structure. Grade is sparse, delayed and game-specific. Training them"}
+{"source": "prose", "text": "forgotten soon, what was learned ten times takes ten times the silence."}
 {"source": "prose", "text": "    it weighed from there and ``found`` whether one of them said something new."}
 {"source": "prose", "text": "- **The sine** is dead on a constant ~2% no matter how large the range gets,"}
 {"source": "prose", "text": "direction is right and it repeats across depths below — but 0.018 inside a"}
 {"source": "prose", "text": "and the failure is the input.\nThe clearest instance is already running. The network calls tools by *writing*"}
-{"source": "prose", "text": "*Contradicted in this architecture, specifically.* The sine's derivative near zero"}
+{"source": "prose", "text": "* a taught node has two children where it had one, so `compress` stops merging"}
 {"source": "prose", "text": "The third exit is the one I find most interesting, because it is not a search"}
 {"source": "prose", "text": "and it updates the *activation parameters* rather than pushing error down a"}
 {"source": "prose", "text": "| 4 | 0.1271 | **0.0807** | 0.0906 | 0.0248 | counting wins |"}
 {"source": "prose", "text": "  directly and the rules story is decoration.\n- **Stating the rules should matter more than stating them well.** Withholding"}
-{"source": "prose", "text": "Here the gradient vanishes because every neuron was initialised into the linear"}
+{"source": "prose", "text": "  existing *a saved file always holds a wrapped reading*;"}
 {"source": "prose", "text": "`SineWaveActivationFunction.md`.)\nThe targeted version is where cycles bite back, and the mathematics here is"}
 {"source": "prose", "text": "very different inputs, one identical output. A downstream unit cannot tell them"}
 {"source": "prose", "text": "normalised all land on 0.147, identical to four significant figures. That is not"}
 {"source": "prose", "text": "**cleared** text has crossed it. The net evidence is"}
-{"source": "prose", "text": "**gradient magnitude** is catastrophic (243–520× worse on healthy networks): a"}
+{"source": "prose", "text": "`generate`, `converse` and every search stay pure: predicting must not change"}
 {"source": "prose", "text": "two-colour the path.\n**And now the cycles.** A path is always two-colourable. A graph with a cycle in"}
 {"source": "prose", "text": "you add a second hand running at a different rate. Biology uses exactly this"}
 {"source": "prose", "text": "The correction is `1 / c**(alpha·n)`. It is **exponential in `n`**, so any error"}
 {"source": "prose", "text": "I can compute. Estimating `H(q)` online and skipping phases 1–2 when the garbage"}
-{"source": "prose", "text": "The stated form — *all weights below X* — is the better of the two magnitude"}
+{"source": "prose", "text": "scope, `not self.parents[BACK]`.\n## 4. API\n```python"}
 {"source": "prose", "text": "`f_p²` is non-negative no matter what `f_p` is, so **flipping the node changes a"}
 {"source": "prose", "text": "function can retreat to being a sigmoid. A sigmoid cannot advance to being a"}
 {"source": "prose", "text": "initialisation and never updated; `counted` re-fits it every step. Same formula,"}
 {"source": "prose", "text": "over-samples; the negative one vetoes — by accumulated blame, by peak blame on a"}
-{"source": "prose", "text": "system, which fine-tuning must repair. Replay transfers the *function* rather"}
+{"source": "prose", "text": "    def settle(self, p: int) -> float:          # pay one node's debt now; returns the factor applied"}
 {"source": "prose", "text": "adjust about a repetition is how attractive repeating is, not which direction"}
 {"source": "prose", "text": "derivatives, with `u = b(x − h)`:\n```\nf      = a·sin(u) + k"}
 {"source": "prose", "text": "points per step, which costs nothing. But \"fixes it here\" is a claim about a"}
 {"source": "prose", "text": "  and only inversion does the former.\n* **The failure model subsumes it.** Inversion is global and blunt (§12, item 2),"}
-{"source": "prose", "text": "training needs to reach a worse 0.0626. Specialists train independently and in"}
+{"source": "prose", "text": "scales, and `weight_config()` reports them.\n* **CLI** — `radixnet decay --model M [--half-life N] [--scope back|node|all] [--save]`,"}
 {"source": "prose", "text": "| within one turn | `backtrack` — notice, cut, explore from past the loop | the query, not the model |"}
 {"source": "prose", "text": "  outliers.** The units seeing inputs far from where they are tuned are the ones"}
 {"source": "prose", "text": "* the systematic geometric decay with depth — the part `c**n` models, **and**"}
 {"source": "prose", "text": "| **Unlikelihood training** | A penalty term on unwanted continuations | Repulsive; a loss modification rather than a phase structure |"}
-{"source": "prose", "text": "*Safe, and for the same reason useless — tested.* With an odd activation"}
+{"source": "prose", "text": "* **Frontend** — the two settings on the weights card; the Converse panel's"}
 {"source": "prose", "text": "Now the claim I actually care about.\nA DAG mind needs no metacognition. Every computation terminates on its own;"}
 {"source": "prose", "text": "  over the same direction and waste gradient. Pick one."}
 {"source": "prose", "text": "| what it can express | the geometric trend only | essentially anything |"}
 {"source": "prose", "text": "system is shaped around. Every feedback source — a human thumb, an LLM"}
-{"source": "prose", "text": "relocates the network without unlearning; ascent destroys the learned function."}
+{"source": "prose", "text": "spent on disk**, only for the graph time it has lived through. The upgrade is a"}
 {"source": "prose", "text": "watching.\nThat is what I meant by cycles being a feature. Not \"loops are tolerable if you"}
 {"source": "prose", "text": "---\n## 9. Evidence: the CartPole experiment\n`Experiments/ActivationFunctionTest/` holds three scripts — `sigmoid.py`,"}
 {"source": "prose", "text": "Adam's estimate is not, and that is the one window where the structural version"}
 {"source": "prose", "text": "   fine-tune pass.\n6. **The critic** — the model writes freely, a reviewer marks it, and everything"}
-{"source": "prose", "text": "exactly to where it began. *A cycle that returns to its origin does no work.*"}
+{"source": "prose", "text": "they are ported. Two rules that decide whether parity holds:"}
 {"source": "prose", "text": "partly making a loop cheap; over-learning it is making the loop so cheap you"}
 {"source": "prose", "text": "| ReLU | 10 |\n| **Sine (`−sin(x/3)`)** | **28 – 48** |"}
 {"source": "prose", "text": "is not even defined. The depth signal was not recovered, it was **flattened"}
 {"source": "prose", "text": "— the count/reward network — implements the 2NRL *interface* with a different"}
-{"source": "prose", "text": "*Confirmed as an activation, contradicted at the stated frequency.* Sweeping `b`"}
+{"source": "prose", "text": "`tests/test_go_parity.py` gains: the same weights after the same sweep"}
 {"source": "prose", "text": "which is, incidentally, the only version of \"self-improving\" that means"}
 {"source": "prose", "text": "**And there is a confound I should name myself.** In all three scripts the"}
 {"source": "prose", "text": "used to fix the forward pass and then discarded."}
 {"source": "prose", "text": "been neither falsified nor confirmed. Everything needed is already in the"}
-{"source": "prose", "text": "peak needs `|z| = π/(2b)`, which at `b = 1/3` is 4.71 — far outside the operating"}
+{"source": "prose", "text": "  proportion;\n* a dropped hand-over restores the node to a unary chain and `compress()`"}
 {"source": "prose", "text": "has the larger `|f|`, and the edges on the other side are rescaled by the ratio"}
 {"source": "prose", "text": "gap, and it is also the reason the number should not be quoted without the"}
 {"source": "prose", "text": "  move: a thing that looks like a defect is a compressed representation, and the"}
 {"source": "prose", "text": "got fairly criticised for.\n**Predictions.**\n- **P1.** A beats D. Systematic failure, inverted, beats not using it."}
-{"source": "prose", "text": "parameterisation.** The rule is `b ≈ π / (2·E|z|)`."}
+{"source": "prose", "text": "* prediction does not settle anything: `predict` twice on a decaying model"}
 {"source": "prose", "text": "**6. Monitors watch outputs, not structure.** Do not write a cycle detector over"}
 {"source": "prose", "text": "measures the activation function and nothing else, and it is the one I would"}
 {"source": "prose", "text": "  than away from it, because the failure carries the information."}
 {"source": "prose", "text": "- **If the rate ratio optimum sits at 1**, §4.4 is wrong. Sweep `η⁻/η⁺` over"}
-{"source": "prose", "text": "*Where:* `Research/CyclesAreAFeature.md`, `GTMNN/DESIGN.md` §2.1, §14 · **held**"}
+{"source": "prose", "text": "  and a conversation adds about one per rethink. That is the honest position —"}
 {"source": "prose", "text": "digits. If conversations stay varied without the monitors, then the generator is"}
 {"source": "prose", "text": "   than asserting it.\n7. Report wall-clock too. `sin` is not free next to `max(0, x)`."}
 {"source": "prose", "text": "   The premise measurement (§6) is solid; the optimiser comparison (§9) is not,"}
 {"source": "prose", "text": "   flips alternating nodes along one failed path, used instead of a global"}
-{"source": "prose", "text": "insight 21 independently confirmed is the only trigger that separates *stuck*"}
+{"source": "prose", "text": "  enough times, the branch stays closed; §3.5 sets how long."}
 {"source": "prose", "text": "**Prediction 3.** Targeted inversion is measurably less effective on paths"}
 {"source": "prose", "text": "k actually produces |\nThe edge signal in RadixCyclicNN is `w · f_p(z_p) · f_c(z_c)` — weight times the"}
 {"source": "prose", "text": "   something that is not there.\n5. **Adam wins and I have not beaten it.** The count-based method is better than"}
 {"source": "prose", "text": "   with no convergence criterion and no held-out evaluation, and its only signal"}
-{"source": "prose", "text": "network does not need to be told which game it is playing."}
+{"source": "prose", "text": "  ordinary route. If they should fade too, it is the same algorithm on a"}
 {"source": "prose", "text": "is the experiment that separates them, but it is the result that would cost me"}
 {"source": "prose", "text": "   in a range you chose. Pre-activations that grow without bound turn the layer"}
 {"source": "prose", "text": "* **`normalised` matching the best `alpha` across seeds and depths.** That would"}
 {"source": "prose", "text": "---\n## 13. Summary\n- Train on the failures at full rate, invert the network, fine-tune on the"}
-{"source": "prose", "text": "speech.\nAnd it must be **cyclic**: chess/checkers 0.609, checkers/go ~0.730, chess/go"}
+{"source": "prose", "text": "  fade `p`'s hand-over\". Same effect where it fires, but it is a trigger dressed"}
 {"source": "prose", "text": "   quantity must come from outside the cycle, and then listed three kinds. The"}
 {"source": "prose", "text": "   large dense network it would.\n6. **Not yet tested at depth.** Everything here is 2–3 layers, or a graph with"}
 {"source": "prose", "text": "  `n` equal to the depth.\n* `c**n` is **invertible**. The magnitude was not destroyed, it was moved into an"}
 {"source": "prose", "text": "  failure's negative entropy. Systematic failure inverts into signal; random"}
-{"source": "prose", "text": "> For chess, a piece moving one space would count here. This allows us to train"}
+{"source": "prose", "text": "  rule, and it cannot work here for the reason in §1: the hand-over's whole"}
 {"source": "prose", "text": "  graph can. That is what the loop is for.\n- The costs are real: no guaranteed termination, no layer order, no negative"}
 {"source": "prose", "text": "  the two should be removed.\n---\n## 13. Summary"}
 {"source": "prose", "text": "  `max |f'| = 0.25`, the value the activation's derivative predicts a priori. The"}
 {"source": "prose", "text": "  the rules, it is the instrument.\n- Which is why the curve is a hockey-stick and not a climb. A long flat stretch"}
-{"source": "prose", "text": ", not the chosen features."}
+{"source": "prose", "text": "  `teach_back`, and cheap. Rejected because it does not reach the trapped node"}
 {"source": "prose", "text": "  that runs past it, which forces the walk out of the loop; taking the"}
 {"source": "prose", "text": "  machine precision. That is what makes 2NRL's `invert()` possible, and neither"}
 {"source": "prose", "text": "  4 plain, counted and count-free normalisation all land on the same number, so"}
 {"source": "prose", "text": "stabilizing effect in collective memories. *Nature* 304, 158–159."}
-{"source": "prose", "text": "0. **Does transfer survive ACROSS regions, or only within them?** (29) The measured transfer was between two grid games sharing displacement semantics — within a region, which is what regions are for. If nothing transfers between a board region and a progr"}
+{"source": "prose", "text": "  `traversals` as the bound on every counter, and makes parity depend on"}
 {"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"seed\": 0,\n      \"config\": {"}
 {"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"seed\": 0,\n      \"config\": {"}
 {"source": "json", "text": "{\n  \"runs\": [\n    {\n      \"seed\": 0,\n      \"config\": {"}

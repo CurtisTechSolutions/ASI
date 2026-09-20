@@ -72,7 +72,7 @@ class RadixTreeNet:
     """A path-compressed context trie with a learnable sine on every node."""
 
     __slots__ = (
-        "depth", "floor", "alphabet", "min_count", "rng",
+        "depth", "floor", "alphabet", "min_count", "scores", "rng",
         "seg", "kids", "par", "cnt", "w", "z", "a", "b", "h", "k",
         "chars", "decisions", "fallback", "pcache",
     )
@@ -84,6 +84,7 @@ class RadixTreeNet:
         seed: int = 0,
         floor: float = FLOOR,
         min_count: int = 1,
+        scores: str = "learned",
     ) -> None:
         if depth < 1:
             raise ValueError(f"depth must be >= 1, got {depth}")
@@ -93,6 +94,20 @@ class RadixTreeNet:
         self.floor = float(floor)
         self.alphabet = int(alphabet) + 1  # one slot reserved for the unseen
         self.min_count = int(min_count)
+        if scores not in ("learned", "counts"):
+            raise ValueError(f"scores must be 'learned' or 'counts', got {scores!r}")
+        self.scores = scores
+        """Where a branch's probabilities come from.
+
+        ``learned``  the softmax of ``w_c * f_p * f_c`` - the one-hop rule.
+        ``counts``   the relative traversal counts, with nothing learned at all.
+
+        The second is not an arm of the architecture; it is the control that
+        says what the first is *worth*.  Everything else - the tree, the path
+        compression, the backoff chain, the shared prior, the smoothing
+        constants - is identical between them, so the difference is the
+        learning rule and nothing else.
+        """
         self.rng = random.Random(seed)
         self.seg: list[str] = [""]
         self.kids: list[dict[str, int]] = [{}]
@@ -273,6 +288,12 @@ class RadixTreeNet:
         kids = self.kids[p]
         if not kids:
             return []
+        if self.scores == "counts":
+            items = list(kids.items())
+            tot = float(sum(self.cnt[c] for _ch, c in items)) or 1.0
+            out = [(ch, c, self.cnt[c] / tot) for ch, c in items]
+            self.pcache[p] = out
+            return out
         fp = self.f(p)
         items = list(kids.items())
         scores = [self.w[c] * fp * self.f(c) for _, c in items]
@@ -471,6 +492,8 @@ class RadixTreeNet:
         shuffle_seed: int = 0,
     ) -> list[float]:
         """Train on ``texts``; returns the mean decision loss per epoch (nats)."""
+        if self.scores == "counts":
+            return [0.0] * epochs  # nothing to train: the counts are the model
         if self.decisions is None:
             self.decisions = self.plan(texts)
         plan = self.decisions

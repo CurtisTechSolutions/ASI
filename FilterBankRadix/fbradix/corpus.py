@@ -54,12 +54,16 @@ SOURCES: dict[str, tuple[str, ...]] = {
         "RadixCyclicNN/go/radixnet/search.go",
         "RadixCyclicNN/go/radixnet/beam.go",
     ),
+    # The four papers, and deliberately not `Research/Insights.md`: that file is
+    # a living index that this directory's own findings get written into, so a
+    # corpus built from it changes every time a result is recorded - including
+    # between two runs of the same sweep.  Measured the hard way.
     "prose": (
         "Research/CyclesAreAFeature.md",
         "Research/SineWaveActivationFunction.md",
         "Research/VanishingGradientIsAFeature.md",
         "Research/2NRL.md",
-        "Research/Insights.md",
+        "RadixCyclicNN/SPEC-EdgeDecay.md",
     ),
     "json": (
         "Experiments/TwoNRL_CartPole/results/twonrl_results.json",
@@ -189,6 +193,33 @@ def load(path: str = SNAPSHOT, per_source: int = 200) -> list[dict]:
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
+    return build(per_source)
+
+
+def per_source_of(samples: list[dict]) -> int:
+    """The largest number of segments any one source contributes."""
+    counts: dict[str, int] = {}
+    for s in samples:
+        counts[s["source"]] = counts.get(s["source"], 0) + 1
+    return max(counts.values()) if counts else 0
+
+
+def take(per_source: int = 200, path: str = SNAPSHOT) -> list[dict]:
+    """The corpus at this size: the committed snapshot if it *is* this size.
+
+    The snapshot is preferred over a fresh build for a reason that cost a run:
+    the sources are files in this repository, so writing a finding into one of
+    them changes the corpus under a sweep that is still running, and two tables
+    in the same README stop being comparable.  A size the snapshot does not
+    have is built - and its digest is recorded in the result file, which is how
+    a reader can tell whether it drifted.
+    """
+    if per_source <= 0:
+        return load(path)
+    if os.path.exists(path):
+        snap = load(path)
+        if per_source_of(snap) == per_source:
+            return snap
     return build(per_source)
 
 

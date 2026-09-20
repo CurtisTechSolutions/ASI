@@ -224,6 +224,32 @@ def test_training_reduces_the_decision_loss():
     assert losses[-1] < losses[0] * 0.8, (losses[0], losses[-1])
 
 
+def test_the_counts_control_changes_only_the_learning():
+    """`counts` is the control that says what the one-hop rule is worth: the
+    same tree, the same compression, the same backoff chain and the same
+    smoothing, with the softmax replaced by relative traversal counts.  If it
+    differed in anything else the comparison would mean nothing."""
+    texts = [s["text"] for s in corpus.synthetic(per_source=8, seed=0)]
+    a = RadixTreeNet(depth=4, alphabet=64, seed=0)
+    b = RadixTreeNet(depth=4, alphabet=64, seed=0, scores="counts")
+    for t in texts:
+        a.insert_text(t)
+        b.insert_text(t)
+    assert (a.num_nodes, a.stored_chars, a.branches) == (b.num_nodes, b.stored_chars, b.branches)
+    assert b.train(texts, epochs=3) == [0.0, 0.0, 0.0], "counts mode has nothing to train"
+    for node in (0, 1):
+        assert abs(sum(p for _ch, _c, p in b.child_probs(node)) - 1.0) < 1e-9
+    chars = sorted({c for t in texts for c in t})
+    for ctx in ("", "A", "the"):
+        assert abs(sum(b.prob(ctx, c) for c in chars) - 1.0) < 1e-6 + b.floor
+    try:
+        RadixTreeNet(depth=2, scores="nonsense")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown scoring mode must not be accepted silently")
+
+
 def test_a_single_child_costs_nothing_to_train():
     """radixnet's rule: the softmax over one child is 1, so the loss and every
     gradient are exactly zero - the plan must not contain those positions."""

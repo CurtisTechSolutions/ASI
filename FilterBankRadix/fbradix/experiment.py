@@ -8,6 +8,7 @@ Four questions, each with the control that settles it:
 | is *learning* the filter worth anything? | ``learned`` vs ``frozen`` |
 | does the periodic unit beat a monotone one? | ``learned`` vs ``monotone`` |
 | is the routing doing it, or just the split? | ``learned`` vs ``roundrobin`` |
+| is the *learning rule* worth anything? | ``single`` vs ``counts`` (the ``baseline`` sweep) |
 | does learning the *wave* help, or only the projection? | ``learned`` vs ``fixedwave`` |
 | is the sign-bit address the thing holding layer 1 back? | ``learned`` vs ``argmax`` |
 | how far short of a perfect router does it fall? | ``learned`` vs ``oracle`` |
@@ -18,6 +19,13 @@ answer none of them properly:
 * ``scale`` - the same arms over 100 to 800 segments per source.  Splitting a
   corpus costs every expert data, so whether a bank can win at all is a
   question about how much text there is per expert.
+* ``baseline`` - the same trees with the softmax replaced by relative counts,
+  so the one-hop rule's contribution is measured rather than assumed.
+* ``epochs`` - the one-hop rule against counting as training goes on, which is
+  what says whether the rule is under-trained or over-trained.
+* ``passes`` - how many hinge passes the refilter step should take, because the
+  default was raised from 1 to 4 on an argument and an argument is not a
+  measurement.
 * ``probe`` - not an arm at all: four supervised measurements that say whether
   the gap between the learned router and the oracle is in the *signal* layer 2
   sends back, in the *address code* layer 1 speaks, or in the rule that fits it.
@@ -54,6 +62,15 @@ RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ARMS = ("single", "roundrobin", "oracle", "frozen", "learned", "argmax", "frozen-argmax",
         "monotone", "unbalanced", "fixedwave", "deep", "deep-oracle")
 
+COUNT_ARMS = {"counts": "single", "counts-oracle": "oracle"}
+"""Arms that keep the whole architecture and delete the learning.
+
+Same trees, same compression, same backoff chain, same prior, same constants -
+only the branch probabilities come from relative traversal counts instead of
+the softmax of ``w_c * f_p * f_c``.  The difference between ``single`` and
+``counts`` is what the one-hop rule is worth, with everything else held fixed;
+these arms are run by the ``baseline`` sweep rather than the main one."""
+
 DEEP = {"deep", "deep-oracle"}
 """Arms whose shared prior is as deep as the experts are.
 
@@ -68,6 +85,7 @@ priced."""
 
 def make_router(arm: str, bits: int, labels, seed: int):
     """One router per arm name."""
+    arm = COUNT_ARMS.get(arm, arm)
     if arm == "single":
         return ConstantRouter()
     if arm == "roundrobin":
@@ -174,7 +192,8 @@ def run_arm(
     labels = [s["source"] for s in train]
     router = make_router(arm, bits, labels, seed)
     bank = FilteredRadixBank(router, depth=depth, alphabet=alphabet, seed=seed,
-                             prior_depth=depth if arm in DEEP else 1)
+                             prior_depth=depth if arm in DEEP else 1,
+                             scores="counts" if arm in COUNT_ARMS else "learned")
     t0 = time.time()
     history = bank.fit(train, rounds=rounds, epochs=epochs, lr=lr, test=test)
     elapsed = time.time() - t0
@@ -207,10 +226,7 @@ def run_arm(
 
 def make_corpus(per_source: int, seed: int = 0):
     """Build (or load the snapshot of) the corpus and split it."""
-    if per_source == 0:
-        data = corpus.load()
-    else:
-        data = corpus.build(per_source)
+    data = corpus.take(per_source)
     train, test = corpus.split(data, seed=seed)
     return data, train, test, corpus.alphabet(data)
 
@@ -272,6 +288,95 @@ def sweep_scale(sizes=(100, 200, 400, 800), bits=2, depth=5,
     return {"sweep": "scale", "bits": bits, "depth": depth, "runs": runs}
 
 
+def sweep_epochs(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=1,
+                 values=(1, 3, 10, 30), log=print) -> dict:
+    """Is the one-hop rule under-trained, or over-trained, against counting?
+
+    The ``baseline`` sweep says a tree whose branches are relative traversal
+    counts beats the same tree trained by the one-hop rule.  That has two very
+    different explanations - three epochs is not enough to reach what counting
+    already knows, or training past it makes the branches sharper than the data
+    supports - and they point in opposite directions.  This is the sweep that
+    tells them apart: one tree, no routing, the same seeds, more and more
+    epochs, against the untrained count line.
+    """
+    data, train, test, alpha = make_corpus(per_source)
+    log(f"# epochs: the one-hop rule against counting, depth {depth}")
+    runs = []
+    for arm, values_for in (("counts", (0,)), ("single", values)):
+        for ep in values_for:
+            for seed in seeds:
+                r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
+                            rounds=rounds, epochs=max(1, ep), seed=seed)
+                r["epochs"] = ep
+                r["arm"] = arm
+                runs.append(r)
+                log(f"  {arm:7s} epochs={ep:2d} seed={seed} "
+                    f"bits/char={r['test_bits_per_char']:.4f} "
+                    f"train={r['train_bits_per_char']:.4f} {r['seconds']:.0f}s")
+    return {"sweep": "epochs", "corpus": corpus.summarise(data), "bits": bits,
+            "depth": depth, "runs": runs}
+
+
+def sweep_passes(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epochs=3,
+                 values=(1, 2, 4, 8), log=print) -> dict:
+    """How many hinge passes the refilter step should take.
+
+    The pricing half of :meth:`FilterRouter.learn` is expensive and the hinge
+    half is nearly free, so running the hinge more than once over the same
+    prices costs almost nothing - which is an argument for more passes, not a
+    measurement.  This is the measurement.  The default (``PASSES``) was raised
+    from 1 to 4 on the argument; the table says whether the argument was worth
+    anything.
+    """
+    data, train, test, alpha = make_corpus(per_source)
+    log(f"# passes: hinge passes per refilter step, depth {depth}")
+    runs = []
+    for n in values:
+        for seed in seeds:
+            router = FilterRouter(bits=bits, seed=seed, passes=n)
+            bank = FilteredRadixBank(router, depth=depth, alphabet=alpha, seed=seed)
+            t0 = time.time()
+            history = bank.fit(train, rounds=rounds, epochs=epochs, test=test)
+            routes = bank.assign(test)
+            labels = [s["source"] for s in test]
+            r = {
+                "arm": f"passes={n}", "passes": n, "seed": seed, "depth": depth,
+                "test_bits_per_char": bank.bits_per_char(test, routes)[0],
+                "purity": purity(routes, labels), "nmi": nmi(routes, labels),
+                "seconds": time.time() - t0, "history": history,
+                **bank.size_stats(), **bank.load_stats(bank.routes),
+            }
+            runs.append(r)
+            log(f"  passes={n:2d} seed={seed} bits/char={r['test_bits_per_char']:.4f} "
+                f"live={r['live_experts']} nmi={r['nmi']:.3f} {r['seconds']:.0f}s")
+    return {"sweep": "passes", "corpus": corpus.summarise(data), "bits": bits,
+            "depth": depth, "runs": runs}
+
+
+def sweep_baseline(per_source=200, bits=2, depth=5, seeds=(0, 1, 2), rounds=3, epochs=3,
+                   log=print) -> dict:
+    """What is the one-hop rule worth?  The same trees, with nothing learned.
+
+    ``counts`` and ``counts-oracle`` keep every other part of the architecture
+    and replace the softmax of ``w_c * f_p * f_c`` with the relative traversal
+    counts.  Whatever is left between them and ``single`` / ``oracle`` is the
+    learning rule's contribution, measured rather than assumed.
+    """
+    data, train, test, alpha = make_corpus(per_source)
+    log(f"# baseline: what the one-hop rule is worth, depth {depth}")
+    runs = []
+    for arm in ("single", "counts", "oracle", "counts-oracle"):
+        for seed in seeds:
+            r = run_arm(arm, train, test, alpha, bits=bits, depth=depth,
+                        rounds=rounds, epochs=epochs, seed=seed)
+            runs.append(r)
+            log(f"  {arm:14s} seed={seed} bits/char={r['test_bits_per_char']:.4f} "
+                f"nodes={r['nodes']:6d} {r['seconds']:.0f}s")
+    return {"sweep": "baseline", "corpus": corpus.summarise(data), "bits": bits,
+            "depth": depth, "runs": runs}
+
+
 # -- the probe: is the signal the problem, or the filter? ----------------------
 
 SUP_EPOCHS = 100
@@ -288,6 +393,27 @@ quietly lowering it.
 """
 
 
+def wave_reach(filt, xs) -> dict:
+    """How far into its own wave each unit has been pushed.
+
+    ``u = b(z - h)`` is the wave's argument, so ``|u| > pi/2`` means the unit
+    is past its first peak - the place where a *periodic* response starts
+    coming back down and a monotone one merely saturates.  That difference is
+    the whole reason the two kinds of unit behave differently as gates, so it
+    is measured rather than reasoned about.
+    """
+    us = []
+    for x in xs:
+        for j in range(filt.bits):
+            us.append(abs(filt.b[j] * (filt.project(x, j) - filt.h[j])))
+    us.sort()
+    return {
+        "median": us[len(us) // 2],
+        "max": us[-1],
+        "past_first_peak": sum(1 for u in us if u > math.pi / 2) / len(us),
+    }
+
+
 def _fit_supervised(filt, xs, targets, epochs: int = SUP_EPOCHS, lr: float = 0.3):
     """Train a filter *directly on the answers* - the ceiling, not an arm.
 
@@ -295,7 +421,6 @@ def _fit_supervised(filt, xs, targets, epochs: int = SUP_EPOCHS, lr: float = 0.3
     two very different failures: a filter that cannot represent the partition,
     and a filter that can but is not being taught it.
     """
-    filt.calibrate(xs)
     for _ in range(epochs):
         for x, want in zip(xs, targets):
             route, _resp = filt.address(x)
@@ -329,6 +454,12 @@ def probe(per_source=200, bits=2, depth=5, epochs=3, seeds=(0, 1, 2), log=print)
        question, and it is not one.
     4. **And one source against the rest?**  What an argmax unit is asked for.
 
+    Every supervised fit also reports :func:`wave_reach` - how far into its own
+    wave the hinge pushed each unit.  That is what separates the two shapes: a
+    hinge can only raise a response by moving the projection, and past the
+    first peak a *periodic* unit starts coming back down while a monotone one
+    only flattens.
+
     Everything but (1) is averaged over ``seeds``, because a single supervised
     fit of this filter is not a stable number - which is itself one of the
     findings.
@@ -360,15 +491,24 @@ def probe(per_source=200, bits=2, depth=5, epochs=3, seeds=(0, 1, 2), log=print)
     def fit(make, targets):
         """Supervised fit over every seed; returns means and the spread."""
         acc, pur, nm, dead = [], [], [], 0
+        reach0, reach1, peak1, freq = [], [], [], []
         for sd in seeds:
             f = make(sd)
+            f.calibrate(xs)
+            reach0.append(wave_reach(f, xs)["median"])
             got = _fit_supervised(f, xs, targets)
             acc.append(sum(1 for g, t in zip(got, targets) if g == t) / len(targets))
             pur.append(purity(got, labels))
             nm.append(nmi(got, labels))
             dead += len(f.dead_units())
+            after = wave_reach(f, xs)
+            reach1.append(after["median"])
+            peak1.append(after["past_first_peak"])
+            freq.append(mean(f.b))
         return {"accuracy": mean(acc), "accuracy_sd": sd_of(acc), "purity": mean(pur),
-                "nmi": mean(nm), "dead_units": dead, "per_seed": acc}
+                "nmi": mean(nm), "dead_units": dead, "per_seed": acc,
+                "wave_u_before": mean(reach0), "wave_u_after": mean(reach1),
+                "past_first_peak": mean(peak1), "mean_b": mean(freq)}
 
     # 2 -- what each address code can express, when handed the answer
     out["ceiling"] = {}
@@ -396,7 +536,9 @@ def probe(per_source=200, bits=2, depth=5, epochs=3, seeds=(0, 1, 2), log=print)
             out["ceiling"][f"argmax_{kind}{tag}"] = r
             log(f"     argmax code, supervised, {kind + tag:19s}: "
                 f"accuracy={r['accuracy']:.3f} +- {r['accuracy_sd']:.3f} "
-                f"nmi={r['nmi']:.3f} dead={r['dead_units']}")
+                f"nmi={r['nmi']:.3f} | median |u| {r['wave_u_before']:.2f} -> "
+                f"{r['wave_u_after']:.2f}, {r['past_first_peak']:.1%} past the first "
+                f"peak, mean b {r['mean_b']:.3f}")
 
     # 3 -- the two-against-two questions a sign-bit address is made of
     out["dichotomies"] = {}
@@ -454,7 +596,9 @@ def main(argv=None) -> int:
     import argparse
 
     ap = argparse.ArgumentParser(prog="fbradix experiment", description=__doc__)
-    ap.add_argument("--sweep", default="all", choices=("all", "main", "depth", "scale", "probe"))
+    ap.add_argument("--sweep", default="all",
+                    choices=("all", "main", "depth", "scale", "probe", "baseline",
+                             "passes", "epochs"))
     ap.add_argument("--quick", action="store_true", help="one seed, small corpus, shallow")
     ap.add_argument("--per-source", type=int, default=200)
     ap.add_argument("--bits", type=int, default=2)
@@ -468,12 +612,16 @@ def main(argv=None) -> int:
     seeds = tuple(range(args.seeds))
     depths = (2, 3, 4, 5, 6)
     sizes = (100, 200, 400, 800)
+    epoch_values = (1, 3, 10, 30)
+    pass_values = (1, 2, 4, 8)
     if args.quick:
         seeds = (0,)
         args.per_source = 60
         args.rounds = 2
         depths = (2, 4)
         sizes = (60, 120)
+        epoch_values = (1, 3)
+        pass_values = (1, 4)
 
     os.makedirs(args.out, exist_ok=True)
     lines: list[str] = []
@@ -497,6 +645,18 @@ def main(argv=None) -> int:
     if args.sweep in ("all", "depth"):
         out["depth"] = sweep_depth(args.per_source, args.bits, depths, seed=0,
                                    rounds=args.rounds, epochs=args.epochs, log=log)
+        log("")
+    if args.sweep in ("all", "epochs"):
+        out["epochs"] = sweep_epochs(args.per_source, args.bits, args.depth, seeds,
+                                     values=epoch_values, log=log)
+        log("")
+    if args.sweep in ("all", "passes"):
+        out["passes"] = sweep_passes(args.per_source, args.bits, args.depth, seeds,
+                                     args.rounds, args.epochs, values=pass_values, log=log)
+        log("")
+    if args.sweep in ("all", "baseline"):
+        out["baseline"] = sweep_baseline(args.per_source, args.bits, args.depth, seeds,
+                                         args.rounds, args.epochs, log)
         log("")
     if args.sweep in ("all", "probe"):
         log("# probe: where the routing gap is")
@@ -523,7 +683,7 @@ def main(argv=None) -> int:
     if args.quick:
         written.append(_write(args.out, "quick", out))
     else:
-        for name in ("main", "depth", "scale", "probe"):
+        for name in ("main", "baseline", "epochs", "passes", "depth", "scale", "probe"):
             if name in out:
                 written.append(_write(args.out, name, {name: out[name], "meta": out["meta"]}))
     lpath = os.path.join(args.out, f"{tag}_run.log")

@@ -12,9 +12,11 @@ have been built, and the experts cannot be built until layer 1 has routed:
                must leave no trace behind, or every expert slowly becomes the
                corpus and the split means nothing;
 3. **train**   each expert runs the one-hop rule over its own text;
-4. **refilter** every live expert prices every training segment, and the filter
-               is pushed - one hinge per disagreeing bit - towards the address
-               that priced it cheapest.
+4. **refilter** the training segments are split into folds; each fold is priced
+               under experts built *without* it, and the filter is pushed - one
+               hinge per disagreeing bit - towards the address that priced it
+               cheapest.  Pricing a segment under the expert that memorised it
+               answers a different question, and answers it "stay" every time.
 
 Steps 1-3 are the hard assignment; step 4 is the only place the bank's parts
 speak to each other, and what crosses is a scalar - the difference in bits
@@ -63,6 +65,18 @@ more than anything else in this rule."""
 
 BALANCE = 0.5
 """Load pressure, in bits/char per unit of load imbalance (0 disables it)."""
+
+FOLDS = 2
+"""Folds the refilter step prices its segments in.
+
+An expert has *memorised* the segments it was built from, so asking "would
+another expert have done better on this one" of the segments that trained it
+answers no almost every time.  Measured: on training segments 99.4% to 100% of
+them are already at the cheapest expert and the mean advantage is 0.001 bits;
+on segments the experts never saw, 52.5% to 70.6% and 0.20 to 0.30 bits.  The
+first number is a property of memorisation and the second is the signal, so the
+filter is taught on prices it did not help produce: the training segments are
+split into folds, and each fold is priced under experts built without it."""
 
 PRIOR_DEPTH = 1
 """The shared fallback is a unigram tree: one node per character, no more."""
@@ -314,6 +328,7 @@ class FilteredRadixBank:
         floor: float = FLOOR,
         min_count: int = 1,
         prior_depth: int = PRIOR_DEPTH,
+        scores: str = "learned",
     ) -> None:
         self.router = router
         self.depth = depth
@@ -322,6 +337,7 @@ class FilteredRadixBank:
         self.floor = floor
         self.min_count = min_count
         self.prior_depth = prior_depth
+        self.scores = scores
         self.experts: list[RadixTreeNet] = []
         self.prior: RadixTreeNet | None = None
         self.routes: list[int] = []
@@ -336,6 +352,7 @@ class FilteredRadixBank:
             seed=self.seed + seed_offset,
             floor=self.floor,
             min_count=self.min_count,
+            scores=self.scores,
         )
 
     def build_prior(self, texts: list[str], epochs: int = 2, lr: float = 0.5) -> RadixTreeNet:
@@ -358,6 +375,56 @@ class FilteredRadixBank:
             self.experts[r].insert_text(s["text"])
         for e in self.experts:
             e.fallback = self.prior
+
+    def fold_experts(
+        self, samples: list[dict], routes: list[int], hold: set, epochs: int, lr: float
+    ) -> list[RadixTreeNet]:
+        """Experts built and trained from every segment *except* ``hold``.
+
+        The shared prior is not rebuilt - it is a unigram over all the training
+        text, it is attached identically to every expert, and so it cannot bias
+        one expert's price against another's.
+        """
+        experts = [self._tree(i + 1) for i in range(self.router.n_experts)]
+        texts: list[list[str]] = [[] for _ in experts]
+        for i, (s, r) in enumerate(zip(samples, routes)):
+            if i in hold:
+                continue
+            experts[r].insert_text(s["text"])
+            texts[r].append(s["text"])
+        for e in experts:
+            e.fallback = self.prior
+        for e, ts in zip(experts, texts):
+            if ts:
+                e.train(ts, epochs=epochs, lr=lr, shuffle_seed=self.seed)
+        return experts
+
+    def refilter(
+        self, samples: list[dict], routes: list[int], epochs: int, lr: float, folds: int = FOLDS
+    ) -> dict:
+        """Teach the filter, fold by fold, on prices it did not help produce."""
+        if not getattr(self.router, "learns", False):
+            return {}
+        n = len(samples)
+        out: dict = {"folds": folds, "moved": 0, "considered": 0, "agreed": 0}
+        adv = 0.0
+        for f in range(folds):
+            hold = set(range(f, n, folds))
+            if not hold:
+                continue
+            experts = self.fold_experts(samples, routes, hold, epochs, lr)
+            idx = sorted(hold)
+            rec = self.router.learn([samples[i]["text"] for i in idx],
+                                    [routes[i] for i in idx], experts)
+            for key in ("moved", "considered", "agreed"):
+                out[key] += rec.get(key, 0)
+            adv += rec.get("mean_advantage", 0.0) * rec.get("considered", 0)
+            out["live"] = rec.get("live", 0)
+            out["dead_units"] = rec.get("dead_units", [])
+            out["amp_freq"] = rec.get("amp_freq", [])
+            out["passes"] = rec.get("passes")
+        out["mean_advantage"] = adv / out["considered"] if out["considered"] else 0.0
+        return out
 
     def train_experts(self, samples: list[dict], routes: list[int], epochs: int, lr: float) -> float:
         """Train each expert on its own segments; returns the mean decision loss."""
@@ -411,7 +478,7 @@ class FilteredRadixBank:
             if test is not None:
                 rec["test_bits"] = self.bits_per_char(test)[0]
             if r + 1 < rounds:
-                rec["filter"] = self.router.learn(texts, routes, self.experts)
+                rec["filter"] = self.refilter(train, routes, epochs, lr)
             self.history.append(rec)
             if log:
                 log(rec)

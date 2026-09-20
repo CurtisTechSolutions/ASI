@@ -21,7 +21,7 @@ RESULTS    ?= results
 
 COMMON = --bits $(BITS) --depth $(DEPTH) --rounds $(ROUNDS) --epochs $(EPOCHS)
 
-.PHONY: help test check demo route generate train corpus quick experiment main depth probe scale all clean
+.PHONY: help test check demo route generate train corpus quick experiment main baseline epochs passes depth probe scale all clean
 
 help: ## Show this help
 	@echo "FilterBankRadix make targets  (override like: make demo BITS=3 DEPTH=4)"
@@ -53,7 +53,7 @@ corpus: ## Rebuild the corpus snapshot from the pinned repository files
 	$(FB) --per-source $(PER_SOURCE) corpus
 
 ##@ The experiment
-quick: ## One seed, small corpus, two depths - about a minute
+quick: ## One seed, small corpus, short sweeps - a few minutes
 	$(FB) experiment --quick
 
 experiment: ## Every sweep, every arm (slow: the numbers in README.md)
@@ -68,6 +68,15 @@ depth: ## Just the depth sweep: does routing matter more with less context?
 
 probe: ## Where the routing gap is: the signal, the address code, or the rule?
 	$(FB) experiment --sweep probe --per-source $(PER_SOURCE)
+
+baseline: ## What the one-hop rule is worth: the same trees, nothing learned
+	$(FB) experiment --sweep baseline --seeds $(SEEDS) --per-source $(PER_SOURCE)
+
+epochs: ## The one-hop rule against counting, as training goes on
+	$(FB) experiment --sweep epochs --seeds $(SEEDS) --per-source $(PER_SOURCE)
+
+passes: ## How many hinge passes the refilter step should take
+	$(FB) experiment --sweep passes --seeds $(SEEDS) --per-source $(PER_SOURCE)
 
 scale: ## Just the scale sweep: does more text per expert rescue the bank?
 	$(FB) experiment --sweep scale
