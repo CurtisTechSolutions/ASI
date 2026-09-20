@@ -33,14 +33,15 @@ Where the tail token stops being the tail
 -----------------------------------------
 A tape ends with an outcome token, and a game whose last state is terminal ends
 the replay before reaching it - so the tail is never ambiguous for a tape that
-came out of :func:`encode`.  It *is* ambiguous for a tape the network
-**predicted**, which can stop anywhere, and worse for a game that was
-adjudicated rather than finished: the replay is still hungry when the tail
-arrives and will happily read ``draw`` as a move.  :func:`_tail_at` decides
-the question the only two ways it can be decided from the tape alone - the
-token is last, and it parses as an outcome - and a prediction that loses to
-both costs at most one ply of survival, which the README states rather than
-hides.
+came out of :func:`encode`.  It *is* ambiguous for a game that was adjudicated
+rather than finished (``uge.corpus`` caps chess and Pig): the replay is still
+hungry when the tail arrives, and would read the result as a move.  Since the
+outcome tokens live in the reserved meta region of the code space that now
+costs a spurious ``syntax`` break rather than a spurious accepted move - but a
+break is still wrong, so :func:`_tail_at` decides the question the only two
+ways it can be decided from the tape alone: the token is last, and it parses as
+an outcome.  A *predicted* tape that loses to both costs at most one ply of
+survival, which the README states rather than hides.
 """
 
 from __future__ import annotations

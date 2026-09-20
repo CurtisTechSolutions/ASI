@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import random
 from typing import Any
 
 from .codec import decode, encode_prefix
@@ -144,30 +145,26 @@ def propose(model, game: Game, spec: TapeSpec, prefix: str, state: Any) -> dict:
         "syntax_refusals": 0,
         "action": None,
     }
-    seen_legal = 0
+    ranked_actions = set()
     for rank, (token, _cost) in enumerate(ranked):
         action = game.token_action(token, spec)
         if action is None:
             out["syntax_refusals"] += 1
-        elif action in legal_set:
-            if not out["resolved"]:
-                out["refusals"] = float(rank)
-                out["resolved"] = True
-                out["action"] = action
-                if rank == 0:
-                    out["legal_at_1"] = True
-                if rank < 3:
-                    out["legal_at_3"] = True
-                if rank < 5:
-                    out["legal_at_5"] = True
-            seen_legal += 1
+            continue
+        ranked_actions.add(action)
+        if action in legal_set and not out["resolved"]:
+            out["refusals"] = float(rank)
+            out["resolved"] = True
+            out["action"] = action
+            out["legal_at_1"] = rank == 0
+            out["legal_at_3"] = rank < 3
+            out["legal_at_5"] = rank < 5
     if not out["resolved"]:
-        # everything the model ranked was refused; the rest of the action space
-        # is a coin toss, and its cost is an expectation rather than a draw
-        ranked_actions = {game.token_action(t, spec) for t, _ in ranked}
-        remaining = game.action_count - len(ranked)
+        # everything the model ranked was refused, so carrying on means guessing
+        # from what is left; its cost is an expectation rather than a draw
+        remaining = max(0, game.action_count - len(ranked_actions))
         remaining_legal = len(legal_set - ranked_actions)
-        out["refusals"] = len(ranked) + expected_refusals(max(0, remaining), remaining_legal)
+        out["refusals"] = len(ranked) + expected_refusals(remaining, remaining_legal)
     out["baseline"] = random_baseline(game, state)
     out["legal_share"] = len(legal) / max(1, game.action_count)
     return out
@@ -184,33 +181,63 @@ def greedy_rollout(
     spec: TapeSpec,
     max_plies: int | None = None,
     assume_winner: int | None = None,
+    fallback: bool = False,
+    seed: int = 0,
 ) -> dict:
     """The model plays both sides from the opening; we keep the tape honest for it.
 
-    At every ply the model proposes and its **top** token is played - no
-    fallback, no second chance - so the rollout ends at the first refusal and
-    ``plies`` is how long the model can stay inside the rules.  The ``phi``
-    tokens are written by us from the real position, which is the difference
-    between this and :func:`free_rollout`: here the model only has to choose a
-    move, there it has to keep the whole tape consistent as well.
+    The ``phi`` tokens are written by us from the real position, which is the
+    difference between this and :func:`free_rollout`: here the model only has to
+    choose a move, there it has to keep the whole tape consistent as well.
+
+    Without ``fallback`` the model's **top** token is played - no second chance -
+    so the rollout ends at the first refusal and ``plies`` is how long it can
+    stay inside the rules unaided.  It is deterministic, so running it twice
+    tells you nothing.
+
+    With ``fallback`` it plays the way you actually would: down its own ranking
+    to the first move the board accepts, and a seeded random legal move when the
+    ranking runs out.  The game then always finishes, and what is measured is
+    ``refusals_per_move`` **on the model's own trajectory** - which is not the
+    same question as :func:`evaluate`'s, because by move ten the positions are
+    the model's, not the teacher's, and the distribution has shifted out from
+    under the corpus.
     """
     cap = max_plies or 200
+    rng = random.Random(seed)
     state = game.initial()
     states, actions = [state], []
     break_kind = "none"
+    refusals = 0.0
     while game.winner(state) is None and len(actions) < cap:
         prefix = encode_prefix(game, spec, states, actions, assume_winner)
         ranked = rank_tokens(model, prefix)
-        if not ranked:
-            break_kind = "unknown"
-            break
-        action = game.token_action(ranked[0][0], spec)
-        if action is None:
-            break_kind = "syntax"
-            break
-        if action not in game.legal(state):
-            break_kind = "illegal"
-            break
+        legal = game.legal(state)
+        if not fallback:
+            if not ranked:
+                break_kind = "unknown"
+                break
+            action = game.token_action(ranked[0][0], spec)
+            if action is None:
+                break_kind = "syntax"
+                break
+            if action not in legal:
+                break_kind = "illegal"
+                break
+        else:
+            legal_set = set(legal)
+            action = None
+            for rank, (token, _cost) in enumerate(ranked):
+                candidate = game.token_action(token, spec)
+                if candidate is not None and candidate in legal_set:
+                    action, refusals = candidate, refusals + rank
+                    break
+            if action is None:
+                tried = {game.token_action(t, spec) for t, _ in ranked}
+                refusals += len(ranked) + expected_refusals(
+                    max(0, game.action_count - len(tried)), len(legal_set - tried)
+                )
+                action = rng.choice(legal)
         state = game.apply(state, action)
         states.append(state)
         actions.append(action)
@@ -219,6 +246,7 @@ def greedy_rollout(
         "break_kind": break_kind,
         "terminal": game.winner(state) is not None,
         "capped": len(actions) >= cap,
+        "refusals_per_move": refusals / max(1, len(actions)),
     }
 
 
@@ -368,7 +396,6 @@ def evaluate(
         "refusals_sum": 0.0,
         "baseline_sum": 0.0,
         "legal_share_sum": 0.0,
-        "covered_legal_at_1": 0,
         "ranked_sum": 0,
     }
     has_optimal = hasattr(game, "optimal")
@@ -419,10 +446,17 @@ def evaluate(
     out.update({"ppl_" + k: v for k, v in perplexity(model, test_tapes).items()})
 
     cap = rollout_plies or 200
-    greedy = [greedy_rollout(model, game, spec, cap) for _ in range(max(1, rollouts))]
-    out["greedy_plies"] = sum(g["plies"] for g in greedy) / len(greedy)
-    out["greedy_break"] = greedy[0]["break_kind"]
-    out["greedy_terminal"] = sum(g["terminal"] for g in greedy) / len(greedy)
+    greedy = greedy_rollout(model, game, spec, cap)  # deterministic: once is every time
+    out["greedy_plies"] = greedy["plies"]
+    out["greedy_break"] = greedy["break_kind"]
+    out["greedy_terminal"] = float(greedy["terminal"])
+    played = [
+        greedy_rollout(model, game, spec, cap, fallback=True, seed=i)
+        for i in range(max(1, rollouts))
+    ]
+    out["selfplay_plies"] = sum(p["plies"] for p in played) / len(played)
+    out["selfplay_terminal"] = sum(p["terminal"] for p in played) / len(played)
+    out["selfplay_refusals"] = sum(p["refusals_per_move"] for p in played) / len(played)
     free = free_rollout(model, game, spec, free_length, mode="sample", samples=max(3, rollouts))
     out["free_plies"] = free["plies"]
     out["free_break"] = free["break_kind"]

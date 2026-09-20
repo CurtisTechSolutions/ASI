@@ -142,9 +142,9 @@ So the code space is partitioned:
 |---|---|
 | `[0, bound)` | actions — `bound` is whatever the game's layout reaches |
 | `[bound, meta)` | `φ` — what is left, so a large action space buys a smaller abstraction |
-| `[meta, capacity)` | header and outcome tokens, 520 codes at the top |
+| `[meta, capacity)` | header and outcome tokens, 2 056 codes at the top |
 
-Chess keeps 14 bits of `φ`; every other game here keeps 15.
+Chess keeps 13 bits of `φ`; every other game here keeps 15.
 
 **The general rule:** if two tokens can be told apart only by where they sit in
 the tape, this architecture cannot tell them apart at all. Give them disjoint
@@ -170,6 +170,30 @@ model's memory is one token wide: 18 bits, or 15 once you buy phase-disjointness
 
 That cap is the sharpest thing this directory has to say about the architecture,
 and `experiment.py phi` sweeps straight through it rather than asserting it.
+
+### A hash is a bad abstraction, and the token can be split
+
+A hash has no **locality**. Two nearly identical chess positions land in
+unrelated buckets, so a hashed `φ` can *recognise* a position it has seen and
+say nothing at all about one it has not — there is no such thing as a near miss.
+For a game whose state space dwarfs the corpus that is fatal, and it is why
+chess's coverage falls as `φ` grows rather than rising.
+
+The same bits buy something else. `phi_prev_bits` spends part of the token on
+`Game.action_summary` — a small, *meaningful* code for the move just played;
+for chess, **the square it landed on**. That is not a hash: "a capture on e5" is
+one bucket across every position in which it happened, and the reply to it is
+usually a recapture on e5. Sixty-five buckets that generalise, against 8 192
+that do not.
+
+| `phi_prev_bits` | the token holds |
+|---|---|
+| `0` | the position only — recognition, no generalisation |
+| between | some of each |
+| `phi_bits` | the last move only — the move bigram, with the moves bucketed |
+
+`experiment.py mix` sweeps it. The point is not which end wins; it is that the
+budget is fixed at one token and *what you spend it on* is the design.
 
 ### Result conditioning comes free
 
@@ -247,7 +271,8 @@ state_key(state)          canonical bytes — what φ hashes
 
 and optionally `is_chance` / `chance_weights` (a die), `struct_token` (your own
 digit layout), `state_code` (an injective code, if the state space is small
-enough), `heuristic` (a teacher), `render` and `action_str`.
+enough), `action_summary` (what `phi_prev_bits` should write down), `heuristic`
+(a teacher), `render` and `action_str`.
 
 Everything else — the encoder, the decoder, the referee, the corpus generator,
 the metrics, the 2NRL negatives — comes for free. The six games here are each
@@ -267,7 +292,7 @@ Stated plainly, because the measurements in the README show all of it.
 2. **A hash has no locality.** Two nearly identical chess positions hash to
    unrelated buckets, so a hashed `φ` cannot generalise between similar
    positions — it can only recognise ones it has seen. For a game whose state
-   space dwarfs the corpus (chess: coverage 0.24 at 14 bits) that means the
+   space dwarfs the corpus that means the
    model is silent almost everywhere. The φ sweep's optimum is therefore
    **interior and game-dependent**: chess does best with *no* state at all,
    Othello with as much as it can get.

@@ -79,7 +79,8 @@ learned three times:
    carry more information than a hashed one, measured *worse*: 0.72 against
    0.99 on legality at known positions.
 
-The fix is a partition of the code space, and :func:`region` is it:
+The fix is a partition of the code space, which :func:`uge.codec.phi_region`
+computes and ``tests.py partition`` asserts:
 
 ===================  ==========================================================
 ``[0, bound)``       actions.  ``bound`` is what the game's own layout reaches
@@ -88,8 +89,8 @@ The fix is a partition of the code space, and :func:`region` is it:
                      structured one.
 ``[bound, meta)``    ``phi``.  What is left over, which is why a game with a
                      large action space gets a smaller abstraction: chess keeps
-                     14 bits, everything else 15.
-``[meta, capacity)`` the header and the outcome tokens - 520 codes at the top.
+                     13 bits, everything else 15.
+``[meta, capacity)`` the header and the outcome tokens - 2056 codes at the top.
 ===================  ==========================================================
 
 The one free choice that is left
@@ -106,6 +107,12 @@ What that window *holds* is ours to choose:
   in one token: the graph becomes a transposition table, perfect on positions
   it has seen and silent on the rest.  ``tictactoe`` (3**9 = 19_683 boards) and
   ``nim`` (384) can do this; the other four cannot.
+
+A hash is also a poor abstraction: it has no **locality**, so two nearly
+identical positions land in unrelated buckets and there is no such thing as a
+near miss.  :attr:`TapeSpec.phi_prev_bits` spends part of the same token on a
+*meaningful* summary of the move just played
+(:meth:`uge.game.Game.action_summary`) instead, which does generalise.
 
 **And the abstraction has to fit in one token.**  ``_locate`` conditions on the
 last trigram of the prefix, so when ``phi`` spans two tokens only the second
@@ -497,7 +504,7 @@ class TapeSpec:
     because of what the ``phi`` sweep shows: a hash has no **locality** - two
     nearly identical positions land in unrelated buckets - so for a game whose
     state space dwarfs the corpus a hashed ``phi`` can only recognise positions
-    it has already seen, and chess at 14 bits covers a quarter of them.  A
+    it has already seen, and chess at 13 bits covers a fraction of them.  A
     summary of the last move (:meth:`uge.game.Game.action_summary`; for chess,
     the square it landed on) is not a hash, generalises across positions, and
     costs the same bits.  ``phi_prev_bits = phi_bits`` is history only, ``0`` is

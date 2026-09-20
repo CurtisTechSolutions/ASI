@@ -19,6 +19,7 @@ produced them.
 | [`NeuralCompression/`](NeuralCompression/) | one network can hold many games; inversion as an escape from a stall | **mixed** — compression holds, but the output partition is *not* what does it |
 | [`SBNN_RNN_ActivationFunction/`](SBNN_RNN_ActivationFunction/) | a learnable activation inside a conventional RNN that grows on a stall | the idea in its smallest form, gradient-checked to 4.8e-09 |
 | [`DepthCountedNormalisation/`](DepthCountedNormalisation/) | the vanishing gradient is a measurement, not a loss | fit `log‖g_n‖ = a + b·n` and divide the decay back out |
+| [`UniversalGameEncoding/`](UniversalGameEncoding/) | every finite discrete game can be written on one tape, and `RadixCyclicNN` can learn from it | **the encoding is the experiment** — six games through one encoder; what the network learns is decided by how a move is spelled, not by the training |
 
 ## What each one needs
 
@@ -27,6 +28,7 @@ Most of this runs with nothing installed. The exceptions are called out below.
 | experiment | dependencies |
 |---|---|
 | `NeuralCompression/` | **none** — standard library, deterministic |
+| `UniversalGameEncoding/` | **none** — standard library, plus `RadixCyclicNN/` from this repository |
 | `DepthCountedNormalisation/` | **none** — standard library |
 | `ActivationFunctionTest/self_building_sinewave.py` | **none** — standard library |
 | `ActivationFunctionTest/` (the other five scripts) | `gymnasium`, plus `tensorflow` or `torch` depending on the script |
@@ -38,6 +40,7 @@ Most of this runs with nothing installed. The exceptions are called out below.
 From this directory — each runs in a subshell, so the order does not matter:
 
 ```bash
+(cd UniversalGameEncoding && make test && make quick)
 (cd NeuralCompression && python3 experiment.py)
 (cd DepthCountedNormalisation && python3 depth_counted_normalisation.py --quick)
 (cd ActivationFunctionTest && python3 self_building_sinewave.py --quick)
@@ -46,8 +49,10 @@ From this directory — each runs in a subshell, so the order does not matter:
 ```
 
 Read each directory's README first — several have a `--quick` mode worth using
-before committing to a full run, and `NeuralCompression/FINDINGS.md` is the one
-document here that collects results rather than describing a procedure.
+before committing to a full run, `NeuralCompression/FINDINGS.md` is the one
+document here that collects results rather than describing a procedure, and
+`UniversalGameEncoding/ENCODING.md` is the one that argues a design rather than
+reporting one.
 
 ## Where the results are cited
 

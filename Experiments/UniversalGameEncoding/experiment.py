@@ -172,6 +172,9 @@ REPORT = [
     "optimal_match",
     "greedy_plies",
     "greedy_terminal",
+    "selfplay_plies",
+    "selfplay_terminal",
+    "selfplay_refusals",
     "free_plies",
     "free_best_plies",
     "ppl_nats_per_token",
@@ -405,11 +408,21 @@ def arm_layout(cfg: dict, seeds: list[int], games: list[str]) -> dict:
     layouts = ["struct", "lsb", "msb"]
     out: dict = {"arm": "layout", "config": cfg, "seeds": seeds, "games": {}}
     for name in games:
-        rows = {}
+        game = uge.get_game(name)
+        # one abstraction size for all three layouts, or the comparison is of two
+        # things at once: a structured layout spreads the same actions over a
+        # wider range of codes, which leaves phi fewer of them
+        bits = min(
+            TapeSpec(name, game.index, phi_bits=0, layout=lay, book="plain").codebook.phi_bits_for(
+                game.token_bound(TapeSpec(name, game.index, phi_bits=0, layout=lay, book="plain"))
+            )
+            for lay in layouts
+        )
+        rows = {"phi_bits": bits}
         for layout in layouts:
             per_seed = []
             for seed in seeds:
-                spec = default_spec(name, book="plain", layout=layout, phi_bits=18)
+                spec = default_spec(name, book="plain", layout=layout, phi_bits=bits)
                 g, corpus, train, test = build(name, spec, cfg, seed)
                 model = train_model(train.tapes, seed, cfg["epochs"])
                 seen = positions(g, test, limit=cfg["eval"])
@@ -576,6 +589,7 @@ def arm_twonrl(cfg: dict, seeds: list[int], games: list[str]) -> dict:
     neg_epochs, pos_epochs = 3, 3
     for name in games:
         rows: dict[str, list] = {"2nrl": [], "positive": [], "local": [], "base": []}
+        negatives = 0
         for seed in seeds:
             spec = default_spec(name)
             game, corpus, train, test = build(name, spec, cfg, seed)
@@ -585,8 +599,9 @@ def arm_twonrl(cfg: dict, seeds: list[int], games: list[str]) -> dict:
             warm = train_model(train.tapes, seed, max(1, cfg["epochs"] // 2))
             bad, good = refused_tapes(warm, game, spec, train, rng, cfg["eval"])
             if not bad:
-                log(f"  twonrl/{name}: no refusable positions, skipping")
+                log(f"  twonrl/{name} seed {seed}: no refusable positions, skipping")
                 continue
+            negatives += len(bad)
             base = metrics.evaluate(warm, game, spec, seen, test.tapes, rollouts=1)
             rows["base"].append(base)
 
@@ -611,7 +626,7 @@ def arm_twonrl(cfg: dict, seeds: list[int], games: list[str]) -> dict:
                 log(f"  twonrl/{name} seed {seed} {arm}: legal@1 {r['legal_at_1']:.3f} "
                     f"refusals {r['refusals']:.2f}")
         out["games"][name] = {
-            "negatives": len(bad) if bad else 0,
+            "negatives": negatives / max(1, len(rows["base"])),
             **{arm: pool(records, REPORT) for arm, records in rows.items() if records},
         }
     return out
@@ -664,14 +679,19 @@ def summarise(into_readme: bool = False) -> None:
         print("a 15-bit hashed abstraction (14 for chess, whose action space takes")
         print("the code space it needs), the disjoint codebook, and the flat `lsb`")
         print("layout. Nothing is tuned per game - the later arms do that.\n")
-        print("| game | `\\|A\\|` | coverage | legal@1 covered | guessing | refusals | refusals guessing | teacher match | greedy plies | to a finish | nodes |")
+        print("| game | `\\|A\\|` | coverage | legal@1 covered | guessing | refusals | refusals guessing | teacher match | unaided plies | self-play refusals | nodes |")
         print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         for name, row in rules["games"].items():
             r = row["seen"]
             print(f"| `{name}` | {row['action_count']} | {_fmt(r['coverage'],2)} | **{_fmt(r['legal_at_1_covered'])}** | "
                   f"{_fmt(r['legal_at_1_baseline'])} | **{_fmt(r['refusals'],2)}** | {_fmt(r['refusals_baseline'],1)} | "
-                  f"{_fmt(r['teacher_match'])} | {_fmt(r['greedy_plies'],1)} | {_fmt(r.get('greedy_terminal'),2)} | "
-                  f"{_fmt(r['nodes'],0)} |")
+                  f"{_fmt(r['teacher_match'])} | {_fmt(r['greedy_plies'],1)} | "
+                  f"{_fmt(r.get('selfplay_refusals'),2)} | {_fmt(r['nodes'],0)} |")
+        print("\n`unaided plies` is how far the model gets playing both sides with **no**")
+        print("second chance - its top token, or the rollout ends. `self-play refusals`")
+        print("is the same rollout allowed to walk down its own ranking, measured on")
+        print("**its own** positions rather than the teacher's, which by move ten are")
+        print("not the same distribution.")
         print("\n**The same models on positions whose `phi` token the training corpus never wrote.**")
         print("Under a hashed `phi` this is a tautology and the point of quoting it:")
         print("the last trigram of the prefix *is* the `phi` token, so an unseen token")
@@ -758,6 +778,8 @@ def summarise(into_readme: bool = False) -> None:
         print("|---|---|---:|---:|---:|---:|---:|---:|")
         for name, rows in layout["games"].items():
             for label, r in rows.items():
+                if not isinstance(r, dict):
+                    continue  # the shared phi_bits this game's three layouts all used
                 print(f"| `{name}` | {label} | {_fmt(r['coverage'],2)} | **{_fmt(r['legal_at_1'])}** | "
                       f"{_fmt(r['legal_at_1_covered'])} | {_fmt(r['refusals'],2)} | "
                       f"{_fmt(r['teacher_match'])} | {_fmt(r['nodes'],0)} |")
