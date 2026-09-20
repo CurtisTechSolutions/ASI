@@ -16,7 +16,7 @@ QUICKDIR   ?= results-quick
 
 COMMON = --seeds $(SEEDS) --out-dir $(RESULTS)
 
-.PHONY: help check test test-full quick all rules phi mix phase layout multi twonrl summary readme show clean
+.PHONY: help check test test-full quick all rules phi mix phase layout multi twonrl summary readme example show clean
 
 help: ## Show this help
 	@echo "Universal game encoding  (override variables like: make phi SEEDS=\"0 1\")"
@@ -72,6 +72,9 @@ summary: ## Turn results/*.json into the markdown tables in README.md
 
 readme: ## The same, spliced into README.md between its <!--NAME--> markers
 	@$(EXPERIMENT) summary --out-dir $(RESULTS) --into-readme
+
+example: ## Run USING.md's tutorial: add a game (Hexapawn), train on it, play it
+	$(PY) examples/hexapawn.py
 
 show: ## Print one encoded tape per game, decoded back, to see the format
 	@$(PY) -c "import sys; sys.path.insert(0, '.'); \

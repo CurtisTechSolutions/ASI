@@ -358,6 +358,50 @@ def test_teachers() -> None:
     check(max(v for v, _ in values) > 1000, "the chess search does not see a mate in one")
 
 
+def test_example() -> None:
+    """``examples/hexapawn.py`` is the tutorial in ``USING.md``, so it has to keep working.
+
+    Importing it registers a **seventh** game, which is the point - it proves an
+    outside game needs nothing from the package but the interface.  This group
+    runs last for that reason: everything before it sees the six that ship.
+    The slow part of the example (training) is not repeated here; what is
+    checked is the rules, the encoding hooks and the round trip.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples"))
+    import hexapawn  # noqa: PLC0415
+
+    game = hexapawn.HEXAPAWN
+    game.validate()
+    eq(len(game.legal(game.initial())), 3, "hexapawn should open with three pawn pushes")
+    eq(game.winner(game.initial()), None, "the opening position is not terminal")
+
+    # the three ways a hexapawn game ends, one at a time
+    eq(game.winner(("......PPP", 1)), 0, "a white pawn on the top rank should win")
+    eq(game.winner(("ppp......", 0)), 1, "a black pawn on the bottom rank should win")
+    eq(game.winner(("PPP......", 1)), 0, "black with no pawns left should have lost")
+    eq(game.winner((".P.PpPp.p", 1)), 0, "black with no legal move should have lost")
+
+    for cfg in ({"book": "disjoint", "layout": "lsb"}, {"book": "plain", "layout": "struct"}):
+        for bits in (0, 12, 15):
+            spec = TapeSpec("hexapawn", game.index, phi_bits=bits, **cfg)
+            corpus = self_play(game, spec, 6, make_policy("search3"), seed=1)
+            for play, tape in zip(corpus.plays, corpus.tapes):
+                d = decode(game, spec, tape, assume_winner=play.winner)
+                check(d.ok, f"hexapawn/{spec.describe()}: the rules refused an encoded tape ({d.break_kind})")
+                eq(d.plies, play.plies, f"hexapawn/{spec.describe()}: ply count")
+                check(d.terminal, f"hexapawn/{spec.describe()}: a hexapawn game should always finish")
+
+    # the referee, on the tampered tape USING.md quotes
+    spec = TapeSpec("hexapawn", game.index, phi_bits=15, layout="struct", book="plain")
+    corpus = self_play(game, spec, 1, make_policy("search3"), seed=4)
+    tape = corpus.tapes[0]
+    at = (1 + spec.phi_tokens_for(game.token_bound(spec))) * W
+    eq(decode(game, spec, tape[:at] + game.action_token((0, 8), spec) + tape[at + W :]).break_kind,
+       "illegal", "a pawn teleporting across the board should be an illegal break")
+    eq(decode(game, spec, tape[:at] + "###" + tape[at + W :]).break_kind,
+       "syntax", "a token outside the alphabet should be a syntax break")
+
+
 GROUPS = {
     "perft": lambda full: test_perft(full),
     "chess": lambda full: test_chess_details(),
@@ -369,6 +413,8 @@ GROUPS = {
     "referee": lambda full: test_referee(),
     "determinism": lambda full: test_determinism(),
     "teachers": lambda full: test_teachers(),
+    # last on purpose: importing the example registers a seventh game
+    "example": lambda full: test_example(),
 }
 
 

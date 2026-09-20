@@ -22,6 +22,11 @@ to use.
 chess rules are here and are proved by perft against the published counts for
 the six standard positions, to depth 4.
 
+> **Want to use it rather than read about it?** [`USING.md`](USING.md) is the
+> how-to: encode a game, train on it, get moves back, and why every knob is set
+> the way it is. [`examples/hexapawn.py`](examples/hexapawn.py) is a complete
+> seventh game added from outside the package, and runs in ten seconds.
+
 ## Five numbers
 
 Three seeds each, full tables below.
@@ -583,6 +588,8 @@ gesturing at it in a results table.
 | file | what it is |
 |---|---|
 | [`ENCODING.md`](ENCODING.md) | **the argument**: why every finite discrete game is the same object, and what the encoding of one costs |
+| [`USING.md`](USING.md) | **the how-to**: quickstart, the five objects you touch, every `TapeSpec` knob and the measurement that sets it, adding a game, playing, and a symptom-to-cause table |
+| [`examples/hexapawn.py`](examples/hexapawn.py) | that how-to, executable - a seventh game written from outside the package |
 | `uge/tape.py` | the universal layer - alphabet, codebooks, the code-space partition, `φ`, `TapeSpec`. Knows nothing about games |
 | `uge/codec.py` | encode, and decode-by-replay. The referee |
 | `uge/game.py` | the interface a game implements, and the registry |
@@ -611,6 +618,7 @@ make all           # every arm, three seeds - this is what the tables above quot
 make summary       # print the tables from results/*.json
 make readme        # splice them into this file between its <!--NAME--> markers
 make show          # print one encoded tape per game, and its decode
+make example       # USING.md's tutorial: add a game, train on it, play it
 ```
 
 `make quick` writes into `results-quick/` rather than `results/`, so checking
@@ -630,6 +638,10 @@ die, `struct_token` for your own digit layout, `state_code` for an injective
 abstraction, `action_summary` for what `mix` should write down, and `heuristic`
 for a teacher. Everything else - encoder, decoder, referee, corpus, metrics,
 2NRL negatives - comes for free. The six here are each under 200 lines.
+
+[`USING.md` §6](USING.md#6-adding-your-own-game) walks through it, and
+[`examples/hexapawn.py`](examples/hexapawn.py) is a working seventh game that
+the test suite keeps honest (`python3 tests.py example`).
 
 ---
 

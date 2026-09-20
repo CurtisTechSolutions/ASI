@@ -2,7 +2,8 @@
 
 Yes, for a precisely delimited class, and the delimitation is the interesting
 part. This document is the argument; [`README.md`](README.md) is the
-measurement; [`uge/tape.py`](uge/tape.py) is the code.
+measurement; [`USING.md`](USING.md) is the how-to; [`uge/tape.py`](uge/tape.py)
+is the code.
 
 ---
 
@@ -293,6 +294,10 @@ Everything else — the encoder, the decoder, the referee, the corpus generator,
 the metrics, the 2NRL negatives — comes for free. The six games here are each
 under 200 lines, which is the argument for the interface: the cost of adding a
 game is the cost of writing the game.
+
+[`USING.md` §6](USING.md#6-adding-your-own-game) is this paragraph with the
+details filled in, and [`examples/hexapawn.py`](examples/hexapawn.py) is a
+seventh game written from outside the package to prove the claim.
 
 ---
 
