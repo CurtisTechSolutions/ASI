@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::counter::{carry, Counter, COUNTER_LIMIT, INVALID_STAMP};
-use crate::encoding::{char_len, char_slice, Trigram, BACK_LABEL, END_LABEL, OVERLAP, START_LABEL, WINDOW};
+use crate::encoding::{Encoding, Gram, BACK_LABEL, END_LABEL, START_LABEL};
 use crate::hash::{map, Map, Set};
 use crate::mt19937::Mt19937;
 use crate::paths::{PathKey, PathRow};
@@ -140,7 +140,11 @@ pub struct GraphOptions {
     pub global_scale: f64,
     pub window_scale: f64,
     pub path_scale: f64,
+    /// The size of the sliding *count* window, not the n of the n-gram - that
+    /// is `encoding.n`.
     pub window: usize,
+    /// How text becomes grams; the default is the character trigram.
+    pub encoding: Encoding,
 }
 
 impl Default for GraphOptions {
@@ -153,6 +157,7 @@ impl Default for GraphOptions {
             window_scale: 0.5,
             path_scale: 1.0,
             window: 10_000,
+            encoding: Encoding::default(),
         }
     }
 }
@@ -196,8 +201,13 @@ pub struct Graph {
     pub window_scale: f64,
     pub path_scale: f64,
 
-    pub(crate) index: Map<Trigram, Loc>,
+    pub(crate) index: Map<Gram, Loc>,
     pub inverted: bool,
+
+    /// How this graph turns text into grams and its labels back into text.
+    /// Fixed when the graph is created - every label, every index key and
+    /// every offset is measured in its units.
+    pub enc: Encoding,
 
     pub(crate) version: Counter,
     pub(crate) structure_version: Counter,
@@ -229,7 +239,9 @@ impl Graph {
         if opts.window < 1 {
             return Err(format!("window must be >= 1, got {}", opts.window));
         }
+        opts.encoding.validate()?;
         let mut g = Graph {
+            enc: opts.encoding,
             seed,
             rng: Mt19937::new(seed),
             labels: Vec::new(),
@@ -335,7 +347,7 @@ impl Graph {
 
     pub(crate) fn new_node(&mut self, label: String, count: i64, count_resets: i64) -> usize {
         let nid = self.labels.len();
-        self.label_len.push(char_len(&label));
+        self.label_len.push(self.enc.len(&label));
         self.labels.push(label);
         self.count.push(AtomicI64::new(count));
         if count_resets != 0 {
@@ -373,7 +385,7 @@ impl Graph {
         e
     }
 
-    fn create_trigram_node(&mut self, trigram: Trigram) -> usize {
+    fn create_trigram_node(&mut self, trigram: Gram) -> usize {
         let nid = self.new_node(trigram.to_string(), 0, 0);
         self.index.insert(trigram, Loc { node: nid, off: 0 });
         nid
@@ -401,7 +413,7 @@ impl Graph {
     pub fn num_edge_ids(&self) -> usize {
         self.edge_w.len()
     }
-    /// Trigrams per real node.
+    /// Grams per real node.
     pub fn compression_ratio(&self) -> f64 {
         let real = (self.n_alive_nodes as i64 - FIRST as i64).max(1) as f64;
         self.index.len() as f64 / real
@@ -427,8 +439,8 @@ impl Graph {
         self.label_len[node]
     }
     /// Finds the node and offset holding a trigram.
-    pub fn lookup(&self, trigram: Trigram) -> Option<Loc> {
-        self.index.get(&trigram).copied()
+    pub fn lookup(&self, trigram: &Gram) -> Option<Loc> {
+        self.index.get(trigram).copied()
     }
     /// The id of edge `p -> c`.
     pub fn edge(&self, p: usize, c: usize) -> Option<usize> {
@@ -453,8 +465,8 @@ impl Graph {
     }
 
     /// Every trigram with the node and offset holding it.
-    pub fn index_entries(&self) -> impl Iterator<Item = (Trigram, Loc)> + '_ {
-        self.index.iter().map(|(&t, &l)| (t, l))
+    pub fn index_entries(&self) -> impl Iterator<Item = (&Gram, Loc)> + '_ {
+        self.index.iter().map(|(t, &l)| (t, l))
     }
 
     /// Counts one traversal of an edge.  The counting passes call it from
@@ -489,19 +501,22 @@ impl Graph {
         if node >= self.labels.len() || !self.alive[node] {
             return Err(format!("node {node} is not alive"));
         }
-        let label: Vec<char> = self.labels[node].chars().collect();
+        let enc = self.enc;
+        let (stride, ov, n) = (enc.stride, enc.overlap(), enc.n);
+        let owned = self.labels[node].clone();
+        let label = enc.units(&owned);
         let length = label.len();
-        if i < 1 || i + WINDOW > length {
+        if i < stride || i + n > length || i % stride != 0 {
             return Err(format!(
-                "split index {i} out of range 1..{} for label {:?}",
-                length.saturating_sub(WINDOW),
+                "split index {i} out of range {stride}..{} (a multiple of the stride {stride}) for label {:?}",
+                length.saturating_sub(n),
                 self.labels[node]
             ));
         }
         let a = node;
         let a_resets = self.count_resets.get(&a).copied().unwrap_or(0);
         let a_count = self.count[a].load(Ordering::Relaxed);
-        let b = self.new_node(label[i..].iter().collect(), a_count, a_resets);
+        let b = self.new_node(label.slice(i, None).to_string(), a_count, a_resets);
 
         let moved: Vec<usize> = self.children[a].edges.clone();
         let pairs: Vec<(usize, usize)> = self.children[a]
@@ -518,12 +533,13 @@ impl Graph {
         }
         self.children[a].clear();
         self.new_edge(a, b, a_count, a_resets);
-        for j in i..length - OVERLAP {
-            let t = Trigram::pack(label[j], label[j + 1], label[j + 2]);
-            self.index.insert(t, Loc { node: b, off: j - i });
+        let mut j = i;
+        while j + n <= length {
+            self.index.insert(enc.gram(&label, j), Loc { node: b, off: j - i });
+            j += stride;
         }
-        self.labels[a] = label[..i + OVERLAP].iter().collect();
-        self.label_len[a] = i + OVERLAP;
+        self.labels[a] = label.slice(0, Some(i + ov)).to_string();
+        self.label_len[a] = i + ov;
         self.dirty_all = true;
         let bridge = self.children[a].get(b);
         self.split_paths(a, b, &moved, bridge); // q -> P -> c is now q -> A -> B -> c
@@ -544,9 +560,12 @@ impl Graph {
         if c == p || c < FIRST || self.parents[c].size() != 1 {
             return false;
         }
-        let lp: Vec<char> = self.labels[p].chars().collect();
-        let lc: Vec<char> = self.labels[c].chars().collect();
-        let shift = lp.len() - OVERLAP;
+        let enc = self.enc;
+        let (lp_owned, lc_owned) = (self.labels[p].clone(), self.labels[c].clone());
+        let lp = enc.units(&lp_owned);
+        let lc = enc.units(&lc_owned);
+        let ov = enc.overlap();
+        let shift = lp.len() - ov;
         let e = self.children[p].edges[0];
         let moved_out: Vec<usize> = self.children[c].edges.clone();
         self.children[p].clear();
@@ -568,20 +587,19 @@ impl Graph {
             self.edge_parent[e2] = p;
         }
         self.children[c].clear();
-        for j in 0..lc.len() - OVERLAP {
-            let t = Trigram::pack(lc[j], lc[j + 1], lc[j + 2]);
+        let mut j = 0;
+        while j + enc.n <= lc.len() {
             self.index.insert(
-                t,
+                enc.gram(&lc, j),
                 Loc {
                     node: p,
                     off: shift + j,
                 },
             );
+            j += enc.stride;
         }
-        let mut label = self.labels[p].clone();
-        label.push_str(&lc[OVERLAP..].iter().collect::<String>());
-        self.labels[p] = label;
-        self.label_len[p] = lp.len() + lc.len() - OVERLAP;
+        self.labels[p] = enc.join(&[lp.text(), lc.slice(ov, None)]);
+        self.label_len[p] = lp.len() + lc.len() - ov;
         self.labels[c] = String::new();
         self.label_len[c] = 0;
         if self.node_count(p).less(self.node_count(c)) {
@@ -628,17 +646,21 @@ impl Graph {
     /// splitting nodes so every transition runs from the last trigram of one
     /// node to the first of another over an edge created on demand.  `count`
     /// also bumps the visit counters.
-    pub fn observe(&mut self, trigrams: &[Trigram], count: bool) -> Result<Vec<Transition>, String> {
+    pub fn observe(&mut self, trigrams: &[Gram], count: bool) -> Result<Vec<Transition>, String> {
         if trigrams.is_empty() {
             return Ok(Vec::new());
         }
+        let enc = self.enc;
+        let (stride, n) = (enc.stride, enc.n);
         let mut did_split = false;
         let mut transitions: Vec<Transition> = Vec::with_capacity(trigrams.len() + 1);
 
-        let mut x = trigrams[0];
-        let (mut px, mut ox) = match self.index.get(&x).copied() {
+        // the grams stay borrowed: a pass walks millions of them, and a
+        // packed one is only cheap to copy, not free
+        let mut x = &trigrams[0];
+        let (mut px, mut ox) = match self.index.get(x).copied() {
             Some(l) => (l.node, l.off),
-            None => (self.create_trigram_node(x), 0),
+            None => (self.create_trigram_node(x.clone()), 0),
         };
         if ox != 0 {
             let (_, b) = self.split(px, ox)?;
@@ -656,24 +678,23 @@ impl Graph {
             self.count[px].fetch_add(1, Ordering::Relaxed);
             self.edge_count[e].fetch_add(1, Ordering::Relaxed);
         }
-        for &y in &trigrams[1..] {
-            let (mut py, mut oy) = match self.index.get(&y).copied() {
+        for y in &trigrams[1..] {
+            let (mut py, mut oy) = match self.index.get(y).copied() {
                 Some(l) => (l.node, l.off),
-                None => (self.create_trigram_node(y), 0),
+                None => (self.create_trigram_node(y.clone()), 0),
             };
-            if py == px && oy == ox + 1 {
+            if py == px && oy == ox + stride {
                 ox = oy;
                 x = y;
                 continue;
             }
-            let (xc, yc) = (x.chars(), y.chars());
-            if xc[1..] != yc[..OVERLAP] {
-                return Err(format!("trigrams {x:?} -> {y:?} do not overlap"));
+            if !enc.overlaps(x, y) {
+                return Err(format!("grams {x} -> {y} do not overlap"));
             }
-            if ox + WINDOW < self.label_len[px] {
-                self.split(px, ox + 1)?;
+            if ox + n < self.label_len[px] {
+                self.split(px, ox + stride)?;
                 did_split = true;
-                let ly = self.index[&y];
+                let ly = self.index[y];
                 py = ly.node;
                 oy = ly.off;
             }
@@ -681,7 +702,7 @@ impl Graph {
                 let (_, b) = self.split(py, oy)?;
                 py = b;
                 did_split = true;
-                px = self.index[&x].node; // the split moved x; only the node is read below
+                px = self.index[x].node; // the split moved x; only the node is read below
             }
             let e = match self.children[px].get(py) {
                 Some(e) => e,
@@ -696,8 +717,8 @@ impl Graph {
             ox = 0;
             x = y;
         }
-        if ox + WINDOW < self.label_len[px] {
-            self.split(px, ox + 1)?;
+        if ox + n < self.label_len[px] {
+            self.split(px, ox + stride)?;
             did_split = true;
         }
         let e = match self.children[px].get(END) {
@@ -723,7 +744,7 @@ impl Graph {
     /// Walks a sequence through the structure without modifying it: the
     /// transitions and the node path `START ... END`, or `None` when a trigram
     /// is unknown, an edge is missing or a split would be needed.
-    pub fn trace(&self, trigrams: &[Trigram]) -> Option<(Vec<Transition>, Vec<usize>)> {
+    pub fn trace(&self, trigrams: &[Gram]) -> Option<(Vec<Transition>, Vec<usize>)> {
         if trigrams.is_empty() {
             return None;
         }
@@ -741,11 +762,11 @@ impl Graph {
         for gram in &trigrams[1..] {
             let l = self.index.get(gram)?;
             let (py, oy) = (l.node, l.off);
-            if py == px && oy == ox + 1 {
+            if py == px && oy == ox + self.enc.stride {
                 ox = oy;
                 continue;
             }
-            if oy != 0 || ox + WINDOW != self.label_len[px] {
+            if oy != 0 || ox + self.enc.n != self.label_len[px] {
                 return None;
             }
             let e = self.children[px].get(py)?;
@@ -754,7 +775,7 @@ impl Graph {
             px = py;
             ox = 0;
         }
-        if ox + WINDOW != self.label_len[px] {
+        if ox + self.enc.n != self.label_len[px] {
             return None;
         }
         let e = self.children[px].get(END)?;
@@ -764,7 +785,7 @@ impl Graph {
     }
 
     /// The node path of a sequence (`START ... END`).
-    pub fn node_path(&self, trigrams: &[Trigram]) -> Option<Vec<usize>> {
+    pub fn node_path(&self, trigrams: &[Gram]) -> Option<Vec<usize>> {
         self.trace(trigrams).map(|(_, path)| path)
     }
 
@@ -772,6 +793,7 @@ impl Graph {
     /// walks through the graph and decodes back to itself.  `compressed`
     /// additionally requires that no unary chain remains.
     pub fn check_invariants(&self, texts: &[String], compressed: bool) -> Result<(), String> {
+        let enc = self.enc;
         let n = self.labels.len();
         if self.label_len.len() != n
             || self.count.len() != n
@@ -806,10 +828,10 @@ impl Graph {
                 continue;
             }
             alive_nodes += 1;
-            if p >= FIRST && self.label_len[p] < WINDOW {
-                return Err(format!("node {p} label {:?} is shorter than {WINDOW}", self.labels[p]));
+            if p >= FIRST && self.label_len[p] < enc.n {
+                return Err(format!("node {p} label {:?} is shorter than {}", self.labels[p], enc.n));
             }
-            if self.label_len[p] != char_len(&self.labels[p]) {
+            if self.label_len[p] != enc.len(&self.labels[p]) {
                 return Err(format!("node {p} has a stale label length"));
             }
             for (i, &c) in self.children[p].order.iter().enumerate() {
@@ -829,11 +851,11 @@ impl Graph {
                         self.edge_parent[e]
                     ));
                 }
-                if p >= FIRST && c >= FIRST {
+                if p >= FIRST && c >= FIRST && enc.overlap() > 0 {
                     let lp = &self.labels[p];
-                    let tail = char_slice(lp, char_len(lp) - OVERLAP, None);
-                    if tail != char_slice(&self.labels[c], 0, Some(OVERLAP)) {
-                        return Err(format!("edge {p}->{c} violates the window overlap"));
+                    let tail = enc.slice(lp, enc.len(lp) - enc.overlap(), None);
+                    if tail != enc.slice(&self.labels[c], 0, Some(enc.overlap())) {
+                        return Err(format!("edge {p}->{c} violates the gram overlap"));
                     }
                 }
             }
@@ -850,19 +872,29 @@ impl Graph {
             if !self.alive[p] {
                 continue;
             }
-            let label: Vec<char> = self.labels[p].chars().collect();
-            for o in 0..label.len() - OVERLAP {
-                let t = Trigram::pack(label[o], label[o + 1], label[o + 2]);
+            let owned = self.labels[p].clone();
+            let label = enc.units(&owned);
+            let mut o = 0;
+            while o + enc.n <= label.len() {
+                let t = enc.gram(&label, o);
                 match self.index.get(&t) {
                     Some(l) if l.node == p && l.off == o => {}
-                    other => return Err(format!("trigram {t} of node {p}@{o} indexed as {other:?}")),
+                    other => return Err(format!("gram {t} of node {p}@{o} indexed as {other:?}")),
                 }
                 expected += 1;
+                o += enc.stride;
+            }
+            let rest = (label.len() - enc.n) % enc.stride;
+            if rest != 0 {
+                return Err(format!(
+                    "node {p} label {owned:?} holds {} units, {rest} past its last whole gram",
+                    label.len()
+                ));
             }
         }
         if self.index.len() != expected {
             return Err(format!(
-                "trigram index has {} entries, expected {expected}",
+                "gram index has {} entries, expected {expected}",
                 self.index.len()
             ));
         }
@@ -877,7 +909,7 @@ impl Graph {
             }
         }
         for text in texts {
-            let grams = crate::encoding::encode(text);
+            let grams = enc.encode(text);
             if grams.is_empty() {
                 continue;
             }
@@ -888,9 +920,13 @@ impl Graph {
                 .iter()
                 .map(|&id| self.labels[id].as_str())
                 .collect();
-            let decoded = crate::encoding::decode_path(&labels, 0, true);
-            if &decoded != text {
-                return Err(format!("round trip of {text:?} gave {decoded:?}"));
+            // what comes back is what the encoding can represent: the text itself
+            // under a sliding character window, its words under a word encoding,
+            // everything but the ragged tail under a grouping one
+            let decoded = enc.decode_path(&labels, 0, true);
+            let want = enc.normalize(text);
+            if decoded != want {
+                return Err(format!("round trip of {want:?} gave {decoded:?}"));
             }
         }
         Ok(())

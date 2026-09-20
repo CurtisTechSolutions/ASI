@@ -17,7 +17,7 @@ nothing in it but this crate.
 
 | file | what it is |
 |---|---|
-| `src/encoding.rs` | the trigram encoding and its inverse — three code points packed into one `u64` |
+| `src/encoding.rs` | the encoding dial — the unit, the n of the n-gram, the stride — and the packed gram |
 | `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants |
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
@@ -30,6 +30,36 @@ nothing in it but this crate.
 | `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark and its binary |
 | `src/json.rs` | enough JSON to report a benchmark run |
 | `tests/model.rs` | the model end to end, and both traversals |
+| `tests/encodings.rs` | every encoding end to end: any n, groups of letters, words |
+
+## The encoding is a dial
+
+How a text becomes grams is three numbers, owned by the graph and fixed when it
+is created — the same three the Python and Go implementations have:
+
+| dial | what it is | the default |
+|---|---|---|
+| `unit` | what one position is: a character (`Unit::Chars`) or a whitespace word (`Unit::Words`) | `Chars` |
+| `n` | units per gram — the *n* of the n-gram, any n | 3 |
+| `stride` | units between two grams: **1** slides the window (they overlap by n-1), **n** cuts the text into non-overlapping groups | 1 |
+
+```rust
+use radixnet::{Encoding, GraphOptions, Model, Unit};
+
+let words = Encoding { unit: Unit::Words, n: 2, stride: 1 };          // word bigrams
+let groups = Encoding { unit: Unit::Chars, n: 5, stride: 5 };         // groups of five letters
+let five = Encoding::parse("char:5:1")?;                              // a sliding window of five
+let mut model = Model::new(0, GraphOptions { encoding: words, ..Default::default() })?;
+```
+
+and on the benchmark binary: `--encoding word:2:1`, or `--units`, `--ngram` and
+`--stride` one at a time. Everything downstream is then measured in that unit
+rather than in characters — a node's label, the length of a prediction, the
+`chars` of a score.
+
+A gram is a [`Gram`]: up to three characters packed into a `u64` as before, or
+the text itself for anything longer and for words. The default encoding's pass
+still allocates nothing; what the dial costs on that path is in the table below.
 
 ## What is here, and what is not
 
@@ -96,7 +126,7 @@ look before reading the numbers as a language comparison:
 
 | | Go | Rust |
 |---|---|---|
-| a trigram | a freshly allocated `string` per window | three code points packed into a `u64`, `Copy`, no allocation |
+| a gram | a freshly allocated `string` per window | up to three code points packed into a `u64`, no allocation; longer grams and word grams carry their text |
 | a node's children during a search | a fresh `[]ChildCost` per expansion | filled into a buffer the search reuses |
 | the hash behind the trigram index | the runtime's (AES-assisted on amd64) | `FxHasher`, written out in `src/hash.rs` |
 
@@ -108,6 +138,26 @@ one worker as well as at their own default parallelism:
 * **The two beams.** Go runs the top and the bottom beam on two goroutines; here
   they run in turn on the calling thread. Go's `--workers 1` runs them in turn
   too, which is the row to read for a like-for-like comparison.
+
+## What the dial costs
+
+Making the index key hold *any* gram rather than exactly three characters is not
+free: the key went from an 8-byte `u64` to a 16-byte enum, which the training
+pass carries one of per gram of the corpus and hashes on every step. Measured
+against the same build with the trigram hard-coded, six runs of each
+interleaved:
+
+| workload | before the dial | on its default encoding |
+|---|--:|--:|
+| `bench-compare`'s corpus (62,757 short texts, 3 epochs) | 19.65 M transitions/s | 19.58 M (no measurable difference) |
+| `radixnet-bench --chars 2000000` (synthesised sentences) | 19.6 M | 17.8 M (91 %) |
+
+So it is free where the graph is small and the per-text work dominates, and
+costs about 9 % where the key itself is the hot thing. Two choices keep it to
+that: a packed gram hashes as the one `u64` it always was, and the text variant
+sits behind a thin pointer so the key is 16 bytes and not 24. Closing the rest
+would mean making the graph generic over its key type, so that a trigram graph
+is keyed on a `u64` again — a change to every signature in the crate.
 
 ## The one `unsafe`
 

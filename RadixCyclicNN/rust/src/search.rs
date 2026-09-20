@@ -1,7 +1,6 @@
 //! Shortest-path prediction: what a walk may take, how a walk is ranked, and
 //! the stochastic walk.
 
-use crate::encoding::{decode_path, truncate_chars, OVERLAP, WINDOW};
 use crate::fsum::fsum;
 use crate::graph::{Graph, BACK, END, START};
 use crate::mt19937::Mt19937;
@@ -162,13 +161,13 @@ pub(crate) fn start_emission(g: &Graph, start_node: usize, start_offset: usize) 
         return Ok(0);
     }
     let len = g.label_len(start_node);
-    if start_offset + WINDOW > len {
+    if start_offset + g.enc.n > len {
         return Err(format!(
             "start_offset {start_offset} out of range for label {:?}",
             g.label(start_node)
         ));
     }
-    Ok(len - (start_offset + WINDOW))
+    Ok(len - (start_offset + g.enc.n))
 }
 
 /// Decodes a node path into a [`PathResult`].  `include_context` `None`
@@ -197,9 +196,9 @@ pub(crate) fn build_result(
         .filter(|(_, &n)| n != START && n != END)
         .map(|(i, _)| labels[i].as_str())
         .collect();
-    let mut text = decode_path(&real, offset, ctx);
+    let mut text = g.enc.decode_path(&real, offset, ctx);
     if let Some(cap) = max_chars {
-        text = truncate_chars(&text, cap).to_string();
+        text = g.enc.truncate(&text, cap);
     }
     let cost = fsum(&step_costs);
     let reached_end = *node_ids.last().unwrap() == END;
@@ -333,7 +332,7 @@ impl Graph {
             }
             node_ids.push(pick.child);
             if pick.child != END {
-                chars += self.label_len(pick.child) - OVERLAP;
+                chars += self.label_len(pick.child) - self.enc.overlap();
             }
             came_from = Some(node);
             node = pick.child;

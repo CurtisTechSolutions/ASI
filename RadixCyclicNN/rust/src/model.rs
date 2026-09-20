@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::beam::{default_beam, BeamOptions, Prediction};
 use crate::counter::Counter;
-use crate::encoding::{char_len, char_slice, encode, truncate_chars, Trigram, WINDOW};
+use crate::encoding::{Encoding, Gram};
 use crate::graph::{Graph, GraphOptions, Loc, Transition, END, FIRST, START};
 use crate::hash::Map;
 use crate::mt19937::Mt19937;
@@ -184,7 +184,7 @@ impl Model {
         let usable: Vec<&String> = texts
             .iter()
             .filter(|t| {
-                let ok = char_len(t) >= WINDOW;
+                let ok = self.g.enc.len(t) >= self.g.enc.n;
                 if !ok {
                     skipped_short += 1;
                 }
@@ -203,7 +203,7 @@ impl Model {
                 parallel_fill(&mut novel, workers, |i, slot| *slot = g.trace(&grams[i]).is_none());
             }
             for (i, &is_novel) in novel.iter().enumerate() {
-                chars += char_len(chunk[i]) as i64;
+                chars += self.g.enc.len(chunk[i]) as i64;
                 if is_novel {
                     self.g.observe(&grams[i], false)?;
                 }
@@ -335,10 +335,16 @@ impl Model {
     }
 
     /// Encodes a chunk of texts on the worker threads.
-    fn encode_all(&self, texts: &[&String]) -> Vec<Vec<Trigram>> {
+    fn encode_all(&self, texts: &[&String]) -> Vec<Vec<Gram>> {
+        let enc = self.g.enc;
         let mut grams = vec![Vec::new(); texts.len()];
-        parallel_fill(&mut grams, self.workers(), |i, slot| *slot = encode(texts[i]));
+        parallel_fill(&mut grams, self.workers(), |i, slot| *slot = enc.encode(texts[i]));
         grams
+    }
+
+    /// How this model turns text into grams and back - its graph's encoding.
+    pub fn encoding(&self) -> Encoding {
+        self.g.enc
     }
 
     /// The mean cost of the pass's traversals: every edge's cost times how
@@ -362,21 +368,37 @@ impl Model {
 
     // -- prediction ---------------------------------------------------------
 
-    /// Where `prefix` ends in the graph: `(node, offset, matched characters of
-    /// the located trigram)`.
+    /// Where `prefix` ends in the graph: `(node, offset, matched units of the
+    /// located gram)`.
     fn locate(&self, prefix: &str) -> (usize, usize, usize) {
-        let runes: Vec<char> = prefix.chars().collect();
-        let n = runes.len();
+        let enc = self.g.enc;
+        let n = enc.len(prefix);
         if n == 0 {
             return (START, 0, 0);
         }
-        if n >= WINDOW {
-            let last = Trigram::pack(runes[n - WINDOW], runes[n - WINDOW + 1], runes[n - 1]);
-            if let Some(l) = self.g.lookup(last) {
-                return (l.node, l.off, WINDOW);
+        if n >= enc.n {
+            // the gram the prefix ends on, then - when the stride skips it -
+            // the last gram of the prefix's own grid
+            let units = enc.units(prefix);
+            let mut found = enc
+                .gram_of(units.slice(n - enc.n, Some(n)))
+                .and_then(|g| self.g.lookup(&g));
+            if found.is_none() {
+                let aligned = (n - enc.n) / enc.stride * enc.stride;
+                if aligned != n - enc.n {
+                    found = enc
+                        .gram_of(units.slice(aligned, Some(aligned + enc.n)))
+                        .and_then(|g| self.g.lookup(&g));
+                }
             }
-            for k in [WINDOW - 1, 1] {
-                if let Some(l) = self.best_trigram(&runes[n - k..]) {
+            if let Some(l) = found {
+                return (l.node, l.off, enc.n);
+            }
+            for k in [enc.n.saturating_sub(1), 1] {
+                if k < 1 || k >= enc.n {
+                    continue;
+                }
+                if let Some(l) = self.best_trigram(units.slice(n - k, Some(n))) {
                     return (l.node, l.off, k);
                 }
             }
@@ -388,12 +410,13 @@ impl Model {
         (START, 0, 0)
     }
 
-    /// The most visited `(node, offset)` holding a trigram that starts with `key`.
-    fn best_trigram(&self, key: &[char]) -> Option<Loc> {
+    /// The most visited `(node, offset)` holding a gram that starts with `key`
+    /// (whole units: `"the ca"` is not a prefix of `"the cat sat"` in words).
+    fn best_trigram(&self, key: &str) -> Option<Loc> {
+        let enc = self.g.enc;
         let mut best: Option<(i64, usize, usize, Loc)> = None;
         for (t, l) in self.g.index_entries() {
-            let chars = t.chars();
-            if !chars.starts_with(key) {
+            if !enc.has_unit_prefix(&t.to_string(), key) {
                 continue;
             }
             let rank = (-(self.g.node_count(l.node).float() as i64), l.node, l.off);
@@ -410,10 +433,11 @@ impl Model {
 
     /// The most visited real node whose label starts with `prefix`.
     fn best_node_with_prefix(&self, prefix: &str) -> Option<usize> {
+        let enc = self.g.enc;
         let mut best: Option<usize> = None;
         let mut best_count = Counter { value: -1, resets: 0 };
         for node in (START + 2)..self.g.num_node_ids() {
-            if !self.g.is_alive(node) || !self.g.label(node).starts_with(prefix) {
+            if !self.g.is_alive(node) || !enc.has_unit_prefix(self.g.label(node), prefix) {
                 continue;
             }
             let c = self.g.node_count(node);
@@ -429,8 +453,9 @@ impl Model {
     /// remainder of the located trigram, which every predicted path starts with.
     fn prefix_start(&self, prefix: &str) -> (usize, usize, String) {
         let (node, offset, matched) = self.locate(prefix);
-        let lead = if node != START && matched < WINDOW {
-            char_slice(self.g.label(node), offset + matched, Some(offset + WINDOW)).to_string()
+        let enc = self.g.enc;
+        let lead = if node != START && matched < enc.n {
+            enc.slice(self.g.label(node), offset + matched, Some(offset + enc.n))
         } else {
             String::new()
         };
@@ -486,8 +511,9 @@ impl Model {
         rng: Option<&mut Mt19937>,
         traversal: Traversal,
     ) -> Result<Prediction, String> {
+        let enc = self.g.enc;
         let (node, offset, lead) = self.prefix_start(prefix);
-        let lead_len = char_len(&lead);
+        let lead_len = enc.len(&lead);
         let want = length.saturating_sub(lead_len);
         let mut cap: Option<usize> = None;
         let (top, bottom, expanded, width);
@@ -528,12 +554,12 @@ impl Model {
         }
         let fix = |r: &mut PathResult| {
             if !lead.is_empty() {
-                r.text = format!("{lead}{}", r.text);
+                r.text = enc.join(&[&lead, &r.text]);
                 if let Some(cap) = cap {
-                    r.text = truncate_chars(&r.text, cap).to_string();
+                    r.text = enc.truncate(&r.text, cap);
                 }
             }
-            r.full_text = format!("{prefix}{}", r.text);
+            r.full_text = enc.join(&[prefix, &r.text]);
         };
         let mut top = top;
         let mut bottom = bottom;
@@ -543,10 +569,10 @@ impl Model {
             Some(best) => best.clone(),
             None => {
                 let text = match cap {
-                    Some(cap) => truncate_chars(&lead, cap).to_string(),
+                    Some(cap) => enc.truncate(&lead, cap),
                     None => lead.clone(),
                 };
-                let full_text = format!("{prefix}{text}");
+                let full_text = enc.join(&[prefix, &text]);
                 PathResult {
                     text,
                     labels: vec![self.g.label(node).to_string()],
@@ -632,7 +658,7 @@ impl Model {
 
     /// `log P(c | p)` for the edge taken from `p`'s trigram at `offset`.
     fn edge_log_prob(&self, p: usize, offset: usize, c: usize) -> Option<f64> {
-        if p != START && offset + WINDOW != self.g.label_len(p) {
+        if p != START && offset + self.g.enc.n != self.g.label_len(p) {
             return None;
         }
         self.g.edge(p, c).map(|e| -self.g.edge_cost(e))
@@ -642,8 +668,9 @@ impl Model {
     /// transitions that would need a split cost `log(UNKNOWN_PROB)`.
     pub fn score(&mut self, text: &str) -> Score {
         self.g.prepare();
-        let grams = encode(text);
-        let chars = char_len(text);
+        let enc = self.g.enc;
+        let grams = enc.encode(text);
+        let chars = enc.len(text);
         if grams.is_empty() {
             return Score {
                 chars,
@@ -656,14 +683,14 @@ impl Model {
         let (mut node, mut offset) = (START, 0usize);
         let mut lost = false;
         for t in &grams {
-            let Some(l) = self.g.lookup(*t) else {
+            let Some(l) = self.g.lookup(t) else {
                 transitions += 1;
                 unknown += 1;
                 log_prob += log_unknown;
                 lost = true;
                 continue;
             };
-            if !lost && l.node == node && l.off == offset + 1 {
+            if !lost && l.node == node && l.off == offset + enc.stride {
                 offset = l.off;
                 continue;
             }

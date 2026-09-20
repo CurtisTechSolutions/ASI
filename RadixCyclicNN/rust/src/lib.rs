@@ -1,8 +1,13 @@
 //! `radixnet` - the Rust port of the **count / reward model** of
-//! RadixCyclicNN: a self-compressing cyclic trigram graph whose edge weights
+//! RadixCyclicNN: a self-compressing cyclic n-gram graph whose edge weights
 //! are a dual frequency function of traversal counts (all time and inside a
 //! sliding window) plus rewards, with beam-search prediction (top-K **and**
 //! bottom-K continuations), generation, scoring and 2NRL feedback.
+//!
+//! How a text becomes those grams is a dial ([`Encoding`]): character
+//! trigrams by default, any n, any stride (groups of four or five letters) or
+//! whole words instead - the same three dials as the Python and Go
+//! implementations.
 //!
 //! It is the same model as `radixnet/` (Python) and `go/radixnet` (Go), built
 //! to answer one question - *how fast is this in Rust?* - and to carry the
@@ -28,7 +33,7 @@
 //! ```
 //! use radixnet::{GraphOptions, Model, PredictOptions, Traversal, TrainOptions};
 //!
-//! let mut model = Model::new(0, GraphOptions::default()).unwrap();
+//! let mut model = Model::new(0, GraphOptions::default()).unwrap();   // character trigrams
 //! let texts: Vec<String> = ["the cat sat on the mat", "the cat sat on the log"]
 //!     .iter()
 //!     .map(|s| s.to_string())
@@ -39,6 +44,13 @@
 //!     .predict("the cat", &PredictOptions { length: 8, k: 2, traversal: Traversal::Reward, ..Default::default() })
 //!     .unwrap();
 //! assert!(found.best.full_text.starts_with("the cat"));
+//!
+//! // the same corpus in word bigrams
+//! use radixnet::{Encoding, Unit};
+//! let words = Encoding { unit: Unit::Words, n: 2, stride: 1 };
+//! let mut model = Model::new(0, GraphOptions { encoding: words, ..Default::default() }).unwrap();
+//! model.train(&texts, &TrainOptions { epochs: 2, ..Default::default() }).unwrap();
+//! assert_eq!(model.encoding().to_string(), "word:2:1");
 //! ```
 
 pub mod beam;
@@ -58,7 +70,7 @@ pub mod weights;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;
-pub use encoding::{encode, Trigram, OVERLAP, WINDOW};
+pub use encoding::{encode, Encoding, Gram, Trigram, Unit, OVERLAP, WINDOW};
 pub use graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
 pub use model::{EpochRecord, GenerateOptions, Meta, Model, PredictOptions, Score, TrainOptions};
 pub use paths::{PathKey, PathOutcome, PathRow};

@@ -14,13 +14,20 @@
 use std::process::ExitCode;
 
 use radixnet::bench::{run_benchmark, BenchOptions, BENCH_DEFAULT_CHARS, BENCH_DEFAULT_EPOCHS};
+use radixnet::encoding::Encoding;
 use radixnet::parallel::effective_workers;
 use radixnet::search::parse_traversal;
 
 const USAGE: &str = "usage: radixnet-bench [--chars N] [--epochs N] [--predictions N] [--seed N]\n\
                      \x20                     [--workers N] [--traversal reward|least-punished]\n\
                      \x20                     [--punish-every N] [--texts FILE] [--prefixes FILE]\n\
-                     \x20                     [--data FILE] [--dump FILE] [--json]";
+                     \x20                     [--data FILE] [--dump FILE] [--json]\n\
+                     \x20                     [--encoding SPEC | --units char|word --ngram N --stride N]\n\
+                     \n\
+                     the encoding is how a text becomes grams: --units says what one unit is, --ngram how many\n\
+                     units a gram holds, --stride how far apart two grams start (1 = the sliding window, n =\n\
+                     non-overlapping groups of n).  --encoding sets all three: char:3:1 (the default, and what\n\
+                     the Python and Go benchmarks measure), char:5:5 (groups of five letters), word:2:1.";
 
 fn main() -> ExitCode {
     match run() {
@@ -78,6 +85,31 @@ fn run() -> Result<(), String> {
             "--seed" => o.seed = value(&mut i)?.parse().map_err(|_| "seed must be a number")?,
             "--workers" => o.workers = value(&mut i)?.parse().map_err(|_| "workers must be a number")?,
             "--traversal" => o.traversal = parse_traversal(&value(&mut i)?)?,
+            "--encoding" => o.encoding = Encoding::parse(&value(&mut i)?)?,
+            "--units" => {
+                let unit = Encoding::parse(&value(&mut i)?)?.unit;
+                o.encoding = Encoding { unit, ..o.encoding };
+            }
+            "--ngram" => {
+                let n = value(&mut i)?.parse().map_err(|_| "ngram must be a number")?;
+                // a bare --ngram keeps a sliding encoding sliding, and grows a group
+                let stride = if o.encoding.sliding() {
+                    o.encoding.stride.min(n)
+                } else {
+                    n
+                };
+                o.encoding = Encoding {
+                    n,
+                    stride,
+                    ..o.encoding
+                };
+                o.encoding.validate()?;
+            }
+            "--stride" => {
+                let stride = value(&mut i)?.parse().map_err(|_| "stride must be a number")?;
+                o.encoding = Encoding { stride, ..o.encoding };
+                o.encoding.validate()?;
+            }
             "--punish-every" => o.punish_every = value(&mut i)?.parse().map_err(|_| "punish-every must be a number")?,
             "--dump" => o.dump = value(&mut i)?,
             "--texts" => texts_path = value(&mut i)?,

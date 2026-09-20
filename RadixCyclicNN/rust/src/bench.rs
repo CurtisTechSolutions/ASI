@@ -14,7 +14,7 @@
 
 use std::time::Instant;
 
-use crate::encoding::char_len;
+use crate::encoding::{char_len, Encoding};
 use crate::graph::GraphOptions;
 use crate::json::Json;
 use crate::model::{Model, PredictOptions, TrainOptions};
@@ -184,6 +184,10 @@ pub struct BenchOptions {
     /// least-punished traversal would have nothing to do and both searches
     /// would measure the same thing.
     pub punish_every: usize,
+    /// How the model reads text: the unit, the n of the n-gram and the stride.
+    /// The default is the character trigram the other two implementations
+    /// benchmark, so a run is comparable with theirs unless this is changed.
+    pub encoding: Encoding,
 }
 
 impl Default for BenchOptions {
@@ -200,6 +204,7 @@ impl Default for BenchOptions {
             traversal: Traversal::Reward,
             dump: String::new(),
             punish_every: 0,
+            encoding: Encoding::default(),
         }
     }
 }
@@ -227,7 +232,13 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
     };
     let total_chars: usize = texts.iter().map(|t| char_len(t)).sum();
 
-    let mut model = Model::new(o.seed, GraphOptions::default())?;
+    let mut model = Model::new(
+        o.seed,
+        GraphOptions {
+            encoding: o.encoding,
+            ..GraphOptions::default()
+        },
+    )?;
     model.workers = o.workers;
     model.g.workers = o.workers;
     let started = Instant::now();
