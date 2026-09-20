@@ -72,7 +72,7 @@ class RadixTreeNet:
     """A path-compressed context trie with a learnable sine on every node."""
 
     __slots__ = (
-        "depth", "floor", "alphabet", "min_count", "scores", "rng",
+        "depth", "floor", "alphabet", "min_count", "scores", "seed", "rng",
         "seg", "kids", "par", "cnt", "w", "z", "a", "b", "h", "k",
         "chars", "decisions", "fallback", "pcache",
     )
@@ -97,6 +97,7 @@ class RadixTreeNet:
         if scores not in ("learned", "counts"):
             raise ValueError(f"scores must be 'learned' or 'counts', got {scores!r}")
         self.scores = scores
+        self.seed = int(seed)
         """Where a branch's probabilities come from.
 
         ``learned``  the softmax of ``w_c * f_p * f_c`` - the one-hop rule.
@@ -514,6 +515,68 @@ class RadixTreeNet:
                 nb += 1
             losses.append(tot / nb if nb else 0.0)
         return losses
+
+    # -- persistence ---------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """The whole tree as JSON: its shape, its counts and every parameter.
+
+        Flat parallel lists, in node-id order, exactly as they are held in
+        memory - so a round trip is a copy, not a re-derivation.  ``alphabet``
+        is written in the form the constructor takes (one less than the
+        internal value, which reserves a slot for the unseen character).
+        """
+        return {
+            "kind": "radix_tree",
+            "depth": self.depth,
+            "floor": self.floor,
+            "alphabet": self.alphabet - 1,
+            "min_count": self.min_count,
+            "scores": self.scores,
+            "seed": self.seed,
+            "chars": self.chars,
+            "seg": list(self.seg),
+            "kids": [dict(d) for d in self.kids],
+            "par": list(self.par),
+            "cnt": list(self.cnt),
+            "w": list(self.w),
+            "z": list(self.z),
+            "a": list(self.a),
+            "b": list(self.b),
+            "h": list(self.h),
+            "k": list(self.k),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RadixTreeNet":
+        """Inverse of :meth:`to_dict`.
+
+        The fallback is *not* restored here - it belongs to whatever holds the
+        tree, and :class:`fbradix.bank.FilteredRadixBank` reattaches the one
+        shared prior to every expert when it loads.
+        """
+        t = cls(
+            depth=d["depth"],
+            alphabet=d["alphabet"],
+            seed=d.get("seed", 0),
+            floor=d.get("floor", FLOOR),
+            min_count=d.get("min_count", 1),
+            scores=d.get("scores", "learned"),
+        )
+        t.seg = list(d["seg"])
+        t.kids = [dict(x) for x in d["kids"]]
+        t.par = list(d["par"])
+        t.cnt = list(d["cnt"])
+        t.w = list(d["w"])
+        t.z = list(d["z"])
+        t.a = list(d["a"])
+        t.b = list(d["b"])
+        t.h = list(d["h"])
+        t.k = list(d["k"])
+        t.chars = int(d.get("chars", 0))
+        t.decisions = None
+        t.pcache = {}
+        return t
 
     # -- size ----------------------------------------------------------------
 

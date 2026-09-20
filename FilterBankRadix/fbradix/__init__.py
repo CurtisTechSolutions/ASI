@@ -20,19 +20,27 @@ from .bank import (
     FilteredRadixBank,
     FilterRouter,
     OracleRouter,
+    router_from_dict,
 )
+from .checkpoint import CheckpointManager
 from .filter import ActivationFilter, features
+from .store import __version__, read_json, write_json_atomic
 from .tree import RadixTreeNet
 
 __all__ = [
     "ActivationFilter",
+    "CheckpointManager",
     "ConstantRouter",
     "CycleRouter",
     "FilteredRadixBank",
     "FilterRouter",
     "OracleRouter",
     "RadixTreeNet",
+    "__version__",
     "features",
+    "read_json",
+    "router_from_dict",
+    "write_json_atomic",
     "sine",
     "sine_partials",
     "tanh_partials",

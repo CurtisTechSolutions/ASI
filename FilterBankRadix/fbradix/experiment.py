@@ -187,17 +187,29 @@ def run_arm(
     epochs: int = 3,
     lr: float = 0.5,
     seed: int = 0,
+    save: str | None = None,
+    manager=None,
+    checkpoint_every: int = 0,
     **router_kw,
 ) -> dict:
-    """Fit one arm and measure it on the held-out segments."""
+    """Fit one arm and measure it on the held-out segments.
+
+    ``save`` writes the fitted bank to a file, ``manager`` and
+    ``checkpoint_every`` hand it to a checkpoint directory round by round.
+    Both default to off, because a sweep measures hundreds of banks and wants
+    none of them kept.
+    """
     labels = [s["source"] for s in train]
     router = make_router(arm, bits, labels, seed, **router_kw)
     bank = FilteredRadixBank(router, depth=depth, alphabet=alphabet, seed=seed,
                              prior_depth=depth if arm in DEEP else 1,
                              scores="counts" if arm in COUNT_ARMS else "learned")
     t0 = time.time()
-    history = bank.fit(train, rounds=rounds, epochs=epochs, lr=lr, test=test)
+    history = bank.fit(train, rounds=rounds, epochs=epochs, lr=lr, test=test,
+                       manager=manager, checkpoint_every=checkpoint_every)
     elapsed = time.time() - t0
+    if save:
+        bank.save(save)
     test_routes = bank.assign(test)
     test_labels = [s["source"] for s in test]
     bits_test, chars = bank.bits_per_char(test, test_routes)
@@ -214,6 +226,7 @@ def run_arm(
         "purity": purity(test_routes, test_labels),
         "nmi": nmi(test_routes, test_labels),
         "seconds": elapsed,
+        "saved": save,
         "history": history,
         **bank.size_stats(),
         **bank.load_stats(bank.routes),

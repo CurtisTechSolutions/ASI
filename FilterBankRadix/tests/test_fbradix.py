@@ -7,7 +7,9 @@ regressions for bugs this architecture actually had, and those say so.
 
 import math
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,7 +21,10 @@ from fbradix.bank import (
     FilteredRadixBank,
     FilterRouter,
     OracleRouter,
+    router_from_dict,
 )
+from fbradix.checkpoint import CheckpointManager
+from fbradix.store import read_json, write_json_atomic
 from fbradix.check import check_filter, check_pair, check_tree
 from fbradix.experiment import contingency, nmi, purity
 from fbradix.filter import DIM, NBUCKET, TAU, ActivationFilter, features
@@ -374,6 +379,113 @@ def test_metrics_agree_at_the_extremes():
     assert purity([0, 0, 1, 1], labels) == 1.0 and nmi([0, 0, 1, 1], labels) == 1.0
     assert purity([0, 0, 0, 0], labels) == 0.5 and nmi([0, 0, 0, 0], labels) == 0.0
     assert nmi([0, 1, 0, 1], labels) == 0.0
+
+
+# -- persistence ---------------------------------------------------------------
+
+def test_every_component_round_trips():
+    """One contract - `to_dict` / `from_dict` - on the tree, the filter and
+    every router, so nothing in the bank is the one piece that cannot be
+    written down."""
+    texts = [s["text"] for s in corpus.synthetic(per_source=6, seed=0)]
+    t = RadixTreeNet(depth=4, alphabet=64, seed=3)
+    for x in texts:
+        t.insert_text(x)
+    t.train(texts, epochs=3)
+    u = RadixTreeNet.from_dict(t.to_dict())
+    assert (u.num_nodes, u.stored_chars, u.branches, u.chars) == \
+           (t.num_nodes, t.stored_chars, t.branches, t.chars)
+    for ctx in ("", "A", "the", "CG"):
+        for ch in "ACGT the":
+            assert abs(t.prob(ctx, ch) - u.prob(ctx, ch)) < 1e-15, (ctx, ch)
+
+    for r in (ConstantRouter(), CycleRouter(4), OracleRouter(["a", "b"]),
+              FilterRouter(bits=3, seed=1), FilterRouter(bits=4, seed=2, code="argmax")):
+        q = router_from_dict(r.to_dict())
+        assert type(q) is type(r) and q.n_experts == r.n_experts
+        assert all(q.route(x, "a") == r.route(x, "a") for x in texts)
+
+
+def test_a_saved_bank_predicts_identically():
+    """The point of saving at all: a restored bank is the same model, not a
+    similar one.  Both layers travel, and the shared prior is reattached - an
+    expert that lost it would price an unknown context at the floor and quietly
+    change every number."""
+    data = corpus.synthetic(per_source=10, seed=0)
+    train, test = corpus.split(data, seed=0)
+    bank = FilteredRadixBank(FilterRouter(bits=2, seed=0), depth=4,
+                             alphabet=corpus.alphabet(data), seed=0)
+    bank.fit(train, rounds=2, epochs=2)
+    tmp = tempfile.mkdtemp()
+    try:
+        for name in ("bank.json", "bank.json.gz"):
+            path = bank.save(os.path.join(tmp, name))
+            back = FilteredRadixBank.load(path)
+            assert back.assign(test) == bank.assign(test), name
+            assert abs(back.bits_per_char(test)[0] - bank.bits_per_char(test)[0]) < 1e-15
+            assert back.generate("the ", length=40, seed=1) == \
+                   bank.generate("the ", length=40, seed=1)
+            assert all(e.fallback is back.prior for e in back.experts if e.chars)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_the_content_decides_not_the_suffix():
+    """A plain-JSON file that merely ends in `.gz` still loads - the rule
+    `radixnet` settled on, and the one that stops a mislabelled file from
+    looking like a corrupt one."""
+    tmp = tempfile.mkdtemp()
+    try:
+        plain = write_json_atomic(os.path.join(tmp, "a.json.gz"), {"x": 1}, use_gzip=False)
+        zipped = write_json_atomic(os.path.join(tmp, "b.json"), {"x": 2}, use_gzip=True)
+        assert read_json(plain) == {"x": 1} and read_json(zipped) == {"x": 2}
+        assert open(zipped, "rb").read(2) == b"\x1f\x8b"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_checkpoints_rotate_and_keep_the_latest():
+    """`keep` is a promise about disk, and `latest` a promise about which one
+    resume picks up.  The oldest go first - but never the one `latest` points
+    at, which is the bug this rule exists to avoid."""
+    data = corpus.synthetic(per_source=6, seed=0)
+    train, _test = corpus.split(data, seed=0)
+    bank = FilteredRadixBank(FilterRouter(bits=1, seed=0), depth=3,
+                             alphabet=corpus.alphabet(data), seed=0)
+    bank.fit(train, rounds=1, epochs=1)
+    tmp = tempfile.mkdtemp()
+    try:
+        cm = CheckpointManager(tmp, keep=2)
+        for step in range(4):
+            cm.save(bank, step=step, metrics={"test_bits": 1.0 + step})
+        names = [r["name"] for r in cm.list()]
+        assert len(names) == 2 and names == sorted(names), names
+        assert cm.latest()["step"] == 3
+        assert cm.latest()["metrics"]["test_bits"] == 4.0
+        # every way of naming one resolves to the same file
+        newest = cm.latest()["name"]
+        assert cm.resolve("latest") == cm.resolve(newest) == cm.resolve("3")
+        assert cm.load().assign(train) == bank.assign(train)
+        assert cm.delete(newest) and not cm.delete(newest)
+        assert cm.latest()["step"] == 2, "latest must fall back when it is deleted"
+        assert CheckpointManager(tmp, keep=2).list() == cm.list(), "the index is on disk"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_an_empty_checkpoint_directory_says_so():
+    tmp = tempfile.mkdtemp()
+    try:
+        cm = CheckpointManager(tmp)
+        assert cm.list() == [] and cm.latest() is None and cm.load_latest() is None
+        for bad in ("latest", "nope", "7"):
+            try:
+                cm.resolve(bad)
+            except FileNotFoundError:
+                continue
+            raise AssertionError(f"resolving {bad!r} in an empty directory must fail")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # -- the corpus ----------------------------------------------------------------

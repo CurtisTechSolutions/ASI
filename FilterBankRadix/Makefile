@@ -18,16 +18,22 @@ EPOCHS     ?= 3
 SEEDS      ?= 3
 PER_SOURCE ?= 200
 RESULTS    ?= results
+MODEL      ?= bank.json.gz
+CKPT_DIR   ?= checkpoints
+KEEP       ?= 5
+EVERY      ?= 1
+TEXT       ?=
 
 COMMON = --bits $(BITS) --depth $(DEPTH) --rounds $(ROUNDS) --epochs $(EPOCHS)
 
-.PHONY: help test check demo route generate train corpus quick experiment main baseline epochs passes depth probe scale all clean
+.PHONY: help test check demo route predict generate train save checkpoints corpus quick experiment main baseline epochs passes depth probe scale all clean
 
 help: ## Show this help
 	@echo "FilterBankRadix make targets  (override like: make demo BITS=3 DEPTH=4)"
 	@awk 'BEGIN {FS = ":.*## "} /^##@/ {printf "\n%s\n", substr($$0, 5)} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-11s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "Defaults: BITS=$(BITS) ($$((1 << $(BITS))) experts) DEPTH=$(DEPTH) ROUNDS=$(ROUNDS) EPOCHS=$(EPOCHS) SEEDS=$(SEEDS)"
+	@echo "          MODEL=$(MODEL) CKPT_DIR=$(CKPT_DIR) KEEP=$(KEEP)"
 
 ##@ Checks
 test: ## Run the 25 tests (seconds)
@@ -43,11 +49,21 @@ demo: ## Fit a small bank and print what each address ended up holding
 route: ## Show the filter's responses and the address for one piece of text
 	$(FB) $(COMMON) route
 
-generate: ## Sample characters, re-routing after every one
-	$(FB) $(COMMON) generate
+generate: ## Sample characters, re-routing after every one (LOAD=... to reuse a bank)
+	$(FB) $(COMMON) $(if $(LOAD),--checkpoint-dir $(CKPT_DIR) --load $(LOAD),) generate
 
 train: ## Fit one arm (ARM=learned|single|oracle|frozen|monotone|roundrobin|unbalanced|deep|deep-oracle)
 	$(FB) $(COMMON) train --arm $(or $(ARM),learned)
+
+save: ## Fit a bank and write it to MODEL, checkpointing every EVERY rounds
+	$(FB) $(COMMON) --checkpoint-dir $(CKPT_DIR) --checkpoint-every $(EVERY) --keep $(KEEP) \
+		train --arm $(or $(ARM),learned) --save $(MODEL)
+
+predict: ## Next characters after TEXT, from a saved bank (LOAD=latest|<name>|<path>)
+	$(FB) --checkpoint-dir $(CKPT_DIR) --load $(or $(LOAD),$(MODEL)) predict $(TEXT)
+
+checkpoints: ## List the checkpoint directory (DELETE=<name> removes one)
+	$(FB) --checkpoint-dir $(CKPT_DIR) --keep $(KEEP) checkpoints $(if $(DELETE),--delete $(DELETE),)
 
 corpus: ## Rebuild the corpus snapshot from the pinned repository files
 	$(FB) --per-source $(PER_SOURCE) corpus
@@ -83,5 +99,8 @@ scale: ## Just the scale sweep: does more text per expert rescue the bank?
 
 all: check test experiment ## Checks, tests, then the full experiment
 
-clean: ## Remove __pycache__ (results and the corpus snapshot are kept)
+clean: ## Remove __pycache__ (results, checkpoints and the snapshot are kept)
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+
+clean-checkpoints: ## Remove the checkpoint directory
+	rm -rf $(CKPT_DIR)

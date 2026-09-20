@@ -31,7 +31,7 @@ number points at.
 
 ```bash
 cd FilterBankRadix
-make test         # 28 tests, standard library, seconds
+make test         # 33 tests, standard library, seconds
 make check        # finite-difference checks of all three learning rules
 make demo         # fit a small bank and see what each address ended up holding
 make quick        # a one-seed smoke run of every sweep, a few minutes
@@ -286,6 +286,39 @@ each disagreeing bit is pushed across its boundary by a hinge whose step is the
 size of the mistake in bits. That scalar is the only thing layer 2 ever tells
 layer 1.
 
+## Saving and resuming
+
+A fit costs minutes; asking the fitted bank a question should not. Everything
+in a bank writes itself with `to_dict` and reads itself back with
+`from_dict` — the trees as flat parallel lists, the filter's `v, a, b, h, k`,
+the router, the shared prior — and every file goes through one atomic,
+optionally-gzipped JSON writer.
+
+```bash
+make save                              # fit, write bank.json.gz, checkpoint each round
+make checkpoints                       # list them, with the round's metrics
+make predict TEXT='"'"'def main('"'"' LOAD=latest   # reuse it: 0.1s instead of 50
+```
+
+```
+  /tmp/ckdemo  (keep=5)
+    ckpt-round-000000.json.gz   step=0   1,767,118 B  2026-09-20T03:33:37  test=3.3426
+  * ckpt-round-000001.json.gz   step=1   1,353,205 B  2026-09-20T03:33:54  test=3.0569
+```
+
+The layout is `radixnet`'s — `ckpt-<tag>-<step>.json[.gz]`, a `latest.json`
+pointer, an `index.json` reconciled with the directory on every listing, and
+rotation that never prunes the one `latest` points at. A reader who knows one
+of these directories knows the other.
+
+Two things are worth being precise about. **Both layers travel**, and every
+expert's fallback is reattached to the one restored prior — an expert that lost
+it would price an unknown context at the floor and quietly change every number.
+And a restored bank **predicts identically but re-fits rather than resumes**:
+the corpus does not travel, and `fit` rebuilds every expert from the segments
+it is given. Resuming would mean *extending* experts, which is the one thing
+the loop is not allowed to do (§6.1).
+
 ## What went wrong first
 
 Four corrections, in the order they were needed. Three of them changed the
@@ -354,9 +387,11 @@ every smoothing rule and every seed.
 | `fbradix/corpus.py` | the four-source corpus and the labels it is scored against |
 | `fbradix/experiment.py` | the arms, the metrics, the sweeps and the probe |
 | `fbradix/check.py` | finite-difference checks of all three learning rules |
+| `fbradix/store.py` | JSON model files: atomic writes, transparent gzip, the format version |
+| `fbradix/checkpoint.py` | `CheckpointManager` — rotation, the `latest` pointer, resume |
 | `fbradix/cli.py` | `python3 -m fbradix.cli <command>` |
 | `summarize.py` | the tables above, read back out of `results/*.json` |
-| `data/`, `results/`, `tests/` | the corpus snapshot, the numbers, and 28 tests |
+| `data/`, `results/`, `tests/` | the corpus snapshot, the numbers, and 33 tests |
 
 ## Where it sits
 

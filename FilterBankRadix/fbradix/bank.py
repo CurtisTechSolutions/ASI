@@ -46,6 +46,7 @@ import math
 import random
 
 from .filter import ActivationFilter, features
+from .store import __version__, read_json, write_json_atomic
 from .tree import FLOOR, RadixTreeNet
 
 ADV_SCALE = 1.0
@@ -104,6 +105,15 @@ class ConstantRouter:
     def stats(self) -> dict:
         return {"router": self.name}
 
+    def to_dict(self) -> dict:
+        """State, with a ``kind`` for :func:`router_from_dict` to dispatch on."""
+        return {"kind": self.name}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ConstantRouter":
+        """Inverse of :meth:`to_dict`."""
+        return cls()
+
 
 class CycleRouter:
     """Round robin: a split that carries no information about the text.
@@ -138,6 +148,23 @@ class CycleRouter:
     def stats(self) -> dict:
         return {"router": self.name}
 
+    def to_dict(self) -> dict:
+        """State, including which segment was given which address.
+
+        The assignment has to travel with the router or this arm stops being a
+        *fixed* partition the moment it is reloaded.
+        """
+        return {"kind": self.name, "n_experts": self.n_experts,
+                "i": self.i, "seen": dict(self.seen)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CycleRouter":
+        """Inverse of :meth:`to_dict`."""
+        r = cls(n_experts=d.get("n_experts", 8))
+        r.i = int(d.get("i", -1))
+        r.seen = dict(d.get("seen", {}))
+        return r
+
 
 class OracleRouter:
     """Route by the true source label - the ceiling, and the only arm that
@@ -161,6 +188,18 @@ class OracleRouter:
 
     def stats(self) -> dict:
         return {"router": self.name, "labels": self.labels}
+
+    def to_dict(self) -> dict:
+        """State: the label-to-address map, which is all this router is."""
+        return {"kind": self.name, "labels": dict(self.labels)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "OracleRouter":
+        """Inverse of :meth:`to_dict`."""
+        r = cls(list(d["labels"]))
+        r.labels = {k: int(v) for k, v in d["labels"].items()}
+        r.n_experts = len(r.labels)
+        return r
 
 
 class FilterRouter:
@@ -198,6 +237,7 @@ class FilterRouter:
         self.margin = margin
         self.reinforce = reinforce
         self.passes = int(passes)
+        self.seed = int(seed)
         self.rng = random.Random(seed + 991)
         self.learns = not frozen
         self.name = ("frozen-" if frozen else "") + kind + "-" + code
@@ -302,6 +342,32 @@ class FilterRouter:
             "amp_freq": [round(v, 4) for v in self.filter.amplitude_frequency()],
         }
 
+    def to_dict(self) -> dict:
+        """The filter itself, plus every knob of the refilter rule."""
+        return {
+            "kind": "filter",
+            "filter": self.filter.to_dict(),
+            "frozen": self.frozen,
+            "lr": self.lr,
+            "balance": self.balance,
+            "margin": self.margin,
+            "reinforce": self.reinforce,
+            "passes": self.passes,
+            "seed": self.seed,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FilterRouter":
+        """Inverse of :meth:`to_dict`; the filter's parameters are restored
+        exactly, so a loaded router addresses every text identically."""
+        f = ActivationFilter.from_dict(d["filter"])
+        r = cls(bits=f.bits, seed=d.get("seed", 0), kind=f.kind, frozen=d.get("frozen", False),
+                lr=d.get("lr", 0.3), balance=d.get("balance", BALANCE),
+                margin=d.get("margin", MARGIN), reinforce=d.get("reinforce", 0.0),
+                passes=d.get("passes", PASSES), code=f.code)
+        r.filter = f
+        return r
+
     def stats(self) -> dict:
         return {
             "router": self.name,
@@ -313,6 +379,23 @@ class FilterRouter:
             "dead_units": self.filter.dead_units(),
             "amp_freq": [round(v, 4) for v in self.filter.amplitude_frequency()],
         }
+
+
+ROUTERS = {
+    "constant": ConstantRouter,
+    "roundrobin": CycleRouter,
+    "oracle": OracleRouter,
+    "filter": FilterRouter,
+}
+"""Every router, by the ``kind`` its :meth:`to_dict` writes."""
+
+
+def router_from_dict(d: dict):
+    """Rebuild whichever router wrote ``d``."""
+    kind = d.get("kind")
+    if kind not in ROUTERS:
+        raise ValueError(f"unknown router kind {kind!r} (have {sorted(ROUTERS)})")
+    return ROUTERS[kind].from_dict(d)
 
 
 # -- the bank ------------------------------------------------------------------
@@ -452,8 +535,16 @@ class FilteredRadixBank:
         lr: float = 0.5,
         test: list[dict] | None = None,
         log=None,
+        manager=None,
+        checkpoint_every: int = 0,
     ) -> list[dict]:
         """Route, build, train, refilter - ``rounds`` times.
+
+        With a :class:`fbradix.checkpoint.CheckpointManager` and
+        ``checkpoint_every = n``, the bank is written to that directory after
+        every ``n`` rounds and again at the end, carrying the round's metrics.
+        A round is the natural unit: it is the point where every expert has
+        just been rebuilt and trained, so a checkpoint is never half a fit.
 
         The filter is not updated after the last round: there would be no
         rebuild left to act on it, and the reported numbers must belong to the
@@ -483,6 +574,11 @@ class FilteredRadixBank:
             self.history.append(rec)
             if log:
                 log(rec)
+            if manager is not None and checkpoint_every > 0:
+                if (r + 1) % checkpoint_every == 0 or r + 1 == rounds:
+                    manager.save(self, step=r, tag="round",
+                                 metrics={k: v for k, v in rec.items()
+                                          if isinstance(v, (int, float))})
         return self.history
 
     # -- scoring -------------------------------------------------------------
@@ -573,8 +669,8 @@ class FilteredRadixBank:
             "balance": ent / math.log(k, 2) if k > 1 else 1.0,
         }
 
-    def to_dict(self) -> dict:
-        """Enough to describe the bank in a result file (not the trees)."""
+    def describe(self) -> dict:
+        """Sizes and settings, for a result file - not the trees themselves."""
         return {
             "depth": self.depth,
             "alphabet": self.alphabet,
@@ -584,6 +680,69 @@ class FilteredRadixBank:
             **self.router.stats(),
             **self.size_stats(),
         }
+
+    # -- persistence ---------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """The whole bank as JSON: both layers, and the routing that joined them.
+
+        Everything a prediction depends on travels: the router (layer 1), every
+        expert tree and the shared prior (layer 2), and the settings they were
+        built with.  What does not travel is the corpus and the fit history -
+        a loaded bank predicts, it does not resume a fit it has no data for.
+        """
+        return {
+            "kind": "filtered_radix_bank",
+            "version": __version__,
+            "depth": self.depth,
+            "alphabet": self.alphabet,
+            "seed": self.seed,
+            "floor": self.floor,
+            "min_count": self.min_count,
+            "prior_depth": self.prior_depth,
+            "scores": self.scores,
+            "router": self.router.to_dict(),
+            "prior": self.prior.to_dict() if self.prior is not None else None,
+            "experts": [e.to_dict() for e in self.experts],
+            "routes": list(self.routes),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FilteredRadixBank":
+        """Inverse of :meth:`to_dict`, with the shared prior reattached.
+
+        Every expert's ``fallback`` points at the one restored prior, which is
+        what :meth:`build` does after a fit - a tree that lost its prior would
+        price an unknown context at the floor and quietly change every number.
+        """
+        bank = cls(
+            router_from_dict(d["router"]),
+            depth=d["depth"],
+            alphabet=d["alphabet"],
+            seed=d.get("seed", 0),
+            floor=d.get("floor", FLOOR),
+            min_count=d.get("min_count", 1),
+            prior_depth=d.get("prior_depth", PRIOR_DEPTH),
+            scores=d.get("scores", "learned"),
+        )
+        bank.prior = RadixTreeNet.from_dict(d["prior"]) if d.get("prior") else None
+        bank.experts = [RadixTreeNet.from_dict(e) for e in d.get("experts", [])]
+        for e in bank.experts:
+            e.fallback = bank.prior
+        bank.routes = list(d.get("routes", []))
+        return bank
+
+    def save(self, path: str) -> str:
+        """Write the bank to ``path`` (gzipped when it ends in ``.gz``), atomically."""
+        return write_json_atomic(path, self.to_dict())
+
+    @classmethod
+    def load(cls, path: str) -> "FilteredRadixBank":
+        """Read a bank written by :meth:`save`."""
+        d = read_json(path)
+        if d.get("kind") not in (None, "filtered_radix_bank"):
+            raise ValueError(f"{path} is a {d.get('kind')!r}, not a bank")
+        return cls.from_dict(d)
 
     def __repr__(self) -> str:
         return (
