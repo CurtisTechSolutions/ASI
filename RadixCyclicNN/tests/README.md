@@ -27,6 +27,7 @@ A few cover a behaviour rather than a module:
 | `test_guard.py` | what the negative network stops on the way out, on every answer path |
 | `test_feedback.py` | ratings and the 2NRL phases they drive |
 | `test_api_uploads.py` | uploads through the API, including ZIP archives kept as one entry and unpacked behind the scenes |
+| `test_penalty.py` | the **punishment traversal** (`../radixnet/penalty.py`): the merit / penalty split per model kind, that the rewards really do leave the score, that the cheapest path is the least punished one, and the option's way through every search mode, the CLI and the HTTP API |
 
 Six modules have no file of their own, and are exercised through the callers
 that use them:

@@ -94,6 +94,7 @@ from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .duo import FilterConfig, NegativeFilter
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeNet
+from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS, resolve_traversal
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
     DEFAULT_URL as OLLAMA_DEFAULT_URL,
@@ -783,7 +784,7 @@ class ModelService:
         }
         if isinstance(result, Prediction):
             payload.update(
-                mode=result.mode, k=result.k, beam=result.beam,
+                mode=result.mode, k=result.k, beam=result.beam, traversal=result.traversal,
                 top=[_path_dict(r) for r in result.top], bottom=[_path_dict(r) for r in result.bottom],
             )
         return payload
@@ -2329,6 +2330,15 @@ def _r_job_stop(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.stop_job()
 
 
+def _traversal_fields(f: Fields) -> dict:
+    """``traversal`` and its two scales, as every search endpoint reads them (:mod:`radixnet.penalty`)."""
+    return {
+        "traversal": resolve_traversal(f.text("traversal", DEFAULT_TRAVERSAL)),
+        "penalty_scale": f.number("penalty_scale", 1.0, minimum=0.0),
+        "merit_scale": f.number("merit_scale", 1.0, minimum=0.0),
+    }
+
+
 def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     prefix = f.text("prefix")
     return 200, svc.predict(
@@ -2342,6 +2352,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         max_length=f.integer("max_length", None, minimum=0),
         k=f.integer("k", 5, minimum=0),
         beam=f.integer("beam", None, minimum=1),
+        **_traversal_fields(f),
     )
 
 
@@ -2356,6 +2367,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         prefix=f.text("prefix", ""),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
         beam=f.integer("beam", None, minimum=1),
+        **_traversal_fields(f),
     )
 
 
@@ -3706,11 +3718,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict,
      "continue a prefix: {prefix, length, mode: dijkstra | beam | sample, to_end, step_penalty, temperature, max_length "
-     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), guard (default on: "
-     "the negative network vetoes the continuations it recognises as failures)}"),
+     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), traversal: reward "
+     "(default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest "
+     "path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), guard "
+     "(default on: the negative network vetoes the continuations it recognises as failures)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
-     "dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the "
+     "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
+     "penalty_scale, merit_scale, guard (default on: the model over-samples and the "
      "negative network vetoes what it recognises as failure)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "

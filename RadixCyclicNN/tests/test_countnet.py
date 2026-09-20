@@ -282,7 +282,8 @@ class TestPrediction(unittest.TestCase):
         for r in p.top:
             self.assertTrue(r.reached_end or len(r.text) >= 8)
         d = p.to_dict()
-        self.assertEqual(set(d) - set(p.top[0].to_dict()), {"top", "bottom", "k", "beam", "mode"})
+        self.assertEqual(set(d) - set(p.top[0].to_dict()), {"top", "bottom", "k", "beam", "mode", "traversal"})
+        self.assertEqual(d["traversal"], "reward")
         self.assertEqual(len(d["top"]), 3)
 
     def test_dijkstra_alias_sample_mode_and_edge_cases(self):

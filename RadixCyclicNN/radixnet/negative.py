@@ -81,6 +81,7 @@ from .model import (
     meta_add_keyed,
     meta_stats,
 )
+from .penalty import DEFAULT_TRAVERSAL
 
 __all__ = [
     "MAX_EDGE_REASONS",
@@ -334,6 +335,26 @@ class NegativeGraph(RadixCyclicGraph):
         degree = max(1, int(degree))
         r_bad = (evidence + s) / (max(0.0, float(parent_evidence)) + s * degree)
         return self.share_scale * math.log(r_bad) + self.blame_scale * math.log1p(evidence)
+
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, merit, penalty)]`` in the negative network's own currency: blame against clearing.
+
+        Nothing here was ever rewarded, so there is no reward to take out.
+        What speaks against a step is the net evidence
+        (:meth:`evidence`) and what speaks for it is the *cleared* text that
+        ran through it - both on a log scale, so they are comparable and a
+        thousandfold blame does not make one child infinitely dearer than the
+        rest.  The punishment traversal over this graph therefore walks the
+        **least blamed** way through the failure structure, which is the
+        opposite of what its ordinary traversal does
+        (:mod:`radixnet.penalty`).
+        """
+        blame = self.evidence
+        clear = self.edge_clear
+        return [
+            (c, e, math.log1p(max(0.0, clear[e])), math.log1p(blame(e)))
+            for c, e in self.children[p].items()
+        ]
 
     def recompute_weights(self) -> None:
         """Write the blame weight to every alive edge (after blame, clearing or scales changed)."""
@@ -1052,6 +1073,9 @@ class NegativeNet(GraphModel):
         temperature: float = 1.0,
         to_end: bool = False,
         max_length: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """How a prefix goes wrong: the ``k`` most likely continuations *among the known failures* (and the ``k``
         least likely, as ``bottom``).
@@ -1060,6 +1084,12 @@ class NegativeNet(GraphModel):
         ``"beam"``, ``"sample"`` draws one walk); the distribution it searches
         is the failure distribution, so a prediction here is a warning, not a
         suggestion.
+
+        ``traversal="punishment"`` turns that on its head
+        (:mod:`radixnet.penalty`): the blame prices every step *against* it, so
+        ``top`` becomes the least blamed way out of the prefix - the
+        continuation this network has the least to say about - instead of the
+        likeliest failure.
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
@@ -1067,7 +1097,10 @@ class NegativeNet(GraphModel):
             mode = "beam"
         if mode not in ("beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
-        return self._search(prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length)
+        return self._search(
+            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
+            traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+        )
 
     # -- the filter ----------------------------------------------------------
 
