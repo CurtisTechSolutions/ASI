@@ -40,15 +40,17 @@ FilterBankRadix/
   fbradix/
     __init__.py          the public surface
     __main__.py          python3 -m fbradix -> cli.main()
+    store.py             JSON model files: atomic writes, transparent gzip, the version
     activation.py        the parametric sine, its partials, and the monotone control
     filter.py            LAYER 1: features, the units, the address, the hinge rule
     tree.py              LAYER 2: the radix context tree and the one-hop rule
     bank.py              the routers and the route/build/train/refilter loop
     corpus.py            the four-source corpus and the labels it is scored against
     experiment.py        the arms, the metrics, the sweeps and the probe
+    checkpoint.py        CheckpointManager: rotation, the latest pointer, resume
     check.py             finite-difference checks of all three learning rules
     cli.py               python3 -m fbradix.cli <command>
-  tests/test_fbradix.py  28 tests, standard library, seconds
+  tests/test_fbradix.py  33 tests, standard library, seconds
 ```
 
 ---
@@ -313,6 +315,49 @@ against a tree that does not exist wastes the update — and every result report
 
 ---
 
+## 6b. Persistence — one contract, and what a checkpoint of *this* contains
+
+Every object that makes up a bank answers the same two methods, and every file
+this package writes goes through the same two functions:
+
+| | |
+|---|---|
+| `to_dict()` / `from_dict(d)` | `RadixTreeNet`, `ActivationFilter`, all four routers (each writes a `kind`, and `bank.router_from_dict` dispatches on it), and `FilteredRadixBank` itself |
+| `store.write_json_atomic` / `store.read_json` | every file: models, checkpoints, the index, the `latest` pointer |
+| `bank.save(path)` / `FilteredRadixBank.load(path)` | one bank, gzipped when the path ends in `.gz` |
+| `CheckpointManager` | a directory of them: `ckpt-<tag>-<step:06d>.json[.gz]`, `latest.json`, `index.json`, rotation by `keep` |
+
+The file rules are `radixnet`'s, deliberately — a model file is a thing you
+lose work by getting wrong, and that package already settled it. Writes go to a
+temporary file in the same directory, are `fsync`ed and then `os.replace`d, so
+a reader never sees a half-written file and a crash leaves the previous version
+intact. On reading, **the content decides, not the suffix**: a file is
+gunzipped because it carries the gzip magic, so a plain-JSON file that happens
+to end in `.gz` still loads.
+
+**What travels in a checkpoint.** A bank is two layers fitted against each
+other, so both go: the router with its filter's `v, a, b, h, k`, every expert
+tree as flat parallel lists, the shared prior, and the routing that joined
+them. Every expert's `fallback` is reattached to the one restored prior on
+load — an expert that lost it would price an unknown context at the floor and
+quietly change every number, which is §6.3's cliff coming back in through the
+file format.
+
+**What does not.** The corpus, and the fit history. So a restored bank
+**predicts** exactly as it did — `test_a_saved_bank_predicts_identically`
+checks routes, bits and a sampled string to the last digit — and **re-fits
+rather than resumes**: `fit` rebuilds every expert from the segments it is
+given (§6.1), which is the same rule that makes a round honest in the first
+place. Resuming a fit from a checkpoint would mean extending experts, and that
+is the one thing the loop is not allowed to do.
+
+`fit(..., manager=cm, checkpoint_every=n)` writes a checkpoint every `n`
+rounds and again at the end, carrying that round's metrics. A round is the
+natural unit: it is the moment every expert has just been rebuilt and trained,
+so a checkpoint is never half a fit.
+
+---
+
 ## 7. Why a periodic unit, here
 
 The sign of a monotone unit cuts its projection in two, so `m` monotone units
@@ -422,6 +467,10 @@ than silently lowering the number.
 7. `prob` is a probability distribution over the alphabet, for every context,
    in every arm (`test_the_prediction_is_a_probability_distribution`).
 8. Everything is deterministic given the seeds: same call, same numbers.
+9. Every part of a bank writes itself with `to_dict` and reads itself with
+   `from_dict`, and every file goes through `store`. A restored bank predicts
+   identically; nothing in the architecture is the one piece that cannot be
+   written down.
 
 ---
 
