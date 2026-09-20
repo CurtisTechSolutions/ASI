@@ -93,12 +93,32 @@ need an LLM.
     npm install
     npm run build                           # writes frontend/dist
 
-`frontend/dist` is committed so the Python server can serve it with zero npm
-steps. From `RadixCyclicNN/`:
+`frontend/dist` is committed so a server can serve it with zero npm steps. From
+`RadixCyclicNN/`, any of the three:
 
     python -m radixnet serve                # serves frontend/dist at http://127.0.0.1:8000/
+    make go-serve                           # the Go count / reward model
+    make rust-serve                         # the Rust count / reward model
 
 Rebuild and recommit `dist` whenever `src/` changes.
+
+## The three servers, and what each one can fill
+
+The same bundle runs against all three, because they answer the same JSON
+contract (`../DESIGN.md` §12) and `/api/status` says which one is replying in
+`engine`. What differs is how much of the contract each one has:
+
+| engine | what it serves |
+|---|---|
+| `python` | everything: every panel in the list above |
+| `go` | the model, the negative network, the tutor, code, the agent and the LLM clients; no scheduler and no MCP |
+| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Network settings and Graph |
+
+A panel whose API the running server does not have **hides itself** rather than
+failing: `App.jsx` reads `engine` from `/api/status` and drops the tabs that
+engine cannot answer. So the Rust badge in the status bar is also the
+explanation for the shorter tab row, and nothing in the app has to be rebuilt to
+point it at a different one.
 
 ## Network settings
 

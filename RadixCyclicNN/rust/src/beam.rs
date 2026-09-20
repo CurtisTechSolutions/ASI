@@ -10,6 +10,7 @@
 
 use crate::encoding::OVERLAP;
 use crate::graph::{Graph, END, START};
+use crate::penalty::PenaltyCosts;
 use crate::search::{build_result, least_punished, onward, start_emission, PathResult, Traversal};
 use crate::weights::ChildCost;
 
@@ -22,7 +23,9 @@ pub struct Prediction {
     pub k: usize,
     pub beam: usize,
     pub mode: String,
-    pub traversal: Traversal,
+    /// The traversal's *name*, as the CLI and the API spell it: "reward",
+    /// "punishment" ([`crate::penalty`]) or "least-punished".
+    pub traversal: String,
     pub expanded: usize,
 }
 
@@ -117,7 +120,9 @@ fn less_state(a: &BeamState, b: &BeamState, traversal: Traversal) -> std::cmp::O
 
 /// The knobs of one beam.
 #[derive(Clone, Copy)]
-struct BeamRun {
+struct BeamRun<'a> {
+    /// The punishment traversal's cost function, or `None` for the graph's own.
+    costs: Option<&'a PenaltyCosts>,
     start_node: usize,
     start_chars: usize,
     min_chars: usize,
@@ -133,7 +138,7 @@ struct BeamRun {
 }
 
 /// One beam: the k best (or, with `worst`, the k worst) complete paths.
-fn run_beam(g: &Graph, o: BeamRun) -> (Vec<Finished>, usize) {
+fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
     let mut entries: Vec<BeamEntry> = vec![BeamEntry {
         node: o.start_node,
         parent: None,
@@ -209,7 +214,7 @@ fn run_beam(g: &Graph, o: BeamRun) -> (Vec<Finished>, usize) {
                 None if st.node == START => Some(START),
                 None => None,
             };
-            g.child_costs_into(st.node, prev, &mut children);
+            g.step_costs_into(st.node, prev, o.costs, &mut children);
             onward(&mut children);
             if o.traversal == Traversal::LeastPunished {
                 least_punished(&mut children);
@@ -389,6 +394,19 @@ impl Graph {
         min_chars: usize,
         opts: BeamOptions,
     ) -> Result<(Vec<PathResult>, Vec<PathResult>, usize), String> {
+        self.beam_predict_by(start_node, start_offset, min_chars, opts, None)
+    }
+
+    /// [`Graph::beam_predict`] reading the graph through a cost function of its
+    /// own - the punishment traversal's ([`crate::penalty`]).
+    pub fn beam_predict_by(
+        &mut self,
+        start_node: usize,
+        start_offset: usize,
+        min_chars: usize,
+        opts: BeamOptions,
+        costs: Option<&PenaltyCosts>,
+    ) -> Result<(Vec<PathResult>, Vec<PathResult>, usize), String> {
         if opts.step_penalty < 0.0 {
             return Err("step_penalty must be >= 0".to_string());
         }
@@ -414,6 +432,7 @@ impl Graph {
             return Ok((Vec::new(), Vec::new(), 0));
         }
         let run = BeamRun {
+            costs,
             start_node,
             start_chars,
             min_chars,

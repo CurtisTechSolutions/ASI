@@ -144,11 +144,20 @@ go-serve: go-build ## Serve the frontend from the Go count / reward model on htt
 
 ##@ Rust port and the cross-language benchmark
 CARGO ?= cargo
+LIMIT         ?= 10
+TRAVERSAL     ?= reward
+MERIT_SCALE   ?= 1
+PENALTY_SCALE ?= 1
 BENCH_CHARS ?= 2000000
 BENCH_PREDICTIONS ?= 3000
 BENCH_EPOCHS ?= 3
 BENCH_REPEAT ?= 3
 PUNISH_EVERY ?= 7
+
+RUST        ?= rust/target/release/radixnet
+MODEL_RUST  ?= $(MODEL_COUNT)
+RUST_GLOBAL := --model $(MODEL_RUST) --seed $(SEED)
+RUST_KIND   ?= count
 
 rust-build: ## Build the Rust port's CLI and benchmark into rust/target/release (needs Rust 1.82+)
 	cd rust && $(CARGO) build --release
@@ -158,6 +167,60 @@ rust-test: ## Run the Rust tests, clippy and the formatter check
 
 rust-parity: ## Cross-language parity of the Rust port against the Python model
 	$(PY) -m unittest tests.test_rust_parity -v
+
+rust-train: rust-build ## Train the Rust model on DATA (RUST_KIND=count|word, MODEL_RUST is its file)
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) train --data $(DATA) --epochs $(EPOCHS)
+
+rust-predict: rust-build ## Continue PREFIX: the K likeliest and K least likely (TRAVERSAL picks what it follows)
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) predict --prefix "$(PREFIX)" --length $(LENGTH) --k $(COUNT) \
+	    --traversal $(TRAVERSAL) --merit-scale $(MERIT_SCALE) --penalty-scale $(PENALTY_SCALE)
+
+rust-generate: rust-build ## Generate COUNT whole texts of at most MAX_LENGTH symbols each
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam \
+	    --traversal $(TRAVERSAL)
+
+rust-score: rust-build ## Log-probability of TEXT under the Rust model
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) score --text "$(TEXT)"
+
+rust-feedback: rust-build ## Thumbs up DATA and thumbs down GARBAGE (2NRL when both are given)
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) feedback --good $(DATA) --bad $(GARBAGE) --strength $(SEVERITY)
+
+rust-paths: rust-build ## What the judged walks did, step by step
+	$(RUST) $(RUST_GLOBAL) paths --limit $(LIMIT)
+
+rust-nodes: rust-build ## Each node against the nodes around it
+	$(RUST) $(RUST_GLOBAL) nodes --limit $(LIMIT)
+
+rust-words: rust-build ## The word model's alphabet, most read first (RUST_KIND=word)
+	$(RUST) $(RUST_GLOBAL) --kind word words --limit $(WORD_LIMIT)
+
+rust-weights: rust-build ## Show the Rust model's weight function
+	$(RUST) $(RUST_GLOBAL) weights
+
+rust-info: rust-build ## The Rust model's statistics and history tail
+	$(RUST) $(RUST_GLOBAL) info
+
+rust-check: rust-build ## The structural invariants of the Rust model, over DATA
+	$(RUST) $(RUST_GLOBAL) check --data $(DATA)
+
+rust-compress: rust-build ## Merge every unary chain by hand, then save
+	$(RUST) $(RUST_GLOBAL) compress
+
+rust-invert: rust-build ## Flip the sign of every reward
+	$(RUST) $(RUST_GLOBAL) invert
+
+rust-serve: rust-build ## Serve the API + the prebuilt frontend from the Rust port on http://HOST:PORT
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) serve --host $(HOST) --port $(PORT) \
+	    --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+
+rust-bench: rust-build ## The Rust port's own benchmark (BENCH_CHARS characters, BENCH_EPOCHS epochs)
+	rust/target/release/radixnet-bench --chars $(BENCH_CHARS) --epochs $(BENCH_EPOCHS) --traversal $(TRAVERSAL)
+
+rust-demo: ## Train on the sample corpus with the Rust port, then predict, generate and read it back
+	$(MAKE) rust-train
+	$(MAKE) rust-predict
+	$(MAKE) rust-generate
+	$(MAKE) rust-info
 
 bench-compare: ## Both ports over one corpus, checked against each other -> bench/RESULTS.md
 	$(PY) bench/compare.py --chars $(BENCH_CHARS) --predictions $(BENCH_PREDICTIONS) \

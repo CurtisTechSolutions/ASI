@@ -70,6 +70,43 @@ pub fn stats(model: &Model) -> Json {
     Json::Obj(pairs)
 }
 
+/// The weight function's settings, as `GET /api/model` and the CLI report them.
+pub fn weight_config(g: &Graph) -> Json {
+    Json::obj([
+        ("function", Json::str("dual-frequency")),
+        ("count_scale", Json::Num(g.count_scale)),
+        ("global_scale", Json::Num(g.global_scale)),
+        ("window_scale", Json::Num(g.window_scale)),
+        ("reward_scale", Json::Num(g.reward_scale)),
+        ("path_scale", Json::Num(g.path_scale)),
+        ("window", Json::Int(g.window_size as i64)),
+        ("smoothing", Json::Num(crate::weights::SMOOTHING)),
+    ])
+}
+
+/// Sets one of those by the name the API and the CLI use; an unknown name is an error.
+pub fn configure_weight(g: &mut Graph, name: &str, value: f64) -> Result<(), String> {
+    match name.replace('-', "_").as_str() {
+        "count_scale" => g.count_scale = value,
+        "global_scale" => g.global_scale = value,
+        "window_scale" => g.window_scale = value,
+        "reward_scale" => g.reward_scale = value,
+        "path_scale" => g.path_scale = value,
+        "window" => {
+            if value < 1.0 {
+                return Err(format!("window must be >= 1, got {value}"));
+            }
+            g.set_window(value as usize);
+        }
+        other => {
+            return Err(format!(
+                "unknown weight setting {other:?}; expected count_scale, global_scale, window_scale,                  reward_scale, path_scale or window"
+            ))
+        }
+    }
+    Ok(())
+}
+
 /// The judged contexts, most judged first; `limit` 0 is all of them and `node`
 /// `Some(n)` only the steps leaving that node.
 pub fn path_rows(g: &Graph, limit: usize, node: Option<usize>) -> Json {

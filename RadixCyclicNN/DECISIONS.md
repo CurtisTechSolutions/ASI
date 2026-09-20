@@ -2676,12 +2676,25 @@ table for "Rust is 4x faster than Go" has been misled by it.
   predictions, generated texts and scores, and each side continuing the other's
   file. Its graph document is Python's **byte for byte** but for the `version`
   cache stamp - which the Go port's is not, because Go renders floats and orders
-  keys its own way. What the port still does **not** have: the HTTP server, the
-  negative network, the tutors and the agent. Undone, not deliberate.
+  keys its own way.
+* The port carries **all three traversals** (D-071, and the punishment traversal
+  of D-069 in `rust/src/penalty.rs`) and **both alphabets** (D-073), so a
+  traversal or a kind added to one implementation is now added to three.
+* The port serves the frontend: `rust/src/http.rs` is HTTP/1.1 written out over
+  `TcpListener` and `rust/src/service.rs` answers the same JSON contract the
+  Python and Go servers answer, so `frontend/dist` runs against
+  `radixnet serve` unmodified. What a Rust server cannot fill, the frontend
+  hides on `engine == "rust"`, and what it will not serve says so with a 400.
+* What the port still does **not** have: the negative network, the tutors and
+  the other teaching loops, the agent and its tools, images and speech, and MCP.
+  Undone, not deliberate. **One gap is deliberate**: the LLM clients need HTTPS,
+  and a crate with no dependencies cannot speak it. Porting them is not a task,
+  it is a proposal to drop the no-dependency rule above - which would also drop
+  what that rule buys, a `Cargo.lock` with nothing in it but this crate.
 * Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
   both sides, because a benchmark of a deliberate data race measures the race.
 
-**Lives in** `rust/`, `bench/`, `Makefile` (`rust-build`, `rust-test`, `bench-compare`)
+**Lives in** `rust/`, `bench/`, `Makefile` (the `rust-*` targets, `bench-compare`)
 
 ---
 

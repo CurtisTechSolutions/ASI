@@ -5,10 +5,12 @@
 //! bottom-K continuations), generation, scoring and 2NRL feedback.
 //!
 //! It is the same model as `radixnet/` (Python) and `go/radixnet` (Go), built
-//! to answer one question - *how fast is this in Rust?* - and to carry the
-//! traversal the other two did not have: the walk that follows the **least
-//! punished** step rather than the best rewarded one (see
-//! `../SPEC-LeastPunished.md` and [`search::Traversal`]).
+//! to answer one question - *how fast is this in Rust?* - and it answers to all
+//! three traversals they do: `reward`, the walk that follows what the model
+//! believes; `punishment`, the same graph priced by the penalties alone
+//! ([`penalty`]); and `least-punished`, the walk that ranks by the blame a path
+//! carries before it looks at the cost at all ([`search::Traversal`],
+//! `../SPEC-LeastPunished.md`).
 //!
 //! # No dependencies
 //!
@@ -18,15 +20,20 @@
 //!
 //! # What is here, and what is not
 //!
-//! The model itself is: the graph and its structural operations, the weight
-//! function, the path contexts, both traversals, training, prediction,
-//! generation, scoring and the benchmark.  The things around it that the Go
-//! port grew - the negative network, the tutor, the agent, the LLM clients, the
-//! HTTP server and the JSON model file format - are not ported; a model file is
-//! read and written by the Python and Go implementations.
+//! The model itself is here in full: the graph and its structural operations,
+//! the weight function, the path contexts, all three traversals, training,
+//! prediction, generation, scoring, the character and **word** alphabets, the
+//! JSON model file (byte for byte what Python and Go read and write), the
+//! benchmark, the CLI (`src/bin/radixnet.rs`) and the HTTP API the frontend talks to
+//! ([`http`], [`service`]).
+//!
+//! What is **not** here is everything the Python package grew around the model:
+//! the negative network, the tutor and the other teaching loops, the agent and
+//! its tools, the LLM clients, images and speech, and MCP.  The LLM clients in
+//! particular need HTTPS, which the no-dependency rule rules out.
 //!
 //! ```
-//! use radixnet::{GraphOptions, Model, PredictOptions, Traversal, TrainOptions};
+//! use radixnet::{GraphOptions, Model, PredictOptions, TrainOptions, REWARD};
 //!
 //! let mut model = Model::new(0, GraphOptions::default()).unwrap();
 //! let texts: Vec<String> = ["the cat sat on the mat", "the cat sat on the log"]
@@ -36,7 +43,7 @@
 //! model.train(&texts, &TrainOptions { epochs: 2, ..Default::default() }).unwrap();
 //!
 //! let found = model
-//!     .predict("the cat", &PredictOptions { length: 8, k: 2, traversal: Traversal::Reward, ..Default::default() })
+//!     .predict("the cat", &PredictOptions { length: 8, k: 2, traversal: REWARD.to_string(), ..Default::default() })
 //!     .unwrap();
 //! assert!(found.best.full_text.starts_with("the cat"));
 //! ```
@@ -51,13 +58,16 @@ pub mod fsum;
 pub mod graph;
 pub mod gzip;
 pub mod hash;
+pub mod http;
 pub mod json;
 pub mod model;
 pub mod mt19937;
 pub mod parallel;
 pub mod paths;
+pub mod penalty;
 pub mod report;
 pub mod search;
+pub mod service;
 pub mod weights;
 pub mod words;
 
@@ -69,6 +79,9 @@ pub use graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
 pub use json::Json;
 pub use model::{EpochRecord, GenerateOptions, Meta, Model, PredictOptions, Score, TrainOptions};
 pub use paths::{PathKey, PathOutcome, PathRow};
+pub use penalty::{
+    resolve_traversal, traversal_costs, PenaltyCosts, DEFAULT_TRAVERSAL, LEAST_PUNISHED, PUNISHMENT, REWARD, TRAVERSALS,
+};
 pub use search::{least_punished, onward, parse_traversal, PathResult, Traversal};
 pub use weights::ChildCost;
 pub use words::{split_words, symbol_word, word_symbol, Vocabulary, WordRow, MAX_WORDS, UNKNOWN_WORD};

@@ -125,14 +125,14 @@ fn the_least_punished_walk_leaves_a_step_that_was_judged_wrong() {
     model.punish(&good, 1, 1.0).unwrap();
 
     let prefix = "the cat sat on the ";
-    let opts = |traversal| PredictOptions {
+    let opts = |traversal: &str| PredictOptions {
         length: 6,
         k: 3,
-        traversal,
+        traversal: traversal.to_string(),
         ..Default::default()
     };
-    let by_reward = model.predict(prefix, &opts(Traversal::Reward)).unwrap();
-    let by_blame = model.predict(prefix, &opts(Traversal::LeastPunished)).unwrap();
+    let by_reward = model.predict(prefix, &opts("reward")).unwrap();
+    let by_blame = model.predict(prefix, &opts("least-punished")).unwrap();
 
     assert_eq!(by_reward.best.full_text, "the cat sat on the mat");
     assert_eq!(by_blame.best.full_text, "the cat sat on the log");
@@ -153,14 +153,14 @@ fn the_least_punished_walk_leaves_a_step_that_was_judged_wrong() {
 fn with_nothing_punished_the_two_traversals_agree() {
     let mut model = trained(CORPUS, 5);
     for prefix in ["the ", "the cat", "a bird flew", "over the "] {
-        let opts = |traversal| PredictOptions {
+        let opts = |traversal: &str| PredictOptions {
             length: 8,
             k: 3,
-            traversal,
+            traversal: traversal.to_string(),
             ..Default::default()
         };
-        let a = model.predict(prefix, &opts(Traversal::Reward)).unwrap();
-        let b = model.predict(prefix, &opts(Traversal::LeastPunished)).unwrap();
+        let a = model.predict(prefix, &opts("reward")).unwrap();
+        let b = model.predict(prefix, &opts("least-punished")).unwrap();
         assert_eq!(a.best.full_text, b.best.full_text, "prefix {prefix:?}");
         assert_eq!(a.best.cost, b.best.cost, "prefix {prefix:?}");
         assert_eq!(a.expanded, b.expanded, "prefix {prefix:?}");

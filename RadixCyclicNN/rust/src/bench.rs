@@ -272,7 +272,7 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
         length: BENCH_PREDICT_LENGTH,
         mode: "beam".into(),
         k: 1,
-        traversal: o.traversal,
+        traversal: o.traversal.name().to_string(),
         ..Default::default()
     };
     let started = Instant::now();

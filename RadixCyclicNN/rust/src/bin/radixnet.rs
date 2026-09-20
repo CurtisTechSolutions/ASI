@@ -20,6 +20,7 @@
 //!   nodes      one node against its neighbours
 //!   words      the word model's alphabet, most read first
 //!   info       the model's statistics
+//!   serve      the HTTP API and the prebuilt frontend
 //!   version    the port's version
 //! ```
 
@@ -28,13 +29,16 @@ use std::process::ExitCode;
 use radixnet::file::read_document;
 use radixnet::json::Json;
 use radixnet::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
+use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
 use radixnet::report::{node_rows, path_rows, split_texts, stats};
-use radixnet::search::{parse_traversal, PathResult};
+use radixnet::search::PathResult;
+use radixnet::service::Service;
 use radixnet::{Graph, GraphOptions};
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--kind count|word] [--json] [--seed N] [--workers N] \
      [--out PATH] <command>\n\
-     commands: train predict generate score feedback 2nrl invert compress weights paths nodes words info version";
+     commands: train predict generate score feedback 2nrl invert compress weights paths nodes words info serve \
+     version";
 
 /// The default `--model` per kind, so one kind never overwrites another's file.
 const DEFAULT_COUNT_MODEL: &str = "model.count.json";
@@ -239,7 +243,9 @@ fn run() -> Result<(), String> {
                 temperature: args.float("temperature", 1.0)?,
                 to_end: args.on("to-end"),
                 max_length: (max_length >= 0).then_some(max_length as usize),
-                traversal: parse_traversal(&args.str("traversal", "reward"))?,
+                traversal: resolve_traversal(&args.str("traversal", DEFAULT_TRAVERSAL))?.to_string(),
+                penalty_scale: args.float("penalty-scale", 1.0)?,
+                merit_scale: args.float("merit-scale", 1.0)?,
             };
             let found = model.predict(&prefix, &opts)?;
             let mut doc = vec![
@@ -266,9 +272,7 @@ fn run() -> Result<(), String> {
                     Json::Arr(found.bottom.iter().map(path_json).collect()),
                 ),
             ];
-            if found.traversal != radixnet::Traversal::Reward {
-                doc.push(("traversal".to_string(), Json::str(found.traversal.name())));
-            }
+            doc.push(("traversal".to_string(), Json::str(found.traversal.clone())));
             emit(Json::Obj(doc));
         }
         "generate" => {
@@ -283,7 +287,9 @@ fn run() -> Result<(), String> {
                 prefix: args.str("prefix", ""),
                 step_penalty: args.float("step-penalty", 0.0)?,
                 beam: args.usize("beam", 0)?,
-                traversal: parse_traversal(&args.str("traversal", "reward"))?,
+                traversal: resolve_traversal(&args.str("traversal", DEFAULT_TRAVERSAL))?.to_string(),
+                penalty_scale: args.float("penalty-scale", 1.0)?,
+                merit_scale: args.float("merit-scale", 1.0)?,
             };
             let samples = model.generate(&opts)?;
             emit(Json::obj([
@@ -467,6 +473,29 @@ fn run() -> Result<(), String> {
                 ("units", Json::str(model.units())),
                 ("stats", stats(&model)),
             ]));
+        }
+        "serve" => {
+            // the HTTP API and, when it is there, the prebuilt frontend beside it
+            let model = open(false)?;
+            let host = args.str("host", "127.0.0.1");
+            let port = args.usize("port", 8000)? as u16;
+            let frontend = args.str("frontend-dir", "frontend/dist");
+            let mut service = Service::new(model, model_path.clone(), seed, workers);
+            service.upload_dir = args.get("upload-dir").map(str::to_string);
+            service.checkpoint_dir = args.get("checkpoint-dir").map(str::to_string);
+            let frontend = if std::path::Path::new(&frontend).is_dir() {
+                Some(frontend)
+            } else {
+                None
+            };
+            eprintln!(
+                "radixnet: serving the API on http://{host}:{port} ({})",
+                match &frontend {
+                    Some(dir) => format!("frontend from {dir}"),
+                    None => "no frontend directory: the API alone".to_string(),
+                }
+            );
+            radixnet::service::build(std::sync::Arc::new(service), frontend).serve(&host, port)?;
         }
         "info" => {
             let model = open(true)?;

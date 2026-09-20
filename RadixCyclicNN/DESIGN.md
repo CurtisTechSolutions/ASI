@@ -3277,11 +3277,23 @@ model answers the two searches differently somewhere, so neither can pass by the
 ## 33. The Rust port (`rust/`) and the cross-language benchmark (`bench/`)
 
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
-graph and its structural operations, the dual frequency weight function, the judged path contexts, both traversals,
-training, prediction, generation, scoring, reward / punish / 2NRL and **the `radixnet-count` model file**.  Its
-binaries are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths,
-nodes, info) and `radixnet-bench`.  Not ported, and undone rather than deliberate: the HTTP server, the negative
-network and every teaching loop.
+graph and its structural operations, the dual frequency weight function, the judged path contexts, **all three
+traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished one in `src/search.rs`), training,
+prediction, generation, scoring, reward / punish / 2NRL, both alphabets (§34) and **the model file**.  Its binaries
+are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes,
+words, info, serve) and `radixnet-bench`.
+
+**The server is here too** (`src/http.rs`, `src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
+line, the headers, `Content-Length`, the static files of `frontend/dist` with the SPA fallback, and a thread per
+connection - under the same 30-route JSON contract §12 defines and the Python and Go servers answer, down to
+`engine` naming which one is replying.  `frontend/dist` runs against `radixnet serve` unmodified; the tabs a Rust
+server cannot fill hide themselves on `engine == "rust"`, and what it will not serve says so with a 400 rather than
+a half answer (`/api/model/select` for a kind this binary was not started with, `/api/words` on a character model).
+
+Not ported, and **undone** rather than deliberate: the negative network, the tutors and the other teaching loops,
+the agent and its tools, images and speech, and MCP.  One gap is **deliberate**: the LLM clients (Ollama, ChatGPT)
+need HTTPS, and a crate with no dependencies cannot speak it.  Porting them means giving up D-072's rule, which is
+a decision to take rather than a thing to quietly do.
 
 **The file is the contract** (`src/file.rs`, `src/json.rs`, `src/gzip.rs`, `src/clock.rs`).  Three things had to be
 written out rather than translated, for the same reason the Go port had to write out BLAKE2b: JSON rendered as
@@ -3306,6 +3318,12 @@ What the port has to get right, beyond the algorithm:
 * **The one `unsafe`** is `parallel::Disjoint`, a raw view of a slice shared by the weight and cost recomputes, which
   fan out over nodes and write per-edge values.  Every edge belongs to exactly one node (an invariant
   `check_invariants` proves), so no two threads write one index; the contract is written out where it is defined.
+* **The traversal is a name, not a type.**  `PredictOptions.traversal` is a `String` resolved by
+  `penalty::resolve_traversal`, exactly as Python's `parse_traversal` resolves it, so the CLI flag, the API field
+  and the library argument all take the same three words and the same aliases.  `penalty::traversal_costs` hands
+  back a cost function for `punishment` and `None` for the other two - `reward` because the graph's own costs are
+  the reward traversal, `least-punished` because it is a *ranking* over those costs and never a second pricing of
+  them (§32).  The two are never composed in any of the three implementations.
 
 **`bench/`** is the comparison.  `make_corpus.py` writes `corpus.txt` and `corpus.prefixes.txt` once - neither
 language can reproduce the other's RNG, so neither generates the corpus - and `compare.py` builds both, runs six
