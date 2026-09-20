@@ -64,7 +64,9 @@ def costs_of(fn, node):
 
 class TestNames(unittest.TestCase):
     def test_the_two_traversals(self):
-        self.assertEqual(TRAVERSALS, ("reward", "punishment"))
+        # the third name is the count model's *ranking* traversal (SPEC-LeastPunished.md):
+        # it is listed here so one flag offers all three, and has no cost function of its own
+        self.assertEqual(TRAVERSALS, ("reward", "punishment", "least-punished"))
         self.assertEqual(DEFAULT_TRAVERSAL, "reward")
 
     def test_resolve_normalises_and_rejects(self):

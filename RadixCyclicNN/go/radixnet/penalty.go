@@ -38,16 +38,22 @@ import (
 // punishment, so its currency is net blame against the cleared text that ran
 // through the same edge.  This mirrors radixnet/penalty.py exactly.
 
-// The two traversals a search can run.
+// The traversals a search can run.  The first two are cost functions and live
+// here; the third is a different kind of thing - a ranking, which orders a walk
+// by the punishment on its worst step before its cost, and which only the count
+// model can run because only it keeps the judged paths that ranking reads
+// (search.go, ../../SPEC-LeastPunished.md).  It is named here so one flag
+// offers all three; the cost functions below simply do not apply to it.
 const (
-	TraversalReward     = "reward"
-	TraversalPunishment = "punishment"
+	TraversalReward        = "reward"
+	TraversalPunishment    = "punishment"
+	TraversalLeastPunished = "least-punished"
 	// DefaultTraversal is what every search runs unless told otherwise.
 	DefaultTraversal = TraversalReward
 )
 
 // Traversals lists the traversal names, in the order the CLI and the API offer them.
-var Traversals = []string{TraversalReward, TraversalPunishment}
+var Traversals = []string{TraversalReward, TraversalPunishment, TraversalLeastPunished}
 
 // ResolveTraversal normalises a traversal name ("" = the default) and rejects anything else.
 func ResolveTraversal(name string) (string, error) {
@@ -60,7 +66,7 @@ func ResolveTraversal(name string) (string, error) {
 			return got, nil
 		}
 	}
-	return "", fmt.Errorf("unknown traversal %q; expected 'reward' or 'punishment'", name)
+	return "", fmt.Errorf("unknown traversal %q; expected 'reward', 'punishment' or 'least-punished'", name)
 }
 
 // CostFn is what a search reads the graph through: (parent, prev) -> the
@@ -187,7 +193,9 @@ func softmaxCosts(evidence []EdgeEvidence, score func(EdgeEvidence) float64) []C
 	lse := m + math.Log(fsum(terms))
 	out := make([]ChildCost, len(evidence))
 	for i, ev := range evidence {
-		out[i] = ChildCost{ev.Child, ev.Edge, lse - scores[i]}
+		// Punish stays zero here: it is the least-punished traversal's currency
+		// (search.go), and this traversal has priced the blame into Cost instead
+		out[i] = ChildCost{Child: ev.Child, Edge: ev.Edge, Cost: lse - scores[i]}
 	}
 	return out
 }
@@ -204,7 +212,7 @@ func (pc *PenaltyCosts) Costs(p, prev int) []ChildCost {
 	out := make([]ChildCost, len(adj.order))
 	for i, c := range adj.order {
 		e := adj.edges[i]
-		out[i] = ChildCost{c, e, pc.edgeCost[e]}
+		out[i] = ChildCost{Child: c, Edge: e, Cost: pc.edgeCost[e]}
 	}
 	return out
 }
@@ -217,7 +225,8 @@ func (g *Graph) TraversalCosts(traversal string, penaltyScale, meritScale float6
 	if err != nil {
 		return nil, err
 	}
-	if name == TraversalReward {
+	if name == TraversalReward || name == TraversalLeastPunished {
+		// the least-punished traversal reads the blame itself, not through a cost function
 		return nil, nil
 	}
 	pc, err := g.PenaltyCosts(penaltyScale, meritScale)

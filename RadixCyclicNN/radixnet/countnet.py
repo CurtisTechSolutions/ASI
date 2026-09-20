@@ -370,7 +370,7 @@ class CountRewardGraph(RadixCyclicGraph):
             reward = float(self.edge_reward[e])
             rows.append({
                 "node": n,
-                "label": self.labels[n] if 0 <= n < len(self.labels) else "",
+                "label": self.text_of(self.labels[n]) if 0 <= n < len(self.labels) else "",
                 "edge": e,
                 "seen": self.edge_count[e],
                 "seen_resets": self.edge_count_resets.get(e, 0),
@@ -409,7 +409,7 @@ class CountRewardGraph(RadixCyclicGraph):
         rows_out = self._side_rows(list(self.children[node].items()))
         return {
             "node": node,
-            "label": self.labels[node],
+            "label": self.text_of(self.labels[node]),
             "visits": self.count[node],
             "visit_resets": self.count_resets.get(node, 0),
             "from": rows_in,
@@ -428,6 +428,51 @@ class CountRewardGraph(RadixCyclicGraph):
         if limit > 0:
             order = order[:limit]
         return [self.node_ratios(i) for i in order]
+
+    def edge_punishment(self, e: int) -> float:
+        """The penalty side of an edge's reward, on the scale the reward function uses.
+
+        Deliberately one-sided: a rewarded edge is not *less* punished than an
+        edge nothing was ever said about - it is exactly as unpunished, which is
+        what lets the least-punished traversal rank walks by what went wrong on
+        them instead of by what went well.
+        """
+        if not (0 <= e < len(self.edge_reward)):
+            return 0.0
+        reward = self.edge_reward[e]
+        return self.reward_scale * -reward if reward < 0 else 0.0
+
+    def path_incorrect(self, prev: int, edge: int) -> int:
+        """How often a walk that came from ``prev`` was judged wrong here: the one
+        number the least-punished traversal steers by, counted against nothing."""
+        row = self.paths.get((prev, edge))
+        return row[2] if row else 0
+
+    def step_punishment(self, prev: int | None, e: int) -> float:
+        """The edge's own penalty plus ``path_scale * log(1 + incorrect)`` for the
+        walks that came from ``prev`` and were judged wrong here.
+
+        The second term counts the failures alone - not the failures against the
+        successes, the way the cost function's path term weighs them.  That is
+        the point: a step that was wrong here once is a step that was wrong here,
+        and no amount of being right afterwards makes it a step nothing is held
+        against.  Blame cannot be bought off, which is what the traversal is for.
+        """
+        punish = self.edge_punishment(e)
+        if prev is not None and self.path_scale and self.paths:
+            punish += self.path_scale * math.log1p(self.path_incorrect(prev, e))
+        return punish
+
+    def child_steps(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """:meth:`child_costs` with each step's punishment beside its cost."""
+        costs = self.child_costs(p, prev)
+        if prev is None or not self.paths:  # nothing judged: only the edges' own penalties
+            return [(c, e, cost, self.edge_punishment(e)) for c, e, cost in costs]
+        scale = self.path_scale
+        return [
+            (c, e, cost, self.edge_punishment(e) + scale * math.log1p(self.path_incorrect(prev, e)))
+            for c, e, cost in costs
+        ]
 
     def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
         """``[(child, edge, -log prob)]`` of ``p``'s out-edges, as seen by a walk that arrived from ``prev``.
@@ -816,6 +861,9 @@ class CountRewardNet(GraphModel):
 
     kind = "count"
     format = COUNT_MODEL_FORMAT
+    graph_class = CountRewardGraph
+    """The graph this kind builds and loads; a kind over another alphabet names its own."""
+
     label = "Count / reward"
     description = (
         "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, "
@@ -835,7 +883,7 @@ class CountRewardNet(GraphModel):
         encoding: Encoding | None = None,
     ) -> None:
         self.seed = int(seed)
-        self.graph = CountRewardGraph(
+        self.graph = self.graph_class(
             seed=self.seed, count_scale=count_scale, reward_scale=reward_scale, global_scale=global_scale,
             window_scale=window_scale, window=window, encoding=encoding,
         )
@@ -889,7 +937,7 @@ class CountRewardNet(GraphModel):
         grams = [self.encoder.encode(t) for t in texts]
         if count:
             meta_add(meta, "trained_texts", len(texts))
-            meta_add(meta, "trained_chars", sum(len(t) for t in texts))
+            meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         # build the structure first (no counting) and compress it, so every pass - the first included - walks
         # the same transitions: steps inside a compressed node are deterministic and never counted
         self._observe_grams(grams, False)
@@ -1218,7 +1266,7 @@ class CountRewardNet(GraphModel):
             transitions = graph.observe_sequence(right_grams, count)
             if count:
                 self.meta["trained_texts"] += 1
-                self.meta["trained_chars"] += len(right)
+                self.meta["trained_chars"] += self.encoding.length(right)
                 graph.record_path(transitions, None, create=False)  # the correction's own traffic
             if right_spans:
                 taught_steps = self._steps_over(right_grams, len(right), right_spans)
@@ -1281,11 +1329,17 @@ class CountRewardNet(GraphModel):
         :class:`~radixnet.search.PathResult`) and carries ``top`` / ``bottom``.
         ``"sample"`` draws one stochastic walk (``top = [it]``).  ``length``,
         ``to_end``, ``max_length``, ``step_penalty`` and ``traversal`` mean
-        what they mean for :meth:`RadixNet.predict` - and this is the model the
-        punishment traversal was written for, because it is the one that keeps
-        a reward per edge: with ``traversal="punishment"`` the rewards leave
-        the score altogether and ``top`` becomes the ``k`` *least punished*
-        continuations (:mod:`radixnet.penalty`).
+        what they mean for :meth:`RadixNet.predict` - and this is the model both
+        punishment traversals were written for, because it is the one that keeps
+        a reward per edge and a record of what each path did.  With
+        ``traversal="punishment"`` the rewards leave the score altogether and
+        ``top`` becomes the ``k`` *least punished* continuations
+        (:mod:`radixnet.penalty`); with ``traversal="least-punished"`` the score
+        is untouched and the **ranking** changes instead - a walk goes by the
+        blame on its worst step before its cost, and a node offers only the
+        children it has the least against, so blame cannot be bought off with
+        rewards elsewhere.  On a model nothing was ever punished on, both are
+        the ordinary search, to the bit (``../SPEC-LeastPunished.md``).
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
@@ -1313,6 +1367,7 @@ class CountRewardNet(GraphModel):
             "grams": g.num_trigrams(),
             "encoding": str(self.encoding),
             "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
@@ -1346,7 +1401,7 @@ class CountRewardNet(GraphModel):
 
     def to_dict(self) -> dict:
         return {
-            "format": COUNT_MODEL_FORMAT,
+            "format": self.format,
             "version": MODEL_FORMAT_VERSION,
             "saved_at": _utc_now(),
             "kind": self.kind,
@@ -1357,12 +1412,12 @@ class CountRewardNet(GraphModel):
 
     @classmethod
     def from_dict(cls, d: dict, backend: str = "auto", device: str | None = None) -> "CountRewardNet":
-        if not isinstance(d, dict) or d.get("format") != COUNT_MODEL_FORMAT:
-            raise ValueError(f"not a {COUNT_MODEL_FORMAT} model document")
+        if not isinstance(d, dict) or d.get("format") != cls.format:
+            raise ValueError(f"not a {cls.format} model document")
         version = int(d.get("version", 1))
         if version > MODEL_FORMAT_VERSION:
-            raise ValueError(f"unsupported {COUNT_MODEL_FORMAT} model version {version}")
-        graph = CountRewardGraph.from_dict(d["graph"])
+            raise ValueError(f"unsupported {cls.format} model version {version}")
+        graph = cls.graph_class.from_dict(d["graph"])
         model = cls(seed=graph.seed, backend=backend, device=device)
         model._adopt(graph)
         model.history = [dict(r) for r in d.get("history", [])]

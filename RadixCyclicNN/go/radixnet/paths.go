@@ -197,6 +197,16 @@ func (g *Graph) PathTerm(prev, edge int) float64 {
 	return math.Log((float64(row.Correct) + Smoothing) / (float64(row.Incorrect) + Smoothing))
 }
 
+// PathIncorrect is how often a walk that came from prev was judged wrong here:
+// the one number the least-punished traversal steers by (search.go), counted
+// against nothing.
+func (g *Graph) PathIncorrect(prev, edge int) int64 {
+	if row, ok := g.paths[PathKey{prev, edge}]; ok {
+		return row.Incorrect
+	}
+	return 0
+}
+
 // PathStatsOf describes one context, or nil when it has never been walked.
 func (g *Graph) PathStatsOf(prev, edge int) *PathStats {
 	row, ok := g.paths[PathKey{prev, edge}]

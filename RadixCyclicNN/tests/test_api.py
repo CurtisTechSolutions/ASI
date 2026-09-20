@@ -683,7 +683,7 @@ class TestEndpoints(unittest.TestCase):
     def test_score(self):
         status, good, _ = self.client.post("/api/score", {"text": CORPUS[0]})
         self.assertEqual(status, 200)
-        self.assertEqual(set(good), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions"})
+        self.assertEqual(set(good), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions", "units"})
         self.assertEqual(good["chars"], len(CORPUS[0]))
         self.assertEqual(good["unknown_transitions"], 0)
         status, bad, _ = self.client.post("/api/score", {"text": "zqxj vwk plmn qzx"})

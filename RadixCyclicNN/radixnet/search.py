@@ -53,10 +53,13 @@ class PathResult:
     expanded: int = 0
     reached_end: bool = False
     full_text: str = ""
+    #: the walk's worst step under the least-punished traversal (0 everywhere
+    #: nothing was ever punished)
+    punish: float = 0.0
 
     def to_dict(self) -> dict:
         """JSON-serialisable representation."""
-        return {
+        d = {
             "text": self.text,
             "labels": list(self.labels),
             "node_ids": list(self.node_ids),
@@ -66,9 +69,49 @@ class PathResult:
             "reached_end": self.reached_end,
             "full_text": self.full_text,
         }
+        if self.punish:
+            d["punish"] = self.punish
+        return d
 
 
-def onward(costs: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
+#: The three traversals a search can run.  Two of them are *cost functions* -
+#: ``reward`` (what the model believes) and ``punishment`` (the same search over
+#: the evidence with the rewards taken out, :mod:`radixnet.penalty`) - and the
+#: third is a different *ranking*: ``least-punished`` orders a walk by the blame
+#: on its worst step before its cost (``../SPEC-LeastPunished.md``).
+REWARD = "reward"
+#: The punishment traversal of :mod:`radixnet.penalty`: the blame is priced
+#: into the cost itself, so a *search* ranks a walk here exactly as it ranks a
+#: rewarded one - what changed is what a step costs, not how walks are ordered.
+PUNISHMENT = "punishment"
+LEAST_PUNISHED = "least-punished"
+
+#: How close two punishments have to be to count as equal: the same penalty
+#: applied in a different order can land a bit or two apart, and a walk is not
+#: "more punished" for that.
+PUNISH_TOLERANCE = 1e-12
+
+_TRAVERSALS = {
+    "": REWARD, "reward": REWARD, "rewards": REWARD, "cost": REWARD,
+    # "punishment" is the other traversal's name and never an alias of this one: the two
+    # price a step in different currencies (``../SPEC-LeastPunished.md`` §1)
+    "punishment": PUNISHMENT, "penalty": PUNISHMENT,
+    "least-punished": LEAST_PUNISHED, "least_punished": LEAST_PUNISHED, "leastpunished": LEAST_PUNISHED,
+    "blame": LEAST_PUNISHED,
+}
+
+
+def parse_traversal(name: str | None) -> str:
+    """Reads a traversal name: ``""`` / ``"reward"`` for the search by cost,
+    ``"punishment"`` for the same search over the punished evidence, and
+    ``"least-punished"`` for the one that ranks a walk by the blame on it."""
+    key = (name or "").strip().lower()
+    if key not in _TRAVERSALS:
+        raise ValueError(f"unknown traversal {name!r}; expected 'reward' or 'least-punished'")
+    return _TRAVERSALS[key]
+
+
+def onward(costs: list[tuple]) -> list[tuple]:
     """The children a walk may actually take, given what the model has learned about going round.
 
     ``BACK`` is not a continuation - it emits nothing and no text passes through it - so it never appears in a
@@ -79,8 +122,34 @@ def onward(costs: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
     onward = [item for item in costs if item[0] != BACK]
     if len(onward) == len(costs):
         return costs
-    back = min(cost for c, _e, cost in costs if c == BACK)
-    return [] if all(cost >= back for _c, _e, cost in onward) else onward
+    back = min(item[2] for item in costs if item[0] == BACK)
+    return [] if all(item[2] >= back for item in onward) else onward
+
+
+def least_punished(steps: list[tuple]) -> list[tuple]:
+    """The children the model has the least against - the whole of the traversal, in one function.
+
+    ``steps`` are :meth:`RadixCyclicGraph.child_steps` tuples, whose fourth
+    element is the step's punishment.  Where nothing at this node was ever
+    punished (every step of an untutored graph) they all tie at zero and the
+    list comes back untouched; where something *was* punished, the steps that
+    carry more blame than the cleanest one here are not options any more,
+    however well rewarded they are.
+    """
+    if len(steps) < 2:
+        return steps
+    first = steps[0][3]
+    low = first
+    same = True
+    for item in steps[1:]:
+        if item[3] != first:
+            same = False
+        if item[3] < low:
+            low = item[3]
+    if same:
+        return steps
+    keep = low + PUNISH_TOLERANCE
+    return [item for item in steps if item[3] <= keep]
 
 
 def _start_emission(graph: RadixCyclicGraph, start_node: int, start_offset: int) -> int:
@@ -233,6 +302,7 @@ def sample_walk(
     stop_at_end: bool = True,
     include_context: bool | None = None,
     costs: CostFn | None = None,
+    traversal: str = REWARD,
 ) -> PathResult:
     """Stochastic walk sampling each child from ``softmax(scores / temperature)``.
 
@@ -245,13 +315,22 @@ def sample_walk(
     :func:`dijkstra_predict`.  ``costs`` replaces the graph's own cost
     function, which is how this walk samples what the network was *not*
     punished for (:mod:`radixnet.penalty`).
+
+    Under ``traversal="least-punished"`` only the least punished children are on
+    offer at every node and the sampling then runs exactly as before: punishment
+    decides *what* may be walked, the cost decides which of those it is.  The
+    two are different currencies and not composed: the least-punished traversal
+    reads the blame itself, so a ``costs`` handed in with it is ignored
+    (``../SPEC-LeastPunished.md`` §1, :mod:`radixnet.penalty`).
     """
+    traversal = parse_traversal(traversal)
     if temperature < 0:
         raise ValueError("temperature must be >= 0")
     if rng is None:
         rng = graph.rng
     labels = graph.labels
-    child_costs = graph.child_costs if costs is None else costs
+    blamed = traversal == LEAST_PUNISHED
+    child_costs = graph.child_steps if blamed else (graph.child_costs if costs is None else costs)
     overlap = graph.encoding.overlap
     exp = math.exp
     node = start_node
@@ -264,6 +343,8 @@ def sample_walk(
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
         options = onward(child_costs(node, came_from))  # a node the model expects to go round offers nothing
+        if blamed:
+            options = least_punished(options)
         if not options:
             break
         if temperature == 0 or len(options) == 1:
@@ -280,7 +361,7 @@ def sample_walk(
                 if r < acc:
                     pick = item
                     break
-        c, _e, cst = pick
+        c, _e, cst = pick[0], pick[1], pick[2]
         step_costs.append(cst)
         node_ids.append(c)
         if c != END:

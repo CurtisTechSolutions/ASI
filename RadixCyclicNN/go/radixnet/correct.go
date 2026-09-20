@@ -59,6 +59,14 @@ type Correction struct {
 // An edge both sentences walk over a changed span - the network wrote the
 // right characters by another route - is rewarded, never penalised.
 func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, error) {
+	// the encoding aligns the two: character by character by default, word by
+	// word under a word encoding (Encoding.Edits), so there is nothing to
+	// translate on either side of it
+	return m.correct(wrong, right, o)
+}
+
+// correct is Correct over the graph's own symbols, whatever they stand for.
+func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, error) {
 	if o.Strength <= 0 {
 		o.Strength = 1
 	}

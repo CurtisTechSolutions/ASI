@@ -117,7 +117,7 @@ class TestConstruction(unittest.TestCase):
             set(stats),
             {
                 "kind", "nodes", "edges", "trigrams", "grams", "compression_ratio", "inverted", "backend", "device",
-                "encoding", "unit", "ngram", "stride",
+                "encoding", "unit", "units", "ngram", "stride",
                 "epochs_total", "epochs_total_resets", "trained_chars", "trained_chars_resets",
                 "trained_texts", "trained_texts_resets", "twonrl_runs", "twonrl_runs_resets",
                 "history_len", "last_loss",
@@ -521,7 +521,7 @@ class TestScore(unittest.TestCase):
         model = corpus_model()
         good = model.score(CORPUS[0])
         bad = model.score(GARBAGE[0])
-        self.assertEqual(set(good), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions"})
+        self.assertEqual(set(good), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions", "units"})
         self.assertGreater(good["log_prob"], bad["log_prob"])
         self.assertGreater(good["per_char"], bad["per_char"])
         self.assertEqual(good["unknown_transitions"], 0)
@@ -546,7 +546,8 @@ class TestScore(unittest.TestCase):
         s = model.score("ello world")  # entering the node in the middle
         self.assertEqual(s["unknown_transitions"], 1)
         s = model.score("hi")
-        self.assertEqual(s, {"log_prob": 0.0, "per_char": 0.0, "chars": 2, "transitions": 0, "unknown_transitions": 0})
+        self.assertEqual(s, {"log_prob": 0.0, "per_char": 0.0, "chars": 2, "transitions": 0,
+                             "unknown_transitions": 0, "units": "chars"})
         s = model.score("hello zorld")
         self.assertEqual(s["unknown_transitions"], 4)  # "o z", " zo", "zor", then re-entry into "orl"
         with self.assertRaises(TypeError):

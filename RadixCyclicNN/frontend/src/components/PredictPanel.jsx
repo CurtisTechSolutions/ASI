@@ -2,7 +2,18 @@ import { Fragment, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, showWhitespace, yesNo } from "../util.js";
+import {
+  asArray,
+  countingKind,
+  fmtInt,
+  fmtNum,
+  jobIsRunning,
+  parseInteger,
+  parseNumber,
+  showWhitespace,
+  unitName,
+  yesNo,
+} from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -180,7 +191,7 @@ export default function PredictPanel({ status }) {
         <div className="row">
           <NumberField
             label="Length"
-            hint="at least this many chars; the path runs to its natural end, no cap"
+            hint={`at least this many ${unitName(status)}; the path runs to its natural end, no cap`}
             value={length}
             onChange={setLength}
             min={0}

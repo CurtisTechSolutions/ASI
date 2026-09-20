@@ -34,7 +34,7 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
-from .encoding import WINDOW, Encoding, parse_encoding
+from .encoding import WINDOW, WORDS, Encoding, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .recall import DEFAULT_LEAD
@@ -52,7 +52,7 @@ DEFAULT_FRONTEND_DIR = os.path.join("frontend", "dist")
 BACKENDS = ("auto", "python", "torch")
 MODES = ("dijkstra", "sample")
 PREDICT_MODES = ("dijkstra", "kbest", "beam", "sample")
-KINDS = ("radix", "count", "negative", "resonant")
+KINDS = ("radix", "count", "word", "negative", "resonant")
 DEFAULT_COUNT_MODEL = "model.count.json"
 DEFAULT_NEGATIVE_MODEL = "model.negative.json"
 DEFAULT_RESONANT_MODEL = "model.resonant.json"
@@ -586,6 +586,11 @@ def kind_label(model: GraphModel) -> str:
     return f"{model.kind} ({type(model).label})"
 
 
+def units_of(model: GraphModel) -> str:
+    """What the model counts in: ``"chars"``, or ``"words"`` under a word encoding."""
+    return model.encoding.units_name
+
+
 def effective_kind(args: argparse.Namespace) -> str:
     return getattr(args, "kind", None) or "radix"
 
@@ -865,6 +870,9 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         "mode": mode,
         "traversal": args.traversal,
     }
+    if args.traversal != "reward":
+        doc["traversal"] = args.traversal
+        doc["punish"] = result.punish
     if isinstance(result, Prediction):
         for title, paths in (("top", result.top), ("bottom", result.bottom)):
             console.say()
@@ -1004,7 +1012,8 @@ def cmd_score(args: argparse.Namespace, console: Console) -> dict:
         [r["log_prob"], r["per_char"], r["chars"], r["transitions"], r["unknown_transitions"], quote(clip(r["text"], 60))]
         for r in results
     ]
-    console.table(("log_prob", "per_char", "chars", "transitions", "unknown", "text"), rows)
+    unit = units_of(model)  # a word model counts in words, and a per-word number read as per-char is read wrong
+    console.table(("log_prob", f"per_{unit[:-1]}", unit, "transitions", "unknown", "text"), rows)
     if len(results) > 1:
         console.say()
         console.say(f"{len(results)} texts: mean log_prob {fmt(mean_log_prob)}, mean per_char {fmt(mean_per_char)}")
@@ -1649,7 +1658,7 @@ def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
     console.table(
         ["after", "step", "correct", "incorrect", "seen", "correct %", "seen %", "term"],
         [[
-            quote(graph.labels[row["prev"]]) if row["prev"] < len(graph.labels) else row["prev"],
+            quote(graph.text_of(graph.labels[row["prev"]])) if row["prev"] < len(graph.labels) else row["prev"],
             _step_label(graph, row["edge"]),
             row["correct"], row["incorrect"], row["seen"],
             "-" if row["correct_ratio"] is None else f"{row['correct_ratio'] * 100:.0f}%",
@@ -1661,14 +1670,18 @@ def cmd_paths(args: argparse.Namespace, console: Console) -> dict:
 
 
 def _resolve_node(graph, text: str) -> int:
-    """A node id from a label the user typed: the whole label first, then the trigram it holds."""
-    wanted = str(text)
+    """A node id from a label the user typed: the whole label first, then the trigram it holds.
+
+    A word graph is addressed in words (``"the cat sat"``), which are its
+    symbols once ``symbols_of`` has mapped them.
+    """
+    wanted = graph.symbols_of(str(text))
     for node, label in enumerate(graph.labels):
         if label == wanted and graph.alive[node]:
             return node
     found = graph.lookup(wanted) if len(wanted) == WINDOW else None
     if found is None:
-        raise CliError(f"no node labelled {wanted!r}: give a node label, or one of its trigrams")
+        raise CliError(f"no node labelled {text!r}: give a node label, or one of its trigrams")
     return found[0]
 
 
@@ -1716,6 +1729,39 @@ def cmd_nodes(args: argparse.Namespace, console: Console) -> dict:
     return {"nodes": rows, "stats": model.stats()}
 
 
+def cmd_words(args: argparse.Namespace, console: Console) -> dict:
+    """A word encoding's alphabet: the words the graph has read and how many grams hold each."""
+    model, origin = open_model(args, console, required=True)
+    encoding = model.encoding
+    if encoding.unit != WORDS:
+        raise CliError(
+            f"{args.model} counts in {encoding.units_name}, so it has no words to list; a word alphabet needs a "
+            f"word encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
+        )
+    rows = word_rows(encoding, model.graph.trigram_index)
+    vocabulary = len(rows)
+    if args.limit > 0:
+        rows = rows[:args.limit]
+    console.pairs([
+        ("model", origin.describe()),
+        ("encoding", encoding.describe()),
+        ("vocabulary", f"{vocabulary} word(s), {len(rows)} shown"),
+        ("read", f"{counter_text(model.stats(), 'trained_chars')} words over "
+                 f"{counter_text(model.stats(), 'trained_texts')} texts"),
+    ])
+    console.say()
+    result = {"words": rows, "vocabulary": vocabulary, "units": encoding.units_name,
+              "encoding": str(encoding), "stats": model.stats()}
+    if not rows:
+        console.say("nothing has been read yet: train the model on a corpus first")
+        return result
+    console.table(
+        ("word", "id", f"{encoding.n}-word grams"),
+        [[quote(row["word"]), row["id"], row["grams"]] for row in rows],
+    )
+    return result
+
+
 def _step_label(graph, edge: int) -> str:
     """``parent -> child`` as the two labels, for a path row."""
     parent = graph.edge_parent[edge] if edge < len(graph.edge_parent) else -1
@@ -1723,7 +1769,7 @@ def _step_label(graph, edge: int) -> str:
         return f"edge {edge}"
     for child, e in graph.children[parent].items():
         if e == edge:
-            return f"{graph.labels[parent]} -> {graph.labels[child]}"
+            return f"{graph.text_of(graph.labels[parent])} -> {graph.text_of(graph.labels[child])}"
     return f"edge {edge}"
 
 
@@ -1830,7 +1876,9 @@ def add_traversal_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--traversal", choices=TRAVERSALS, default=DEFAULT_TRAVERSAL,
                         help="what the search follows: reward = the model's own distribution, rewards included; "
                              "punishment = the rewards leave the score and the punishments price every step, so "
-                             "the cheapest path is the least punished one")
+                             "the cheapest path is the least punished one; least-punished (count model) = a walk is "
+                             "ranked by the blame on its WORST step, cost only to break ties, so blame cannot be "
+                             "bought off with rewards elsewhere")
     parser.add_argument("--penalty-scale", type=nonneg_float, default=1.0, metavar="X",
                         help="punishment: how heavily a punishment counts (default 1)")
     parser.add_argument("--merit-scale", type=nonneg_float, default=1.0, metavar="X",
@@ -2452,7 +2500,8 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
         ("compression ratio", stats["compression_ratio"]),
         ("inverted", stats["inverted"]),
         ("epochs total", counter_text(stats, "epochs_total")),
-        ("trained", f"{counter_text(stats, 'trained_texts')} texts, {counter_text(stats, 'trained_chars')} chars"),
+        ("trained", f"{counter_text(stats, 'trained_texts')} texts, {counter_text(stats, 'trained_chars')} "
+                    f"{units_of(model)}"),
         ("2NRL runs", counter_text(stats, "twonrl_runs")),
         ("last loss", stats["last_loss"]),
         *([("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
@@ -3447,7 +3496,9 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
     group.add_argument("--kind", choices=KINDS, default=default(None),
                        help="algorithm of a NEW model: radix = the sine-activation network (default), count = the count / "
                             "reward model (edge weight = the edge's share of its node's traversals plus rewards, "
-                            "top-K / bottom-K prediction), negative = the negative network (failures only, blamed "
+                            "top-K / bottom-K prediction), word = the same model over an alphabet whose symbols are "
+                            "words (a whitespace split for an encoder; lengths, counts and scores are per word), "
+                            "negative = the negative network (failures only, blamed "
                             "with the tutor's reasons), resonant = the phase model (edges learn the phase at which "
                             "they fire; a phase-locked cycle goes to the metacognitive layer); a loaded file's own "
                             "kind always wins.  The default --model follows the kind "
@@ -4117,6 +4168,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=nonneg_int, default=10, help="nodes to show, most visited first (0 = all)")
     p.add_argument("--node", metavar="LABEL", help="only this node (a node label, or a trigram it holds)")
     p.set_defaults(handler=cmd_nodes)
+
+    # words ----------------------------------------------------------------
+    p = command(
+        "words", "a word encoding's alphabet",
+        "Under a word encoding (--encoding word:2:1, word:3:1, ...) a gram is n words rather than n characters,\n"
+        "and this is the alphabet the graph has read: every word, in the order it was first read, with how many\n"
+        "grams hold it - what the graph actually knows about it, and the one count compression cannot change.\n"
+        "There is no vocabulary to freeze, prune or learn: a gram is text, so the alphabet is whatever the grams\n"
+        "are made of, and it grows as training reads new words.",
+    )
+    p.add_argument("--limit", type=nonneg_int, default=20, help="words to show, most read first (0 = all)")
+    p.set_defaults(handler=cmd_words)
 
     # correct --------------------------------------------------------------
     p = command(

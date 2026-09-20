@@ -1,0 +1,23 @@
+{
+  "bytes": 6622,
+  "metrics": {
+    "compression_ratio": 3.514705882352941,
+    "edges": 131,
+    "epoch": 10,
+    "loss": 1.8965364012155304,
+    "merges": 0,
+    "nodes": 71,
+    "perplexity": 6.662777243876525,
+    "reward": 0.0,
+    "seconds": 0.013898810000227968,
+    "skipped_short": 0,
+    "transitions": 132,
+    "traversed": true,
+    "trigrams": 239
+  },
+  "name": "ckpt-epoch-000010.json.gz",
+  "path": "/home/user/ASI/RadixCyclicNN/checkpoints/ckpt-epoch-000010.json.gz",
+  "saved_at": "2026-09-20T04:19:16.722988+00:00",
+  "step": 10,
+  "tag": "epoch"
+}

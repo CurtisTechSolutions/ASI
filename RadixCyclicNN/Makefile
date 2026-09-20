@@ -92,7 +92,8 @@ export EPOCHS LR BATCH RADIXNET_PORT RADIXNET_BACKEND RADIXNET_CORPUS WITH_TORCH
 DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
-.PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative train resume predict generate score 2nrl invert compress \
+.PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
+        rust-build rust-test rust-parity bench-compare train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
@@ -141,6 +142,93 @@ MODEL_COUNT ?= model.count.json
 go-serve: go-build ## Serve the frontend from the Go count / reward model on http://HOST:PORT (uploads / checkpoints as for `serve`)
 	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
 
+go-mcp: go-build ## The Go MCP server on stdin / stdout: the tools and the network, for any MCP client
+	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) mcp --upload-dir $(UPLOAD_DIR)
+
+##@ Rust port and the cross-language benchmark
+CARGO ?= cargo
+LIMIT         ?= 10
+TRAVERSAL     ?= reward
+MERIT_SCALE   ?= 1
+PENALTY_SCALE ?= 1
+BENCH_CHARS ?= 2000000
+BENCH_PREDICTIONS ?= 3000
+BENCH_EPOCHS ?= 3
+BENCH_REPEAT ?= 3
+PUNISH_EVERY ?= 7
+
+RUST        ?= rust/target/release/radixnet
+MODEL_RUST  ?= $(MODEL_COUNT)
+RUST_GLOBAL := --model $(MODEL_RUST) --seed $(SEED)
+RUST_ENC    ?= char:3:1
+
+rust-build: ## Build the Rust port's CLI and benchmark into rust/target/release (needs Rust 1.82+)
+	cd rust && $(CARGO) build --release
+
+rust-test: ## Run the Rust tests, clippy and the formatter check
+	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+
+rust-parity: ## Cross-language parity of the Rust port against the Python model
+	$(PY) -m unittest tests.test_rust_parity -v
+
+rust-train: rust-build ## Train the Rust model on DATA (RUST_ENC=char:3:1|word:3:1|..., MODEL_RUST is its file)
+	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) train --data $(DATA) --epochs $(EPOCHS)
+
+rust-predict: rust-build ## Continue PREFIX: the K likeliest and K least likely (TRAVERSAL picks what it follows)
+	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) predict --prefix "$(PREFIX)" --length $(LENGTH) --k $(COUNT) \
+	    --traversal $(TRAVERSAL) --merit-scale $(MERIT_SCALE) --penalty-scale $(PENALTY_SCALE)
+
+rust-generate: rust-build ## Generate COUNT whole texts of at most MAX_LENGTH symbols each
+	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam \
+	    --traversal $(TRAVERSAL)
+
+rust-score: rust-build ## Log-probability of TEXT under the Rust model
+	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) score --text "$(TEXT)"
+
+rust-feedback: rust-build ## Thumbs up DATA and thumbs down GARBAGE (2NRL when both are given)
+	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) feedback --good $(DATA) --bad $(GARBAGE) --strength $(SEVERITY)
+
+rust-paths: rust-build ## What the judged walks did, step by step
+	$(RUST) $(RUST_GLOBAL) paths --limit $(LIMIT)
+
+rust-nodes: rust-build ## Each node against the nodes around it
+	$(RUST) $(RUST_GLOBAL) nodes --limit $(LIMIT)
+
+rust-words: rust-build ## A word encoding's alphabet, most read first (needs RUST_ENC=word:3:1)
+	$(RUST) $(RUST_GLOBAL) words --limit $(WORD_LIMIT)
+
+rust-weights: rust-build ## Show the Rust model's weight function
+	$(RUST) $(RUST_GLOBAL) weights
+
+rust-info: rust-build ## The Rust model's statistics and history tail
+	$(RUST) $(RUST_GLOBAL) info
+
+rust-check: rust-build ## The structural invariants of the Rust model, over DATA
+	$(RUST) $(RUST_GLOBAL) check --data $(DATA)
+
+rust-compress: rust-build ## Merge every unary chain by hand, then save
+	$(RUST) $(RUST_GLOBAL) compress
+
+rust-invert: rust-build ## Flip the sign of every reward
+	$(RUST) $(RUST_GLOBAL) invert
+
+rust-serve: rust-build ## Serve the API + the prebuilt frontend from the Rust port on http://HOST:PORT
+	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) serve --host $(HOST) --port $(PORT) \
+	    --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+
+rust-bench: rust-build ## The Rust port's own benchmark (BENCH_CHARS characters, BENCH_EPOCHS epochs)
+	rust/target/release/radixnet-bench --chars $(BENCH_CHARS) --epochs $(BENCH_EPOCHS) --traversal $(TRAVERSAL)
+
+rust-demo: ## Train on the sample corpus with the Rust port, then predict, generate and read it back
+	$(MAKE) rust-train
+	$(MAKE) rust-predict
+	$(MAKE) rust-generate
+	$(MAKE) rust-info
+
+bench-compare: ## Both ports over one corpus, checked against each other -> bench/RESULTS.md
+	$(PY) bench/compare.py --chars $(BENCH_CHARS) --predictions $(BENCH_PREDICTIONS) \
+	    --epochs $(BENCH_EPOCHS) --repeat $(BENCH_REPEAT) --punish-every $(PUNISH_EVERY) --seed $(SEED)
+
 ##@ Train / predict (local)
 train: ## Train on DATA (incremental: MODEL is loaded first if it exists), checkpointing into CKPT_DIR
 	$(RADIXNET) $(GLOBAL) train --data $(DATA) --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR)
@@ -165,6 +253,56 @@ invert: ## Invert the network (flip every edge weight and activation amplitude)
 
 compress: ## Merge unary chains (radix-tree path compression) and save
 	$(RADIXNET) $(GLOBAL) compress
+
+##@ Word n-grams (the encoding dial's word unit: the same model over words)
+MODEL_WORD  ?= model.word.json
+WORD_ENC    ?= word:3:1
+WORD        := --model $(MODEL_WORD) --kind count --encoding $(WORD_ENC) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
+WORD_PREFIX ?= the cat sat on
+WORD_LENGTH ?= 6
+WORD_TEXT   ?= $(TEXT)
+WORD_LIMIT  ?= 20
+
+word-train: ## Train the word model on DATA (MODEL_WORD is its file; lengths and counts are per word)
+	$(RADIXNET) $(WORD) train --data $(DATA) --epochs $(EPOCHS) --checkpoint-dir $(CKPT_DIR)
+
+word-predict: ## Continue WORD_PREFIX with WORD_LENGTH words (top-K and bottom-K)
+	$(RADIXNET) $(WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH) --mode beam
+
+word-generate: ## Generate COUNT texts of at most MAX_LENGTH words each
+	$(RADIXNET) $(WORD) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam
+
+word-score: ## Log-probability of WORD_TEXT, per word (an unread word is <unk>)
+	$(RADIXNET) $(WORD) score --text "$(WORD_TEXT)"
+
+word-vocab: ## The words the model has read, most read first (WORD_LIMIT rows, 0 = all)
+	$(RADIXNET) $(WORD) words --limit $(WORD_LIMIT)
+
+word-info: ## What the word model holds: its statistics and the training history tail
+	$(RADIXNET) $(WORD) info
+
+word-serve: ## Serve the frontend with the word model selected (the Words tab shows its alphabet)
+	$(RADIXNET) $(WORD) serve --host $(HOST) --port $(PORT) --checkpoint-dir $(CKPT_DIR) --upload-dir $(UPLOAD_DIR)
+
+word-test: ## The encoding dial's unit tests (Python)
+	$(PY) -m unittest tests.test_encoding tests.test_encodings_end_to_end -v
+
+word-demo: ## Train a word model on the sample corpus, then predict, generate and list its alphabet
+	$(MAKE) word-train
+	$(MAKE) word-predict
+	$(MAKE) word-generate
+	$(MAKE) word-vocab
+
+word-go: ## The Go port over words: train on DATA and continue WORD_PREFIX (needs `make go-build`)
+	go/bin/radixnet-count --encoding $(WORD_ENC) --model $(MODEL_WORD) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	go/bin/radixnet-count --model $(MODEL_WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH)
+
+word-rust: ## The Rust port over words: train on DATA and continue WORD_PREFIX (needs `make rust-build`)
+	rust/target/release/radixnet --encoding $(WORD_ENC) --model $(MODEL_WORD) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	rust/target/release/radixnet --model $(MODEL_WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH)
+
+word-parity: ## Cross-language parity of the word model (Go and Rust against Python)
+	$(PY) -m unittest tests.test_go_parity.TestGoWordParity tests.test_rust_parity.TestRustWordParity -v
 
 ##@ The negative network (failures only; it filters the positive model)
 negative-blame: ## Blame every line of GARBAGE for REASON with SEVERITY (the negative model is NEGATIVE)

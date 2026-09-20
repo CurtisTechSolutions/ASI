@@ -673,7 +673,7 @@ class NegativeNet(GraphModel):
         records: list[dict] = []
         if blame:
             meta_add(meta, "trained_texts", len(texts))
-            meta_add(meta, "trained_chars", sum(len(t) for t in texts))
+            meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
             if source:
                 meta_add_keyed(meta, "sources", source, len(texts))
             for text in texts:
@@ -1305,6 +1305,7 @@ class NegativeNet(GraphModel):
             "grams": g.num_trigrams(),
             "encoding": str(self.encoding),
             "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),

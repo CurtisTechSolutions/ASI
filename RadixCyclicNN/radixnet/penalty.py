@@ -87,10 +87,23 @@ __all__ = [
     "phase_traversal_costs",
     "resolve_traversal",
     "traversal_costs",
+    "LEAST_PUNISHED",
 ]
 
-TRAVERSALS = ("reward", "punishment")
-"""The traversals a search can run: follow the rewards, or avoid the punishments."""
+TRAVERSALS = ("reward", "punishment", "least-punished")
+"""The traversals a search can run: follow the rewards, avoid the punishments, or rank a walk by the blame on it.
+
+The first two are **cost functions** and live here.  The third is a different
+kind of thing - a *ranking*, which orders a walk by the punishment on its worst
+step before its cost, and which only the count model can run because only it
+keeps the judged paths that ranking reads (:mod:`radixnet.search`,
+``../SPEC-LeastPunished.md``).  It is named here so one flag offers all three
+and no search has to guess which registry a name came from; the cost functions
+below simply do not apply to it.
+"""
+
+LEAST_PUNISHED = "least-punished"
+"""The ranking traversal, priced in the count model's own currency rather than in a cost."""
 
 DEFAULT_TRAVERSAL = "reward"
 """What every search runs unless told otherwise - the behaviour of every release before this option existed."""
@@ -185,8 +198,8 @@ def traversal_costs(
     ``None`` is what the reward traversal returns: the searches then call
     ``graph.child_costs`` directly and nothing about them changes.
     """
-    if resolve_traversal(traversal) == "reward":
-        return None
+    if resolve_traversal(traversal) in ("reward", LEAST_PUNISHED):
+        return None  # the least-punished traversal reads the blame itself, not through a cost function
     return PenaltyCosts(graph, penalty_scale, merit_scale)
 
 
@@ -194,6 +207,6 @@ def phase_traversal_costs(
     graph, traversal: str | None = DEFAULT_TRAVERSAL, penalty_scale: float = 1.0, merit_scale: float = 1.0
 ):
     """:func:`traversal_costs` for the phase-unrolled searches: ``(node, bucket) -> costs``, or ``None``."""
-    if resolve_traversal(traversal) == "reward":
+    if resolve_traversal(traversal) in ("reward", LEAST_PUNISHED):
         return None
     return PhasePenaltyCosts(graph, penalty_scale, merit_scale)

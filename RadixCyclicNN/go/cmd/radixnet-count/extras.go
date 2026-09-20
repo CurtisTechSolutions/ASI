@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,7 +28,7 @@ func cmdCompress(args []string) {
 	merged := m.G.Compress()
 	target := *out
 	if target == "" {
-		target = modelPath
+		target = modelFile()
 	}
 	if err := m.Save(target); err != nil {
 		fail("cannot save %s: %v", target, err)
@@ -97,7 +98,7 @@ func cmdCheckpoints(args []string) {
 	}
 	target := *out
 	if target == "" {
-		target = modelPath
+		target = modelFile()
 	}
 	if err := m.Save(target); err != nil {
 		fail("cannot save %s: %v", target, err)
@@ -123,13 +124,31 @@ func cmdBench(args []string) {
 	epochs := fs.Int("epochs", radixnet.BenchDefaultEpochs, "training epochs to time")
 	predictions := fs.Int("predictions", 0, "predictions to time (0: chars/2, clamped to [100, 20000])")
 	corpus := fs.String("data", filepath.Join("data", "sample_corpus.txt"), "sample corpus the sentences are built from")
+	traversal := fs.String("traversal", "reward", "the search to time: reward | least-punished")
+	textsPath := fs.String("texts", "", "train on this file's lines instead of a synthetic corpus")
+	prefixPath := fs.String("prefixes", "", "predict these lines instead of prefixes cut out of the corpus")
+	punishEvery := fs.Int("punish-every", 0, "punish every Nth text before predicting, so there is blame to walk by")
 	_ = fs.Parse(args)
 
-	say("benchmark: %d chars, %d epoch(s), %s counting, %s",
-		*chars, *epochs, map[bool]string{true: "exact", false: "racy"}[exact], workerText())
+	texts, err := benchFileLines(*textsPath)
+	if err != nil {
+		fail("%v", err)
+	}
+	prefixes, err := benchFileLines(*prefixPath)
+	if err != nil {
+		fail("%v", err)
+	}
+	if len(texts) > 0 {
+		say("benchmark: %d text(s) from %s, %d epoch(s), %s traversal, %s counting, %s",
+			len(texts), *textsPath, *epochs, *traversal, map[bool]string{true: "exact", false: "racy"}[exact], workerText())
+	} else {
+		say("benchmark: %d chars, %d epoch(s), %s traversal, %s counting, %s",
+			*chars, *epochs, *traversal, map[bool]string{true: "exact", false: "racy"}[exact], workerText())
+	}
 	result, err := radixnet.RunBenchmark(radixnet.BenchOptions{
 		Chars: *chars, Epochs: *epochs, Seed: seedFlag, Predictions: *predictions,
 		CorpusPath: *corpus, Workers: workers, Exact: exact,
+		Texts: texts, Prefixes: prefixes, Traversal: *traversal, PunishEvery: *punishEvery,
 	})
 	if err != nil {
 		fail("%v", err)
@@ -152,6 +171,27 @@ func cmdBench(args []string) {
 	if jsonMode {
 		emit(result)
 	}
+}
+
+// benchFileLines reads one text per line (blank lines dropped); "" reads nothing.
+func benchFileLines(path string) ([]string, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	lines := []string{}
+	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("%s holds no usable line", path)
+	}
+	return lines, nil
 }
 
 // fmtValue renders a benchmark number readably: rates to whole numbers, ratios

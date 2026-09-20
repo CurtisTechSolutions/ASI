@@ -15,7 +15,8 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `GeneratePanel.jsx` | Generate | free generation, beam or sample, either traversal, with 👍 / 👎 feeding 2NRL |
 | `ConversePanel.jsx` | Converse | the model talking to itself. Newest turn on top, stutter detection, and "Explore" to back out of a repetition |
 | `ChatPanel.jsx` | Chat | an LLM conversing with the model and marking every reply |
-| `ScorePanel.jsx` | Score | what the model makes of a piece of text |
+| `ScorePanel.jsx` | Score | what the model makes of a piece of text (per character, or per **word** on a word model) |
+| `WordsPanel.jsx` | Words | the word model's alphabet: every word it has read and how much of the graph holds it. The tab appears only while the active model counts in words |
 | `TwoNRLPanel.jsx` | 2NRL | the three phases — train on the bad, invert, fine-tune on the good |
 | `NegativePanel.jsx` | Negative | the negative network: the failures, why they were failures, and the automatic reviewer loop |
 | `EvolvePanel.jsx` | Evolve | the self-upgrading loop |

@@ -37,7 +37,7 @@ split or a merge) takes a write lock.
 
 | directory | what it is |
 |---|---|
-| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools and the LLM clients |
+| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients and the MCP server (`mcp.go`) |
 | `server/` | the HTTP API — the same JSON contract as the Python server, so the prebuilt React frontend runs unchanged against it |
 | `cmd/radixnet-count/` | the CLI binary |
 | `go.mod` | the module — `github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, **no dependencies** |
@@ -52,7 +52,10 @@ make go-test                                    # cd go && go test -race ./...
 
 go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
 go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
+go/bin/radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
+go/bin/radixnet-count --kind word words --limit 20            # the alphabet it has read
 go/bin/radixnet-count --model model.count.json serve          # the API and the frontend
+go/bin/radixnet-count --model model.count.json mcp            # MCP on stdin / stdout, for any client
 python -m radixnet --model model.count.json info              # the Python side reads the same file
 ```
 
@@ -61,3 +64,16 @@ is a prebuilt binary for convenience.
 
 `../README.md` § *Go implementation of the count / reward model* lists every
 command and every global flag, and says where the goroutines go.
+
+## The second traversal
+
+`predict`, `generate` and `bench` take `--traversal least-punished`: the walk is
+ranked by the **blame** on its worst step before its cost, and at every node it
+may only take the children the model has the least against
+(`../SPEC-LeastPunished.md`).  Where nothing has been punished it is the
+ordinary search, to the bit.  Python and the Rust port have it too, and
+`../tests/test_go_parity.py` holds this one to Python's answers under it -
+the same continuations, the same costs and the same punishment per path.  `--workers 1` also runs the two beams of a
+prediction in turn rather than side by side, so a one-worker run means the same
+thing here as it does in the Rust port (`../rust/`), which the cross-language
+benchmark compares this one against (`../bench/`).

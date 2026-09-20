@@ -127,12 +127,44 @@ class Encoding:
     # -- units ---------------------------------------------------------------
 
     def units(self, text: str) -> str | list[str]:
-        """The text as something that slices by unit: itself, or its words."""
-        return text if self.unit == CHARS else text.split()
+        """The text as something that slices by unit: itself, or its words.
+
+        The split is :func:`split_words`, not ``str.split()``.  The two
+        disagree about four separators, and Go and Rust split on the Unicode
+        property, so a text holding one of them would be cut into different
+        words here than there - and a word split differently is a different
+        node (``../SPEC-WordNGrams.md`` §4).
+        """
+        return text if self.unit == CHARS else split_words(text)
 
     def length(self, text: str) -> int:
         """How many units a text holds."""
-        return len(text) if self.unit == CHARS else len(text.split())
+        return len(text) if self.unit == CHARS else len(split_words(text))
+
+    @property
+    def units_name(self) -> str:
+        """What this encoding counts in: ``"chars"`` or ``"words"``.
+
+        Every length, count and score of a model is in these; a number whose
+        unit depends on the encoding is a number that will be read wrong, so
+        the CLI, the API and the frontend all carry this beside it.
+        """
+        return "chars" if self.unit == CHARS else "words"
+
+    def vocabulary(self, grams: Iterable[str]) -> dict[str, int]:
+        """The words of a word encoding's grams, and how many grams hold each.
+
+        A word encoding has no vocabulary object to read: a gram is text, so
+        the alphabet the graph has actually read is whatever its grams are made
+        of.  ``grams`` is the graph's gram index, which is the one count that
+        survives compression.  Returns insertion order, which is the order the
+        words were first read.
+        """
+        counts: dict[str, int] = {}
+        for gram in grams:
+            for word in self.units(gram):
+                counts[word] = counts.get(word, 0) + 1
+        return counts
 
     def piece(self, text: str, lo: int, hi: int | None = None) -> str:
         """Units ``[lo:hi)`` of a text, as text."""
@@ -386,3 +418,170 @@ def repair_base64(body: str) -> tuple[bytes, bool]:
     except (ValueError, binascii.Error) as exc:  # pragma: no cover - the junk filter makes this rare
         raise ValueError(f"the base64 part cannot be decoded: {exc}") from exc
     return payload, repaired
+
+
+# ---------------------------------------------------------------------------
+# the word alphabet (see ``../SPEC-WordNGrams.md``)
+# ---------------------------------------------------------------------------
+
+WORD_BASE = 0x0100
+"""The first word symbol: past ASCII and past Latin-1, so no label can be mistaken for text."""
+
+SURROGATE_LO = 0xD800
+SURROGATE_HI = 0xDFFF
+_SURROGATES = SURROGATE_HI - SURROGATE_LO + 1
+
+MAX_WORDS = 0x110000 - WORD_BASE - _SURROGATES
+"""1 111 808: every code point above Latin-1 that a string can hold, the surrogate block excepted."""
+
+UNKNOWN_WORD = "<unk>"
+UNKNOWN_ID = 0
+"""Id 0 is the unknown word: a word the model has never read maps to it at prediction and scoring time."""
+
+_NOT_UNICODE_SPACE = "\x1c\x1d\x1e\x1f"
+"""Python calls these whitespace; the Unicode ``White_Space`` property (Go and Rust) does not.
+
+The three implementations have to split a text into the *same* words, so the
+rule is the Unicode property and Python subtracts the four separators it adds.
+"""
+
+
+def word_symbol(word_id: int) -> str:
+    """The code point that carries word ``word_id`` (``0 -> U+0100``, skipping the surrogates)."""
+    if not 0 <= word_id < MAX_WORDS:
+        raise ValueError(f"word id must lie in [0, {MAX_WORDS}), got {word_id}")
+    code = WORD_BASE + word_id
+    if code >= SURROGATE_LO:
+        code += _SURROGATES
+    return chr(code)
+
+
+def symbol_word(symbol: str) -> int:
+    """Inverse of :func:`word_symbol`; ``ValueError`` for a code point that carries no word."""
+    if len(symbol) != 1:
+        raise ValueError(f"a word symbol is one code point, got {symbol!r}")
+    code = ord(symbol)
+    if code < WORD_BASE or SURROGATE_LO <= code <= SURROGATE_HI:
+        raise ValueError(f"U+{code:04X} is not a word symbol")
+    return code - WORD_BASE - (_SURROGATES if code > SURROGATE_HI else 0)
+
+
+def split_words(text: str) -> list[str]:
+    """The words of ``text``: maximal runs of code points the Unicode ``White_Space`` property does not cover.
+
+    Punctuation stays attached to the word it touches and case is kept - the
+    split is the whole tokeniser (``SPEC-WordNGrams.md`` §4), and every
+    refinement of it would be a step towards a vocabulary that has to be
+    designed, versioned and defended.
+    """
+    if not any(ch in text for ch in _NOT_UNICODE_SPACE):
+        return text.split()  # the common case: no code point the two rules disagree about
+    words: list[str] = []
+    current: list[str] = []
+    for ch in text:
+        if ch.isspace() and ch not in _NOT_UNICODE_SPACE:
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        words.append("".join(current))
+    return words
+
+
+class Vocabulary:
+    """The alphabet of a word model: a two-way map between words and single code points.
+
+    A word model is the count / reward model over an alphabet whose symbols are
+    words (``../SPEC-WordNGrams.md``), and this is that alphabet.  Id 0 is
+    always :data:`UNKNOWN_WORD`; every other word is in the vocabulary because
+    training read it, in the order it was first read.  Nothing is frozen,
+    pruned or learned: there is no tokeniser here and no training run before
+    the training run.
+    """
+
+    __slots__ = ("words", "_ids")
+
+    def __init__(self, words: Iterable[str] | None = None) -> None:
+        self.words: list[str] = [UNKNOWN_WORD]
+        self._ids: dict[str, int] = {UNKNOWN_WORD: UNKNOWN_ID}
+        if words is not None:
+            items = list(words)
+            if not items:
+                return
+            if items[0] != UNKNOWN_WORD:
+                raise ValueError(f"a vocabulary starts with {UNKNOWN_WORD!r}, got {items[0]!r}")
+            for word in items[1:]:
+                if not isinstance(word, str):
+                    raise TypeError(f"a vocabulary holds strings, got {type(word).__name__}")
+                if word in self._ids:
+                    raise ValueError(f"the vocabulary holds {word!r} twice")
+                self.add(word)
+
+    def __len__(self) -> int:
+        return len(self.words)
+
+    def __contains__(self, word: object) -> bool:
+        return word in self._ids
+
+    def id(self, word: str) -> int:
+        """The id of ``word``, or :data:`UNKNOWN_ID` if it has never been read."""
+        return self._ids.get(word, UNKNOWN_ID)
+
+    def add(self, word: str) -> int:
+        """The id of ``word``, giving it the next one if it is new."""
+        found = self._ids.get(word)
+        if found is not None:
+            return found
+        if len(self.words) >= MAX_WORDS:
+            raise ValueError(f"a word model holds at most {MAX_WORDS} words")
+        new = len(self.words)
+        self.words.append(word)
+        self._ids[word] = new
+        return new
+
+    def encode(self, text: str, grow: bool = False) -> str:
+        """``text`` as the graph's symbols, one code point per word.
+
+        ``grow`` gives an unread word the next id (training); without it an
+        unread word is :data:`UNKNOWN_WORD`, whose windows are not in the index,
+        so the search and the score charge it what they charge any unknown
+        transition.
+        """
+        pick = self.add if grow else self.id
+        return "".join(word_symbol(pick(word)) for word in split_words(text))
+
+    def decode(self, symbols: str) -> str:
+        """The words of a symbol string, joined by single spaces (a word model normalises whitespace)."""
+        words = self.words
+        out: list[str] = []
+        for symbol in symbols:
+            index = symbol_word(symbol)
+            if index >= len(words):
+                raise ValueError(f"word {index} is past the end of a vocabulary of {len(words)}")
+            out.append(words[index])
+        return " ".join(out)
+
+    def to_list(self) -> list[str]:
+        """The vocabulary in id order, as the model file carries it."""
+        return list(self.words)
+
+    def __repr__(self) -> str:
+        return f"Vocabulary(words={len(self.words)})"
+
+
+def word_rows(encoding: Encoding, grams: Iterable[str]) -> list[dict]:
+    """The alphabet as the API and the CLI list it: most read first, ties alphabetically.
+
+    ``id`` is the row's **rank**, not an identity: the graph has no vocabulary,
+    so nothing records the order the words were first read, and a rank is what
+    a reader can actually check.  ``trigrams`` is ``grams`` under the name a
+    word-model client knew it by.
+
+    This is the one place the rows are built, so Python, Go and Rust hand back
+    the same alphabet in the same order.
+    """
+    counts = encoding.vocabulary(grams)
+    rows = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    return [{"word": word, "id": i, "grams": n, "trigrams": n} for i, (word, n) in enumerate(rows)]

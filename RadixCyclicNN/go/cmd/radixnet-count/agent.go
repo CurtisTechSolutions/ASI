@@ -288,7 +288,7 @@ func cmdAgent(args []string) {
 		fail("cannot load tasks from %s: %v", *tasksPath, err)
 	}
 	trainer, box, client := agentSetup(cfg, *phase, *url, *timeout, *sampleFirst, *lenient, *noJudge, *noTeach, *replayOff)
-	say("model:  %s", modelPath)
+	say("model:  %s", modelFile())
 	say("tasks:  %d from %s", len(tasks), *tasksPath)
 	say("phases: %s, %d round(s)", strings.Join(trainer.Config.Phases, " -> "), trainer.Config.Rounds)
 	say("llm:    %s: %s at %s", trainer.Config.Provider, client.ModelName(), client.BaseURL())
@@ -317,7 +317,7 @@ func cmdExplore(args []string) {
 	if *steps == 0 {
 		stepsText = "until interrupted"
 	}
-	say("model:  %s", modelPath)
+	say("model:  %s", modelFile())
 	say("steps:  %s (the network chooses every task itself)", stepsText)
 	say("llm:    %s: %s at %s", trainer.Config.Provider, client.ModelName(), client.BaseURL())
 	say("tools:  %s", strings.Join(box.Names(), ", "))

@@ -25,8 +25,9 @@ and an optional GPU backend (torch) are built in.
 | Accept the vanishing gradient, update the activation function instead; `N*N`; activation(child) × activation(parent) | Weights are an N×N node-to-node matrix (stored sparse). The signal on edge `p -> c` is `W[p,c] · f_c(z_c) · f_p(z_p)`, the activation of the child times the activation of the parent. Learning is a **one-hop local rule**: an observed transition only updates `W[p,·]`, the node states `z`, and the **activation-function parameters** of the parent and its children. Nothing is propagated deeper, so vanishing gradients never enter the picture; the activation functions adapt instead. |
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
+| A second way through: the least punished | `--traversal least-punished` (Python, Go and Rust, `predict` / `generate` / `bench`, `traversal` in the HTTP API and a selector on the Predict and Generate tabs): the walk is ranked by the **blame** on its worst step first and by the cost only between steps nothing is held against, and at every node it may only take the children the model has the least against. A step's punishment is the penalty side of its reward plus `log(1 + incorrect)` of the judged path context - the failures counted **against nothing**, so a reward cannot buy blame off the way it nets it off the edge. On a graph where nothing was ever punished it is the ordinary search, to the bit. `SPEC-LeastPunished.md` is the specification. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
-| Traverse by the punishments, not the rewards | `--traversal punishment` (`traversal` in the HTTP API, a selector on the Predict and Generate tabs, both languages): the rewards leave the score altogether and the **penalties** price every step, so the cheapest path is the one that accumulated the **least punishment**. It is *what* a search looks for, as opposed to `--mode`, which is how it looks - every mode of every kind can run either traversal. See below. |
+| Traverse by the punishments, not the rewards | `--traversal punishment` (`traversal` in the HTTP API, a selector on the Predict and Generate tabs, all three languages): the rewards leave the score altogether and the **penalties** price every step, so the cheapest path is the one that accumulated the **least punishment**. It is *what* a search looks for, as opposed to `--mode`, which is how it looks - every mode of every kind can run either traversal. See below. |
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), the failures are asked about (*why* is this wrong, and what else is wrong the same way - see below), and the round's mistakes become the next round's syllabus. |
 | The report card plans the next lessons | `tutor --plan N` / the Tutor tab's **Lesson plan** / `POST /api/tutor/plan` (both servers): the report card at the end of a run goes back to the teacher, which answers with the syllabus that repairs it - one point of grammar per lesson, the mistake of the card it targets, a topic and a line on why. The marks alone already plan it (a lesson per weak point, worst first); the teacher improves on that floor and never drops a weakness from it. |
 | Auto run: the lessons teach themselves | `tutor --batches N` / the Tutor tab's **Batches** / `{"batches": N}` (both servers): a batch is `rounds` rounds and the report card over them. With more than one batch the run closes its own loop - card -> plan -> the plan applied to itself (brief, level, openings, pass mark, drills) -> the next batch taught to it - and `--batches 0` keeps going until Ctrl-C or **Stop**. The Tutor tab fills the brief and the step up into the form as each batch starts, so the settings always show what is being taught. |
@@ -41,8 +42,10 @@ and an optional GPU backend (torch) are built in.
 | External tools, browsing, exploring on its own | `agent` / `explore` and the Agent tab: the network calls tools by *writing* them (`<tool>web_fetch {"url": "..."}</tool>`) and reads the answer back as `<result>...</result>`, so a whole attempt is one training text. Ollama writes the acceptance criteria before anything is attempted, repairs the calls the network cannot write yet, judges the answer against those criteria and demonstrates with the same real tools when it failed; then 2NRL trains on the failures — the harder the worse they were — inverts, and fine-tunes on what was right. `explore` lets the network choose every task itself and follow what it finds. |
 | A real browser, and MCP | `--browser` draws each page in a headless **Chrome** over the WebDriver protocol (no driver library: `chromedriver` is started and spoken to with the standard library), so a page that renders itself with JavaScript is readable. `radixnet mcp` serves the tools **and** the network — predict, generate, score, judge against the negative network, solve a task through the agent loop — over the Model Context Protocol, so any MCP client can use this instance. |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
+| Word n-grams | the same count / reward model over an alphabet of **words** (`--encoding word:3:1`, the Words tab): the encoding's `unit` dial, not a second model, so a gram is three words and compression turns a repeated phrase into one node. There is no vocabulary to freeze or learn - a gram is text, so the alphabet is whatever the grams are made of; lengths, counts and scores are per word. |
 | Resonant model | a fourth algorithm on the same graph (`--kind resonant`): a walk carries an analog **phase** advanced by every trigram (a position clock plus a hash kick), edges learn the phase at which they fire and how **coherently**, and the score adds `resonance_scale · coherence · cos(phase − mu)` to the edge's share of its node. Prediction searches `(node, chars, phase)`. A **phase-locked** cycle - back to the same node at the same phase - hands the decision to a metacognitive layer that learned from the corpus whether to ride the loop, escape it or stop. |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. The punishment traversal is ported as well, and the parity suite requires both sides to walk the same least-punished paths at the same costs. |
+| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, all three traversals, the encoding dial, training, prediction, generation, scoring, 2NRL, **the model file** (`radixnet-count`, gzipped or not: byte for byte what Python writes on every dial setting, but for the `version` cache stamp), the CLI and **the HTTP server the frontend runs against** - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. What it does not have yet: the negative network, the teaching loops, the agent and the LLM clients (those last need HTTPS, which the no-dependency rule rules out). `tests/test_rust_parity.py` holds it to Python the way `test_go_parity.py` holds Go, and it is 2.2-2.8x faster than Go at counting and 3.8-6.2x at predicting on the same corpus (`bench/RESULTS.md`, `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). |
 | Judgements follow the path, not the edge | An edge is right in one sentence and wrong in the next, so a verdict is not filed against the edge but against the **caller that reached it**: the key is the node *before* the edge's parent, so `the cat -> sat` and `a cat -> sat` are counted apart (`paths`, `GET /api/paths`). A correction only rewards a path when the whole answer was right - one wrong word and nothing on that walk is rewarded - and each context keeps `correct`, `incorrect` and how often it has been walked since (`seen`). The search pays for what it learns there: `path_scale · log((correct + ½) / (incorrect + ½))` joins the edge weight before the softmax, so a step that was right *from here* is cheaper here and nowhere else. |
 | A node sees itself from where it stands | An edge's counters say what that step did, not what it did *here*, among the other ways out of the same node. `nodes` / `GET /api/nodes` / clicking a node in the Graph tab shares a node out both ways: a row per previous node and a row per next node, each with its share of that side's traffic, its **signed** share of that side's reward - a penalty reads as a negative share of the pressure on the node - and what the judged paths on it came to. The denominators are the side's own, not the node's visits: a node is entered without an in-edge whenever a text starts on it. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -117,6 +120,9 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
+| `make rust-build` / `rust-test` / `rust-parity` | build the Rust port's binaries / run its tests, clippy and the formatter check / hold it to the Python model |
+| `make rust-train` / `rust-predict` / `rust-serve` / ... | the Rust CLI, one target per subcommand (`make help` lists them; `RUST_KIND=count\|word`, `MODEL_RUST` is its file) |
+| `make bench-compare` | the Go port and the Rust port over one corpus, checked against each other, into `bench/RESULTS.md` (`BENCH_CHARS`, `BENCH_EPOCHS`, `BENCH_REPEAT`, `PUNISH_EVERY`) |
 | `make go-build` / `go-test` / `go-parity` / `go-negative` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model, blame a garbage file into the Go negative network and judge a text through it |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
@@ -185,9 +191,9 @@ Behind a registry mirror, pass `--build-arg PYTHON_IMAGE=... --build-arg NODE_IM
 ## CLI reference
 
 Global options (before or after the command): `--model PATH` (default
-`model.json`, gzip when the name ends with `.gz`), `--kind radix|count|resonant`
+`model.json`, gzip when the name ends with `.gz`), `--kind radix|count|word|resonant`
 (the algorithm of a *new* model; a file's own kind wins; the default model file
-follows the kind - `model.count.json`, `model.resonant.json`),
+follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`),
 `--backend auto|python|torch`,
 `--device cpu|cuda|mps`, `--seed N`, `--json` (one JSON document on stdout).
 
@@ -216,6 +222,7 @@ follows the kind - `model.count.json`, `model.resonant.json`),
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--variants 3` / `--variant-weight 0.5` (with `--blame`: the teacher explains why each failure is wrong and writes that many more sentences with the same mistake, blamed at that share of its severity), `--topic TEXT`, `--rounds 3`, `--batches 1` (auto run: batches of `--rounds` rounds, each planned from the one before; 0 = until Ctrl-C), `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--brief TEXT` (what this batch is being taught to: the prompt the last report card led to), `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0` (what the unchanged words still earn; a whole path is only rewarded when the answer was right), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `paths` | count model: the judged paths - `--limit 20`, `--node LABEL` (only the paths leaving one node). Each line is `prev -> parent -> child`, its correct / incorrect counter, how often it has been walked since (`seen`) and what that says about the edge (`seen ratio`, `correct ratio`) |
+| `words` | word model: its alphabet - `--limit 20` (0 = all). Every word it has read, with how many of the graph's three-word windows hold it; a word graph is addressed in words everywhere else too (`nodes --node "sat on the mat"`) |
 | `nodes` | count model: each node against the nodes around it - `--limit 10`, `--node LABEL`. A row per previous node and a row per next node, each with its share of that side's traffic (`seen %`) and of that side's reward (`reward %`, signed), how much of the edge a judged context has been watching, and what those contexts made of it |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
 | `image info` / `image encode FILE` / `image tutor FILE...` / `image decode` | encoders and their dependencies; `encode --size 128 --encoder auto\|sd\|tiny [--out TEXTFILE] [--train --epochs 3 --lr 0.5 --batch-size 8 --model-out]`; `tutor FILE...`: the recall tutor - ask it to draw back what it was shown and mark what comes back, `--size`, `--encoder`, `--lead 16` (payload characters the opening gives away, so it knows which picture), `--length`, `--attempts`, `--mode`, `--threshold 6`, `--train`, `--blame` / `--negative PATH`; `decode (--text TEXT \| --data FILE) --out image.png [--encoder]` |
@@ -239,8 +246,9 @@ at a time, and mutating requests answer 409 while it runs.
 |---|---|
 | `GET /api/health` | `{"ok": true, "version"}` |
 | `GET /api/status` | model statistics (with the active `kind`), current job, available backends, model path; the resonant model adds `buckets`, `coherence_mean` / `coherence_max`, `cycles_seen` and `meta` (the metacognitive layer) |
-| `GET /api/model` | `{"kind", "label", "kinds": [{"kind","label","description"}], "model_path", "paths", "in_memory"}` |
-| `POST /api/model/select` | `{"kind": "radix"\|"count"\|"resonant"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
+| `GET /api/model` | `{"kind", "label", "units", "kinds": [{"kind","label","description","units"}], "model_path", "paths", "in_memory"}` |
+| `GET /api/words` | word model: `?limit=50` -> `{"vocabulary", "units", "words": [{"word","id","trigrams"}]}`, most read first (400 on a model that counts in characters) |
+| `POST /api/model/select` | `{"kind": "radix"\|"count"\|"word"\|"resonant"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
 | `GET /api/encoding` | the text encoding every kind shares: `{"window", "stride", "overlap", "start_label", "end_label", "back_label", "configurable": false, "note"}`. The window is part of the model format, not a setting |
 | `POST /api/encoding/preview` | `{"text"}` -> the same document plus `{"chars", "windows", "count", "decoded", "round_trip", "unknown_windows", "kind", "path": {"known", "reason", "labels", "node_ids", "decoded", "nodes", "compressed"}}`: one text through the encoder, back through the decoder, and through the graph's own (possibly merged) node labels. `path.known` is false with the reason - a window never seen, or a text that cannot be walked from START to END as it stands |
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress` -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used |
@@ -1025,12 +1033,21 @@ and the uploaded files) *and* the network itself:
 python -m radixnet --model model.json mcp        # tools + the network
 python -m radixnet mcp --no-model --offline      # the calculator alone
 python -m radixnet mcp --browser                 # browsing in a real Chrome
+make go-mcp                                      # the Go server, same protocol
 ```
 
-Point a client at it the usual way:
+The **Go port speaks it too** (`go/radixnet/mcp.go`, `radixnet-count mcp`): the
+same protocol revision, the same tool names and schemas, and the same answers
+down to the error text, so a client cannot tell which one it is connected to.
+It offers `radixnet_solve` only when an LLM is reachable, and `radixnet_judge`
+only when the negative network is there — the same rule the Python server
+follows. The Rust port does not speak it.
+
+Point a client at either the usual way:
 
 ```json
 {"mcpServers": {"radixnet": {"command": "python", "args": ["-m", "radixnet", "--model", "model.json", "mcp"]}}}
+{"mcpServers": {"radixnet": {"command": "go/bin/radixnet-count", "args": ["--model", "model.count.json", "mcp"]}}}
 ```
 
 MCP is JSON-RPC 2.0 over a stream, so this is the standard library and nothing
@@ -1044,7 +1061,10 @@ The selector at the top of the frontend (and `--kind` in the CLI, `POST
 /api/model/select` in the API) chooses the algorithm.  All three live on the same
 self-compressing cyclic graph and share encoding, prefix location, sampling,
 scoring, compression, checkpoints and persistence; a model file records its
-kind, so `load` always restores the right one.
+kind, so `load` always restores the right one.  A fourth kind, `word`, is the
+count / reward model over an alphabet whose symbols are **words** rather than
+characters - the same graph, the same weights, the same search (see *Word
+n-grams* below).
 
 | | RadixNet (`radix`) | Count / reward (`count`) | Resonant (`resonant`) |
 |---|---|---|---|
@@ -1059,6 +1079,38 @@ python -m radixnet --kind count train --data data/sample_corpus.txt --epochs 3  
 python -m radixnet --model model.count.json predict --prefix 'the quick' --length 10 --k 5
 python -m radixnet --model model.count.json feedback --good-text 'the quick brown fox' --bad-text 'zzz qqq' --strength 2
 ```
+
+### Word n-grams: the same model over an alphabet of words
+
+`--encoding word:3:1` (the **Words** tab in the frontend, `SPEC-WordNGrams.md`,
+D-071 and D-073) keeps every one of those rules and changes only what a *unit*
+is.  Not one of the graph's structural rules mentions a character, so a word
+n-gram model is not a different model - it is the same one with the encoding's
+`unit` dial turned: a gram is three words rather than three characters, and a
+label is text either way.  Compression then does to word chains what it does to
+character chains - a repeated phrase becomes **one node whose label is that
+phrase**.
+
+```bash
+python -m radixnet --kind count --encoding word:3:1 --model model.word.json train \
+    --data data/sample_corpus.txt --epochs 3
+python -m radixnet --model model.word.json predict --prefix 'the cat sat on' --length 6
+python -m radixnet --model model.word.json words --limit 20   # the alphabet its grams are made of
+make word-demo                                                # train, predict, generate, list it
+```
+
+There is **no vocabulary**: a gram is text, so the alphabet a graph has read is
+whatever its grams are made of, and there is nothing to freeze, prune or learn.
+Tokenising is the whitespace split and nothing else (punctuation stays attached,
+case is kept).  Two things that costs, both deliberate: a word encoding
+**normalises whitespace**, so a corpus whose whitespace carries meaning (source
+code, base64, a waveform) belongs on the character encoding; and a word it has
+never read makes a gram it has never seen, which shows up in
+`unknown_transitions`.  Everything counted in units is counted in **words** -
+`--length 6` emits six words, `score`'s `per_char` is per word - and `units` in
+`stats`, the API and the frontend says which.  Python, Go and Rust read and
+write the same file: the format never changed, and the encoding rides in the
+graph document as a three-key block written only when it is not the default.
 
 **The count model's weight function** keeps several numbers per edge - its
 all-time traversals, its traversals inside a sliding window of the last
@@ -1983,6 +2035,7 @@ go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
 go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
 go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
 go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
+go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished  # walk by the blame
 go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
 go/bin/radixnet-count --model five.json --ngram 5 --stride 5 train --data book.txt   # groups of five letters
 go/bin/radixnet-count --model words.json --encoding word:2:1 train --data book.txt   # word bigrams
@@ -1997,7 +2050,8 @@ Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`
 `ollama` (`models` | `corpus` | `review`), `chatgpt` (`models` | `ask`),
 `image` (`info` | `encode` | `tutor` | `decode`),
 `speech` (`info` | `teach` | `tutor` | `decode`),
-`checkpoints`, `bench`, `serve`, `version`; `--blame`
+`checkpoints`, `bench`, `serve`, `version`; `--traversal reward|least-punished`
+on `predict`, `generate` and `bench`; `--blame`
 (with `--negative PATH`) on `tutor`, `correct`, `evolve` and `ollama review`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
 none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
@@ -2014,7 +2068,7 @@ Where the goroutines go:
 | the sliding window | applied in corpus order after each chunk's parallel pass (its semantics are the order of traversals); exact in both modes |
 | weights and edge costs | recomputed lazily, only the touched rows after feedback; a full recompute after structural changes runs on a goroutine per 64 nodes |
 | loss, scoring many texts | parallel reductions / one goroutine per text; the loss is the traversal-weighted mean edge cost, so it needs no list of transitions |
-| prediction | the top and the bottom beam run side by side |
+| prediction | the top and the bottom beam run side by side - in turn under `--workers 1`, so a single-worker run is single-threaded end to end and means the same thing as the Rust port's |
 
 Measured on this 4-core machine (2 epochs over a 39 MB corpus: 1,000,000
 lines in a ZIP of 10 entries):
@@ -2172,6 +2226,60 @@ against the key sets the Python API tests assert on, loads the model it saves
 in Python, trains from a ZIP upload with `split: paragraphs`, and reads its
 checkpoints with the Python `CheckpointManager`.
 
+## Rust implementation of the count / reward model, and the two measured against each other
+
+`rust/` is a third implementation of the same model - a standalone crate with no
+dependencies - written to find out how much of what this model costs is the
+model and how much is the language, and to build the least-punished traversal
+beside the Go one.  It ports the graph, the weight function, the judged path
+contexts, all three traversals, both alphabets, training, prediction,
+generation, scoring and 2NRL; it reads and writes the model file byte for byte
+as Python does; and `radixnet serve` answers the same JSON API the Python and Go
+servers answer, so `frontend/dist` runs against it unmodified.  It does **not**
+carry the negative network, the teaching loops, the agent or the LLM clients
+(see `rust/README.md`).
+
+```bash
+make rust-build        # -> rust/target/release/radixnet{,-bench} (needs Rust 1.82+)
+make rust-test         # cargo test, clippy, fmt --check
+make rust-serve        # frontend/dist against the Rust model on http://HOST:PORT
+make bench-compare     # both ports over one corpus -> bench/RESULTS.md
+```
+
+`bench/compare.py` hands both builds the same texts and the same prefixes (one
+Python generator writes them, because neither language can reproduce the
+other's RNG), trains both for the same epochs, punishes every Nth text so the
+least-punished traversal has blame to walk by, and **checks the two against each
+other before it reports a single timing**: same nodes, edges, trigrams,
+transitions and expansions; same compression ratio, loss and total penalty; same
+prediction at the same cost, to the bit.  A speed comparison between two
+programs that computed different things is not a comparison.
+
+On a 4-core Xeon, 2,000,000 characters, 3 epochs, 3,000 predictions, Go counting
+with `--exact` (its racy default is within a few percent, and a benchmark of a
+deliberate data race measures the race):
+
+| | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
+|---|--:|--:|--:|--:|
+| training | 5.9M transitions/s | **14.3M** | 7.1M | **20.6M** |
+| prediction, by reward | 4.3k/s | **16.1k** | 3.7k | **16.1k** |
+| prediction, least punished | 41k/s | **275k** | 41k | **246k** |
+
+2.2-2.8x at counting and 3.8-6.2x at predicting against Go's own default
+counting, more against `--exact`, on identical work.  Three
+representation choices carry most of it and none is algorithmic - a trigram is a
+packed integer rather than a fresh string, a node's children are read into a
+buffer the search reuses, and the trigram index hashes with a cheap
+non-cryptographic hash - which is why `rust/README.md` lists them beside the
+table.  The full matrix, with the machine and the toolchain versions it was
+measured on, is `bench/RESULTS.md`.
+
+The other column in that table is the traversal rather than the language: the
+least-punished search expands **15x fewer nodes** than the ordinary one on the
+same model, because refusing a blamed step at the node prunes the beam - and it
+disagrees with it on about **20%** of the continuations.  That is an effort
+result, not a quality result; which answers are better is the tutor's question.
+
 ## Python API
 
 ```python
@@ -2190,7 +2298,7 @@ Evolver(RadixNet.load("model.json.gz"), corpus=["the cat sat on the mat"]).run(g
 The traversal, on any kind:
 
 ```python
-from radixnet import CountRewardNet, TRAVERSALS      # ("reward", "punishment")
+from radixnet import CountRewardNet, TRAVERSALS   # ("reward", "punishment", "least-punished")
 
 net = CountRewardNet(seed=1)
 net.train(["the cat sat on the mat", "the cat ate the rat", "the cat ran up the hill"], epochs=4)
@@ -2259,11 +2367,16 @@ RadixCyclicNN/
   frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
                       the panels' settings in localStorage, test/ holds its node --test suite)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
+  rust/               Rust port of the count / reward model: src/ (crate, HTTP server included), src/bin (the CLI
+                      and the benchmark), tests/ (the model, the word alphabet and the server end to end)
+  bench/              the two ports over one corpus: make_corpus.py, compare.py, RESULTS.md
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
                       sample_problems.* (codegen), sample_tasks.* (agent / explore)
   docker/             container entrypoint (optional checkpoint resume)
   Dockerfile, docker-compose.yml, docker-compose.gpu.yml, .env.example, Makefile
   DESIGN.md           the specification
+  SPEC-LeastPunished.md   the traversal that follows the blame (built)
+  SPEC-EdgeDecay.md   a node's edges fading on the graph's own clock (proposed)
 ```
 
 ## Design decisions

@@ -160,7 +160,7 @@ func (g *Graph) NodeRatios(node int) *NodeStats {
 	}
 	from, to := g.sideRows(in), g.sideRows(g.Children(node))
 	return &NodeStats{
-		Node: node, Label: g.Label(node),
+		Node: node, Label: g.Label((node)),
 		Visits: g.Count[node], VisitResets: g.CountResets[node],
 		From: from, To: to,
 		InTotals: sideTotals(from), OutTotals: sideTotals(to),

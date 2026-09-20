@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// Version is this implementation's version, kept equal to the Python
+// package's __version__ so a client that asks either one gets the same answer.
+const Version = "0.1.0"
+
 // UnknownProb is the probability charged for a transition the structure does not know.
 const UnknownProb = 1e-6
 
@@ -162,6 +166,10 @@ func cleanTexts(enc Encoding, texts []string) ([]string, int) {
 	}
 	return kept, skipped
 }
+
+// cleanTexts is cleanTexts over the model's symbols: a word model maps every
+// text to its words first (growing the vocabulary, which is what training
+// does) and then drops the texts of fewer than Window of them.
 
 // encodeAll encodes texts on the worker goroutines.
 func (m *Model) encodeAll(texts []string) [][]string {
@@ -924,8 +932,10 @@ type PredictOptions struct {
 	MaxLength   int
 	// Traversal is what the search looks for, as opposed to Mode, which is how
 	// it looks: "reward" (the default) the model's own distribution, rewards
-	// included, or "punishment" the same graph priced by the punishments alone,
-	// where the cheapest path is the least punished one (penalty.go).
+	// included, "punishment" the same graph priced by the punishments alone,
+	// where the cheapest path is the least punished one (penalty.go), or
+	// "least-punished", which leaves the prices alone and ranks a walk by the
+	// blame on its worst step instead (search.go, ../../SPEC-LeastPunished.md).
 	Traversal    string
 	PenaltyScale float64
 	MeritScale   float64
@@ -1010,10 +1020,23 @@ func (w walkCosts) resolve(g *Graph) (CostFn, error) {
 	return g.TraversalCosts(w.Traversal, scale, merit)
 }
 
+// ranking is how the walks are *ordered*: by cost, or by the blame on a walk's
+// worst step (search.go).  The punishment traversal prices a step instead and
+// orders exactly as the reward one does, so it reads as ByReward here.
+func (w walkCosts) ranking() (Traversal, error) {
+	return ParseTraversal(w.Traversal)
+}
+
 // search is the prediction engine shared by Predict, Generate and Converse.
+// Lengths are counted in the encoding's units - characters, or words under a
+// word encoding.
 func (m *Model) search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, walk walkCosts) (*Prediction, error) {
 	g := m.G
 	costs, err := walk.resolve(g)
+	if err != nil {
+		return nil, err
+	}
+	ranking, err := walk.ranking()
 	if err != nil {
 		return nil, err
 	}
@@ -1041,7 +1064,7 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 				maxChars = want
 			}
 		}
-		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Costs: costs})
+		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Costs: costs, Traversal: ranking})
 		if err != nil {
 			return nil, err
 		}
@@ -1058,7 +1081,7 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 		if maxChars < 0 {
 			maxChars = 0
 		}
-		one, err := g.SampleWalk(node, offset, maxChars, temperature, rng, nil, costs)
+		one, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, costs, ranking)
 		if err != nil {
 			return nil, err
 		}
@@ -1141,6 +1164,9 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode != "beam" && mode != "dijkstra" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
+	// the search is what joined the prefix to the continuation, in the model's own
+	// symbols; a generated text never re-joins them here, because only the search
+	// knows the alphabet (../../SPEC-WordNGrams.md)
 	whole := func(r *PathResult) *PathResult {
 		r.FullText = m.Encoding().Join(o.Prefix, r.Text)
 		r.Text = r.FullText
@@ -1292,7 +1318,7 @@ func (m *Model) Stats() map[string]any {
 	}
 	pathTotals := g.PathTotals()
 	stats := map[string]any{
-		"kind":                    "count",
+		"kind":                    m.Kind(),
 		"nodes":                   g.NumNodes(),
 		"edges":                   g.NumEdges(),
 		"trigrams":                g.NumTrigrams(),
@@ -1328,6 +1354,11 @@ func (m *Model) Stats() map[string]any {
 		"window_traversals":       g.WindowTraversals(),
 	}
 	m.metaStats(stats, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes")
+	// what every number above is counted in; a per-word number read as per-character is read wrong
+	stats["units"] = m.Encoding().UnitsName()
+	if m.Encoding().Unit == Words {
+		stats["vocabulary"] = len(m.Encoding().Vocabulary(m.G.GramIndex()))
+	}
 	return stats
 }
 

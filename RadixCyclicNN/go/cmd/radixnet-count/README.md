@@ -36,7 +36,22 @@ radixnet-count --model model.count.json predict --prefix "the cat" --k 5
 radixnet-count --model model.count.json negative filter --count 3   # write, then veto
 radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame
 radixnet-count --seed 1 bench --chars 200000
+radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished
+radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
+radixnet-count --kind word words --limit 20            # the alphabet it has read
 ```
+
+`--kind word` builds the same model over an alphabet whose symbols are **words**
+(`../../../SPEC-WordNGrams.md`): every length, count and score is then per word,
+`words` lists the vocabulary, and a node is addressed in words
+(`nodes --node "sat on the mat"`). A loaded file's own kind always wins.
+
+`--traversal least-punished` on `predict`, `generate` and `bench` walks by the
+blame on a step rather than by its cost (`../../../SPEC-LeastPunished.md`); the
+`bench` command also takes `--texts` / `--prefixes` to be handed a corpus rather
+than build one, and `--punish-every N` to punish every Nth text before the
+predictions are timed, which is how `../../../bench/compare.py` runs it against
+the Rust port.
 
 `../../../README.md` § *Go implementation of the count / reward model* has the
 full command list, the flags and the Ctrl-C behaviour of the long-running loops.

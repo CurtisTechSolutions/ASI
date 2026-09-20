@@ -3,10 +3,19 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Converse, Chat, Score, 2NRL, Negative, Evolve, Ollama, Tutor,
+Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
 Code, Agent, Images, Speech, Checkpoints, Network settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
+
+**Words** (`GET /api/words`) appears only while the active model counts in
+words - the word n-gram kind, which is the same model over an alphabet whose
+symbols are words (`../SPEC-WordNGrams.md`). It lists every word training has
+read, in the order it first read them, with how many of the graph's three-word
+windows hold it. On that model every length field says *words* rather than
+*characters*, Score reports per word, and the status bar carries the size of the
+vocabulary: the unit follows `units` in `/api/status`, because a number whose
+unit depends on the model is a number that will be read wrong.
 
 The Converse panel (`POST /api/converse`) lets the model talk to itself in a
 chat view that reads newest first: a new turn is appended to the top and pushes
@@ -84,12 +93,40 @@ need an LLM.
     npm install
     npm run build                           # writes frontend/dist
 
-`frontend/dist` is committed so the Python server can serve it with zero npm
-steps. From `RadixCyclicNN/`:
+`frontend/dist` is committed so a server can serve it with zero npm steps. From
+`RadixCyclicNN/`, any of the three:
 
     python -m radixnet serve                # serves frontend/dist at http://127.0.0.1:8000/
+    make go-serve                           # the Go count / reward model
+    make rust-serve                         # the Rust count / reward model
 
 Rebuild and recommit `dist` whenever `src/` changes.
+
+## The three servers, and what each one can fill
+
+The same bundle runs against all three, because they answer the same JSON
+contract (`../DESIGN.md` §12) and `/api/status` says which one is replying in
+`engine`. What differs is how much of the contract each one has:
+
+| engine | what it serves |
+|---|---|
+| `python` | everything: every panel in the list above |
+| `go` | the model, the negative network, the tutor, code, the agent and the LLM clients; no scheduler and no MCP |
+| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Network settings and Graph, over any encoding |
+
+All three switch between a character and a word **encoding** from the selector
+in Network settings. An encoding is fixed for a model's life - the labels, the
+split rules and the file are all measured in its units - so switching is to a
+different model, and the one that was running is kept as it was left: switch to
+words, back, and forward again and the training is still there. Each encoding
+has its own file (`model.count.json`, `model.word.json`), and saving follows
+whichever is active. `POST /api/reset` is where a new encoding is chosen.
+
+A panel whose API the running server does not have **hides itself** rather than
+failing: `App.jsx` reads `engine` from `/api/status` and drops the tabs that
+engine cannot answer. So the Rust badge in the status bar is also the
+explanation for the shorter tab row, and nothing in the app has to be rebuilt to
+point it at a different one.
 
 ## Network settings
 

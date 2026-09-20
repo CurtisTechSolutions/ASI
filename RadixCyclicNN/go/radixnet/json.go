@@ -18,6 +18,10 @@ import (
 const (
 	ModelFormat        = "radixnet-count"
 	ModelFormatVersion = 1
+	// WordFormat is the word model's own format, so that every reader written
+	// before it existed refuses the file by the check it already makes
+	// (../../SPEC-WordNGrams.md).
+	WordFormat = "radixnet-word"
 )
 
 type nodesDoc struct {
@@ -144,6 +148,15 @@ func (w *weightsDoc) UnmarshalJSON(b []byte) error {
 }
 
 func (w *weightsDoc) has(key string) bool { return w != nil && w.present[key] }
+
+// countWeightKeys are the keys MarshalJSON writes for the count form.
+func countWeightKeys() map[string]bool {
+	return map[string]bool{
+		"function": true, "count_scale": true, "global_scale": true, "window_scale": true, "reward_scale": true,
+		"path_scale": true, "window": true, "smoothing": true, "kind": true, "total_traversals": true,
+		"total_traversals_resets": true, "window_events": true,
+	}
+}
 
 // GraphDoc is the JSON layout of a graph (the "graph" block of a model file).
 type GraphDoc struct {
@@ -272,7 +285,11 @@ func (g *Graph) ToDoc() *GraphDoc {
 		doc.Edges.CountResets = nil
 	}
 	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward",
-		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events}
+		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events,
+		// which keys this block carries, exactly as UnmarshalJSON records them for a file: a
+		// document handed straight back to GraphFromDoc (a test, a copy) then reads like the
+		// file it would have been, instead of like one written before the dual frequency function
+		present: countWeightKeys()}
 	rows := make([][3]int64, 0, len(g.paths))
 	keys := make([][2]int, 0, len(g.paths))
 	for key, row := range g.paths {
@@ -675,8 +692,8 @@ func (m *Model) ToDoc() *ModelDoc {
 // FromDoc rebuilds a model from its document: the count / reward model, or the
 // negative network (the format decides, as in Python's load_model).
 func FromDoc(d *ModelDoc) (*Model, error) {
-	if d.Format != ModelFormat && d.Format != NegativeFormat {
-		return nil, fmt.Errorf("not a %s or %s model document", ModelFormat, NegativeFormat)
+	if d.Format != ModelFormat && d.Format != NegativeFormat && d.Format != WordFormat {
+		return nil, fmt.Errorf("not a %s, %s or %s model document", ModelFormat, WordFormat, NegativeFormat)
 	}
 	if d.Version > ModelFormatVersion {
 		return nil, fmt.Errorf("unsupported %s model version %d", d.Format, d.Version)

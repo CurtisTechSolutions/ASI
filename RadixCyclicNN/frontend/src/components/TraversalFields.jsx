@@ -12,6 +12,10 @@ import { TRAVERSALS, useNetworkSettings } from "../hooks/useNetworkSettings.jsx"
  * accumulated the least punishment. The two scales say how heavily a
  * punishment counts and how heavily what the corpus did counts; a merit scale
  * of 0 is the pure form, where nothing but the punishments decides.
+ * **least-punished** changes no price at all: it changes the *ranking*, so a
+ * walk goes by the blame on its worst step before its cost and blame cannot be
+ * bought off with rewards elsewhere (../../SPEC-LeastPunished.md). It belongs
+ * to the count model, which is the one that keeps the judged paths it reads.
  *
  * The setting is shared (`useNetworkSettings`), so this control is the same
  * control wherever it appears: the Network settings tab, Predict and Generate
@@ -56,6 +60,13 @@ export default function TraversalFields({ compact = false }) {
           accumulated the <b>least punishment</b>.
         </p>
       ) : null}
+      {traversal === "least-punished" && compact ? (
+        <p className="muted">
+          The prices are untouched; the <b>ranking</b> changes. A walk goes by the blame on its <b>worst step</b>,
+          cost only to break ties, and a node offers only the children it has the least against — so blame cannot
+          be bought off with rewards elsewhere. The count model keeps the judged paths this reads.
+        </p>
+      ) : null}
       {!compact ? (
         <>
           <p className="muted">
@@ -71,8 +82,15 @@ export default function TraversalFields({ compact = false }) {
             through the failures instead of the likeliest one.
           </p>
           <p className="muted">
+            <b>least-punished</b> is a third thing again: it leaves every price alone and changes what the walks
+            are <i>ranked</i> by. A path goes by the punishment on its <b>worst step</b> first and by its summed
+            cost only to break ties, and a node offers only the children it has the least against — so a heavily
+            punished step cannot be paid for with rewards further along, which the summed cost of the other two
+            allows. It belongs to the count model, the one that keeps a record of what each path did.
+          </p>
+          <p className="muted">
             The traversal is <i>what</i> a search looks for; the mode (dijkstra / k-best / beam / sample) is{" "}
-            <i>how</i> it looks. They are independent - every mode can run either traversal. The setting is used
+            <i>how</i> it looks. They are independent - every mode can run any of the three. The setting is used
             by the <b>Predict</b> and <b>Generate</b> tabs, which show the same control.
           </p>
         </>

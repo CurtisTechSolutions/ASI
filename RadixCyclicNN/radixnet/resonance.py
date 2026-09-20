@@ -1403,6 +1403,7 @@ class ResonantNet(GraphModel):
             "grams": graph.num_trigrams(),
             "encoding": str(self.encoding),
             "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
             "compression_ratio": graph.compression_ratio(),

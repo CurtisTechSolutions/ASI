@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
+import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
@@ -164,8 +164,8 @@ export default function ConversePanel({ status }) {
         />
         <div className="row">
           <NumberField label="Turns" hint="per run" value={turns} onChange={setTurns} min={0} step={1} />
-          <NumberField label="Context" hint="characters picked up" value={context} onChange={setContext} min={0} step={1} />
-          <NumberField label="Max length" hint="characters added per turn" value={maxLength} onChange={setMaxLength} min={0} step={1} />
+          <NumberField label="Context" hint={`${unitName(status)} picked up`} value={context} onChange={setContext} min={0} step={1} />
+          <NumberField label="Max length" hint={`${unitName(status)} added per turn`} value={maxLength} onChange={setMaxLength} min={0} step={1} />
         </div>
         <div className="row">
           <SelectField

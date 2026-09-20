@@ -16,6 +16,7 @@ import { useStoredState } from "./useStoredState.js";
 export const TRAVERSALS = [
   ["reward", "reward (follow what was rewarded)"],
   ["punishment", "punishment (avoid what was punished)"],
+  ["least-punished", "least-punished (rank by the worst step's blame)"],
 ];
 
 export const DEFAULTS = Object.freeze({ traversal: "reward", penaltyScale: "1", meritScale: "1" });
@@ -31,8 +32,14 @@ const FALLBACK = Object.freeze({
 
 const NetworkSettings = createContext(null);
 
-/** The request fields for a traversal; `{}` for the default, so an older server is unaffected. */
+/**
+ * The request fields for a traversal; `{}` for the default, so an older server
+ * is unaffected. The least-punished traversal has no scales of its own - it
+ * reads the blame off the graph rather than pricing a step with it - so it
+ * travels as the name alone (../../SPEC-LeastPunished.md).
+ */
 export function traversalBody(traversal, penaltyScale, meritScale) {
+  if (traversal === "least-punished") return { traversal };
   if (traversal !== "punishment") return {};
   const number = (value, fallback) => {
     const parsed = Number.parseFloat(value);

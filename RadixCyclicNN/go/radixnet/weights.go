@@ -289,10 +289,43 @@ func (g *Graph) Invert() {
 
 // -- costs -------------------------------------------------------------------------
 
-// ChildCost is one out-edge of a node with its -log softmax probability.
+// ChildCost is one out-edge of a node with its -log softmax probability and
+// the punishment the model carries against that step (see EdgePunishment).
 type ChildCost struct {
 	Child, Edge int
 	Cost        float64
+	Punish      float64
+}
+
+// EdgePunishment is what the model has been taught *against* one edge: the
+// penalty side of its reward, on the same scale the reward function uses.
+//
+// It is deliberately one-sided.  A rewarded edge is not *less* punished than an
+// edge nothing was ever said about - it is exactly as unpunished, which is what
+// lets the least-punished traversal (search.go) rank walks by what went wrong on
+// them instead of by what went well.
+func (g *Graph) EdgePunishment(e int) float64 {
+	if e < 0 || e >= len(g.EdgeReward) {
+		return 0
+	}
+	return g.RewardScale * math.Max(0, -g.EdgeReward[e])
+}
+
+// StepPunishment is the punishment of one step taken from prev: the edge's own,
+// plus PathScale * log(1 + incorrect) for the walks that came from prev and
+// were judged wrong here.  prev < 0 is a step with no judged context.
+//
+// The second term counts the failures alone - not the failures against the
+// successes, the way the cost function's path term weighs them.  That is the
+// point: a step that was wrong here once is a step that was wrong here, and no
+// amount of being right afterwards makes it a step nothing is held against.
+// Blame cannot be bought off, which is what the traversal is for.
+func (g *Graph) StepPunishment(prev, e int) float64 {
+	punish := g.EdgePunishment(e)
+	if prev >= 0 && g.PathScale != 0 && len(g.paths) > 0 {
+		punish += g.PathScale * math.Log1p(float64(g.PathIncorrect(prev, e)))
+	}
+	return punish
 }
 
 // ensureCosts recomputes the per-edge costs when weights or structure changed
@@ -303,6 +336,7 @@ func (g *Graph) ensureCosts() {
 	}
 	if len(g.edgeCost) != len(g.EdgeW) {
 		g.edgeCost = make([]float64, len(g.EdgeW))
+		g.edgePunish = make([]float64, len(g.EdgeW))
 	}
 	n := len(g.Labels)
 	row := func(p int) {
@@ -324,6 +358,7 @@ func (g *Graph) ensureCosts() {
 		for i := range adj.order {
 			e := adj.edges[i]
 			g.edgeCost[e] = lse - g.EdgeW[e]
+			g.edgePunish[e] = g.EdgePunishment(e)
 		}
 	}
 	if n < 4096 || g.Workers == 1 {
@@ -397,9 +432,12 @@ func (g *Graph) ensureContextCosts() {
 			continue
 		}
 		weights := make([]float64, len(adj.order))
+		punish := make([]float64, len(adj.order))
 		m := math.Inf(-1)
 		for i := range adj.order {
-			weights[i] = g.EdgeW[adj.edges[i]] + g.PathScale*g.PathTerm(pair.Prev, adj.edges[i])
+			e := adj.edges[i]
+			weights[i] = g.EdgeW[e] + g.PathScale*g.PathTerm(pair.Prev, e)
+			punish[i] = g.edgePunish[e] + g.PathScale*math.Log1p(float64(g.PathIncorrect(pair.Prev, e)))
 			if weights[i] > m {
 				m = weights[i]
 			}
@@ -411,7 +449,7 @@ func (g *Graph) ensureContextCosts() {
 		lse := m + math.Log(fsum(terms))
 		costs := make([]ChildCost, len(adj.order))
 		for i, c := range adj.order {
-			costs[i] = ChildCost{c, adj.edges[i], lse - weights[i]}
+			costs[i] = ChildCost{c, adj.edges[i], lse - weights[i], punish[i]}
 		}
 		cache[pair] = costs
 	}
@@ -428,7 +466,7 @@ func (g *Graph) ChildCosts(p int) []ChildCost {
 	out := make([]ChildCost, len(adj.order))
 	for i, c := range adj.order {
 		e := adj.edges[i]
-		out[i] = ChildCost{c, e, g.edgeCost[e]}
+		out[i] = ChildCost{c, e, g.edgeCost[e], g.edgePunish[e]}
 	}
 	return out
 }

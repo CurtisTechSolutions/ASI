@@ -175,7 +175,7 @@ func cmdOllamaCorpus(args []string) {
 		}
 		target := *modelOut
 		if target == "" {
-			target = modelPath
+			target = modelFile()
 		}
 		if err := m.Save(target); err != nil {
 			fail("cannot save %s: %v", target, err)

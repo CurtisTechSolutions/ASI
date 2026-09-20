@@ -37,7 +37,7 @@ from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
-from .search import PathResult, dijkstra_predict, sample_walk
+from .search import LEAST_PUNISHED, REWARD, PathResult, dijkstra_predict, parse_traversal, sample_walk
 from .schedule import preview_points
 
 __all__ = [
@@ -318,6 +318,15 @@ class GraphModel:
     kind = "graph"
     label = "graph model"
     description = ""
+    units = "chars"
+    """What a *new* model of this kind counts in; the encoding decides for a live one."""
+
+    @property
+    def counts_in(self) -> str:
+        """What this model counts in - ``"chars"``, or ``"words"`` under a word encoding."""
+        return self.encoding.units_name
+    """What this kind counts in: its symbols, as a reader of ``length``, ``max_length`` or ``per_char`` needs
+    them named.  Characters everywhere but the word model (``../SPEC-WordNGrams.md``)."""
 
     graph: RadixCyclicGraph
     encoder: Encoder
@@ -620,7 +629,9 @@ class GraphModel:
         """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
         continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
         ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`.  ``traversal``
-        picks the cost function the search reads the graph through (:mod:`radixnet.penalty`)."""
+        picks the cost function the search reads the graph through
+        (``"punishment"``, :mod:`radixnet.penalty`) or, with ``"least-punished"``,
+        what a walk is *ranked* by (``../SPEC-LeastPunished.md``)."""
         graph = self.graph
         traversal = resolve_traversal(traversal)
         costs = traversal_costs(graph, traversal, penalty_scale, merit_scale)
@@ -637,14 +648,14 @@ class GraphModel:
                 max_chars = max(want, cap - len(lead))
             top, bottom, expanded = beam_predict(
                 graph, node, offset, min_chars=want, k=k, beam=beam, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end, costs=costs,
+                step_penalty=step_penalty, to_end=to_end, costs=costs, traversal=traversal,
             )
             width = default_beam(k) if beam is None else int(beam)
         else:
             cap = max_length if max_length is not None else length
             walk = sample_walk(
                 graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng,
-                costs=costs,
+                costs=costs, traversal=traversal,
             )
             top, bottom, expanded, width = [walk], [], walk.expanded, 0
         enc = self.encoding
@@ -761,13 +772,19 @@ class GraphModel:
         counted as transitions.  An unknown trigram, a missing edge or a
         transition that would need a split contributes ``log(UNKNOWN_PROB)``
         and is counted in ``unknown_transitions``.
+
+        ``chars`` and ``per_char`` are in the encoding's **units**: characters
+        under the default encoding, words under a word one.  ``units`` says
+        which, because a per-word number read as per-character is read wrong.
         """
         if not isinstance(text, str):
             raise TypeError("text must be a string")
         grams = self.encoder.encode(text)
-        chars = len(text)
+        chars = self.encoding.length(text)
+        units = self.encoding.units_name
         if not grams:
-            return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0, "unknown_transitions": 0}
+            return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0,
+                    "unknown_transitions": 0, "units": units}
         index = self.graph.trigram_index
         log_prob = 0.0
         transitions = 0
@@ -808,6 +825,7 @@ class GraphModel:
             "chars": chars,
             "transitions": transitions,
             "unknown_transitions": unknown,
+            "units": units,
         }
 
     # -- structure -----------------------------------------------------------
@@ -906,7 +924,7 @@ class RadixNet(GraphModel):
 
         transitions, observed_version = self._observe(texts, count=True)
         meta_add(meta, "trained_texts", len(texts))
-        meta_add(meta, "trained_chars", sum(len(t) for t in texts))
+        meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         pending_merges = graph.compress() if cfg.auto_compress else 0
 
         parents_all: list[int] = []
@@ -1027,7 +1045,16 @@ class RadixNet(GraphModel):
         and ``merit_scale`` what the corpus did; ``merit_scale = 0`` is the
         pure form, where nothing but the punishments decides.  Both are
         ignored by the reward traversal.
+
+        ``"least-punished"`` is the count model's own traversal and is refused
+        here: it ranks a walk by the blame on its **worst step**, which needs
+        the judged paths this model does not keep (``../SPEC-LeastPunished.md``).
         """
+        if parse_traversal(traversal) == LEAST_PUNISHED:
+            raise ValueError(
+                f"the {traversal!r} traversal belongs to the count model; this model keeps no record of failure "
+                "to rank a walk by (its punishments price a step instead: --traversal punishment)"
+            )
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "dijkstra").lower()
         if mode not in ("dijkstra", "beam", "sample"):
@@ -1312,6 +1339,7 @@ class RadixNet(GraphModel):
             "grams": g.num_trigrams(),
             "encoding": str(self.encoding),
             "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
@@ -1369,7 +1397,7 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"negative"`` and ``"resonant"``)."""
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"word"``, ``"negative"``, ``"resonant"``)."""
     from .countnet import CountRewardNet  # local imports: they all build on this module
     from .negative import NegativeNet
     from .resonance import ResonantNet
@@ -1383,8 +1411,11 @@ def model_classes() -> dict[str, type[GraphModel]]:
 
 
 def model_kinds() -> list[dict]:
-    """``[{"kind", "label", "description"}]`` for menus and help texts."""
-    return [{"kind": c.kind, "label": c.label, "description": c.description} for c in model_classes().values()]
+    """``[{"kind", "label", "description", "units"}]`` for menus and help texts."""
+    return [
+        {"kind": c.kind, "label": c.label, "description": c.description, "units": c.units}
+        for c in model_classes().values()
+    ]
 
 
 def model_class(kind: str | None) -> type[GraphModel]:
