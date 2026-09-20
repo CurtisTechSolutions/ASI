@@ -86,8 +86,11 @@ from .codegen import (
     parse_problem_file,
     parse_problems,
 )
+from .encoding import (
+    BACK_LABEL, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
+    word_rows,
+)
 from .gan import EvolveConfig, Evolver
-from .encoding import WINDOW
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
@@ -101,9 +104,9 @@ from .model import (
     model_class,
     model_kinds,
     new_model,
-    traversal_option,
 )
 from .negative import NegativeNet
+from .penalty import DEFAULT_TRAVERSAL, resolve_traversal
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
     DEFAULT_URL as OLLAMA_DEFAULT_URL,
@@ -523,7 +526,7 @@ class ModelService:
         return {
             "kind": self.kind,
             "label": type(self.model).label,
-            "units": type(self.model).units,
+            "units": self.model.encoding.units_name,
             "kinds": kinds,
             "model_path": self.model_path_for(self.kind),
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
@@ -704,7 +707,7 @@ class ModelService:
         stats.update(
             kind=self.kind,
             model_label=type(self.model).label,
-            units=type(self.model).units,
+            units=self.model.encoding.units_name,
             kinds=model_kinds(),
             job=job.to_dict() if job is not None else None,
             backends=self.backends,
@@ -772,9 +775,6 @@ class ModelService:
         ``guard=False`` hands out what the positive model wrote, unfiltered.
         """
         with self.session() as model:
-            # pop before the merge: ``{**options, ...}`` would copy the key back in
-            asked = options.pop("traversal", "reward")
-            options = {**options, **traversal_option(model, asked)}
             result = model.predict(prefix, **options)
             pair = self.guard(model) if guard else None
             report = None
@@ -798,7 +798,7 @@ class ModelService:
         }
         if isinstance(result, Prediction):
             payload.update(
-                mode=result.mode, k=result.k, beam=result.beam,
+                mode=result.mode, k=result.k, beam=result.beam, traversal=result.traversal,
                 top=[_path_dict(r) for r in result.top], bottom=[_path_dict(r) for r in result.bottom],
             )
         return payload
@@ -814,9 +814,6 @@ class ModelService:
         ``guard=False`` returns what the positive model wrote, unfiltered.
         """
         with self.session() as model:
-            # pop before the merge: ``{**options, ...}`` would copy the key back in
-            asked = options.pop("traversal", "reward")
-            options = {**options, **traversal_option(model, asked)}
             pair = self.guard(model) if guard else None
             if pair is None:
                 return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
@@ -932,15 +929,27 @@ class ModelService:
             }
 
     def words(self, limit: int = 50) -> dict:
-        """The word model's alphabet: the words it has read and how much of the graph each one holds."""
+        """A word encoding's alphabet: the words the graph has read and how many grams hold each.
+
+        There is no vocabulary object to read - a gram is text - so the
+        alphabet is whatever the graph's grams are made of, which is the one
+        count that survives compression.
+        """
         if limit < 0:
             raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
         with self.session() as model:
-            if not hasattr(model, "top_words"):
-                raise ApiError(400, f"the {model.kind} model has no vocabulary; it counts in {type(model).units}")
+            encoding = model.encoding
+            if encoding.unit != WORDS:
+                raise ApiError(
+                    400,
+                    f"this model counts in {encoding.units_name}, so it has no words to list; "
+                    f"a word alphabet needs a word encoding (--encoding word:{encoding.n}:{encoding.stride})",
+                )
+            rows = word_rows(encoding, model.graph.trigram_index)
             return {
-                "words": model.top_words(limit=limit), "limit": limit,
-                "vocabulary": len(model.vocabulary), "units": type(model).units,
+                "words": rows[:limit] if limit > 0 else rows, "limit": limit,
+                "vocabulary": len(rows), "units": encoding.units_name,
+                "encoding": str(encoding),
             }
 
     def node_ratios(self, limit: int = 20, node: str | None = None) -> dict:
@@ -1235,8 +1244,14 @@ class ModelService:
         model = load_model(path, backend=self.backend_name, device=self.device)
         return self._replace_model(model)
 
-    def reset(self, seed: int | None = None, kind: str | None = None, **options: Any) -> dict:
+    def reset(
+        self, seed: int | None = None, kind: str | None = None, encoding: Encoding | None = None, **options: Any
+    ) -> dict:
         """Replace the model with a fresh one (``seed`` defaults to the server seed; ``kind`` to the active kind).
+
+        ``encoding`` is how the new model reads text - the unit, the n of the
+        n-gram and the stride - and is fixed for its life; ``None`` is the
+        character trigram.
 
         ``options`` are the score-function settings of the kind that has them:
         ``count_scale``, ``global_scale``, ``window_scale``, ``reward_scale``
@@ -1250,10 +1265,118 @@ class ModelService:
         if extra and not hasattr(cls, "weight_config"):
             raise ApiError(400, f"weight options ({', '.join(sorted(extra))}) do not apply to the {cls.kind} model")
         try:
-            model = cls(seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device, **extra)
+            model = cls(
+                seed=self.seed if seed is None else seed, backend=self.backend_name, device=self.device,
+                encoding=encoding, **extra,
+            )
         except (TypeError, ValueError) as exc:
             raise ApiError(400, str(exc)) from exc
         return self._replace_model(model)
+
+    # -- the encoding: what a text becomes before the graph ever sees it -----
+
+    def encoding(self) -> dict:
+        """The encoding the active model reads in: the unit, the n of the n-gram, the stride, the sentinels.
+
+        It is a *choice*, and ``configurable`` says so - but one made when a
+        model is created and fixed for its life, because the graph's labels,
+        its splits and merges and its saved file are all written in it.
+        ``POST /api/reset`` is where it is chosen; a model trained at one
+        encoding cannot be read at another.
+        """
+        enc = self.model.encoding
+        return {
+            "encoding": str(enc),
+            "unit": enc.unit,
+            "window": enc.n,
+            "ngram": enc.n,
+            "stride": enc.stride,
+            "overlap": enc.overlap,
+            "start_label": START_LABEL,
+            "end_label": END_LABEL,
+            "back_label": BACK_LABEL,
+            "configurable": True,
+            "note": (
+                f"Text goes in as {enc.describe()}, and comes back out of the (possibly compressed) node "
+                "labels along a path. The encoding is fixed for a model's life - every label is written in "
+                'it - so it is chosen when a model is made: POST /api/reset with {"encoding": "word:2:1"}, '
+                "or {unit, ngram, stride}."
+            ),
+        }
+
+    def encoding_preview(self, text: str) -> dict:
+        """One text through the encoder and back through both decoders.
+
+        ``windows`` is what the model's :class:`~radixnet.encoding.Encoding`
+        makes of the text and ``decoded`` what its decoder makes of those again
+        - ``round_trip`` is whether the two agree, which they do for any text
+        the encoding can represent (:meth:`Encoding.normalize`).  ``path`` is the same
+        text through the *graph*: the nodes it walks and what
+        :meth:`Decoder.decode_path` reads back off their labels, which is where
+        the radix compression becomes visible - a node whose label is longer
+        than the window is a merged chain.  ``path.known`` is false when the
+        structure cannot walk the text as it stands, and ``path.reason`` says
+        which of the reasons it is: windows never seen (they are listed in
+        ``unknown_windows``), or a text every window of which *is* known that
+        still cannot be walked from START to END - a missing edge, a step into
+        the middle of a merged node, or a text that is only part of one the
+        model was trained on, since the walk has to reach the end of a text.
+        """
+        if not isinstance(text, str):
+            raise ApiError(400, "'text' must be a string")
+        enc = self.model.encoding
+        encoder, decoder = Encoder(encoding=enc), Decoder(encoding=enc)
+        windows = encoder.encode(text)
+        decoded = decoder.decode_trigrams(windows)
+        info = {
+            **self.encoding(),
+            "text": text,
+            "chars": enc.length(text),
+            "windows": windows,
+            "count": len(windows),
+            "decoded": decoded,
+            # what comes back is what the encoding can represent
+            "round_trip": decoded == enc.normalize(text),
+        }
+        with self.session() as model:
+            graph = model.graph
+            index = graph.trigram_index
+            unknown = [w for w in windows if w not in index]
+            info["unknown_windows"] = unknown
+            walked = graph.node_path(windows) if windows else None
+            if walked is None:
+                if not windows:
+                    reason = f"the text is shorter than one window ({enc.n} {enc.unit}s)"
+                elif unknown:
+                    reason = (
+                        f"{len(unknown)} of the {len(windows)} windows have never been seen: "
+                        + ", ".join(json.dumps(w) for w in unknown[:5])  # the Go port quotes them the same way
+                        + ("..." if len(unknown) > 5 else "")
+                    )
+                else:
+                    reason = (
+                        "every window is known, but the structure cannot walk the whole text from START to END "
+                        "as it stands - a missing edge, a step into the middle of a merged node, or a text that "
+                        "is only part of one it was trained on (the walk has to reach the end of a text)"
+                    )
+                info["path"] = {
+                    "known": False, "reason": reason,
+                    "labels": [], "node_ids": [], "decoded": "", "nodes": 0, "compressed": 0,
+                }
+            else:
+                labels = [graph.labels[n] for n in walked]
+                real = [graph.labels[n] for n in walked if n not in (START, END)]
+                info["path"] = {
+                    "known": True,
+                    "reason": None,
+                    "labels": labels,
+                    "node_ids": list(walked),
+                    "decoded": decoder.decode_path(real, 0, True, skip_sentinels=False),
+                    "nodes": len(real),
+                    "compressed": sum(1 for label in real if enc.length(label) > enc.n),
+                }
+            info["kind"] = model.kind
+        return info
 
     def configure_weights(self, **options: Any) -> dict:
         """Change the active model's score function (400 for RadixNet); returns the config and stats.
@@ -2363,6 +2486,15 @@ def _r_job_stop(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.stop_job()
 
 
+def _traversal_fields(f: Fields) -> dict:
+    """``traversal`` and its two scales, as every search endpoint reads them (:mod:`radixnet.penalty`)."""
+    return {
+        "traversal": resolve_traversal(f.text("traversal", DEFAULT_TRAVERSAL)),
+        "penalty_scale": f.number("penalty_scale", 1.0, minimum=0.0),
+        "merit_scale": f.number("merit_scale", 1.0, minimum=0.0),
+    }
+
+
 def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     prefix = f.text("prefix")
     return 200, svc.predict(
@@ -2376,7 +2508,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         max_length=f.integer("max_length", None, minimum=0),
         k=f.integer("k", 5, minimum=0),
         beam=f.integer("beam", None, minimum=1),
-        traversal=f.text("traversal", "reward"),
+        **_traversal_fields(f),
     )
 
 
@@ -2391,7 +2523,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         prefix=f.text("prefix", ""),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
         beam=f.integer("beam", None, minimum=1),
-        traversal=f.text("traversal", "reward"),
+        **_traversal_fields(f),
     )
 
 
@@ -2514,12 +2646,44 @@ def _weight_options(f: Fields) -> dict:
     }
 
 
+def _encoding_option(f: Fields) -> Encoding | None:
+    """``encoding`` as a spec, or the three dials on their own; ``None`` when nothing was asked for."""
+    spec = f.text("encoding", None) or ""
+    unit = f.text("unit", None) or ""
+    n = f.integer("ngram", None)
+    stride = f.integer("stride", None)
+    if not (spec or unit or n is not None or stride is not None):
+        return None
+    try:
+        enc = parse_encoding(spec)
+        if unit:
+            enc = Encoding(unit=unit, n=enc.n, stride=enc.stride)
+        if n is not None:
+            enc = Encoding(unit=enc.unit, n=n, stride=min(enc.stride if enc.sliding else n, n))
+        if stride is not None:
+            enc = Encoding(unit=enc.unit, n=enc.n, stride=stride)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return enc
+
+
 def _r_reset(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.reset(f.integer("seed", None), kind=f.text("kind", None) or None, **_weight_options(f))
+    return 200, svc.reset(
+        f.integer("seed", None), kind=f.text("kind", None) or None, encoding=_encoding_option(f),
+        **_weight_options(f),
+    )
 
 
 def _r_model_weights(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.configure_weights(**_weight_options(f))
+
+
+def _r_encoding(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.encoding()
+
+
+def _r_encoding_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.encoding_preview(f.text("text", "") or "")
 
 
 def _r_model(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3751,11 +3915,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/job/stop", _r_job_stop, "ask the running job to stop"),
     ("POST", "/api/predict", _r_predict,
      "continue a prefix: {prefix, length, mode: dijkstra | beam | sample, to_end, step_penalty, temperature, max_length "
-     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), guard (default on: "
-     "the negative network vetoes the continuations it recognises as failures)}"),
+     "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), traversal: reward "
+     "(default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest "
+     "path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), guard "
+     "(default on: the negative network vetoes the continuations it recognises as failures)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
-     "dijkstra, temperature, seed, prefix, step_penalty, beam, guard (default on: the model over-samples and the "
+     "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
+     "penalty_scale, merit_scale, guard (default on: the model over-samples and the "
      "negative network vetoes what it recognises as failure)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
@@ -3786,9 +3953,20 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/save", _r_save, "save the model: {path} (default: the server's model path)"),
     ("POST", "/api/load", _r_load, "load a model file: {path}"),
     ("POST", "/api/reset", _r_reset,
-     "replace the model with a fresh one: {seed, kind, and the kind's score-function settings - count: "
-     "count_scale, global_scale, window_scale, reward_scale, window; resonant: buckets, period, kick_scale, "
-     "resonance_scale, amp_scale, reward_scale, concentration}"),
+     "replace the model with a fresh one: {seed, kind, encoding | unit + ngram + stride, and the kind's "
+     "score-function settings - count: count_scale, global_scale, window_scale, reward_scale, window; resonant: "
+     "buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, concentration}.  The encoding is how "
+     "text becomes grams and is fixed for the model's life: unit char | word, ngram the n of the n-gram, stride the "
+     "units between two grams (1 = sliding window, n = non-overlapping groups); \"encoding\" sets all three "
+     "(char:3:1 the default, char:5:5 groups of five letters, word:2:1 word bigrams, word:3:1 word trigrams)"),
+    ("GET", "/api/encoding", _r_encoding,
+     "the text encoding the active model reads in: {encoding, unit, window (the n of the n-gram), ngram, stride, "
+     "overlap, start_label, end_label, back_label, configurable: true (fixed for a model's life, chosen when one "
+     "is made - see POST /api/reset), note}"),
+    ("POST", "/api/encoding/preview", _r_encoding_preview,
+     "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, "
+     "round_trip, kind, path: {known, reason, labels, node_ids, decoded, nodes, compressed}} - path is the text "
+     "through the graph's own (possibly merged) node labels"),
     ("POST", "/api/model/weights", _r_model_weights,
      "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
      "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "

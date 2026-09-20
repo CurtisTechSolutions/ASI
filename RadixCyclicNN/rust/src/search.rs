@@ -4,6 +4,7 @@
 use crate::fsum::fsum;
 use crate::graph::{Graph, BACK, END, START};
 use crate::mt19937::Mt19937;
+use crate::penalty::PenaltyCosts;
 use crate::weights::ChildCost;
 
 /// How a walk chooses its way through the graph.
@@ -44,14 +45,19 @@ impl std::fmt::Display for Traversal {
 /// Reads a traversal name: `""`, `"reward"` or `"rewards"` for the original
 /// search, `"least-punished"` (also `"least_punished"`, `"punished"`,
 /// `"punish"`, `"blame"`) for the one that follows the blame.
+/// Reads a traversal name as a *ranking*.
+///
+/// `"punishment"` is the other punishment traversal ([`crate::penalty`]), which
+/// prices a step rather than ordering the walks: the beams rank it exactly as
+/// they rank a rewarded one, so it reads as [`Traversal::Reward`] here and is
+/// never an alias of [`Traversal::LeastPunished`] - the two are different
+/// currencies.
 pub fn parse_traversal(name: &str) -> Result<Traversal, String> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "" | "reward" | "rewards" | "cost" => Ok(Traversal::Reward),
-        "least-punished" | "least_punished" | "leastpunished" | "punished" | "punish" | "blame" => {
-            Ok(Traversal::LeastPunished)
-        }
+        "" | "reward" | "rewards" | "cost" | "punishment" | "penalty" => Ok(Traversal::Reward),
+        "least-punished" | "least_punished" | "leastpunished" | "blame" => Ok(Traversal::LeastPunished),
         other => Err(format!(
-            "unknown traversal {other:?}; expected 'reward' or 'least-punished'"
+            "unknown traversal {other:?}; expected 'reward', 'punishment' or 'least-punished'"
         )),
     }
 }
@@ -233,6 +239,7 @@ impl Graph {
         temperature: f64,
         rng: Option<&mut Mt19937>,
         include_context: Option<bool>,
+        costs: Option<&PenaltyCosts>,
         traversal: Traversal,
     ) -> Result<PathResult, String> {
         self.prepare();
@@ -244,6 +251,7 @@ impl Graph {
                 temperature,
                 rng,
                 include_context,
+                costs,
                 traversal,
             ),
             None => {
@@ -256,6 +264,7 @@ impl Graph {
                     temperature,
                     &mut own,
                     include_context,
+                    costs,
                     traversal,
                 );
                 self.rng = own;
@@ -274,6 +283,7 @@ impl Graph {
         temperature: f64,
         rng: &mut Mt19937,
         include_context: Option<bool>,
+        walk_costs: Option<&PenaltyCosts>,
         traversal: Traversal,
     ) -> Result<PathResult, String> {
         if temperature < 0.0 {
@@ -293,7 +303,7 @@ impl Graph {
                 break;
             }
             // a node the model expects to go round offers nothing
-            self.child_costs_into(node, came_from, &mut costs);
+            self.step_costs_into(node, came_from, walk_costs, &mut costs);
             onward(&mut costs);
             if traversal == Traversal::LeastPunished {
                 least_punished(&mut costs);

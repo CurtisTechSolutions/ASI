@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// Version is this implementation's version, kept equal to the Python
+// package's __version__ so a client that asks either one gets the same answer.
+const Version = "0.1.0"
+
 // UnknownProb is the probability charged for a transition the structure does not know.
 const UnknownProb = 1e-6
 
@@ -59,9 +63,6 @@ func newModelWithGraph(g *Graph) *Model {
 func (m *Model) Kind() string {
 	if m.G != nil && m.G.IsNegative() {
 		return "negative"
-	}
-	if m.G.IsWords() {
-		return "word"
 	}
 	return "count"
 }
@@ -141,12 +142,23 @@ func (m *Model) metaAddFloat(key string, delta float64) { m.Meta[key] = toFloat(
 
 // -- text helpers ---------------------------------------------------------------------------
 
-// cleanTexts drops texts shorter than a trigram; returns (usable, skipped).
-func cleanTexts(texts []string) ([]string, int) {
+// Encoding is how this model turns text into grams and back (Graph.Enc).
+func (m *Model) Encoding() Encoding {
+	if m.G == nil {
+		return DefaultEncoding()
+	}
+	return m.G.Enc
+}
+
+// Encode cuts a text into this model's grams.
+func (m *Model) Encode(text string) []string { return m.Encoding().Encode(text) }
+
+// cleanTexts drops texts too short to hold a single gram; returns (usable, skipped).
+func cleanTexts(enc Encoding, texts []string) ([]string, int) {
 	kept := make([]string, 0, len(texts))
 	skipped := 0
 	for _, t := range texts {
-		if runeLen(t) < Window {
+		if enc.Len(t) < enc.N {
 			skipped++
 		} else {
 			kept = append(kept, t)
@@ -158,27 +170,12 @@ func cleanTexts(texts []string) ([]string, int) {
 // cleanTexts is cleanTexts over the model's symbols: a word model maps every
 // text to its words first (growing the vocabulary, which is what training
 // does) and then drops the texts of fewer than Window of them.
-func (m *Model) cleanTexts(texts []string) ([]string, int) {
-	if !m.IsWords() {
-		return cleanTexts(texts)
-	}
-	kept := make([]string, 0, len(texts))
-	skipped := 0
-	for _, t := range texts {
-		symbols := m.G.Vocab.Encode(t, true)
-		if runeLen(symbols) < Window {
-			skipped++
-		} else {
-			kept = append(kept, symbols)
-		}
-	}
-	return kept, skipped
-}
 
 // encodeAll encodes texts on the worker goroutines.
 func (m *Model) encodeAll(texts []string) [][]string {
+	enc := m.Encoding()
 	grams := make([][]string, len(texts))
-	parallelFor(len(texts), m.workers(), func(i int) { grams[i] = Encode(texts[i]) })
+	parallelFor(len(texts), m.workers(), func(i int) { grams[i] = enc.Encode(texts[i]) })
 	return grams
 }
 
@@ -491,22 +488,13 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		return nil, err
 	}
 	defer parts.Close()
-	if m.IsWords() {
-		// The reader maps every text to its words as it goes, so the graph downstream
-		// only ever sees symbols - and the ids are handed out in corpus order, which is
-		// what makes a Go vocabulary the same vocabulary as a Python one.  That order
-		// is the reader's: parts racing would number the words by the race, so a word
-		// model streams its parts in corpus order whatever was asked for.
-		parts = wordParts{Parts: parts, vocab: m.G.Vocab}
-		opts.ParallelParts = false
-	}
 	workers := m.workers()
 
 	// build the structure first (no counting) and compress it, so every pass -
 	// the first included - walks the same transitions
 	var stats streamStats
 	seq := newSequencer(parts.Len())
-	err = runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &stats, seq, func(part, idx int, chunk []string) error {
+	err = runParts(parts, m.Encoding(), chunkSize, workers, opts.Inflight, opts.ParallelParts, &stats, seq, func(part, idx int, chunk []string) error {
 		grams := m.encodeAll(chunk)
 		novel := make([]bool, len(chunk))
 		parallelFor(len(chunk), workers, func(i int) {
@@ -545,7 +533,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		var chunks int64
 		var passStats streamStats
 		seq := newSequencer(parts.Len())
-		err := runParts(parts, chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
+		err := runParts(parts, m.Encoding(), chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
 			atomic.AddInt64(&chunks, 1)
 			grams := m.encodeAll(chunk)
 			perText := make([][]Transition, len(chunk))
@@ -758,7 +746,7 @@ func (m *Model) pathsOf(texts []string) ([][]int, error) {
 	g := m.G
 	paths := make([][]int, 0, len(texts))
 	for _, text := range texts {
-		grams := Encode(text)
+		grams := g.Encode(text)
 		if grams == nil {
 			continue
 		}
@@ -788,7 +776,7 @@ type InvertPathsResult struct {
 // InvertPaths (failures): every edge of a text's path loses strength * 2 *
 // amount reward; amounts nil means 1 for every text.
 func (m *Model) InvertPaths(texts []string, amounts []float64, strength float64) (*InvertPathsResult, error) {
-	texts, _ = m.cleanTexts(texts)
+	texts, _ = cleanTexts(m.Encoding(), texts)
 	if amounts == nil {
 		amounts = make([]float64, len(texts))
 		for i := range amounts {
@@ -853,20 +841,32 @@ func (m *Model) InvertPaths(texts []string, amounts []float64, strength float64)
 
 // -- prediction ------------------------------------------------------------------------------------
 
-// locate finds where prefix ends in the graph: (node, offset, matched characters of the located trigram).
+// locate finds where prefix ends in the graph: (node, offset, matched units of
+// the located gram).
 func (m *Model) locate(prefix string) (node, offset, matched int) {
 	g := m.G
-	runes := []rune(prefix)
-	n := len(runes)
+	enc := g.Enc
+	u := enc.Units(prefix)
+	n := u.Len()
 	if n == 0 {
 		return Start, 0, 0
 	}
-	if n >= Window {
-		if nd, off, ok := g.Lookup(string(runes[n-Window:])); ok {
-			return nd, off, Window
+	if n >= enc.N {
+		// the gram the prefix ends on, then - when the stride skips it - the
+		// last gram of the prefix's own grid
+		if nd, off, ok := g.Lookup(u.Slice(n-enc.N, n)); ok {
+			return nd, off, enc.N
 		}
-		for _, k := range []int{Window - 1, 1} {
-			if nd, off, ok := m.bestTrigram(string(runes[n-k:])); ok {
+		if aligned := (n - enc.N) / enc.Stride * enc.Stride; aligned != n-enc.N {
+			if nd, off, ok := g.Lookup(u.Slice(aligned, aligned+enc.N)); ok {
+				return nd, off, enc.N
+			}
+		}
+		for _, k := range []int{enc.N - 1, 1} {
+			if k < 1 || k >= enc.N {
+				continue
+			}
+			if nd, off, ok := m.bestGram(u.Slice(n-k, n)); ok {
 				return nd, off, k
 			}
 		}
@@ -878,14 +878,14 @@ func (m *Model) locate(prefix string) (node, offset, matched int) {
 	return Start, 0, 0
 }
 
-// bestTrigram is the most visited (node, offset) holding a trigram that starts with key.
-func (m *Model) bestTrigram(key string) (int, int, bool) {
+// bestGram is the most visited (node, offset) holding a gram that starts with key.
+func (m *Model) bestGram(key string) (int, int, bool) {
 	g := m.G
 	found := false
 	var best loc
 	var bestRank [3]int64
 	for t, l := range g.index {
-		if len(t) >= len(key) && t[:len(key)] == key {
+		if g.Enc.HasUnitPrefix(t, key) {
 			rank := [3]int64{-int64(g.NodeCount(l.node).Float()), int64(l.node), int64(l.off)}
 			if !found || rank[0] < bestRank[0] || (rank[0] == bestRank[0] && (rank[1] < bestRank[1] || (rank[1] == bestRank[1] && rank[2] < bestRank[2]))) {
 				best, bestRank, found = l, rank, true
@@ -900,7 +900,7 @@ func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 	g := m.G
 	best, bestCount := -1, Counter{Value: -1}
 	for node := 2; node < len(g.Labels); node++ {
-		if g.Alive[node] && len(g.Labels[node]) >= len(prefix) && g.Labels[node][:len(prefix)] == prefix {
+		if g.Alive[node] && g.Enc.HasUnitPrefix(g.Labels[node], prefix) {
 			if c := g.NodeCount(node); bestCount.Less(c) {
 				best, bestCount = node, c
 			}
@@ -910,12 +910,12 @@ func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 }
 
 // prefixStart is (node, offset, lead): where the prefix ends and the unmatched
-// remainder of the located trigram, which every predicted path starts with.
+// remainder of the located gram, which every predicted path starts with.
 func (m *Model) prefixStart(prefix string) (int, int, string) {
 	node, offset, matched := m.locate(prefix)
 	lead := ""
-	if node != Start && matched < Window {
-		lead = runeSlice(m.G.Labels[node], offset+matched, offset+Window)
+	if node != Start && matched < m.G.Enc.N {
+		lead = m.G.Enc.Slice(m.G.Labels[node], offset+matched, offset+m.G.Enc.N)
 	}
 	return node, offset, lead
 }
@@ -930,14 +930,23 @@ type PredictOptions struct {
 	Temperature float64
 	ToEnd       bool
 	MaxLength   int
-	// Traversal is "" / "reward" for the search by cost, or "least-punished"
-	// for the search that follows the blame (see search.go).
-	Traversal string
+	// Traversal is what the search looks for, as opposed to Mode, which is how
+	// it looks: "reward" (the default) the model's own distribution, rewards
+	// included, "punishment" the same graph priced by the punishments alone,
+	// where the cheapest path is the least punished one (penalty.go), or
+	// "least-punished", which leaves the prices alone and ranks a walk by the
+	// blame on its worst step instead (search.go, ../../SPEC-LeastPunished.md).
+	Traversal    string
+	PenaltyScale float64
+	MeritScale   float64
 }
 
 // DefaultPredictOptions mirror the Python defaults.
 func DefaultPredictOptions() PredictOptions {
-	return PredictOptions{Length: 20, Mode: "beam", K: 5, Temperature: 1.0, MaxLength: -1}
+	return PredictOptions{
+		Length: 20, Mode: "beam", K: 5, Temperature: 1.0, MaxLength: -1,
+		Traversal: DefaultTraversal, PenaltyScale: 1, MeritScale: 1,
+	}
 }
 
 func checkPredictArgs(o PredictOptions) error {
@@ -956,6 +965,15 @@ func checkPredictArgs(o PredictOptions) error {
 	if o.Temperature < 0 {
 		return fmt.Errorf("temperature must be >= 0")
 	}
+	if o.PenaltyScale < 0 {
+		return fmt.Errorf("penalty_scale must be >= 0")
+	}
+	if o.MeritScale < 0 {
+		return fmt.Errorf("merit_scale must be >= 0")
+	}
+	if _, err := ResolveTraversal(o.Traversal); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -973,36 +991,56 @@ func (m *Model) Predict(prefix string, o PredictOptions) (*Prediction, error) {
 	if mode != "beam" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
-	traversal, err := ParseTraversal(o.Traversal)
+	return m.search(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, rngNone, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
+}
+
+// walkCosts is the traversal a search runs and its two scales (penalty.go).
+type walkCosts struct {
+	Traversal    string
+	PenaltyScale float64
+	MeritScale   float64
+}
+
+// rewardWalk is the default traversal: the model's own distribution, unchanged.
+var rewardWalk = walkCosts{DefaultTraversal, 1, 1}
+
+// rngNone reads as "no private generator" at a call site full of arguments.
+var rngNone *MT19937
+
+// resolve turns the traversal into the cost function the searches read the graph through (nil = the graph's own).
+func (w walkCosts) resolve(g *Graph) (CostFn, error) {
+	scale, merit := w.PenaltyScale, w.MeritScale
+	if w.Traversal == "" || w.Traversal == TraversalReward {
+		return nil, nil
+	}
+	if scale == 0 && merit == 0 {
+		// zero-valued options from a caller that never set them: the documented defaults
+		scale, merit = 1, 1
+	}
+	return g.TraversalCosts(w.Traversal, scale, merit)
+}
+
+// ranking is how the walks are *ordered*: by cost, or by the blame on a walk's
+// worst step (search.go).  The punishment traversal prices a step instead and
+// orders exactly as the reward one does, so it reads as ByReward here.
+func (w walkCosts) ranking() (Traversal, error) {
+	return ParseTraversal(w.Traversal)
+}
+
+// search is the prediction engine shared by Predict, Generate and Converse.
+// Lengths are counted in the encoding's units - characters, or words under a
+// word encoding.
+func (m *Model) search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, walk walkCosts) (*Prediction, error) {
+	g := m.G
+	costs, err := walk.resolve(g)
 	if err != nil {
 		return nil, err
 	}
-	return m.searchBy(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, nil, traversal)
-}
-
-// search is the prediction engine shared by Predict, Generate and Converse; it
-// walks by cost, the way the model always has.
-func (m *Model) search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937) (*Prediction, error) {
-	return m.searchBy(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, ByReward)
-}
-
-// searchBy is search under a chosen traversal.  A word model's prefix arrives
-// as text and its results leave as text; everything between is the graph's own
-// symbols, and length / maxLength are counted in them - words, there.
-func (m *Model) searchBy(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
-	if m.IsWords() {
-		found, err := m.searchSymbols(m.Symbols(prefix, false), length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, traversal)
-		if err != nil {
-			return nil, err
-		}
-		return m.decodePrediction(found), nil
+	ranking, err := walk.ranking()
+	if err != nil {
+		return nil, err
 	}
-	return m.searchSymbols(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, traversal)
-}
-
-// searchSymbols is the search itself, over whatever the graph's symbols are.
-func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
-	g := m.G
+	traversal, _ := ResolveTraversal(walk.Traversal)
 	node, offset, lead := m.prefixStart(prefix)
 	leadLen := runeLen(lead)
 	want := length - leadLen
@@ -1012,7 +1050,6 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 	var top, bottom []*PathResult
 	var expanded, width int
 	cap := -1
-	var err error
 	if mode == "beam" {
 		maxChars := -1
 		if maxLength < 0 && length == 0 {
@@ -1027,7 +1064,7 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 				maxChars = want
 			}
 		}
-		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Traversal: traversal})
+		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Costs: costs, Traversal: ranking})
 		if err != nil {
 			return nil, err
 		}
@@ -1044,20 +1081,21 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 		if maxChars < 0 {
 			maxChars = 0
 		}
-		walk, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, traversal)
+		one, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, costs, ranking)
 		if err != nil {
 			return nil, err
 		}
-		top, bottom, expanded, width = []*PathResult{walk}, []*PathResult{}, walk.Expanded, 0
+		top, bottom, expanded, width = []*PathResult{one}, []*PathResult{}, one.Expanded, 0
 	}
+	enc := g.Enc
 	fix := func(r *PathResult) {
 		if lead != "" {
-			r.Text = lead + r.Text
+			r.Text = enc.Join(lead, r.Text)
 			if cap >= 0 {
-				r.Text = truncateRunes(r.Text, cap)
+				r.Text = enc.Truncate(r.Text, cap)
 			}
 		}
-		r.FullText = prefix + r.Text
+		r.FullText = enc.Join(prefix, r.Text)
 	}
 	for _, r := range top {
 		fix(r)
@@ -1071,15 +1109,12 @@ func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam in
 	} else {
 		text := lead
 		if cap >= 0 {
-			text = truncateRunes(lead, cap)
+			text = enc.Truncate(lead, cap)
 		}
 		best = &PathResult{Text: text, Labels: []string{g.Labels[node]}, NodeIDs: []int{node}, StepCosts: []float64{}}
-		best.FullText = prefix + best.Text
+		best.FullText = enc.Join(prefix, best.Text)
 	}
-	pred := &Prediction{PathResult: *best, Top: top, Bottom: bottom, K: k, Beam: width, Mode: mode}
-	if traversal != ByReward {
-		pred.Traversal = traversal.String()
-	}
+	pred := &Prediction{PathResult: *best, Top: top, Bottom: bottom, K: k, Beam: width, Mode: mode, Traversal: traversal}
 	pred.Expanded = expanded
 	pred.Labels = append([]string(nil), best.Labels...)
 	pred.NodeIDs = append([]int(nil), best.NodeIDs...)
@@ -1097,13 +1132,18 @@ type GenerateOptions struct {
 	Prefix      string
 	StepPenalty float64
 	Beam        int
-	// Traversal is "" / "reward" or "least-punished" (see PredictOptions).
-	Traversal string
+	// Traversal and its scales: see PredictOptions.
+	Traversal    string
+	PenaltyScale float64
+	MeritScale   float64
 }
 
 // DefaultGenerateOptions mirror the Python defaults.
 func DefaultGenerateOptions() GenerateOptions {
-	return GenerateOptions{MaxLength: 60, Mode: "sample", Temperature: 1.0, Count: 1}
+	return GenerateOptions{
+		MaxLength: 60, Mode: "sample", Temperature: 1.0, Count: 1,
+		Traversal: DefaultTraversal, PenaltyScale: 1, MeritScale: 1,
+	}
 }
 
 // Generate whole texts with the prediction search, from START or continuing a
@@ -1124,14 +1164,11 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode != "beam" && mode != "dijkstra" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
-	traversal, err := ParseTraversal(o.Traversal)
-	if err != nil {
-		return nil, err
-	}
 	// the search is what joined the prefix to the continuation, in the model's own
 	// symbols; a generated text never re-joins them here, because only the search
 	// knows the alphabet (../../SPEC-WordNGrams.md)
 	whole := func(r *PathResult) *PathResult {
+		r.FullText = m.Encoding().Join(o.Prefix, r.Text)
 		r.Text = r.FullText
 		return r
 	}
@@ -1145,7 +1182,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 		}
 		results := make([]*PathResult, 0, o.Count)
 		for i := 0; i < o.Count; i++ {
-			walk, err := m.searchBy(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, traversal)
+			walk, err := m.search(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
 			if err != nil {
 				return nil, err
 			}
@@ -1157,7 +1194,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode == "dijkstra" {
 		k = 1
 	}
-	found, err := m.searchBy(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, nil, traversal)
+	found, err := m.search(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, rngNone, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
 	if err != nil {
 		return nil, err
 	}
@@ -1182,11 +1219,11 @@ type Score struct {
 	UnknownTransitions int     `json:"unknown_transitions"`
 }
 
-// edgeLogProb is log P(c | p) for the edge taken from p's trigram at offset,
-// or ok=false when p is not positioned at its last trigram or the edge is missing.
+// edgeLogProb is log P(c | p) for the edge taken from p's gram at offset,
+// or ok=false when p is not positioned at its last gram or the edge is missing.
 func (m *Model) edgeLogProb(p, offset, c int) (float64, bool) {
 	g := m.G
-	if p != Start && offset+Window != g.labelLen[p] {
+	if p != Start && offset+g.Enc.N != g.labelLen[p] {
 		return 0, false
 	}
 	e, ok := g.Edge(p, c)
@@ -1196,16 +1233,14 @@ func (m *Model) edgeLogProb(p, offset, c int) (float64, bool) {
 	return -g.EdgeCost(e), true
 }
 
-// Score walks the text START -> ... -> END; unknown trigrams, missing edges and
-// transitions that would need a split cost log(UnknownProb).  On a word model
-// the text is walked as its words, so Chars counts words, PerChar is per word,
-// and a word the model has never read is <unk>: an unknown transition.
+// Score walks the text START -> ... -> END; unknown grams, missing edges and
+// transitions that would need a split cost log(UnknownProb).  Chars is the
+// length in the encoding's units - characters, or words under a word encoding.
 func (m *Model) Score(text string) Score {
 	g := m.G
 	g.Prepare()
-	symbols := m.Symbols(text, false)
-	grams := Encode(symbols)
-	chars := runeLen(symbols)
+	grams := g.Encode(text)
+	chars := g.Enc.Len(text)
 	if grams == nil {
 		return Score{Chars: chars}
 	}
@@ -1222,7 +1257,7 @@ func (m *Model) Score(text string) Score {
 			lost = true
 			continue
 		}
-		if !lost && l.node == node && l.off == offset+1 {
+		if !lost && l.node == node && l.off == offset+g.Enc.Stride {
 			offset = l.off
 			continue
 		}
@@ -1287,6 +1322,11 @@ func (m *Model) Stats() map[string]any {
 		"nodes":                   g.NumNodes(),
 		"edges":                   g.NumEdges(),
 		"trigrams":                g.NumTrigrams(),
+		"grams":                   g.NumGrams(),
+		"encoding":                g.Enc.String(),
+		"unit":                    string(g.Enc.Unit),
+		"ngram":                   g.Enc.N,
+		"stride":                  g.Enc.Stride,
 		"compression_ratio":       g.CompressionRatio(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",
@@ -1314,10 +1354,10 @@ func (m *Model) Stats() map[string]any {
 		"window_traversals":       g.WindowTraversals(),
 	}
 	m.metaStats(stats, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes")
-	if m.IsWords() {
-		// what the numbers above are counted in, and how large the alphabet has grown
-		stats["units"] = WordUnits
-		stats["vocabulary"] = m.G.Vocab.Len()
+	// what every number above is counted in; a per-word number read as per-character is read wrong
+	stats["units"] = m.Encoding().UnitsName()
+	if m.Encoding().Unit == Words {
+		stats["vocabulary"] = len(m.Encoding().Vocabulary(m.G.GramIndex()))
 	}
 	return stats
 }

@@ -5,6 +5,8 @@ temporary directory; then both implementations train the same corpus with the
 same settings and must produce the same structure, counts, rewards, sliding
 window and RNG state, the same predictions, generated texts, scores and
 conversation, and each side must load and continue the other's model file.
+The punishment traversal is part of that contract: both sides must walk the
+same least-punished paths at the same costs.
 """
 
 import array
@@ -300,6 +302,48 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(one_py, one_go)
         self.assertEqual([row["node"] for row in one_py], [branch["node"]])
 
+    def test_the_punishment_traversal_matches(self):
+        """The traversal option, both sides: the same least-punished paths and the same costs."""
+        py_path = os.path.join(TMP.name, "trav_py.count.json")
+        go_path = os.path.join(TMP.name, "trav_go.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.go_model, go_path)
+        for run, path in ((py, py_path), (go, go_path)):
+            run("feedback", "--good-text", "the cat sat on the mat", "--strength", 4, model=path)
+            run("feedback", "--bad-text", "the dog ate the bone", "--strength", 4, model=path)
+        self.assertEqual(
+            load_json(py_path)["graph"]["edges"]["reward"], load_json(go_path)["graph"]["edges"]["reward"]
+        )
+        for scales in (("--merit-scale", 1), ("--merit-scale", 0), ("--penalty-scale", 3)):
+            for prefix in ("the cat", "the dog", "the ", ""):
+                with self.subTest(prefix=prefix, scales=scales):
+                    common = ("predict", "--prefix", prefix, "--length", 8, "--k", 3, "--mode", "beam",
+                              "--traversal", "punishment", *scales)
+                    a = py(*common, model=py_path)
+                    b = go(*common, model=go_path)
+                    self.assertEqual((a["traversal"], b["traversal"]), ("punishment", "punishment"))
+                    self.assertEqual(a["full_text"], b["full_text"])
+                    self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+                    self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+                    self.assertEqual([t["full_text"] for t in a["bottom"]], [t["full_text"] for t in b["bottom"]])
+                    assert_close(self, [t["cost"] for t in a["top"]], [t["cost"] for t in b["top"]])
+        # the two traversals really do differ on a model that has been both praised and corrected
+        moved = []
+        for prefix in ("the cat", "the dog", "the ", "on the ", ""):
+            common = ("predict", "--prefix", prefix, "--length", 12, "--k", 3, "--mode", "beam")
+            plain = py(*common, model=py_path)
+            other = py(*common, "--traversal", "punishment", "--merit-scale", 0, model=py_path)
+            moved.append(plain["full_text"] != other["full_text"])
+        self.assertTrue(any(moved), "the punishment traversal walked exactly where the rewards led")
+        common = ("generate", "--mode", "beam", "--count", 4, "--max-length", 40, "--traversal", "punishment")
+        a = py(*common, model=py_path)
+        b = go(*common, model=go_path)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
+        assert_close(self, [s["cost"] for s in a["samples"]], [s["cost"] for s in b["samples"]])
+        # and an unknown name is refused on both sides
+        py("predict", "--prefix", "the", "--traversal", "nope", model=py_path, expect=1)
+        go("predict", "--prefix", "the", "--traversal", "nope", model=go_path, expect=1)
+
     def test_feedback_2nrl_and_invert_match(self):
         py_path = os.path.join(TMP.name, "fb_py.count.json")
         go_path = os.path.join(TMP.name, "fb_go.count.json")
@@ -450,32 +494,38 @@ class TestGoParity(unittest.TestCase):
 
 
 class TestGoWordParity(unittest.TestCase):
-    """The word model over the same graph: same vocabulary, same structure, same predictions.
+    """A word encoding over the same graph: same grams, same structure, same predictions.
 
-    ``../SPEC-WordNGrams.md`` §8 - interchange is the contract the count model
-    has, and the vocabulary has to come back in the same order on both sides,
-    because a word's id is what the graph is made of.
+    Words are not a kind - they are an encoding (``--encoding word:3:1``), so a
+    gram is three words rather than three characters and a label is text like
+    any other.  What has to agree across the two implementations is everything:
+    the grams, the graph built from them, the alphabet those grams are made of,
+    and every prediction and score.
     """
+
+    ENCODING = "word:3:1"
 
     @classmethod
     def setUpClass(cls):
         cls.py_model = os.path.join(TMP.name, "py.word.json")
         cls.go_model = os.path.join(TMP.name, "go.word.json")
-        py("--kind", "word", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=cls.py_model)
-        go("--kind", "word", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, "--workers", 4, model=cls.go_model)
+        # --kind count: Python's default kind is the sine network, and a word
+        # encoding is a dial of any kind - the Go port only has this one
+        py("--kind", "count", "--encoding", cls.ENCODING, "--seed", 1, "train", "--data", CORPUS, "--epochs", 2,
+           model=cls.py_model)
+        go("--encoding", cls.ENCODING, "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, "--workers", 4,
+           model=cls.go_model)
         cls.py_doc = load_json(cls.py_model)
         cls.go_doc = load_json(cls.go_model)
 
-    def test_the_same_alphabet_in_the_same_order(self):
+    def test_the_file_carries_the_encoding_on_both_sides(self):
         p, g = self.py_doc["graph"], self.go_doc["graph"]
-        self.assertEqual(p["units"], "words")
-        self.assertEqual(g["units"], "words")
-        self.assertEqual(p["vocabulary"], g["vocabulary"])
-        self.assertEqual(p["vocabulary"][0], "<unk>")
-        self.assertGreater(len(p["vocabulary"]), 100)
-        self.assertEqual(self.py_doc["format"], "radixnet-word")
-        self.assertEqual(self.go_doc["format"], "radixnet-word")
-        self.assertEqual((self.py_doc["kind"], self.go_doc["kind"]), ("word", "word"))
+        for doc, side in ((p, "python"), (g, "go")):
+            self.assertEqual(doc["encoding"], {"unit": "word", "n": 3, "stride": 1}, side)
+        # a word model is still the count model: the format never changed
+        self.assertEqual(self.py_doc["format"], "radixnet-count")
+        self.assertEqual(self.go_doc["format"], "radixnet-count")
+        self.assertEqual((self.py_doc["kind"], self.go_doc["kind"]), ("count", "count"))
 
     def test_the_same_graph_over_words(self):
         p, g = self.py_doc["graph"], self.go_doc["graph"]
@@ -489,26 +539,25 @@ class TestGoWordParity(unittest.TestCase):
         self.assertEqual(p["weights"]["window_events"], g["weights"]["window_events"])
         for key in ("epochs_total", "trained_texts", "trained_chars"):
             self.assertEqual(self.py_doc["meta"][key], self.go_doc["meta"][key], key)
-        # every label is made of word symbols, and no label is text
+        # every label is words, and a gram of three of them holds two spaces
         for label in p["nodes"]["labels"][3:]:
-            self.assertTrue(all(ord(ch) >= 0x0100 for ch in label), label)
+            self.assertGreaterEqual(len(label.split()), 1, label)
 
     def test_the_same_words_are_the_most_read(self):
-        a = py("--kind", "word", "words", "--limit", 10, model=self.py_model)
-        b = go("--kind", "word", "words", "--limit", 10, model=self.go_model)
+        a = py("words", "--limit", 10, model=self.py_model)
+        b = go("words", "--limit", 10, model=self.go_model)
         self.assertEqual(a["vocabulary"], b["vocabulary"])
-        self.assertEqual(a["units"], "words")
-        self.assertEqual(b["units"], "words")
-        self.assertEqual([(r["word"], r["id"], r["trigrams"]) for r in a["words"]],
-                         [(r["word"], r["id"], r["trigrams"]) for r in b["words"]])
+        self.assertGreater(a["vocabulary"], 100)
+        self.assertEqual((a["units"], b["units"]), ("words", "words"))
+        self.assertEqual((a["encoding"], b["encoding"]), (self.ENCODING, self.ENCODING))
+        self.assertEqual([(r["word"], r["id"], r["grams"]) for r in a["words"]],
+                         [(r["word"], r["id"], r["grams"]) for r in b["words"]])
 
     def test_the_same_predictions_scores_and_texts(self):
         for prefix in ("the cat sat on", "the", "water boils at", "qqzz never read", ""):
             with self.subTest(prefix=prefix):
-                a = py("--kind", "word", "predict", "--prefix", prefix, "--length", 4, "--k", 3, "--mode", "beam",
-                       model=self.py_model)
-                b = go("--kind", "word", "predict", "--prefix", prefix, "--length", 4, "--k", 3, "--mode", "beam",
-                       model=self.go_model)
+                a = py("predict", "--prefix", prefix, "--length", 4, "--k", 3, "--mode", "beam", model=self.py_model)
+                b = go("predict", "--prefix", prefix, "--length", 4, "--k", 3, "--mode", "beam", model=self.go_model)
                 self.assertEqual(a["continuation"], b["continuation"])
                 self.assertEqual(a["full_text"], b["full_text"])
                 self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
@@ -516,43 +565,36 @@ class TestGoWordParity(unittest.TestCase):
                 self.assertEqual(a["path"], b["path"])  # the labels are words on both sides
         for text in ("the cat sat on the mat", "water boils at 100 degrees celsius", "qqzz never read this"):
             with self.subTest(text=text):
-                a = py("--kind", "word", "score", "--text", text, model=self.py_model)["results"][0]
-                b = go("--kind", "word", "score", "--text", text, model=self.go_model)["results"][0]
+                a = py("score", "--text", text, model=self.py_model)["results"][0]
+                b = go("score", "--text", text, model=self.go_model)["results"][0]
                 self.assertLessEqual(abs(a["log_prob"] - b["log_prob"]), 1e-9)
                 self.assertEqual(a["chars"], b["chars"])  # words, here
                 self.assertEqual(a["unknown_transitions"], b["unknown_transitions"])
-        a = py("--kind", "word", "generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.py_model)
-        b = go("--kind", "word", "generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.go_model)
+        a = py("generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.py_model)
+        b = go("generate", "--mode", "beam", "--count", 4, "--max-length", 12, model=self.go_model)
         self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
         assert_close(self, [s["cost"] for s in a["samples"]], [s["cost"] for s in b["samples"]])
 
     def test_each_side_reads_the_other_s_word_model(self):
         loaded = load_model(self.go_model)  # Python reads the Go file
-        self.assertEqual(loaded.kind, "word")
-        self.assertEqual(loaded.vocabulary.to_list(), self.py_doc["graph"]["vocabulary"])
+        self.assertEqual(str(loaded.encoding), self.ENCODING)
         self.assertEqual(loaded.predict("the cat sat on", length=4, k=3).text,
-                         py("--kind", "word", "predict", "--prefix", "the cat sat on", "--length", 4, "--k", 3,
+                         py("predict", "--prefix", "the cat sat on", "--length", 4, "--k", 3,
                             model=self.py_model)["continuation"])
         # and Go reads the Python file, continues it, and Python reads that back
         crossed = os.path.join(TMP.name, "crossed.word.json")
         shutil.copyfile(self.py_model, crossed)
-        go("--kind", "word", "train", "--data", CORPUS, "--epochs", 1, model=crossed)
+        go("train", "--data", CORPUS, "--epochs", 1, model=crossed)
         again = load_model(crossed)
-        self.assertEqual(again.kind, "word")
+        self.assertEqual(str(again.encoding), self.ENCODING)
         self.assertEqual(again.stats()["epochs_total"], 3)
-        self.assertEqual(again.vocabulary.to_list(), self.py_doc["graph"]["vocabulary"])
 
-    def test_a_count_reader_refuses_a_word_file_on_both_sides(self):
-        with self.assertRaises(ValueError):
-            CountRewardNet.from_dict(self.py_doc)
-        # the Go CLI refuses it the same way: the format is the check
-        wrong = os.path.join(TMP.name, "mislabelled.count.json")
-        doc = load_json(self.go_model)
-        doc["format"] = "radixnet-count"
-        with open(wrong, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh)
-        out = go("info", model=wrong, expect=1)
-        self.assertIn("word", out["error"])
+    def test_the_encoding_is_fixed_for_the_model_s_life(self):
+        """A loaded file's own encoding wins, and a flag that disagrees is refused, not ignored."""
+        out = py("--kind", "count", "--encoding", "char:3:1", "info", model=self.py_model, expect=1)
+        self.assertIn("encoding", out["error"])
+        out = go("--encoding", "char:3:1", "info", model=self.go_model, expect=1)
+        self.assertIn("encoding", out["error"])
 
 
 class TestGoTutorParity(unittest.TestCase):
@@ -1484,6 +1526,26 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(NODE_KEYS <= set(graph["nodes"][0]))
         self.assertTrue((EDGE_KEYS | {"reward", "share", "recent_share", "recent_count"}) <= set(graph["edges"][0]))
+        # the Network settings tab: the encoder / decoder, identical on both sides
+        status, enc, _ = self.client.get("/api/encoding")
+        self.assertEqual(status, 200)
+        from radixnet.api import ModelService  # the Python service answers the same document
+
+        mine_enc = ModelService(saved["path"], backend="python")
+        self.assertEqual(enc, mine_enc.encoding())
+        for text in (CORPUS[0], CORPUS[0][:-4], "qqzzxx qqzz", "ab", ""):
+            with self.subTest(text=text):
+                status, prev, _ = self.client.post("/api/encoding/preview", {"text": text})
+                self.assertEqual(status, 200, prev)
+                theirs = mine_enc.encoding_preview(text)
+                for key in ("windows", "count", "decoded", "round_trip", "chars", "unknown_windows"):
+                    self.assertEqual(prev[key], theirs[key], key)
+                self.assertEqual(prev["path"]["known"], theirs["path"]["known"])
+                self.assertEqual(prev["path"]["labels"], theirs["path"]["labels"])
+                self.assertEqual(prev["path"]["decoded"], theirs["path"]["decoded"])
+                self.assertEqual(prev["path"]["nodes"], theirs["path"]["nodes"])
+                self.assertEqual(prev["path"]["compressed"], theirs["path"]["compressed"])
+                self.assertEqual(prev["path"]["reason"], theirs["path"]["reason"])
         # model selector: the one kind, other kinds refused
         status, m, _ = self.client.get("/api/model")
         self.assertEqual((status, m["kind"], m["in_memory"]), (200, "count", ["count"]))
@@ -1578,3 +1640,80 @@ class TestGoServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGoEncodingParity(unittest.TestCase):
+    """The encoding dial is the same dial on both sides.
+
+    Every encoding the two implementations offer - n-grams of any size, groups
+    of letters, word grams - must build the same graph from the same corpus,
+    write the same file, and read each other's.
+    """
+
+    ENCODINGS = ["char:3:1", "char:5:1", "char:4:4", "char:5:5", "char:6:3",
+                 "word:1:1", "word:2:1", "word:3:1", "word:2:2"]
+
+    def test_the_same_graph_from_the_same_corpus(self):
+        for spec in self.ENCODINGS:
+            with self.subTest(encoding=spec):
+                tag = spec.replace(":", "-")
+                py_model = os.path.join(TMP.name, f"enc-py-{tag}.json")
+                go_model = os.path.join(TMP.name, f"enc-go-{tag}.json")
+                py("--kind", "count", "--seed", 1, "--encoding", spec, "train",
+                   "--data", CORPUS, "--epochs", 2, model=py_model)
+                go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+                   "--workers", 4, model=go_model)
+                p, g = load_json(py_model)["graph"], load_json(go_model)["graph"]
+                self.assertEqual(p.get("encoding"), g.get("encoding"), "the written encoding block")
+                self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+                self.assertEqual(p["nodes"]["count"], g["nodes"]["count"])
+                self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+                self.assertEqual(p["edges"]["count"], g["edges"]["count"])
+                assert_close(self, p["edges"]["w"], g["edges"]["w"], 1e-12)
+                self.assertEqual(p["rng_state"], g["rng_state"])
+                # only a non-default encoding is written at all
+                self.assertEqual("encoding" in p, spec != "char:3:1", spec)
+
+    def test_each_side_reads_the_other(self):
+        spec = "word:2:1"
+        py_model = os.path.join(TMP.name, "enc-cross-py.json")
+        go_model = os.path.join(TMP.name, "enc-cross-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 1,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 1, model=go_model)
+        # each side reports the other's file as the word bigram it is
+        for reader, path in ((go, py_model), (py, go_model)):
+            info = reader("info", model=path)
+            self.assertEqual(info["stats"]["encoding"], spec)
+            self.assertEqual((info["stats"]["ngram"], info["stats"]["stride"]), (2, 1))
+        # and continues it: one more epoch on either side leaves the same graph
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 1, model=go_model)
+        go("train", "--data", CORPUS, "--epochs", 1, model=py_model)
+        a, b = load_json(py_model)["graph"], load_json(go_model)["graph"]
+        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
+        self.assertEqual(a["nodes"]["count"], b["nodes"]["count"])
+        self.assertEqual(a["encoding"], b["encoding"])
+
+    def test_the_same_prediction_in_words(self):
+        spec = "word:2:1"
+        py_model = os.path.join(TMP.name, "enc-pred-py.json")
+        go_model = os.path.join(TMP.name, "enc-pred-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=go_model)
+        a = py("predict", "--prefix", "the cat", "--k", 3, "--length", 4, model=py_model)
+        b = go("predict", "--prefix", "the cat", "--k", 3, "--length", 4, model=go_model)
+        self.assertEqual(a["continuation"], b["continuation"])
+        self.assertEqual(a["full_text"], b["full_text"])
+        self.assertEqual([r["full_text"] for r in a["top"]], [r["full_text"] for r in b["top"]])
+        assert_close(self, [r["cost"] for r in a["top"]], [r["cost"] for r in b["top"]])
+        # the words come back whole, with the space the prefix needs
+        self.assertTrue(a["full_text"].startswith("the cat "), a["full_text"])
+        self.assertEqual(a["continuation"], " ".join(a["continuation"].split()))
+
+    def test_both_refuse_the_same_nonsense(self):
+        model = os.path.join(TMP.name, "enc-bad.json")
+        for spec in ("rune:3", "char:2:3", "char:0"):
+            with self.subTest(spec=spec):
+                self.assertTrue(py("--encoding", spec, "info", model=model, expect=1)["error"])
+                self.assertTrue(go("--encoding", spec, "info", model=model, expect=1)["error"])

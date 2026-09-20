@@ -21,6 +21,7 @@ from radixnet.graph import BACK, END, START  # noqa: E402
 from radixnet.search import (  # noqa: E402
     LEAST_PUNISHED,
     PUNISH_TOLERANCE,
+    PUNISHMENT,
     REWARD,
     least_punished,
     parse_traversal,
@@ -289,7 +290,8 @@ class TestPrediction(unittest.TestCase):
         for r in p.top:
             self.assertTrue(r.reached_end or len(r.text) >= 8)
         d = p.to_dict()
-        self.assertEqual(set(d) - set(p.top[0].to_dict()), {"top", "bottom", "k", "beam", "mode"})
+        self.assertEqual(set(d) - set(p.top[0].to_dict()), {"top", "bottom", "k", "beam", "mode", "traversal"})
+        self.assertEqual(d["traversal"], "reward")
         self.assertEqual(len(d["top"]), 3)
 
     def test_dijkstra_alias_sample_mode_and_edge_cases(self):
@@ -376,7 +378,7 @@ class TestPersistenceAndKinds(unittest.TestCase):
             model_from_dict({"format": "nope"})
 
     def test_kind_registry(self):
-        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "word", "negative", "resonant"])
+        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "negative", "resonant"])
         self.assertIs(model_class("count"), CountRewardNet)
         self.assertIs(model_class(None), RadixNet)
         self.assertIs(model_class(" Radix "), RadixNet)
@@ -441,7 +443,7 @@ class TestApi(unittest.TestCase):
         status, data, _ = self.client.get("/api/model")
         self.assertEqual(status, 200)
         self.assertEqual(data["kind"], "radix")
-        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "word", "negative", "resonant"])
+        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "negative", "resonant"])
         self.assertEqual(data["paths"]["count"], os.path.join(self.tmp.name, "model.count.json"))
         data = self.select("count")
         self.assertEqual((data["kind"], data["origin"]), ("count", "new"))
@@ -1016,8 +1018,13 @@ class TestLeastPunishedTraversal(unittest.TestCase):
     def test_the_names_it_answers_to(self):
         for name in ("", "reward", "Rewards", "cost"):
             self.assertEqual(parse_traversal(name), REWARD, name)
-        for name in ("least-punished", "LEAST_PUNISHED", "punished", "blame"):
+        for name in ("least-punished", "LEAST_PUNISHED", "blame"):
             self.assertEqual(parse_traversal(name), LEAST_PUNISHED, name)
+        # "punishment" is the other punishment traversal (radixnet.penalty), which prices a
+        # step rather than ranking the walks: it is never an alias of this one
+        for name in ("punishment", "penalty"):
+            self.assertEqual(parse_traversal(name), PUNISHMENT, name)
+            self.assertNotEqual(parse_traversal(name), LEAST_PUNISHED, name)
         with self.assertRaises(ValueError):
             parse_traversal("sideways")
 
@@ -1059,7 +1066,7 @@ class TestLeastPunishedTraversal(unittest.TestCase):
         blamed = next(r for r in by_blame.top if r.full_text == "the cat sat on the mat")
         self.assertGreater(blamed.punish, 0.0, "the blamed walk should still be offered, marked with its blame")
         self.assertEqual(by_blame.to_dict()["traversal"], "least-punished")
-        self.assertNotIn("traversal", by_reward.to_dict())
+        self.assertEqual(by_reward.to_dict()["traversal"], "reward")
 
     def test_a_reward_does_not_buy_the_blame_off(self):
         model = self.trained()

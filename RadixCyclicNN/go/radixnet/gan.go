@@ -59,16 +59,18 @@ func DefaultEvolveConfig() EvolveConfig {
 	}
 }
 
-// Validate checks the configuration.
-func (c *EvolveConfig) Validate() error {
+// Validate checks the configuration against the encoding it will run in (the
+// zero Encoding is the default one).
+func (c *EvolveConfig) Validate(enc Encoding) error {
+	enc = enc.WithDefaults()
 	if c.Samples < 1 {
 		return fmt.Errorf("samples must be >= 1")
 	}
 	if c.RealPerGeneration < 1 {
 		return fmt.Errorf("real_per_generation must be >= 1")
 	}
-	if c.MaxLength < Window {
-		return fmt.Errorf("max_length must be >= %d", Window)
+	if c.MaxLength < enc.N {
+		return fmt.Errorf("max_length must be >= %d (one gram of %s)", enc.N, enc.Describe())
 	}
 	if c.Temperature < 0 {
 		return fmt.Errorf("temperature must be >= 0")
@@ -115,20 +117,25 @@ func NewEvolver(generator *Model, corpus []string, discriminator *Model, config 
 	if generator == nil {
 		return nil, fmt.Errorf("a generator is required")
 	}
-	if err := config.Validate(); err != nil {
+	enc := generator.Encoding()
+	if err := config.Validate(enc); err != nil {
 		return nil, err
 	}
 	kept := []string{}
 	for _, text := range corpus {
-		if len([]rune(text)) >= Window {
+		if enc.Len(text) >= enc.N {
 			kept = append(kept, text)
 		}
 	}
 	if len(kept) == 0 {
-		return nil, fmt.Errorf("corpus needs at least one text of %d+ characters", Window)
+		return nil, fmt.Errorf("corpus needs at least one text of %d+ %ss", enc.N, enc.Unit)
 	}
 	if discriminator == nil {
-		fresh, err := NewModel(config.Seed+1, DefaultGraphOptions())
+		// the discriminator judges the generator's texts: it has to read them
+		// the same way, so it is born with the generator's encoding
+		opts := DefaultGraphOptions()
+		opts.Encoding = enc
+		fresh, err := NewModel(config.Seed+1, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +149,7 @@ func NewEvolver(generator *Model, corpus []string, discriminator *Model, config 
 }
 
 // fakes samples this generation's fakes, falling back to the cheapest path when
-// every sample came out shorter than a trigram.
+// every sample came out shorter than one gram.
 func (e *Evolver) fakes() ([]string, error) {
 	cfg := e.Config
 	results, err := e.Generator.Generate(GenerateOptions{
@@ -151,9 +158,10 @@ func (e *Evolver) fakes() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	enc := e.Generator.Encoding()
 	out := []string{}
 	for _, result := range results {
-		if len([]rune(result.Text)) >= Window {
+		if enc.Len(result.Text) >= enc.N {
 			out = append(out, result.Text)
 		}
 	}
@@ -162,7 +170,7 @@ func (e *Evolver) fakes() ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(best) > 0 && len([]rune(best[0].Text)) >= Window {
+		if len(best) > 0 && enc.Len(best[0].Text) >= enc.N {
 			out = append(out, best[0].Text)
 		}
 	}

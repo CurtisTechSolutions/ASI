@@ -23,7 +23,7 @@ import (
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/server"
 )
 
-const version = "0.1.0"
+const version = radixnet.Version
 
 // DefaultCountModel and DefaultWordModel are the default --model per kind, so
 // one kind never overwrites another's file.
@@ -43,6 +43,12 @@ var (
 	memProfile string
 	memLimit   = ""
 	memory     radixnet.MemoryLimit
+
+	// how a NEW model reads text: the unit, the n of the n-gram and the stride
+	encSpec    string
+	unitsFlag  string
+	ngramFlag  int
+	strideFlag int
 )
 
 func addGlobalFlags(fs *flag.FlagSet) {
@@ -58,6 +64,61 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&memProfile, "memprofile", memProfile, "write a heap profile to this file when the command finishes")
 	fs.StringVar(&memLimit, "memlimit", memLimit, "soft memory limit, e.g. 2GiB (default: 80% of the container / machine memory; \"off\" to let the heap grow freely)")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
+	fs.StringVar(&encSpec, "encoding", encSpec, "encoding of a NEW model, unit[:n[:stride]] (default char:3:1); also trigram | bigram | word-bigram | word-trigram")
+	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word (default char)")
+	fs.IntVar(&ngramFlag, "ngram", ngramFlag, "units per gram of a NEW model: the n of the n-gram (default 3)")
+	fs.IntVar(&strideFlag, "stride", strideFlag, "units between consecutive grams of a NEW model: 1 = sliding window, n = groups of n (default 1)")
+}
+
+// encodingFlags is the encoding the flags ask for, and whether any of them was
+// given at all.  --encoding sets all three at once; --units / --ngram /
+// --stride override it one dial at a time.
+func encodingFlags() (radixnet.Encoding, bool) {
+	enc, err := radixnet.ParseEncoding(encSpec)
+	if err != nil {
+		fail("%v", err)
+	}
+	set := encSpec != ""
+	if unitsFlag != "" {
+		parsed, err := radixnet.ParseEncoding(unitsFlag)
+		if err != nil {
+			fail("%v", err)
+		}
+		enc.Unit, set = parsed.Unit, true
+	}
+	if ngramFlag != 0 {
+		// a bare --ngram on a sliding encoding keeps the sliding window; on
+		// groups (stride == n) it grows the group
+		if !enc.Sliding() {
+			enc.Stride = ngramFlag
+		}
+		enc.N, set = ngramFlag, true
+	}
+	if strideFlag != 0 {
+		enc.Stride, set = strideFlag, true
+	}
+	if err := enc.Validate(); err != nil {
+		fail("%v", err)
+	}
+	return enc, set
+}
+
+// newGraphOptions are the graph options a new model is created with.
+func newGraphOptions() radixnet.GraphOptions {
+	opts := radixnet.DefaultGraphOptions()
+	opts.Encoding, _ = encodingFlags()
+	return opts
+}
+
+// checkEncoding refuses to run when the encoding flags disagree with the model
+// that was loaded: the encoding is fixed when a model is created, so silently
+// ignoring them would train a trigram model and call it a word model.
+func checkEncoding(m *radixnet.Model, path string) *radixnet.Model {
+	if want, set := encodingFlags(); set && want != m.Encoding() {
+		fail("%s is %s; --encoding / --units / --ngram / --stride only apply to a NEW model (train one to a new --model path)",
+			path, m.Encoding().Describe())
+	}
+	return m
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -173,14 +234,12 @@ func openModel(required bool) *radixnet.Model {
 		if kind := wantedKind(); kind != m.Kind() && kindFlag != "" {
 			note("note: %s holds a %s model; --kind %s applies to new models only", path, m.Kind(), kind)
 		}
-		return configure(m)
+		return configure(checkEncoding(m, modelPath))
 	}
 	if required {
 		fail("model file not found: %s (train one first with `radixnet-count train --data FILE`)", path)
 	}
-	opts := radixnet.DefaultGraphOptions()
-	opts.Words = wantedKind() == "word"
-	m, err := radixnet.NewModel(seedFlag, opts)
+	m, err := radixnet.NewModel(seedFlag, newGraphOptions())
 	if err != nil {
 		fail("%v", err)
 	}
@@ -234,10 +293,18 @@ commands:
   ollama     a corpus written to order, and the adversarial review (models | corpus | review)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
+  mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client
   version    print the version
 
 global options (before or after the command): --model PATH --kind count|word --json --seed N --workers N --exact --out PATH
                                              --memlimit SIZE (soft heap limit, default 80%% of the machine / container) --memprofile PATH
+                                             --encoding SPEC / --units char|word / --ngram N / --stride N (a NEW model only)
+
+the encoding of a NEW model: --units says what one unit is (a character or a word), --ngram how many
+units a gram holds, --stride how far apart consecutive grams start (1 = the sliding window, n = groups
+of n).  --encoding SPEC sets all three: char:3:1 (the default), char:5:5 (groups of five letters),
+word:2:1 (word bigrams), word:3:1 (word trigrams).  It is fixed when the model is created and travels
+with the file; the Python implementation reads every one of them too.
 `, version)
 }
 
@@ -343,6 +410,8 @@ func main() {
 		cmdExplore(rest)
 	case "serve":
 		cmdServe(rest)
+	case "mcp":
+		cmdMCP(rest)
 	case "version":
 		if jsonMode {
 			emit(map[string]any{"version": version, "go": runtime.Version()})
@@ -387,8 +456,7 @@ func cmdTrain(args []string) {
 	if _, err := os.Stat(modelFile()); err == nil {
 		m = openModel(true)
 	} else {
-		opts := radixnet.DefaultGraphOptions()
-		opts.Words = wantedKind() == "word" // the symbols are words, and nothing else about the model changes
+		opts := newGraphOptions()
 		if *window > 0 {
 			opts.Window = *window
 		}
@@ -416,7 +484,7 @@ func cmdTrain(args []string) {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
 	before := m.MetaInt("trained_texts")
-	say("training from %s (%s, chunks of %d texts): %s, %s counting, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), *epochs, memory)
+	say("training from %s (%s, chunks of %d texts): %s, %s counting, %s, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), m.Encoding().Describe(), *epochs, memory)
 	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %6s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "chunks", "seconds")
 	opts := radixnet.DefaultTrainOptions()
 	opts.Epochs = *epochs
@@ -448,7 +516,7 @@ func predictDoc(prefix string, p *radixnet.Prediction) map[string]any {
 	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
-		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
+		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal, "k": p.K, "beam": p.Beam,
 		"top": pathDicts(p.Top), "bottom": pathDicts(p.Bottom),
 	}
 	// what the walk was punished for, and which search wrote it: reported only
@@ -477,6 +545,19 @@ func pathDicts(paths []*radixnet.PathResult) []map[string]any {
 
 func quote(s string) string { return fmt.Sprintf("%q", s) }
 
+// traversalFlags adds --traversal and its two scales: *what* a search looks
+// for, as opposed to --mode, which is how it looks for it.
+func traversalFlags(fs *flag.FlagSet) (*string, *float64, *float64) {
+	traversal := fs.String("traversal", radixnet.DefaultTraversal,
+		"reward = the model's own distribution, rewards included; punishment = the rewards leave the score and the "+
+			"punishments price every step, so the cheapest path is the least punished one; least-punished = a walk "+
+			"is ranked by the blame on its WORST step, cost only to break ties, so blame cannot be bought off with "+
+			"rewards elsewhere")
+	penaltyScale := fs.Float64("penalty-scale", 1, "punishment: how heavily a punishment counts")
+	meritScale := fs.Float64("merit-scale", 1, "punishment: how heavily what the corpus did counts (0 = nothing but the punishments decides)")
+	return traversal, penaltyScale, meritScale
+}
+
 func cmdPredict(args []string) {
 	fs := subFlagSet("predict")
 	prefix := fs.String("prefix", "", "text to continue")
@@ -488,11 +569,12 @@ func cmdPredict(args []string) {
 	toEnd := fs.Bool("to-end", false, "run to the end of a text")
 	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
-	traversal := fs.String("traversal", "reward", "reward | least-punished (walk by the blame instead of the cost)")
+	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
-	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength, Traversal: *traversal}
+	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength,
+		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale}
 	p, err := m.Predict(*prefix, opts)
 	if err != nil {
 		fail("%v", err)
@@ -544,11 +626,12 @@ func cmdGenerate(args []string) {
 	stepPenalty := fs.Float64("step-penalty", 0, "beam / dijkstra: extra cost per edge")
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
-	traversal := fs.String("traversal", "reward", "reward | least-punished (walk by the blame instead of the cost)")
+	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
-	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam, Traversal: *traversal}
+	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam,
+		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale}
 	if *seeded {
 		s := seedFlag
 		opts.Seed = &s
@@ -625,8 +708,8 @@ func cmdScore(args []string) {
 		emit(map[string]any{"results": results, "count": len(results), "mean_log_prob": meanLog, "mean_per_char": meanPer})
 		return
 	}
-	// a word model counts in words, and a per-word number read as per-char is read wrong
-	units := m.Units()
+	// a word encoding counts in words, and a per-word number read as per-char is read wrong
+	units := m.Encoding().UnitsName()
 	fmt.Printf("%10s %9s %5s %11s %7s  %s\n", "log_prob", "per_"+strings.TrimSuffix(units, "s"), units,
 		"transitions", "unknown", "text")
 	for i, s := range scores {
@@ -749,7 +832,7 @@ func resolveNode(g *radixnet.Graph, text string) int {
 	if text == "" {
 		return -1
 	}
-	key := g.SymbolsOf(text) // a word graph is addressed in words; the identity anywhere else
+	key := text // a label is text on every encoding
 	for node := 0; node < g.NumNodeIDs(); node++ {
 		if g.Label(node) == key {
 			return node
@@ -805,24 +888,29 @@ func cmdWords(args []string) {
 	limit := fs.Int("limit", 20, "words to show, most read first (0 = all)")
 	_ = fs.Parse(args)
 	m := openModel(true)
-	if !m.IsWords() {
-		fail("%s holds a %s model; a vocabulary belongs to the word model (--kind word)", modelFile(), m.Kind())
+	enc := m.Encoding()
+	if enc.Unit != radixnet.Words {
+		fail("%s counts in %s, so it has no words to list; a word alphabet needs a word encoding "+
+			"(train a new model with --encoding word:%d:%d)", modelPath, enc.UnitsName(), enc.N, enc.Stride)
 	}
 	rows := m.TopWords(*limit)
-	say("vocabulary %d word(s), %d shown", m.Vocabulary().Len(), len(rows))
+	vocabulary := len(enc.Vocabulary(m.G.GramIndex()))
+	say("encoding   %s", enc.Describe())
+	say("vocabulary %d word(s), %d shown", vocabulary, len(rows))
 	say("read       %s words over %s texts", counterText(m.MetaCounter("trained_chars")),
 		counterText(m.MetaCounter("trained_texts")))
 	if len(rows) == 0 {
 		say("nothing has been read yet: train the model on a corpus first")
 	} else {
 		say("")
-		say("%-24s %8s %8s", "word", "id", "windows")
+		say("%-24s %8s %10s", "word", "id", fmt.Sprintf("%d-word", enc.N))
 		for _, row := range rows {
-			say("%-24s %8d %8d", strconv.Quote(row.Word), row.ID, row.Trigrams)
+			say("%-24s %8d %10d", strconv.Quote(row.Word), row.ID, row.Grams)
 		}
 	}
 	if jsonMode {
-		emit(map[string]any{"words": rows, "vocabulary": m.Vocabulary().Len(), "units": m.Units(), "stats": m.Stats()})
+		emit(map[string]any{"words": rows, "vocabulary": vocabulary, "units": enc.UnitsName(),
+			"encoding": enc.String(), "stats": m.Stats()})
 	}
 }
 
@@ -831,7 +919,7 @@ func quoteLabel(g *radixnet.Graph, node int) string {
 	if node < 0 || node >= g.NumNodeIDs() {
 		return fmt.Sprintf("node %d", node)
 	}
-	return strconv.Quote(g.TextOf(g.Label(node)))
+	return strconv.Quote(g.Label(node))
 }
 
 // stepLabel is "parent -> child" as the two labels, for a path row.
@@ -842,7 +930,7 @@ func stepLabel(g *radixnet.Graph, edge int) string {
 	}
 	for _, t := range g.Children(parent) {
 		if t.E == edge {
-			return fmt.Sprintf("%s -> %s", g.TextOf(g.Label(parent)), g.TextOf(g.Label(t.P)))
+			return fmt.Sprintf("%s -> %s", g.Label(parent), g.Label(t.P))
 		}
 	}
 	return fmt.Sprintf("edge %d", edge)
@@ -1017,7 +1105,7 @@ func cmdInfo(args []string) {
 		emit(map[string]any{"model": modelFile(), "stats": stats, "history": hist, "meta": m.Meta})
 		return
 	}
-	fmt.Printf("model %s\n", modelFile())
+	fmt.Printf("model %s (%s)\n", modelPath, m.Encoding().Describe())
 	for _, k := range radixnet.SortedKeys(stats) {
 		fmt.Printf("%-22s %v\n", k, stats[k])
 	}
@@ -1469,7 +1557,8 @@ func cmdServe(args []string) {
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
-		ModelPath: modelFile(), Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
+		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, Encoding: newGraphOptions().Encoding,
+		UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
 		ChatGPTURL: *chatgptURL, ChatGPTModel: *chatgptModel,
 		Offline: toolFlags.Offline, AllowPrivate: toolFlags.AllowPrivate, SearchURL: toolFlags.SearchURL,

@@ -12,17 +12,26 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
 
 from .encoding import WINDOW, Decoder
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 
-__all__ = ["PathResult", "dijkstra_predict", "sample_walk"]
+__all__ = ["CostFn", "PathResult", "dijkstra_predict", "sample_walk"]
 
-_W = WINDOW
-_OV = WINDOW - 1
-_DECODER = Decoder(_W)
+CostFn = Callable[..., list[tuple[int, int, float]]]
+"""What a search reads the graph through: ``(parent[, prev]) -> [(child, edge, cost)]``.
+
+:meth:`RadixCyclicGraph.child_costs` is the default one; the punishment
+traversal (:mod:`radixnet.penalty`) hands in a
+:class:`~radixnet.penalty.PenaltyCosts` instead, and every search behaves
+exactly as it always did - it is only reading a different cost function.
+"""
+
+_W = WINDOW      # the default n; a graph's own n is graph.encoding.n
+_OV = WINDOW - 1  # and its own overlap graph.encoding.overlap
 
 
 @dataclass(slots=True)
@@ -65,8 +74,16 @@ class PathResult:
         return d
 
 
-#: The two ways a walk can be ranked (``../SPEC-LeastPunished.md``).
+#: The three traversals a search can run.  Two of them are *cost functions* -
+#: ``reward`` (what the model believes) and ``punishment`` (the same search over
+#: the evidence with the rewards taken out, :mod:`radixnet.penalty`) - and the
+#: third is a different *ranking*: ``least-punished`` orders a walk by the blame
+#: on its worst step before its cost (``../SPEC-LeastPunished.md``).
 REWARD = "reward"
+#: The punishment traversal of :mod:`radixnet.penalty`: the blame is priced
+#: into the cost itself, so a *search* ranks a walk here exactly as it ranks a
+#: rewarded one - what changed is what a step costs, not how walks are ordered.
+PUNISHMENT = "punishment"
 LEAST_PUNISHED = "least-punished"
 
 #: How close two punishments have to be to count as equal: the same penalty
@@ -76,14 +93,18 @@ PUNISH_TOLERANCE = 1e-12
 
 _TRAVERSALS = {
     "": REWARD, "reward": REWARD, "rewards": REWARD, "cost": REWARD,
+    # "punishment" is the other traversal's name and never an alias of this one: the two
+    # price a step in different currencies (``../SPEC-LeastPunished.md`` §1)
+    "punishment": PUNISHMENT, "penalty": PUNISHMENT,
     "least-punished": LEAST_PUNISHED, "least_punished": LEAST_PUNISHED, "leastpunished": LEAST_PUNISHED,
-    "punished": LEAST_PUNISHED, "punish": LEAST_PUNISHED, "blame": LEAST_PUNISHED,
+    "blame": LEAST_PUNISHED,
 }
 
 
 def parse_traversal(name: str | None) -> str:
     """Reads a traversal name: ``""`` / ``"reward"`` for the search by cost,
-    ``"least-punished"`` for the one that follows the blame."""
+    ``"punishment"`` for the same search over the punished evidence, and
+    ``"least-punished"`` for the one that ranks a walk by the blame on it."""
     key = (name or "").strip().lower()
     if key not in _TRAVERSALS:
         raise ValueError(f"unknown traversal {name!r}; expected 'reward' or 'least-punished'")
@@ -132,12 +153,12 @@ def least_punished(steps: list[tuple]) -> list[tuple]:
 
 
 def _start_emission(graph: RadixCyclicGraph, start_node: int, start_offset: int) -> int:
-    """Characters emitted by the start node (its remainder after the matched trigram)."""
+    """Units emitted by the start node (its remainder after the matched gram)."""
     if start_node < 0 or start_node >= len(graph.labels) or not graph.alive[start_node]:
         raise ValueError(f"start node {start_node} is not alive")
     if start_node < FIRST:
         return 0
-    remainder = len(graph.labels[start_node]) - (start_offset + _W)
+    remainder = graph.label_len(start_node) - (start_offset + graph.encoding.n)
     if start_offset < 0 or remainder < 0:
         raise ValueError(
             f"start_offset {start_offset} out of range for label {graph.labels[start_node]!r}"
@@ -162,9 +183,9 @@ def _build_result(
     offset = 0 if start_node < FIRST else start_offset
     # sentinels are stripped by id: a real node may carry the label "<s>" or "</s>"
     real = [lab for n, lab in zip(node_ids, labels) if n >= FIRST]
-    text = _DECODER.decode_path(real, offset, include_context, skip_sentinels=False)
+    text = graph.encoding.decode_path(real, offset, include_context, skip_sentinels=False)
     if max_chars is not None and max_chars >= 0:
-        text = text[:max_chars]
+        text = graph.encoding.truncate(text, max_chars)
     return PathResult(
         text=text,
         labels=labels,
@@ -186,6 +207,7 @@ def dijkstra_predict(
     to_end: bool = False,
     max_expansions: int = 200_000,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
 ) -> PathResult:
     """Cheapest path from ``(start_node, start_offset)`` emitting ``>= min_chars``.
 
@@ -199,14 +221,17 @@ def dijkstra_predict(
     characters (ties: lowest cost) is returned; this never raises for a valid
     start.  ``include_context`` defaults to ``True`` from START and ``False``
     otherwise (see :meth:`Decoder.decode_path`); the text is truncated to
-    ``max_chars``.
+    ``max_chars``.  ``costs`` replaces the graph's own cost function: it is
+    how the punishment traversal walks the least punished path instead of the
+    most rewarded one (:mod:`radixnet.penalty`).
     """
     if step_penalty < 0:
         raise ValueError("step_penalty must be >= 0 (Dijkstra needs non-negative costs)")
     if max_chars is not None and max_chars < min_chars:
         max_chars = min_chars
     labels = graph.labels
-    child_costs = graph.child_costs
+    child_costs = graph.child_costs if costs is None else costs
+    overlap = graph.encoding.overlap
     push = heappush
     pop = heappop
     inf = math.inf
@@ -242,7 +267,7 @@ def dijkstra_predict(
         if max_chars is not None and chars >= max_chars:
             continue
         for c, _e, ec in onward(child_costs(node, came_from if came_from >= 0 else None)):
-            nchars = chars if c == END else chars + len(labels[c]) - _OV
+            nchars = chars if c == END else chars + graph.label_len(c) - overlap
             step = ec + step_penalty
             ncost = cost + step
             nkey = (node if c in context else -1, c, nchars)
@@ -276,6 +301,7 @@ def sample_walk(
     rng: random.Random | None = None,
     stop_at_end: bool = True,
     include_context: bool | None = None,
+    costs: CostFn | None = None,
     traversal: str = REWARD,
 ) -> PathResult:
     """Stochastic walk sampling each child from ``softmax(scores / temperature)``.
@@ -286,11 +312,16 @@ def sample_walk(
     (argmax); negative temperatures are rejected.  ``rng`` defaults to the
     graph's own seeded generator.  ``cost`` / ``step_costs`` are the model's
     ``-log p`` of each chosen edge (temperature 1), comparable with
-    :func:`dijkstra_predict`.
+    :func:`dijkstra_predict`.  ``costs`` replaces the graph's own cost
+    function, which is how this walk samples what the network was *not*
+    punished for (:mod:`radixnet.penalty`).
 
     Under ``traversal="least-punished"`` only the least punished children are on
     offer at every node and the sampling then runs exactly as before: punishment
-    decides *what* may be walked, the cost decides which of those it is.
+    decides *what* may be walked, the cost decides which of those it is.  The
+    two are different currencies and not composed: the least-punished traversal
+    reads the blame itself, so a ``costs`` handed in with it is ignored
+    (``../SPEC-LeastPunished.md`` §1, :mod:`radixnet.penalty`).
     """
     traversal = parse_traversal(traversal)
     if temperature < 0:
@@ -299,7 +330,8 @@ def sample_walk(
         rng = graph.rng
     labels = graph.labels
     blamed = traversal == LEAST_PUNISHED
-    child_costs = graph.child_steps if blamed else graph.child_costs
+    child_costs = graph.child_steps if blamed else (graph.child_costs if costs is None else costs)
+    overlap = graph.encoding.overlap
     exp = math.exp
     node = start_node
     chars = _start_emission(graph, start_node, start_offset)
@@ -310,21 +342,21 @@ def sample_walk(
     while True:
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break
-        costs = onward(child_costs(node, came_from))  # a node the model expects to go round offers nothing
+        options = onward(child_costs(node, came_from))  # a node the model expects to go round offers nothing
         if blamed:
-            costs = least_punished(costs)
-        if not costs:
+            options = least_punished(options)
+        if not options:
             break
-        if temperature == 0 or len(costs) == 1:
-            pick = min(costs, key=lambda item: item[2])
+        if temperature == 0 or len(options) == 1:
+            pick = min(options, key=lambda item: item[2])
         else:
             inv_t = 1.0 / temperature
-            lowest = min(cst for _, _, cst in costs)
-            weights = [exp(-(cst - lowest) * inv_t) for _, _, cst in costs]
+            lowest = min(cst for _, _, cst in options)
+            weights = [exp(-(cst - lowest) * inv_t) for _, _, cst in options]
             r = rng.random() * math.fsum(weights)
-            pick = costs[-1]
+            pick = options[-1]
             acc = 0.0
-            for item, wgt in zip(costs, weights):
+            for item, wgt in zip(options, weights):
                 acc += wgt
                 if r < acc:
                     pick = item
@@ -333,7 +365,7 @@ def sample_walk(
         step_costs.append(cst)
         node_ids.append(c)
         if c != END:
-            chars += len(labels[c]) - _OV
+            chars += graph.label_len(c) - overlap
         came_from = node
         node = c
         steps += 1

@@ -7,7 +7,16 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radixnet.encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder  # noqa: E402
+from radixnet.encoding import (  # noqa: E402
+    CHARS, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
+)
+
+EVERY_ENCODING = [
+    Encoding(), Encoding(n=1), Encoding(n=2), Encoding(n=5), Encoding(n=4, stride=4),
+    Encoding(n=5, stride=5), Encoding(n=6, stride=3), Encoding(unit=WORDS, n=1),
+    Encoding(unit=WORDS, n=2), Encoding(unit=WORDS, n=3), Encoding(unit=WORDS, n=2, stride=2),
+]
+"""The encodings the tests drive end to end."""
 
 
 class TestEncoder(unittest.TestCase):
@@ -114,3 +123,95 @@ class TestDecoder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEncodingDial(unittest.TestCase):
+    """The three dials: what a unit is, how many make a gram, how far apart they start."""
+
+    def test_defaults_and_validation(self):
+        self.assertEqual(Encoding(), Encoding(unit=CHARS, n=WINDOW, stride=1))
+        self.assertTrue(Encoding().is_default())
+        self.assertEqual(Encoding().overlap, WINDOW - 1)
+        self.assertEqual(Encoding(n=4, stride=4).overlap, 0)
+        self.assertFalse(Encoding(n=4, stride=4).sliding)
+        for bad in (dict(unit="rune"), dict(n=0), dict(stride=0), dict(n=2, stride=3)):
+            with self.assertRaises(ValueError):
+                Encoding(**bad)
+
+    def test_parse(self):
+        cases = {
+            "": Encoding(), "trigram": Encoding(), "char:4": Encoding(n=4),
+            "chars:4:4": Encoding(n=4, stride=4), "char:5:groups": Encoding(n=5, stride=5),
+            "letters:7:2": Encoding(n=7, stride=2), "word": Encoding(unit=WORDS, n=1),
+            "word:2": Encoding(unit=WORDS, n=2), "word-trigram": Encoding(unit=WORDS, n=3),
+            "WORD:2:2": Encoding(unit=WORDS, n=2, stride=2),
+        }
+        for spec, want in cases.items():
+            self.assertEqual(parse_encoding(spec), want, spec)
+            self.assertEqual(parse_encoding(str(want)), want, spec)  # str() round trips
+        for bad in ("rune:3", "char:x", "char:3:y", "char:2:3", "char:0", "a:b:c:d"):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_encoding(bad)
+
+    def test_encode(self):
+        cases = [
+            (Encoding(), "hello", ["hel", "ell", "llo"]),
+            (Encoding(n=1), "abc", ["a", "b", "c"]),
+            (Encoding(n=4, stride=4), "abcdefghij", ["abcd", "efgh"]),
+            (Encoding(n=5, stride=5), "abcdefghij", ["abcde", "fghij"]),
+            (Encoding(n=4, stride=2), "abcdef", ["abcd", "cdef"]),
+            (Encoding(), "hi", []),
+            (Encoding(unit=WORDS, n=2), "the cat sat down", ["the cat", "cat sat", "sat down"]),
+            (Encoding(unit=WORDS, n=3), "the cat sat down", ["the cat sat", "cat sat down"]),
+            (Encoding(unit=WORDS, n=2, stride=2), "the cat sat down here", ["the cat", "sat down"]),
+            (Encoding(unit=WORDS, n=2), "  the   cat  ", ["the cat"]),
+            (Encoding(unit=WORDS, n=2), "alone", []),
+        ]
+        for enc, text, want in cases:
+            self.assertEqual(enc.encode(text), want, f"{enc}.encode({text!r})")
+
+    def test_normalize_is_what_comes_back(self):
+        cases = [
+            (Encoding(), "hello", "hello"),
+            (Encoding(n=4, stride=4), "abcdefghij", "abcdefgh"),
+            (Encoding(n=4, stride=4), "abc", ""),
+            (Encoding(unit=WORDS, n=2), "  the  cat   sat ", "the cat sat"),
+            (Encoding(unit=WORDS, n=2, stride=2), "the cat sat down here", "the cat sat down"),
+        ]
+        for enc, text, want in cases:
+            self.assertEqual(enc.normalize(text), want, f"{enc}.normalize({text!r})")
+            grams = enc.encode(text)
+            if grams:
+                self.assertEqual(enc.decode_grams(grams), want, f"{enc} decode_grams")
+
+    def test_units_and_join(self):
+        for enc in EVERY_ENCODING:
+            text = "the quick brown fox jumps"
+            view = enc.units(text)
+            self.assertEqual(len(view), enc.length(text), str(enc))
+            self.assertEqual(enc.piece(text, 0), text if enc.unit == CHARS else " ".join(text.split()))
+            self.assertEqual(enc.piece(text, 2, 2), "")
+            whole = " ".join(text.split()) if enc.unit == WORDS else text
+            self.assertEqual(enc.join(*[enc.piece(text, i, i + 1) for i in range(len(view))]), whole)
+
+    def test_unit_prefix_stops_at_a_word_boundary(self):
+        word = Encoding(unit=WORDS, n=2)
+        self.assertFalse(word.has_unit_prefix("the cat", "the ca"))
+        self.assertTrue(word.has_unit_prefix("the cat", "the"))
+        self.assertTrue(word.has_unit_prefix("the cat", "the cat"))
+        self.assertTrue(Encoding().has_unit_prefix("the cat", "the ca"))
+
+    def test_decode_path(self):
+        word = Encoding(unit=WORDS, n=2)
+        self.assertEqual(word.decode_path(["the cat", "cat sat", "sat down"]), "the cat sat down")
+        # the continuation only: the matched gram is dropped
+        self.assertEqual(word.decode_path(["the cat", "cat sat"], 0, include_context=False), "sat")
+        groups = Encoding(n=4, stride=4)
+        self.assertEqual(groups.decode_path(["abcd", "efgh"]), "abcdefgh")
+
+    def test_encoder_and_decoder_carry_an_encoding(self):
+        self.assertEqual(Encoder(5).encode("abcdefg"), ["abcde", "bcdef", "cdefg"])
+        word = Encoding(unit=WORDS, n=2)
+        self.assertEqual(Encoder(encoding=word).encode("the cat sat"), ["the cat", "cat sat"])
+        self.assertEqual(Decoder(encoding=word).decode_trigrams(["the cat", "cat sat"]), "the cat sat")
+        self.assertEqual(Encoder().window, WINDOW)

@@ -4,7 +4,7 @@ Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
 Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
-Code, Agent, Images, Speech, Checkpoints, Graph.
+Code, Agent, Images, Speech, Checkpoints, Network settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
@@ -93,12 +93,61 @@ need an LLM.
     npm install
     npm run build                           # writes frontend/dist
 
-`frontend/dist` is committed so the Python server can serve it with zero npm
-steps. From `RadixCyclicNN/`:
+`frontend/dist` is committed so a server can serve it with zero npm steps. From
+`RadixCyclicNN/`, any of the three:
 
     python -m radixnet serve                # serves frontend/dist at http://127.0.0.1:8000/
+    make go-serve                           # the Go count / reward model
+    make rust-serve                         # the Rust count / reward model
 
 Rebuild and recommit `dist` whenever `src/` changes.
+
+## The three servers, and what each one can fill
+
+The same bundle runs against all three, because they answer the same JSON
+contract (`../DESIGN.md` §12) and `/api/status` says which one is replying in
+`engine`. What differs is how much of the contract each one has:
+
+| engine | what it serves |
+|---|---|
+| `python` | everything: every panel in the list above |
+| `go` | the model, the negative network, the tutor, code, the agent and the LLM clients; no scheduler and no MCP |
+| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Network settings and Graph, over both kinds |
+
+All three switch model kind from the selector in Network settings: the model
+that was running is kept as it was left, so switching to the word model, back,
+and forward again does not lose unsaved training. Each kind has its own file
+(`model.count.json`, `model.word.json`), and saving follows whichever is active.
+
+A panel whose API the running server does not have **hides itself** rather than
+failing: `App.jsx` reads `engine` from `/api/status` and drops the tabs that
+engine cannot answer. So the Rust badge in the status bar is also the
+explanation for the shorter tab row, and nothing in the app has to be rebuilt to
+point it at a different one.
+
+## Network settings
+
+The **Network settings** panel holds the settings of the network itself, as
+opposed to the options of one run:
+
+* the **traversal** every search uses - `reward` (the model's own distribution,
+  rewards and all) or `punishment` (the rewards leave the score and the
+  penalties price every step, so the cheapest path is the least punished one),
+  with a penalty and a merit scale. The Predict and Generate tabs show the same
+  control: it is one setting (`src/hooks/useNetworkSettings.jsx`), remembered in
+  this browser, and changing it anywhere changes it everywhere;
+* the **score function** of whichever kind is active - the count model's dual
+  frequency scales and sliding window, the resonant model's phase and
+  resonance settings (`GET /api/model` to read, `POST /api/model/weights` to
+  apply). The sine model has no score function to set and says why; the
+  negative network's blame function stays on the Negative tab beside the
+  failures it weighs;
+* the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
+  the sliding window, its stride and the three sentinels - read-only, because
+  the window is part of the model format rather than a setting - and a live
+  preview that encodes a text, decodes it back and walks it through the graph's
+  own node labels, where a label longer than the window is a radix chain the
+  graph merged into one node.
 
 ## Configuration
 
@@ -121,4 +170,5 @@ Rebuild and recommit `dist` whenever `src/` changes.
     src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
+    src/hooks/useNetworkSettings.jsx  the settings several panels share, held once (the traversal)
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

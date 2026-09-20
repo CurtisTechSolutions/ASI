@@ -154,6 +154,12 @@ impl Graph {
 
     /// `log((correct + s) / (incorrect + s))` of a context: zero until a path is
     /// judged, and symmetric.
+    /// Whether any context has been judged at all: the searches skip the
+    /// context lookup entirely where nothing has.
+    pub fn paths_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
     pub fn path_term(&self, prev: usize, edge: usize) -> f64 {
         match self.paths.get(&PathKey { prev, edge }) {
             Some(row) if row.correct != 0 || row.incorrect != 0 => {

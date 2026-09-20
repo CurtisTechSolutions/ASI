@@ -116,11 +116,14 @@ func (j *Job) ToDict() map[string]any {
 
 // Options configure a Service.
 type Options struct {
-	ModelPath     string
-	Seed          int64
-	Workers       int
-	Exact         bool
-	UploadDir     string
+	ModelPath string
+	Seed      int64
+	Workers   int
+	Exact     bool
+	UploadDir string
+	// Encoding is how a model created here reads text (a model loaded from
+	// ModelPath brings its own); the zero value is the character trigram.
+	Encoding      radixnet.Encoding
 	CheckpointDir string
 	Keep          int
 	Quiet         bool
@@ -207,7 +210,12 @@ func NewService(opts Options) (*Service, error) {
 		}
 	}
 	if m == nil {
-		fresh, err := radixnet.NewModel(opts.Seed, radixnet.DefaultGraphOptions())
+		graph := radixnet.DefaultGraphOptions()
+		graph.Encoding = opts.Encoding.WithDefaults()
+		if err := graph.Encoding.Validate(); err != nil {
+			return nil, err
+		}
+		fresh, err := radixnet.NewModel(opts.Seed, graph)
 		if err != nil {
 			return nil, err
 		}
@@ -473,28 +481,28 @@ func (s *Service) mutate(fn func(m *radixnet.Model) (any, error)) (any, error) {
 }
 
 // Kinds describes the one kind this server runs.
-func Kinds() []map[string]any {
+//
+// Words are not a kind: they are an encoding (`--encoding word:3:1`), so the
+// units below follow the running model's encoding rather than its kind.
+func Kinds(units string) []map[string]any {
 	return []map[string]any{{
-		"kind": "count", "label": ModelLabel, "units": radixnet.CharUnits,
+		"kind": "count", "label": ModelLabel, "units": units,
 		"description": "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K continuations (Go implementation)",
-	}}
-}
-
-// WordKinds is Kinds for a server running the word model: the same algorithm
-// over an alphabet whose symbols are words, so it is a kind of its own.
-func WordKinds() []map[string]any {
-	return []map[string]any{{
-		"kind": "word", "label": WordModelLabel, "units": radixnet.WordUnits,
-		"description": "the count / reward model over an alphabet whose symbols are words: the same graph, weights and search, with a whitespace split for an encoder - lengths, counts and scores are per word, an unread word is <unk>, and whitespace is normalised (Go implementation)",
 	}}
 }
 
 // kinds is the list for the model this server actually runs.
 func (s *Service) kinds() []map[string]any {
-	if s.model != nil && s.model.IsWords() {
-		return WordKinds()
+	return Kinds(s.units())
+}
+
+// units is what the running model counts in: "chars", or "words" under a word
+// encoding.
+func (s *Service) units() string {
+	if s.model == nil {
+		return radixnet.DefaultEncoding().UnitsName()
 	}
-	return Kinds()
+	return s.model.Encoding().UnitsName()
 }
 
 // Backends mirrors the Python status's backend availability block.
@@ -523,11 +531,7 @@ func (s *Service) Status() (map[string]any, error) {
 	if s.ckpts != nil {
 		ckptDir = s.ckpts.Dir
 	}
-	kind, label := "count", ModelLabel
-	units := radixnet.CharUnits
-	if s.model != nil && s.model.IsWords() {
-		kind, label, units = "word", WordModelLabel, radixnet.WordUnits
-	}
+	kind, label, units := "count", ModelLabel, s.units()
 	stats["kind"] = kind
 	stats["model_label"] = label
 	stats["units"] = units
@@ -567,15 +571,118 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	if s.modelPath != "" {
 		modelPath, _ = filepath.Abs(s.modelPath)
 	}
-	active, label := "count", ModelLabel
-	units := radixnet.CharUnits
-	if s.model != nil && s.model.IsWords() {
-		active, label, units = "word", WordModelLabel, radixnet.WordUnits
-	}
+	active, label, units := "count", ModelLabel, s.units()
 	return map[string]any{
 		"kind": active, "label": label, "units": units, "kinds": s.kinds(), "model_path": modelPath,
 		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out, "engine": "go",
 	}, nil
+}
+
+// Encoding is GET /api/encoding: the text encoding every kind shares.
+//
+// Read-only, and "configurable" says so.  The window is not a setting but part
+// of the model format: the graph's labels, its splits and merges, the saved
+// file and the Python implementation all assume the same number, so a model
+// trained at one window could not be read at another.
+func (s *Service) Encoding() map[string]any {
+	enc := s.model.Encoding()
+	return map[string]any{
+		"encoding": enc.String(), "unit": string(enc.Unit),
+		"window": enc.N, "ngram": enc.N, "stride": enc.Stride, "overlap": enc.Overlap(),
+		"start_label": radixnet.StartLabel, "end_label": radixnet.EndLabel, "back_label": radixnet.BackLabel,
+		"configurable": true,
+		"note": fmt.Sprintf(
+			"Text goes in as %s, and comes back out of the (possibly compressed) node labels along a "+
+				"path. The encoding is fixed for a model's life - every label is written in it - so it is "+
+				"chosen when a model is made: POST /api/reset with {\"encoding\": \"word:2:1\"}, or "+
+				"{unit, ngram, stride}.", enc.Describe()),
+	}
+}
+
+// EncodingPreview is POST /api/encoding/preview: one text through the encoder
+// and back through both decoders, and through the graph's own labels.
+func (s *Service) EncodingPreview(text string) (map[string]any, error) {
+	enc := s.model.Encoding()
+	windows := enc.Encode(text)
+	if windows == nil {
+		windows = []string{}
+	}
+	decoded := enc.DecodeGrams(windows)
+	info := s.Encoding()
+	info["text"] = text
+	info["chars"] = enc.Len(text)
+	info["windows"] = windows
+	info["count"] = len(windows)
+	info["decoded"] = decoded
+	// what comes back is what the encoding can represent: the text itself under a
+	// sliding character window, its words under a word encoding
+	info["round_trip"] = decoded == enc.Normalize(text)
+	info["kind"] = "count"
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		g := m.G
+		unknown := []string{}
+		for _, w := range windows {
+			if _, _, ok := g.Lookup(w); !ok {
+				unknown = append(unknown, w)
+			}
+		}
+		info["unknown_windows"] = unknown
+		walked, ok := []int(nil), false
+		if len(windows) > 0 {
+			walked, ok = g.NodePath(windows)
+		}
+		if !ok {
+			return map[string]any{
+				"known": false, "reason": encodingReason(enc, len(windows), unknown),
+				"labels": []string{}, "node_ids": []int{}, "decoded": "", "nodes": 0, "compressed": 0,
+			}, nil
+		}
+		labels := make([]string, len(walked))
+		real := make([]string, 0, len(walked))
+		compressed := 0
+		for i, n := range walked {
+			labels[i] = g.Labels[n]
+			if n != radixnet.Start && n != radixnet.End {
+				real = append(real, labels[i])
+				if enc.Len(labels[i]) > enc.N {
+					compressed++
+				}
+			}
+		}
+		return map[string]any{
+			"known": true, "reason": nil, "labels": labels, "node_ids": walked,
+			"decoded": enc.DecodePath(real, 0, true), "nodes": len(real), "compressed": compressed,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	info["path"] = out
+	return info, nil
+}
+
+// encodingReason says why a text cannot be walked: windows never seen, or a
+// text whose windows are all known that still does not run from START to END.
+func encodingReason(enc radixnet.Encoding, windows int, unknown []string) string {
+	if windows == 0 {
+		return fmt.Sprintf("the text is shorter than one window (%d %ss)", enc.N, enc.Unit)
+	}
+	if len(unknown) > 0 {
+		shown := unknown
+		suffix := ""
+		if len(shown) > 5 {
+			shown, suffix = shown[:5], "..."
+		}
+		quoted := make([]string, len(shown))
+		for i, w := range shown {
+			quoted[i] = fmt.Sprintf("%q", w)
+		}
+		return fmt.Sprintf("%d of the %d windows have never been seen: %s%s",
+			len(unknown), windows, strings.Join(quoted, ", "), suffix)
+	}
+	return "every window is known, but the structure cannot walk the whole text from START to END as it " +
+		"stands - a missing edge, a step into the middle of a merged node, or a text that is only part of " +
+		"one it was trained on (the walk has to reach the end of a text)"
 }
 
 // SelectKind is POST /api/model/select: this server runs the model it was
@@ -583,9 +690,6 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 // graph - and selecting the other one is starting the server again with it.
 func (s *Service) SelectKind(kind string) (map[string]any, error) {
 	active := "count"
-	if s.model != nil && s.model.IsWords() {
-		active = "word"
-	}
 	wanted := strings.ToLower(strings.TrimSpace(kind))
 	if wanted != active {
 		if wanted == "count" || wanted == "word" {
@@ -709,8 +813,9 @@ func (s *Service) Load(path string) (map[string]any, error) {
 	return s.replaceModel(m)
 }
 
-// Reset replaces the model with a fresh one.
-func (s *Service) Reset(seed *int64, kind string, opts map[string]float64) (map[string]any, error) {
+// Reset replaces the model with a fresh one, in the encoding given (the zero
+// Encoding is the default one: character trigrams).
+func (s *Service) Reset(seed *int64, kind string, opts map[string]float64, enc radixnet.Encoding) (map[string]any, error) {
 	if kind != "" && strings.ToLower(kind) != "count" {
 		return nil, badRequest("the Go server runs the count / reward model only (kind %q is served by the Python server)", kind)
 	}
@@ -718,6 +823,10 @@ func (s *Service) Reset(seed *int64, kind string, opts map[string]float64) (map[
 		return nil, err
 	}
 	g := radixnet.DefaultGraphOptions()
+	g.Encoding = enc.WithDefaults()
+	if err := g.Encoding.Validate(); err != nil {
+		return nil, badRequest("%v", err)
+	}
 	for name, v := range opts {
 		switch name {
 		case "count_scale":
@@ -839,8 +948,8 @@ func (s *Service) Paths(limit int) (map[string]any, error) {
 			rows = append(rows, map[string]any{
 				"prev": row.Prev, "edge": row.Edge, "seen": row.Seen, "correct": row.Correct,
 				"incorrect": row.Incorrect, "correct_ratio": row.CorrectRatio, "seen_ratio": row.SeenRatio,
-				"term": row.Term, "after": g.TextOf(g.Label(row.Prev)), "parent": parent,
-				"parent_label": g.TextOf(g.Label(parent)), "child": child, "child_label": g.TextOf(g.Label(child)),
+				"term": row.Term, "after": g.Label(row.Prev), "parent": parent,
+				"parent_label": g.Label(parent), "child": child, "child_label": g.Label(child),
 			})
 		}
 		totals := g.PathTotals()
@@ -858,21 +967,25 @@ func (s *Service) Paths(limit int) (map[string]any, error) {
 	return out.(map[string]any), nil
 }
 
-// Words is GET /api/words: the word model's alphabet, most read first.
+// Words is GET /api/words: a word encoding's alphabet, most read first.
 func (s *Service) Words(limit int) (map[string]any, error) {
 	if limit < 0 {
 		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
 	}
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
-		if !m.IsWords() {
-			return nil, badRequest("the %s model has no vocabulary; it counts in %s", m.Kind(), m.Units())
+		enc := m.Encoding()
+		if enc.Unit != radixnet.Words {
+			return nil, badRequest(
+				"this model counts in %s, so it has no words to list; a word alphabet needs a word encoding "+
+					"(--encoding word:%d:%d)", enc.UnitsName(), enc.N, enc.Stride)
 		}
 		rows := m.TopWords(limit)
 		if rows == nil {
 			rows = []radixnet.WordRow{}
 		}
 		return map[string]any{
-			"words": rows, "limit": limit, "vocabulary": m.Vocabulary().Len(), "units": m.Units(),
+			"words": rows, "limit": limit, "vocabulary": len(enc.Vocabulary(m.G.GramIndex())),
+			"units": enc.UnitsName(), "encoding": enc.String(),
 		}, nil
 	})
 	if err != nil {
@@ -891,7 +1004,7 @@ func (s *Service) NodeRatios(limit int, node string) (map[string]any, error) {
 		g := m.G
 		wanted := -1
 		if node != "" {
-			key := g.SymbolsOf(node) // a word graph is addressed in words; the identity anywhere else
+			key := node // a label is text on every encoding
 			for i := 0; i < g.NumNodeIDs(); i++ {
 				if g.Label(i) == key {
 					wanted = i
@@ -973,7 +1086,7 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	}
 	nodes := make([]map[string]any, 0, len(ids))
 	for _, i := range ids {
-		nodes = append(nodes, map[string]any{"id": i, "label": g.TextOf(g.Labels[i]), "count": g.Count[i],
+		nodes = append(nodes, map[string]any{"id": i, "label": g.Labels[i], "count": g.Count[i],
 			"count_resets": g.CountResets[i], "activation": 1.0, "z": 0.0, "a": 0.0, "b": 1.0 / 3.0, "h": 0.0, "k": 1.0})
 	}
 	edges := []map[string]any{}

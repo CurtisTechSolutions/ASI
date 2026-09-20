@@ -21,6 +21,7 @@ from .encoding import WINDOW
 from .graph import END, START, RadixCyclicGraph
 from .search import (
     LEAST_PUNISHED,
+    CostFn,
     PathResult,
     _build_result,
     _start_emission,
@@ -31,7 +32,7 @@ from .search import (
 
 __all__ = ["Prediction", "beam_predict", "default_beam", "path_probability"]
 
-_OV = WINDOW - 1
+_OV = WINDOW - 1  # the default overlap; a graph's own is graph.encoding.overlap
 
 
 @dataclass(slots=True)
@@ -43,8 +44,9 @@ class Prediction(PathResult):
     k: int = 0
     beam: int = 0
     mode: str = "beam"
-    #: the search that wrote this, when it was not the ordinary one by cost
-    traversal: str = ""
+    traversal: str = "reward"
+    """Which traversal wrote this: ``"reward"``, ``"punishment"`` (:mod:`radixnet.penalty` prices the steps)
+    or ``"least-punished"`` (``../SPEC-LeastPunished.md`` ranks the walks)."""
 
     def to_dict(self) -> dict:
         d = PathResult.to_dict(self)
@@ -54,6 +56,7 @@ class Prediction(PathResult):
             k=self.k,
             beam=self.beam,
             mode=self.mode,
+            traversal=self.traversal,
         )
         if self.traversal and self.traversal != "reward":
             d["traversal"] = self.traversal
@@ -84,17 +87,21 @@ def _run_beam(
     max_expansions: int,
     worst: bool,
     traversal: str = "reward",
+    costs: CostFn | None = None,
 ) -> tuple[list[tuple[float, list[int], list[float], float]], int]:
     """One beam: the ``k`` cheapest (or, with ``worst``, dearest) complete paths
     as ``(cost, node_ids, step_costs, punish)``.
 
-    Under ``traversal="least-punished"`` "cheapest" reads as "least punished, and
-    cheapest among those": a path is ranked by its *worst* step first and by its
-    summed cost only where two paths carry the same worst step.
+    ``costs`` replaces the graph's own cost function, which is how the
+    punishment traversal prices a step (:mod:`radixnet.penalty`).  Under
+    ``traversal="least-punished"`` "cheapest" instead reads as "least punished,
+    and cheapest among those": a path is ranked by its *worst* step first and by
+    its summed cost only where two paths carry the same worst step.
     """
     labels = graph.labels
     blamed = traversal == LEAST_PUNISHED
-    child_costs = graph.child_steps if blamed else graph.child_costs
+    child_costs = graph.child_steps if blamed else (graph.child_costs if costs is None else costs)
+    overlap = graph.encoding.overlap
     entries: list[tuple[int, int, float]] = [(start_node, -1, 0.0)]  # entry -> (node, parent, step cost)
     sign = -1.0 if worst else 1.0  # heap keys: the k-th best finished path sits at the heap top
 
@@ -141,7 +148,8 @@ def _run_beam(
                 children = least_punished(children)
             for item in children:
                 c, ec = item[0], item[2]
-                nchars = chars if c == END else chars + len(labels[c]) - _OV
+                # a length is counted in the encoding's units, not in characters
+                nchars = chars if c == END else chars + graph.label_len(c) - overlap
                 step = ec + step_penalty
                 ncost = cost + step
                 npunish = max(punish, item[3]) if blamed else 0.0  # a path is as punished as its worst step
@@ -206,6 +214,7 @@ def beam_predict(
     max_expansions: int = 200_000,
     include_context: bool | None = None,
     traversal: str = "reward",
+    costs: CostFn | None = None,
 ) -> tuple[list[PathResult], list[PathResult], int]:
     """``(top, bottom, expanded)``: the ``k`` cheapest and the ``k`` most expensive complete paths.
 
@@ -217,9 +226,12 @@ def beam_predict(
     50``, or 500 with ``to_end``) or ``max_expansions``, the surviving partial
     paths are returned instead (``reached_end`` is ``False`` on them).  A start
     that already satisfies the goal gives one complete path (the start itself).
-    ``traversal="least-punished"`` ranks a path by the blame on its worst step
-    before its cost, and lets a node offer only the children it has the least
-    against (``../SPEC-LeastPunished.md``).
+    ``costs`` replaces the graph's own cost function: with the punishment
+    traversal's (:mod:`radixnet.penalty`) ``top`` is the ``k`` *least punished*
+    continuations and ``bottom`` the ``k`` most punished ones.
+    ``traversal="least-punished"`` does something else again: it ranks a path by
+    the blame on its worst step before its cost, and lets a node offer only the
+    children it has the least against (``../SPEC-LeastPunished.md``).
     """
     traversal = parse_traversal(traversal)
     if k < 0:
@@ -238,15 +250,16 @@ def beam_predict(
         return [], [], 0
     common = (graph, start_node, start_chars, min_chars)
     limits = (k, width, step_penalty, to_end, max_steps, max_expansions)
-    best, expanded = _run_beam(*common, max_chars, *limits, False, traversal)
+    best, expanded = _run_beam(*common, max_chars, *limits, False, traversal, costs)
     bottom_cap = max_chars
     if bottom_cap is None and to_end:
-        longest = max((len(graph.labels[n]) for _, ids, _, _ in best for n in ids[1:]), default=0)
+        longest = max((graph.label_len(n) for _, ids, _, _ in best for n in ids[1:]), default=0)
+        overlap = graph.encoding.overlap
         emitted = max(
-            (sum(len(graph.labels[n]) - _OV for n in ids[1:] if n != END) for _, ids, _, _ in best), default=0
+            (sum(graph.label_len(n) - overlap for n in ids[1:] if n != END) for _, ids, _, _ in best), default=0
         )
         bottom_cap = max(2 * emitted + longest + 8, min_chars, 16)
-    worst, expanded_worst = _run_beam(*common, bottom_cap, *limits, True, traversal)
+    worst, expanded_worst = _run_beam(*common, bottom_cap, *limits, True, traversal, costs)
     expanded += expanded_worst
     seen = {tuple(ids) for _, ids, _, _ in best}
 

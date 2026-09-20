@@ -458,6 +458,24 @@ impl Graph {
         }
     }
 
+    /// The children of `p` as the traversal in force sees them: the graph's own
+    /// costs, or the punishment traversal's ([`crate::penalty`]).
+    pub(crate) fn step_costs_into(
+        &self,
+        p: usize,
+        prev: Option<usize>,
+        costs: Option<&crate::penalty::PenaltyCosts>,
+        out: &mut Vec<ChildCost>,
+    ) {
+        match costs {
+            Some(priced) => {
+                out.clear();
+                out.extend(priced.costs(self, p, prev));
+            }
+            None => self.child_costs_into(p, prev, out),
+        }
+    }
+
     /// [`Graph::child_costs_into`] into a fresh vector.
     pub fn child_costs_from(&self, p: usize, prev: Option<usize>) -> Vec<ChildCost> {
         let mut out = Vec::new();

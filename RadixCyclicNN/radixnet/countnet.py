@@ -46,7 +46,7 @@ from .backend import get_backend
 from .beam import Prediction
 from . import diff
 from .counter import CyclicCounter
-from .encoding import WINDOW, Decoder, Encoder
+from .encoding import WINDOW, Decoder, Encoder, Encoding
 from .graph import BACK, END, START, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
@@ -60,11 +60,12 @@ from .model import (
     meta_add,
     meta_stats,
 )
+from .penalty import DEFAULT_TRAVERSAL
 
 __all__ = ["COUNT_MODEL_FORMAT", "CountRewardGraph", "CountRewardNet"]
 
 COUNT_MODEL_FORMAT = "radixnet-count"
-_W = WINDOW
+_W = WINDOW  # the default n; a net's own is self.encoding.n
 _MAX_LOG_PPL = 700.0
 
 
@@ -142,6 +143,7 @@ class CountRewardGraph(RadixCyclicGraph):
         window_scale: float = 0.5,
         path_scale: float = 1.0,
         window: int = 10_000,
+        encoding: Encoding | None = None,
     ) -> None:
         self.count_scale = float(count_scale)
         self.reward_scale = float(reward_scale)
@@ -164,7 +166,7 @@ class CountRewardGraph(RadixCyclicGraph):
         self._path_parents: set[int] | None = None  # nodes whose costs depend on where the walk came from
         self._ctx_cache: dict[tuple[int, int], list[tuple[int, int, float]]] = {}
         self._ctx_version = -1
-        super().__init__(seed)
+        super().__init__(seed, encoding=encoding)
 
     # -- the tracked numbers -------------------------------------------------
 
@@ -501,6 +503,37 @@ class CountRewardGraph(RadixCyclicGraph):
             costs = []
         self._ctx_cache[(prev, p)] = costs
         return costs
+
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, merit, penalty)]``: the dual frequency function with the rewards taken out, and the
+        punishments on their own.
+
+        The weight of an edge here is ``frequency terms + reward_scale *
+        reward``, so the two halves come apart exactly: the **merit** is what
+        the corpus did - the all-time and windowed shares, and the count term
+        when it is on - with the whole reward subtracted back out, and the
+        **penalty** is ``reward_scale * max(0, -reward)``, the punishment half
+        of that reward and nothing else.  A judged context
+        (:meth:`path_term`) splits the same way: what says the step was right
+        here is merit, what says it was wrong here is penalty.  The punishment
+        traversal therefore never sees a reward at all
+        (:mod:`radixnet.penalty`).
+        """
+        rs = self.reward_scale
+        ps = self.path_scale
+        ew, er = self.edge_w, self.edge_reward
+        context = prev is not None and ps != 0.0 and p in self.nodes_with_paths()
+        out: list[tuple[int, int, float, float]] = []
+        for c, e in self.children[p].items():
+            reward = er[e]
+            merit = ew[e] - rs * reward
+            penalty = rs * max(0.0, -reward)
+            if context:
+                term = ps * self.path_term(prev, e)
+                merit += max(0.0, term)
+                penalty += max(0.0, -term)
+            out.append((c, e, merit, penalty))
+        return out
 
     # -- keeping the contexts honest through splits and merges ----------------
 
@@ -847,14 +880,15 @@ class CountRewardNet(GraphModel):
         global_scale: float = 0.5,
         window_scale: float = 0.5,
         window: int = 10_000,
+        encoding: Encoding | None = None,
     ) -> None:
         self.seed = int(seed)
         self.graph = self.graph_class(
             seed=self.seed, count_scale=count_scale, reward_scale=reward_scale, global_scale=global_scale,
-            window_scale=window_scale, window=window,
+            window_scale=window_scale, window=window, encoding=encoding,
         )
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
+        self.encoder = Encoder(encoding=self.graph.encoding)
+        self.decoder = Decoder(encoding=self.graph.encoding)
         # no numeric learning rule runs, so the backend is only reported (python / cpu); backend / device are accepted
         # for interface parity with RadixNet
         self.backend = get_backend("python", None)
@@ -903,7 +937,7 @@ class CountRewardNet(GraphModel):
         grams = [self.encoder.encode(t) for t in texts]
         if count:
             meta_add(meta, "trained_texts", len(texts))
-            meta_add(meta, "trained_chars", sum(len(t) for t in texts))
+            meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         # build the structure first (no counting) and compress it, so every pass - the first included - walks
         # the same transitions: steps inside a compressed node are deterministic and never counted
         self._observe_grams(grams, False)
@@ -1201,8 +1235,8 @@ class CountRewardNet(GraphModel):
         """
         base = abs(1.0 if strength is None else float(strength))
         wrong, right = str(wrong or ""), str(right or "")
-        changes = diff.summary(wrong, right, limit=0)
-        wrong_spans, right_spans = diff.changed_spans(wrong, right)
+        changes = diff.summary(wrong, right, limit=0, encoding=self.encoding)
+        wrong_spans, right_spans = diff.changed_spans(wrong, right, self.encoding)
         result = {
             "edits": len(changes), "changes": changes[:8],
             "penalised": 0, "rewarded": 0, "kept": 0, "penalty": 0.0, "reward": 0.0, "loss": None,
@@ -1211,8 +1245,9 @@ class CountRewardNet(GraphModel):
             "marked_correct": 0, "marked_incorrect": 0,
         }
         graph = self.graph
-        wrong_grams = self.encoder.encode(wrong) if len(wrong) >= _W else []
-        right_grams = self.encoder.encode(right) if len(right) >= _W else []
+        enc = self.encoding
+        wrong_grams = enc.encode(wrong)
+        right_grams = enc.encode(right)
         if not wrong_grams and not right_grams:
             return result
         # both sentences join the structure before either is measured: observing one can split a node the
@@ -1231,7 +1266,7 @@ class CountRewardNet(GraphModel):
             transitions = graph.observe_sequence(right_grams, count)
             if count:
                 self.meta["trained_texts"] += 1
-                self.meta["trained_chars"] += len(right)
+                self.meta["trained_chars"] += self.encoding.length(right)
                 graph.record_path(transitions, None, create=False)  # the correction's own traffic
             if right_spans:
                 taught_steps = self._steps_over(right_grams, len(right), right_spans)
@@ -1283,7 +1318,9 @@ class CountRewardNet(GraphModel):
         temperature: float = 1.0,
         to_end: bool = False,
         max_length: int | None = None,
-        traversal: str = "reward",
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """Continue ``prefix``: the ``k`` most likely and the ``k`` least likely continuations in one search.
 
@@ -1291,12 +1328,18 @@ class CountRewardNet(GraphModel):
         search of :mod:`radixnet.beam`; the result *is* the best path (a
         :class:`~radixnet.search.PathResult`) and carries ``top`` / ``bottom``.
         ``"sample"`` draws one stochastic walk (``top = [it]``).  ``length``,
-        ``to_end``, ``max_length`` and ``step_penalty`` mean what they mean for
-        :meth:`RadixNet.predict`.  ``traversal="least-punished"`` ranks a walk by
-        the blame on its worst step before its cost and lets a node offer only
-        the children it has the least against; on a model nothing was ever
-        punished on it is the ordinary search, to the bit
-        (``../SPEC-LeastPunished.md``).
+        ``to_end``, ``max_length``, ``step_penalty`` and ``traversal`` mean
+        what they mean for :meth:`RadixNet.predict` - and this is the model both
+        punishment traversals were written for, because it is the one that keeps
+        a reward per edge and a record of what each path did.  With
+        ``traversal="punishment"`` the rewards leave the score altogether and
+        ``top`` becomes the ``k`` *least punished* continuations
+        (:mod:`radixnet.penalty`); with ``traversal="least-punished"`` the score
+        is untouched and the **ranking** changes instead - a walk goes by the
+        blame on its worst step before its cost, and a node offers only the
+        children it has the least against, so blame cannot be bought off with
+        rewards elsewhere.  On a model nothing was ever punished on, both are
+        the ordinary search, to the bit (``../SPEC-LeastPunished.md``).
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
@@ -1305,7 +1348,8 @@ class CountRewardNet(GraphModel):
         if mode not in ("beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
         return self._search(
-            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length, traversal=traversal
+            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
+            traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
         )
 
     # -- introspection -------------------------------------------------------
@@ -1320,6 +1364,12 @@ class CountRewardNet(GraphModel):
             "nodes": g.num_nodes(),
             "edges": g.num_edges(),
             "trigrams": g.num_trigrams(),
+            "grams": g.num_trigrams(),
+            "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
+            "ngram": self.encoding.n,
+            "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
             "inverted": g.inverted,
             "backend": self.backend.name,
@@ -1369,7 +1419,7 @@ class CountRewardNet(GraphModel):
             raise ValueError(f"unsupported {cls.format} model version {version}")
         graph = cls.graph_class.from_dict(d["graph"])
         model = cls(seed=graph.seed, backend=backend, device=device)
-        model.graph = graph
+        model._adopt(graph)
         model.history = [dict(r) for r in d.get("history", [])]
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})

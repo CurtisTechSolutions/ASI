@@ -93,7 +93,7 @@ from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
 from .counter import CyclicCounter
 from .beam import Prediction, default_beam
-from .encoding import WINDOW, Decoder, Encoder
+from .encoding import WINDOW, Decoder, Encoder, Encoding
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .metacog import ABORT, ESCAPE, RIDE, MetaLayer, cycle_signature
 from .model import (
@@ -106,6 +106,7 @@ from .model import (
     _weight_groups,
     _whole_text,
 )
+from .penalty import DEFAULT_TRAVERSAL, phase_traversal_costs, resolve_traversal
 from .phasesearch import phase_beam, phase_dijkstra, phase_kbest, phase_walk
 from .search import PathResult
 
@@ -113,8 +114,8 @@ __all__ = ["RESONANT_MODEL_FORMAT", "TAU", "ResonantGraph", "ResonantNet", "trig
 
 RESONANT_MODEL_FORMAT = "radixnet-resonant"
 TAU = 2.0 * math.pi
-_W = WINDOW
-_OV = WINDOW - 1
+_W = WINDOW       # the default n; a graph's own is graph.encoding.n
+_OV = WINDOW - 1  # and its own overlap graph.encoding.overlap
 _MAX_LOG_PPL = 700.0
 _LOG_UNKNOWN = math.log(1e-6)
 
@@ -163,6 +164,7 @@ class ResonantGraph(RadixCyclicGraph):
         amp_scale: float = 1.0,
         reward_scale: float = 1.0,
         concentration: float = 2.0,
+        encoding: Encoding | None = None,
     ) -> None:
         self.buckets = int(buckets)
         if self.buckets < 1:
@@ -186,7 +188,7 @@ class ResonantGraph(RadixCyclicGraph):
         self._adv_cache: dict[str, int] = {}
         self._phase_costs: dict[tuple[int, int], list[tuple[int, int, float]]] = {}
         self._phase_cache_version = -1
-        super().__init__(seed)
+        super().__init__(seed, encoding=encoding)
 
     # -- the phase -----------------------------------------------------------
 
@@ -208,10 +210,8 @@ class ResonantGraph(RadixCyclicGraph):
         change which trigrams exist - and makes a walk's phase equal
         :meth:`text_bucket` of the text it emitted.
         """
-        if len(label) < _W:
-            return 0
         adv = self.trigram_advance
-        return sum(adv(label[i : i + _W]) for i in range(len(label) - _OV)) % self.buckets
+        return sum(adv(g) for g in self.encoding.encode(label)) % self.buckets
 
     def node_advance(self, node: int, label: str) -> int:
         """:meth:`label_advance` of a real node; 0 for START and END.
@@ -224,10 +224,8 @@ class ResonantGraph(RadixCyclicGraph):
 
     def text_bucket(self, text: str, start: int = 0) -> int:
         """Phase of a piece of text - the bucket a walk that emitted it would carry."""
-        if len(text) < _W:
-            return start % self.buckets
         adv = self.trigram_advance
-        total = sum(adv(text[i : i + _W]) for i in range(len(text) - _OV))
+        total = sum(adv(g) for g in self.encoding.encode(text))
         return (start + total) % self.buckets
 
     def bucket_phase(self, bucket: int) -> float:
@@ -453,6 +451,20 @@ class ResonantGraph(RadixCyclicGraph):
             self._phase_costs[key] = costs
         return costs
 
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, merit, penalty)]`` of the phase-marginal: the amplitude with the rewards taken out,
+        and the punishments on their own (:mod:`radixnet.penalty`)."""
+        rs = self.reward_scale
+        ew, er = self.edge_w, self.edge_reward
+        return [(c, e, ew[e] - rs * er[e], rs * max(0.0, -er[e])) for c, e in self.children[p].items()]
+
+    def child_evidence_at(self, p: int, bucket: int) -> list[tuple[int, int, float, float]]:
+        """:meth:`child_evidence` at one phase: the resonance is merit, so a walk that arrives in phase with an
+        edge is still rewarded *by the corpus* - what it never sees is a reward a judge handed out."""
+        rs = self.reward_scale
+        er = self.edge_reward
+        return [(c, e, score - rs * er[e], rs * max(0.0, -er[e])) for c, e, score in self.child_scores_at(p, bucket)]
+
     def child_probs_at(self, p: int, bucket: int) -> list[tuple[int, float]]:
         """``[(child, P(child | parent, phase))]``."""
         return [(c, math.exp(-cost)) for c, _e, cost in self.child_costs_at(p, bucket)]
@@ -651,6 +663,7 @@ class ResonantNet(GraphModel):
         teach_back: bool = False,
         back_strength: float = 0.25,
         back_ceiling: float = 0.10,
+        encoding: Encoding | None = None,
     ) -> None:
         self.seed = int(seed)
         self.teach_back = bool(teach_back)
@@ -666,11 +679,11 @@ class ResonantNet(GraphModel):
         self.graph = ResonantGraph(
             seed=self.seed, buckets=buckets, period=period, kick_scale=kick_scale,
             resonance_scale=resonance_scale, amp_scale=amp_scale, reward_scale=reward_scale,
-            concentration=concentration,
+            concentration=concentration, encoding=encoding,
         )
         self.metacog = MetaLayer()
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
+        self.encoder = Encoder(encoding=self.graph.encoding)
+        self.decoder = Decoder(encoding=self.graph.encoding)
         # nothing numeric runs on a device; backend / device are accepted for interface parity with RadixNet
         self.backend = get_backend("python", None)
         self.history: list[dict] = []
@@ -1101,6 +1114,9 @@ class ResonantNet(GraphModel):
         to_end: bool,
         max_length: int | None,
         rng=None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """The shared search hook, routed through :meth:`predict`.
 
@@ -1112,6 +1128,7 @@ class ResonantNet(GraphModel):
         return self.predict(
             prefix, length=length, mode=mode, step_penalty=step_penalty, temperature=temperature,
             to_end=to_end, max_length=max_length, k=max(1, k), beam=beam, rng=rng,
+            traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
         )
 
     def predict(
@@ -1126,6 +1143,9 @@ class ResonantNet(GraphModel):
         k: int = 5,
         beam: int | None = None,
         rng=None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """Continue ``prefix`` over the phase-unrolled graph.
 
@@ -1142,12 +1162,21 @@ class ResonantNet(GraphModel):
           worst walk is unboundedly bad, so "worst" needs a frontier's bound
           rather than a goal count.
         * ``"sample"`` is one stochastic walk, layer included.
+
+        ``traversal`` picks the cost function all four read the graph through:
+        ``"reward"`` (the default) the phase-aware score, rewards and all, or
+        ``"punishment"`` the same score with the rewards taken out and the
+        punishments pricing the step, so the cheapest walk is the least
+        punished one (:mod:`radixnet.penalty`).  The phase, the cycles and the
+        metacognitive handoff are unchanged by it.
         """
         mode = (mode or "kbest").lower()
         if mode not in ("kbest", "beam", "dijkstra", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'kbest', 'beam', 'dijkstra' or 'sample'")
         self._check_predict_args(prefix, length, max_length, k, beam)
+        traversal = resolve_traversal(traversal)
         graph = self.graph
+        costs = phase_traversal_costs(graph, traversal, penalty_scale, merit_scale)
         node, offset, lead = self._prefix_start(prefix)
         bucket = graph.text_bucket(prefix) if prefix else 0
         want = max(0, length - len(lead))
@@ -1166,43 +1195,46 @@ class ResonantNet(GraphModel):
         if mode == "kbest":
             found, expanded = phase_kbest(
                 graph, self.metacog, node, offset, bucket, min_chars=want, k=k, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end,
+                step_penalty=step_penalty, to_end=to_end, costs=costs,
             )
             top, bottom = found, []
             best = top[0] if top else None
         elif mode == "dijkstra":
             best = phase_dijkstra(
                 graph, node, offset, bucket, min_chars=want, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end,
+                step_penalty=step_penalty, to_end=to_end, costs=costs,
             )
             top, bottom, expanded = [best], [], best.expanded
         elif mode == "beam":
             top, bottom, expanded = phase_beam(
                 graph, self.metacog, node, offset, bucket, min_chars=want, k=k, beam=beam,
-                max_chars=max_chars, step_penalty=step_penalty, to_end=to_end,
+                max_chars=max_chars, step_penalty=step_penalty, to_end=to_end, costs=costs,
             )
             width = default_beam(k) if beam is None else int(beam)
             best = top[0] if top else None
         else:
             walk = phase_walk(
                 graph, self.metacog, node, offset, bucket, max_chars=max_chars,
-                temperature=temperature, rng=rng,
+                temperature=temperature, rng=rng, costs=costs,
             )
             top, bottom, expanded, best = [walk], [], walk.expanded, walk
+        enc = self.encoding
         for result in top + bottom:
             if lead:
-                result.text = lead + result.text if cap is None else (lead + result.text)[:cap]
-            result.full_text = prefix + result.text
+                joined = enc.join(lead, result.text)
+                result.text = joined if cap is None else enc.truncate(joined, cap)
+            result.full_text = enc.join(prefix, result.text)
         if best is None:
             best = PathResult(
-                text=lead if cap is None else lead[: cap or 0],
+                text=lead if cap is None else enc.truncate(lead, cap or 0),
                 labels=[graph.labels[node]], node_ids=[node],
             )
-            best.full_text = prefix + best.text
+            best.full_text = enc.join(prefix, best.text)
         return Prediction(
             text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
             step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end,
             full_text=best.full_text, top=top, bottom=bottom, k=k, beam=width, mode=mode,
+            traversal=traversal,
         )
 
     def _edge_log_prob_at(self, p: int, offset: int, c: int, bucket: int) -> float | None:
@@ -1212,7 +1244,7 @@ class ResonantNet(GraphModel):
         out of the middle of a compressed node is impossible) or the edge does
         not exist - the phase-aware twin of :meth:`GraphModel._edge_log_prob`.
         """
-        if p != START and offset + _W != len(self.graph.labels[p]):
+        if p != START and offset + self.encoding.n != self.graph.label_len(p):
             return None
         for child, _edge, cost in self.graph.child_costs_at(p, bucket):
             if child == c:
@@ -1229,6 +1261,9 @@ class ResonantNet(GraphModel):
         prefix: str = "",
         step_penalty: float = 0.0,
         beam: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> list[PathResult]:
         """Whole texts from the prediction search; ``"kbest"`` (the default) returns the exact ``count`` cheapest.
 
@@ -1242,7 +1277,8 @@ class ResonantNet(GraphModel):
         if mode != "kbest":
             return super().generate(
                 max_length=max_length, mode=mode, temperature=temperature, count=count, seed=seed,
-                prefix=prefix, step_penalty=step_penalty, beam=beam,
+                prefix=prefix, step_penalty=step_penalty, beam=beam, traversal=traversal,
+                penalty_scale=penalty_scale, merit_scale=merit_scale,
             )
         if max_length < 0:
             raise ValueError(f"max_length must be >= 0, got {max_length}")
@@ -1254,9 +1290,10 @@ class ResonantNet(GraphModel):
             return []
         found = self.predict(
             prefix, length=0, mode="kbest", k=count, to_end=True, max_length=max_length,
-            step_penalty=step_penalty,
+            step_penalty=step_penalty, traversal=traversal, penalty_scale=penalty_scale,
+            merit_scale=merit_scale,
         )
-        return [_whole_text(result) for result in found.top]
+        return [_whole_text(result, prefix, self.encoding) for result in found.top]
 
     def score(self, text: str) -> dict:
         """Log-probability of ``text`` under the model, phase included.
@@ -1363,6 +1400,12 @@ class ResonantNet(GraphModel):
             "nodes": graph.num_nodes(),
             "edges": graph.num_edges(),
             "trigrams": graph.num_trigrams(),
+            "grams": graph.num_trigrams(),
+            "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
+            "ngram": self.encoding.n,
+            "stride": self.encoding.stride,
             "compression_ratio": graph.compression_ratio(),
             "inverted": graph.inverted,
             "backend": self.backend.name,
@@ -1415,7 +1458,7 @@ class ResonantNet(GraphModel):
         if d.get("format") != RESONANT_MODEL_FORMAT:
             raise ValueError(f"not a {RESONANT_MODEL_FORMAT} model document")
         model = cls(seed=int(d.get("meta", {}).get("seed", 0)), backend=backend, device=device)
-        model.graph = ResonantGraph.from_dict(d["graph"])
+        model._adopt(ResonantGraph.from_dict(d["graph"]))
         model.metacog = MetaLayer.from_dict(d.get("metacog"))
         cycles = d.get("cycles") or {}
         model.teach_back = bool(cycles.get("teach_back", False))

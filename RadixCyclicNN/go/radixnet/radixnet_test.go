@@ -835,8 +835,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 			t.Fatalf("%s: predictions differ after reload", name)
 		}
 		// the RNG continues identically
-		w1, _ := m.G.SampleWalk(Start, 0, 30, 1.0, nil, nil)
-		w2, _ := loaded.G.SampleWalk(Start, 0, 30, 1.0, nil, nil)
+		w1, _ := m.G.SampleWalk(Start, 0, 30, 1.0, nil, nil, nil)
+		w2, _ := loaded.G.SampleWalk(Start, 0, 30, 1.0, nil, nil, nil)
 		if w1.Text != w2.Text {
 			t.Fatalf("%s: RNG state not restored", name)
 		}

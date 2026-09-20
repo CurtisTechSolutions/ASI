@@ -26,6 +26,7 @@ POS_LR      ?= 0.1
 PREFIX      ?= the quick brown
 LENGTH      ?= 20
 MODE        ?= dijkstra
+TRAVERSAL   ?= reward
 COUNT       ?= 5
 MAX_LENGTH  ?= 60
 TEXT        ?= the cat sat on the mat
@@ -141,13 +142,25 @@ MODEL_COUNT ?= model.count.json
 go-serve: go-build ## Serve the frontend from the Go count / reward model on http://HOST:PORT (uploads / checkpoints as for `serve`)
 	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
 
+go-mcp: go-build ## The Go MCP server on stdin / stdout: the tools and the network, for any MCP client
+	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) mcp --upload-dir $(UPLOAD_DIR)
+
 ##@ Rust port and the cross-language benchmark
 CARGO ?= cargo
+LIMIT         ?= 10
+TRAVERSAL     ?= reward
+MERIT_SCALE   ?= 1
+PENALTY_SCALE ?= 1
 BENCH_CHARS ?= 2000000
 BENCH_PREDICTIONS ?= 3000
 BENCH_EPOCHS ?= 3
 BENCH_REPEAT ?= 3
 PUNISH_EVERY ?= 7
+
+RUST        ?= rust/target/release/radixnet
+MODEL_RUST  ?= $(MODEL_COUNT)
+RUST_GLOBAL := --model $(MODEL_RUST) --seed $(SEED)
+RUST_KIND   ?= count
 
 rust-build: ## Build the Rust port's CLI and benchmark into rust/target/release (needs Rust 1.82+)
 	cd rust && $(CARGO) build --release
@@ -157,6 +170,60 @@ rust-test: ## Run the Rust tests, clippy and the formatter check
 
 rust-parity: ## Cross-language parity of the Rust port against the Python model
 	$(PY) -m unittest tests.test_rust_parity -v
+
+rust-train: rust-build ## Train the Rust model on DATA (RUST_KIND=count|word, MODEL_RUST is its file)
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) train --data $(DATA) --epochs $(EPOCHS)
+
+rust-predict: rust-build ## Continue PREFIX: the K likeliest and K least likely (TRAVERSAL picks what it follows)
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) predict --prefix "$(PREFIX)" --length $(LENGTH) --k $(COUNT) \
+	    --traversal $(TRAVERSAL) --merit-scale $(MERIT_SCALE) --penalty-scale $(PENALTY_SCALE)
+
+rust-generate: rust-build ## Generate COUNT whole texts of at most MAX_LENGTH symbols each
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam \
+	    --traversal $(TRAVERSAL)
+
+rust-score: rust-build ## Log-probability of TEXT under the Rust model
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) score --text "$(TEXT)"
+
+rust-feedback: rust-build ## Thumbs up DATA and thumbs down GARBAGE (2NRL when both are given)
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) feedback --good $(DATA) --bad $(GARBAGE) --strength $(SEVERITY)
+
+rust-paths: rust-build ## What the judged walks did, step by step
+	$(RUST) $(RUST_GLOBAL) paths --limit $(LIMIT)
+
+rust-nodes: rust-build ## Each node against the nodes around it
+	$(RUST) $(RUST_GLOBAL) nodes --limit $(LIMIT)
+
+rust-words: rust-build ## The word model's alphabet, most read first (RUST_KIND=word)
+	$(RUST) $(RUST_GLOBAL) --kind word words --limit $(WORD_LIMIT)
+
+rust-weights: rust-build ## Show the Rust model's weight function
+	$(RUST) $(RUST_GLOBAL) weights
+
+rust-info: rust-build ## The Rust model's statistics and history tail
+	$(RUST) $(RUST_GLOBAL) info
+
+rust-check: rust-build ## The structural invariants of the Rust model, over DATA
+	$(RUST) $(RUST_GLOBAL) check --data $(DATA)
+
+rust-compress: rust-build ## Merge every unary chain by hand, then save
+	$(RUST) $(RUST_GLOBAL) compress
+
+rust-invert: rust-build ## Flip the sign of every reward
+	$(RUST) $(RUST_GLOBAL) invert
+
+rust-serve: rust-build ## Serve the API + the prebuilt frontend from the Rust port on http://HOST:PORT
+	$(RUST) $(RUST_GLOBAL) --kind $(RUST_KIND) serve --host $(HOST) --port $(PORT) \
+	    --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+
+rust-bench: rust-build ## The Rust port's own benchmark (BENCH_CHARS characters, BENCH_EPOCHS epochs)
+	rust/target/release/radixnet-bench --chars $(BENCH_CHARS) --epochs $(BENCH_EPOCHS) --traversal $(TRAVERSAL)
+
+rust-demo: ## Train on the sample corpus with the Rust port, then predict, generate and read it back
+	$(MAKE) rust-train
+	$(MAKE) rust-predict
+	$(MAKE) rust-generate
+	$(MAKE) rust-info
 
 bench-compare: ## Both ports over one corpus, checked against each other -> bench/RESULTS.md
 	$(PY) bench/compare.py --chars $(BENCH_CHARS) --predictions $(BENCH_PREDICTIONS) \
@@ -169,11 +236,11 @@ train: ## Train on DATA (incremental: MODEL is loaded first if it exists), check
 resume: ## Continue training from the latest checkpoint in CKPT_DIR
 	$(RADIXNET) $(GLOBAL) train --data $(DATA) --epochs $(EPOCHS) --lr $(LR) --batch-size $(BATCH) --checkpoint-dir $(CKPT_DIR) --resume
 
-predict: ## Continue PREFIX by shortest path (MODE=dijkstra|sample) for LENGTH characters
-	$(RADIXNET) $(GLOBAL) predict --prefix "$(PREFIX)" --length $(LENGTH) --mode $(MODE)
+predict: ## Continue PREFIX by shortest path (MODE=dijkstra|sample, TRAVERSAL=reward|punishment) for LENGTH characters
+	$(RADIXNET) $(GLOBAL) predict --prefix "$(PREFIX)" --length $(LENGTH) --mode $(MODE) --traversal $(TRAVERSAL)
 
-generate: ## Generate COUNT texts from scratch (up to MAX_LENGTH characters each)
-	$(RADIXNET) $(GLOBAL) generate --count $(COUNT) --max-length $(MAX_LENGTH)
+generate: ## Generate COUNT texts from scratch (up to MAX_LENGTH characters each; TRAVERSAL=reward|punishment)
+	$(RADIXNET) $(GLOBAL) generate --count $(COUNT) --max-length $(MAX_LENGTH) --traversal $(TRAVERSAL)
 
 score: ## Log-probability of TEXT under the model
 	$(RADIXNET) $(GLOBAL) score --text "$(TEXT)"

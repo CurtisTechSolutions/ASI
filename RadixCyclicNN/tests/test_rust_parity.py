@@ -368,6 +368,40 @@ class TestRustParity(unittest.TestCase):
                 differed += plain["full_text"] != a["full_text"]
         self.assertTrue(differed, "the punished model answered the same to both searches everywhere")
 
+    def test_the_punishment_traversal_agrees_across_the_two(self):
+        """The *other* punishment traversal (`radixnet/penalty.py`): the cost function, not the ranking."""
+        py_path = os.path.join(TMP.name, "punish_py.count.json")
+        rs_path = os.path.join(TMP.name, "punish_rs.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.rs_model, rs_path)
+        # a line of the corpus itself, so the punishment lands on a path the search would otherwise take
+        punished = os.path.join(TMP.name, "punished.txt")
+        with open(punished, "w", encoding="utf-8") as fh:
+            fh.write("the cat sat on the mat\n")
+        py("feedback", "--bad", punished, "--strength", "3", model=py_path)
+        rust("feedback", "--bad", punished, "--strength", "3", model=rs_path)
+        differed = 0
+        for prefix, merit in (("the cat", 1.0), ("the cat", 0.0), ("on the ma", 0.0), ("a bird", 1.0)):
+            with self.subTest(prefix=prefix, merit_scale=merit):
+                args = ("predict", "--prefix", prefix, "--length", 10, "--k", 3,
+                        "--traversal", "punishment", "--merit-scale", merit)
+                a = py(*args, model=py_path)
+                b = rust(*args, model=rs_path)
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+                self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+                assert_close(self, [t["cost"] for t in a["top"]], [t["cost"] for t in b["top"]], 1e-9)
+                self.assertEqual((a["traversal"], b["traversal"]), ("punishment", "punishment"))
+                plain = py("predict", "--prefix", prefix, "--length", 10, "--k", 3, model=py_path)
+                differed += plain["full_text"] != a["full_text"]
+        self.assertTrue(differed, "the punished model answered the same to both searches everywhere")
+        # and it is a different thing from the ranking traversal: both exist, neither is the other
+        one = rust("predict", "--prefix", "the cat", "--length", 10, "--traversal", "punishment",
+                   "--merit-scale", 0.0, model=rs_path)
+        other = rust("predict", "--prefix", "the cat", "--length", 10, "--traversal", "least-punished",
+                     model=rs_path)
+        self.assertEqual((one["traversal"], other["traversal"]), ("punishment", "least-punished"))
+
     def test_the_rust_specific_options(self):
         """``--workers`` changes how the work is spread, never the answer."""
         one = os.path.join(TMP.name, "w1.count.json")

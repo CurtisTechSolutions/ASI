@@ -67,7 +67,7 @@ from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
 from .beam import Prediction
 from .counter import CyclicCounter, carry_series, total
-from .encoding import WINDOW, Decoder, Encoder
+from .encoding import WINDOW, Decoder, Encoder, Encoding
 from .graph import END, START, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
@@ -81,6 +81,7 @@ from .model import (
     meta_add_keyed,
     meta_stats,
 )
+from .penalty import DEFAULT_TRAVERSAL
 
 __all__ = [
     "MAX_EDGE_REASONS",
@@ -101,7 +102,7 @@ MAX_EDGE_REASONS = 8
 MAX_LOG_ENTRIES = 200
 """Entries kept in the journal of failures (the newest win)."""
 
-_W = WINDOW
+_W = WINDOW  # the default n; a net's own is self.encoding.n
 _MAX_LOG_PPL = 700.0
 _LOG_TEXT_CHARS = 160
 
@@ -131,6 +132,7 @@ class NegativeGraph(RadixCyclicGraph):
         share_scale: float = 1.0,
         blame_scale: float = 0.0,
         clear_scale: float = 1.0,
+        encoding: Encoding | None = None,
     ) -> None:
         self.share_scale = float(share_scale)
         self.blame_scale = float(blame_scale)
@@ -148,7 +150,7 @@ class NegativeGraph(RadixCyclicGraph):
         self.total_blame = 0.0
         self.total_fails = CyclicCounter()
         self.total_clear = 0.0
-        super().__init__(seed)
+        super().__init__(seed, encoding=encoding)
 
     # -- counters ------------------------------------------------------------
 
@@ -334,6 +336,26 @@ class NegativeGraph(RadixCyclicGraph):
         degree = max(1, int(degree))
         r_bad = (evidence + s) / (max(0.0, float(parent_evidence)) + s * degree)
         return self.share_scale * math.log(r_bad) + self.blame_scale * math.log1p(evidence)
+
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """``[(child, edge, merit, penalty)]`` in the negative network's own currency: blame against clearing.
+
+        Nothing here was ever rewarded, so there is no reward to take out.
+        What speaks against a step is the net evidence
+        (:meth:`evidence`) and what speaks for it is the *cleared* text that
+        ran through it - both on a log scale, so they are comparable and a
+        thousandfold blame does not make one child infinitely dearer than the
+        rest.  The punishment traversal over this graph therefore walks the
+        **least blamed** way through the failure structure, which is the
+        opposite of what its ordinary traversal does
+        (:mod:`radixnet.penalty`).
+        """
+        blame = self.evidence
+        clear = self.edge_clear
+        return [
+            (c, e, math.log1p(max(0.0, clear[e])), math.log1p(blame(e)))
+            for c, e in self.children[p].items()
+        ]
 
     def recompute_weights(self) -> None:
         """Write the blame weight to every alive edge (after blame, clearing or scales changed)."""
@@ -563,13 +585,15 @@ class NegativeNet(GraphModel):
         clear_scale: float = 1.0,
         threshold: float = 1.0,
         min_coverage: float = 0.5,
+        encoding: Encoding | None = None,
     ) -> None:
         self.seed = int(seed)
         self.graph = NegativeGraph(
-            seed=self.seed, share_scale=share_scale, blame_scale=blame_scale, clear_scale=clear_scale
+            seed=self.seed, share_scale=share_scale, blame_scale=blame_scale, clear_scale=clear_scale,
+            encoding=encoding,
         )
-        self.encoder = Encoder(_W)
-        self.decoder = Decoder(_W)
+        self.encoder = Encoder(encoding=self.graph.encoding)
+        self.decoder = Decoder(encoding=self.graph.encoding)
         # no numeric learning rule runs, so the backend is only reported (python / cpu); backend / device are
         # accepted for interface parity with RadixNet
         self.backend = get_backend("python", None)
@@ -649,7 +673,7 @@ class NegativeNet(GraphModel):
         records: list[dict] = []
         if blame:
             meta_add(meta, "trained_texts", len(texts))
-            meta_add(meta, "trained_chars", sum(len(t) for t in texts))
+            meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
             if source:
                 meta_add_keyed(meta, "sources", source, len(texts))
             for text in texts:
@@ -1000,20 +1024,23 @@ class NegativeNet(GraphModel):
         wrong, right = str(wrong or ""), str(right or "")
         tag = _clean_reason(reason)
         amount = abs(float(severity))
-        changes = diff.summary(wrong, right, limit=0)
-        wrong_spans, right_spans = diff.changed_spans(wrong, right)
+        changes = diff.summary(wrong, right, limit=0, encoding=self.encoding)
+        wrong_spans, right_spans = diff.changed_spans(wrong, right, self.encoding)
         result = {
             "changes": changes[:8], "edits": len(changes), "blamed": 0, "cleared": 0, "reason": tag,
             "severity": amount, "phase": "correction",
             "wrong_chars": sum(hi - lo for lo, hi in wrong_spans),
             "right_chars": sum(hi - lo for lo, hi in right_spans),
         }
-        if len(wrong) < _W:
+        enc = self.encoding
+        grams = enc.encode(wrong)
+        if not grams:
             return result
-        grams = self.encoder.encode(wrong)
         self._register([grams])  # the failure joins the structure; the correction never does
-        cleared = {e for _p, e in self._shared_edges(right)} if len(right) >= _W else set()
-        blamed = [e for _prev, e in self._steps_over(grams, len(wrong), wrong_spans) if e not in cleared]
+        cleared = {e for _p, e in self._shared_edges(right)} if enc.encode(right) else set()
+        blamed = [
+            e for _prev, e in self._steps_over(grams, enc.length(wrong), wrong_spans) if e not in cleared
+        ]
         if blamed and amount:
             result["blamed"] = self.graph.record_failure(blamed, amount, tag)
             meta_add(self.meta, "failures_total", 1)
@@ -1052,6 +1079,9 @@ class NegativeNet(GraphModel):
         temperature: float = 1.0,
         to_end: bool = False,
         max_length: int | None = None,
+        traversal: str = DEFAULT_TRAVERSAL,
+        penalty_scale: float = 1.0,
+        merit_scale: float = 1.0,
     ) -> Prediction:
         """How a prefix goes wrong: the ``k`` most likely continuations *among the known failures* (and the ``k``
         least likely, as ``bottom``).
@@ -1060,6 +1090,12 @@ class NegativeNet(GraphModel):
         ``"beam"``, ``"sample"`` draws one walk); the distribution it searches
         is the failure distribution, so a prediction here is a warning, not a
         suggestion.
+
+        ``traversal="punishment"`` turns that on its head
+        (:mod:`radixnet.penalty`): the blame prices every step *against* it, so
+        ``top`` becomes the least blamed way out of the prefix - the
+        continuation this network has the least to say about - instead of the
+        likeliest failure.
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
@@ -1067,7 +1103,10 @@ class NegativeNet(GraphModel):
             mode = "beam"
         if mode not in ("beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
-        return self._search(prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length)
+        return self._search(
+            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
+            traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+        )
 
     # -- the filter ----------------------------------------------------------
 
@@ -1092,11 +1131,15 @@ class NegativeNet(GraphModel):
         crossings: list[dict] = []
         node, offset, lost = START, 0, False
 
+        enc = self.encoding
+        length = enc.length(text)
+
         def crossing(i: int, edge: int | None) -> dict:
             start = max(0, i - 1)
-            end = min(len(text), i + _W)
+            end = min(length, i + enc.n)
             entry = {
-                "index": i, "start": start, "end": end, "fragment": text[start:end], "parent": node, "edge": edge,
+                "index": i, "start": start, "end": end, "fragment": enc.piece(text, start, end),
+                "parent": node, "edge": edge,
                 "blame": 0.0, "fails": 0, "clear": 0.0, "evidence": 0.0, "reason": None, "reasons": [],
             }
             if edge is not None:
@@ -1109,7 +1152,7 @@ class NegativeNet(GraphModel):
             return entry
 
         def edge_from(n: int) -> int | None:
-            if lost or (node != START and offset + _W != len(labels[node])):
+            if lost or (node != START and offset + enc.n != graph.label_len(node)):
                 return None
             return children[node].get(n)
 
@@ -1120,7 +1163,7 @@ class NegativeNet(GraphModel):
                 lost = True
                 continue
             n, o = loc
-            if not lost and n == node and o == offset + 1:
+            if not lost and n == node and o == offset + enc.stride:
                 offset = o  # deterministic step inside a compressed node: no edge, nothing to blame
                 continue
             crossings.append(crossing(i, None if o != 0 else edge_from(n)))
@@ -1259,6 +1302,12 @@ class NegativeNet(GraphModel):
             "nodes": g.num_nodes(),
             "edges": g.num_edges(),
             "trigrams": g.num_trigrams(),
+            "grams": g.num_trigrams(),
+            "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
+            "ngram": self.encoding.n,
+            "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
             "inverted": g.inverted,
             "backend": self.backend.name,
@@ -1310,7 +1359,7 @@ class NegativeNet(GraphModel):
             raise ValueError(f"unsupported {NEGATIVE_MODEL_FORMAT} model version {version}")
         graph = NegativeGraph.from_dict(d["graph"])
         model = cls(seed=graph.seed, backend=backend, device=device)
-        model.graph = graph
+        model._adopt(graph)
         model.history = [dict(r) for r in d.get("history", [])]
         model.log = [dict(entry) for entry in d.get("log", [])][-MAX_LOG_ENTRIES:]
         settings = d.get("filter") or {}

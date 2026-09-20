@@ -100,7 +100,7 @@ func (g *Graph) sideRows(pairs []Transition) []NeighbourStats {
 		pathSeen, correct, incorrect := g.EdgePaths(t.E)
 		reward := g.EdgeReward[t.E]
 		row := NeighbourStats{
-			Node: t.P, Label: g.TextOf(g.Label(t.P)), Edge: t.E,
+			Node: t.P, Label: g.Label(t.P), Edge: t.E,
 			Seen: g.EdgeCount[t.E], SeenResets: g.EdgeCountResets[t.E],
 			Reward: reward, PathSeen: pathSeen, Correct: correct, Incorrect: incorrect,
 		}
@@ -160,7 +160,7 @@ func (g *Graph) NodeRatios(node int) *NodeStats {
 	}
 	from, to := g.sideRows(in), g.sideRows(g.Children(node))
 	return &NodeStats{
-		Node: node, Label: g.TextOf(g.Label(node)),
+		Node: node, Label: g.Label((node)),
 		Visits: g.Count[node], VisitResets: g.CountResets[node],
 		From: from, To: to,
 		InTotals: sideTotals(from), OutTotals: sideTotals(to),

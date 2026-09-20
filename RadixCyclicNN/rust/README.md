@@ -1,10 +1,12 @@
 # rust
 
 A Rust port of the **count / reward model** (`CountRewardNet`), written to
-answer one question — *how much of this model's cost is the language?* — and to
-carry the traversal the other two implementations did not have: the walk that
-follows the **least punished** step instead of the best rewarded one
-(`../SPEC-LeastPunished.md`).
+answer one question — *how much of this model's cost is the language?* — and it
+answers to all three traversals the other two do: `reward`, the walk that
+follows what the model believes; `punishment`, the same graph priced by the
+penalties alone (`../radixnet/penalty.py`, DESIGN §31); and `least-punished`,
+the walk that ranks by the blame a path carries before it looks at the cost at
+all (`../SPEC-LeastPunished.md`).
 
 A standalone crate. The Python implementation in `../radixnet/` and the Go port
 in `../go/` are untouched by it.
@@ -23,6 +25,7 @@ nothing in it but this crate.
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
 | `src/search.rs` | the traversals, what a node offers a walk, and the stochastic walk |
+| `src/penalty.rs` | the punishment traversal: the merit / penalty split, and the cost function it prices a step with |
 | `src/beam.rs` | the two beams — the k best paths and the k worst |
 | `src/model.rs` | train, predict, generate, score, reward / punish / 2NRL |
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
@@ -32,10 +35,12 @@ nothing in it but this crate.
 | `src/json.rs` | JSON as Python writes it - compact, UTF-8, and floats rendered as `repr(float)` renders them |
 | `src/gzip.rs` | the gzip container, written out: inflate for reading, a stored-block writer for writing |
 | `src/clock.rs` | the one timestamp a model file carries |
-| `src/report.rs` | the statistics, the judged paths, and a node against its neighbours |
-| `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, words, info |
+| `src/report.rs` | the statistics, the judged paths, a node against its neighbours, and the weight knobs |
+| `src/http.rs` | HTTP/1.1 written out: the requests, the routes, the static files and the SPA fallback |
+| `src/service.rs` | the API the frontend talks to — the same JSON contract as the Python and Go servers |
+| `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, words, info, serve |
 | `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark and its binary |
-| `tests/model.rs` | the model end to end, and both traversals |
+| `tests/model.rs` | the model end to end, and all three traversals |
 | `tests/encodings.rs` | every encoding end to end: any n, groups of letters, words |
 
 ## Two dials, and they compose
@@ -64,30 +69,45 @@ and `--stride` one at a time. Lengths, offsets and the `chars` of a score are
 then counted in symbols — words, on a word model.
 
 | `tests/words.rs` | the word model: the alphabet, the phrases compression makes of it, and its file |
+| `tests/server.rs` | the HTTP API end to end: a real server on a real port, answering the JSON contract |
 
 ## What is here, and what is not
 
-The model is: the graph and its structural operations, the weight function, the
-path contexts, both traversals, training, prediction, generation, scoring,
-reward / punish / 2NRL, the `radixnet-count` **model file** and the CLI over all
-of it — and, with `--kind word`, the same model over an alphabet whose symbols
-are words (`radixnet-word`, `../SPEC-WordNGrams.md`; a `Trigram` already packs
-three code points of 21 bits, which is every code point there is, so the
-representation needed no change). A model trained here continues in Python or in
-Go and back again.
+The model is here in full: the graph and its structural operations, the weight
+function, the path contexts, all three traversals, training, prediction,
+generation, scoring, reward / punish / 2NRL, the `radixnet-count` **model file**,
+the CLI over all of it, and the **HTTP server** the frontend talks to — and, with
+`--kind word`, the same model over an alphabet whose symbols are words
+(`radixnet-word`, `../SPEC-WordNGrams.md`; a `Trigram` already packs three code
+points of 21 bits, which is every code point there is, so the representation
+needed no change). A model trained here continues in Python or in Go and back
+again, and `frontend/dist` runs against `radixnet serve` the same way it runs
+against the other two — including switching between the two kinds from the
+model selector, which parks the model that was running rather than dropping it.
 
-Not ported: the HTTP server, the negative network, the tutors, the agent and the
-LLM clients. That is a gap of the *undone* kind, not the deliberate kind.
+Not ported: the negative network, the tutors and the other teaching loops, the
+agent and its tools, the LLM clients, images and speech, and MCP. The first
+group is a gap of the *undone* kind. The LLM clients are the deliberate kind:
+they need HTTPS, and a crate with no dependencies cannot speak it — porting them
+means giving up the rule in D-072, which is a decision to take rather than a
+thing to quietly do.
 
 ## Building and running
 
 From `..`:
 
 ```bash
-make rust-build        # cargo build --release -> rust/target/release/radixnet-bench
+make rust-build        # cargo build --release -> rust/target/release/radixnet{,-bench}
 make rust-test         # cargo test, cargo clippy, cargo fmt --check
+make rust-train        # train the Rust model on DATA (RUST_KIND=count|word)
+make rust-serve        # serve frontend/dist from the Rust model on http://HOST:PORT
+make rust-parity       # the contract with Python
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
 ```
+
+`make help` lists the rest of the `rust-*` targets — predict, generate, score,
+feedback, 2nrl, invert, compress, weights, paths, nodes, words and info — each
+one the CLI subcommand of the same name.
 
 or directly:
 
@@ -97,6 +117,8 @@ cargo test
 cargo run --release --bin radixnet -- --model model.count.json train --data ../data/sample_corpus.txt --epochs 5
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --k 5
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal least-punished
+cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal punishment --merit-scale 0
+cargo run --release --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../frontend/dist
 python3 -m radixnet --model rust/model.count.json info     # ... and Python reads the same file
 cargo run --release --bin radixnet-bench -- --chars 200000 --epochs 3
 cargo run --release --bin radixnet-bench -- --texts ../bench/corpus.txt \
@@ -104,13 +126,13 @@ cargo run --release --bin radixnet-bench -- --texts ../bench/corpus.txt \
 ```
 
 ```rust
-use radixnet::{GraphOptions, Model, PredictOptions, TrainOptions, Traversal};
+use radixnet::{GraphOptions, Model, PredictOptions, TrainOptions, LEAST_PUNISHED};
 
 let mut model = Model::new(0, GraphOptions::default())?;
 model.train(&texts, &TrainOptions { epochs: 5, ..Default::default() })?;
 
 let found = model.predict("the cat sat on the ", &PredictOptions {
-    length: 6, k: 3, traversal: Traversal::LeastPunished, ..Default::default()
+    length: 6, k: 3, traversal: LEAST_PUNISHED.to_string(), ..Default::default()
 })?;
 println!("{} (worst step: {})", found.best.full_text, found.best.punish);
 ```

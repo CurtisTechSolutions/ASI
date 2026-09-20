@@ -13,7 +13,7 @@ use crate::json::Json;
 use crate::mt19937::Mt19937;
 use crate::parallel::{effective_workers, parallel_fill};
 use crate::paths::PathOutcome;
-use crate::search::{PathResult, Traversal};
+use crate::search::{parse_traversal, PathResult};
 
 /// The probability charged for a transition the structure does not know.
 pub const UNKNOWN_PROB: f64 = 1e-6;
@@ -772,7 +772,9 @@ impl Model {
             o.to_end,
             o.max_length,
             None,
-            o.traversal,
+            &o.traversal,
+            o.penalty_scale,
+            o.merit_scale,
         )
     }
 
@@ -790,9 +792,17 @@ impl Model {
         to_end: bool,
         max_length: Option<usize>,
         rng: Option<&mut Mt19937>,
-        traversal: Traversal,
+        traversal: &str,
+        penalty_scale: f64,
+        merit_scale: f64,
     ) -> Result<Prediction, String> {
         let enc = self.g.enc;
+        // the traversal is two independent things: a cost function (the punishment
+        // one prices a step) and a ranking (the least-punished one orders the walks)
+        let name = crate::penalty::resolve_traversal(traversal)?;
+        let priced = crate::penalty::traversal_costs(name, penalty_scale, merit_scale)?;
+        let costs = priced.as_ref();
+        let traversal = parse_traversal(name)?;
         // a word model's prefix arrives as text and its results leave as text;
         // everything between is the graph's own symbols, and length / max_length are
         // counted in them - words, there (`../../SPEC-WordNGrams.md` §9)
@@ -826,7 +836,7 @@ impl Model {
                 traversal,
                 ..Default::default()
             };
-            let (t, b, e) = self.g.beam_predict(node, offset, want, opts)?;
+            let (t, b, e) = self.g.beam_predict_by(node, offset, want, opts, costs)?;
             top = t;
             bottom = b;
             expanded = e;
@@ -836,7 +846,7 @@ impl Model {
             let max_chars = cap.map(|c| c.saturating_sub(lead_len));
             let walk = self
                 .g
-                .sample_walk(node, offset, max_chars, temperature, rng, None, traversal)?;
+                .sample_walk(node, offset, max_chars, temperature, rng, None, costs, traversal)?;
             expanded = walk.expanded;
             top = vec![walk];
             bottom = Vec::new();
@@ -879,7 +889,7 @@ impl Model {
             k,
             beam: width,
             mode: mode.to_string(),
-            traversal,
+            traversal: name.to_string(),
             expanded,
         };
         if self.is_words() {
@@ -922,7 +932,9 @@ impl Model {
                     false,
                     Some(o.max_length),
                     rng.as_mut(),
-                    o.traversal,
+                    &o.traversal,
+                    o.penalty_scale,
+                    o.merit_scale,
                 )?;
                 whole(&mut found.best);
                 results.push(found.best);
@@ -941,7 +953,9 @@ impl Model {
             true,
             Some(o.max_length),
             None,
-            o.traversal,
+            &o.traversal,
+            o.penalty_scale,
+            o.merit_scale,
         )?;
         let mut results = found.top;
         results.iter_mut().for_each(whole);
@@ -1067,7 +1081,15 @@ pub struct PredictOptions {
     pub to_end: bool,
     /// `None` = no cap
     pub max_length: Option<usize>,
-    pub traversal: Traversal,
+    /// What the search looks for, as opposed to `mode`, which is how it looks:
+    /// `"reward"` (the default), `"punishment"` (the rewards leave the score and
+    /// the punishments price every step, [`crate::penalty`]) or
+    /// `"least-punished"` (the prices are untouched and a walk is ranked by the
+    /// blame on its worst step, `../../SPEC-LeastPunished.md`).
+    pub traversal: String,
+    /// The punishment traversal's scales; ignored by the other two.
+    pub penalty_scale: f64,
+    pub merit_scale: f64,
 }
 
 impl Default for PredictOptions {
@@ -1082,7 +1104,9 @@ impl Default for PredictOptions {
             temperature: 1.0,
             to_end: false,
             max_length: None,
-            traversal: Traversal::Reward,
+            traversal: crate::penalty::DEFAULT_TRAVERSAL.to_string(),
+            penalty_scale: 1.0,
+            merit_scale: 1.0,
         }
     }
 }
@@ -1098,7 +1122,10 @@ pub struct GenerateOptions {
     pub prefix: String,
     pub step_penalty: f64,
     pub beam: usize,
-    pub traversal: Traversal,
+    /// See [`PredictOptions::traversal`].
+    pub traversal: String,
+    pub penalty_scale: f64,
+    pub merit_scale: f64,
 }
 
 impl Default for GenerateOptions {
@@ -1112,7 +1139,9 @@ impl Default for GenerateOptions {
             prefix: String::new(),
             step_penalty: 0.0,
             beam: 0,
-            traversal: Traversal::Reward,
+            traversal: crate::penalty::DEFAULT_TRAVERSAL.to_string(),
+            penalty_scale: 1.0,
+            merit_scale: 1.0,
         }
     }
 }

@@ -45,15 +45,18 @@ RadixCyclicNN/
                             CheckpointManager, Evolver, EvolveConfig, __version__
     __main__.py             `python -m radixnet` -> cli.main()
     activation.py           sine activation (parametric sine + derivatives)
-    encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 33)
+    encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 34)
     counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
     search.py               PathResult, Dijkstra predictor + stochastic sampler
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
+    penalty.py              the punishment traversal: the merit / penalty split of an edge's evidence, and the
+                            cost function that prices a step by the punishment it carries (section 31)
+                            (ported to Go as go/radixnet/penalty.go)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
-    wordnet.py              WordGraph, WordNGramNet - the same model over an alphabet of words (section 33)
+    wordnet.py              WordGraph, WordNGramNet - the same model over an alphabet of words (section 34)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
                             (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
@@ -125,18 +128,32 @@ def edge_signal(w: float, fp: float, fc: float) -> float    # w * fp * fc  ("act
 
 ## 4. `encoding.py`
 
+The default is the character trigram of stride 1 (D-006); it is the default of a **dial**, and section 23.1 is
+the full account of the dial in both implementations. Everything below is that default.
+
 ```python
-WINDOW = 3
+WINDOW = 3               # the default n of the n-gram
+CHARS, WORDS = "char", "word"   # what one unit is
 START_LABEL = "<s>"      # reserved label of the START node (id 0)
 END_LABEL   = "</s>"     # reserved label of the END node   (id 1)
 
-class Encoder:
-    def __init__(self, window: int = WINDOW)
+@dataclasses.dataclass(frozen=True)
+class Encoding:          # unit x n x stride; the zero value is the trigram
+    unit: str = CHARS
+    n: int = WINDOW
+    stride: int = 1
+    # overlap == n - stride; encode / decode_path / decode_grams / normalize / units / piece / join /
+    # truncate / has_unit_prefix / to_dict / from_dict
+
+def parse_encoding(spec: str) -> Encoding   # "word:2:1", "char:5:groups", "trigram", ...
+
+class Encoder:           # the encoder half of an Encoding, kept as an object
+    def __init__(self, window: int = WINDOW, encoding: Encoding | None = None)
     def encode(self, text: str) -> list[str]
         # sliding window, stride 1. len(text) < window -> [] ; "hello" -> ["hel","ell","llo"]
 
 class Decoder:
-    def __init__(self, window: int = WINDOW)
+    def __init__(self, window: int = WINDOW, encoding: Encoding | None = None)
     def decode_trigrams(self, grams: list[str]) -> str
         # [] -> ""; first gram in full, then gram[-1] for each following gram
     def decode_path(self, labels: list[str], start_offset: int = 0, include_context: bool = True) -> str
@@ -157,7 +174,7 @@ def word_symbol(word_id: int) -> str    # id -> the code point that carries it (
 def symbol_word(symbol: str) -> int     # and back
 def split_words(text: str) -> list[str] # the whole tokeniser: the Unicode White_Space property
 
-class Vocabulary:                       # the alphabet of a word model (section 33)
+class Vocabulary:                       # the alphabet of a word model (section 34)
     def id(self, word) -> int           # 0 = <unk>: a word it has never read
     def add(self, word) -> int          # the next id, in first-read order
     def encode(self, text, grow=False) -> str   # text -> the graph's symbols, one code point per word
@@ -166,7 +183,7 @@ class Vocabulary:                       # the alphabet of a word model (section 
 
 The word alphabet, used only by `wordnet.py`: it turns text into the symbols the
 same `Encoder` then cuts into windows of three, so the graph never learns what a
-symbol stands for. Section 33 and `SPEC-WordNGrams.md` are the whole of it.
+symbol stands for. Section 34 and `SPEC-WordNGrams.md` are the whole of it.
 
 ```python
 def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired)
@@ -432,6 +449,11 @@ def sample_walk(graph, start_node: int, start_offset: int, max_chars: int | None
     # Stops at END, at max_chars (None = no limit), or at a node without children.
 ```
 
+Both take an optional `costs: CostFn` - `(parent[, prev]) -> [(child, edge, cost)]` - in place of
+`graph.child_costs`, and so do `beam.beam_predict` and the four phase searches of `phasesearch.py`.  That one
+parameter is the **traversal** option of section 31: `None` is the model's own cost function and nothing about
+any search changes; the punishment traversal hands in a cost function built from the penalties alone.
+
 ---
 
 ## 8. `model.py` — RadixNet
@@ -669,6 +691,8 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
 | POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
 | POST `/api/score` | `{"text"}` | score dict |
+| GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
+| POST `/api/encoding/preview` | `{"text"}` | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
 | POST `/api/invert` | | `stats()` |
@@ -721,6 +745,8 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
+* `NetworkSettingsPanel.jsx` — **Network settings** (section 31.4): the settings of the network itself, as opposed to the options of one run. Three cards: the **traversal** every search uses (`TraversalFields.jsx` over the shared `useNetworkSettings`), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), and the **encoder / decoder** (`GET /api/encoding` for the window, stride, overlap and sentinels, `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the windows the model has never seen marked and a label longer than the window shown as the merged chain it is).
+* `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Network settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any).
 * `ScorePanel.jsx` — score a text.
 * `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
@@ -753,6 +779,15 @@ removeSetting / settingNames / clearSettings(storage)   // only this app's keys
 browserStorage()                       // localStorage probed once with a real write, else null
 ```
 
+A setting that belongs to the **network** rather than to a panel - the traversal and its two scales - is the one
+exception, and it is why `src/hooks/useNetworkSettings.jsx` exists: `NetworkSettingsProvider` holds it once at the
+top of `App.jsx` (persisted with `useStoredState` under `network.*`) and every panel reads it through
+`useNetworkSettings()`, which also hands back `body`, the request fields a `/api/predict` or `/api/generate` call
+needs for it. Two panels cannot share a `useStoredState` name - they would share the stored value but not the
+state, and every panel here stays mounted while hidden, so they would drift apart within a session - so a shared
+setting has to live in one place with several doors into it. Outside the provider the hook returns the defaults
+with no-op setters.
+
 `useStoredState(name, initialValue)` is `useState` with that store behind it: the initial value is the stored
 one when a value of the same shape exists, every later change is written back 250 ms after the last keystroke,
 and the value just read is *not* written again - a panel nobody touched leaves no trace. `name` is
@@ -783,7 +818,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
-* `test_wordnet.py` — word n-grams (section 33): the alphabet (every id round-trips, the surrogate block skipped, the cap), the whitespace split and the round trip that normalises whitespace, an unread word as a new id while training and `<unk>` after, the graph invariants over words, a repeated phrase compressed into one node, predictions and lengths counted in words, a correction aligned word by word, the `radixnet-word` file (the vocabulary back in order, a count reader refusing it, a truncated vocabulary refused) and the kind registry. The cross-language half is `test_go_parity.py::TestGoWordParity` and `test_rust_parity.py::TestRustWordParity`, with `go/radixnet/words_test.go` and `rust/tests/words.rs` on their own sides.
+* `test_wordnet.py` — word n-grams (section 34): the alphabet (every id round-trips, the surrogate block skipped, the cap), the whitespace split and the round trip that normalises whitespace, an unread word as a new id while training and `<unk>` after, the graph invariants over words, a repeated phrase compressed into one node, predictions and lengths counted in words, a correction aligned word by word, the `radixnet-word` file (the vocabulary back in order, a count reader refusing it, a truncated vocabulary refused) and the kind registry. The cross-language half is `test_go_parity.py::TestGoWordParity` and `test_rust_parity.py::TestRustWordParity`, with `go/radixnet/words_test.go` and `rust/tests/words.rs` on their own sides.
 * `test_counter.py` — the cyclic counters of section 28: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
@@ -1777,7 +1812,83 @@ both sides and the batch records - brief, step, level, openings, pass mark, dril
 `TestGoChatParity` does the same for the chat loop (section 28.1): one fake partner and judge answers both CLIs,
 and the prompts, the transcripts, the marks, the report card and both saved networks must match.
 
-### 23.1 The Go HTTP server (`go/server`) and the frontend hookup
+### 23.1 The encoding (`radixnet/encoding.py`, `go/radixnet/encoding.go`) — n-grams of any size, groups of letters, words
+
+The character trigram of stride 1 (section 4, D-006) becomes the **default of a dial** (D-071), in *both*
+implementations. An `Encoding` is three numbers, owned by the graph, fixed when the graph is created and written
+into the model file:
+
+```go
+type Encoding struct {
+    Unit   UnitKind // Chars ("char") or Words ("word")
+    N      int      // units per gram: the n of the n-gram
+    Stride int      // units between two consecutive grams; 1 <= Stride <= N
+}
+
+func DefaultEncoding() Encoding        // {Chars, 3, 1} - the trigram
+func (e Encoding) Overlap() int        // N - Stride: what two consecutive grams share
+func ParseEncoding(spec string) (Encoding, error)   // "word:2:1", "char:5:groups", "trigram", ...
+```
+
+| spec | what it is |
+|---|---|
+| `char:3:1` | the trigram, the default, the only encoding Python reads |
+| `char:5:1` | a sliding window of five letters (overlap four) |
+| `char:4:4`, `char:5:5` | **tokenisation**: non-overlapping groups of four or five letters |
+| `char:6:3` | groups of six, half of each shared with the next |
+| `word:2:1`, `word:3:1` | word bigrams and word trigrams |
+| `word:1:1` | one word per node |
+
+**Units, not characters.** `Encoding.Units(text)` returns a `Units` view - the normalised text plus the byte
+offset of every unit - so `Slice(from, to)` is O(1) whichever the unit is. For `Chars` a unit is a code point and
+the text is untouched; for `Words` a unit is a `strings.Fields` word and the text is normalised to single spaces
+(a word encoding keeps the words, not the layout). Everything the graph measures moves to units:
+
+| quantity | was | is |
+|---|---|---|
+| `Graph.labelLen[n]` | characters in the label | units in the label |
+| `loc.off`, the offset of a gram in a node | characters | units (always a multiple of `Stride`) |
+| `Split(node, i)` | split before character `i` | split before the gram starting at unit `i` |
+| `PredictOptions.Length`, `MaxLength`, `Score.Chars` | characters | units (words, on a word model) |
+| `ChangedSpans`, `stepsOver` | character spans | unit spans (`Encoding.Edits` aligns words on a word model) |
+
+The three structural operations generalise exactly:
+
+* **Encode** cuts grams at `0, Stride, 2·Stride, …` while a whole gram fits; the ragged tail is dropped, as the
+  trigram encoding already drops the last two characters. `Encoding.Normalize(text)` is what survives, and is what
+  a round trip through the graph is checked against (`CheckInvariants`).
+* **Split** at unit `i` (a positive multiple of `Stride`) leaves `A = label[:i+Overlap]` - the text through the
+  end of the gram before `i` - and `B = label[i:]`, so `A` and `B` share `Overlap` units, which is the invariant
+  every edge is keyed on. With `Stride == N` they share nothing and the edge is a plain join.
+* **Merge** writes `label(p) + label(c)[Overlap:]`, joined with the unit separator, and re-indexes `c`'s grams at
+  `len(p) - Overlap + j`.
+
+**Persistence.** The `encoding` block of the graph document is written **only when it is not the default**, so an
+ordinary model file is byte for byte what it always was and the existing parity tests are unaffected. Both sides
+read the block, so a word model written by either continues in the other:
+`tests/test_go_parity.py::TestGoEncodingParity` trains the same corpus under nine encodings on both sides and
+compares labels, counts, edges, weights and the RNG state, has each side continue the other's file, and holds the
+two to the same prediction in words.
+
+**Reach.** In Go: the library (`NewModel` / `NewGraph` via `GraphOptions.Encoding`, `NewNegativeModel` via
+`NegativeOptions.Encoding`), the CLI (`--encoding SPEC`, `--units`, `--ngram`, `--stride`) and the HTTP API. In
+Python: `RadixCyclicGraph(seed, encoding=)` and every subclass, `new_model(kind, encoding=)` and all four model
+kinds (RadixNet, count, negative, resonant — they share the graph, so the dial reaches the sine and the phase
+models too), the same four CLI flags and the same `POST /api/reset` fields. On both sides the flags are honoured
+when a model is *created* and refused when they disagree with one that is loaded, `GET /api/status` reports
+`encoding` / `unit` / `ngram` / `stride`, and a model that trains a discriminator (`evolve`) or a negative
+network beside itself hands them its own encoding: two networks reading one text differently would be judging
+different grams.
+
+**Python specifics.** A unit view is whatever slices by unit — the `str` itself for characters (Python slices
+strings by code point already), `text.split()` for words — so `len(view)` is the unit count of both and
+`_piece(view, lo, hi)` writes a slice of either back out; that is the whole of the machinery the Go side needs a
+`Units` index for. `diff.py` takes an `encoding=` on every entry point and aligns units rather than characters,
+so a word model's correction marks whole words. `GraphModel._adopt(graph)` is what a loaded model goes through:
+a model is constructed before its file's graph is read, so its encoder and decoder have to be rebuilt from the
+graph that arrives, or a word graph would be fed character trigrams.
+
+### 23.2 The Go HTTP server (`go/server`) and the frontend hookup
 
 `radixnet-count serve --port 8001 --frontend-dir frontend/dist --upload-dir uploads --checkpoint-dir checkpoints`
 runs `go/server`: `service.go` (the `Service` - model, `Job`, uploads, checkpoints; `startJob` runs the work on a
@@ -3066,10 +3177,142 @@ the evolver and `converse`, the CLI and the HTTP API.
 
 ---
 
-## 31. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
+## 31. The traversal (`penalty.py`, `go/radixnet/penalty.go`) — follow the rewards, or avoid the punishments
+
+Every search in the package reads the graph through one funnel: `[(child, edge, cost)]` for a node, with
+`cost = -log P(child | parent)`.  `search.dijkstra_predict`, `search.sample_walk`, `beam.beam_predict` and the four
+phase searches of `phasesearch.py` all call `graph.child_costs(p[, prev])` (or `child_costs_at(p, bucket)`) and
+nothing else.  **Which cost function fills that list is the traversal**, and it is an option:
+
+| traversal | what the search looks for |
+|---|---|
+| `"reward"` (the default) | what the model believes.  The count / reward model's weight carries `reward_scale * reward`, so a path the tutor rewarded is cheap and the search follows the rewards.  Every release before this option behaved this way, and `traversal_costs` returns `None` for it — the searches call `graph.child_costs` exactly as they always did, at no cost at all. |
+| `"punishment"` | what the model was punished for.  The rewards leave the score altogether and only the penalties price the step, so the cheapest path is the one that accumulated the **least punishment**. |
+
+The traversal is *what* a search looks for; the mode (`dijkstra` / `kbest` / `beam` / `sample`) is *how* it looks.
+They are independent by construction: the option replaces the funnel instead of adding a fifth mode, so every mode
+of every kind gains it at once and no search code changes.
+
+### 31.1 The split: `child_evidence`
+
+```python
+class RadixCyclicGraph:
+    def child_evidence(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]
+        # [(child, edge, merit, penalty)] over p's out-edges.
+        #   merit    - what speaks FOR the step, with every reward taken out of it
+        #   penalty  - what speaks AGAINST it, >= 0
+        # prev is the node the walk arrived from, which a model that counts paths prices the step by.
+```
+
+| graph | merit | penalty |
+|---|---|---|
+| `RadixCyclicGraph` (the sine model) | `max(0, w * f_p * f_c)` | `max(0, -(w * f_p * f_c))` |
+| `CountRewardGraph` | `edge_w[e] - reward_scale * reward` (the dual frequency function, rewards out) | `reward_scale * max(0, -reward)` |
+| `ResonantGraph` | `edge_w[e] - reward_scale * reward`; `child_evidence_at(p, bucket)` adds the resonance | `reward_scale * max(0, -reward)` |
+| `NegativeGraph` | `log1p(edge_clear[e])` | `log1p(evidence(e))` |
+
+The sine model keeps no separate ledger of its punishments — 2NRL trains a failure in and then inverts it, so what
+a punishment leaves behind *is* a negative score on that path's edges — which is why its penalty is read straight
+off the score, and why at the default scales its two traversals coincide and part company as soon as
+`penalty_scale` is raised.  A judged path context (`CountRewardGraph.path_term`) splits the same way: the part of
+the term that says the step was right here is merit, the part that says it was wrong here is penalty.  On the
+negative network the option reverses the network's purpose, which is the point: its ordinary traversal predicts the
+likeliest way a prefix goes wrong, the punishment traversal walks the least blamed way through the same structure.
+
+### 31.2 The cost function
+
+```python
+TRAVERSALS = ("reward", "punishment")
+DEFAULT_TRAVERSAL = "reward"
+
+def resolve_traversal(traversal: str | None) -> str          # None / "" -> the default; ValueError otherwise
+
+class PenaltyCosts:                                          # a drop-in for graph.child_costs
+    def __init__(self, graph, penalty_scale: float = 1.0, merit_scale: float = 1.0)
+    def __call__(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]
+
+class PhasePenaltyCosts:                                     # a drop-in for graph.child_costs_at
+    def __call__(self, p: int, bucket: int) -> list[tuple[int, int, float]]
+
+def traversal_costs(graph, traversal, penalty_scale=1.0, merit_scale=1.0)        # None for "reward"
+def phase_traversal_costs(graph, traversal, penalty_scale=1.0, merit_scale=1.0)  # None for "reward"
+```
+
+`score(child) = merit_scale * merit - penalty_scale * penalty`, and the cost is `-log softmax(score)` over the
+parent's children.  That keeps every invariant the searches rely on: costs are `>= 0` (Dijkstra stays a true
+shortest path, `step_penalty >= 0` still holds), `exp(-cost)` is still a path's probability, the children still sum
+to 1, and `onward()` can still compare a `BACK` edge against the real children.  The result is cached per
+`(parent, prev)` until `graph.version` changes, exactly like the graph's own cost cache; the Go port instead prices
+every edge once into a table before the search starts, because its two beams run in parallel goroutines.
+
+`merit_scale = 0` is the pure form: nothing but the punishment decides, and among equally unpunished children the
+walk is indifferent.  Both scales must be `>= 0`.
+
+### 31.3 Where it is reachable
+
+* Python: `predict(..., traversal=, penalty_scale=, merit_scale=)` and `generate(...)` on all four kinds, and the
+  same three on `NegativeFilter.predict` / `.generate`.  A `Prediction` carries `traversal`, so a result says
+  which one ran.
+* CLI: `--traversal reward|punishment`, `--penalty-scale`, `--merit-scale` on `predict` and `generate`
+  (`add_traversal_flags`), and the `--json` document carries `traversal`.
+* HTTP API: `traversal`, `penalty_scale`, `merit_scale` on `POST /api/predict` and `POST /api/generate`
+  (`_traversal_fields`), both servers.
+* Frontend: the **Network settings** tab (section 31.4) and, as the same control, the Predict and Generate tabs
+  (`frontend/src/components/TraversalFields.jsx` over the shared `useNetworkSettings`), with the two scales shown
+  only when the punishment traversal is chosen; the Result card reports the traversal that ran.
+* Go: `Graph.ChildEvidence`, `Graph.PenaltyCosts`, `Graph.TraversalCosts`, a `CostFn` on `SampleWalk` and
+  `BeamOptions`, and `Traversal` / `PenaltyScale` / `MeritScale` on `PredictOptions` and `GenerateOptions`.
+
+Tests: `tests/test_penalty.py` (the split per kind, that the rewards really do leave the score, the cheapest path
+being the least punished one, the distribution invariant, the cache, every mode of every kind, the CLI and the HTTP
+API), `go/radixnet/penalty_test.go` (the same contract in Go) and
+`tests/test_go_parity.py::TestGoParity::test_the_punishment_traversal_matches` (both sides walk the same
+least-punished paths at the same costs, under three settings of the scales, for `predict` and `generate`).
+
+### 31.4 The Network settings tab
+
+The traversal is a setting of the **network**, not an option of one run, and it was the first of those the
+frontend had nowhere to put. `frontend/src/components/NetworkSettingsPanel.jsx` is that place, and it collects
+the three settings of the network itself:
+
+| card | what it sets | how |
+|---|---|---|
+| **Traversal** | the traversal every search runs, and its penalty / merit scales | the shared `useNetworkSettings` store, remembered in this browser; `TraversalFields.jsx` renders it here in full and on the Predict and Generate tabs in its `compact` form |
+| **Score function** | the active kind's weight function | `GET /api/model` → `weights` on mount and after every change, `POST /api/model/weights` to apply. The count model's `global_scale / window_scale / reward_scale / count_scale / path_scale / window`, the resonant model's `buckets / period / kick_scale / resonance_scale / amp_scale / reward_scale / concentration`. A kind without one - the sine model, whose score is learned rather than set, and the negative network, whose blame function is on its own tab - gets the sentence saying so and where to look instead |
+| **Encoder / decoder** | nothing: it is read-only, and says so | `GET /api/encoding` for the window, stride, overlap and the three sentinels; `POST /api/encoding/preview` for a text the user types - the windows it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than the window is a merged radix chain and `decode_path` reads the text back out of it |
+
+Two decisions are worth stating.
+
+**One setting, several doors.** The traversal is edited in three places and is one value
+(`src/hooks/useNetworkSettings.jsx`, section 13.1): a provider at the top of `App.jsx` holds it, every panel reads
+it through `useNetworkSettings()`, and changing it anywhere changes it everywhere at once. Two `useStoredState`
+calls under one name would have shared the *stored* value and not the state, and every panel here stays mounted
+while hidden, so they would have disagreed until a reload.
+
+**The score function moved off the Train tab.** It was a fieldset there, count-model-only and missing
+`path_scale`; the Train tab now carries one line pointing at this one. How an edge is scored is a property of the
+model that is saved with it, not a setting of a training run, and having it in two places would have had the same
+drift problem - the form that was not touched would keep showing what the function used to be.
+
+**The encoder is read-only on purpose.** The window is the one number here that *looks* like a setting and is
+not: the graph's labels, the split and merge rules, the saved file and the Go port all assume 3, so a model
+trained at one window could not be read at another. Rather than leave that unsaid, the card reports
+`configurable: false` from the server and explains why, and spends its space on making the encoding *visible*
+instead - which is also the clearest demonstration of the radix compression anywhere in the frontend.
+## 32. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
 
 The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
 the code must do.
+
+**This is not section 31's traversal, and the two do not compose.**  Section 31 replaces the *cost function*: the
+punishments price a step and the walks are then ordered by summed cost exactly as always, so ten small penalties
+and one large one can trade off against each other and a reward further along can pay for a punished step.  This
+one leaves every price alone and replaces the *ranking*: a walk goes by the blame on its **worst** step first, and
+a node offers only the children it has the least against, so blame cannot be bought off at all.  They are two
+answers to one question, both selected by `--traversal` (`punishment` and `least-punished`), and a request for one
+never silently gets the other: `penalty.traversal_costs` returns `None` for `least-punished` because there is no
+cost function to hand out, and `search.parse_traversal` maps `"punishment"` to the *reward* ranking because the
+blame is already in its costs.  The names are never aliases of each other.
 
 **A traversal is a per-call choice**, `reward` (the default, nothing changes) or `least-punished`.  The name is
 parsed from `""` / `"reward"` / `"rewards"` / `"cost"`, or `"least-punished"` / `"least_punished"` / `"punished"` /
@@ -3080,8 +3323,8 @@ carry it on `predict` and `generate` (and the Go and Rust `bench`) as `--travers
 on `/api/predict` and `/api/generate`.
 
 **A model that keeps no record of failure refuses it.**  `RadixNet` and `ResonantNet` accept the argument and raise
-on anything but `reward` (`model.traversal_option` decides, in one place, what a model is handed): ranking a walk by
-the blame on it needs failures to have been counted, and the sine and resonant models count none.  Their graphs
+on `least-punished` (they take `reward` and `punishment`, which section 31 gives every kind): ranking a walk by
+the blame on it needs failures to have been *counted per path*, and the sine and resonant models count none.  Their graphs
 answer 0 to `edge_punishment` / `step_punishment`, so the machinery is inert rather than wrong where it does reach.
 
 **The punishment of a step** is `punish(prev, e) = reward_scale · max(0, -edge_reward[e]) + path_scale ·
@@ -3121,14 +3364,41 @@ Both parity suites (`tests/test_go_parity.py`, `tests/test_rust_parity.py`) puni
 require the same continuation, cost, ranking **and punishment** under the traversal - and require that the punished
 model answers the two searches differently somewhere, so neither can pass by the traversal doing nothing.
 
-## 32. The Rust port (`rust/`) and the cross-language benchmark (`bench/`)
+## 33. The Rust port (`rust/`) and the cross-language benchmark (`bench/`)
 
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
-graph and its structural operations, the dual frequency weight function, the judged path contexts, both traversals,
-training, prediction, generation, scoring, reward / punish / 2NRL and **the `radixnet-count` model file**.  Its
-binaries are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths,
-nodes, info) and `radixnet-bench`.  Not ported, and undone rather than deliberate: the HTTP server, the negative
-network and every teaching loop.
+graph and its structural operations, the dual frequency weight function, the judged path contexts, **all three
+traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished one in `src/search.rs`), training,
+prediction, generation, scoring, reward / punish / 2NRL, both alphabets (§34) and **the model file**.  Its binaries
+are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes,
+words, info, serve) and `radixnet-bench`.
+
+**The server is here too** (`src/http.rs`, `src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
+line, the headers, `Content-Length`, the static files of `frontend/dist` with the SPA fallback, and a thread per
+connection - under the same 30-route JSON contract §12 defines and the Python and Go servers answer, down to
+`engine` naming which one is replying.  `frontend/dist` runs against `radixnet serve` unmodified; the tabs a Rust
+server cannot fill hide themselves on `engine == "rust"`, and what it will not serve says so with a 400 rather than
+a half answer (`/api/words` on a character model, `/api/model/select` for a kind no Rust server runs).
+
+Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
+of the port:
+
+* **`/api/model/select` switches kind**, between `count` and `word`, the way the Python service does: the model
+  that was running is *parked* with its unsaved work rather than dropped, and the one selected is whichever comes
+  first of the parked model of that kind, its own file (`<stem>.<kind><ext>`) and a fresh one - which the answer
+  says in `origin`.  Without it a server started on the count model could never reach the Words tab.
+* **A job answers 202 and runs on its own thread.**  `train` and `2nrl` open the job, hand the model to a worker
+  and reply at once, so the frontend follows the run on `/api/job` rather than waiting out a long training run on
+  one blocked request.  The model lock is what makes a second request wait, and `ensure_idle` is what refuses a
+  second job.
+* **The texts of a request may come three ways** - `texts` as a list, `text` as one per line, `files` as the
+  uploads to read, added together (`good` / `good_text` / `good_files` and their `bad` twins for the feedback
+  routes).  A server that reads only the first of the three silently ignores the uploads a client ticked.
+
+Not ported, and **undone** rather than deliberate: the negative network, the tutors and the other teaching loops,
+the agent and its tools, images and speech, and MCP.  One gap is **deliberate**: the LLM clients (Ollama, ChatGPT)
+need HTTPS, and a crate with no dependencies cannot speak it.  Porting them means giving up D-072's rule, which is
+a decision to take rather than a thing to quietly do.
 
 **The file is the contract** (`src/file.rs`, `src/json.rs`, `src/gzip.rs`, `src/clock.rs`).  Three things had to be
 written out rather than translated, for the same reason the Go port had to write out BLAKE2b: JSON rendered as
@@ -3153,6 +3423,12 @@ What the port has to get right, beyond the algorithm:
 * **The one `unsafe`** is `parallel::Disjoint`, a raw view of a slice shared by the weight and cost recomputes, which
   fan out over nodes and write per-edge values.  Every edge belongs to exactly one node (an invariant
   `check_invariants` proves), so no two threads write one index; the contract is written out where it is defined.
+* **The traversal is a name, not a type.**  `PredictOptions.traversal` is a `String` resolved by
+  `penalty::resolve_traversal`, exactly as Python's `parse_traversal` resolves it, so the CLI flag, the API field
+  and the library argument all take the same three words and the same aliases.  `penalty::traversal_costs` hands
+  back a cost function for `punishment` and `None` for the other two - `reward` because the graph's own costs are
+  the reward traversal, `least-punished` because it is a *ranking* over those costs and never a second pricing of
+  them (§32).  The two are never composed in any of the three implementations.
 
 **`bench/`** is the comparison.  `make_corpus.py` writes `corpus.txt` and `corpus.prefixes.txt` once - neither
 language can reproduce the other's RNG, so neither generates the corpus - and `compare.py` builds both, runs six
@@ -3168,9 +3444,9 @@ nothing was ever punished for gives the two traversals nothing to disagree about
 
 ---
 
-## 33. Word n-grams (`radixnet/wordnet.py`, `go/radixnet/words.go`, `rust/src/words.rs`) — the same graph over an alphabet of words
+## 34. Word n-grams (`radixnet/wordnet.py`, `go/radixnet/words.go`, `rust/src/words.rs`) — the same graph over an alphabet of words
 
-`SPEC-WordNGrams.md` and D-071.  D-006's input decision is about what a **symbol** is; every structural rule in
+`SPEC-WordNGrams.md` and D-073.  D-006's input decision is about what a **symbol** is; every structural rule in
 section 5's graph is stated in terms of a window of symbols and nothing else - a label is a sequence of them, an edge
 exists where two labels overlap by `WINDOW - 1` of them, the index maps a `WINDOW`-symbol key to `(node, offset)`,
 compression merges a unary chain at that seam.  Not one of those rules mentions a character.  So a word n-gram model

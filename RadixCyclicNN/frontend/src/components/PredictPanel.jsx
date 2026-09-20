@@ -18,6 +18,8 @@ import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
+import TraversalFields from "./TraversalFields.jsx";
+import { useNetworkSettings } from "../hooks/useNetworkSettings.jsx";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -112,6 +114,7 @@ export default function PredictPanel({ status }) {
   const [toEnd, setToEnd] = useStoredState("predict.toEnd", false);
   const [stepPenalty, setStepPenalty] = useStoredState("predict.stepPenalty", "0");
   const [temperature, setTemperature] = useStoredState("predict.temperature", "1.0");
+  const network = useNetworkSettings();  // the traversal is shared with the Network settings tab
   const [guard, setGuard] = useStoredState("predict.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -152,6 +155,7 @@ export default function PredictPanel({ status }) {
         step_penalty: parseNumber(stepPenalty, 0),
         temperature: parseNumber(temperature, 1),
         guard,
+        ...network.body,
       };
       if (effectiveMode === "beam") {
         body.k = parseInteger(k, 5);
@@ -252,6 +256,7 @@ export default function PredictPanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <TraversalFields compact />
         <CheckField label="Run to END (cheapest complete path)" checked={toEnd} onChange={setToEnd} />
         <CheckField
           label="Filter with the negative network"
@@ -314,6 +319,8 @@ export default function PredictPanel({ status }) {
               <dd>{result.reached_end === undefined ? "–" : yesNo(result.reached_end)}</dd>
               <dt>states expanded</dt>
               <dd>{fmtInt(result.expanded)}</dd>
+              <dt>traversal</dt>
+              <dd>{String(result.traversal ?? "reward")}</dd>
               <dt>path nodes</dt>
               <dd>{fmtInt(path.length)}</dd>
               {resultIsCount ? (

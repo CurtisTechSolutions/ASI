@@ -76,8 +76,12 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
-**Part XV — A second way through, and a third implementation** ·
-D-069 the least-punished traversal · D-070 the Rust port · D-071 words as symbols
+**Part XV — The traversal** · D-069 what a search looks for is an option · D-070 one home for a network setting ·
+D-071 the least-punished traversal
+
+**Part XVI — A third implementation, and a second alphabet** · D-072 the Rust port · D-073 words as symbols
+
+**Part XVI — The encoding** · D-071 the encoding is a dial, and it belongs to the model
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2419,9 +2423,147 @@ recorded with its reason is a design statement, an unrecorded one is debt.
 
 ---
 
-# Part XV — A second way through, and a third implementation
+# Part XV — The traversal
 
-### D-069 — A walk can be ranked by what went **wrong** on it, and blame is not for sale
+### D-069 — What a search *looks for* is an option, separate from how it looks
+
+**Status** Accepted · 2026-09-20 (`dc154c8`) · **Layer** search
+
+**Context** Every reward the system hands out is also, implicitly, a
+navigational instruction. The count / reward model's probability carries
+`exp(reward_scale * reward)` (D-026), so once a path is rewarded the search
+follows it: prediction, generation, conversation, the tutor's completions, the
+agent's attempts. That is the intended behaviour and it is also the whole of
+the behaviour — a network with a thousand corrections and a handful of thumbs
+up still navigates by the handful, because the corrections only enter as the
+same number with a minus sign in front, competing on the rewards' terms.
+
+Rewards and penalties are not symmetric evidence, though. A reward says *this
+was good once*; a penalty says *this was wrong, and here is the correction*.
+The first is an invitation to repeat a success; the second is a boundary. A
+walk that respects every boundary it has been taught is not the walk that
+chases every reward it has been given, and there was no way to ask for it.
+
+**Decision** The cost function a search reads the graph through is an option,
+the **traversal**, beside the existing **mode**:
+
+* `reward` (the default) — the model's own distribution, rewards and all.
+  Exactly the previous behaviour, at exactly the previous cost: the option
+  resolves to `None` and the searches call `graph.child_costs` as before.
+* `punishment` — the rewards leave the score altogether and the penalties
+  price every step, so the cheapest path is the one that accumulated the
+  **least punishment**.
+
+**What was rejected**
+
+* **A fifth mode** (`dijkstra | kbest | beam | sample | punishment`). The
+  wrong axis: it would have had to be written once for Dijkstra, once for each
+  beam, once for the sampler and again for all four phase searches, and it
+  would have made "least punished" and "top-K / bottom-K" mutually exclusive
+  when they are orthogonal. Every search already reads the graph through one
+  funnel — `[(child, edge, cost)]` for a node — so the option replaces the
+  funnel instead. No search changed.
+* **A second graph** holding the punishments. That already exists and is the
+  negative network (D-045); this is about *navigating the model you have*, not
+  about modelling failure.
+* **Flipping the sign of the rewards.** `invert` (D-009) does that, and it is
+  not the same thing: it makes the punished path *attractive*, whereas this
+  makes it expensive and leaves everything else alone.
+* **A lexicographic cost** (total punishment first, the model's own cost as a
+  tie-break). Exact and tempting, but it would have made the cost a tuple
+  through every heap in the package, and it forbids the trade-off that
+  `penalty_scale` exists to express. A blended score with a knob says more.
+
+**How the two currencies are separated** One hook,
+`RadixCyclicGraph.child_evidence`, splits an edge's evidence into **merit** —
+what speaks for the step with every reward taken out of it — and **penalty**
+`>= 0`. Each kind implements it in its own currency: the count / reward model
+and the phase model split `edge_reward` in half, the negative network weighs
+net blame against cleared text, and the sine model reads the negative part of
+`w · f_p · f_c`, because 2NRL trains a failure in and then inverts it, so what
+a punishment leaves behind *is* a negative score on that path. A judged path
+context — a verdict filed against the caller that reached the edge rather than
+against the edge — splits the same way.
+
+**Consequences**
+* `score = merit_scale * merit − penalty_scale * penalty` and
+  `cost = -log softmax(score)`, so costs stay `>= 0`, Dijkstra stays a true
+  shortest path, `exp(-cost)` is still a probability and the two traversals'
+  numbers are comparable. `merit_scale = 0` is the pure form.
+* Every mode of every kind gains the traversal at once, in both languages, and
+  the parity suite requires the same least-punished paths at the same costs.
+* On the sine model the two traversals coincide at the default scales, because
+  there the punishment *is* the negative score; they part company as soon as
+  `penalty_scale` is raised. That is honest rather than convenient: a model
+  that keeps no separate ledger of its punishments cannot be made to pretend
+  it does.
+* On the negative network the option reverses the network's purpose — the
+  least blamed way through the failures rather than the likeliest one — which
+  is a use nobody had before and falls out for free.
+* **The cost:** a second cost cache per graph while a punishment search runs,
+  and one more thing to choose. The default is unchanged behaviour, so nobody
+  who does not want it pays for it.
+
+**Lives in** `radixnet/penalty.py`, `radixnet/graph.py`, `go/radixnet/penalty.go`
+
+### D-070 — A setting of the network gets one home and one value, wherever it is edited
+
+**Status** Accepted · 2026-09-20 · **Layer** frontend
+
+**Context** D-069 gave every search a traversal, and the frontend had nowhere
+to put it. It went on the two tabs that use it, Predict and Generate, as a copy
+each. That was already wrong in a way worth naming: the traversal is a property
+of *the network's behaviour*, not an option of one prediction, and two copies of
+one setting is two answers to the same question. The frontend had the same shape
+elsewhere - the count model's weight function was a fieldset on the **Train**
+tab, which is a training form, and it was missing `path_scale`.
+
+**Decision** A **Network settings** tab: the settings of the network itself, as
+opposed to the options of one run. The traversal, the score function of whichever
+kind is active, and the encoder / decoder.
+
+A setting several panels use lives **once** and is read through a provider
+(`useNetworkSettings`), so the Network settings, Predict and Generate tabs show
+one control in three places rather than three controls. `useStoredState`, which
+every other field uses, cannot do this: two mounted components under one name
+share the stored value and not the state, and every panel here stays mounted
+while hidden, so two copies would drift apart within a session and only agree
+again after a reload.
+
+The score function left the Train tab for the same reason - two forms over one
+server-side value, whichever is not touched showing what the function used to be.
+
+**What the encoder card does *not* do** The window (3) is the one number on the
+page that looks like a setting and is not: the graph's labels, the split and
+merge rules, the model file and the Go port all assume it, so a model trained at
+one window could not be read at another. `GET /api/encoding` reports
+`configurable: false` and the card says why, then spends its space making the
+encoding **visible** instead - `POST /api/encoding/preview` runs a text through
+the encoder, back through the decoder, and through the graph's own node labels,
+where a label longer than the window is a merged radix chain. Saying "this is
+fixed, and here is what it does" is worth more than a disabled input.
+
+**Alternatives rejected**
+* **A modal or a header menu.** Settings that take a paragraph each to explain
+  are not a menu; the tab strip already is the app's navigation.
+* **Leaving the traversal only on Predict and Generate.** It would have kept two
+  values for one thing and left the score function homeless.
+* **Making the window settable** by re-encoding on change. It is a model-format
+  change, not a setting, and pretending otherwise would break a saved file and
+  the cross-language contract at once.
+* **Mirroring the negative network's blame function here too.** It belongs
+  beside the failures it weighs; the card links to the Negative tab instead of
+  opening a second door onto a third value.
+
+**Consequences** The frontend now distinguishes the two kinds of control it has
+always had and never separated: what the network *is* (this tab, saved with the
+model or remembered in the browser) and what one run *asks for* (the action
+tabs). The traversal is the first setting to be shared rather than copied, and
+`useNetworkSettings` is the pattern for the next one.
+
+**Lives in** `frontend/src/components/NetworkSettingsPanel.jsx`,
+`frontend/src/hooks/useNetworkSettings.jsx`, `radixnet/api.py`, `go/server/`
+### D-071 — A walk can be ranked by what went **wrong** on it, and blame is not for sale
 
 **Status** Accepted · 2026-09-20 · **Layer** search · **Extends** D-008, D-058 ·
 **Specified in** `SPEC-LeastPunished.md`
@@ -2469,7 +2611,7 @@ takes (D-047): the two now agree about what a path's blame is.
   suites hold the ports to Python's answers under it, punishment included. The
   sine model accepts the argument and refuses anything but `reward`: it keeps no
   record of failure to rank a walk by, and says so rather than ignoring the
-  option (the discipline of D-070's `weights` command).
+  option (the discipline of D-070's one-home rule).
 * It is a way of *reading* the model, and nothing reads it that way on the
   model's behalf: the tutor, the conversation, the agent and the guard all still
   walk by cost.
@@ -2485,7 +2627,9 @@ the first term of the punishment is a stand-in for until then.
 
 ---
 
-### D-070 — A third implementation, to price the language rather than the model
+# Part XVI — A third implementation, and a second alphabet
+
+### D-072 — A third implementation, to price the language rather than the model
 
 **Status** Accepted · 2026-09-20 · **Layer** platform · **Beside** D-038
 
@@ -2534,16 +2678,29 @@ table for "Rust is 4x faster than Go" has been misled by it.
   predictions, generated texts and scores, and each side continuing the other's
   file. Its graph document is Python's **byte for byte** but for the `version`
   cache stamp - which the Go port's is not, because Go renders floats and orders
-  keys its own way. What the port still does **not** have: the HTTP server, the
-  negative network, the tutors and the agent. Undone, not deliberate.
+  keys its own way.
+* The port carries **all three traversals** (D-071, and the punishment traversal
+  of D-069 in `rust/src/penalty.rs`) and **both alphabets** (D-073), so a
+  traversal or a kind added to one implementation is now added to three.
+* The port serves the frontend: `rust/src/http.rs` is HTTP/1.1 written out over
+  `TcpListener` and `rust/src/service.rs` answers the same JSON contract the
+  Python and Go servers answer, so `frontend/dist` runs against
+  `radixnet serve` unmodified. What a Rust server cannot fill, the frontend
+  hides on `engine == "rust"`, and what it will not serve says so with a 400.
+* What the port still does **not** have: the negative network, the tutors and
+  the other teaching loops, the agent and its tools, images and speech, and MCP.
+  Undone, not deliberate. **One gap is deliberate**: the LLM clients need HTTPS,
+  and a crate with no dependencies cannot speak it. Porting them is not a task,
+  it is a proposal to drop the no-dependency rule above - which would also drop
+  what that rule buys, a `Cargo.lock` with nothing in it but this crate.
 * Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
   both sides, because a benchmark of a deliberate data race measures the race.
 
-**Lives in** `rust/`, `bench/`, `Makefile` (`rust-build`, `rust-test`, `bench-compare`)
+**Lives in** `rust/`, `bench/`, `Makefile` (the `rust-*` targets, `bench-compare`)
 
 ---
 
-### D-071 — A word n-gram model is this model over an alphabet of words
+### D-073 — A word n-gram model is this model over an alphabet of words
 
 **Status** Accepted · 2026-09-20 · **Layer** input · **Beside** D-006
 
@@ -2614,6 +2771,143 @@ versioned and defended.
 **Lives in** `radixnet/wordnet.py`, `radixnet/encoding.py` (the alphabet),
 `go/radixnet/words.go`, `rust/src/words.rs`, `SPEC-WordNGrams.md`,
 `Makefile` (`word-*`)
+
+---
+
+### D-074 — A port is finished when a client cannot tell which one answered
+
+**Status** Accepted · 2026-09-20 · **Layer** platform · **Beside** D-038, D-072
+
+**Context** "Is everything ported?" had no answer anyone could check. Each
+implementation's README listed what it had, in prose, written when it was
+written. Two gaps found by walking the three surfaces rather than the prose:
+Go had every HTTP route and every CLI command but `mcp` and
+`speech transcribe`; the Rust server had thirty routes that each answered
+*something*, but refused to switch model kind, read only the first of the three
+ways the contract lets a client name its texts, answered a job 200 where the
+other two answer 202, and saved whichever kind was active to the file of the
+kind the binary had started on.
+
+**Decision** Parity is measured against the **surfaces**, not the prose: the
+route list, the CLI command list, and the fields and status code of each route.
+A gap is either closed or named in the decision that owns it, with which of the
+two kinds it is:
+
+* **undone** — portable, not yet done (Rust's negative network, the teaching
+  loops, the agent);
+* **deliberate** — cannot or should not be ported, with the reason (the LLM
+  clients need HTTPS, which D-072's no-dependency rule rules out; learning-rate
+  schedules belong to the sine-activation model, which neither port has, so
+  `radixnet schedule` is a command about a model Go and Rust do not run).
+
+**Rationale** A port that answers every route with *something* looks finished
+from the outside and is not. The three surfaces are enumerable and can be
+diffed in a shell one-liner, which is the only reason the four Rust gaps above
+were found at all — every one of them returned a 200 and a plausible document.
+The distinction between undone and deliberate is what makes the remaining list
+readable: a reader who cannot tell them apart reads every gap as neglect.
+
+**Consequences**
+* Go speaks MCP (`go/radixnet/mcp.go`, `radixnet-count mcp`): the same protocol
+  revision, tool names and schemas as `radixnet/mcp.py`, and the same answers
+  down to the error text — asserted by running both over one message stream.
+  `/api/speech/transcribe` stays Python's, because local Whisper is not a thing
+  a Go binary carries.
+* The Rust server switches kind, parking the model that was running; reads
+  `texts` / `text` / `files` (and the `good_*` / `bad_*` twins); answers 202 for
+  a job it has started on a worker thread; and saves each kind to its own file.
+* The gap lists in `rust/README.md`, `go/README.md` and DESIGN §33 say which
+  kind of gap each remaining item is.
+
+**Lives in** `go/radixnet/mcp.go`, `go/cmd/radixnet-count/mcp.go`,
+`rust/src/service.rs`, `rust/src/http.rs`, `Makefile` (`go-mcp`)
+
+---
+
+# Part XVI — The encoding
+
+### D-071 — The encoding is a dial of the model, not a constant of the package
+
+**Status** Accepted · 2026-09-20 · **Layer** representation ·
+**Extends** D-006, which stays the default
+
+**Context** D-006 fixed the input at three characters with stride 1 and gave the
+reason: the shared character is a *pivot*, and three is the smallest window that
+gives a pivot with context either side. That argument says what the **default**
+should be. It does not say the number should be a constant - and in both
+implementations it was one: `WINDOW = 3` / `Window = 3`, read directly by the
+graph, the models, the beams, the diff and the loader, with the overlap beside
+it. Anyone wanting to ask "what does this corpus look like in fives?" had to
+edit two constants, and nothing in a model file said how to read its labels.
+
+**Decision** The encoding becomes a value - `Encoding(unit, n, stride)` - owned
+by the graph, fixed when the graph is created, written into the model file and
+read back from it, **in every implementation**. Three dials:
+
+| dial | what it is | the default |
+|---|---|---|
+| `Unit` | what one position of a text is: a character, or a whitespace word | `char` |
+| `N` | how many units one gram holds - the *n* of the n-gram | 3 |
+| `Stride` | how far apart consecutive grams start | 1 |
+
+`Stride` is the dial that makes the other two useful. At 1 the grams slide and
+overlap by `N - 1`, which is D-006's pivot generalised. At `N` they do not
+overlap at all, which is *tokenisation*: `char:4:4` cuts text into groups of
+four letters, and the graph becomes a chain of groups that meet only at their
+ends. `word:2:1` is the word bigram, `word:3:1` the word trigram.
+
+Everything the graph measures is now measured in **units**, not characters: a
+node's label length, the offset of a gram inside a label, the length of a
+prediction, the spans of the correction diff. Under the default encoding a unit
+*is* a character, so every one of those quantities is what it always was - which
+is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
+
+**Alternatives rejected**
+* **A package-level variable instead of a field.** One process, one encoding -
+  and a model loaded from a file could silently disagree with it. The encoding
+  belongs to the graph because the graph's labels are written in it.
+* **Keeping the label a `[]rune` and special-casing words.** Words are not
+  characters of a different width; the split, the merge and the index all walk
+  *positions*. A `Units` view (an index of byte offsets, sliced in O(1)) makes
+  one code path serve both.
+* **A learned sub-word vocabulary.** Still rejected, for D-006's reason: it
+  needs a corpus before training can start, and freezes what the model can read.
+  `word` is not a vocabulary - an unseen word is a new node, exactly as an
+  unseen trigram is.
+* **Writing the encoding into every file.** A file that says `char:3:1` is a
+  file the Python loader would have to be taught to ignore. It is written only
+  when it is *not* the default, so an ordinary model file is byte for byte what
+  it always was.
+
+**Consequences**
+* **D-039's bit-identical interchange now covers every encoding.** Both sides
+  write the same `encoding` block and read each other's, and
+  `TestGoEncodingParity` holds them to the same graph, the same file and the
+  same prediction under nine of them. A word model trained in Python continues
+  in Go and back.
+* **The dial reaches all four Python kinds.** RadixNet, the count model, the
+  negative network and the resonant model share one graph, so none of them
+  could have it alone. The sine model trains on word bigrams because the graph
+  it trains on does.
+* **The Rust port carries it too**, on its own branch, and paid the most for
+  it: its index key was three code points packed into a `u64`, which four
+  characters do not fit and a word does not fit at all. It becomes an enum -
+  packed for character grams of up to three, the text itself otherwise - and
+  the port's own tests pin the structure Python and Go build under nine
+  encodings, since it writes no model file to compare.
+* **The units leak into the vocabulary of the API.** `--length`, `--max-length`
+  and `Score.chars` count units, so on a word model they count words. That is
+  the honest reading - a "40-character" cap on a model that thinks in words is
+  meaningless - but it does mean two models answer the same flag differently.
+* **Compression means something different per encoding.** With no overlap there
+  is no shared context for two nodes to be merged *through*; a grouping
+  encoding compresses only the unary chains its corpus actually repeats.
+* **A model cannot change its mind.** The encoding is fixed at creation: every
+  label in the graph is written in it. The CLI refuses an encoding flag that
+  disagrees with the model it loaded rather than ignoring it.
+
+**Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
+`go/radixnet/graph.go`, `rust/src/encoding.rs`, `DESIGN.md` § 23.1
 
 ---
 

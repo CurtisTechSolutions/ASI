@@ -35,7 +35,7 @@ func smallEvolveConfig(mode string) EvolveConfig {
 
 func TestEvolveConfigDefaultsAndValidation(t *testing.T) {
 	config := DefaultEvolveConfig()
-	if err := config.Validate(); err != nil {
+	if err := config.Validate(DefaultEncoding()); err != nil {
 		t.Fatalf("the defaults must validate: %v", err)
 	}
 	for name, broken := range map[string]EvolveConfig{
@@ -47,7 +47,7 @@ func TestEvolveConfigDefaultsAndValidation(t *testing.T) {
 		"mode":        {Samples: 1, RealPerGeneration: 1, MaxLength: 10, BlatantMode: "sideways"},
 		"boost":       {Samples: 1, RealPerGeneration: 1, MaxLength: 10, BlatantMode: "none", BlatantBoost: 0.5},
 	} {
-		if err := broken.Validate(); err == nil {
+		if err := broken.Validate(DefaultEncoding()); err == nil {
 			t.Errorf("%s: expected the configuration to be refused", name)
 		}
 	}
