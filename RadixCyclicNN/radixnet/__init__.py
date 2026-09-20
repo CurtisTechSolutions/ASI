@@ -71,7 +71,6 @@ __all__ = [
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
     "NegativeNet", "NegativeGraph", "NegativeFilter", "FilterConfig",
     "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",
-    "MAX_WORDS", "UNKNOWN_WORD",
     "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
     "get_backend", "describe_backends", "torch_available",

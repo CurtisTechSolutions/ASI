@@ -127,12 +127,19 @@ class Encoding:
     # -- units ---------------------------------------------------------------
 
     def units(self, text: str) -> str | list[str]:
-        """The text as something that slices by unit: itself, or its words."""
-        return text if self.unit == CHARS else text.split()
+        """The text as something that slices by unit: itself, or its words.
+
+        The split is :func:`split_words`, not ``str.split()``.  The two
+        disagree about four separators, and Go and Rust split on the Unicode
+        property, so a text holding one of them would be cut into different
+        words here than there - and a word split differently is a different
+        node (``../SPEC-WordNGrams.md`` §4).
+        """
+        return text if self.unit == CHARS else split_words(text)
 
     def length(self, text: str) -> int:
         """How many units a text holds."""
-        return len(text) if self.unit == CHARS else len(text.split())
+        return len(text) if self.unit == CHARS else len(split_words(text))
 
     @property
     def units_name(self) -> str:

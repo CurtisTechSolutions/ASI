@@ -575,6 +575,27 @@ class TestGoWordParity(unittest.TestCase):
         self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])
         assert_close(self, [s["cost"] for s in a["samples"]], [s["cost"] for s in b["samples"]])
 
+    def test_the_same_words_out_of_the_same_text(self):
+        """The tokeniser is the Unicode ``White_Space`` property on both sides.
+
+        Python calls U+001C..U+001F whitespace and the property Go and Rust
+        split on does not, so a text holding one is where the two rules would
+        disagree - and a text cut into different words is a different graph.
+        """
+        odd = os.path.join(TMP.name, "separators-go.txt")
+        with open(odd, "w", encoding="utf-8") as fh:
+            fh.write("a\x1cb c d\n" * 4)
+        py_model = os.path.join(TMP.name, "split-py-go.json")
+        other_model = os.path.join(TMP.name, "split-go.json")
+        py("--kind", "count", "--encoding", self.ENCODING, "--seed", 1, "train", "--data", odd, "--epochs", 1,
+           model=py_model)
+        go("--encoding", self.ENCODING, "--seed", 1, "train", "--data", odd, "--epochs", 1, model=other_model)
+        a, b = load_json(py_model)["graph"], load_json(other_model)["graph"]
+        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
+        # "a\x1cb" is one word, so the text is three units and not four
+        self.assertEqual(py("score", "--text", "a\x1cb c d", model=py_model)["results"][0]["chars"], 3)
+        self.assertEqual(go("score", "--text", "a\x1cb c d", model=other_model)["results"][0]["chars"], 3)
+
     def test_each_side_reads_the_other_s_word_model(self):
         loaded = load_model(self.go_model)  # Python reads the Go file
         self.assertEqual(str(loaded.encoding), self.ENCODING)

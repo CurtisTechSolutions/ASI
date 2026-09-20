@@ -8,7 +8,6 @@
 //! come back as the dearest paths - or, following the blame, the most punished
 //! ones.
 
-use crate::encoding::OVERLAP;
 use crate::graph::{Graph, END, START};
 use crate::penalty::PenaltyCosts;
 use crate::search::{build_result, least_punished, onward, start_emission, PathResult, Traversal};
@@ -222,7 +221,10 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             for &cc in children.iter() {
                 let mut nchars = st.chars;
                 if cc.child != END {
-                    nchars += g.label_len(cc.child) - OVERLAP;
+                    // the graph's own overlap, not the trigram's: a grouping
+                    // encoding shares nothing, and a label can be shorter than
+                    // the default overlap
+                    nchars += g.label_len(cc.child) - g.enc.overlap();
                 }
                 let step = cc.cost + o.step_penalty;
                 let ncost = st.cost + step;
@@ -456,7 +458,7 @@ impl Graph {
                 for &n in &f.ids[1..] {
                     longest = longest.max(self.label_len(n));
                     if n != END {
-                        sum += self.label_len(n) - OVERLAP;
+                        sum += self.label_len(n) - self.enc.overlap();
                     }
                 }
                 emitted = emitted.max(sum);

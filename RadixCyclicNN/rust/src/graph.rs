@@ -963,9 +963,13 @@ impl Graph {
                 .iter()
                 .map(|&id| self.labels[id].as_str())
                 .collect();
+            // what comes back is what the encoding can represent: the original
+            // text under a sliding character window, its words under a word
+            // encoding, and everything but the ragged tail under a grouping one
             let decoded = self.enc.decode_path(&labels, 0, true);
-            if &decoded != text {
-                return Err(format!("round trip of {text:?} gave {decoded:?}"));
+            let want = self.enc.normalize(text);
+            if decoded != want {
+                return Err(format!("round trip of {want:?} gave {decoded:?}"));
             }
         }
         Ok(())

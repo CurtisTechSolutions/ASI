@@ -491,6 +491,27 @@ class TestRustWordParity(unittest.TestCase):
         self.assertEqual([(r["word"], r["id"], r["grams"]) for r in a["words"]],
                          [(r["word"], r["id"], r["grams"]) for r in b["words"]])
 
+    def test_the_same_words_out_of_the_same_text(self):
+        """The tokeniser is the Unicode ``White_Space`` property on both sides.
+
+        Python calls U+001C..U+001F whitespace and the property Go and Rust
+        split on does not, so a text holding one is where the two rules would
+        disagree - and a text cut into different words is a different graph.
+        """
+        odd = os.path.join(TMP.name, "separators-rust.txt")
+        with open(odd, "w", encoding="utf-8") as fh:
+            fh.write("a\x1cb c d\n" * 4)
+        py_model = os.path.join(TMP.name, "split-py-rust.json")
+        other_model = os.path.join(TMP.name, "split-rust.json")
+        py("--kind", "count", "--encoding", self.ENCODING, "--seed", 1, "train", "--data", odd, "--epochs", 1,
+           model=py_model)
+        rust("--encoding", self.ENCODING, "--seed", 1, "train", "--data", odd, "--epochs", 1, model=other_model)
+        a, b = load_json(py_model)["graph"], load_json(other_model)["graph"]
+        self.assertEqual(a["nodes"]["labels"], b["nodes"]["labels"])
+        # "a\x1cb" is one word, so the text is three units and not four
+        self.assertEqual(py("score", "--text", "a\x1cb c d", model=py_model)["results"][0]["chars"], 3)
+        self.assertEqual(rust("score", "--text", "a\x1cb c d", model=other_model)["results"][0]["chars"], 3)
+
     def test_each_side_reads_the_other_s_word_model(self):
         loaded = load_model(self.rs_model)  # Python reads the Rust file
         self.assertEqual(str(loaded.encoding), self.ENCODING)
