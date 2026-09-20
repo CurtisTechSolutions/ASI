@@ -173,7 +173,11 @@ def inversion_effect(arms: dict[str, list[dict]]) -> list[dict]:
 def load_arms(results: str) -> dict[str, list[dict]]:
     arms: dict[str, list[dict]] = {}
     for path in sorted(glob.glob(os.path.join(results, "*.json"))):
-        if "benchmark" in os.path.basename(path):
+        name = os.path.basename(path)
+        # Neither of these holds training runs, and elo.json has no "runs" key
+        # at all, so they would silently contribute nothing while still being
+        # opened on every rebuild.
+        if any(tag in name for tag in ("benchmark", "ranking_ablation", "elo")):
             continue
         with open(path) as fh:
             for run in json.load(fh).get("runs", []):
@@ -224,6 +228,13 @@ def main() -> None:
     if os.path.exists(bench):
         with open(bench) as fh:
             blob["benchmark"] = json.load(fh)
+    # The same weights ranked two ways. It belongs on the page because it is
+    # what says the refusal counts and the ratings are measuring different
+    # things - see ranking_ablation.py.
+    exposure = os.path.join(args.results, "ranking_ablation.json")
+    if os.path.exists(exposure):
+        with open(exposure) as fh:
+            blob["exposure"] = json.load(fh)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as fh:
@@ -234,6 +245,7 @@ def main() -> None:
     print(f"  action spaces {len(blob['action_space'])} positions "
           f"x {len(blob['action_space'][0]['states']) if blob['action_space'] else 0} states")
     print(f"  benchmark     {'yes' if 'benchmark' in blob else 'not yet'}")
+    print(f"  exposure      {'yes' if 'exposure' in blob else 'not yet'}")
 
 
 if __name__ == "__main__":

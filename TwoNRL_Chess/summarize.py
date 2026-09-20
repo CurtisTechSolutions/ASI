@@ -11,6 +11,7 @@ import argparse
 import glob
 import json
 import os
+import re
 
 import numpy as np
 
@@ -31,6 +32,11 @@ def label_of(run: dict) -> str:
     """
     cfg = run.get("config", {})
     label = run["arm"]
+    # The rule curriculum is on by default, so the ablation is what gets named:
+    # pooling it with the arm it ablates would average the two things the whole
+    # comparison is about.
+    if not cfg.get("rule_updates", 0):
+        return f"{label} (no rule heads)"
     if cfg.get("schedule", DEFAULT_SCHEDULE) != DEFAULT_SCHEDULE:
         return f"{label} (per-round)"
     if cfg.get("invert_mode", "unit") != "unit":
@@ -112,6 +118,37 @@ def table_headline(arms: dict[str, list[dict]]) -> None:
               f"{fmt(*refus, 1)} | {fmt(*cpl, 1)} | {fmt(*agree, 3)} |")
 
 
+def table_rules(arms: dict[str, list[dict]]) -> None:
+    """What the heads actually know, asked of them directly.
+
+    ``legal AUC`` is the one to read: accuracy is meaningless against a 97:3
+    class split, and this is not.
+    """
+    keys = [("legal_auc", "legal AUC", 3), ("pseudo_auc", "pseudo-legal AUC", 3),
+            ("capture_acc", "capture", 3), ("check_acc", "gives check", 3),
+            ("safe_acc", "lands safely", 3), ("threat_acc", "piece is loose", 3)]
+    present = [k for k, _, _ in keys
+               if any(k in r["heldout"] for rs in arms.values() for r in rs)]
+    if not present:
+        return
+    print("\n### What the heads know, on the held-out exam\n")
+    print("| arm | " + " | ".join(l for k, l, _ in keys if k in present)
+          + " | refusals per move |")
+    print("|---" * (len(present) + 2) + "|")
+    for arm, runs in arms.items():
+        cells = []
+        for key, _, places in keys:
+            if key not in present:
+                continue
+            vals = [r["heldout"][key] for r in runs if key in r["heldout"]]
+            cells.append(fmt(float(np.mean(vals)), float(np.std(vals)), places)
+                         if vals else "—")
+        cells.append(fmt(*stat(runs, ("heldout", "refusals")), 1))
+        print(f"| `{arm}` | " + " | ".join(cells) + " |")
+    print("\n0.5 is no knowledge of the rules and 1.0 is the rules. A network and "
+          "its\ninversion score `a` and `1 - a`, exactly.")
+
+
 def table_inversion(arms: dict[str, list[dict]]) -> None:
     """What the sign flip alone buys: no training between the two columns."""
     rows = []
@@ -121,7 +158,13 @@ def table_inversion(arms: dict[str, list[dict]]) -> None:
             continue
         for key, label, places in (("refusals", "refusals per move", 1),
                                    ("top1_legal", "legal first try", 3),
+                                   ("legal_auc", "legal AUC", 3),
+                                   ("pseudo_auc", "pseudo-legal AUC", 3),
+                                   ("capture_acc", "capture", 3),
+                                   ("check_acc", "gives check", 3),
                                    ("cp_loss", "centipawn loss", 1)):
+            if key not in flips[0]["before"]:
+                continue
             before = np.array([f["before"][key] for f in flips])
             after = np.array([f["after"][key] for f in flips])
             rows.append((arm, label, before.mean(), before.std(), after.mean(),
@@ -133,7 +176,8 @@ def table_inversion(arms: dict[str, list[dict]]) -> None:
     print("| arm | metric | before the flip | after the flip | change |")
     print("|---|---|---|---|---|")
     for arm, label, bm, bs, am, asd, places, n, _ in rows:
-        if label == "legal first try":          # higher is better, and starts at zero
+        if label in ("legal first try", "legal AUC", "pseudo-legal AUC",
+                     "capture", "gives check"):   # higher is better; these complement
             change = f"{am - bm:+.3f}"
         elif am <= 0 or bm <= 0:
             change = "—"
@@ -207,10 +251,79 @@ def table_bench(path: str) -> None:
               f"{sf['top1_legal']:.3f} | {sf['refusals']:.1f} |")
 
 
+def table_exposure(path: str) -> None:
+    """The same weights ranked two ways - what the rating was measuring."""
+    with open(path) as fh:
+        blob = json.load(fh)
+    rows = blob.get("rows", {})
+    if not rows:
+        return
+    print("\n### The same networks, ranked two ways "
+          f"({blob.get('openings', 0) * 2} games a row, against a random legal mover)\n")
+    print("| network | ranked by | score vs random | centipawn loss | refusals per move |")
+    print("|---|---|---|---|---|")
+    for name, r in rows.items():
+        arm, tagged, weight = name.partition(" (rule_weight=")
+        w = weight.rstrip(")")
+        if not tagged:                       # the baseline row ranks nothing
+            how = "—"
+        elif w in ("0", "0.0"):
+            how = "quality alone"
+        else:
+            how = f"quality + {w} × legal"
+        print(f"| `{arm}` | {how} | {r['score']:.3f} ± {r['stderr']:.3f} | "
+              f"{r['acpl']:.0f} | {r['refusals']:.1f} |")
+    print("\nNothing was retrained between the two rows of a pair and not one weight\n"
+          "differs. Only the ordering the moves are proposed in changes.")
+
+
+def fill_readme(readme: str, sections: dict[str, str]) -> None:
+    """Replace each ``<!--NAME-->`` placeholder with its table, in place.
+
+    The README and the runs cannot then drift apart, which is the whole reason
+    this file exists.  A section is wrapped in ``<!--NAME-->`` / ``<!--/NAME-->``
+    so a second run replaces what the first wrote instead of stacking a copy
+    underneath it, and a placeholder with no table keeps its bare marker, so a
+    partial results directory leaves the rest of the document alone.
+    """
+    with open(readme) as fh:
+        text = fh.read()
+    filled = []
+    for name, body in sections.items():
+        body = body.strip()
+        if not body:
+            continue
+        block = f"<!--{name}-->\n{body}\n<!--/{name}-->"
+        pattern = re.compile(rf"<!--{name}-->.*?<!--/{name}-->", re.S)
+        if pattern.search(text):
+            text = pattern.sub(lambda _: block, text, count=1)
+        elif f"<!--{name}-->" in text:
+            text = text.replace(f"<!--{name}-->", block, 1)
+        else:
+            continue
+        filled.append(name)
+    with open(readme, "w") as fh:
+        fh.write(text)
+    print(f"filled {len(filled)} README section(s): {', '.join(filled)}")
+
+
+def capture(fn, *args) -> str:
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*args)
+    return buf.getvalue()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--results", default=RESULTS)
     p.add_argument("--bench", default=None)
+    p.add_argument("--exposure", default=None,
+                   help="ranking_ablation.py output; fills the EXPOSURE section")
+    p.add_argument("--write-readme", default=None,
+                   help="a README to fill the <!--NAME--> placeholders in, in place")
     args = p.parse_args()
     paths = sorted(glob.glob(os.path.join(args.results, "*.json")))
     runs = [x for x in paths if "benchmark" not in os.path.basename(x)]
@@ -219,6 +332,7 @@ def main() -> None:
         raise SystemExit(f"no run JSON in {args.results}/ - run `make run` first")
     print(f"# Tables rebuilt from {len(runs)} result file(s)")
     table_headline(arms)
+    table_rules(arms)
     table_inversion(arms)
     table_games(arms)
     table_curve(arms)
@@ -226,6 +340,21 @@ def main() -> None:
     bench = args.bench or os.path.join(args.results, "benchmark.json")
     if os.path.exists(bench):
         table_bench(bench)
+    exposure = args.exposure or os.path.join(args.results, "ranking_ablation.json")
+    if os.path.exists(exposure):
+        table_exposure(exposure)
+
+    if args.write_readme:
+        sections = {
+            "HEADLINE": capture(table_headline, arms),
+            "RULES": capture(table_rules, arms),
+            "CURVE": capture(table_curve, arms),
+            "ARMS": capture(table_inversion, arms),
+            "GROWTH": capture(table_growth, arms),
+            "BENCH": capture(table_bench, bench) if os.path.exists(bench) else "",
+            "EXPOSURE": capture(table_exposure, exposure) if os.path.exists(exposure) else "",
+        }
+        fill_readme(args.write_readme, sections)
 
 
 if __name__ == "__main__":
