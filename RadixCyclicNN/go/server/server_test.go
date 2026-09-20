@@ -866,3 +866,80 @@ func TestTrainingHonoursTheInflightBound(t *testing.T) {
 		t.Fatalf("inflight 0: %d %v", status, doc)
 	}
 }
+
+// The encoding is a reset option: the new model reads text the way it says,
+// and says so in its statistics.
+func TestResetTakesAnEncoding(t *testing.T) {
+	e := newEnv(t, false)
+	status, info := e.get("/api/status")
+	if status != 200 || info["encoding"] != "char:3:1" {
+		t.Fatalf("a fresh server is the trigram: %d %v", status, info["encoding"])
+	}
+	for _, c := range []struct {
+		body map[string]any
+		want string
+	}{
+		{map[string]any{"encoding": "word:2:1"}, "word:2:1"},
+		{map[string]any{"encoding": "char:5:groups"}, "char:5:5"},
+		{map[string]any{"unit": "word", "ngram": 3}, "word:3:1"},
+		{map[string]any{"ngram": 4, "stride": 4}, "char:4:4"},
+		{map[string]any{}, "char:3:1"},
+	} {
+		status, reset := e.post("/api/reset", c.body)
+		if status != 200 {
+			t.Fatalf("reset %v: %d %v", c.body, status, reset)
+		}
+		if got := e.svc.Model().Encoding().String(); got != c.want {
+			t.Fatalf("reset %v gave %s, want %s", c.body, got, c.want)
+		}
+		if _, status := e.get("/api/status"); status["encoding"] != c.want {
+			t.Fatalf("status reports %v after reset %v, want %s", status["encoding"], c.body, c.want)
+		}
+	}
+	// a reset that cannot be encoded is a bad request, and leaves the model alone
+	before := e.svc.Model().Encoding()
+	for _, bad := range []map[string]any{
+		{"encoding": "rune:3"}, {"unit": "syllable"}, {"ngram": 3, "stride": 4}, {"ngram": 0},
+	} {
+		if status, doc := e.post("/api/reset", bad); status != 400 {
+			t.Fatalf("reset %v: %d %v", bad, status, doc)
+		}
+	}
+	if e.svc.Model().Encoding() != before {
+		t.Fatalf("a refused reset changed the model to %v", e.svc.Model().Encoding())
+	}
+}
+
+// A word model trains, predicts and saves over the API like any other.
+func TestTrainAndPredictInWords(t *testing.T) {
+	e := newEnv(t, false)
+	if status, doc := e.post("/api/reset", map[string]any{"encoding": "word:2:1"}); status != 200 {
+		t.Fatalf("reset: %d %v", status, doc)
+	}
+	status, doc := e.post("/api/train", map[string]any{
+		"texts":  []string{"the cat sat on the mat", "the cat sat on the floor", "the dog sat on the mat"},
+		"epochs": 2,
+	})
+	if status != 200 && status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	if job, ok := doc["job"]; ok && job != nil {
+		doc = e.waitJob()
+	}
+	status, pred := e.post("/api/predict", map[string]any{"prefix": "the cat sat", "k": 3, "length": 3})
+	if status != 200 {
+		t.Fatalf("predict: %d %v", status, pred)
+	}
+	top, _ := pred["top"].([]any)
+	if len(top) == 0 {
+		t.Fatalf("no continuation: %v", pred)
+	}
+	for _, row := range top {
+		text, _ := row.(map[string]any)["text"].(string)
+		for _, word := range strings.Fields(text) {
+			if !strings.Contains("the cat sat on the mat floor dog", word) {
+				t.Errorf("predicted %q, not a word of the corpus", word)
+			}
+		}
+	}
+}

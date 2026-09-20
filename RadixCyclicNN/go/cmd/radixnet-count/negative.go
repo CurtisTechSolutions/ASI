@@ -50,16 +50,18 @@ func openNegative(required bool) *radixnet.Model {
 		if !m.IsNegative() {
 			fail("%s holds a %s model, not a negative one", path, m.Kind())
 		}
-		return configure(m)
+		return configure(checkEncoding(m, path))
 	}
 	if required {
 		fail("negative model file not found: %s (teach it first with `radixnet-count negative blame --text '...' --reason gibberish`)", path)
 	}
-	m, err := radixnet.NewNegativeModel(seedFlag, radixnet.DefaultNegativeOptions())
+	negOpts := radixnet.DefaultNegativeOptions()
+	negOpts.Encoding, _ = encodingFlags()
+	m, err := radixnet.NewNegativeModel(seedFlag, negOpts)
 	if err != nil {
 		fail("%v", err)
 	}
-	return configure(m)
+	return configure(checkEncoding(m, path))
 }
 
 // noGuard turns the guard off for one command: print what the positive model

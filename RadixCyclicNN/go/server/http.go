@@ -256,7 +256,10 @@ func init() {
 	route("POST", "/api/load", rLoad)
 	doc("POST", "/api/load", "{path}: replace the model with a file")
 	route("POST", "/api/reset", rReset)
-	doc("POST", "/api/reset", "{seed, count_scale, global_scale, window_scale, reward_scale, window}: a fresh model")
+	doc("POST", "/api/reset", "{seed, count_scale, global_scale, window_scale, reward_scale, window, encoding | unit + ngram + stride}: a fresh model. "+
+		"The encoding is how text becomes grams and is fixed for the model's life: unit char | word, ngram the n of the n-gram, "+
+		"stride the units between two grams (1 = sliding window, n = non-overlapping groups). \"encoding\" sets all three at once "+
+		"(char:3:1 the default, char:5:5 groups of five letters, word:2:1 word bigrams, word:3:1 word trigrams)")
 	route("GET", "/api/checkpoints", rCheckpoints)
 	doc("GET", "/api/checkpoints", "checkpoint records and the latest one")
 	route("POST", "/api/checkpoints/save", rCheckpointSave)
@@ -338,6 +341,47 @@ func weightOptions(f fields) (map[string]float64, error) {
 		opts["window"] = float64(w)
 	}
 	return opts, nil
+}
+
+// encodingOption reads the encoding a new model is to be built in: either
+// "encoding" as a spec ("word:2:1"), or the three dials on their own.
+func encodingOption(f fields) (radixnet.Encoding, error) {
+	spec, err := f.optText("encoding", "")
+	if err != nil {
+		return radixnet.Encoding{}, err
+	}
+	enc, err := radixnet.ParseEncoding(spec)
+	if err != nil {
+		return radixnet.Encoding{}, badRequest("%v", err)
+	}
+	unit, err := f.optText("unit", "")
+	if err != nil {
+		return radixnet.Encoding{}, err
+	}
+	if unit != "" {
+		parsed, err := radixnet.ParseEncoding(unit)
+		if err != nil {
+			return radixnet.Encoding{}, badRequest("%v", err)
+		}
+		enc.Unit = parsed.Unit
+	}
+	if n, present, err := f.integer("ngram", 0, intp(1)); err != nil {
+		return radixnet.Encoding{}, err
+	} else if present {
+		if !enc.Sliding() { // groups stay groups when n changes
+			enc.Stride = n
+		}
+		enc.N = n
+	}
+	if st, present, err := f.integer("stride", 0, intp(1)); err != nil {
+		return radixnet.Encoding{}, err
+	} else if present {
+		enc.Stride = st
+	}
+	if err := enc.Validate(); err != nil {
+		return radixnet.Encoding{}, badRequest("%v", err)
+	}
+	return enc, nil
 }
 
 func rModelWeights(rq *request) (int, any, error) {
@@ -901,7 +945,11 @@ func rReset(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	out, err := rq.svc.Reset(seedp, kind, opts)
+	enc, err := encodingOption(rq.f)
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.Reset(seedp, kind, opts, enc)
 	return 200, out, err
 }
 

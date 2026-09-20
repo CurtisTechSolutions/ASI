@@ -103,6 +103,29 @@ def _with_back(d: dict) -> dict:
     return {**d, "nodes": nodes, "edges": edges, "format_version": _GRAPH_FORMAT_VERSION}
 
 
+def _check_encoding(encoding: dict | None) -> None:
+    """Refuse a file written in an encoding this implementation cannot read.
+
+    The Go implementation can build the graph out of n-grams of any size, out
+    of non-overlapping groups of letters and out of words; it writes an
+    ``encoding`` block when it does.  Nothing here reads anything but the
+    character trigram of stride 1, and a trigram reader would quietly make
+    nonsense of such a file, so it is turned away instead.
+    """
+    if not encoding:
+        return
+    unit = str(encoding.get("unit", "char"))
+    n = int(encoding.get("n", _W))
+    stride = int(encoding.get("stride", 1))
+    if (unit, n, stride) == ("char", _W, 1):
+        return
+    raise ValueError(
+        f"this graph is encoded as {n}-{unit} grams of stride {stride}; the Python implementation "
+        f"reads character {_W}-grams of stride 1 only - continue it with the Go implementation "
+        "(RadixCyclicNN/go)"
+    )
+
+
 class RadixCyclicGraph:
     """Nodes, edges, trigram index and the radix split / merge operations."""
 
@@ -868,6 +891,7 @@ class RadixCyclicGraph:
         """Inverse of :meth:`to_dict`."""
         if d.get("format") != _GRAPH_FORMAT:
             raise ValueError(f"not a {_GRAPH_FORMAT} document")
+        _check_encoding(d.get("encoding"))
         d = _with_back(d)
         nodes = d["nodes"]
         edges = d["edges"]

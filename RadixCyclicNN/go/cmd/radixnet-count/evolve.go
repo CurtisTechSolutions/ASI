@@ -44,11 +44,11 @@ func cmdEvolve(args []string) {
 	cfg.NegEpochs, cfg.PosEpochs, cfg.DiscNegEpochs, cfg.DiscPosEpochs = *negEpochs, *posEpochs, *discNeg, *discPos
 	cfg.Strength, cfg.BlatantMode, cfg.BlatantMargin, cfg.BlatantBoost = *strength, *mode, *margin, *boost
 	cfg.Seed = seedFlag
-	if err := cfg.Validate(); err != nil {
-		fail("%v", err)
-	}
 	corpus := readTexts(data, "lines", 0)
 	generator := openModel(false)
+	if err := cfg.Validate(generator.Encoding()); err != nil {
+		fail("%v", err)
+	}
 	discriminator, discFile := openDiscriminator(*discPath)
 	loop, err := radixnet.NewEvolver(generator, corpus, discriminator, cfg)
 	if err != nil {

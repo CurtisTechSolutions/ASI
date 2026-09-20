@@ -2,6 +2,7 @@ package radixnet
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -188,6 +189,13 @@ type Graph struct {
 	index    map[string]loc
 	Inverted bool
 
+	// Enc is how this graph turns text into grams and its labels back into
+	// text: the unit (characters or words), the n of the n-gram and the
+	// stride between consecutive grams.  It is fixed when the graph is
+	// created - every label, every index key and every offset is measured in
+	// its units - and travels with the model file.
+	Enc Encoding
+
 	Version          Counter
 	StructureVersion Counter
 	nAliveNodes      int
@@ -215,25 +223,36 @@ type Graph struct {
 	Workers int
 }
 
-// GraphOptions are the dual frequency function's scales and the window size.
+// GraphOptions are the dual frequency function's scales, the size of the
+// sliding count window and the encoding the graph is built in.
 type GraphOptions struct {
 	CountScale  float64
 	RewardScale float64
 	GlobalScale float64
 	WindowScale float64
 	PathScale   float64
-	Window      int
+	// Window is the size of the sliding *count* window (the recent share of
+	// the weight function), not the n of the n-gram - that is Encoding.N.
+	Window int
+	// Encoding is how text becomes grams; the zero value is the character
+	// trigram of stride 1 the model was born with.
+	Encoding Encoding
 }
 
 // DefaultGraphOptions mirror the Python defaults (geometric mean of the two shares).
 func DefaultGraphOptions() GraphOptions {
-	return GraphOptions{CountScale: 0, RewardScale: 1, GlobalScale: 0.5, WindowScale: 0.5, PathScale: 1, Window: 10_000}
+	return GraphOptions{CountScale: 0, RewardScale: 1, GlobalScale: 0.5, WindowScale: 0.5, PathScale: 1,
+		Window: 10_000, Encoding: DefaultEncoding()}
 }
 
 // NewGraph creates an empty graph with the two sentinels.
 func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 	if opts.Window < 1 {
 		return nil, fmt.Errorf("window must be >= 1, got %d", opts.Window)
+	}
+	enc := opts.Encoding.WithDefaults()
+	if err := enc.Validate(); err != nil {
+		return nil, err
 	}
 	g := &Graph{
 		Seed:             seed,
@@ -244,6 +263,7 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 		EdgeCountResets:  map[int]int64{},
 		weightsStructure: invalidStamp,
 		costsVersion:     invalidStamp,
+		Enc:              enc,
 		WindowSize:       opts.Window,
 		CountScale:       opts.CountScale,
 		RewardScale:      opts.RewardScale,
@@ -316,7 +336,7 @@ func (g *Graph) CarryCounters(force bool) int {
 func (g *Graph) newNode(label string, count, countResets int64) int {
 	nid := len(g.Labels)
 	g.Labels = append(g.Labels, label)
-	g.labelLen = append(g.labelLen, runeLen(label))
+	g.labelLen = append(g.labelLen, g.Enc.Len(label))
 	g.Count = append(g.Count, count)
 	if countResets != 0 {
 		g.CountResets[nid] = countResets
@@ -356,12 +376,15 @@ func (g *Graph) newEdge(p, c int, count, countResets int64) int {
 	return e
 }
 
-func (g *Graph) createTrigramNode(trigram string) int {
-	if runeLen(trigram) != Window {
-		panic(fmt.Sprintf("expected a %d-character trigram, got %q", Window, trigram))
+func (g *Graph) createGramNode(gram string) int {
+	if g.Enc.Len(gram) != g.Enc.N {
+		panic(fmt.Sprintf("expected a gram of %d %s, got %q", g.Enc.N, g.Enc.Unit, gram))
 	}
-	nid := g.newNode(trigram, 0, 0)
-	g.index[trigram] = loc{nid, 0}
+	// a gram cut out of a text is a slice of it, and this one is about to
+	// outlive the text: copy it, or the whole line stays in memory behind it
+	gram = strings.Clone(gram)
+	nid := g.newNode(gram, 0, 0)
+	g.index[gram] = loc{nid, 0}
 	return nid
 }
 
@@ -449,10 +472,14 @@ func (g *Graph) NumNodes() int { return g.nAliveNodes }
 // NumEdges is the number of alive edges.
 func (g *Graph) NumEdges() int { return g.nAliveEdges }
 
-// NumTrigrams is the number of distinct trigrams stored.
+// NumTrigrams is the number of distinct grams stored (trigrams under the
+// default encoding, which is where the name comes from).
 func (g *Graph) NumTrigrams() int { return len(g.index) }
 
-// CompressionRatio is trigrams per real node.
+// NumGrams is the number of distinct grams stored, whatever the encoding.
+func (g *Graph) NumGrams() int { return len(g.index) }
+
+// CompressionRatio is grams per real node.
 func (g *Graph) CompressionRatio() float64 {
 	real := g.nAliveNodes - First
 	if real < 1 {
@@ -472,13 +499,21 @@ func (g *Graph) AliveNodes() []int {
 	return out
 }
 
-// Lookup finds the node and offset holding a trigram.
-func (g *Graph) Lookup(trigram string) (node, off int, ok bool) {
-	l, found := g.index[trigram]
+// Lookup finds the node and the unit offset holding a gram.
+func (g *Graph) Lookup(gram string) (node, off int, ok bool) {
+	l, found := g.index[gram]
 	return l.node, l.off, found
 }
 
-// LabelLen is the character length of a node's label.
+// Encode cuts a text into this graph's grams (Graph.Enc).
+func (g *Graph) Encode(text string) []string { return g.Enc.Encode(text) }
+
+// DecodePath turns node labels back into text under this graph's encoding.
+func (g *Graph) DecodePath(labels []string, startOffset int, includeContext bool) string {
+	return g.Enc.DecodePath(labels, startOffset, includeContext)
+}
+
+// LabelLen is the length of a node's label in the encoding's units.
 func (g *Graph) LabelLen(node int) int { return g.labelLen[node] }
 
 // Children lists (child, edge) pairs of p in insertion order.
@@ -504,9 +539,11 @@ func (g *Graph) Parents(c int) []int {
 
 // -- structural operations ----------------------------------------------------------
 
-// Split cuts a node between its trigrams i-1 and i: A keeps the id with
-// label[:i+2], B is a new node with label[i:] that inherits A's out-edges
-// (edge ids kept) and count; A gets the single new edge A -> B.
+// Split cuts a node between the gram starting at unit i and the one before
+// it: A keeps the id and the label up to the end of the earlier gram, B is a
+// new node with label[i:] that inherits A's out-edges (edge ids kept) and
+// count; A gets the single new edge A -> B.  i is a unit offset and must be
+// the start of one of the node's grams - a positive multiple of the stride.
 func (g *Graph) Split(node, i int) (int, int, error) {
 	if node < First {
 		return 0, 0, fmt.Errorf("cannot split a sentinel node")
@@ -514,14 +551,17 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 	if node < 0 || node >= len(g.Labels) || !g.Alive[node] {
 		return 0, 0, fmt.Errorf("node %d is not alive", node)
 	}
-	label := []rune(g.Labels[node])
-	length := len(label)
-	if i < 1 || i > length-Window {
-		return 0, 0, fmt.Errorf("split index %d out of range 1..%d for label %q", i, length-Window, string(label))
+	enc := g.Enc
+	label := enc.Units(g.Labels[node])
+	length := label.Len()
+	stride, overlap := enc.Stride, enc.Overlap()
+	if i < stride || i > length-enc.N || i%stride != 0 {
+		return 0, 0, fmt.Errorf("split index %d out of range %d..%d (a multiple of the stride %d) for label %q",
+			i, stride, length-enc.N, stride, label.Text())
 	}
 	a := node
 	aResets := g.CountResets[a]
-	b := g.newNode(string(label[i:]), g.Count[a], aResets)
+	b := g.newNode(label.Slice(i, -1), g.Count[a], aResets)
 	chA := &g.children[a]
 	chB := &g.children[b]
 	moved := append([]int(nil), chA.edges...)
@@ -535,11 +575,11 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 	}
 	chA.clear()
 	g.newEdge(a, b, g.Count[a], aResets)
-	for j := i; j < length-Overlap; j++ {
-		g.index[string(label[j:j+Window])] = loc{b, j - i}
+	for j := i; j <= length-enc.N; j += stride {
+		g.index[label.Slice(j, j+enc.N)] = loc{b, j - i}
 	}
-	g.Labels[a] = string(label[:i+Overlap])
-	g.labelLen[a] = i + Overlap
+	g.Labels[a] = label.Slice(0, i+overlap)
+	g.labelLen[a] = i + overlap
 	g.dirtyAll = true
 	bridge := -1
 	if e, ok := g.children[a].get(b); ok {
@@ -571,9 +611,11 @@ func (g *Graph) MergeChild(p int) bool {
 	if g.blocksMerge(ch.edges[0]) {
 		return false // a blamed transition stays an edge, so the negative network can still name it
 	}
-	lp := []rune(g.Labels[p])
-	lc := []rune(g.Labels[c])
-	shift := len(lp) - Overlap
+	enc := g.Enc
+	lp := enc.Units(g.Labels[p])
+	lc := enc.Units(g.Labels[c])
+	overlap := enc.Overlap()
+	shift := lp.Len() - overlap
 	e := ch.edges[0]
 	movedOut := append([]int(nil), g.children[c].edges...)
 	ch.clear()
@@ -594,11 +636,11 @@ func (g *Graph) MergeChild(p int) bool {
 		g.EdgeParent[e2] = p
 	}
 	cc.clear()
-	for j := 0; j < len(lc)-Overlap; j++ {
-		g.index[string(lc[j:j+Window])] = loc{p, shift + j}
+	for j := 0; j <= lc.Len()-enc.N; j += enc.Stride {
+		g.index[lc.Slice(j, j+enc.N)] = loc{p, shift + j}
 	}
-	g.Labels[p] = string(lp) + string(lc[Overlap:])
-	g.labelLen[p] = len(lp) + len(lc) - Overlap
+	g.Labels[p] = enc.Join(lp.Text(), lc.Slice(overlap, -1))
+	g.labelLen[p] = lp.Len() + lc.Len() - overlap
 	g.Labels[c] = ""
 	g.labelLen[c] = 0
 	if g.NodeCount(p).Less(g.NodeCount(c)) {
@@ -637,20 +679,22 @@ func (g *Graph) Compress() int {
 }
 
 // ObserveSequence registers a training sequence START -> t0 -> ... -> tn -> END,
-// splitting nodes so every transition runs from the last trigram of one node
-// to the first of another over an edge created on demand.  Returns the
+// splitting nodes so every transition runs from the last gram of one node to
+// the first of another over an edge created on demand.  Returns the
 // (parent, edge) transitions; count also bumps the visit counters.  Takes the
 // structure write lock.
-func (g *Graph) ObserveSequence(trigrams []string, count bool) ([]Transition, error) {
+func (g *Graph) ObserveSequence(grams []string, count bool) ([]Transition, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.observeLocked(trigrams, count)
+	return g.observeLocked(grams, count)
 }
 
 func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, error) {
 	if len(trigrams) == 0 {
 		return nil, nil
 	}
+	enc := g.Enc
+	stride, overlap := enc.Stride, enc.Overlap()
 	didSplit := false
 	transitions := make([]Transition, 0, len(trigrams)+1)
 
@@ -658,7 +702,7 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 	l, ok := g.index[x]
 	var px, ox int
 	if !ok {
-		px, ox = g.createTrigramNode(x), 0
+		px, ox = g.createGramNode(x), 0
 	} else {
 		px, ox = l.node, l.off
 	}
@@ -685,20 +729,20 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 		l, ok := g.index[y]
 		var py, oy int
 		if !ok {
-			py, oy = g.createTrigramNode(y), 0
+			py, oy = g.createGramNode(y), 0
 		} else {
 			py, oy = l.node, l.off
 		}
-		if py == px && oy == ox+1 {
+		if py == px && oy == ox+stride {
 			ox = oy
 			x = y
 			continue
 		}
-		if runeSlice(x, 1, -1) != runeSlice(y, 0, Overlap) {
-			return nil, fmt.Errorf("trigrams %q -> %q do not overlap", x, y)
+		if enc.Slice(x, stride, -1) != enc.Slice(y, 0, overlap) {
+			return nil, fmt.Errorf("grams %q -> %q do not overlap", x, y)
 		}
-		if ox+Window < g.labelLen[px] {
-			if _, _, err := g.Split(px, ox+1); err != nil {
+		if ox+enc.N < g.labelLen[px] {
+			if _, _, err := g.Split(px, ox+stride); err != nil {
 				return nil, err
 			}
 			didSplit = true
@@ -726,8 +770,8 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 		}
 		px, ox, x = py, 0, y
 	}
-	if ox+Window < g.labelLen[px] {
-		if _, _, err := g.Split(px, ox+1); err != nil {
+	if ox+enc.N < g.labelLen[px] {
+		if _, _, err := g.Split(px, ox+stride); err != nil {
 			return nil, err
 		}
 		didSplit = true
@@ -756,7 +800,7 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 
 // Trace walks a sequence through the structure without modifying it (read
 // lock): the transitions and the node path START ... END, or ok=false when a
-// trigram is unknown, an edge is missing or a split would be needed.
+// gram is unknown, an edge is missing or a split would be needed.
 func (g *Graph) Trace(trigrams []string) ([]Transition, []int, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -773,6 +817,7 @@ func (g *Graph) trace(trigrams []string) ([]Transition, []int, bool) {
 	if len(trigrams) == 0 {
 		return nil, nil, false
 	}
+	stride := g.Enc.Stride
 	l, ok := g.index[trigrams[0]]
 	if !ok || l.off != 0 {
 		return nil, nil, false
@@ -792,11 +837,11 @@ func (g *Graph) trace(trigrams []string) ([]Transition, []int, bool) {
 			return nil, nil, false
 		}
 		py, oy := l.node, l.off
-		if py == px && oy == ox+1 {
+		if py == px && oy == ox+stride {
 			ox = oy
 			continue
 		}
-		if oy != 0 || ox+Window != g.labelLen[px] {
+		if oy != 0 || ox+g.Enc.N != g.labelLen[px] {
 			return nil, nil, false
 		}
 		e, ok := g.children[px].get(py)
@@ -807,7 +852,7 @@ func (g *Graph) trace(trigrams []string) ([]Transition, []int, bool) {
 		path = append(path, py)
 		px, ox = py, 0
 	}
-	if ox+Window != g.labelLen[px] {
+	if ox+g.Enc.N != g.labelLen[px] {
 		return nil, nil, false
 	}
 	e, ok = g.children[px].get(End)
@@ -854,10 +899,10 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 			continue
 		}
 		aliveNodes++
-		if p >= First && g.labelLen[p] < Window {
-			return fmt.Errorf("node %d label %q shorter than %d", p, g.Labels[p], Window)
+		if p >= First && g.labelLen[p] < g.Enc.N {
+			return fmt.Errorf("node %d label %q shorter than %d", p, g.Labels[p], g.Enc.N)
 		}
-		if g.labelLen[p] != runeLen(g.Labels[p]) {
+		if g.labelLen[p] != g.Enc.Len(g.Labels[p]) {
 			return fmt.Errorf("node %d has a stale label length", p)
 		}
 		for i, c := range g.children[p].order {
@@ -875,10 +920,10 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 			if g.EdgeParent[e] != p {
 				return fmt.Errorf("edge %d records parent %d, listed under %d", e, g.EdgeParent[e], p)
 			}
-			if p >= First && c >= First {
-				lp := []rune(g.Labels[p])
-				if string(lp[len(lp)-Overlap:]) != runeSlice(g.Labels[c], 0, Overlap) {
-					return fmt.Errorf("edge %d->%d violates the window overlap", p, c)
+			if p >= First && c >= First && g.Enc.Overlap() > 0 {
+				lp := g.Enc.Units(g.Labels[p])
+				if lp.Slice(lp.Len()-g.Enc.Overlap(), -1) != g.Enc.Slice(g.Labels[c], 0, g.Enc.Overlap()) {
+					return fmt.Errorf("edge %d->%d violates the gram overlap", p, c)
 				}
 			}
 		}
@@ -906,17 +951,21 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		if !g.Alive[p] {
 			continue
 		}
-		label := []rune(g.Labels[p])
-		for o := 0; o < len(label)-Overlap; o++ {
-			t := string(label[o : o+Window])
+		label := g.Enc.Units(g.Labels[p])
+		for o := 0; o <= label.Len()-g.Enc.N; o += g.Enc.Stride {
+			t := label.Slice(o, o+g.Enc.N)
 			if l, ok := g.index[t]; !ok || l.node != p || l.off != o {
-				return fmt.Errorf("trigram %q of node %d@%d indexed as %v", t, p, o, l)
+				return fmt.Errorf("gram %q of node %d@%d indexed as %v", t, p, o, l)
 			}
 			expected++
 		}
+		if rest := (label.Len() - g.Enc.N) % g.Enc.Stride; rest != 0 {
+			return fmt.Errorf("node %d label %q holds %d units, %d past its last whole gram",
+				p, g.Labels[p], label.Len(), rest)
+		}
 	}
 	if len(g.index) != expected {
-		return fmt.Errorf("trigram index has %d entries, expected %d", len(g.index), expected)
+		return fmt.Errorf("gram index has %d entries, expected %d", len(g.index), expected)
 	}
 	if compressed {
 		for p := 2; p < n; p++ {
@@ -929,7 +978,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		}
 	}
 	for _, text := range texts {
-		grams := Encode(text)
+		grams := g.Encode(text)
 		if grams == nil {
 			continue
 		}
@@ -941,8 +990,11 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		for _, id := range path[1 : len(path)-1] {
 			labels = append(labels, g.Labels[id])
 		}
-		if decoded := DecodePath(labels, 0, true); decoded != text {
-			return fmt.Errorf("round trip of %q gave %q", text, decoded)
+		// what comes back is what the encoding can represent: the original
+		// text under a sliding character window, its words under a word
+		// encoding, and everything but the ragged tail under a grouping one
+		if want := g.Enc.Normalize(text); g.DecodePath(labels, 0, true) != want {
+			return fmt.Errorf("round trip of %q gave %q", text, g.DecodePath(labels, 0, true))
 		}
 	}
 	return nil

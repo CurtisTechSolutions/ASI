@@ -113,11 +113,14 @@ func (j *Job) ToDict() map[string]any {
 
 // Options configure a Service.
 type Options struct {
-	ModelPath     string
-	Seed          int64
-	Workers       int
-	Exact         bool
-	UploadDir     string
+	ModelPath string
+	Seed      int64
+	Workers   int
+	Exact     bool
+	UploadDir string
+	// Encoding is how a model created here reads text (a model loaded from
+	// ModelPath brings its own); the zero value is the character trigram.
+	Encoding      radixnet.Encoding
 	CheckpointDir string
 	Keep          int
 	Quiet         bool
@@ -204,7 +207,12 @@ func NewService(opts Options) (*Service, error) {
 		}
 	}
 	if m == nil {
-		fresh, err := radixnet.NewModel(opts.Seed, radixnet.DefaultGraphOptions())
+		graph := radixnet.DefaultGraphOptions()
+		graph.Encoding = opts.Encoding.WithDefaults()
+		if err := graph.Encoding.Validate(); err != nil {
+			return nil, err
+		}
+		fresh, err := radixnet.NewModel(opts.Seed, graph)
 		if err != nil {
 			return nil, err
 		}
@@ -664,8 +672,9 @@ func (s *Service) Load(path string) (map[string]any, error) {
 	return s.replaceModel(m)
 }
 
-// Reset replaces the model with a fresh one.
-func (s *Service) Reset(seed *int64, kind string, opts map[string]float64) (map[string]any, error) {
+// Reset replaces the model with a fresh one, in the encoding given (the zero
+// Encoding is the default one: character trigrams).
+func (s *Service) Reset(seed *int64, kind string, opts map[string]float64, enc radixnet.Encoding) (map[string]any, error) {
 	if kind != "" && strings.ToLower(kind) != "count" {
 		return nil, badRequest("the Go server runs the count / reward model only (kind %q is served by the Python server)", kind)
 	}
@@ -673,6 +682,10 @@ func (s *Service) Reset(seed *int64, kind string, opts map[string]float64) (map[
 		return nil, err
 	}
 	g := radixnet.DefaultGraphOptions()
+	g.Encoding = enc.WithDefaults()
+	if err := g.Encoding.Validate(); err != nil {
+		return nil, badRequest("%v", err)
+	}
 	for name, v := range opts {
 		switch name {
 		case "count_scale":

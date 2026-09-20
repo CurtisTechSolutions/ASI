@@ -1775,7 +1775,9 @@ a CLI (`go/cmd/radixnet-count`); the Python implementation stays as it is.
 Model files are interchangeable: both sides read and write the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained on one side continues on the other with
-identical numbers (`tests/test_go_parity.py` trains the same corpus on both,
+identical numbers (that is the default encoding, character trigrams - a Go
+model built with any other encoding is Go-only, and the Python loader says so
+instead of misreading it) (`tests/test_go_parity.py` trains the same corpus on both,
 compares structure, counts, rewards, window, RNG state, predictions, generated
 texts, scores and conversations, blames the same failures and corrections and
 compares the verdicts character for character, and lets each side read the
@@ -1805,6 +1807,9 @@ go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the
 go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
 go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
 go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
+go/bin/radixnet-count --model five.json --ngram 5 --stride 5 train --data book.txt   # groups of five letters
+go/bin/radixnet-count --model words.json --encoding word:2:1 train --data book.txt   # word bigrams
+go/bin/radixnet-count --model words.json predict --prefix "the cat sat" --k 5        # ... predicted in words
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
 ```
@@ -1819,7 +1824,9 @@ Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`
 (with `--negative PATH`) on `tutor`, `correct`, `evolve` and `ollama review`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
 none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
-limit, 80 % of the machine or container by default), `--memprofile PATH`.
+limit, 80 % of the machine or container by default), `--memprofile PATH`,
+`--encoding SPEC` / `--units char|word` / `--ngram N` / `--stride N` (a **new**
+model's encoding - see below).
 Where the goroutines go:
 
 | phase | concurrency |
@@ -1850,6 +1857,46 @@ contention on shared counters cost more than they save. It is the default
 because it was asked for; `--exact --workers 4` is the reproducible choice and
 the faster one on this hardware. The structure, the window and the weights'
 consistency with whatever was counted are exact in both modes.
+
+### The encoding: n-grams of any size, groups of letters, words
+
+The Python implementation reads text one way - the sliding window of three
+characters. The Go implementation makes that the *default* of three dials,
+fixed when a model is created and carried in its file:
+
+| flag | what it sets | default |
+|---|---|---|
+| `--units char\|word` | what one unit of text is: a character, or a whitespace-delimited word | `char` |
+| `--ngram N` | how many units one gram holds - the *n* of the n-gram, any number | 3 |
+| `--stride N` | how far apart two consecutive grams start: **1** slides them (they overlap by n-1), **n** cuts the text into non-overlapping groups | 1 |
+
+`--encoding SPEC` sets all three at once - `unit[:n[:stride]]`, plus the names
+`trigram`, `bigram`, `word-bigram`, `word-trigram` and the shorthand
+`:groups` for a stride equal to n:
+
+```bash
+go/bin/radixnet-count --model m.json --encoding char:3:1 train --data book.txt   # the default: trigrams
+go/bin/radixnet-count --model m.json --encoding char:5:1 train --data book.txt   # a sliding window of five
+go/bin/radixnet-count --model m.json --encoding char:4:4 train --data book.txt   # groups of four letters
+go/bin/radixnet-count --model m.json --encoding char:5:groups train --data book.txt   # ... and of five
+go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt   # word bigrams
+go/bin/radixnet-count --model m.json --encoding word:3:1 train --data book.txt   # word trigrams
+```
+
+Everything downstream is then measured in that unit rather than in characters:
+a node's label, `--length` and `--max-length`, the `chars` of a score, and the
+spans a correction blames. On a word model, `predict --prefix "the cat sat"`
+walks whole words and `--length 3` means three more words. `info` and
+`GET /api/status` say which encoding a model is in; over HTTP,
+`POST /api/reset` takes `{"encoding": "word:2:1"}` or
+`{"unit": "word", "ngram": 2, "stride": 1}`.
+
+The encoding is fixed for the model's life - every label in the graph is
+written in it - so the flags apply to a **new** model, and the CLI refuses
+them (rather than ignoring them) when they disagree with the model it loaded.
+A model that is not `char:3:1` writes an `encoding` block into its file and is
+read by the Go implementation only; `python -m radixnet` turns such a file away
+by name instead of misreading it as trigrams.
 
 ### Massive ZIP archives: streaming, chunking and memory
 
@@ -1954,7 +2001,7 @@ with the audio - which is what the page dictates anyway.
 | `POST /api/2nrl`, `POST /api/feedback` | jobs with `strength` (penalties, then traversal + reward); `good_ratings` / `bad_ratings` (marks out of 10) or `good_weights` / `bad_weights` scale the reward and the penalty per text |
 | `GET /api/negative`, `POST /api/negative/blame`, `/clear`, `/judge`, `/filter`, `/forget`, `/settings`, `/reset`, `/save` | the negative network, same bodies and results as the Python server: the failures with the tutor's reasons, the verdicts with their blamed fragments, and the pair (the count model writes, the negative network vetoes by blame, peak or the likelihood ratio). Its file is `model.negative.json` beside the model path, interchangeable with Python's; `POST /api/save` writes it alongside the model |
 | `GET /api/tutor`, `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `GET /api/chatgpt/models` | the English lessons, same bodies and records as the Python server: the teacher (`tutor_provider`: a local Ollama model or ChatGPT) sets and marks the exercises, the count / reward model answers them (`serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` set the defaults, the key is the server's own `$OPENAI_API_KEY`). With `blame` every failed sentence also teaches the negative network what the teacher marked it down for |
-| `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused) |
+| `POST /api/invert`, `/api/compress`, `/api/save`, `/api/load`, `/api/reset` | as the Python server (reset / load of another kind is refused); `reset` also takes the encoding of the fresh model - `{"encoding": "word:2:1"}`, or `{"unit", "ngram", "stride"}` |
 | `GET /api/checkpoints`, `POST /api/checkpoints/save`, `POST /api/checkpoints/restore` | the Python `CheckpointManager` layout (`ckpt-<tag>-<step>.json.gz`, `latest.json`, `index.json`), so both servers can share a directory |
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history`, `GET /api/paths`, `GET /api/nodes` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`; the judged paths and the node ratios come back with the same counters, the same shares and the same order) |

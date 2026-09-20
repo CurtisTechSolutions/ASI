@@ -126,7 +126,7 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 			for _, cc := range Onward(g.ChildCostsFrom(st.node, prev)) {
 				nchars := st.chars
 				if cc.Child != End {
-					nchars += g.labelLen[cc.Child] - Overlap
+					nchars += g.labelLen[cc.Child] - g.Enc.Overlap()
 				}
 				step := cc.Cost + stepPenalty
 				ncost := st.cost + step
@@ -292,7 +292,7 @@ func (g *Graph) BeamPredict(startNode, startOffset, minChars int, opts BeamOptio
 					longest = l
 				}
 				if n != End {
-					sum += g.labelLen[n] - Overlap
+					sum += g.labelLen[n] - g.Enc.Overlap()
 				}
 			}
 			if sum > emitted {

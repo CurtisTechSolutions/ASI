@@ -74,7 +74,8 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIII — Counters** · D-064 the odometer
 
-**Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
+**Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why ·
+D-069 the encoding is a dial, and it belongs to the model
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2413,6 +2414,81 @@ honest accounting of *deliberate* versus *undone* is itself the decision: a gap
 recorded with its reason is a design statement, an unrecorded one is debt.
 
 **Lives in** `go/`, `DESIGN.md`
+
+---
+
+### D-069 — The encoding is a dial of the model, not a constant of the package
+
+**Status** Accepted · 2026-09-20 · **Layer** representation (Go) ·
+**Extends** D-006, which stays the default
+
+**Context** D-006 fixed the input at three characters with stride 1 and gave the
+reason: the shared character is a *pivot*, and three is the smallest window that
+gives a pivot with context either side. That argument says what the **default**
+should be. It does not say the number should be a compile-time constant - and in
+the Go port it was one, `Window = 3`, read directly by the graph, the model, the
+beams, the diff and the loader, with `Overlap = Window - 1` beside it. Anyone
+wanting to ask "what does this corpus look like in fives?" had to edit two
+constants and rebuild, and nothing in the file said which of the two binaries
+had written a model.
+
+**Decision** The encoding becomes a value - `Encoding{Unit, N, Stride}` - owned
+by the graph, fixed when the graph is created, written into the model file and
+read back from it. Three dials:
+
+| dial | what it is | the default |
+|---|---|---|
+| `Unit` | what one position of a text is: a character, or a whitespace word | `char` |
+| `N` | how many units one gram holds - the *n* of the n-gram | 3 |
+| `Stride` | how far apart consecutive grams start | 1 |
+
+`Stride` is the dial that makes the other two useful. At 1 the grams slide and
+overlap by `N - 1`, which is D-006's pivot generalised. At `N` they do not
+overlap at all, which is *tokenisation*: `char:4:4` cuts text into groups of
+four letters, and the graph becomes a chain of groups that meet only at their
+ends. `word:2:1` is the word bigram, `word:3:1` the word trigram.
+
+Everything the graph measures is now measured in **units**, not characters: a
+node's label length, the offset of a gram inside a label, the length of a
+prediction, the spans of the correction diff. Under the default encoding a unit
+*is* a character, so every one of those quantities is what it always was - which
+is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
+
+**Alternatives rejected**
+* **A package-level variable instead of a field.** One process, one encoding -
+  and a model loaded from a file could silently disagree with it. The encoding
+  belongs to the graph because the graph's labels are written in it.
+* **Keeping the label a `[]rune` and special-casing words.** Words are not
+  characters of a different width; the split, the merge and the index all walk
+  *positions*. A `Units` view (an index of byte offsets, sliced in O(1)) makes
+  one code path serve both.
+* **A learned sub-word vocabulary.** Still rejected, for D-006's reason: it
+  needs a corpus before training can start, and freezes what the model can read.
+  `word` is not a vocabulary - an unseen word is a new node, exactly as an
+  unseen trigram is.
+* **Writing the encoding into every file.** A file that says `char:3:1` is a
+  file the Python loader would have to be taught to ignore. It is written only
+  when it is *not* the default, so an ordinary model file is byte for byte what
+  it always was.
+
+**Consequences**
+* **Python refuses what it cannot read.** The Python implementation speaks the
+  character trigram only. Rather than let a trigram reader make nonsense of a
+  word graph, `graph.from_dict` turns away any file carrying a non-default
+  encoding and names the Go implementation. D-039's bit-identical interchange is
+  unchanged for the default encoding, which is the encoding both sides speak.
+* **The units leak into the vocabulary of the API.** `--length`, `--max-length`
+  and `Score.chars` count units, so on a word model they count words. That is
+  the honest reading - a "40-character" cap on a model that thinks in words is
+  meaningless - but it does mean two models answer the same flag differently.
+* **Compression means something different per encoding.** With no overlap there
+  is no shared context for two nodes to be merged *through*; a grouping
+  encoding compresses only the unary chains its corpus actually repeats.
+* **A model cannot change its mind.** The encoding is fixed at creation: every
+  label in the graph is written in it. The CLI refuses an encoding flag that
+  disagrees with the model it loaded rather than ignoring it.
+
+**Lives in** `go/radixnet/encoding.go`, `go/radixnet/graph.go`, `DESIGN.md`
 
 ---
 

@@ -546,6 +546,23 @@ class TestSerialisation(unittest.TestCase):
         with self.assertRaises(ValueError):
             RadixCyclicGraph.from_dict(d)
 
+    def test_from_dict_refuses_an_encoding_it_cannot_read(self):
+        """The Go implementation can encode in n-grams of any size, in groups
+        of letters and in words, and says so in the file.  A trigram reader
+        would make nonsense of such a graph, so it is turned away."""
+        g = RadixCyclicGraph(seed=1)
+        g.observe_sequence(ENC.encode("hello there"))
+        for encoding in ({"unit": "word", "n": 2, "stride": 1},
+                         {"unit": "char", "n": 5, "stride": 5},
+                         {"unit": "char", "n": 4, "stride": 1}):
+            d = {**g.to_dict(), "encoding": encoding}
+            with self.assertRaises(ValueError) as caught:
+                RadixCyclicGraph.from_dict(d)
+            self.assertIn("Go implementation", str(caught.exception))
+        # the default encoding is what this side speaks: written or not, it loads
+        d = {**g.to_dict(), "encoding": {"unit": "char", "n": 3, "stride": 1}}
+        self.assertEqual(len(RadixCyclicGraph.from_dict(d).labels), len(g.labels))
+
 
 class TestInvert(unittest.TestCase):
     def test_invert_negates_every_edge_signal_with_learned_offsets(self):
