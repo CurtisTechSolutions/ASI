@@ -2480,6 +2480,12 @@ is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
   negative network and the resonant model share one graph, so none of them
   could have it alone. The sine model trains on word bigrams because the graph
   it trains on does.
+* **The Rust port carries it too**, on its own branch, and paid the most for
+  it: its index key was three code points packed into a `u64`, which four
+  characters do not fit and a word does not fit at all. It becomes an enum -
+  packed for character grams of up to three, the text itself otherwise - and
+  the port's own tests pin the structure Python and Go build under nine
+  encodings, since it writes no model file to compare.
 * **The units leak into the vocabulary of the API.** `--length`, `--max-length`
   and `Score.chars` count units, so on a word model they count words. That is
   the honest reading - a "40-character" cap on a model that thinks in words is
@@ -2492,7 +2498,7 @@ is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
   disagrees with the model it loaded rather than ignoring it.
 
 **Lives in** `radixnet/encoding.py`, `radixnet/graph.py`, `go/radixnet/encoding.go`,
-`go/radixnet/graph.go`, `DESIGN.md` § 23.1
+`go/radixnet/graph.go`, `rust/src/encoding.rs`, `DESIGN.md` § 23.1
 
 ---
 
