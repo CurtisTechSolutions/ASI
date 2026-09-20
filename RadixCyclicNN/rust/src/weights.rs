@@ -226,6 +226,20 @@ impl Graph {
         self.flush_weights();
     }
 
+    /// Changes the sliding window's size, dropping whatever no longer fits in
+    /// it (as `Graph.configure` does in the other two implementations).
+    pub fn set_window(&mut self, size: usize) {
+        self.window_size = size.max(1);
+        while self.window.len() - self.window_head > self.window_size {
+            let old = self.window[self.window_head];
+            self.window_head += 1;
+            if old < self.window_edge_count.len() && self.window_edge_count[old] > 0 {
+                self.window_edge_count[old] -= 1;
+            }
+        }
+        self.dirty_all = true;
+    }
+
     // -- punishment ---------------------------------------------------------
 
     /// What the model has been taught *against* one edge: the penalty side of

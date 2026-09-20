@@ -401,19 +401,32 @@ func cmdTrain(args []string) {
 }
 
 func predictDoc(prefix string, p *radixnet.Prediction) map[string]any {
-	return map[string]any{
+	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
 		"top": pathDicts(p.Top), "bottom": pathDicts(p.Bottom),
 	}
+	// what the walk was punished for, and which search wrote it: reported only
+	// where they are not the defaults, as the Python and Rust CLIs report them
+	if p.Traversal != "" {
+		doc["traversal"] = p.Traversal
+	}
+	if p.Punish != 0 {
+		doc["punish"] = p.Punish
+	}
+	return doc
 }
 
 func pathDicts(paths []*radixnet.PathResult) []map[string]any {
 	out := make([]map[string]any, 0, len(paths))
 	for _, r := range paths {
-		out = append(out, map[string]any{"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
-			"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd})
+		row := map[string]any{"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
+			"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd}
+		if r.Punish != 0 {
+			row["punish"] = r.Punish
+		}
+		out = append(out, row)
 	}
 	return out
 }

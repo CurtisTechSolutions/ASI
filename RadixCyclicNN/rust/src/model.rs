@@ -9,6 +9,7 @@ use crate::counter::Counter;
 use crate::encoding::{char_len, char_slice, encode, truncate_chars, Trigram, WINDOW};
 use crate::graph::{Graph, GraphOptions, Loc, Transition, END, FIRST, START};
 use crate::hash::Map;
+use crate::json::Json;
 use crate::mt19937::Mt19937;
 use crate::parallel::{effective_workers, parallel_fill};
 use crate::paths::PathOutcome;
@@ -21,16 +22,112 @@ const MAX_LOG_PERPLEXITY: f64 = 700.0;
 /// How many texts a pass takes at a time.
 pub const DEFAULT_CHUNK_SIZE: usize = 8192;
 
-/// The lifetime counters a model keeps beside its graph.
-#[derive(Clone, Copy, Default, Debug)]
+/// The lifetime counters a model keeps beside its graph - the `meta` block of a
+/// model file, in the order Python writes it.
+///
+/// `extra` is whatever else the file carried.  Another implementation may keep
+/// a counter this one knows nothing about, and a model that loses it on a round
+/// trip through here is not interchangeable with anything.
+#[derive(Clone, Default, Debug)]
 pub struct Meta {
+    pub created: String,
+    pub seed: i64,
     pub epochs_total: Counter,
     pub trained_chars: Counter,
     pub trained_texts: Counter,
     pub twonrl_runs: Counter,
-    pub feedback_passes: Counter,
     pub rewards_total: f64,
     pub penalties_total: f64,
+    pub feedback_passes: Counter,
+    pub extra: Vec<(String, Json)>,
+}
+
+/// The `meta` entries that are an odometer plus a reset count.
+const META_COUNTERS: [&str; 5] = [
+    "epochs_total",
+    "trained_chars",
+    "trained_texts",
+    "twonrl_runs",
+    "feedback_passes",
+];
+
+impl Meta {
+    /// A new model's metadata.
+    pub fn new(seed: i64) -> Meta {
+        Meta {
+            created: crate::clock::utc_now(),
+            seed,
+            ..Default::default()
+        }
+    }
+
+    fn counter(&self, key: &str) -> Counter {
+        match key {
+            "epochs_total" => self.epochs_total,
+            "trained_chars" => self.trained_chars,
+            "trained_texts" => self.trained_texts,
+            "twonrl_runs" => self.twonrl_runs,
+            _ => self.feedback_passes,
+        }
+    }
+
+    fn set_counter(&mut self, key: &str, value: Counter) {
+        match key {
+            "epochs_total" => self.epochs_total = value,
+            "trained_chars" => self.trained_chars = value,
+            "trained_texts" => self.trained_texts = value,
+            "twonrl_runs" => self.twonrl_runs = value,
+            "feedback_passes" => self.feedback_passes = value,
+            _ => {}
+        }
+    }
+
+    /// The `meta` block, in Python's key order.
+    pub fn to_json(&self) -> Json {
+        let mut pairs: Vec<(String, Json)> = vec![
+            ("created".to_string(), Json::str(self.created.clone())),
+            ("seed".to_string(), Json::Int(self.seed)),
+        ];
+        for key in ["epochs_total", "trained_chars", "trained_texts", "twonrl_runs"] {
+            let c = self.counter(key);
+            pairs.push((key.to_string(), Json::Int(c.value)));
+            pairs.push((format!("{key}_resets"), Json::Int(c.resets)));
+        }
+        pairs.push(("rewards_total".to_string(), Json::Num(self.rewards_total)));
+        pairs.push(("penalties_total".to_string(), Json::Num(self.penalties_total)));
+        pairs.push(("feedback_passes".to_string(), Json::Int(self.feedback_passes.value)));
+        pairs.push((
+            "feedback_passes_resets".to_string(),
+            Json::Int(self.feedback_passes.resets),
+        ));
+        pairs.extend(self.extra.iter().cloned());
+        Json::Obj(pairs)
+    }
+
+    /// Reads a file's `meta` over this one, wrapping every counter it carried (a
+    /// file written by hand can hold a reading past the limit) and keeping every
+    /// key this implementation does not know about.
+    pub fn merge_json(&mut self, doc: &Json) {
+        let Json::Obj(pairs) = doc else { return };
+        for (key, value) in pairs {
+            match key.as_str() {
+                "created" => self.created = value.as_str().unwrap_or(&self.created).to_string(),
+                "seed" => self.seed = value.as_i64().unwrap_or(self.seed),
+                "rewards_total" => self.rewards_total = value.as_f64().unwrap_or(0.0),
+                "penalties_total" => self.penalties_total = value.as_f64().unwrap_or(0.0),
+                _ => {
+                    let base = key.strip_suffix("_resets").unwrap_or(key);
+                    if META_COUNTERS.contains(&base) {
+                        let value = doc.at(base).as_i64().unwrap_or(0);
+                        let resets = doc.at(&format!("{base}_resets")).as_i64().unwrap_or(0);
+                        self.set_counter(base, Counter::new(value, resets));
+                    } else if !self.extra.iter().any(|(k, _)| k == key) {
+                        self.extra.push((key.clone(), value.clone()));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// What one epoch did.
@@ -50,6 +147,79 @@ pub struct EpochRecord {
     pub traversed: bool,
     pub reward: f64,
     pub phase: Option<String>,
+    /// Whatever else the record carried when it was read from a file.
+    pub extra: Vec<(String, Json)>,
+}
+
+impl EpochRecord {
+    /// The record as a `history` entry.
+    pub fn to_json(&self) -> Json {
+        let mut pairs: Vec<(String, Json)> = vec![
+            ("epoch".to_string(), Json::Int(self.epoch)),
+            ("loss".to_string(), Json::Num(self.loss)),
+            ("perplexity".to_string(), Json::Num(self.perplexity)),
+            ("nodes".to_string(), Json::Int(self.nodes as i64)),
+            ("edges".to_string(), Json::Int(self.edges as i64)),
+            ("trigrams".to_string(), Json::Int(self.trigrams as i64)),
+            ("compression_ratio".to_string(), Json::Num(self.compression_ratio)),
+            ("merges".to_string(), Json::Int(self.merges as i64)),
+            ("transitions".to_string(), Json::Int(self.transitions)),
+            ("seconds".to_string(), Json::Num(self.seconds)),
+            ("skipped_short".to_string(), Json::Int(self.skipped_short as i64)),
+            ("traversed".to_string(), Json::Bool(self.traversed)),
+            ("reward".to_string(), Json::Num(self.reward)),
+        ];
+        if let Some(phase) = &self.phase {
+            pairs.push(("phase".to_string(), Json::str(phase.clone())));
+        }
+        pairs.extend(self.extra.iter().cloned());
+        Json::Obj(pairs)
+    }
+
+    /// One `history` entry, keeping any field this implementation does not write.
+    pub fn from_json(doc: &Json) -> EpochRecord {
+        const KNOWN: [&str; 14] = [
+            "epoch",
+            "loss",
+            "perplexity",
+            "nodes",
+            "edges",
+            "trigrams",
+            "compression_ratio",
+            "merges",
+            "transitions",
+            "seconds",
+            "skipped_short",
+            "traversed",
+            "reward",
+            "phase",
+        ];
+        let extra = match doc {
+            Json::Obj(pairs) => pairs
+                .iter()
+                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        EpochRecord {
+            epoch: doc.at("epoch").as_i64().unwrap_or(0),
+            loss: doc.at("loss").as_f64().unwrap_or(0.0),
+            perplexity: doc.at("perplexity").as_f64().unwrap_or(0.0),
+            nodes: doc.at("nodes").as_i64().unwrap_or(0) as usize,
+            edges: doc.at("edges").as_i64().unwrap_or(0) as usize,
+            trigrams: doc.at("trigrams").as_i64().unwrap_or(0) as usize,
+            compression_ratio: doc.at("compression_ratio").as_f64().unwrap_or(0.0),
+            merges: doc.at("merges").as_i64().unwrap_or(0) as usize,
+            transitions: doc.at("transitions").as_i64().unwrap_or(0),
+            seconds: doc.at("seconds").as_f64().unwrap_or(0.0),
+            skipped_short: doc.at("skipped_short").as_i64().unwrap_or(0) as usize,
+            traversed: doc.at("traversed").as_bool().unwrap_or(true),
+            reward: doc.at("reward").as_f64().unwrap_or(0.0),
+            phase: doc.at("phase").as_str().map(str::to_string),
+            extra,
+        }
+    }
 }
 
 /// The passes over the texts.
@@ -91,14 +261,18 @@ pub struct Model {
 impl Model {
     /// An untrained model.
     pub fn new(seed: i64, opts: GraphOptions) -> Result<Model, String> {
-        let mut g = Graph::new(seed, opts)?;
-        g.workers = 0;
-        Ok(Model {
+        Ok(Model::from_graph(Graph::new(seed, opts)?))
+    }
+
+    /// A model around a graph that already exists - what the file reader builds.
+    pub fn from_graph(g: Graph) -> Model {
+        let seed = g.seed;
+        Model {
             g,
             history: Vec::new(),
-            meta: Meta::default(),
+            meta: Meta::new(seed),
             workers: 0,
-        })
+        }
     }
 
     /// The model kind shared with the Python and Go implementations.
@@ -327,6 +501,7 @@ impl Model {
                 traversed: count,
                 reward,
                 phase: opts.phase.clone(),
+                extra: Vec::new(),
             };
             self.history.push(record.clone());
             records.push(record);

@@ -739,6 +739,29 @@ class RadixCyclicGraph:
         """Nodes whose costs depend on where the walk came from; empty unless the model counts paths."""
         return _NO_NODES
 
+    def edge_punishment(self, e: int) -> float:
+        """What the model has been taught *against* one edge.
+
+        A graph with no record of failure has nothing against any of them, so
+        this is 0 here; :class:`~radixnet.countnet.CountRewardGraph` overrides
+        it with the penalty side of the edge's reward (see
+        ``../SPEC-LeastPunished.md``).
+        """
+        return 0.0
+
+    def step_punishment(self, prev: int | None, e: int) -> float:
+        """The punishment of one step taken from ``prev`` (0 without a record of failure)."""
+        return 0.0
+
+    def child_steps(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """:meth:`child_costs` with the punishment of each step beside its cost.
+
+        The least-punished traversal reads the fourth element; every other
+        search reads the first three, which is why the two are one call rather
+        than two.
+        """
+        return [(c, e, cost, self.step_punishment(prev, e)) for c, e, cost in self.child_costs(p, prev)]
+
     def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
         """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes.
 

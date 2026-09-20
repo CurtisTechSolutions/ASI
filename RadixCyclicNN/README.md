@@ -43,7 +43,7 @@ and an optional GPU backend (torch) are built in.
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Resonant model | a fourth algorithm on the same graph (`--kind resonant`): a walk carries an analog **phase** advanced by every trigram (a position clock plus a hash kick), edges learn the phase at which they fire and how **coherently**, and the score adds `resonance_scale · coherence · cos(phase − mu)` to the edge's share of its node. Prediction searches `(node, chars, phase)`. A **phase-locked** cycle - back to the same node at the same phase - hands the decision to a metacognitive layer that learned from the corpus whether to ride the loop, escape it or stop. |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. |
-| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, both traversals, training, prediction, generation, scoring and 2NRL - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. It is where the least-punished traversal was built, and it is 2.3-3.1x faster than Go at counting and 3.8-6.8x at predicting on the same corpus (`bench/RESULTS.md`, measured with `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). Model files are Python's and Go's; this crate trains in memory. |
+| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, both traversals, training, prediction, generation, scoring, 2NRL and **the model file** (`radixnet-count`, gzipped or not: byte for byte what Python writes, but for the `version` cache stamp) - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. `tests/test_rust_parity.py` holds it to Python the way `test_go_parity.py` holds Go, and it is 2.2-2.8x faster than Go at counting and 3.8-6.2x at predicting on the same corpus (`bench/RESULTS.md`, `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). |
 | Judgements follow the path, not the edge | An edge is right in one sentence and wrong in the next, so a verdict is not filed against the edge but against the **caller that reached it**: the key is the node *before* the edge's parent, so `the cat -> sat` and `a cat -> sat` are counted apart (`paths`, `GET /api/paths`). A correction only rewards a path when the whole answer was right - one wrong word and nothing on that walk is rewarded - and each context keeps `correct`, `incorrect` and how often it has been walked since (`seen`). The search pays for what it learns there: `path_scale · log((correct + ½) / (incorrect + ½))` joins the edge weight before the softmax, so a step that was right *from here* is cheaper here and nowhere else. |
 | A node sees itself from where it stands | An edge's counters say what that step did, not what it did *here*, among the other ways out of the same node. `nodes` / `GET /api/nodes` / clicking a node in the Graph tab shares a node out both ways: a row per previous node and a row per next node, each with its share of that side's traffic, its **signed** share of that side's reward - a penalty reads as a negative share of the pressure on the node - and what the judged paths on it came to. The denominators are the side's own, not the node's visits: a node is entered without an in-edge whenever a text starts on it. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -118,7 +118,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
-| `make rust-build` / `rust-test` | build the Rust port's benchmark binary / run its tests, clippy and the formatter check |
+| `make rust-build` / `rust-test` / `rust-parity` | build the Rust port's binaries / run its tests, clippy and the formatter check / hold it to the Python model |
 | `make bench-compare` | the Go port and the Rust port over one corpus, checked against each other, into `bench/RESULTS.md` (`BENCH_CHARS`, `BENCH_EPOCHS`, `BENCH_REPEAT`, `PUNISH_EVERY`) |
 | `make go-build` / `go-test` / `go-parity` / `go-negative` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model, blame a garbage file into the Go negative network and judge a text through it |
 | `make serve PORT=8000` | API + prebuilt frontend |
@@ -2005,7 +2005,7 @@ contexts, both traversals, training, prediction, generation, scoring and
 negative network (see `rust/README.md`).
 
 ```bash
-make rust-build        # -> rust/target/release/radixnet-bench (needs Rust 1.75+)
+make rust-build        # -> rust/target/release/radixnet-bench (needs Rust 1.82+)
 make rust-test         # cargo test, clippy, fmt --check
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
 ```
@@ -2025,11 +2025,11 @@ deliberate data race measures the race):
 
 | | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
 |---|--:|--:|--:|--:|
-| training | 5.5M transitions/s | **14.2M** | 6.7M | **19.7M** |
-| prediction, by reward | 4.0k/s | **15.7k** | 3.4k | **15.7k** |
-| prediction, least punished | 40k/s | **266k** | 41k | **250k** |
+| training | 5.9M transitions/s | **14.3M** | 7.1M | **20.6M** |
+| prediction, by reward | 4.3k/s | **16.1k** | 3.7k | **16.1k** |
+| prediction, least punished | 41k/s | **275k** | 41k | **246k** |
 
-2.3-2.9x at counting and 3.8-6.5x at predicting against Go's own default
+2.2-2.8x at counting and 3.8-6.2x at predicting against Go's own default
 counting, more against `--exact`, on identical work.  Three
 representation choices carry most of it and none is algorithmic - a trigram is a
 packed integer rather than a fresh string, a node's children are read into a
@@ -2115,7 +2115,7 @@ RadixCyclicNN/
   frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
                       the panels' settings in localStorage, test/ holds its node --test suite)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
-  rust/               Rust port of the count / reward model, and the least-punished traversal: src/ (crate), src/bin (the benchmark)
+  rust/               Rust port of the count / reward model: src/ (crate), src/bin (the CLI and the benchmark)
   bench/              the two ports over one corpus: make_corpus.py, compare.py, RESULTS.md
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
                       sample_problems.* (codegen), sample_tasks.* (agent / explore)

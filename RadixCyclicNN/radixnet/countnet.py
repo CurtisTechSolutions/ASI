@@ -427,6 +427,51 @@ class CountRewardGraph(RadixCyclicGraph):
             order = order[:limit]
         return [self.node_ratios(i) for i in order]
 
+    def edge_punishment(self, e: int) -> float:
+        """The penalty side of an edge's reward, on the scale the reward function uses.
+
+        Deliberately one-sided: a rewarded edge is not *less* punished than an
+        edge nothing was ever said about - it is exactly as unpunished, which is
+        what lets the least-punished traversal rank walks by what went wrong on
+        them instead of by what went well.
+        """
+        if not (0 <= e < len(self.edge_reward)):
+            return 0.0
+        reward = self.edge_reward[e]
+        return self.reward_scale * -reward if reward < 0 else 0.0
+
+    def path_incorrect(self, prev: int, edge: int) -> int:
+        """How often a walk that came from ``prev`` was judged wrong here: the one
+        number the least-punished traversal steers by, counted against nothing."""
+        row = self.paths.get((prev, edge))
+        return row[2] if row else 0
+
+    def step_punishment(self, prev: int | None, e: int) -> float:
+        """The edge's own penalty plus ``path_scale * log(1 + incorrect)`` for the
+        walks that came from ``prev`` and were judged wrong here.
+
+        The second term counts the failures alone - not the failures against the
+        successes, the way the cost function's path term weighs them.  That is
+        the point: a step that was wrong here once is a step that was wrong here,
+        and no amount of being right afterwards makes it a step nothing is held
+        against.  Blame cannot be bought off, which is what the traversal is for.
+        """
+        punish = self.edge_punishment(e)
+        if prev is not None and self.path_scale and self.paths:
+            punish += self.path_scale * math.log1p(self.path_incorrect(prev, e))
+        return punish
+
+    def child_steps(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """:meth:`child_costs` with each step's punishment beside its cost."""
+        costs = self.child_costs(p, prev)
+        if prev is None or not self.paths:  # nothing judged: only the edges' own penalties
+            return [(c, e, cost, self.edge_punishment(e)) for c, e, cost in costs]
+        scale = self.path_scale
+        return [
+            (c, e, cost, self.edge_punishment(e) + scale * math.log1p(self.path_incorrect(prev, e)))
+            for c, e, cost in costs
+        ]
+
     def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
         """``[(child, edge, -log prob)]`` of ``p``'s out-edges, as seen by a walk that arrived from ``prev``.
 
@@ -1235,6 +1280,7 @@ class CountRewardNet(GraphModel):
         temperature: float = 1.0,
         to_end: bool = False,
         max_length: int | None = None,
+        traversal: str = "reward",
     ) -> Prediction:
         """Continue ``prefix``: the ``k`` most likely and the ``k`` least likely continuations in one search.
 
@@ -1243,7 +1289,11 @@ class CountRewardNet(GraphModel):
         :class:`~radixnet.search.PathResult`) and carries ``top`` / ``bottom``.
         ``"sample"`` draws one stochastic walk (``top = [it]``).  ``length``,
         ``to_end``, ``max_length`` and ``step_penalty`` mean what they mean for
-        :meth:`RadixNet.predict`.
+        :meth:`RadixNet.predict`.  ``traversal="least-punished"`` ranks a walk by
+        the blame on its worst step before its cost and lets a node offer only
+        the children it has the least against; on a model nothing was ever
+        punished on it is the ordinary search, to the bit
+        (``../SPEC-LeastPunished.md``).
         """
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "beam").lower()
@@ -1251,7 +1301,9 @@ class CountRewardNet(GraphModel):
             mode = "beam"
         if mode not in ("beam", "sample"):
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
-        return self._search(prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length)
+        return self._search(
+            prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length, traversal=traversal
+        )
 
     # -- introspection -------------------------------------------------------
 

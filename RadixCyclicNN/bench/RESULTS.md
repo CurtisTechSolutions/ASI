@@ -8,7 +8,7 @@ same transitions, same loss, same prediction at the same cost).
 The last two columns are against **Go's own default counting at the same
 worker count** - the row above each group of three.
 
-- **when** 2026-09-20 00:59 UTC
+- **when** 2026-09-20 03:04 UTC
 - **machine** Intel(R) Xeon(R) Processor @ 2.10GHz, Linux x86_64
 - **go** go version go1.24.7 linux/amd64
 - **rust** rustc 1.94.1 (e408947bf 2026-03-25)
@@ -20,15 +20,15 @@ worker count** - the row above each group of three.
 
 | build | traversal | workers | train s | transitions/s | predict s | predictions/s | expansions | train vs Go | predict vs Go |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| Go (racy, its default) | reward | 1 | 0.8266 | 6,212,717 | 0.7353 | 4,080 | 918,919 | 1.00x | 1.00x |
-| Go (exact) | reward | 1 | 0.9406 | 5,459,494 | 0.7513 | 3,993 | 918,919 | 0.88x | 0.98x |
-| Rust | reward | 1 | 0.3611 | 14,219,552 | 0.1916 | 15,657 | 918,919 | 2.29x | 3.84x |
-| Go (racy, its default) | reward | all cores | 0.7543 | 6,808,141 | 0.8834 | 3,396 | 918,919 | 1.00x | 1.00x |
-| Go (exact) | reward | all cores | 0.7634 | 6,726,917 | 0.8738 | 3,433 | 918,919 | 0.99x | 1.01x |
-| Rust | reward | all cores | 0.2613 | 19,651,727 | 0.1914 | 15,676 | 918,919 | 2.89x | 4.62x |
-| Go (racy, its default) | least-punished | 1 | 0.8340 | 6,157,089 | 0.0736 | 40,748 | 60,068 | 1.00x | 1.00x |
-| Go (exact) | least-punished | 1 | 0.9552 | 5,376,051 | 0.0750 | 39,981 | 60,068 | 0.87x | 0.98x |
-| Rust | least-punished | 1 | 0.3618 | 14,191,842 | 0.0113 | 266,194 | 60,068 | 2.30x | 6.53x |
-| Go (racy, its default) | least-punished | all cores | 0.7128 | 7,204,648 | 0.0744 | 40,330 | 60,068 | 1.00x | 1.00x |
-| Go (exact) | least-punished | all cores | 0.7740 | 6,634,617 | 0.0733 | 40,930 | 60,068 | 0.92x | 1.01x |
-| Rust | least-punished | all cores | 0.2613 | 19,648,996 | 0.0120 | 250,423 | 60,068 | 2.73x | 6.21x |
+| Go (racy, its default) | reward | 1 | 0.7838 | 6,551,689 | 0.7169 | 4,185 | 918,919 | 1.00x | 1.00x |
+| Go (exact) | reward | 1 | 0.8661 | 5,928,926 | 0.7048 | 4,256 | 918,919 | 0.90x | 1.02x |
+| Rust | reward | 1 | 0.3579 | 14,348,494 | 0.1865 | 16,087 | 918,919 | 2.19x | 3.84x |
+| Go (racy, its default) | reward | all cores | 0.6906 | 7,435,905 | 0.7853 | 3,820 | 918,919 | 1.00x | 1.00x |
+| Go (exact) | reward | all cores | 0.7260 | 7,073,650 | 0.8074 | 3,716 | 918,919 | 0.95x | 0.97x |
+| Rust | reward | all cores | 0.2488 | 20,638,692 | 0.1869 | 16,054 | 918,919 | 2.78x | 4.20x |
+| Go (racy, its default) | least-punished | 1 | 0.7710 | 6,660,382 | 0.0681 | 44,077 | 60,068 | 1.00x | 1.00x |
+| Go (exact) | least-punished | 1 | 0.9029 | 5,687,671 | 0.0732 | 40,969 | 60,068 | 0.85x | 0.93x |
+| Rust | least-punished | 1 | 0.3588 | 14,312,614 | 0.0109 | 274,601 | 60,068 | 2.15x | 6.23x |
+| Go (racy, its default) | least-punished | all cores | 0.7054 | 7,279,337 | 0.0702 | 42,716 | 60,068 | 1.00x | 1.00x |
+| Go (exact) | least-punished | all cores | 0.6798 | 7,553,548 | 0.0731 | 41,021 | 60,068 | 1.04x | 0.96x |
+| Rust | least-punished | all cores | 0.2513 | 20,433,258 | 0.0122 | 245,934 | 60,068 | 2.81x | 5.76x |

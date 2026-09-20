@@ -27,21 +27,24 @@ nothing in it but this crate.
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
 | `src/parallel.rs` | the worker pool, and the one `unsafe` in the crate (with its contract) |
 | `src/fsum.rs`, `src/mt19937.rs`, `src/hash.rs` | the exact sum, the RNG and the hash, written out |
+| `src/file.rs` | the `radixnet-count` model file: what Python and Go read and write |
+| `src/json.rs` | JSON as Python writes it - compact, UTF-8, and floats rendered as `repr(float)` renders them |
+| `src/gzip.rs` | the gzip container, written out: inflate for reading, a stored-block writer for writing |
+| `src/clock.rs` | the one timestamp a model file carries |
+| `src/report.rs` | the statistics, the judged paths, and a node against its neighbours |
+| `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, info |
 | `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark and its binary |
-| `src/json.rs` | enough JSON to report a benchmark run |
 | `tests/model.rs` | the model end to end, and both traversals |
 
 ## What is here, and what is not
 
 The model is: the graph and its structural operations, the weight function, the
 path contexts, both traversals, training, prediction, generation, scoring,
-reward / punish / 2NRL and the benchmark. Everything the Go port grew around it
-— the negative network, the tutor, the agent, the LLM clients, the HTTP server
-and the JSON **model file format** — is not ported. A model file is written and
-read by Python and Go; this crate trains in memory and reports.
+reward / punish / 2NRL, the `radixnet-count` **model file** and the CLI over all
+of it. A model trained here continues in Python or in Go and back again.
 
-That is a gap of the *undone* kind, not the deliberate kind: nothing about the
-format resists a third reader.
+Not ported: the HTTP server, the negative network, the tutors, the agent and the
+LLM clients. That is a gap of the *undone* kind, not the deliberate kind.
 
 ## Building and running
 
@@ -58,6 +61,10 @@ or directly:
 ```bash
 cd rust
 cargo test
+cargo run --release --bin radixnet -- --model model.count.json train --data ../data/sample_corpus.txt --epochs 5
+cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --k 5
+cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal least-punished
+python3 -m radixnet --model rust/model.count.json info     # ... and Python reads the same file
 cargo run --release --bin radixnet-bench -- --chars 200000 --epochs 3
 cargo run --release --bin radixnet-bench -- --texts ../bench/corpus.txt \
     --prefixes ../bench/corpus.prefixes.txt --punish-every 7 --traversal least-punished
@@ -77,12 +84,24 @@ println!("{} (worst step: {})", found.best.full_text, found.best.punish);
 
 ## The same model, checked
 
-The port is only worth timing if it does the same work, so `bench/compare.py`
-checks it before reporting anything: on one corpus, Go and Rust must agree on
-the nodes, the edges, the trigrams, the transitions, the compression ratio, the
-loss, the search expansions and the prediction — down to the cost of the path,
-which comes out bit for bit identical because the summation order and the exact
-sum (`fsum`) are the same on both sides.
+`../tests/test_rust_parity.py` is the contract with Python, and it is the one
+`test_go_parity.py` holds the Go port to: both train the same corpus with the
+same settings and must produce the same structure, counts, rewards, sliding
+window and RNG state, the same predictions, generated texts and scores, the same
+judged paths and node ratios — and each side must load and continue the other's
+file, gzipped or not.
+
+One thing it asks for that the Go suite does not: **the graph document has to be
+Python's byte for byte**, but for the `version` cache stamp that every load
+bumps. Same key order, same float rendering (`repr(float)`, which is not how
+Rust prints a float), same everything. It is a stricter bar, it is free once the
+writer is right, and it turns "the numbers agree" into "it is the same file".
+
+The benchmark checks the other side of it: `bench/compare.py` refuses to report a
+timing until Go and Rust agree on the nodes, the edges, the trigrams, the
+transitions, the compression ratio, the loss, the search expansions and the
+prediction — down to the cost of the path, which comes out bit for bit identical
+because the summation order and the exact sum (`fsum`) are the same on both sides.
 
 They are compared with Go's `--exact` counting, for the same reason: Go's
 default counting is racy by design (D-038), and a benchmark of a deliberate data

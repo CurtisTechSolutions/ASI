@@ -256,6 +256,7 @@ class NegativeFilter:
         seed: int | None = None,
         step_penalty: float = 0.0,
         beam: int | None = None,
+        traversal: str = "reward",
     ) -> dict:
         """Generate through the pair: over-sample from the positive model, keep what the negative one allows.
 
@@ -279,7 +280,7 @@ class NegativeFilter:
         asked = count * factor
         results = self.positive.generate(
             max_length=max_length, mode=mode, temperature=temperature, count=asked, seed=seed, prefix=prefix,
-            step_penalty=step_penalty, beam=beam,
+            step_penalty=step_penalty, beam=beam, traversal=traversal,
         )
         candidates: list[str] = []
         paths: dict[str, Any] = {}
@@ -313,6 +314,7 @@ class NegativeFilter:
         step_penalty: float = 0.0,
         to_end: bool = False,
         max_length: int | None = None,
+        traversal: str = "reward",
     ) -> dict:
         """Continue ``prefix`` through the pair: the positive model's top-K continuations, minus the vetoed ones.
 
@@ -324,7 +326,7 @@ class NegativeFilter:
         """
         found = self.positive.predict(
             prefix, length=length, mode="beam", k=k, beam=beam, step_penalty=step_penalty, to_end=to_end,
-            max_length=max_length,
+            max_length=max_length, traversal=traversal,
         )
         candidates: list[str] = []
         for result in getattr(found, "top", None) or [found]:

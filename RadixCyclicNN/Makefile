@@ -92,7 +92,7 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
-        rust-build rust-test bench-compare train resume predict generate score 2nrl invert compress \
+        rust-build rust-test rust-parity bench-compare train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
@@ -149,11 +149,14 @@ BENCH_EPOCHS ?= 3
 BENCH_REPEAT ?= 3
 PUNISH_EVERY ?= 7
 
-rust-build: ## Build the Rust port's benchmark binary into rust/target/release (needs Rust 1.75+)
+rust-build: ## Build the Rust port's CLI and benchmark into rust/target/release (needs Rust 1.82+)
 	cd rust && $(CARGO) build --release
 
 rust-test: ## Run the Rust tests, clippy and the formatter check
 	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+
+rust-parity: ## Cross-language parity of the Rust port against the Python model
+	$(PY) -m unittest tests.test_rust_parity -v
 
 bench-compare: ## Both ports over one corpus, checked against each other -> bench/RESULTS.md
 	$(PY) bench/compare.py --chars $(BENCH_CHARS) --predictions $(BENCH_PREDICTIONS) \

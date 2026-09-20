@@ -447,6 +447,32 @@ impl Graph {
             .map(|(&c, &e)| Transition { p: c, e })
             .collect()
     }
+    /// `(neighbour, edge)` pairs of `p`'s out-edges, in insertion order.
+    pub fn children_pairs(&self, p: usize) -> Vec<(usize, usize)> {
+        let adj = &self.children[p];
+        adj.order.iter().copied().zip(adj.edges.iter().copied()).collect()
+    }
+
+    /// `(neighbour, edge)` pairs of `c`'s in-edges.
+    pub fn parents_of(&self, c: usize) -> Vec<(usize, usize)> {
+        let adj = &self.parents[c];
+        adj.order.iter().copied().zip(adj.edges.iter().copied()).collect()
+    }
+
+    /// What every judged context of one edge came to, summed over its callers:
+    /// `(seen, correct, incorrect)`.
+    pub fn edge_paths(&self, edge: usize) -> (i64, i64, i64) {
+        let mut totals = (0i64, 0i64, 0i64);
+        if let Some(callers) = self.paths_by_edge.get(&edge) {
+            for &prev in callers {
+                if let Some(row) = self.path_stats_of(prev, edge) {
+                    totals = (totals.0 + row.seen, totals.1 + row.correct, totals.2 + row.incorrect);
+                }
+            }
+        }
+        totals
+    }
+
     /// The node an edge leaves, or `None`.
     pub fn parent_of_edge(&self, edge: usize) -> Option<usize> {
         self.edge_parent.get(edge).copied()

@@ -3046,16 +3046,23 @@ the evolver and `converse`, the CLI and the HTTP API.
 
 ---
 
-## 31. The least-punished traversal (`go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
+## 31. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
 
 The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
 the code must do.
 
-**A traversal is a per-call choice**, `ByReward` (the default, nothing changes) or `ByLeastPunished`.  `Traversal` is
-parsed from a name - `""` / `"reward"` / `"rewards"` / `"cost"`, or `"least-punished"` / `"least_punished"` /
-`"punished"` / `"punish"` / `"blame"` - and reaches the search through `PredictOptions.Traversal`,
-`GenerateOptions.Traversal`, `BeamOptions.Traversal` and `SampleWalkBy`.  The CLI carries it on `predict`, `generate`
-and `bench` as `--traversal`.
+**A traversal is a per-call choice**, `reward` (the default, nothing changes) or `least-punished`.  The name is
+parsed from `""` / `"reward"` / `"rewards"` / `"cost"`, or `"least-punished"` / `"least_punished"` / `"punished"` /
+`"punish"` / `"blame"`, and reaches the search through `predict(traversal=)` / `generate(traversal=)` /
+`beam_predict(traversal=)` / `sample_walk(traversal=)` in Python, `PredictOptions.Traversal` /
+`GenerateOptions.Traversal` / `BeamOptions.Traversal` / `SampleWalkBy` in Go and the same options in Rust.  The CLIs
+carry it on `predict` and `generate` (and the Go and Rust `bench`) as `--traversal`; the HTTP API takes `traversal`
+on `/api/predict` and `/api/generate`.
+
+**A model that keeps no record of failure refuses it.**  `RadixNet` and `ResonantNet` accept the argument and raise
+on anything but `reward` (`model.traversal_option` decides, in one place, what a model is handed): ranking a walk by
+the blame on it needs failures to have been counted, and the sine and resonant models count none.  Their graphs
+answer 0 to `edge_punishment` / `step_punishment`, so the machinery is inert rather than wrong where it does reach.
 
 **The punishment of a step** is `punish(prev, e) = reward_scale · max(0, -edge_reward[e]) + path_scale ·
 log1p(incorrect(prev, e))`, where `incorrect(prev, e)` is the failure count of the judged path context (section 16.5)
@@ -3086,20 +3093,32 @@ may be walked, the cost decides which of them it is.
 was not the ordinary one.  Both are omitted from JSON when zero or empty, so a reader of today's prediction sees no
 new field.  Nothing in the traversal writes to the graph, and nothing about it touches the model file.
 
-**Tests** `go/radixnet/traversal_test.go` and `rust/tests/model.rs`: identical answers, costs and expansions where
-nothing is punished; the blamed step left even when it is five times rewarded and an order of magnitude cheaper; 50
-units of reward failing to buy the blame off; the filter's minimum, tolerance and infinity; the names.
-
-**Not in Python.**  `search.py` and `beam.py` would take the same change and have not had it, so no `--traversal`
-flag appears on the Python CLI.
+**Tests** `tests/test_countnet.py::TestLeastPunishedTraversal`, `go/radixnet/traversal_test.go` and
+`rust/tests/model.rs`: identical answers, costs and expansions where nothing is punished; the blamed step left even
+when it is five times rewarded and an order of magnitude cheaper; 50 units of reward failing to buy the blame off;
+the filter's minimum, tolerance and infinity; the names; and a model with no record of failure refusing the option.
+Both parity suites (`tests/test_go_parity.py`, `tests/test_rust_parity.py`) punish the same texts on both sides and
+require the same continuation, cost, ranking **and punishment** under the traversal - and require that the punished
+model answers the two searches differently somewhere, so neither can pass by the traversal doing nothing.
 
 ## 32. The Rust port (`rust/`) and the cross-language benchmark (`bench/`)
 
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
 graph and its structural operations, the dual frequency weight function, the judged path contexts, both traversals,
-training, prediction, generation, scoring and reward / punish / 2NRL.  `src/bin/radixnet-bench.rs` is its only
-binary.  Not ported, and undone rather than deliberate: the model file format, the HTTP server, the negative network
-and every teaching loop.
+training, prediction, generation, scoring, reward / punish / 2NRL and **the `radixnet-count` model file**.  Its
+binaries are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths,
+nodes, info) and `radixnet-bench`.  Not ported, and undone rather than deliberate: the HTTP server, the negative
+network and every teaching loop.
+
+**The file is the contract** (`src/file.rs`, `src/json.rs`, `src/gzip.rs`, `src/clock.rs`).  Three things had to be
+written out rather than translated, for the same reason the Go port had to write out BLAKE2b: JSON rendered as
+Python's `json.dumps` renders it - compact separators, UTF-8 rather than `\u` escapes, and **floats formatted as
+`repr(float)` formats them**, which is not how Rust prints a float (`0.0` prints as `0`, `1e-05` as `0.00001`); the
+gzip container, inflate included, because `model.json.gz` is an ordinary model file and the standard library has no
+gzip; and the ISO-8601 timestamp `saved_at` carries.  What comes out is Python's graph document **byte for byte**,
+but for the `version` cache stamp that every load bumps - a stricter bar than the Go port meets, and free once the
+writer is right.  `tests/test_rust_parity.py` asserts exactly that, alongside the structure, the predictions, the
+judged paths, the node ratios, the wrapped counters and each side continuing the other's file, gzipped or not.
 
 What the port has to get right, beyond the algorithm:
 

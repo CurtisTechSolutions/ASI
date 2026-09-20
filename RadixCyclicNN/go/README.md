@@ -49,7 +49,9 @@ command and every global flag, and says where the goroutines go.
 ranked by the **blame** on its worst step before its cost, and at every node it
 may only take the children the model has the least against
 (`../SPEC-LeastPunished.md`).  Where nothing has been punished it is the
-ordinary search, to the bit.  `--workers 1` also runs the two beams of a
+ordinary search, to the bit.  Python and the Rust port have it too, and
+`../tests/test_go_parity.py` holds this one to Python's answers under it -
+the same continuations, the same costs and the same punishment per path.  `--workers 1` also runs the two beams of a
 prediction in turn rather than side by side, so a one-worker run means the same
 thing here as it does in the Rust port (`../rust/`), which the cross-language
 benchmark compares this one against (`../bench/`).

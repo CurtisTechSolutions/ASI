@@ -43,23 +43,29 @@
 
 pub mod beam;
 pub mod bench;
+pub mod clock;
 pub mod counter;
 pub mod encoding;
+pub mod file;
 pub mod fsum;
 pub mod graph;
+pub mod gzip;
 pub mod hash;
 pub mod json;
 pub mod model;
 pub mod mt19937;
 pub mod parallel;
 pub mod paths;
+pub mod report;
 pub mod search;
 pub mod weights;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;
 pub use encoding::{encode, Trigram, OVERLAP, WINDOW};
+pub use file::{MODEL_FORMAT, MODEL_FORMAT_VERSION};
 pub use graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
+pub use json::Json;
 pub use model::{EpochRecord, GenerateOptions, Meta, Model, PredictOptions, Score, TrainOptions};
 pub use paths::{PathKey, PathOutcome, PathRow};
 pub use search::{least_punished, onward, parse_traversal, PathResult, Traversal};

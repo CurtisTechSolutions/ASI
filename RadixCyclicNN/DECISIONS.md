@@ -2465,15 +2465,22 @@ takes (D-047): the two now agree about what a path's blame is.
   an effort result, not a quality result; nothing here has been graded.
 * It reads numbers the model file already carries, so it costs the format
   nothing and changes nothing it walks.
-* **Python does not have it.** An *undone* gap, not a deliberate one (D-066's
-  distinction).
+* **All three implementations have it** - Python, Go and Rust - and both parity
+  suites hold the ports to Python's answers under it, punishment included. The
+  sine model accepts the argument and refuses anything but `reward`: it keeps no
+  record of failure to rank a walk by, and says so rather than ignoring the
+  option (the discipline of D-070's `weights` command).
+* It is a way of *reading* the model, and nothing reads it that way on the
+  model's behalf: the tutor, the conversation, the agent and the guard all still
+  walk by cost.
 
 **The honest gap it papers over.** An edge keeps one reward, so its own penalty
 *is* netted - only the path contexts remember a failure as a failure. The edge
 should learn to keep the two apart; that is a model file change, and it is what
 the first term of the punishment is a stand-in for until then.
 
-**Lives in** `go/radixnet/search.go`, `go/radixnet/beam.go`, `go/radixnet/weights.go`,
+**Lives in** `radixnet/search.py`, `radixnet/beam.py`, `radixnet/countnet.py`,
+`go/radixnet/search.go`, `go/radixnet/beam.go`, `go/radixnet/weights.go`,
 `rust/src/search.rs`, `rust/src/beam.rs`, `rust/src/weights.rs`, `SPEC-LeastPunished.md`
 
 ---
@@ -2504,10 +2511,10 @@ design of `bench/compare.py`.
 
 | | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
 |---|--:|--:|--:|--:|
-| training | 6.2M transitions/s | **14.2M** | 6.8M | **19.7M** |
-| prediction | 4.1k/s | **15.7k** | 3.4k | **15.7k** |
+| training | 6.6M transitions/s | **14.3M** | 7.4M | **20.6M** |
+| prediction | 4.2k/s | **16.1k** | 3.8k | **16.1k** |
 
-2.3-2.9x at counting, 3.8-6.5x at predicting (the wide end of the second range is
+2.2-2.8x at counting, 3.8-6.2x at predicting (the wide end of the second range is
 the least-punished traversal, where the search is small and the constant factors
 are most of it). Three representation choices carry
 most of it and none of them is algorithmic: a trigram is a packed `u64` rather
@@ -2521,9 +2528,14 @@ table for "Rust is 4x faster than Go" has been misled by it.
   the third; `tests/test_go_parity.py` remains the check for the second.
 * Go's `--workers 1` now runs the two beams of a prediction in turn rather than
   on two goroutines, so a one-worker row means the same thing on both sides.
-* The Rust port does **not** read or write model files, does not serve the API
-  and has no negative network, tutor or agent. It trains in memory and reports.
-  Undone, not deliberate.
+* The Rust port reads and writes the `radixnet-count` model file, gzipped or
+  not, and `tests/test_rust_parity.py` holds it to Python's: the same structure,
+  counts, rewards, window, RNG state, judged paths and node ratios, the same
+  predictions, generated texts and scores, and each side continuing the other's
+  file. Its graph document is Python's **byte for byte** but for the `version`
+  cache stamp - which the Go port's is not, because Go renders floats and orders
+  keys its own way. What the port still does **not** have: the HTTP server, the
+  negative network, the tutors and the agent. Undone, not deliberate.
 * Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
   both sides, because a benchmark of a deliberate data race measures the race.
 

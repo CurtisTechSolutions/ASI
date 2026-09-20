@@ -92,7 +92,16 @@ from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .duo import FilterConfig, NegativeFilter
-from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
+from .model import (
+    GraphModel,
+    RadixNet,
+    TrainConfig,
+    load_model,
+    model_class,
+    model_kinds,
+    new_model,
+    traversal_option,
+)
 from .negative import NegativeNet
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
@@ -760,6 +769,9 @@ class ModelService:
         ``guard=False`` hands out what the positive model wrote, unfiltered.
         """
         with self.session() as model:
+            # pop before the merge: ``{**options, ...}`` would copy the key back in
+            asked = options.pop("traversal", "reward")
+            options = {**options, **traversal_option(model, asked)}
             result = model.predict(prefix, **options)
             pair = self.guard(model) if guard else None
             report = None
@@ -799,6 +811,9 @@ class ModelService:
         ``guard=False`` returns what the positive model wrote, unfiltered.
         """
         with self.session() as model:
+            # pop before the merge: ``{**options, ...}`` would copy the key back in
+            asked = options.pop("traversal", "reward")
+            options = {**options, **traversal_option(model, asked)}
             pair = self.guard(model) if guard else None
             if pair is None:
                 return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
@@ -2342,6 +2357,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         max_length=f.integer("max_length", None, minimum=0),
         k=f.integer("k", 5, minimum=0),
         beam=f.integer("beam", None, minimum=1),
+        traversal=f.text("traversal", "reward"),
     )
 
 
@@ -2356,6 +2372,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         prefix=f.text("prefix", ""),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
         beam=f.integer("beam", None, minimum=1),
+        traversal=f.text("traversal", "reward"),
     )
 
 

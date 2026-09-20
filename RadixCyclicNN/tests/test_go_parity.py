@@ -408,6 +408,35 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(load_json(py_path)["meta"]["trained_texts"], load_json(go_path)["meta"]["trained_texts"])
         # the same archive uploaded to the Python server style path and streamed by Go's server is covered below
 
+    def test_the_least_punished_traversal_agrees_across_the_two(self):
+        """Both sides rank a walk by the blame on it the same way (SPEC-LeastPunished.md)."""
+        for prefix in ("the cat", "the "):  # nothing punished: the ordinary search, to the bit
+            with self.subTest(prefix=prefix):
+                a = go("predict", "--prefix", prefix, "--length", 8, "--k", 3, model=self.go_model)
+                b = go("predict", "--prefix", prefix, "--length", 8, "--k", 3,
+                       "--traversal", "least-punished", model=self.go_model)
+                self.assertEqual((a["full_text"], a["cost"], a["expanded"]),
+                                 (b["full_text"], b["cost"], b["expanded"]))
+        py_path = os.path.join(TMP.name, "blame_py.count.json")
+        go_path = os.path.join(TMP.name, "blame_go.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.go_model, go_path)
+        py("feedback", "--bad", GARBAGE, "--strength", "2", model=py_path)
+        go("feedback", "--bad", GARBAGE, "--strength", "2", model=go_path)
+        differed = 0
+        for prefix in ("the cat", "the ", "on the ma", "a bird", "he s"):
+            with self.subTest(prefix=prefix):
+                args = ("predict", "--prefix", prefix, "--length", 10, "--k", 3, "--mode", "beam")
+                a = py(*args, "--traversal", "least-punished", model=py_path)
+                b = go(*args, "--traversal", "least-punished", model=go_path)
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+                self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+                assert_close(self, [t.get("punish", 0.0) for t in a["top"]],
+                             [t.get("punish", 0.0) for t in b["top"]], 1e-12)
+                differed += py(*args, model=py_path)["full_text"] != a["full_text"]
+        self.assertTrue(differed, "the punished model answered the same to both searches everywhere")
+
     def test_go_specific_options(self):
         path = os.path.join(TMP.name, "paras.count.json")
         doc = go("--seed", 2, "train", "--data", CORPUS, "--epochs", 1, "--split", "paragraphs", "--workers", 2, model=path)
