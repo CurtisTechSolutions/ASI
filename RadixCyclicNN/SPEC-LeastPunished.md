@@ -1,9 +1,12 @@
 # The least-punished traversal — the search that follows the blame
 
-**Status** Built. `Traversal.ByLeastPunished` in the Go port
-(`go/radixnet/search.go`) and `Traversal::LeastPunished` in the Rust port
-(`rust/src/search.rs`), off by default on both, selected with
-`--traversal least-punished`. Python has it in neither model yet.
+**Status** Built, in all three implementations: `traversal="least-punished"`
+in Python (`radixnet/search.py`, `radixnet/beam.py`),
+`Traversal.ByLeastPunished` in Go (`go/radixnet/search.go`) and
+`Traversal::LeastPunished` in Rust (`rust/src/search.rs`). Off by default
+everywhere, selected with `--traversal least-punished` on `predict` and
+`generate` (and on the Go and Rust `bench`), and with `"traversal"` on
+`POST /api/predict` and `/api/generate`.
 
 **Answers** the question D-047 and D-045 leave standing on the *search* side:
 the negative network can veto an answer after the fact, but the walk that wrote
@@ -153,6 +156,29 @@ order is what makes the beam prefer a branch that never had to take one.
 
 ## 4. API
 
+```python
+# Python — radixnet
+REWARD = "reward"
+LEAST_PUNISHED = "least-punished"
+parse_traversal(name) -> str                      # "" / "reward" | "least-punished"
+least_punished(steps) -> list                     # the filter, beside onward()
+
+CountRewardGraph.edge_punishment(e) -> float      # the edge term
+CountRewardGraph.step_punishment(prev, e) -> float  # both terms
+CountRewardGraph.path_incorrect(prev, edge) -> int  # the failures of one context, counted against nothing
+RadixCyclicGraph.child_steps(p, prev) -> [(child, edge, cost, punish)]
+
+model.predict(prefix, ..., traversal="least-punished")
+model.generate(..., traversal="least-punished")
+beam_predict(..., traversal="least-punished")
+sample_walk(..., traversal="least-punished")
+```
+
+The sine model (`RadixNet`) accepts the argument and **refuses** anything but
+`"reward"`: ranking a walk by the blame on it needs a record of what went
+wrong, and that model keeps none.  Its graph answers 0 to every punishment
+question, so a search over it is inert rather than wrong.
+
 ```go
 // Go — go/radixnet
 type Traversal int
@@ -200,19 +226,23 @@ can be walked either way, and a model walked this way is not changed by it.
 
 ## 6. Parity
 
-Go and Rust implement the same thing and are checked against each other by
-`bench/compare.py`, which fails before reporting any timing if the two disagree
-on the graph, the transitions, the loss, the expansions or the prediction.
+All three implementations have it, and each is held to the reference one:
+`tests/test_go_parity.py` and `tests/test_rust_parity.py` punish the same texts
+in Python and in the port, then predict the same prefixes under the traversal
+and require the same continuation, the same cost, the same ranking **and the
+same punishment on every path** — and require that the punished model answers
+the two searches differently somewhere, so the test cannot pass by the
+traversal doing nothing.
 
-Python does not have it. That is a gap of the *undone* kind, not the deliberate
-kind (D-066's distinction): the count model's `search.py` would take the same
-change, and until it does, a `--traversal` flag must not appear on the Python
-CLI claiming to do nothing.
+`bench/compare.py` additionally refuses to report any timing if Go and Rust
+disagree on the graph, the transitions, the loss, the expansions or the
+prediction.
 
 ## 7. Tests
 
 | test | what it pins |
 |---|---|
+| `TestLeastPunishedTraversal` (Python), `test_the_least_punished_traversal_agrees_across_the_two` (both parity suites) | that the three implementations answer the same thing, punishment included |
 | `TestLeastPunishedIsTheOldSearchUntilSomethingIsPunished` / `with_nothing_punished_the_two_traversals_agree` | the same text, the same cost, the same expansions on an unpunished graph |
 | `TestLeastPunishedLeavesAJudgedStep` / `the_least_punished_walk_leaves_a_step_that_was_judged_wrong` | the blamed step is left even though it is five times rewarded and an order of magnitude cheaper |
 | `TestPunishmentIsNotBoughtOff` / `punishment_is_not_bought_off_by_a_reward` | 50 units of reward on a punished step, and the step is still punished |
@@ -232,6 +262,9 @@ CLI claiming to do nothing.
   disagree on about a fifth of continuations and that the least-punished one
   expands an order of magnitude fewer nodes. Which answers are *better* is a
   question for the tutor, and nothing here has been graded.
+* **Nothing selects it on the model's behalf.** The tutor, the conversation,
+  the agent and the guard all still walk by cost; the traversal is something a
+  caller asks for, not a policy the system applies to itself.
 
 ## 9. Alternatives rejected
 
@@ -253,3 +286,8 @@ demonstration in §1.
 likelihood, and that is what `predict` should mean without being asked. This
 traversal answers a different question, and a question nobody asked should not
 be answered by default.
+
+**Let the sine model ignore the argument.** It would then accept
+`--traversal least-punished` and quietly do nothing, which is the failure mode
+the resonant model's `weights` command was built to avoid (D-070's "rejects
+another kind's options by name instead of ignoring them"). It refuses instead.

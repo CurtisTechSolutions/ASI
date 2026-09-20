@@ -116,6 +116,24 @@ impl Mt19937 {
         (a * 67108864.0 + b) * (1.0 / 9007199254740992.0)
     }
 
+    /// The generator state in Python's `getstate()` layout: the 624 words and
+    /// the index into them.
+    pub fn state(&self) -> (Vec<u32>, usize) {
+        (self.mt.to_vec(), self.index)
+    }
+
+    /// Restores a state produced by [`Mt19937::state`] or by Python's
+    /// `getstate()`; an index past the end reads as "exhausted", which is how
+    /// Python spells a freshly twisted state.
+    pub fn set_state(&mut self, words: &[u32], index: usize) -> Result<(), String> {
+        if words.len() != N {
+            return Err(format!("rng_state needs {N} words, got {}", words.len()));
+        }
+        self.mt.copy_from_slice(words);
+        self.index = index.min(N);
+        Ok(())
+    }
+
     /// `a + (b - a) * random()`, like `random.uniform`.
     pub fn uniform(&mut self, a: f64, b: f64) -> f64 {
         a + (b - a) * self.next_f64()

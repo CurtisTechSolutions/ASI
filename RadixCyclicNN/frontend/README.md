@@ -3,10 +3,19 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Converse, Chat, Score, 2NRL, Negative, Evolve, Ollama, Tutor,
+Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
 Code, Agent, Images, Speech, Checkpoints, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
+
+**Words** (`GET /api/words`) appears only while the active model counts in
+words - the word n-gram kind, which is the same model over an alphabet whose
+symbols are words (`../SPEC-WordNGrams.md`). It lists every word training has
+read, in the order it first read them, with how many of the graph's three-word
+windows hold it. On that model every length field says *words* rather than
+*characters*, Score reports per word, and the status bar carries the size of the
+vocabulary: the unit follows `units` in `/api/status`, because a number whose
+unit depends on the model is a number that will be read wrong.
 
 The Converse panel (`POST /api/converse`) lets the model talk to itself in a
 chat view that reads newest first: a new turn is appended to the top and pushes

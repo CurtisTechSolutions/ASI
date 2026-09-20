@@ -45,7 +45,7 @@ RadixCyclicNN/
                             CheckpointManager, Evolver, EvolveConfig, __version__
     __main__.py             `python -m radixnet` -> cli.main()
     activation.py           sine activation (parametric sine + derivatives)
-    encoding.py             Encoder / Decoder
+    encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 33)
     counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
@@ -53,6 +53,7 @@ RadixCyclicNN/
     beam.py                 Prediction, beam_predict (top-K / bottom-K continuations in one search; section 19)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
     countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
+    wordnet.py              WordGraph, WordNGramNet - the same model over an alphabet of words (section 33)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
                             (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
@@ -148,6 +149,24 @@ class Decoder:
 ```
 
 Round-trip property: `Decoder().decode_trigrams(Encoder().encode(t)) == t` for all `len(t) >= 3`.
+
+```python
+WORD_BASE = 0x0100          # the first word symbol; MAX_WORDS = 1_111_808, UNKNOWN_WORD = "<unk>"
+
+def word_symbol(word_id: int) -> str    # id -> the code point that carries it (the surrogates skipped)
+def symbol_word(symbol: str) -> int     # and back
+def split_words(text: str) -> list[str] # the whole tokeniser: the Unicode White_Space property
+
+class Vocabulary:                       # the alphabet of a word model (section 33)
+    def id(self, word) -> int           # 0 = <unk>: a word it has never read
+    def add(self, word) -> int          # the next id, in first-read order
+    def encode(self, text, grow=False) -> str   # text -> the graph's symbols, one code point per word
+    def decode(self, symbols) -> str            # and back, words joined by single spaces
+```
+
+The word alphabet, used only by `wordnet.py`: it turns text into the symbols the
+same `Encoder` then cuts into windows of three, so the graph never learns what a
+symbol stands for. Section 33 and `SPEC-WordNGrams.md` are the whole of it.
 
 ```python
 def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired)
@@ -764,6 +783,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_gan.py` — one generation runs, history record shape, stop_event honoured.
 * `test_cli.py` — subprocess smoke test of train/predict/info/2nrl/checkpoints/bench with `--json`.
 * `test_api.py` — server in a thread; health/status/train(job polling)/predict/generate/converse/score/2nrl/invert/compress/save/load/checkpoints/graph/evolve start-stop/static fallback.
+* `test_wordnet.py` — word n-grams (section 33): the alphabet (every id round-trips, the surrogate block skipped, the cap), the whitespace split and the round trip that normalises whitespace, an unread word as a new id while training and `<unk>` after, the graph invariants over words, a repeated phrase compressed into one node, predictions and lengths counted in words, a correction aligned word by word, the `radixnet-word` file (the vocabulary back in order, a count reader refusing it, a truncated vocabulary refused) and the kind registry. The cross-language half is `test_go_parity.py::TestGoWordParity` and `test_rust_parity.py::TestRustWordParity`, with `go/radixnet/words_test.go` and `rust/tests/words.rs` on their own sides.
 * `test_counter.py` — the cyclic counters of section 28: wrapping at the limit, exact totals across a reset, weights / shares / rankings unchanged by a wrap, the save-load round trip with reset fields, a format 1 file, the carry guard, the lifetime counters.
 * `test_negative.py` — the negative network (section 24): the blame weight function, evidence as blame minus clearing, blaming / clearing / two_nrl / invert_paths, corrections (only the changed characters blamed, nothing correct created), `judge` (risk, peak, coverage, reasons, spans, the thresholds), `crossings`, prediction over the failure distribution, `forget`, the capped per-edge reasons and journal, persistence and the kind registry, the `/api/negative/*` routes and the CLI's `negative` group.
 * `test_blame.py` — where the negatives come from (section 24.2): reason classification from a critique, severity from a rating, code reasons from the sandbox / style / judge, faults from the English tutor's lessons (the named mistake, the mark, the correction), from reviews and from attempts, `teach`, and the tutor / evolve / codegen hooks.
@@ -3046,16 +3066,23 @@ the evolver and `converse`, the CLI and the HTTP API.
 
 ---
 
-## 31. The least-punished traversal (`go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
+## 31. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
 
 The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
 the code must do.
 
-**A traversal is a per-call choice**, `ByReward` (the default, nothing changes) or `ByLeastPunished`.  `Traversal` is
-parsed from a name - `""` / `"reward"` / `"rewards"` / `"cost"`, or `"least-punished"` / `"least_punished"` /
-`"punished"` / `"punish"` / `"blame"` - and reaches the search through `PredictOptions.Traversal`,
-`GenerateOptions.Traversal`, `BeamOptions.Traversal` and `SampleWalkBy`.  The CLI carries it on `predict`, `generate`
-and `bench` as `--traversal`.
+**A traversal is a per-call choice**, `reward` (the default, nothing changes) or `least-punished`.  The name is
+parsed from `""` / `"reward"` / `"rewards"` / `"cost"`, or `"least-punished"` / `"least_punished"` / `"punished"` /
+`"punish"` / `"blame"`, and reaches the search through `predict(traversal=)` / `generate(traversal=)` /
+`beam_predict(traversal=)` / `sample_walk(traversal=)` in Python, `PredictOptions.Traversal` /
+`GenerateOptions.Traversal` / `BeamOptions.Traversal` / `SampleWalkBy` in Go and the same options in Rust.  The CLIs
+carry it on `predict` and `generate` (and the Go and Rust `bench`) as `--traversal`; the HTTP API takes `traversal`
+on `/api/predict` and `/api/generate`.
+
+**A model that keeps no record of failure refuses it.**  `RadixNet` and `ResonantNet` accept the argument and raise
+on anything but `reward` (`model.traversal_option` decides, in one place, what a model is handed): ranking a walk by
+the blame on it needs failures to have been counted, and the sine and resonant models count none.  Their graphs
+answer 0 to `edge_punishment` / `step_punishment`, so the machinery is inert rather than wrong where it does reach.
 
 **The punishment of a step** is `punish(prev, e) = reward_scale · max(0, -edge_reward[e]) + path_scale ·
 log1p(incorrect(prev, e))`, where `incorrect(prev, e)` is the failure count of the judged path context (section 16.5)
@@ -3086,20 +3113,32 @@ may be walked, the cost decides which of them it is.
 was not the ordinary one.  Both are omitted from JSON when zero or empty, so a reader of today's prediction sees no
 new field.  Nothing in the traversal writes to the graph, and nothing about it touches the model file.
 
-**Tests** `go/radixnet/traversal_test.go` and `rust/tests/model.rs`: identical answers, costs and expansions where
-nothing is punished; the blamed step left even when it is five times rewarded and an order of magnitude cheaper; 50
-units of reward failing to buy the blame off; the filter's minimum, tolerance and infinity; the names.
-
-**Not in Python.**  `search.py` and `beam.py` would take the same change and have not had it, so no `--traversal`
-flag appears on the Python CLI.
+**Tests** `tests/test_countnet.py::TestLeastPunishedTraversal`, `go/radixnet/traversal_test.go` and
+`rust/tests/model.rs`: identical answers, costs and expansions where nothing is punished; the blamed step left even
+when it is five times rewarded and an order of magnitude cheaper; 50 units of reward failing to buy the blame off;
+the filter's minimum, tolerance and infinity; the names; and a model with no record of failure refusing the option.
+Both parity suites (`tests/test_go_parity.py`, `tests/test_rust_parity.py`) punish the same texts on both sides and
+require the same continuation, cost, ranking **and punishment** under the traversal - and require that the punished
+model answers the two searches differently somewhere, so neither can pass by the traversal doing nothing.
 
 ## 32. The Rust port (`rust/`) and the cross-language benchmark (`bench/`)
 
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
 graph and its structural operations, the dual frequency weight function, the judged path contexts, both traversals,
-training, prediction, generation, scoring and reward / punish / 2NRL.  `src/bin/radixnet-bench.rs` is its only
-binary.  Not ported, and undone rather than deliberate: the model file format, the HTTP server, the negative network
-and every teaching loop.
+training, prediction, generation, scoring, reward / punish / 2NRL and **the `radixnet-count` model file**.  Its
+binaries are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths,
+nodes, info) and `radixnet-bench`.  Not ported, and undone rather than deliberate: the HTTP server, the negative
+network and every teaching loop.
+
+**The file is the contract** (`src/file.rs`, `src/json.rs`, `src/gzip.rs`, `src/clock.rs`).  Three things had to be
+written out rather than translated, for the same reason the Go port had to write out BLAKE2b: JSON rendered as
+Python's `json.dumps` renders it - compact separators, UTF-8 rather than `\u` escapes, and **floats formatted as
+`repr(float)` formats them**, which is not how Rust prints a float (`0.0` prints as `0`, `1e-05` as `0.00001`); the
+gzip container, inflate included, because `model.json.gz` is an ordinary model file and the standard library has no
+gzip; and the ISO-8601 timestamp `saved_at` carries.  What comes out is Python's graph document **byte for byte**,
+but for the `version` cache stamp that every load bumps - a stricter bar than the Go port meets, and free once the
+writer is right.  `tests/test_rust_parity.py` asserts exactly that, alongside the structure, the predictions, the
+judged paths, the node ratios, the wrapped counters and each side continuing the other's file, gzipped or not.
 
 What the port has to get right, beyond the algorithm:
 
@@ -3126,3 +3165,75 @@ configuration must agree exactly on `chars`, `texts`, `nodes`, `edges`, `trigram
 `edge_reward_negative`; and on the sample prediction's continuation and its cost.  A disagreement stops the run and
 names what differs.  `--punish-every N` punishes every Nth text before the predictions are timed, because a model
 nothing was ever punished for gives the two traversals nothing to disagree about.
+
+---
+
+## 33. Word n-grams (`radixnet/wordnet.py`, `go/radixnet/words.go`, `rust/src/words.rs`) — the same graph over an alphabet of words
+
+`SPEC-WordNGrams.md` and D-071.  D-006's input decision is about what a **symbol** is; every structural rule in
+section 5's graph is stated in terms of a window of symbols and nothing else - a label is a sequence of them, an edge
+exists where two labels overlap by `WINDOW - 1` of them, the index maps a `WINDOW`-symbol key to `(node, offset)`,
+compression merges a unary chain at that seam.  Not one of those rules mentions a character.  So a word n-gram model
+is not a different model: it is the count / reward model (section 19) over an alphabet whose symbols are **words**.
+
+**The alphabet** (`encoding.Vocabulary`).  A label is a string and its length is counted in code points on all three
+implementations, so a symbol is one code point:
+
+```
+id 0            -> U+0100          the unknown word, <unk>
+id i (i >= 1)   -> U+0100 + i      skipping the surrogate block D800..DFFF
+```
+
+Starting past Latin-1 keeps every label out of the range text, sentinels (`<s>`, `</s>`, `<back>`) and punctuation
+live in; skipping the surrogates keeps every label a string all three languages can hold and write (Go replaces a
+lone surrogate with `U+FFFD`, which would silently corrupt a model).  The cap is **1 111 808 words**: every code
+point above Latin-1 that is not a surrogate.  A `Trigram` in Rust packs three code points of 21 bits, which is
+every one of them, so the fastest representation needed no change at all.
+
+**Tokenising is the whitespace split and nothing else.**  Punctuation stays attached to the word it touches
+(`"mat."` and `"mat"` are two words) and case is kept (`"The"` and `"the"` are two words).  The rule is the Unicode
+`White_Space` property, so the three implementations cut a text into the *same* words - Python calls U+001C..U+001F
+whitespace and the property does not, which `split_words` subtracts.  The vocabulary grows as training reads new
+words and is never frozen, pruned or learned: a word is in it because it was seen.
+
+**What a round trip costs.**  `decode(encode(t))` joins the words with single spaces, so a word model **normalises
+whitespace** and a corpus whose whitespace carries meaning - source code, base64, a waveform (D-036) - belongs
+on the character model.  At prediction and scoring time a word the model has never read is `<unk>`, whose windows are
+not in the index, so it is charged what any unknown transition is charged and counted in `unknown_transitions`; two
+different unread words are therefore one symbol and score identically.  Both kinds stay; neither replaces the other.
+
+**Where the translation lives.**  Text becomes symbols at the model's own boundary - `_clean_texts` on the way in,
+the search and `score` around their own calls - and symbols become text on the way out of the search.  Between those
+two points the graph, the weights, the counters, the path contexts, both traversals and the beam are the count
+model's, unchanged.  Three seams in shared code make the alphabet a model's business rather than the search's:
+`graph.text_of(label)` (a label as text) and `graph.symbols_of(text)` (its inverse, for looking a node up by what a
+user typed), a model-level `units`, and `_whole_text` no longer re-joining a prefix the search already joined.
+
+**What it looks like.**  Compression does to word chains what it already did to character chains, so a repeated
+phrase becomes one node whose label *is* that phrase:
+
+```
+$ make word-train word-predict
+"<s>"  visited 180x  (0 in, 60 out)
+to  "the cat sat on the mat"    3   2%
+to  "the dog chased the cat around the garden"   3   2%
+prefix        "the cat sat on"
+continuation  "the mat"
+```
+
+**The file** is a format of its own, `radixnet-word`, so every reader written before it existed refuses it by the
+check it already makes; the graph block gains `units: "words"` and `vocabulary` in id order, and a load checks that
+every symbol every label carries is a word the vocabulary holds.  Interchange is the contract the count model has:
+Python, Go and Rust read and write it, `tests/test_go_parity.py` and `tests/test_rust_parity.py` train a word model
+on both sides of each pair and require the same structure, the same counts, the same vocabulary **in the same
+order** and the same predictions, and the Rust word document is Python's byte for byte.
+
+**Everything counted in symbols is counted in words**: `--length 6` emits six words, `--max-length` caps words,
+`Score.chars` counts words and `per_char` is per word, and `trained_chars` counts words.  `stats()["units"]` says
+which, and so do the CLI's score columns (`per_word words`), the API's status and the frontend's length hints,
+because a number whose unit depends on the model is a number that will be read wrong.  The kind is `--kind word`
+(default file `model.word.json`) in all three CLIs, `radixnet --kind word words` lists the alphabet, `GET
+/api/words` serves it and the frontend's **Words** tab shows it whenever the active model counts in words.
+
+**N stays 3**: the overlap is two words and the pivot is the middle one, which is D-006's argument word for
+word.  Word bigrams need `WINDOW = 2`, a separate change with its own costs, and nothing here prevents it later.

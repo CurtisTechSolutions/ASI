@@ -254,6 +254,24 @@ class RadixCyclicGraph:
         """Distinct trigrams stored in the graph."""
         return len(self.trigram_index)
 
+    def symbols_of(self, text: str) -> str:
+        """Text as *this graph's symbols*, the inverse of :meth:`text_of`, for anything that looks a label up.
+
+        The identity here, and the word model's encoder in a word graph; an
+        unread word comes back as the unknown symbol.
+        """
+        return text
+
+    def text_of(self, label: str) -> str:
+        """A label as *text*, for anything that reports one.
+
+        The identity here: a character model's symbols are the text.  A word
+        model's symbols are code points standing for words
+        (``../SPEC-WordNGrams.md``), and its graph decodes them back before a
+        label is shown to anyone.
+        """
+        return label
+
     def compression_ratio(self) -> float:
         """Trigrams per real (non-sentinel) node."""
         return len(self.trigram_index) / max(1, self._n_alive_nodes - FIRST)
@@ -738,6 +756,29 @@ class RadixCyclicGraph:
     def nodes_with_paths(self) -> set[int]:
         """Nodes whose costs depend on where the walk came from; empty unless the model counts paths."""
         return _NO_NODES
+
+    def edge_punishment(self, e: int) -> float:
+        """What the model has been taught *against* one edge.
+
+        A graph with no record of failure has nothing against any of them, so
+        this is 0 here; :class:`~radixnet.countnet.CountRewardGraph` overrides
+        it with the penalty side of the edge's reward (see
+        ``../SPEC-LeastPunished.md``).
+        """
+        return 0.0
+
+    def step_punishment(self, prev: int | None, e: int) -> float:
+        """The punishment of one step taken from ``prev`` (0 without a record of failure)."""
+        return 0.0
+
+    def child_steps(self, p: int, prev: int | None = None) -> list[tuple[int, int, float, float]]:
+        """:meth:`child_costs` with the punishment of each step beside its cost.
+
+        The least-punished traversal reads the fourth element; every other
+        search reads the first three, which is why the two are one call rather
+        than two.
+        """
+        return [(c, e, cost, self.step_punishment(prev, e)) for c, e, cost in self.child_costs(p, prev)]
 
     def child_costs(self, p: int, prev: int | None = None) -> list[tuple[int, int, float]]:
         """``[(child_id, edge_id, -log softmax prob)]``, cached until ``version`` changes.

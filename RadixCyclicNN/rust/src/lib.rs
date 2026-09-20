@@ -4,10 +4,12 @@
 //! sliding window) plus rewards, with beam-search prediction (top-K **and**
 //! bottom-K continuations), generation, scoring and 2NRL feedback.
 //!
-//! How a text becomes those grams is a dial ([`Encoding`]): character
-//! trigrams by default, any n, any stride (groups of four or five letters) or
-//! whole words instead - the same three dials as the Python and Go
-//! implementations.
+//! How a text becomes those grams is two dials that compose: [`Encoding`] says
+//! how many symbols a gram holds (`n`) and how far apart grams start
+//! (`stride`), and `GraphOptions::words` says whether one symbol is a
+//! character or a whole word ([`words`], `../SPEC-WordNGrams.md`).  So
+//! character trigrams are the default, `n: 5, stride: 5` is groups of five
+//! letters, and `words: true, n: 2` is the word bigram.
 //!
 //! It is the same model as `radixnet/` (Python) and `go/radixnet` (Go), built
 //! to answer one question - *how fast is this in Rust?* - and to carry the
@@ -45,34 +47,43 @@
 //!     .unwrap();
 //! assert!(found.best.full_text.starts_with("the cat"));
 //!
-//! // the same corpus in word bigrams
-//! use radixnet::{Encoding, Unit};
-//! let words = Encoding { unit: Unit::Words, n: 2, stride: 1 };
-//! let mut model = Model::new(0, GraphOptions { encoding: words, ..Default::default() }).unwrap();
+//! // the same corpus in word bigrams: `words` says a symbol is a word,
+//! // `n` says a gram holds two of them
+//! use radixnet::Encoding;
+//! let opts = GraphOptions { words: true, encoding: Encoding { n: 2, stride: 1 }, ..Default::default() };
+//! let mut model = Model::new(0, opts).unwrap();
 //! model.train(&texts, &TrainOptions { epochs: 2, ..Default::default() }).unwrap();
-//! assert_eq!(model.encoding().to_string(), "word:2:1");
+//! assert_eq!(model.g.enc.spec(model.is_words()), "word:2:1");
 //! ```
 
 pub mod beam;
 pub mod bench;
+pub mod clock;
 pub mod counter;
 pub mod encoding;
+pub mod file;
 pub mod fsum;
 pub mod graph;
+pub mod gzip;
 pub mod hash;
 pub mod json;
 pub mod model;
 pub mod mt19937;
 pub mod parallel;
 pub mod paths;
+pub mod report;
 pub mod search;
 pub mod weights;
+pub mod words;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;
-pub use encoding::{encode, Encoding, Gram, Trigram, Unit, OVERLAP, WINDOW};
+pub use encoding::{encode, Encoding, Gram, Trigram, OVERLAP, WINDOW};
+pub use file::{MODEL_FORMAT, MODEL_FORMAT_VERSION};
 pub use graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
+pub use json::Json;
 pub use model::{EpochRecord, GenerateOptions, Meta, Model, PredictOptions, Score, TrainOptions};
 pub use paths::{PathKey, PathOutcome, PathRow};
 pub use search::{least_punished, onward, parse_traversal, PathResult, Traversal};
 pub use weights::ChildCost;
+pub use words::{split_words, symbol_word, word_symbol, Vocabulary, WordRow, MAX_WORDS, UNKNOWN_WORD};

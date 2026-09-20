@@ -60,6 +60,9 @@ func (m *Model) Kind() string {
 	if m.G != nil && m.G.IsNegative() {
 		return "negative"
 	}
+	if m.G.IsWords() {
+		return "word"
+	}
 	return "count"
 }
 
@@ -147,6 +150,26 @@ func cleanTexts(texts []string) ([]string, int) {
 			skipped++
 		} else {
 			kept = append(kept, t)
+		}
+	}
+	return kept, skipped
+}
+
+// cleanTexts is cleanTexts over the model's symbols: a word model maps every
+// text to its words first (growing the vocabulary, which is what training
+// does) and then drops the texts of fewer than Window of them.
+func (m *Model) cleanTexts(texts []string) ([]string, int) {
+	if !m.IsWords() {
+		return cleanTexts(texts)
+	}
+	kept := make([]string, 0, len(texts))
+	skipped := 0
+	for _, t := range texts {
+		symbols := m.G.Vocab.Encode(t, true)
+		if runeLen(symbols) < Window {
+			skipped++
+		} else {
+			kept = append(kept, symbols)
 		}
 	}
 	return kept, skipped
@@ -468,6 +491,15 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		return nil, err
 	}
 	defer parts.Close()
+	if m.IsWords() {
+		// The reader maps every text to its words as it goes, so the graph downstream
+		// only ever sees symbols - and the ids are handed out in corpus order, which is
+		// what makes a Go vocabulary the same vocabulary as a Python one.  That order
+		// is the reader's: parts racing would number the words by the race, so a word
+		// model streams its parts in corpus order whatever was asked for.
+		parts = wordParts{Parts: parts, vocab: m.G.Vocab}
+		opts.ParallelParts = false
+	}
 	workers := m.workers()
 
 	// build the structure first (no counting) and compress it, so every pass -
@@ -756,7 +788,7 @@ type InvertPathsResult struct {
 // InvertPaths (failures): every edge of a text's path loses strength * 2 *
 // amount reward; amounts nil means 1 for every text.
 func (m *Model) InvertPaths(texts []string, amounts []float64, strength float64) (*InvertPathsResult, error) {
-	texts, _ = cleanTexts(texts)
+	texts, _ = m.cleanTexts(texts)
 	if amounts == nil {
 		amounts = make([]float64, len(texts))
 		for i := range amounts {
@@ -954,8 +986,22 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 	return m.searchBy(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, ByReward)
 }
 
-// searchBy is search under a chosen traversal.
+// searchBy is search under a chosen traversal.  A word model's prefix arrives
+// as text and its results leave as text; everything between is the graph's own
+// symbols, and length / maxLength are counted in them - words, there.
 func (m *Model) searchBy(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
+	if m.IsWords() {
+		found, err := m.searchSymbols(m.Symbols(prefix, false), length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, traversal)
+		if err != nil {
+			return nil, err
+		}
+		return m.decodePrediction(found), nil
+	}
+	return m.searchSymbols(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, traversal)
+}
+
+// searchSymbols is the search itself, over whatever the graph's symbols are.
+func (m *Model) searchSymbols(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
 	g := m.G
 	node, offset, lead := m.prefixStart(prefix)
 	leadLen := runeLen(lead)
@@ -1082,8 +1128,10 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// the search is what joined the prefix to the continuation, in the model's own
+	// symbols; a generated text never re-joins them here, because only the search
+	// knows the alphabet (../../SPEC-WordNGrams.md)
 	whole := func(r *PathResult) *PathResult {
-		r.FullText = o.Prefix + r.Text
 		r.Text = r.FullText
 		return r
 	}
@@ -1149,12 +1197,15 @@ func (m *Model) edgeLogProb(p, offset, c int) (float64, bool) {
 }
 
 // Score walks the text START -> ... -> END; unknown trigrams, missing edges and
-// transitions that would need a split cost log(UnknownProb).
+// transitions that would need a split cost log(UnknownProb).  On a word model
+// the text is walked as its words, so Chars counts words, PerChar is per word,
+// and a word the model has never read is <unk>: an unknown transition.
 func (m *Model) Score(text string) Score {
 	g := m.G
 	g.Prepare()
-	grams := Encode(text)
-	chars := runeLen(text)
+	symbols := m.Symbols(text, false)
+	grams := Encode(symbols)
+	chars := runeLen(symbols)
 	if grams == nil {
 		return Score{Chars: chars}
 	}
@@ -1232,7 +1283,7 @@ func (m *Model) Stats() map[string]any {
 	}
 	pathTotals := g.PathTotals()
 	stats := map[string]any{
-		"kind":                    "count",
+		"kind":                    m.Kind(),
 		"nodes":                   g.NumNodes(),
 		"edges":                   g.NumEdges(),
 		"trigrams":                g.NumTrigrams(),
@@ -1263,6 +1314,11 @@ func (m *Model) Stats() map[string]any {
 		"window_traversals":       g.WindowTraversals(),
 	}
 	m.metaStats(stats, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes")
+	if m.IsWords() {
+		// what the numbers above are counted in, and how large the alphabet has grown
+		stats["units"] = WordUnits
+		stats["vocabulary"] = m.G.Vocab.Len()
+	}
 	return stats
 }
 

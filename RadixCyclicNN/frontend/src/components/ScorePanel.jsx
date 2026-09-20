@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { fmtInt, fmtNum } from "../util.js";
+import { fmtInt, fmtNum, unitName, wordKind } from "../util.js";
 import Alert from "./Alert.jsx";
 import { TextArea } from "./Fields.jsx";
 
 /** Log-probability of a text under the model. */
-export default function ScorePanel() {
+export default function ScorePanel({ status }) {
   const [text, setText] = useStoredState("score.text", "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -31,6 +31,9 @@ export default function ScorePanel() {
   }
 
   const perChar = result && typeof result.per_char === "number" ? result.per_char : null;
+  // a word model counts in words: `chars` and `per_char` carry the model's symbols, whatever they are
+  const unit = unitName(status, false);
+  const units = unitName(status);
 
   return (
     <>
@@ -50,17 +53,18 @@ export default function ScorePanel() {
         {!result ? (
           <p className="muted">
             Scores are sums of log transition probabilities along the text's path (START → … → END). Higher (closer to
-            0) is more likely; unknown trigrams or missing edges count as log(1e-6).
+            0) is more likely; unknown {wordKind(status) ? "three-word windows" : "trigrams"} or missing edges count as
+            log(1e-6){wordKind(status) ? ", which is also what a word the model has never read costs" : ""}.
           </p>
         ) : (
           <dl className="kv">
             <dt>log-probability</dt>
             <dd>{fmtNum(result.log_prob, 4)}</dd>
-            <dt>per character</dt>
+            <dt>per {unit}</dt>
             <dd>{fmtNum(result.per_char, 4)}</dd>
-            <dt>mean char probability</dt>
+            <dt>mean {unit} probability</dt>
             <dd>{perChar === null ? "–" : fmtNum(Math.exp(perChar), 4)}</dd>
-            <dt>characters</dt>
+            <dt>{units}</dt>
             <dd>{fmtInt(result.chars)}</dd>
             <dt>transitions</dt>
             <dd>{fmtInt(result.transitions)}</dd>

@@ -18,6 +18,10 @@ import (
 const (
 	ModelFormat        = "radixnet-count"
 	ModelFormatVersion = 1
+	// WordFormat is the word model's own format, so that every reader written
+	// before it existed refuses the file by the check it already makes
+	// (../../SPEC-WordNGrams.md).
+	WordFormat = "radixnet-word"
 )
 
 type nodesDoc struct {
@@ -145,6 +149,15 @@ func (w *weightsDoc) UnmarshalJSON(b []byte) error {
 
 func (w *weightsDoc) has(key string) bool { return w != nil && w.present[key] }
 
+// countWeightKeys are the keys MarshalJSON writes for the count form.
+func countWeightKeys() map[string]bool {
+	return map[string]bool{
+		"function": true, "count_scale": true, "global_scale": true, "window_scale": true, "reward_scale": true,
+		"path_scale": true, "window": true, "smoothing": true, "kind": true, "total_traversals": true,
+		"total_traversals_resets": true, "window_events": true,
+	}
+}
+
 // GraphDoc is the JSON layout of a graph (the "graph" block of a model file).
 type GraphDoc struct {
 	Format                 string      `json:"format"`
@@ -162,6 +175,10 @@ type GraphDoc struct {
 	RngState               []any       `json:"rng_state"`
 	Weights                *weightsDoc `json:"weights,omitempty"`
 	Paths                  *pathsDoc   `json:"paths,omitempty"`
+
+	// the word model's alphabet: what the symbols are, and the words in id order
+	Units      string   `json:"units,omitempty"`
+	Vocabulary []string `json:"vocabulary,omitempty"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -262,7 +279,11 @@ func (g *Graph) ToDoc() *GraphDoc {
 		doc.Edges.CountResets = nil
 	}
 	doc.Weights = &weightsDoc{WeightConfig: g.WeightConfig(), Kind: "count-reward",
-		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events}
+		TotalTraversals: g.TotalTraversals.Value, TotalTraversalsResets: g.TotalTraversals.Resets, WindowEvents: events,
+		// which keys this block carries, exactly as UnmarshalJSON records them for a file: a
+		// document handed straight back to GraphFromDoc (a test, a copy) then reads like the
+		// file it would have been, instead of like one written before the dual frequency function
+		present: countWeightKeys()}
 	rows := make([][3]int64, 0, len(g.paths))
 	keys := make([][2]int, 0, len(g.paths))
 	for key, row := range g.paths {
@@ -295,6 +316,10 @@ func (g *Graph) ToDoc() *GraphDoc {
 		paths.Incorrect = append(paths.Incorrect, rows[at][2])
 	}
 	doc.Paths = paths
+	if g.IsWords() {
+		doc.Units = WordUnits
+		doc.Vocabulary = g.Vocab.List()
+	}
 	return doc
 }
 
@@ -418,9 +443,20 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			opts.Window = 1
 		}
 	}
+	if d.Units != "" && d.Units != WordUnits {
+		return nil, fmt.Errorf("unknown graph units %q", d.Units)
+	}
+	opts.Words = d.Units == WordUnits || d.Vocabulary != nil
 	g, err := NewGraph(d.Seed, opts)
 	if err != nil {
 		return nil, err
+	}
+	if opts.Words {
+		vocab, err := VocabularyFrom(d.Vocabulary)
+		if err != nil {
+			return nil, err
+		}
+		g.Vocab = vocab
 	}
 	g.Inverted = d.Inverted
 	g.Labels = make([]string, n)
@@ -533,6 +569,9 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g.dirtyAll = true
 	g.weightsStructure = invalidStamp
 	g.CarryCounters(true) // normalise whatever the file carried, however it was written
+	if err := g.checkVocabulary(); err != nil {
+		return nil, err
+	}
 	return g, nil
 }
 
@@ -649,6 +688,9 @@ func (m *Model) ToDoc() *ModelDoc {
 	}
 	doc := &ModelDoc{Format: ModelFormat, Version: ModelFormatVersion, SavedAt: utcNow(), Kind: m.Kind(),
 		Meta: copyMap(m.Meta), History: history, Graph: m.G.ToDoc()}
+	if m.IsWords() {
+		doc.Format = WordFormat
+	}
 	if m.IsNegative() {
 		doc.Format = NegativeFormat
 		doc.Log = append([]LogEntry{}, m.Neg.Log...)
@@ -660,8 +702,8 @@ func (m *Model) ToDoc() *ModelDoc {
 // FromDoc rebuilds a model from its document: the count / reward model, or the
 // negative network (the format decides, as in Python's load_model).
 func FromDoc(d *ModelDoc) (*Model, error) {
-	if d.Format != ModelFormat && d.Format != NegativeFormat {
-		return nil, fmt.Errorf("not a %s or %s model document", ModelFormat, NegativeFormat)
+	if d.Format != ModelFormat && d.Format != NegativeFormat && d.Format != WordFormat {
+		return nil, fmt.Errorf("not a %s, %s or %s model document", ModelFormat, WordFormat, NegativeFormat)
 	}
 	if d.Version > ModelFormatVersion {
 		return nil, fmt.Errorf("unsupported %s model version %d", d.Format, d.Version)
@@ -694,6 +736,12 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 	m.carryMeta() // a file may carry a counter that was never wrapped
 	if d.Format == NegativeFormat && !g.IsNegative() {
 		return nil, fmt.Errorf("%s document without a negative graph", NegativeFormat)
+	}
+	if (d.Format == WordFormat) != g.IsWords() {
+		if d.Format == WordFormat {
+			return nil, fmt.Errorf("%s document without a word graph", WordFormat)
+		}
+		return nil, fmt.Errorf("a word graph belongs to a %s document, not %s", WordFormat, d.Format)
 	}
 	return m, nil
 }

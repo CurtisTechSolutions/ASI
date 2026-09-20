@@ -87,12 +87,22 @@ from .codegen import (
     parse_problems,
 )
 from .gan import EvolveConfig, Evolver
+from .encoding import WINDOW
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .duo import FilterConfig, NegativeFilter
-from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
+from .model import (
+    GraphModel,
+    RadixNet,
+    TrainConfig,
+    load_model,
+    model_class,
+    model_kinds,
+    new_model,
+    traversal_option,
+)
 from .negative import NegativeNet
 from .ollama import (
     DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL,
@@ -513,6 +523,7 @@ class ModelService:
         return {
             "kind": self.kind,
             "label": type(self.model).label,
+            "units": type(self.model).units,
             "kinds": kinds,
             "model_path": self.model_path_for(self.kind),
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
@@ -693,6 +704,7 @@ class ModelService:
         stats.update(
             kind=self.kind,
             model_label=type(self.model).label,
+            units=type(self.model).units,
             kinds=model_kinds(),
             job=job.to_dict() if job is not None else None,
             backends=self.backends,
@@ -760,6 +772,9 @@ class ModelService:
         ``guard=False`` hands out what the positive model wrote, unfiltered.
         """
         with self.session() as model:
+            # pop before the merge: ``{**options, ...}`` would copy the key back in
+            asked = options.pop("traversal", "reward")
+            options = {**options, **traversal_option(model, asked)}
             result = model.predict(prefix, **options)
             pair = self.guard(model) if guard else None
             report = None
@@ -799,6 +814,9 @@ class ModelService:
         ``guard=False`` returns what the positive model wrote, unfiltered.
         """
         with self.session() as model:
+            # pop before the merge: ``{**options, ...}`` would copy the key back in
+            asked = options.pop("traversal", "reward")
+            options = {**options, **traversal_option(model, asked)}
             pair = self.guard(model) if guard else None
             if pair is None:
                 return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
@@ -897,20 +915,32 @@ class ModelService:
             graph = model.graph
             rows = []
             for row in model.paths(limit=limit):
-                prev = graph.labels[row["prev"]] if row["prev"] < len(graph.labels) else ""
+                prev = graph.text_of(graph.labels[row["prev"]]) if row["prev"] < len(graph.labels) else ""
                 parent = graph.edge_parent[row["edge"]] if row["edge"] < len(graph.edge_parent) else -1
                 child = next((c for c, e in graph.children[parent].items() if e == row["edge"]), -1) if parent >= 0 else -1
                 rows.append({
                     **row,
                     "after": prev,
                     "parent": parent,
-                    "parent_label": graph.labels[parent] if 0 <= parent < len(graph.labels) else "",
+                    "parent_label": graph.text_of(graph.labels[parent]) if 0 <= parent < len(graph.labels) else "",
                     "child": child,
-                    "child_label": graph.labels[child] if 0 <= child < len(graph.labels) else "",
+                    "child_label": graph.text_of(graph.labels[child]) if 0 <= child < len(graph.labels) else "",
                 })
             return {
                 "totals": graph.path_totals(), "paths": rows, "limit": limit,
                 "path_scale": graph.weight_config()["path_scale"],
+            }
+
+    def words(self, limit: int = 50) -> dict:
+        """The word model's alphabet: the words it has read and how much of the graph each one holds."""
+        if limit < 0:
+            raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
+        with self.session() as model:
+            if not hasattr(model, "top_words"):
+                raise ApiError(400, f"the {model.kind} model has no vocabulary; it counts in {type(model).units}")
+            return {
+                "words": model.top_words(limit=limit), "limit": limit,
+                "vocabulary": len(model.vocabulary), "units": type(model).units,
             }
 
     def node_ratios(self, limit: int = 20, node: str | None = None) -> dict:
@@ -923,9 +953,11 @@ class ModelService:
             graph = model.graph
             wanted = None
             if node:
-                wanted = next((i for i, label in enumerate(graph.labels) if label == node and graph.alive[i]), None)
+                # a word model is addressed in words; ``symbols_of`` is the identity everywhere else
+                key = graph.symbols_of(node)
+                wanted = next((i for i, label in enumerate(graph.labels) if label == key and graph.alive[i]), None)
                 if wanted is None:
-                    found = graph.lookup(node) if len(node) == 3 else None
+                    found = graph.lookup(key) if len(key) == WINDOW else None
                     if found is None:
                         raise ApiError(404, f"no node labelled {node!r}: give a node label, or one of its trigrams")
                     wanted = found[0]
@@ -1812,7 +1844,9 @@ def _graph_view(graph: RadixCyclicGraph, limit: int) -> dict:
     labels, z, a, b, h, k = graph.labels, graph.z, graph.a, graph.b, graph.h, graph.k
     nodes = [
         {
-            "id": i, "label": labels[i], "count": graph.count[i], "count_resets": graph.count_resets.get(i, 0),
+            # ``text_of`` is the identity for a character model and the words for a word model
+            "id": i, "label": graph.text_of(labels[i]), "count": graph.count[i],
+            "count_resets": graph.count_resets.get(i, 0),
             "activation": graph.activation_of(i),
             "z": z[i], "a": a[i], "b": b[i], "h": h[i], "k": k[i],
         }
@@ -2342,6 +2376,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         max_length=f.integer("max_length", None, minimum=0),
         k=f.integer("k", 5, minimum=0),
         beam=f.integer("beam", None, minimum=1),
+        traversal=f.text("traversal", "reward"),
     )
 
 
@@ -2356,6 +2391,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         prefix=f.text("prefix", ""),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
         beam=f.integer("beam", None, minimum=1),
+        traversal=f.text("traversal", "reward"),
     )
 
 
@@ -2736,6 +2772,15 @@ def _r_nodes(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
     node = q.get("node", [None])[-1]
     return 200, svc.node_ratios(limit, node)
+
+
+def _r_words(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    raw = q.get("limit", ["50"])[-1]
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ApiError(400, f"query parameter 'limit' must be an integer (got {raw!r})") from None
+    return 200, svc.words(limit)
 
 
 def _r_history(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3797,6 +3842,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "count model: each node against the nodes around it (?limit=20, ?node=LABEL) - {nodes: [{node, label, visits, "
      "from: [{label, seen, seen_ratio, reward, reward_ratio, path_seen, path_ratio, correct, incorrect, "
      "correct_ratio}], to: [...], in_totals, out_totals}]}"),
+    ("GET", "/api/words", _r_words,
+     "word model: its alphabet (?limit=50) - {vocabulary, units, words: [{word, id, trigrams}]}, most read first"),
     ("GET", "/api/history", _r_history, "the model's training history"),
     ("GET", "/api/uploads", _r_uploads, "uploaded training files (name, bytes, lines)"),
     ("POST", "/api/uploads", _r_upload,

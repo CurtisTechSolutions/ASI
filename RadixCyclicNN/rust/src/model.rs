@@ -9,6 +9,7 @@ use crate::counter::Counter;
 use crate::encoding::{Encoding, Gram};
 use crate::graph::{Graph, GraphOptions, Loc, Transition, END, FIRST, START};
 use crate::hash::Map;
+use crate::json::Json;
 use crate::mt19937::Mt19937;
 use crate::parallel::{effective_workers, parallel_fill};
 use crate::paths::PathOutcome;
@@ -21,16 +22,112 @@ const MAX_LOG_PERPLEXITY: f64 = 700.0;
 /// How many texts a pass takes at a time.
 pub const DEFAULT_CHUNK_SIZE: usize = 8192;
 
-/// The lifetime counters a model keeps beside its graph.
-#[derive(Clone, Copy, Default, Debug)]
+/// The lifetime counters a model keeps beside its graph - the `meta` block of a
+/// model file, in the order Python writes it.
+///
+/// `extra` is whatever else the file carried.  Another implementation may keep
+/// a counter this one knows nothing about, and a model that loses it on a round
+/// trip through here is not interchangeable with anything.
+#[derive(Clone, Default, Debug)]
 pub struct Meta {
+    pub created: String,
+    pub seed: i64,
     pub epochs_total: Counter,
     pub trained_chars: Counter,
     pub trained_texts: Counter,
     pub twonrl_runs: Counter,
-    pub feedback_passes: Counter,
     pub rewards_total: f64,
     pub penalties_total: f64,
+    pub feedback_passes: Counter,
+    pub extra: Vec<(String, Json)>,
+}
+
+/// The `meta` entries that are an odometer plus a reset count.
+const META_COUNTERS: [&str; 5] = [
+    "epochs_total",
+    "trained_chars",
+    "trained_texts",
+    "twonrl_runs",
+    "feedback_passes",
+];
+
+impl Meta {
+    /// A new model's metadata.
+    pub fn new(seed: i64) -> Meta {
+        Meta {
+            created: crate::clock::utc_now(),
+            seed,
+            ..Default::default()
+        }
+    }
+
+    fn counter(&self, key: &str) -> Counter {
+        match key {
+            "epochs_total" => self.epochs_total,
+            "trained_chars" => self.trained_chars,
+            "trained_texts" => self.trained_texts,
+            "twonrl_runs" => self.twonrl_runs,
+            _ => self.feedback_passes,
+        }
+    }
+
+    fn set_counter(&mut self, key: &str, value: Counter) {
+        match key {
+            "epochs_total" => self.epochs_total = value,
+            "trained_chars" => self.trained_chars = value,
+            "trained_texts" => self.trained_texts = value,
+            "twonrl_runs" => self.twonrl_runs = value,
+            "feedback_passes" => self.feedback_passes = value,
+            _ => {}
+        }
+    }
+
+    /// The `meta` block, in Python's key order.
+    pub fn to_json(&self) -> Json {
+        let mut pairs: Vec<(String, Json)> = vec![
+            ("created".to_string(), Json::str(self.created.clone())),
+            ("seed".to_string(), Json::Int(self.seed)),
+        ];
+        for key in ["epochs_total", "trained_chars", "trained_texts", "twonrl_runs"] {
+            let c = self.counter(key);
+            pairs.push((key.to_string(), Json::Int(c.value)));
+            pairs.push((format!("{key}_resets"), Json::Int(c.resets)));
+        }
+        pairs.push(("rewards_total".to_string(), Json::Num(self.rewards_total)));
+        pairs.push(("penalties_total".to_string(), Json::Num(self.penalties_total)));
+        pairs.push(("feedback_passes".to_string(), Json::Int(self.feedback_passes.value)));
+        pairs.push((
+            "feedback_passes_resets".to_string(),
+            Json::Int(self.feedback_passes.resets),
+        ));
+        pairs.extend(self.extra.iter().cloned());
+        Json::Obj(pairs)
+    }
+
+    /// Reads a file's `meta` over this one, wrapping every counter it carried (a
+    /// file written by hand can hold a reading past the limit) and keeping every
+    /// key this implementation does not know about.
+    pub fn merge_json(&mut self, doc: &Json) {
+        let Json::Obj(pairs) = doc else { return };
+        for (key, value) in pairs {
+            match key.as_str() {
+                "created" => self.created = value.as_str().unwrap_or(&self.created).to_string(),
+                "seed" => self.seed = value.as_i64().unwrap_or(self.seed),
+                "rewards_total" => self.rewards_total = value.as_f64().unwrap_or(0.0),
+                "penalties_total" => self.penalties_total = value.as_f64().unwrap_or(0.0),
+                _ => {
+                    let base = key.strip_suffix("_resets").unwrap_or(key);
+                    if META_COUNTERS.contains(&base) {
+                        let value = doc.at(base).as_i64().unwrap_or(0);
+                        let resets = doc.at(&format!("{base}_resets")).as_i64().unwrap_or(0);
+                        self.set_counter(base, Counter::new(value, resets));
+                    } else if !self.extra.iter().any(|(k, _)| k == key) {
+                        self.extra.push((key.clone(), value.clone()));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// What one epoch did.
@@ -50,6 +147,79 @@ pub struct EpochRecord {
     pub traversed: bool,
     pub reward: f64,
     pub phase: Option<String>,
+    /// Whatever else the record carried when it was read from a file.
+    pub extra: Vec<(String, Json)>,
+}
+
+impl EpochRecord {
+    /// The record as a `history` entry.
+    pub fn to_json(&self) -> Json {
+        let mut pairs: Vec<(String, Json)> = vec![
+            ("epoch".to_string(), Json::Int(self.epoch)),
+            ("loss".to_string(), Json::Num(self.loss)),
+            ("perplexity".to_string(), Json::Num(self.perplexity)),
+            ("nodes".to_string(), Json::Int(self.nodes as i64)),
+            ("edges".to_string(), Json::Int(self.edges as i64)),
+            ("trigrams".to_string(), Json::Int(self.trigrams as i64)),
+            ("compression_ratio".to_string(), Json::Num(self.compression_ratio)),
+            ("merges".to_string(), Json::Int(self.merges as i64)),
+            ("transitions".to_string(), Json::Int(self.transitions)),
+            ("seconds".to_string(), Json::Num(self.seconds)),
+            ("skipped_short".to_string(), Json::Int(self.skipped_short as i64)),
+            ("traversed".to_string(), Json::Bool(self.traversed)),
+            ("reward".to_string(), Json::Num(self.reward)),
+        ];
+        if let Some(phase) = &self.phase {
+            pairs.push(("phase".to_string(), Json::str(phase.clone())));
+        }
+        pairs.extend(self.extra.iter().cloned());
+        Json::Obj(pairs)
+    }
+
+    /// One `history` entry, keeping any field this implementation does not write.
+    pub fn from_json(doc: &Json) -> EpochRecord {
+        const KNOWN: [&str; 14] = [
+            "epoch",
+            "loss",
+            "perplexity",
+            "nodes",
+            "edges",
+            "trigrams",
+            "compression_ratio",
+            "merges",
+            "transitions",
+            "seconds",
+            "skipped_short",
+            "traversed",
+            "reward",
+            "phase",
+        ];
+        let extra = match doc {
+            Json::Obj(pairs) => pairs
+                .iter()
+                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        EpochRecord {
+            epoch: doc.at("epoch").as_i64().unwrap_or(0),
+            loss: doc.at("loss").as_f64().unwrap_or(0.0),
+            perplexity: doc.at("perplexity").as_f64().unwrap_or(0.0),
+            nodes: doc.at("nodes").as_i64().unwrap_or(0) as usize,
+            edges: doc.at("edges").as_i64().unwrap_or(0) as usize,
+            trigrams: doc.at("trigrams").as_i64().unwrap_or(0) as usize,
+            compression_ratio: doc.at("compression_ratio").as_f64().unwrap_or(0.0),
+            merges: doc.at("merges").as_i64().unwrap_or(0) as usize,
+            transitions: doc.at("transitions").as_i64().unwrap_or(0),
+            seconds: doc.at("seconds").as_f64().unwrap_or(0.0),
+            skipped_short: doc.at("skipped_short").as_i64().unwrap_or(0) as usize,
+            traversed: doc.at("traversed").as_bool().unwrap_or(true),
+            reward: doc.at("reward").as_f64().unwrap_or(0.0),
+            phase: doc.at("phase").as_str().map(str::to_string),
+            extra,
+        }
+    }
 }
 
 /// The passes over the texts.
@@ -91,19 +261,120 @@ pub struct Model {
 impl Model {
     /// An untrained model.
     pub fn new(seed: i64, opts: GraphOptions) -> Result<Model, String> {
-        let mut g = Graph::new(seed, opts)?;
-        g.workers = 0;
-        Ok(Model {
+        Ok(Model::from_graph(Graph::new(seed, opts)?))
+    }
+
+    /// A model around a graph that already exists - what the file reader builds.
+    pub fn from_graph(g: Graph) -> Model {
+        let seed = g.seed;
+        Model {
             g,
             history: Vec::new(),
-            meta: Meta::default(),
+            meta: Meta::new(seed),
             workers: 0,
-        })
+        }
     }
 
     /// The model kind shared with the Python and Go implementations.
     pub fn kind(&self) -> &'static str {
-        "count"
+        if self.g.is_words() {
+            "word"
+        } else {
+            "count"
+        }
+    }
+
+    /// The file format of this kind (`../../SPEC-WordNGrams.md` §8).
+    pub fn format(&self) -> &'static str {
+        if self.g.is_words() {
+            crate::file::WORD_MODEL_FORMAT
+        } else {
+            crate::file::MODEL_FORMAT
+        }
+    }
+
+    /// What the model counts in: lengths, caps and per-symbol scores are in
+    /// these (`"words"` on a word model, `"chars"` everywhere else).
+    pub fn units(&self) -> &'static str {
+        self.g.units()
+    }
+
+    /// Whether this model's symbols are words.
+    pub fn is_words(&self) -> bool {
+        self.g.is_words()
+    }
+
+    /// `text` as the graph's symbols; `grow` gives an unread word the next id.
+    pub fn symbols(&mut self, text: &str, grow: bool) -> String {
+        match &mut self.g.vocab {
+            Some(vocab) => vocab.encode(text, grow),
+            None => text.to_string(),
+        }
+    }
+
+    /// The text a symbol string stands for (the identity off a word model).
+    pub fn words(&self, symbols: &str) -> String {
+        match &self.g.vocab {
+            Some(vocab) => vocab.decode(symbols),
+            None => symbols.to_string(),
+        }
+    }
+
+    /// `text` as a word model can represent it: its words joined by single
+    /// spaces.  A word model's round trip costs the original whitespace and
+    /// nothing else, and this is what it costs.
+    pub fn normalise(&self, text: &str) -> String {
+        if !self.is_words() {
+            return text.to_string();
+        }
+        crate::words::split_words(text).collect::<Vec<_>>().join(" ")
+    }
+
+    /// One walk's texts and labels, back in words.
+    fn decode_result(&self, r: &mut PathResult) {
+        if !self.is_words() {
+            return;
+        }
+        r.text = self.words(&r.text);
+        r.full_text = self.words(&r.full_text);
+        for label in r.labels.iter_mut() {
+            *label = self.g.text_of(label);
+        }
+    }
+
+    /// The most read words: `trigrams` is how many of the graph's windows the
+    /// word appears in - what the graph actually knows about it, and the one
+    /// count that survives compression.  Ties keep id order; `limit` 0 is all.
+    pub fn top_words(&mut self, limit: usize) -> Vec<crate::words::WordRow> {
+        self.g.prepare();
+        let Some(vocab) = &self.g.vocab else { return Vec::new() };
+        let mut counts = vec![0usize; vocab.len()];
+        let trigrams: Vec<crate::Gram> = self.g.trigrams().cloned().collect();
+        for trigram in trigrams {
+            for symbol in trigram.chars() {
+                if let Ok(id) = crate::words::symbol_word(symbol) {
+                    if id < counts.len() {
+                        counts[id] += 1;
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<crate::words::WordRow> = vocab
+            .words()
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| *id != crate::words::UNKNOWN_ID || counts[*id] > 0)
+            .map(|(id, word)| crate::words::WordRow {
+                word: word.clone(),
+                id,
+                trigrams: counts[id],
+            })
+            .collect();
+        rows.sort_by(|a, b| b.trigrams.cmp(&a.trigrams).then(a.id.cmp(&b.id)));
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        rows
     }
 
     fn workers(&self) -> usize {
@@ -181,6 +452,16 @@ impl Model {
         };
         let workers = self.workers();
         let mut skipped_short = 0;
+        // A word model reads its texts as words: every one is mapped to the graph's
+        // symbols here, in corpus order, which is what makes a Rust vocabulary the
+        // same vocabulary as a Python one - a word's id is the order it was first
+        // read in (`../../SPEC-WordNGrams.md` §3).
+        let encoded: Option<Vec<String>> = if self.is_words() {
+            Some(texts.iter().map(|t| self.symbols(t, true)).collect())
+        } else {
+            None
+        };
+        let texts: &[String] = encoded.as_deref().unwrap_or(texts);
         let usable: Vec<&String> = texts
             .iter()
             .filter(|t| {
@@ -327,6 +608,7 @@ impl Model {
                 traversed: count,
                 reward,
                 phase: opts.phase.clone(),
+                extra: Vec::new(),
             };
             self.history.push(record.clone());
             records.push(record);
@@ -413,10 +695,9 @@ impl Model {
     /// The most visited `(node, offset)` holding a gram that starts with `key`
     /// (whole units: `"the ca"` is not a prefix of `"the cat sat"` in words).
     fn best_trigram(&self, key: &str) -> Option<Loc> {
-        let enc = self.g.enc;
         let mut best: Option<(i64, usize, usize, Loc)> = None;
         for (t, l) in self.g.index_entries() {
-            if !enc.has_unit_prefix(&t.to_string(), key) {
+            if !t.to_string().starts_with(key) {
                 continue;
             }
             let rank = (-(self.g.node_count(l.node).float() as i64), l.node, l.off);
@@ -433,11 +714,10 @@ impl Model {
 
     /// The most visited real node whose label starts with `prefix`.
     fn best_node_with_prefix(&self, prefix: &str) -> Option<usize> {
-        let enc = self.g.enc;
         let mut best: Option<usize> = None;
         let mut best_count = Counter { value: -1, resets: 0 };
         for node in (START + 2)..self.g.num_node_ids() {
-            if !self.g.is_alive(node) || !enc.has_unit_prefix(self.g.label(node), prefix) {
+            if !self.g.is_alive(node) || !self.g.label(node).starts_with(prefix) {
                 continue;
             }
             let c = self.g.node_count(node);
@@ -456,6 +736,7 @@ impl Model {
         let enc = self.g.enc;
         let lead = if node != START && matched < enc.n {
             enc.slice(self.g.label(node), offset + matched, Some(offset + enc.n))
+                .to_string()
         } else {
             String::new()
         };
@@ -512,6 +793,15 @@ impl Model {
         traversal: Traversal,
     ) -> Result<Prediction, String> {
         let enc = self.g.enc;
+        // a word model's prefix arrives as text and its results leave as text;
+        // everything between is the graph's own symbols, and length / max_length are
+        // counted in them - words, there (`../../SPEC-WordNGrams.md` §9)
+        let encoded = if self.is_words() {
+            Some(self.symbols(prefix, false))
+        } else {
+            None
+        };
+        let prefix: &str = encoded.as_deref().unwrap_or(prefix);
         let (node, offset, lead) = self.prefix_start(prefix);
         let lead_len = enc.len(&lead);
         let want = length.saturating_sub(lead_len);
@@ -554,12 +844,12 @@ impl Model {
         }
         let fix = |r: &mut PathResult| {
             if !lead.is_empty() {
-                r.text = enc.join(&[&lead, &r.text]);
+                r.text = format!("{lead}{}", r.text);
                 if let Some(cap) = cap {
-                    r.text = enc.truncate(&r.text, cap);
+                    r.text = enc.truncate(&r.text, cap).to_string();
                 }
             }
-            r.full_text = enc.join(&[prefix, &r.text]);
+            r.full_text = format!("{prefix}{}", r.text);
         };
         let mut top = top;
         let mut bottom = bottom;
@@ -569,10 +859,10 @@ impl Model {
             Some(best) => best.clone(),
             None => {
                 let text = match cap {
-                    Some(cap) => enc.truncate(&lead, cap),
+                    Some(cap) => enc.truncate(&lead, cap).to_string(),
                     None => lead.clone(),
                 };
-                let full_text = enc.join(&[prefix, &text]);
+                let full_text = format!("{prefix}{text}");
                 PathResult {
                     text,
                     labels: vec![self.g.label(node).to_string()],
@@ -582,7 +872,7 @@ impl Model {
                 }
             }
         };
-        Ok(Prediction {
+        let mut found = Prediction {
             best,
             top,
             bottom,
@@ -591,7 +881,14 @@ impl Model {
             mode: mode.to_string(),
             traversal,
             expanded,
-        })
+        };
+        if self.is_words() {
+            for r in found.top.iter_mut().chain(found.bottom.iter_mut()) {
+                self.decode_result(r);
+            }
+            self.decode_result(&mut found.best);
+        }
+        Ok(found)
     }
 
     /// Generates whole texts with the prediction search, from `START` or
@@ -606,10 +903,10 @@ impl Model {
         if o.count == 0 {
             return Ok(Vec::new());
         }
-        let whole = |r: &mut PathResult, prefix: &str| {
-            r.full_text = format!("{prefix}{}", r.text);
-            r.text = r.full_text.clone();
-        };
+        // the search is what joined the prefix to the continuation, in the model's own
+        // symbols; a generated text never re-joins them here, because only the search
+        // knows the alphabet (`../../SPEC-WordNGrams.md`)
+        let whole = |r: &mut PathResult| r.text = r.full_text.clone();
         if mode == "sample" {
             let mut rng = o.seed.map(Mt19937::new);
             let mut results = Vec::with_capacity(o.count);
@@ -627,7 +924,7 @@ impl Model {
                     rng.as_mut(),
                     o.traversal,
                 )?;
-                whole(&mut found.best, &o.prefix);
+                whole(&mut found.best);
                 results.push(found.best);
             }
             return Ok(results);
@@ -647,7 +944,7 @@ impl Model {
             o.traversal,
         )?;
         let mut results = found.top;
-        results.iter_mut().for_each(|r| whole(r, &o.prefix));
+        results.iter_mut().for_each(whole);
         if mode == "dijkstra" {
             results.truncate(1);
         }
@@ -668,9 +965,13 @@ impl Model {
     /// transitions that would need a split cost `log(UNKNOWN_PROB)`.
     pub fn score(&mut self, text: &str) -> Score {
         self.g.prepare();
+        // on a word model the text is walked as its words, so `chars` counts words,
+        // `per_char` is per word, and a word it has never read is <unk>: an unknown
+        // transition, charged exactly what any unknown transition is charged
         let enc = self.g.enc;
-        let grams = enc.encode(text);
-        let chars = enc.len(text);
+        let symbols = self.symbols(text, false);
+        let grams = enc.encode(&symbols);
+        let chars = enc.len(&symbols);
         if grams.is_empty() {
             return Score {
                 chars,
@@ -844,6 +1145,11 @@ pub fn stats(model: &Model) -> Vec<(String, String)> {
     put("trained_texts", model.meta.trained_texts.value.to_string());
     put("total_traversals", g.total_traversals().value.to_string());
     put("window_traversals", g.window_traversals().to_string());
+    if let Some(vocab) = &g.vocab {
+        // what the numbers above are counted in, and how large the alphabet has grown
+        put("units", model.units().to_string());
+        put("vocabulary", vocab.len().to_string());
+    }
     out
 }
 

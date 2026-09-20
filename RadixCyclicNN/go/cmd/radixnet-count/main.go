@@ -25,8 +25,16 @@ import (
 
 const version = "0.1.0"
 
+// DefaultCountModel and DefaultWordModel are the default --model per kind, so
+// one kind never overwrites another's file.
+const (
+	DefaultCountModel = "model.count.json"
+	DefaultWordModel  = "model.word.json"
+)
+
 var (
-	modelPath  = "model.count.json"
+	modelPath  = DefaultCountModel
+	kindFlag   = "count"
 	jsonMode   bool
 	seedFlag   int64
 	workers    = 0
@@ -39,6 +47,10 @@ var (
 
 func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&modelPath, "model", modelPath, "model file to load / save (gzip when the name ends with .gz)")
+	fs.StringVar(&kindFlag, "kind", kindFlag, "algorithm of a NEW model: count = the count / reward model over "+
+		"characters (default), word = the same model over an alphabet whose symbols are words (lengths, counts and "+
+		"scores are per word); a loaded file's own kind always wins, and the default --model follows the kind ("+
+		DefaultWordModel+")")
 	fs.BoolVar(&jsonMode, "json", jsonMode, "print one JSON document instead of human-readable text")
 	fs.Int64Var(&seedFlag, "seed", seedFlag, "RNG seed for a new model and for sampling")
 	fs.IntVar(&workers, "workers", workers, "cap on the goroutines fanned out over texts and nodes (0 = none: one goroutine per text)")
@@ -128,19 +140,47 @@ func configure(m *radixnet.Model) *radixnet.Model {
 	return m
 }
 
+// wantedKind is --kind, normalised; "" means the default (count).
+func wantedKind() string {
+	kind := strings.ToLower(strings.TrimSpace(kindFlag))
+	switch kind {
+	case "", "count":
+		return "count"
+	case "word":
+		return "word"
+	}
+	fail("unknown model kind %q; expected one of: count, word", kindFlag)
+	return ""
+}
+
+// modelFile is --model, defaulting to the file of the wanted kind so a word
+// model never overwrites a character one.
+func modelFile() string {
+	if modelPath == DefaultCountModel && wantedKind() == "word" {
+		return DefaultWordModel
+	}
+	return modelPath
+}
+
 func openModel(required bool) *radixnet.Model {
 	radixnet.Workers = workers
-	if _, err := os.Stat(modelPath); err == nil {
-		m, err := radixnet.Load(modelPath)
+	path := modelFile()
+	if _, err := os.Stat(path); err == nil {
+		m, err := radixnet.Load(path)
 		if err != nil {
-			fail("%s: %v", modelPath, err)
+			fail("%s: %v", path, err)
+		}
+		if kind := wantedKind(); kind != m.Kind() && kindFlag != "" {
+			note("note: %s holds a %s model; --kind %s applies to new models only", path, m.Kind(), kind)
 		}
 		return configure(m)
 	}
 	if required {
-		fail("model file not found: %s (train one first with `radixnet-count train --data FILE`)", modelPath)
+		fail("model file not found: %s (train one first with `radixnet-count train --data FILE`)", path)
 	}
-	m, err := radixnet.NewModel(seedFlag, radixnet.DefaultGraphOptions())
+	opts := radixnet.DefaultGraphOptions()
+	opts.Words = wantedKind() == "word"
+	m, err := radixnet.NewModel(seedFlag, opts)
 	if err != nil {
 		fail("%v", err)
 	}
@@ -150,7 +190,7 @@ func openModel(required bool) *radixnet.Model {
 func saveModel(m *radixnet.Model) string {
 	path := outPath
 	if path == "" {
-		path = modelPath
+		path = modelFile()
 	}
 	if err := m.Save(path); err != nil {
 		fail("cannot save %s: %v", path, err)
@@ -173,6 +213,7 @@ commands:
   correct    teach one correction: only the trigram nodes --wrong and --right disagree on move
   paths      what the judged walks did, step by step: correct / incorrect per path, not per edge
   nodes      each node against the nodes around it: its traffic and its reward, shared out both ways
+  words      the word model's alphabet: the words it has read, most read first
   negative   the failures, and why: blame | clear | why | filter | reasons | forget | auto
   codegen    write Python programs: the teacher tutors, the sandbox runs them, 2NRL follows
   tools      the external tools the network can call: list | describe | call
@@ -195,7 +236,7 @@ commands:
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   version    print the version
 
-global options (before or after the command): --model PATH --json --seed N --workers N --exact --out PATH
+global options (before or after the command): --model PATH --kind count|word --json --seed N --workers N --exact --out PATH
                                              --memlimit SIZE (soft heap limit, default 80%% of the machine / container) --memprofile PATH
 `, version)
 }
@@ -260,6 +301,8 @@ func main() {
 		cmdPaths(rest)
 	case "nodes":
 		cmdNodes(rest)
+	case "words":
+		cmdWords(rest)
 	case "correct":
 		cmdCorrect(rest)
 	case "image":
@@ -341,10 +384,11 @@ func cmdTrain(args []string) {
 	source := sourcesFor(data, *unit, *pageLines)
 	radixnet.Workers = workers
 	var m *radixnet.Model
-	if _, err := os.Stat(modelPath); err == nil {
+	if _, err := os.Stat(modelFile()); err == nil {
 		m = openModel(true)
 	} else {
 		opts := radixnet.DefaultGraphOptions()
+		opts.Words = wantedKind() == "word" // the symbols are words, and nothing else about the model changes
 		if *window > 0 {
 			opts.Window = *window
 		}
@@ -401,19 +445,32 @@ func cmdTrain(args []string) {
 }
 
 func predictDoc(prefix string, p *radixnet.Prediction) map[string]any {
-	return map[string]any{
+	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "k": p.K, "beam": p.Beam,
 		"top": pathDicts(p.Top), "bottom": pathDicts(p.Bottom),
 	}
+	// what the walk was punished for, and which search wrote it: reported only
+	// where they are not the defaults, as the Python and Rust CLIs report them
+	if p.Traversal != "" {
+		doc["traversal"] = p.Traversal
+	}
+	if p.Punish != 0 {
+		doc["punish"] = p.Punish
+	}
+	return doc
 }
 
 func pathDicts(paths []*radixnet.PathResult) []map[string]any {
 	out := make([]map[string]any, 0, len(paths))
 	for _, r := range paths {
-		out = append(out, map[string]any{"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
-			"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd})
+		row := map[string]any{"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
+			"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd}
+		if r.Punish != 0 {
+			row["punish"] = r.Punish
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -568,7 +625,10 @@ func cmdScore(args []string) {
 		emit(map[string]any{"results": results, "count": len(results), "mean_log_prob": meanLog, "mean_per_char": meanPer})
 		return
 	}
-	fmt.Printf("%10s %9s %5s %11s %7s  %s\n", "log_prob", "per_char", "chars", "transitions", "unknown", "text")
+	// a word model counts in words, and a per-word number read as per-char is read wrong
+	units := m.Units()
+	fmt.Printf("%10s %9s %5s %11s %7s  %s\n", "log_prob", "per_"+strings.TrimSuffix(units, "s"), units,
+		"transitions", "unknown", "text")
 	for i, s := range scores {
 		fmt.Printf("%10.4f %9.4f %5d %11d %7d  %s\n", s.LogProb, s.PerChar, s.Chars, s.Transitions, s.UnknownTransitions, quote(texts[i]))
 	}
@@ -689,12 +749,13 @@ func resolveNode(g *radixnet.Graph, text string) int {
 	if text == "" {
 		return -1
 	}
+	key := g.SymbolsOf(text) // a word graph is addressed in words; the identity anywhere else
 	for node := 0; node < g.NumNodeIDs(); node++ {
-		if g.Label(node) == text {
+		if g.Label(node) == key {
 			return node
 		}
 	}
-	if node, _, ok := g.Lookup(text); ok {
+	if node, _, ok := g.Lookup(key); ok {
 		return node
 	}
 	fail("no node labelled %q: give a node label, or one of its trigrams", text)
@@ -739,12 +800,38 @@ func cmdNodes(args []string) {
 	}
 }
 
+func cmdWords(args []string) {
+	fs := subFlagSet("words")
+	limit := fs.Int("limit", 20, "words to show, most read first (0 = all)")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	if !m.IsWords() {
+		fail("%s holds a %s model; a vocabulary belongs to the word model (--kind word)", modelFile(), m.Kind())
+	}
+	rows := m.TopWords(*limit)
+	say("vocabulary %d word(s), %d shown", m.Vocabulary().Len(), len(rows))
+	say("read       %s words over %s texts", counterText(m.MetaCounter("trained_chars")),
+		counterText(m.MetaCounter("trained_texts")))
+	if len(rows) == 0 {
+		say("nothing has been read yet: train the model on a corpus first")
+	} else {
+		say("")
+		say("%-24s %8s %8s", "word", "id", "windows")
+		for _, row := range rows {
+			say("%-24s %8d %8d", strconv.Quote(row.Word), row.ID, row.Trigrams)
+		}
+	}
+	if jsonMode {
+		emit(map[string]any{"words": rows, "vocabulary": m.Vocabulary().Len(), "units": m.Units(), "stats": m.Stats()})
+	}
+}
+
 // quoteLabel is a node's label in quotes (whitespace is part of it).
 func quoteLabel(g *radixnet.Graph, node int) string {
 	if node < 0 || node >= g.NumNodeIDs() {
 		return fmt.Sprintf("node %d", node)
 	}
-	return strconv.Quote(g.Label(node))
+	return strconv.Quote(g.TextOf(g.Label(node)))
 }
 
 // stepLabel is "parent -> child" as the two labels, for a path row.
@@ -755,7 +842,7 @@ func stepLabel(g *radixnet.Graph, edge int) string {
 	}
 	for _, t := range g.Children(parent) {
 		if t.E == edge {
-			return fmt.Sprintf("%s -> %s", g.Label(parent), g.Label(t.P))
+			return fmt.Sprintf("%s -> %s", g.TextOf(g.Label(parent)), g.TextOf(g.Label(t.P)))
 		}
 	}
 	return fmt.Sprintf("edge %d", edge)
@@ -927,10 +1014,10 @@ func cmdInfo(args []string) {
 		hist = hist[len(hist)-*tail:]
 	}
 	if jsonMode {
-		emit(map[string]any{"model": modelPath, "stats": stats, "history": hist, "meta": m.Meta})
+		emit(map[string]any{"model": modelFile(), "stats": stats, "history": hist, "meta": m.Meta})
 		return
 	}
-	fmt.Printf("model %s\n", modelPath)
+	fmt.Printf("model %s\n", modelFile())
 	for _, k := range radixnet.SortedKeys(stats) {
 		fmt.Printf("%-22s %v\n", k, stats[k])
 	}
@@ -1382,7 +1469,7 @@ func cmdServe(args []string) {
 	_ = fs.Parse(args)
 	logf := func(line string) { fmt.Fprintln(os.Stderr, line) }
 	svc, err := server.NewService(server.Options{
-		ModelPath: modelPath, Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
+		ModelPath: modelFile(), Seed: seedFlag, Workers: workers, Exact: exact, UploadDir: *uploadDir, CheckpointDir: *checkpointDir,
 		Keep: *keep, Quiet: *quiet, Log: logf, OllamaURL: *ollamaURL, OllamaModel: *ollamaModel,
 		ChatGPTURL: *chatgptURL, ChatGPTModel: *chatgptModel,
 		Offline: toolFlags.Offline, AllowPrivate: toolFlags.AllowPrivate, SearchURL: toolFlags.SearchURL,
@@ -1402,10 +1489,10 @@ func cmdServe(args []string) {
 		}
 	}
 	addr := fmt.Sprintf("%s:%d", *host, *port)
-	origin, _ := os.Stat(modelPath)
+	origin, _ := os.Stat(modelFile())
 	source := "a fresh model"
 	if origin != nil {
-		source = modelPath
+		source = modelFile()
 	}
 	pool := "one goroutine per text"
 	if workers > 0 {

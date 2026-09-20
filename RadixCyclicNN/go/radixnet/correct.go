@@ -59,6 +59,25 @@ type Correction struct {
 // An edge both sentences walk over a changed span - the network wrote the
 // right characters by another route - is rewarded, never penalised.
 func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, error) {
+	if m.IsWords() {
+		// the symbols of a word model are words, so the alignment is word by word and
+		// WrongChars / RightChars count words; the teacher's words join the vocabulary,
+		// the network's are already in it and anything else is <unk>
+		out, err := m.correct(m.Symbols(wrong, false), m.Symbols(right, true), o)
+		if err != nil || out == nil {
+			return out, err
+		}
+		for i := range out.Changes {
+			out.Changes[i].Wrong = m.Words(out.Changes[i].Wrong)
+			out.Changes[i].Right = m.Words(out.Changes[i].Right)
+		}
+		return out, nil
+	}
+	return m.correct(wrong, right, o)
+}
+
+// correct is Correct over the graph's own symbols, whatever they stand for.
+func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, error) {
 	if o.Strength <= 0 {
 		o.Strength = 1
 	}

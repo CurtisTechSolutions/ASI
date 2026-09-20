@@ -434,7 +434,7 @@ func cmdMediaTutor(args []string, modality string) {
 	if *train {
 		target := *modelOut
 		if target == "" {
-			target = modelPath
+			target = modelFile()
 		}
 		if err := model.Save(target); err != nil {
 			fail("cannot save %s: %v", target, err)
@@ -523,7 +523,7 @@ func trainOnTexts(texts []string, epochs int, out string) map[string]any {
 	}
 	target := out
 	if target == "" {
-		target = modelPath
+		target = modelFile()
 	}
 	if err := m.Save(target); err != nil {
 		fail("cannot save %s: %v", target, err)

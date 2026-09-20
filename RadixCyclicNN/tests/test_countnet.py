@@ -18,6 +18,13 @@ from radixnet import diff  # noqa: E402
 from radixnet.beam import Prediction, beam_predict, default_beam, path_probability  # noqa: E402
 from radixnet.countnet import COUNT_MODEL_FORMAT, CountRewardGraph, CountRewardNet  # noqa: E402
 from radixnet.graph import BACK, END, START  # noqa: E402
+from radixnet.search import (  # noqa: E402
+    LEAST_PUNISHED,
+    PUNISH_TOLERANCE,
+    REWARD,
+    least_punished,
+    parse_traversal,
+)
 from radixnet.model import RadixNet, load_model, model_class, model_from_dict, model_kinds, new_model  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -369,7 +376,7 @@ class TestPersistenceAndKinds(unittest.TestCase):
             model_from_dict({"format": "nope"})
 
     def test_kind_registry(self):
-        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "negative", "resonant"])
+        self.assertEqual([k["kind"] for k in model_kinds()], ["radix", "count", "word", "negative", "resonant"])
         self.assertIs(model_class("count"), CountRewardNet)
         self.assertIs(model_class(None), RadixNet)
         self.assertIs(model_class(" Radix "), RadixNet)
@@ -434,7 +441,7 @@ class TestApi(unittest.TestCase):
         status, data, _ = self.client.get("/api/model")
         self.assertEqual(status, 200)
         self.assertEqual(data["kind"], "radix")
-        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "negative", "resonant"])
+        self.assertEqual([k["kind"] for k in data["kinds"]], ["radix", "count", "word", "negative", "resonant"])
         self.assertEqual(data["paths"]["count"], os.path.join(self.tmp.name, "model.count.json"))
         data = self.select("count")
         self.assertEqual((data["kind"], data["origin"]), ("count", "new"))
@@ -994,6 +1001,96 @@ class TestNodeRatios(unittest.TestCase):
         if dead is None:
             self.skipTest("this corpus compressed nothing away")
         self.assertIsNone(graph.node_ratios(dead))
+
+
+class TestLeastPunishedTraversal(unittest.TestCase):
+    """The second traversal: a walk ranked by what went wrong on it (SPEC-LeastPunished.md)."""
+
+    TEXTS = ["the cat sat on the mat", "the cat sat on the log"]
+
+    def trained(self) -> CountRewardNet:
+        model = CountRewardNet(seed=0)
+        model.train(self.TEXTS, epochs=3)
+        return model
+
+    def test_the_names_it_answers_to(self):
+        for name in ("", "reward", "Rewards", "cost"):
+            self.assertEqual(parse_traversal(name), REWARD, name)
+        for name in ("least-punished", "LEAST_PUNISHED", "punished", "blame"):
+            self.assertEqual(parse_traversal(name), LEAST_PUNISHED, name)
+        with self.assertRaises(ValueError):
+            parse_traversal("sideways")
+
+    def test_the_filter_keeps_the_cleanest_children(self):
+        steps = [(4, 0, 1.0, 0.0), (5, 1, 2.0, 0.0)]
+        self.assertEqual(least_punished(steps), steps, "nothing punished, nothing dropped")
+        steps[0] = (4, 0, 1.0, 0.5)
+        self.assertEqual([item[0] for item in least_punished(steps)], [5])
+        steps[1] = (5, 1, 2.0, 0.5 + PUNISH_TOLERANCE / 2)  # the same penalty, a bit or two apart
+        self.assertEqual(len(least_punished(steps)), 2)
+        steps[1] = (5, 1, 2.0, math.inf)
+        self.assertEqual([item[0] for item in least_punished(steps)], [4])
+        self.assertEqual(least_punished([]), [])
+
+    def test_it_is_the_old_search_until_something_is_punished(self):
+        model = self.trained()
+        for prefix in ("the ", "the cat", "sat on"):
+            with self.subTest(prefix=prefix):
+                a = model.predict(prefix, length=8, k=3, mode="beam")
+                b = model.predict(prefix, length=8, k=3, mode="beam", traversal="least-punished")
+                self.assertEqual(a.full_text, b.full_text)
+                self.assertEqual(a.cost, b.cost)
+                self.assertEqual(a.expanded, b.expanded)
+                self.assertEqual([r.full_text for r in a.top], [r.full_text for r in b.top])
+                self.assertEqual([r.full_text for r in a.bottom], [r.full_text for r in b.bottom])
+
+    def test_it_leaves_a_step_that_was_judged_wrong(self):
+        """Rewarded five times over, punished once - and not walked again."""
+        model = self.trained()
+        model.reward(["the cat sat on the mat"], epochs=1, strength=5.0)
+        model.punish(["the cat sat on the mat"], epochs=1, strength=1.0)
+        prefix = "the cat sat on the "
+        by_reward = model.predict(prefix, length=6, k=3, mode="beam")
+        by_blame = model.predict(prefix, length=6, k=3, mode="beam", traversal="least-punished")
+        self.assertEqual(by_reward.full_text, "the cat sat on the mat")
+        self.assertEqual(by_blame.full_text, "the cat sat on the log")
+        self.assertGreater(by_blame.cost, by_reward.cost)  # dearer, and taken anyway
+        self.assertEqual(by_blame.punish, 0.0)
+        blamed = next(r for r in by_blame.top if r.full_text == "the cat sat on the mat")
+        self.assertGreater(blamed.punish, 0.0, "the blamed walk should still be offered, marked with its blame")
+        self.assertEqual(by_blame.to_dict()["traversal"], "least-punished")
+        self.assertNotIn("traversal", by_reward.to_dict())
+
+    def test_a_reward_does_not_buy_the_blame_off(self):
+        model = self.trained()
+        model.punish(["the cat sat on the mat"], epochs=1, strength=1.0)
+        model.reward(["the cat sat on the mat"], epochs=1, strength=50.0)
+        graph = model.graph
+        judged = [(prev, edge) for (prev, edge), row in graph.paths.items() if row[2] > 0]
+        self.assertTrue(judged, "the punished pass recorded no context")
+        for prev, edge in judged:
+            self.assertEqual(graph.edge_punishment(edge), 0.0, "the edge's own reward is positive now")
+            self.assertGreater(graph.step_punishment(prev, edge), 0.0, "a reward bought off the blame")
+
+    def test_a_graph_with_no_record_of_failure_has_nothing_against_anything(self):
+        model = RadixNet(seed=0)
+        model.train(self.TEXTS, epochs=1)
+        graph = model.graph
+        self.assertEqual(graph.edge_punishment(0), 0.0)
+        self.assertEqual(graph.step_punishment(START, 0), 0.0)
+        self.assertTrue(all(step[3] == 0.0 for step in graph.child_steps(START, None)))
+        with self.assertRaises(ValueError):  # and it says so rather than pretending
+            model.predict("the", length=4, traversal="least-punished")
+
+    def test_a_sampled_walk_follows_the_blame_too(self):
+        model = self.trained()
+        model.punish(["the cat sat on the mat"], epochs=2, strength=3.0)
+        walks = [
+            model.predict("the cat sat on the ", length=6, mode="sample", temperature=0.0,
+                          traversal="least-punished").full_text
+            for _ in range(5)
+        ]
+        self.assertEqual(set(walks), {"the cat sat on the log"}, walks)
 
 
 if __name__ == "__main__":

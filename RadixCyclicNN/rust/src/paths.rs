@@ -163,6 +163,18 @@ impl Graph {
         }
     }
 
+    /// Sets one context's counters as a file recorded them.
+    pub(crate) fn load_path(&mut self, prev: usize, edge: usize, seen: i64, correct: i64, incorrect: i64) {
+        if edge >= self.edge_alive.len() || prev >= self.labels.len() {
+            return;
+        }
+        if let Some(row) = self.path_row(prev, edge, true) {
+            row.seen = seen;
+            row.correct = correct;
+            row.incorrect = incorrect;
+        }
+    }
+
     /// How often a walk that came from `prev` was judged wrong here: the one
     /// number the least-punished traversal steers by, counted against nothing.
     pub fn path_incorrect(&self, prev: usize, edge: usize) -> i64 {

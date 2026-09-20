@@ -77,7 +77,7 @@ D-068 the BACK sentinel: where it goes round, learned
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
 **Part XV — A second way through, and a third implementation** ·
-D-069 the least-punished traversal · D-070 the Rust port
+D-069 the least-punished traversal · D-070 the Rust port · D-071 words as symbols
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2465,15 +2465,22 @@ takes (D-047): the two now agree about what a path's blame is.
   an effort result, not a quality result; nothing here has been graded.
 * It reads numbers the model file already carries, so it costs the format
   nothing and changes nothing it walks.
-* **Python does not have it.** An *undone* gap, not a deliberate one (D-066's
-  distinction).
+* **All three implementations have it** - Python, Go and Rust - and both parity
+  suites hold the ports to Python's answers under it, punishment included. The
+  sine model accepts the argument and refuses anything but `reward`: it keeps no
+  record of failure to rank a walk by, and says so rather than ignoring the
+  option (the discipline of D-070's `weights` command).
+* It is a way of *reading* the model, and nothing reads it that way on the
+  model's behalf: the tutor, the conversation, the agent and the guard all still
+  walk by cost.
 
 **The honest gap it papers over.** An edge keeps one reward, so its own penalty
 *is* netted - only the path contexts remember a failure as a failure. The edge
 should learn to keep the two apart; that is a model file change, and it is what
 the first term of the punishment is a stand-in for until then.
 
-**Lives in** `go/radixnet/search.go`, `go/radixnet/beam.go`, `go/radixnet/weights.go`,
+**Lives in** `radixnet/search.py`, `radixnet/beam.py`, `radixnet/countnet.py`,
+`go/radixnet/search.go`, `go/radixnet/beam.go`, `go/radixnet/weights.go`,
 `rust/src/search.rs`, `rust/src/beam.rs`, `rust/src/weights.rs`, `SPEC-LeastPunished.md`
 
 ---
@@ -2504,10 +2511,10 @@ design of `bench/compare.py`.
 
 | | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
 |---|--:|--:|--:|--:|
-| training | 6.2M transitions/s | **14.2M** | 6.8M | **19.7M** |
-| prediction | 4.1k/s | **15.7k** | 3.4k | **15.7k** |
+| training | 6.6M transitions/s | **14.3M** | 7.4M | **20.6M** |
+| prediction | 4.2k/s | **16.1k** | 3.8k | **16.1k** |
 
-2.3-2.9x at counting, 3.8-6.5x at predicting (the wide end of the second range is
+2.2-2.8x at counting, 3.8-6.2x at predicting (the wide end of the second range is
 the least-punished traversal, where the search is small and the constant factors
 are most of it). Three representation choices carry
 most of it and none of them is algorithmic: a trigram is a packed `u64` rather
@@ -2521,13 +2528,92 @@ table for "Rust is 4x faster than Go" has been misled by it.
   the third; `tests/test_go_parity.py` remains the check for the second.
 * Go's `--workers 1` now runs the two beams of a prediction in turn rather than
   on two goroutines, so a one-worker row means the same thing on both sides.
-* The Rust port does **not** read or write model files, does not serve the API
-  and has no negative network, tutor or agent. It trains in memory and reports.
-  Undone, not deliberate.
+* The Rust port reads and writes the `radixnet-count` model file, gzipped or
+  not, and `tests/test_rust_parity.py` holds it to Python's: the same structure,
+  counts, rewards, window, RNG state, judged paths and node ratios, the same
+  predictions, generated texts and scores, and each side continuing the other's
+  file. Its graph document is Python's **byte for byte** but for the `version`
+  cache stamp - which the Go port's is not, because Go renders floats and orders
+  keys its own way. What the port still does **not** have: the HTTP server, the
+  negative network, the tutors and the agent. Undone, not deliberate.
 * Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
   both sides, because a benchmark of a deliberate data race measures the race.
 
 **Lives in** `rust/`, `bench/`, `Makefile` (`rust-build`, `rust-test`, `bench-compare`)
+
+---
+
+### D-071 — A word n-gram model is this model over an alphabet of words
+
+**Status** Accepted · 2026-09-20 · **Layer** input · **Beside** D-006
+
+**Context** *"What about word n-grams?"* The obvious reading of that question is
+that it asks for a second model. It does not. D-006 decides what a **symbol**
+is - characters, window 3, stride 1 - and every structural rule in the graph is
+stated in terms of that window and nothing else: a label is a sequence of
+symbols, an edge exists where the last `WINDOW - 1` symbols of one label are the
+first `WINDOW - 1` of another, the index maps a `WINDOW`-symbol key to
+`(node, offset)`, compression merges a unary chain at that seam. Not one of
+those rules mentions a character.
+
+**Decision** Add one model kind, `word`, which is the count / reward model
+(D-021, D-022) with the encoder and the decoder replaced: **a word is a
+symbol**, carried as one code point (`id 0 -> U+0100` is `<unk>`, `id i ->
+U+0100 + i`, the surrogate block skipped, 1 111 808 words). Text becomes symbols
+on the way in and symbols become text on the way out; between those two points
+the graph, the weight function, the counters, the paths, both traversals and the
+search are untouched, in all three implementations. The file is a format of its
+own, `radixnet-word`, carrying `units: "words"` and the `vocabulary` in id
+order.
+
+**Rationale** The alternative - making the graph generic over a sequence of
+symbols - is what a type system would prefer, and it changes every structural
+routine in three implementations to buy what a code-point alphabet already
+buys. The current design *already* proves the graph is alphabet-agnostic; this
+decision only names what was always true. The vocabulary grows as training reads
+new words and is never frozen, pruned or learned, which is the part of D-006
+that matters: there is no tokeniser, no merge table and no training run before
+the training run. Tokenising is `text.split()` and nothing else, because every
+refinement of that rule is a step towards a vocabulary that has to be designed,
+versioned and defended.
+
+**What it costs, stated plainly**
+* **Whitespace is normalised.** `decode(encode(t))` joins the words with single
+  spaces, so a corpus whose whitespace carries meaning - source code, base64, a
+  waveform (D-036) - must stay on the character model. A word model cannot eat
+  the corpora the character model was chosen to be able to eat, and that is why
+  both kinds stay.
+* **Two unread words are one symbol.** At prediction and scoring time an unread
+  word is `<unk>`, so `"the qux sat"` and `"the quux sat"` score identically. It
+  is visible in `unknown_transitions`, and it is why the character model remains
+  the default.
+* **N stays 3.** The overlap is two words and the pivot is the middle one -
+  D-006's argument word for word. Word *bigrams* need `WINDOW = 2`, which
+  collapses the pivot and the context that D-006 rejected collapsing, and in
+  Rust additionally needs the packed-trigram representation rewritten. Out of
+  scope; nothing here prevents it later.
+
+**Consequences**
+* Everything counted in symbols is counted in **words**: `--length 6` emits six
+  words, `--max-length` caps words, `Score.chars` counts words and `per_char` is
+  per word. `stats()["units"]` says which, because a number whose unit depends
+  on the model is a number that will be read wrong; the CLI's score columns, the
+  frontend's length fields and the API's status carry it too.
+* Compression does to word chains what it already did to character chains: a
+  repeated phrase becomes **one node whose label is that phrase**
+  (`'sat on the mat'`), and the search walks phrases.
+* Interchange is the contract the count model has: Python, Go and Rust read and
+  write the file, and the parity tests require the same structure, the same
+  counts, the same vocabulary **in the same order** and the same predictions.
+  The Rust word document is Python's byte for byte, as the count one is.
+* Three small seams were opened in shared code to make the alphabet a model's
+  own business rather than the search's: `graph.text_of` / `graph.symbols_of`
+  (a label as text, and back), a model-level `units`, and `_whole_text` no
+  longer re-joining a prefix the search already joined.
+
+**Lives in** `radixnet/wordnet.py`, `radixnet/encoding.py` (the alphabet),
+`go/radixnet/words.go`, `rust/src/words.rs`, `SPEC-WordNGrams.md`,
+`Makefile` (`word-*`)
 
 ---
 

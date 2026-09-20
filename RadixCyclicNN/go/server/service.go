@@ -22,6 +22,9 @@ const Version = "0.1.0"
 // ModelLabel is what the frontend shows for the active model kind.
 const ModelLabel = "Count / reward (Go)"
 
+// WordModelLabel is the same for a server running the word model.
+const WordModelLabel = "Word n-gram (Go)"
+
 // apiError is a client-visible failure with an HTTP status.
 type apiError struct {
 	status  int
@@ -472,9 +475,26 @@ func (s *Service) mutate(fn func(m *radixnet.Model) (any, error)) (any, error) {
 // Kinds describes the one kind this server runs.
 func Kinds() []map[string]any {
 	return []map[string]any{{
-		"kind": "count", "label": ModelLabel,
+		"kind": "count", "label": ModelLabel, "units": radixnet.CharUnits,
 		"description": "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K continuations (Go implementation)",
 	}}
+}
+
+// WordKinds is Kinds for a server running the word model: the same algorithm
+// over an alphabet whose symbols are words, so it is a kind of its own.
+func WordKinds() []map[string]any {
+	return []map[string]any{{
+		"kind": "word", "label": WordModelLabel, "units": radixnet.WordUnits,
+		"description": "the count / reward model over an alphabet whose symbols are words: the same graph, weights and search, with a whitespace split for an encoder - lengths, counts and scores are per word, an unread word is <unk>, and whitespace is normalised (Go implementation)",
+	}}
+}
+
+// kinds is the list for the model this server actually runs.
+func (s *Service) kinds() []map[string]any {
+	if s.model != nil && s.model.IsWords() {
+		return WordKinds()
+	}
+	return Kinds()
 }
 
 // Backends mirrors the Python status's backend availability block.
@@ -503,9 +523,15 @@ func (s *Service) Status() (map[string]any, error) {
 	if s.ckpts != nil {
 		ckptDir = s.ckpts.Dir
 	}
-	stats["kind"] = "count"
-	stats["model_label"] = ModelLabel
-	stats["kinds"] = Kinds()
+	kind, label := "count", ModelLabel
+	units := radixnet.CharUnits
+	if s.model != nil && s.model.IsWords() {
+		kind, label, units = "word", WordModelLabel, radixnet.WordUnits
+	}
+	stats["kind"] = kind
+	stats["model_label"] = label
+	stats["units"] = units
+	stats["kinds"] = s.kinds()
 	stats["job"] = job
 	stats["backends"] = s.Backends()
 	stats["model_path"] = modelPath
@@ -541,16 +567,35 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	if s.modelPath != "" {
 		modelPath, _ = filepath.Abs(s.modelPath)
 	}
+	active, label := "count", ModelLabel
+	units := radixnet.CharUnits
+	if s.model != nil && s.model.IsWords() {
+		active, label, units = "word", WordModelLabel, radixnet.WordUnits
+	}
 	return map[string]any{
-		"kind": "count", "label": ModelLabel, "kinds": Kinds(), "model_path": modelPath,
-		"paths": map[string]any{"count": modelPath}, "in_memory": []string{"count"}, "weights": out, "engine": "go",
+		"kind": active, "label": label, "units": units, "kinds": s.kinds(), "model_path": modelPath,
+		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out, "engine": "go",
 	}, nil
 }
 
-// SelectKind is POST /api/model/select: only the count kind exists here.
+// SelectKind is POST /api/model/select: this server runs the model it was
+// started with - the count / reward model, or the word model over the same
+// graph - and selecting the other one is starting the server again with it.
 func (s *Service) SelectKind(kind string) (map[string]any, error) {
-	if strings.ToLower(strings.TrimSpace(kind)) != "count" {
-		return nil, badRequest("the Go server runs the count / reward model only (kind %q is served by the Python server)", kind)
+	active := "count"
+	if s.model != nil && s.model.IsWords() {
+		active = "word"
+	}
+	wanted := strings.ToLower(strings.TrimSpace(kind))
+	if wanted != active {
+		if wanted == "count" || wanted == "word" {
+			// both are this same model, over characters or over words: which one a server runs is
+			// settled when it starts, because it is the model it holds
+			return nil, badRequest("this Go server runs the %s model; the %s model needs "+
+				"`radixnet-count --kind %s serve`", active, wanted, wanted)
+		}
+		return nil, badRequest("the Go server runs the count / reward model only, over characters or over words "+
+			"(kind %q is served by the Python server)", kind)
 	}
 	desc, err := s.DescribeModel()
 	if err != nil {
@@ -794,8 +839,8 @@ func (s *Service) Paths(limit int) (map[string]any, error) {
 			rows = append(rows, map[string]any{
 				"prev": row.Prev, "edge": row.Edge, "seen": row.Seen, "correct": row.Correct,
 				"incorrect": row.Incorrect, "correct_ratio": row.CorrectRatio, "seen_ratio": row.SeenRatio,
-				"term": row.Term, "after": g.Label(row.Prev), "parent": parent,
-				"parent_label": g.Label(parent), "child": child, "child_label": g.Label(child),
+				"term": row.Term, "after": g.TextOf(g.Label(row.Prev)), "parent": parent,
+				"parent_label": g.TextOf(g.Label(parent)), "child": child, "child_label": g.TextOf(g.Label(child)),
 			})
 		}
 		totals := g.PathTotals()
@@ -805,6 +850,29 @@ func (s *Service) Paths(limit int) (map[string]any, error) {
 				"correct": totals.Correct, "incorrect": totals.Incorrect,
 			},
 			"paths": rows, "limit": limit, "path_scale": g.WeightConfig().PathScale,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// Words is GET /api/words: the word model's alphabet, most read first.
+func (s *Service) Words(limit int) (map[string]any, error) {
+	if limit < 0 {
+		return nil, badRequest("'limit' must be >= 0 (got %d)", limit)
+	}
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		if !m.IsWords() {
+			return nil, badRequest("the %s model has no vocabulary; it counts in %s", m.Kind(), m.Units())
+		}
+		rows := m.TopWords(limit)
+		if rows == nil {
+			rows = []radixnet.WordRow{}
+		}
+		return map[string]any{
+			"words": rows, "limit": limit, "vocabulary": m.Vocabulary().Len(), "units": m.Units(),
 		}, nil
 	})
 	if err != nil {
@@ -823,14 +891,15 @@ func (s *Service) NodeRatios(limit int, node string) (map[string]any, error) {
 		g := m.G
 		wanted := -1
 		if node != "" {
+			key := g.SymbolsOf(node) // a word graph is addressed in words; the identity anywhere else
 			for i := 0; i < g.NumNodeIDs(); i++ {
-				if g.Label(i) == node {
+				if g.Label(i) == key {
 					wanted = i
 					break
 				}
 			}
 			if wanted < 0 {
-				found, _, ok := g.Lookup(node)
+				found, _, ok := g.Lookup(key)
 				if !ok {
 					return nil, notFound("no node labelled %q: give a node label, or one of its trigrams", node)
 				}
@@ -904,7 +973,7 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 	}
 	nodes := make([]map[string]any, 0, len(ids))
 	for _, i := range ids {
-		nodes = append(nodes, map[string]any{"id": i, "label": g.Labels[i], "count": g.Count[i],
+		nodes = append(nodes, map[string]any{"id": i, "label": g.TextOf(g.Labels[i]), "count": g.Count[i],
 			"count_resets": g.CountResets[i], "activation": 1.0, "z": 0.0, "a": 0.0, "b": 1.0 / 3.0, "h": 0.0, "k": 1.0})
 	}
 	edges := []map[string]any{}

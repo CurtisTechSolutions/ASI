@@ -29,7 +29,19 @@ from .backend import (
     torch_available,
 )
 from .checkpoint import CheckpointManager
-from .encoding import END_LABEL, START_LABEL, WINDOW, Decoder, Encoder
+from .encoding import (
+    END_LABEL,
+    MAX_WORDS,
+    START_LABEL,
+    UNKNOWN_WORD,
+    WINDOW,
+    Decoder,
+    Encoder,
+    Vocabulary,
+    split_words,
+    symbol_word,
+    word_symbol,
+)
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict
@@ -40,6 +52,7 @@ from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, m
 from .negative import NegativeGraph, NegativeNet
 from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .resonance import ResonantGraph, ResonantNet, trigram_phase
+from .wordnet import WordGraph, WordNGramNet
 from .search import PathResult, dijkstra_predict, sample_walk
 from .speech import (
     ASR_BACKENDS,
@@ -60,6 +73,8 @@ __all__ = [
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
     "NegativeNet", "NegativeGraph", "NegativeFilter", "FilterConfig",
     "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",
+    "WordNGramNet", "WordGraph", "Vocabulary", "split_words", "word_symbol", "symbol_word",
+    "MAX_WORDS", "UNKNOWN_WORD",
     "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
     "get_backend", "describe_backends", "torch_available",

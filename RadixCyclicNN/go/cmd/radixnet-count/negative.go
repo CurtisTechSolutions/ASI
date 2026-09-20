@@ -20,8 +20,8 @@ func negativeFile() string {
 	if strings.TrimSpace(negativePath) != "" {
 		return negativePath
 	}
-	ext := filepath.Ext(modelPath)
-	root := strings.TrimSuffix(modelPath, ext)
+	ext := filepath.Ext(modelFile())
+	root := strings.TrimSuffix(modelFile(), ext)
 	if ext == ".gz" {
 		inner := filepath.Ext(root)
 		root = strings.TrimSuffix(root, inner)

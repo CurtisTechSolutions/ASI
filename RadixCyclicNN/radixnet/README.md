@@ -27,12 +27,13 @@ does what.
 | `beam.py` | beam search — the K best **and** the K worst continuations in one prediction |
 | `schedule.py` | learning-rate schedules, expressed as a *graph function* of the epoch |
 
-## The three models
+## The models
 
 | module | what it is |
 |---|---|
 | `model.py` | `RadixNet` — training, prediction, generation, scoring, 2NRL and persistence |
 | `countnet.py` | `CountRewardNet` — the count / reward model: a second algorithm on the same graph, weights a dual frequency function of traversal counts plus rewards |
+| `wordnet.py` | `WordNGramNet` — the same count / reward model over an alphabet whose symbols are **words**: a word is one code point, the window is still three, and only the encoder and the decoder differ (`../SPEC-WordNGrams.md`) |
 | `resonance.py` | `ResonantNet` — the phase model: an analog carrier on the same graph |
 | `phasesearch.py` | search over the phase-unrolled graph, with the metacognitive handoff on cycles |
 | `metacog.py` | `MetaLayer` — the part that takes over when the walk meets a phase-locked cycle. Its answer is a cost, never a prohibition |

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, fmtInt, fmtNum, parseInteger, parseNumber } from "../util.js";
+import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, unitLength, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
@@ -76,7 +76,8 @@ export default function GeneratePanel({ status }) {
         <TextField label="Prefix" hint="optional: every text starts with it" value={prefix} onChange={setPrefix} placeholder="the quick" />
         <div className="row">
           <NumberField label="Count" hint="beam: the K most likely" value={count} onChange={setCount} min={1} step={1} />
-          <NumberField label="Max length" value={maxLength} onChange={setMaxLength} min={1} step={1} />
+          <NumberField label="Max length" hint={`${unitName(status)} per text`} value={maxLength}
+                       onChange={setMaxLength} min={1} step={1} />
         </div>
         <div className="row">
           <SelectField
@@ -133,7 +134,7 @@ export default function GeneratePanel({ status }) {
                   <pre className="sample">{text}</pre>
                   <div className="meta">
                     cost {fmtNum(s && s.cost, 3)} · p {fmtNum(s && s.probability, 4)} ·{" "}
-                    {fmtInt(asArray(s && s.path).length)} path nodes · {fmtInt(text.length)} chars
+                    {fmtInt(asArray(s && s.path).length)} path nodes · {fmtInt(unitLength(text, status))} {unitName(status)}
                     <RateButtons
                       text={text}
                       rating={rating}

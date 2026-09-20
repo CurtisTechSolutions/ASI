@@ -102,3 +102,30 @@ export function countingKind(status) {
   const kind = modelKind(status);
   return kind !== "" && kind !== "radix";
 }
+
+/**
+ * What the active model counts in: "words" for the word n-gram model, whose
+ * symbols are words, and "chars" for every other kind. Lengths, caps and
+ * per-symbol scores are in those units, and a number whose unit depends on the
+ * model is a number that will be read wrong (../../SPEC-WordNGrams.md section 9).
+ */
+export function unitsOf(status) {
+  return status && status.units === "words" ? "words" : "chars";
+}
+
+/** True when the active model's symbols are words rather than characters. */
+export function wordKind(status) {
+  return unitsOf(status) === "words";
+}
+
+/** The model's unit as an English word: "characters" / "words" (`plural: false` for the singular). */
+export function unitName(status, plural = true) {
+  if (wordKind(status)) return plural ? "words" : "word";
+  return plural ? "characters" : "character";
+}
+
+/** How long a text is in the model's units: its words, or its characters. */
+export function unitLength(text, status) {
+  const value = String(text ?? "");
+  return wordKind(status) ? (value.match(/\S+/g) || []).length : value.length;
+}

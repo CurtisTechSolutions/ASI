@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import gzip
+import inspect
 import json
 import math
 import os
@@ -36,7 +37,7 @@ from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
-from .search import PathResult, dijkstra_predict, sample_walk
+from .search import REWARD, PathResult, dijkstra_predict, parse_traversal, sample_walk
 from .schedule import preview_points
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "TrainConfig",
     "UNKNOWN_PROB",
     "load_model",
+    "traversal_option",
     "model_class",
     "model_classes",
     "model_from_dict",
@@ -176,9 +178,40 @@ class TrainConfig:
 _CONFIG_FIELDS = frozenset(f.name for f in dataclasses.fields(TrainConfig))
 
 
-def _whole_text(result: PathResult, prefix: str) -> PathResult:
-    """A generated result is a whole text: ``text`` becomes ``prefix + continuation`` (``full_text`` already is)."""
-    result.full_text = prefix + result.text
+def traversal_option(model, traversal: str = "reward") -> dict:
+    """``{"traversal": ...}`` for a model whose search takes one, ``{}`` for a model that has only its own.
+
+    Asking a model for a traversal it does not have is an error rather than a
+    silence - the discipline the resonant model's ``weights`` command set, which
+    rejects another kind's options by name instead of ignoring them.
+    """
+    if _takes_traversal(model):
+        return {"traversal": traversal}
+    if parse_traversal(traversal) != REWARD:
+        raise ValueError(
+            f"the {traversal!r} traversal belongs to the count model; the {model.kind} model searches its own way"
+        )
+    return {}
+
+
+def _takes_traversal(model) -> bool:
+    """Whether this model's ``predict`` accepts a traversal.
+
+    The count model and :class:`RadixNet` do; the resonant model and the
+    negative network keep their own searches and do not, so the option rides
+    along only where it means something - and asking for the one they do not
+    have is an error rather than a silence.
+    """
+    return "traversal" in inspect.signature(type(model).predict).parameters
+
+
+def _whole_text(result: PathResult) -> PathResult:
+    """A generated result is a whole text: ``text`` becomes the whole of it, which ``full_text`` already holds.
+
+    The search is what joined the prefix to the continuation, in whatever the
+    model's symbols are; a generated text never re-joins them here, because
+    only the search knows the alphabet (``../SPEC-WordNGrams.md``).
+    """
     result.text = result.full_text
     return result
 
@@ -313,6 +346,9 @@ class GraphModel:
     kind = "graph"
     label = "graph model"
     description = ""
+    units = "chars"
+    """What this kind counts in: its symbols, as a reader of ``length``, ``max_length`` or ``per_char`` needs
+    them named.  Characters everywhere but the word model (``../SPEC-WordNGrams.md``)."""
 
     graph: RadixCyclicGraph
     encoder: Encoder
@@ -576,10 +612,13 @@ class GraphModel:
         to_end: bool,
         max_length: int | None,
         rng: random.Random | None = None,
+        traversal: str = "reward",
     ) -> Prediction:
         """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
         continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
-        ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`."""
+        ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`.  ``traversal``
+        chooses what a walk is ranked by (``../SPEC-LeastPunished.md``)."""
+        traversal = parse_traversal(traversal)
         graph = self.graph
         node, offset, lead = self._prefix_start(prefix)
         want = max(0, length - len(lead))
@@ -594,12 +633,15 @@ class GraphModel:
                 max_chars = max(want, cap - len(lead))
             top, bottom, expanded = beam_predict(
                 graph, node, offset, min_chars=want, k=k, beam=beam, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end,
+                step_penalty=step_penalty, to_end=to_end, traversal=traversal,
             )
             width = default_beam(k) if beam is None else int(beam)
         else:
             cap = max_length if max_length is not None else length
-            walk = sample_walk(graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng)
+            walk = sample_walk(
+                graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng,
+                traversal=traversal,
+            )
             top, bottom, expanded, width = [walk], [], walk.expanded, 0
         for result in top + bottom:
             if lead:
@@ -611,7 +653,7 @@ class GraphModel:
         return Prediction(
             text=best.text, labels=list(best.labels), node_ids=list(best.node_ids), cost=best.cost,
             step_costs=list(best.step_costs), expanded=expanded, reached_end=best.reached_end, full_text=best.full_text,
-            top=top, bottom=bottom, k=k, beam=width, mode=mode,
+            top=top, bottom=bottom, k=k, beam=width, mode=mode, traversal=traversal,
         )
 
     # -- generation and scoring ----------------------------------------------
@@ -626,6 +668,7 @@ class GraphModel:
         prefix: str = "",
         step_penalty: float = 0.0,
         beam: int | None = None,
+        traversal: str = "reward",
     ) -> list[PathResult]:
         """Generate whole texts with the prediction search, from START or continuing ``prefix``.
 
@@ -652,21 +695,27 @@ class GraphModel:
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
         if count == 0:
             return []
+        extra = traversal_option(self, traversal)  # only where the model's search takes one
         if mode == "sample":
             rng = random.Random(seed) if seed is not None else None
             results: list[PathResult] = []
             for _ in range(count):
-                walk = self._search(prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng)
-                results.append(_whole_text(walk, prefix))
+                walk = self._search(
+                    prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng, **extra
+                )
+                results.append(_whole_text(walk))
             return results
         if mode == "dijkstra":
-            best = self.predict(prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length, step_penalty=step_penalty)
-            return [_whole_text(best, prefix)]
+            best = self.predict(
+                prefix, length=0, mode="dijkstra", to_end=True, max_length=max_length,
+                step_penalty=step_penalty, **extra,
+            )
+            return [_whole_text(best)]
         found = self.predict(
             prefix, length=0, mode="beam", k=count, beam=beam, to_end=True, max_length=max_length,
-            step_penalty=step_penalty,
+            step_penalty=step_penalty, **extra,
         )
-        return [_whole_text(result, prefix) for result in found.top]
+        return [_whole_text(result) for result in found.top]
 
     def converse(self, opening: str = "", turns: int = 6, **options):
         """The model converses with itself: two voices, each reply the prediction search picking up the end of
@@ -932,6 +981,7 @@ class RadixNet(GraphModel):
         max_length: int | None = None,
         k: int = 5,
         beam: int | None = None,
+        traversal: str = "reward",
     ) -> PathResult:
         """Continue ``prefix``.
 
@@ -949,7 +999,17 @@ class RadixNet(GraphModel):
         matched, the unmatched remainder of that trigram opens the
         continuation; a cap, when given, applies to the continuation as a
         whole (lead included).
+
+        ``traversal`` is accepted for interface parity with the count model and
+        must be ``"reward"``: ranking a walk by the blame on it needs a record
+        of what went wrong, and this model keeps none
+        (``../SPEC-LeastPunished.md``).
         """
+        if parse_traversal(traversal) != REWARD:
+            raise ValueError(
+                f"the {traversal!r} traversal belongs to the count model; this model keeps no record of failure "
+                "to rank a walk by"
+            )
         self._check_predict_args(prefix, length, max_length, k, beam)
         mode = (mode or "dijkstra").lower()
         if mode not in ("dijkstra", "beam", "sample"):
@@ -1280,22 +1340,27 @@ class RadixNet(GraphModel):
 
 
 def model_classes() -> dict[str, type[GraphModel]]:
-    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"negative"`` and ``"resonant"``)."""
+    """``{kind: class}`` of every model kind (``"radix"``, ``"count"``, ``"word"``, ``"negative"``, ``"resonant"``)."""
     from .countnet import CountRewardNet  # local imports: they all build on this module
     from .negative import NegativeNet
     from .resonance import ResonantNet
+    from .wordnet import WordNGramNet
 
     return {
         RadixNet.kind: RadixNet,
         CountRewardNet.kind: CountRewardNet,
+        WordNGramNet.kind: WordNGramNet,
         NegativeNet.kind: NegativeNet,
         ResonantNet.kind: ResonantNet,
     }
 
 
 def model_kinds() -> list[dict]:
-    """``[{"kind", "label", "description"}]`` for menus and help texts."""
-    return [{"kind": c.kind, "label": c.label, "description": c.description} for c in model_classes().values()]
+    """``[{"kind", "label", "description", "units"}]`` for menus and help texts."""
+    return [
+        {"kind": c.kind, "label": c.label, "description": c.description, "units": c.units}
+        for c in model_classes().values()
+    ]
 
 
 def model_class(kind: str | None) -> type[GraphModel]:

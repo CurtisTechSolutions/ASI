@@ -173,6 +173,10 @@ type Graph struct {
 	// Neg is the negative network's evidence (nil on a count / reward graph).
 	Neg *NegativeData
 
+	// Vocab is the alphabet of a word model - words to code points - and is nil
+	// on a character graph, which is every other kind (see words.go).
+	Vocab *Vocabulary
+
 	// the count / reward numbers
 	EdgeReward      []float64
 	WindowEdgeCount []int64
@@ -224,6 +228,9 @@ type GraphOptions struct {
 	WindowScale float64
 	PathScale   float64
 	Window      int
+	// Words makes the graph's symbols words rather than characters: the same
+	// graph over a different alphabet (../../SPEC-WordNGrams.md).
+	Words bool
 }
 
 // DefaultGraphOptions mirror the Python defaults (geometric mean of the two shares).
@@ -256,6 +263,9 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 		pathsByPrev:      map[int]map[int]bool{},
 		ctxVersion:       invalidStamp,
 		Workers:          Workers,
+	}
+	if opts.Words {
+		g.Vocab = NewVocabulary()
 	}
 	g.newNode(StartLabel, 0, 0)
 	g.newNode(EndLabel, 0, 0)

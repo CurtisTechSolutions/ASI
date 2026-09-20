@@ -109,7 +109,7 @@ func cmdCodeGen(args []string) {
 		trainer.Negative = negative
 	}
 
-	say("model:    %s", modelPath)
+	say("model:    %s", modelFile())
 	say("problems: %d from %s", len(problems), *problemsPath)
 	say("phases:   %s, %d round(s)", strings.Join(cfg.Phases, " -> "), cfg.Rounds)
 	say("teacher:  %s: %s at %s", cfg.TeacherProvider, client.ModelName(), client.BaseURL())

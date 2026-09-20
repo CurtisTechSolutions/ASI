@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
 import { browserStorage, clearSettings } from "./storage.js";
+import { wordKind } from "./util.js";
 import StatusBar from "./components/StatusBar.jsx";
 import ModelSelector from "./components/ModelSelector.jsx";
 import TrainPanel from "./components/TrainPanel.jsx";
@@ -20,6 +21,7 @@ import ImagesPanel from "./components/ImagesPanel.jsx";
 import SpeechPanel from "./components/SpeechPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
+import WordsPanel from "./components/WordsPanel.jsx";
 
 // Both servers now run every tab: the lessons, the evolve loop, the Ollama corpus and review, code
 // generation, tool use and the image and speech encoders. The Go side's images use a thumbnail rather than
@@ -33,6 +35,7 @@ const TABS = [
   { id: "converse", label: "Converse", Component: ConversePanel },
   { id: "chat", label: "Chat", Component: ChatPanel },
   { id: "score", label: "Score", Component: ScorePanel },
+  { id: "words", label: "Words", Component: WordsPanel, wordOnly: true },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel },
   { id: "negative", label: "Negative", Component: NegativePanel },
   { id: "evolve", label: "Evolve", Component: EvolvePanel },
@@ -85,8 +88,10 @@ export function engineOf(status, health) {
   return fromStatus || fromHealth || "python";
 }
 
-function tabsFor(engine) {
-  return engine === "go" ? TABS.filter((t) => !t.pythonOnly) : TABS;
+function tabsFor(engine, status) {
+  // `wordOnly` belongs to the word model, whose symbols are words: there is no vocabulary to show anywhere else
+  const words = wordKind(status);
+  return TABS.filter((t) => !(engine === "go" && t.pythonOnly) && !(t.wordOnly && !words));
 }
 
 function tabFromHash() {
@@ -105,7 +110,7 @@ export default function App() {
   const [version, setVersion] = useState(null);
   const [health, setHealth] = useState(null);
   const engine = engineOf(status, health);
-  const tabs = tabsFor(engine);
+  const tabs = tabsFor(engine, status);
   const activeTab = tabs.some((t) => t.id === tab) ? tab : tabs[0].id;
 
   useEffect(() => {

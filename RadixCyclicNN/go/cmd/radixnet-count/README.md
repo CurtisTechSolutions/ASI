@@ -8,7 +8,7 @@ files interchangeable with the Python implementation.
 
 | file | what it holds |
 |---|---|
-| `main.go` | the package doc, the global flags (`--model`, `--json`, `--seed`, `--workers`, `--exact`, `--out`, `--memlimit`, `--memprofile`), the dispatcher, and the core commands — `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`, `invert`, `weights`, `nodes`, `paths`, `info`, `converse`, `tutor`, `serve`, `version` |
+| `main.go` | the package doc, the global flags (`--model`, `--kind`, `--json`, `--seed`, `--workers`, `--exact`, `--out`, `--memlimit`, `--memprofile`), the dispatcher, and the core commands — `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`, `invert`, `weights`, `nodes`, `paths`, `words`, `info`, `converse`, `tutor`, `serve`, `version` |
 | `negative.go` | `negative` — `blame`, `clear`, `why`, `filter`, `reasons`, `forget`, `auto` |
 | `ollama.go` | `ollama` (`models`, `corpus`, `review`) and `chatgpt` (`models`, `ask`) |
 | `chat.go` | `chat` — an LLM converses with the model and marks every reply |
@@ -37,7 +37,14 @@ radixnet-count --model model.count.json negative filter --count 3   # write, the
 radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame
 radixnet-count --seed 1 bench --chars 200000
 radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished
+radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
+radixnet-count --kind word words --limit 20            # the alphabet it has read
 ```
+
+`--kind word` builds the same model over an alphabet whose symbols are **words**
+(`../../../SPEC-WordNGrams.md`): every length, count and score is then per word,
+`words` lists the vocabulary, and a node is addressed in words
+(`nodes --node "sat on the mat"`). A loaded file's own kind always wins.
 
 `--traversal least-punished` on `predict`, `generate` and `bench` walks by the
 blame on a step rather than by its cost (`../../../SPEC-LeastPunished.md`); the
