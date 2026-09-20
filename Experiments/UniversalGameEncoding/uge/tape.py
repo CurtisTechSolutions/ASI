@@ -115,12 +115,15 @@ near miss.  :attr:`TapeSpec.phi_prev_bits` spends part of the same token on a
 (:meth:`uge.game.Game.action_summary`) instead, which does generalise.
 
 **And the abstraction has to fit in one token.**  ``_locate`` conditions on the
-last trigram of the prefix, so when ``phi`` spans two tokens only the second
-one is read and the first is tape the model pays for and never uses.  That caps
+last trigram of the prefix, so when ``phi`` spans two tokens only the *last* one
+is read and the others are tape the model pays for and never uses.  That caps
 the model's memory at :attr:`Codebook.bits` - 18 under :data:`PLAIN`, 15 under
-:data:`DISJOINT`, which is what phase-unambiguity costs.  ``experiment.py phi``
-sweeps straight through the cliff at 16 bits rather than taking anyone's word
-for it.
+:data:`DISJOINT`, which is what phase-unambiguity costs.
+
+The cliff is therefore at the last token and not at the second: ``nim`` scores
+0.94 at 15 bits, 0.51 at 20 and 0.94 again at 30, because 20 bits leaves five in
+the final token and 30 leaves fifteen.  ``experiment.py phi`` walks through it
+rather than taking anyone's word for it.
 
 :mod:`uge.metrics` measures that curve.  It is the answer to "how do you encode
 a game" that this directory exists to produce.

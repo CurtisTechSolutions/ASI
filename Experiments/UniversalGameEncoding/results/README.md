@@ -37,7 +37,7 @@ The measurement keys are the same everywhere and come from
 | `legal_at_1` / `_covered` / `_baseline` / `_fallback` | the top token was legal: over all positions, over covered ones, what a uniform guess scores, and the model-where-it-knows-guess-where-it-does-not combination |
 | `refusals` / `refusals_baseline` | moves the board refuses before accepting one, against what guessing costs. The tail the model did not rank is charged analytically, not sampled |
 | `teacher_match` | the top token was the move the teacher actually played |
-| `optimal_match` | (Nim only, which is solved) the move taken was one of the ones that wins |
+| `optimal_match` | (Nim only, which is solved) the move taken was one that wins from that position — and from a position that is already lost, any move counts, which is how `Nim.optimal` is defined and which inflates the number against a strong opponent |
 | `greedy_plies` / `greedy_break` | how far the model gets playing both sides with no second chance, and what ended it |
 | `selfplay_*` | the same rollout allowed to walk down its own ranking - measured on **its own** positions, which by move ten are not the teacher's distribution |
 | `free_plies` / `free_break` / `free_best_plies` | the model writing a whole tape by itself. It cannot; see README limitation 3 |

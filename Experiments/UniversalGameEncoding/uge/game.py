@@ -148,10 +148,10 @@ class Game(ABC):
 
         Injective matters: two positions that share a key are one node in the
         graph whatever ``phi_bits`` says, and the abstraction stops being a
-        dial we control.  Include everything the rules depend on (for chess
-        that is castling rights and the en passant square, not just the
-        pieces) and nothing they do not (the move counters are excluded, so a
-        transposition is a transposition).
+        dial we control.  Include everything the rules read - for chess that is
+        castling rights, the en passant square and the halfmove clock, not just
+        the pieces - and as little else as possible: the move *number* is left
+        out, so a transposition hashes as a transposition.
         """
 
     action_summary_bound: int = 64

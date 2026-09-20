@@ -367,14 +367,25 @@ def arm_phase(cfg: dict, seeds: list[int], games: list[str]) -> dict:
     because only the second one predicts the damage.
     """
     books = [
-        ("plain/lsb", {"book": "plain", "layout": "lsb", "phi_bits": 15}),
-        ("plain/struct", {"book": "plain", "layout": "struct", "phi_bits": 15}),
-        ("disjoint/lsb", {"book": "disjoint", "layout": "lsb", "phi_bits": 15}),
+        ("plain/lsb", {"book": "plain", "layout": "lsb"}),
+        ("plain/struct", {"book": "plain", "layout": "struct"}),
+        ("disjoint/lsb", {"book": "disjoint", "layout": "lsb"}),
     ]
     out: dict = {"arm": "phase", "config": cfg, "seeds": seeds, "games": {}}
     for name in games:
-        rows = {}
+        game = uge.get_game(name)
+        # one abstraction size for every codebook, or chess compares a two-token
+        # phi against a one-token one and the answer is about the cliff, not the
+        # phases: `disjoint` carries 13 bits a token where `plain` carries 17
+        bits = min(
+            TapeSpec(name, game.index, phi_bits=0, **kw).codebook.phi_bits_for(
+                game.token_bound(TapeSpec(name, game.index, phi_bits=0, **kw))
+            )
+            for _label, kw in books
+        )
+        rows = {"phi_bits": bits}
         for label, kw in books:
+            kw = dict(kw, phi_bits=bits)
             per_seed, ambiguity = [], None
             for seed in seeds:
                 spec = default_spec(name, **kw)
@@ -637,6 +648,16 @@ def arm_twonrl(cfg: dict, seeds: list[int], games: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _order(rows: dict) -> list:
+    """Row labels in numeric order.  ``json.dump(sort_keys=True)`` writes ``phi=11``
+    before ``phi=4``, which is correct for a string and useless for a sweep."""
+    def key(label: str):
+        digits = "".join(c if c.isdigit() else " " for c in label).split()
+        return (0, int(digits[0])) if digits else (1, 0)
+
+    return sorted(rows, key=lambda k: key(k))
+
+
 def _fmt(value, digits=3):
     if value is None:
         return "-"
@@ -676,7 +697,7 @@ def summarise(into_readme: bool = False) -> None:
         section("RULES")
         print("### rules\n")
         print("Six games, one encoder, and the same defaults for all of them:")
-        print("a 15-bit hashed abstraction (14 for chess, whose action space takes")
+        print("a 15-bit hashed abstraction (13 for chess, whose 20 480 actions take")
         print("the code space it needs), the disjoint codebook, and the flat `lsb`")
         print("layout. Nothing is tuned per game - the later arms do that.\n")
         print("| game | `\\|A\\|` | coverage | legal@1 covered | guessing | refusals | refusals guessing | teacher match | unaided plies | self-play refusals | nodes |")
@@ -711,15 +732,27 @@ def summarise(into_readme: bool = False) -> None:
     if phi:
         section("PHI")
         print("### phi\n")
-        print("From a move-only tape to an injective one. `tokens` is what the")
-        print("abstraction costs: **2 is the cliff** - a second token is tape the model")
-        print("pays for and never reads, because only the last trigram of the prefix")
-        print("conditions the prediction.\n")
+        print("From a move-only tape to an injective one.\n")
+        print("**The cliff is not at two tokens, it is at the *last* token.** Only the")
+        print("last trigram of the prefix conditions a prediction, so what matters is")
+        print("how many bits land in the final token. Nim at 15 bits scores 0.94; at")
+        print("20 bits it scores 0.51; at 30 bits it is back to 0.94. Twenty and thirty")
+        print("both cost two tokens - but at 20 the second token carries five bits and")
+        print("at 30 it carries fifteen. Othello is the same story and louder: 211")
+        print("refusals a move at 20 bits against 8.6 at 30.\n")
+        print("**An injective `phi` is not automatically the best one.** Tic-tac-toe's")
+        print("`exact` row is *worse* than its 15-bit hash (0.65 against 0.99 at covered")
+        print("positions) although it throws nothing away, because a hash uses the token")
+        print("space evenly and a board code does not: at matched corpus size the hashed")
+        print("tape has 875 distinct seam trigrams and the exact one has 677, so the")
+        print("exact tape's seams are shared by more contexts and mix them. Uniformity")
+        print("is worth something on its own, separately from injectivity.\n")
         for name, rows in phi["games"].items():
             print(f"\n**`{name}`**\n")
             print("| phi | tokens | coverage | legal@1 | legal@1 covered | with fallback | guessing | refusals | teacher match | nodes | tape chars |")
             print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-            for label, r in rows.items():
+            for label in _order(rows):
+                r = rows[label]
                 print(f"| {label} | {r['phi_tokens']} | {_fmt(r['coverage'],2)} | {_fmt(r['legal_at_1'])} | "
                       f"{_fmt(r['legal_at_1_covered'])} | **{_fmt(r.get('legal_at_1_fallback'))}** | "
                       f"{_fmt(r.get('legal_at_1_baseline'))} | {_fmt(r['refusals'],2)} | "
@@ -736,7 +769,8 @@ def summarise(into_readme: bool = False) -> None:
             print(f"\n**`{name}`** - {block['bits']} bits to spend\n")
             print("| split | coverage | legal@1 | legal@1 covered | with fallback | guessing | refusals | refusals guessing | teacher match |")
             print("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-            for label, r in block["rows"].items():
+            for label in _order(block["rows"]):
+                r = block["rows"][label]
                 print(f"| {label} | {_fmt(r['coverage'],2)} | **{_fmt(r['legal_at_1'])}** | "
                       f"{_fmt(r['legal_at_1_covered'])} | {_fmt(r.get('legal_at_1_fallback'))} | "
                       f"{_fmt(r.get('legal_at_1_baseline'))} | **{_fmt(r['refusals'],2)}** | "
@@ -744,11 +778,12 @@ def summarise(into_readme: bool = False) -> None:
             unseen = block.get("unseen") or {}
             if unseen:
                 print("\nOn positions whose `phi` token the training corpus never wrote:\n")
-                print("| split | positions | coverage | legal@1 | refusals | refusals guessing |")
+                print("| split | coverage | legal@1 | legal@1 covered | refusals | refusals guessing |")
                 print("|---|---:|---:|---:|---:|---:|")
-                for label, r in unseen.items():
-                    print(f"| {label} | {_fmt(r['positions'],0)} | {_fmt(r['coverage'],2)} | "
-                          f"{_fmt(r['legal_at_1'])} | {_fmt(r['refusals'],2)} | "
+                for label in _order(unseen):
+                    r = unseen[label]
+                    print(f"| {label} | {_fmt(r['coverage'],2)} | {_fmt(r['legal_at_1'])} | "
+                          f"{_fmt(r['legal_at_1_covered'])} | {_fmt(r['refusals'],2)} | "
                           f"{_fmt(r['refusals_baseline'],1)} |")
 
     phase = load("phase")
@@ -762,6 +797,8 @@ def summarise(into_readme: bool = False) -> None:
         print("|---|---|---:|---:|---:|---:|---:|")
         for name, rows in phase["games"].items():
             for label, r in rows.items():
+                if not isinstance(r, dict) or "ambiguity" not in r:
+                    continue  # the shared phi_bits every codebook of this game used
                 a = r["ambiguity"]
                 print(f"| `{name}` | {label} | {a['distinct']:.1%} | **{a['weighted']:.1%}** | "
                       f"{_fmt(r['legal_at_1_covered'])} | {_fmt(r.get('legal_at_1_fallback'))} | "
@@ -789,7 +826,20 @@ def summarise(into_readme: bool = False) -> None:
         section("MULTI")
         print("### multi\n")
         print("Six corpora into one `RadixNet.train` call. The header token is the")
-        print("whole selector.\n")
+        print("whole selector - `Experiments/NeuralCompression` needed a partitioned")
+        print("output and a selector network to ask this question; here it falls out of")
+        print("the encoding.\n")
+        print("It works, and it is not free. The shared graph is smaller than six")
+        print("separate ones, and every game pays for the company: refusals are worse")
+        print("inside it for all six, and legality for five of the six (Connect Four's")
+        print("top-1 improves and its refusals get five times worse). The last")
+        print("column says why, and it is the same lesson as everywhere else in this")
+        print("directory: the six games share a code space, only the header is reserved")
+        print("per game, so nothing structurally stops a Connect Four position being")
+        print("answered with a token that only ever appeared in Othello. It is not a")
+        print("hypothetical - a quarter of the answers are exactly that, and the")
+        print("legality columns hide it, because a foreign token is usually illegal")
+        print("anyway and just looks like an ordinary miss.\n")
         print(f"shared graph: {multi['shared_nodes']:.0f} nodes; six separate graphs: "
               f"{multi['separate_nodes']:.0f} nodes (ratio {multi['node_ratio']:.2f}x)\n")
         print("| game | legal@1 shared | legal@1 alone | refusals shared | refusals alone | answered with another game's move |")

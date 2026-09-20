@@ -165,11 +165,22 @@ window *holds* is the design freedom, and it is the whole experiment:
 | injective | a transposition table: perfect where it has been, silent elsewhere |
 
 And it has to fit in **one** token. A `φ` that spans two tokens is tape the
-model pays for and never reads, because only the last one is looked at. The
+model pays for and never reads, because only the *last* one is looked at. The
 model's memory is one token wide: 18 bits, or 15 once you buy phase-disjointness.
 
 That cap is the sharpest thing this directory has to say about the architecture,
-and `experiment.py phi` sweeps straight through it rather than asserting it.
+and `experiment.py phi` walks through it rather than asserting it. The cliff is
+at the last token, not at the second: Nim scores 0.94 legality at 15 bits, 0.51
+at 20 and 0.94 again at 30 — twenty and thirty both cost two tokens, but at 20
+the final token carries five bits and at 30 it carries fifteen.
+
+One more thing the sweep found that the argument did not predict: an
+**injective `φ` is not automatically the best one**. Tic-tac-toe's exact board
+code loses to a 15-bit hash (0.65 against 0.99 at covered positions) although it
+throws nothing away, because a hash uses the token space evenly and a board code
+clusters in it — at matched corpus size the hashed tape has 875 distinct seam
+trigrams and the exact one 677, so the exact tape's seams are shared by more
+contexts and mix them. Uniformity is worth something on its own.
 
 ### A hash is a bad abstraction, and the token can be split
 
