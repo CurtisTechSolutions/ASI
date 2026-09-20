@@ -1,0 +1,28 @@
+# radixnet (Rust) - the count / reward model of RadixCyclicNN.
+#
+# No dependencies, on purpose: the Python implementation is pure standard
+# library, the Go port is the standard library, and so is this one.  Everything
+# the model needs - the hash, the RNG, the exact sum, the worker pool - is
+# written out in src/.
+[package]
+name = "radixnet"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The count / reward model of RadixCyclicNN: a self-compressing cyclic trigram graph"
+license = "LicenseRef-ASI"
+publish = false
+
+[lib]
+name = "radixnet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "radixnet-bench"
+path = "src/bin/radixnet-bench.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

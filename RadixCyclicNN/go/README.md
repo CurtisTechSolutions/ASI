@@ -42,3 +42,14 @@ is a prebuilt binary for convenience.
 
 `../README.md` § *Go implementation of the count / reward model* lists every
 command and every global flag, and says where the goroutines go.
+
+## The second traversal
+
+`predict`, `generate` and `bench` take `--traversal least-punished`: the walk is
+ranked by the **blame** on its worst step before its cost, and at every node it
+may only take the children the model has the least against
+(`../SPEC-LeastPunished.md`).  Where nothing has been punished it is the
+ordinary search, to the bit.  `--workers 1` also runs the two beams of a
+prediction in turn rather than side by side, so a one-worker run means the same
+thing here as it does in the Rust port (`../rust/`), which the cross-language
+benchmark compares this one against (`../bench/`).

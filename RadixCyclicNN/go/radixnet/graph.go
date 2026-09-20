@@ -207,6 +207,7 @@ type Graph struct {
 	dirtyAll         bool
 	weightsStructure Counter
 	edgeCost         []float64
+	edgePunish       []float64 // the penalty side of every edge's reward (EdgePunishment)
 	costsVersion     Counter
 
 	// mu guards structural changes: splits / merges / new nodes and edges take

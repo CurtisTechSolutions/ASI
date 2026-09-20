@@ -76,6 +76,9 @@ D-068 the BACK sentinel: where it goes round, learned
 
 **Part XIV — Memory and the Go gap** · D-065 bounded memory · D-066 what is left, and why
 
+**Part XV — A second way through, and a third implementation** ·
+D-069 the least-punished traversal · D-070 the Rust port
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -2413,6 +2416,118 @@ honest accounting of *deliberate* versus *undone* is itself the decision: a gap
 recorded with its reason is a design statement, an unrecorded one is debt.
 
 **Lives in** `go/`, `DESIGN.md`
+
+---
+
+# Part XV — A second way through, and a third implementation
+
+### D-069 — A walk can be ranked by what went **wrong** on it, and blame is not for sale
+
+**Status** Accepted · 2026-09-20 · **Layer** search · **Extends** D-008, D-058 ·
+**Specified in** `SPEC-LeastPunished.md`
+
+**Context** Every path this model has taken was chosen by one number, and the
+rewards and the penalties land in the same accumulator (D-022): a step rewarded
+five times and punished once carries `+4` and is indistinguishable from a step
+rewarded four times and never punished. That is right for *likelihood* and wrong
+for a question the system asks constantly and could not express - **which way
+through has the least gone wrong on it?**
+
+**Decision** A second traversal, selected per call
+(`--traversal least-punished`), that changes what a walk is *ranked by* and
+nothing else. A step carries a punishment - the penalty side of its reward, plus
+`path_scale · log(1 + incorrect)` of its judged path context. A walk is ranked by
+its **worst** step first, by cost only between walks whose worst step ties, and
+at every node it may take only the children with the least against them.
+
+**Rationale** The context term is the load-bearing half, and it is deliberately
+**asymmetric**: the cost function's path term weighs `correct` against
+`incorrect` and is symmetric on purpose (D-058), while this one counts the
+failures against nothing. A step that was wrong here once is a step that was
+wrong here, and no amount of being right afterwards makes it a step nothing is
+held against. Without that asymmetry the traversal is a clipped copy of the cost
+order - which is exactly what the first implementation of it turned out to be,
+netted away by a reward in the first test written against it.
+
+The **worst step** rather than the sum, because ten small penalties are not one
+real failure, and because it is the reading the negative filter's `peak` already
+takes (D-047): the two now agree about what a path's blame is.
+
+**Consequences**
+* Provably inert where nothing was punished: the first component of the order is
+  0 on every path, so the comparison *is* the cost order - same text, same cost,
+  same expansions, pinned by a test on both sides.
+* Not the default, and should not be: `predict` without an argument should mean
+  the model's own estimate of what comes next.
+* Measured on a 2M-character corpus with every 7th text punished, it disagrees
+  with the ordinary search on **20% of continuations** and expands **15x fewer
+  nodes** - because refusing a blamed step at the node prunes the beam. That is
+  an effort result, not a quality result; nothing here has been graded.
+* It reads numbers the model file already carries, so it costs the format
+  nothing and changes nothing it walks.
+* **Python does not have it.** An *undone* gap, not a deliberate one (D-066's
+  distinction).
+
+**The honest gap it papers over.** An edge keeps one reward, so its own penalty
+*is* netted - only the path contexts remember a failure as a failure. The edge
+should learn to keep the two apart; that is a model file change, and it is what
+the first term of the punishment is a stand-in for until then.
+
+**Lives in** `go/radixnet/search.go`, `go/radixnet/beam.go`, `go/radixnet/weights.go`,
+`rust/src/search.rs`, `rust/src/beam.rs`, `rust/src/weights.rs`, `SPEC-LeastPunished.md`
+
+---
+
+### D-070 — A third implementation, to price the language rather than the model
+
+**Status** Accepted · 2026-09-20 · **Layer** platform · **Beside** D-038
+
+**Context** D-038 ported the count model to Go because pure Python topped out
+near 100k transitions/s. Go now runs the same model at ~6M. How much of what is
+left is the model, and how much is the runtime? Nothing in the repository could
+answer that, because nothing had ever run this model twice.
+
+**Decision** Port the count model to Rust (`rust/`), with no dependencies, and
+build the cross-language benchmark (`bench/`) that runs it against Go **over one
+corpus** and refuses to report a timing until the two agree on the graph, the
+transitions, the loss, the expansions and the prediction - to the bit, on the
+cost of the path.
+
+**Rationale** A speed comparison between two programs that computed different
+things is not a comparison, and a port that quietly drifts is the normal failure
+mode of having three implementations (D-038's "two implementations of one model,
+which must stay in step"). Making the parity check a precondition of the
+benchmark, rather than a separate test someone remembers to run, is the whole
+design of `bench/compare.py`.
+
+**What it measured** (4-core Xeon, 2M characters, 3 epochs; `bench/RESULTS.md`)
+
+| | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
+|---|--:|--:|--:|--:|
+| training | 6.2M transitions/s | **14.2M** | 6.8M | **19.7M** |
+| prediction | 4.1k/s | **15.7k** | 3.4k | **15.7k** |
+
+2.3-2.9x at counting, 3.8-6.5x at predicting (the wide end of the second range is
+the least-punished traversal, where the search is small and the constant factors
+are most of it). Three representation choices carry
+most of it and none of them is algorithmic: a trigram is a packed `u64` rather
+than a fresh string, a node's children are read into a buffer the search reuses
+rather than a fresh slice per expansion, and the trigram index hashes with
+`FxHasher`. They are listed in `rust/README.md` because a reader who takes the
+table for "Rust is 4x faster than Go" has been misled by it.
+
+**Consequences**
+* Three implementations to keep in step, not two. The benchmark is the check for
+  the third; `tests/test_go_parity.py` remains the check for the second.
+* Go's `--workers 1` now runs the two beams of a prediction in turn rather than
+  on two goroutines, so a one-worker row means the same thing on both sides.
+* The Rust port does **not** read or write model files, does not serve the API
+  and has no negative network, tutor or agent. It trains in memory and reports.
+  Undone, not deliberate.
+* Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
+  both sides, because a benchmark of a deliberate data race measures the race.
+
+**Lives in** `rust/`, `bench/`, `Makefile` (`rust-build`, `rust-test`, `bench-compare`)
 
 ---
 

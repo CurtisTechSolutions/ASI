@@ -431,10 +431,11 @@ func cmdPredict(args []string) {
 	toEnd := fs.Bool("to-end", false, "run to the end of a text")
 	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
+	traversal := fs.String("traversal", "reward", "reward | least-punished (walk by the blame instead of the cost)")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
-	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength}
+	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength, Traversal: *traversal}
 	p, err := m.Predict(*prefix, opts)
 	if err != nil {
 		fail("%v", err)
@@ -486,10 +487,11 @@ func cmdGenerate(args []string) {
 	stepPenalty := fs.Float64("step-penalty", 0, "beam / dijkstra: extra cost per edge")
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
+	traversal := fs.String("traversal", "reward", "reward | least-punished (walk by the blame instead of the cost)")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
-	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam}
+	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam, Traversal: *traversal}
 	if *seeded {
 		s := seedFlag
 		opts.Seed = &s

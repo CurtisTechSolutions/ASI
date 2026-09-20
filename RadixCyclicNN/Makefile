@@ -91,7 +91,8 @@ export EPOCHS LR BATCH RADIXNET_PORT RADIXNET_BACKEND RADIXNET_CORPUS WITH_TORCH
 DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
-.PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative train resume predict generate score 2nrl invert compress \
+.PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
+        rust-build rust-test bench-compare train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
         frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
@@ -139,6 +140,24 @@ go-parity: ## Cross-language parity of the Go port against the Python model
 MODEL_COUNT ?= model.count.json
 go-serve: go-build ## Serve the frontend from the Go count / reward model on http://HOST:PORT (uploads / checkpoints as for `serve`)
 	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+
+##@ Rust port and the cross-language benchmark
+CARGO ?= cargo
+BENCH_CHARS ?= 2000000
+BENCH_PREDICTIONS ?= 3000
+BENCH_EPOCHS ?= 3
+BENCH_REPEAT ?= 3
+PUNISH_EVERY ?= 7
+
+rust-build: ## Build the Rust port's benchmark binary into rust/target/release (needs Rust 1.75+)
+	cd rust && $(CARGO) build --release
+
+rust-test: ## Run the Rust tests, clippy and the formatter check
+	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+
+bench-compare: ## Both ports over one corpus, checked against each other -> bench/RESULTS.md
+	$(PY) bench/compare.py --chars $(BENCH_CHARS) --predictions $(BENCH_PREDICTIONS) \
+	    --epochs $(BENCH_EPOCHS) --repeat $(BENCH_REPEAT) --punish-every $(PUNISH_EVERY) --seed $(SEED)
 
 ##@ Train / predict (local)
 train: ## Train on DATA (incremental: MODEL is loaded first if it exists), checkpointing into CKPT_DIR

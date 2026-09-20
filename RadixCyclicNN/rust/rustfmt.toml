@@ -1,0 +1,5 @@
+# The Go port's lines run to about 110 columns and the comments beside them are
+# the documentation, so the Rust port is formatted to the same width rather than
+# to rustfmt's 100.
+max_width = 120
+use_field_init_shorthand = true

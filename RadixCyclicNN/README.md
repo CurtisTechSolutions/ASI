@@ -25,6 +25,7 @@ and an optional GPU backend (torch) are built in.
 | Accept the vanishing gradient, update the activation function instead; `N*N`; activation(child) × activation(parent) | Weights are an N×N node-to-node matrix (stored sparse). The signal on edge `p -> c` is `W[p,c] · f_c(z_c) · f_p(z_p)`, the activation of the child times the activation of the parent. Learning is a **one-hop local rule**: an observed transition only updates `W[p,·]`, the node states `z`, and the **activation-function parameters** of the parent and its children. Nothing is propagated deeper, so vanishing gradients never enter the picture; the activation functions adapt instead. |
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
+| A second way through: the least punished | `--traversal least-punished` (Go and Rust, `predict` / `generate` / `bench`): the walk is ranked by the **blame** on its worst step first and by the cost only between steps nothing is held against, and at every node it may only take the children the model has the least against. A step's punishment is the penalty side of its reward plus `log(1 + incorrect)` of the judged path context - the failures counted **against nothing**, so a reward cannot buy blame off the way it nets it off the edge. On a graph where nothing was ever punished it is the ordinary search, to the bit. `SPEC-LeastPunished.md` is the specification. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), the failures are asked about (*why* is this wrong, and what else is wrong the same way - see below), and the round's mistakes become the next round's syllabus. |
 | The report card plans the next lessons | `tutor --plan N` / the Tutor tab's **Lesson plan** / `POST /api/tutor/plan` (both servers): the report card at the end of a run goes back to the teacher, which answers with the syllabus that repairs it - one point of grammar per lesson, the mistake of the card it targets, a topic and a line on why. The marks alone already plan it (a lesson per weak point, worst first); the teacher improves on that floor and never drops a weakness from it. |
@@ -42,6 +43,7 @@ and an optional GPU backend (torch) are built in.
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
 | Resonant model | a fourth algorithm on the same graph (`--kind resonant`): a walk carries an analog **phase** advanced by every trigram (a position clock plus a hash kick), edges learn the phase at which they fire and how **coherently**, and the score adds `resonance_scale · coherence · cos(phase − mu)` to the edge's share of its node. Prediction searches `(node, chars, phase)`. A **phase-locked** cycle - back to the same node at the same phase - hands the decision to a metacognitive layer that learned from the corpus whether to ride the loop, escape it or stop. |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. |
+| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, both traversals, training, prediction, generation, scoring and 2NRL - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. It is where the least-punished traversal was built, and it is 2.3-3.1x faster than Go at counting and 3.8-6.8x at predicting on the same corpus (`bench/RESULTS.md`, measured with `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). Model files are Python's and Go's; this crate trains in memory. |
 | Judgements follow the path, not the edge | An edge is right in one sentence and wrong in the next, so a verdict is not filed against the edge but against the **caller that reached it**: the key is the node *before* the edge's parent, so `the cat -> sat` and `a cat -> sat` are counted apart (`paths`, `GET /api/paths`). A correction only rewards a path when the whole answer was right - one wrong word and nothing on that walk is rewarded - and each context keeps `correct`, `incorrect` and how often it has been walked since (`seen`). The search pays for what it learns there: `path_scale · log((correct + ½) / (incorrect + ½))` joins the edge weight before the softmax, so a step that was right *from here* is cheaper here and nowhere else. |
 | A node sees itself from where it stands | An edge's counters say what that step did, not what it did *here*, among the other ways out of the same node. `nodes` / `GET /api/nodes` / clicking a node in the Graph tab shares a node out both ways: a row per previous node and a row per next node, each with its share of that side's traffic, its **signed** share of that side's reward - a penalty reads as a negative share of the pressure on the node - and what the judged paths on it came to. The denominators are the side's own, not the node's visits: a node is entered without an in-edge whenever a text starts on it. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -116,6 +118,8 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
+| `make rust-build` / `rust-test` | build the Rust port's benchmark binary / run its tests, clippy and the formatter check |
+| `make bench-compare` | the Go port and the Rust port over one corpus, checked against each other, into `bench/RESULTS.md` (`BENCH_CHARS`, `BENCH_EPOCHS`, `BENCH_REPEAT`, `PUNISH_EVERY`) |
 | `make go-build` / `go-test` / `go-parity` / `go-negative` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model, blame a garbage file into the Go negative network and judge a text through it |
 | `make serve PORT=8000` | API + prebuilt frontend |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
@@ -1804,6 +1808,7 @@ go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
 go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
 go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
 go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
+go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished  # walk by the blame
 go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
@@ -1815,7 +1820,8 @@ Commands: `train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `correct`
 `ollama` (`models` | `corpus` | `review`), `chatgpt` (`models` | `ask`),
 `image` (`info` | `encode` | `tutor` | `decode`),
 `speech` (`info` | `teach` | `tutor` | `decode`),
-`checkpoints`, `bench`, `serve`, `version`; `--blame`
+`checkpoints`, `bench`, `serve`, `version`; `--traversal reward|least-punished`
+on `predict`, `generate` and `bench`; `--blame`
 (with `--negative PATH`) on `tutor`, `correct`, `evolve` and `ollama review`; global options `--model`,
 `--json`, `--seed`, `--workers N` (a cap on the goroutines; 0, the default, is
 none), `--exact` (atomic counting), `--out`, `--memlimit SIZE` (soft heap
@@ -1830,7 +1836,7 @@ Where the goroutines go:
 | the sliding window | applied in corpus order after each chunk's parallel pass (its semantics are the order of traversals); exact in both modes |
 | weights and edge costs | recomputed lazily, only the touched rows after feedback; a full recompute after structural changes runs on a goroutine per 64 nodes |
 | loss, scoring many texts | parallel reductions / one goroutine per text; the loss is the traversal-weighted mean edge cost, so it needs no list of transitions |
-| prediction | the top and the bottom beam run side by side |
+| prediction | the top and the bottom beam run side by side - in turn under `--workers 1`, so a single-worker run is single-threaded end to end and means the same thing as the Rust port's |
 
 Measured on this 4-core machine (2 epochs over a 39 MB corpus: 1,000,000
 lines in a ZIP of 10 entries):
@@ -1988,6 +1994,56 @@ against the key sets the Python API tests assert on, loads the model it saves
 in Python, trains from a ZIP upload with `split: paragraphs`, and reads its
 checkpoints with the Python `CheckpointManager`.
 
+## Rust implementation of the count / reward model, and the two measured against each other
+
+`rust/` is a third implementation of the same model - a standalone crate with no
+dependencies - written to find out how much of what this model costs is the
+model and how much is the language, and to build the least-punished traversal
+beside the Go one.  It ports the graph, the weight function, the judged path
+contexts, both traversals, training, prediction, generation, scoring and
+2NRL; it does **not** read or write model files, serve the API or carry the
+negative network (see `rust/README.md`).
+
+```bash
+make rust-build        # -> rust/target/release/radixnet-bench (needs Rust 1.75+)
+make rust-test         # cargo test, clippy, fmt --check
+make bench-compare     # both ports over one corpus -> bench/RESULTS.md
+```
+
+`bench/compare.py` hands both builds the same texts and the same prefixes (one
+Python generator writes them, because neither language can reproduce the
+other's RNG), trains both for the same epochs, punishes every Nth text so the
+least-punished traversal has blame to walk by, and **checks the two against each
+other before it reports a single timing**: same nodes, edges, trigrams,
+transitions and expansions; same compression ratio, loss and total penalty; same
+prediction at the same cost, to the bit.  A speed comparison between two
+programs that computed different things is not a comparison.
+
+On a 4-core Xeon, 2,000,000 characters, 3 epochs, 3,000 predictions, Go counting
+with `--exact` (its racy default is within a few percent, and a benchmark of a
+deliberate data race measures the race):
+
+| | Go, one worker | Rust, one worker | Go, all cores | Rust, all cores |
+|---|--:|--:|--:|--:|
+| training | 5.5M transitions/s | **14.2M** | 6.7M | **19.7M** |
+| prediction, by reward | 4.0k/s | **15.7k** | 3.4k | **15.7k** |
+| prediction, least punished | 40k/s | **266k** | 41k | **250k** |
+
+2.3-2.9x at counting and 3.8-6.5x at predicting against Go's own default
+counting, more against `--exact`, on identical work.  Three
+representation choices carry most of it and none is algorithmic - a trigram is a
+packed integer rather than a fresh string, a node's children are read into a
+buffer the search reuses, and the trigram index hashes with a cheap
+non-cryptographic hash - which is why `rust/README.md` lists them beside the
+table.  The full matrix, with the machine and the toolchain versions it was
+measured on, is `bench/RESULTS.md`.
+
+The other column in that table is the traversal rather than the language: the
+least-punished search expands **15x fewer nodes** than the ordinary one on the
+same model, because refusing a blamed step at the node prunes the beam - and it
+disagrees with it on about **20%** of the continuations.  That is an effort
+result, not a quality result; which answers are better is the tutor's question.
+
 ## Python API
 
 ```python
@@ -2059,11 +2115,15 @@ RadixCyclicNN/
   frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
                       the panels' settings in localStorage, test/ holds its node --test suite)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
+  rust/               Rust port of the count / reward model, and the least-punished traversal: src/ (crate), src/bin (the benchmark)
+  bench/              the two ports over one corpus: make_corpus.py, compare.py, RESULTS.md
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
                       sample_problems.* (codegen), sample_tasks.* (agent / explore)
   docker/             container entrypoint (optional checkpoint resume)
   Dockerfile, docker-compose.yml, docker-compose.gpu.yml, .env.example, Makefile
   DESIGN.md           the specification
+  SPEC-LeastPunished.md   the traversal that follows the blame (built)
+  SPEC-EdgeDecay.md   a node's edges fading on the graph's own clock (proposed)
 ```
 
 ## Design decisions

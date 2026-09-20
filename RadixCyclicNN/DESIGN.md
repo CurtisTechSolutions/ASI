@@ -3043,3 +3043,86 @@ invert, prior fallback, round trip), the net (records, falling loss, the three p
 cycle learning, the layer moving the beam while Dijkstra ignores it, reward / punish / decohere, 2NRL with weights,
 `invert_paths`, stats, argument validation), persistence (file, gzip, wrong kind, checkpoints), the kind registry,
 the evolver and `converse`, the CLI and the HTTP API.
+
+---
+
+## 31. The least-punished traversal (`go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
+
+The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
+the code must do.
+
+**A traversal is a per-call choice**, `ByReward` (the default, nothing changes) or `ByLeastPunished`.  `Traversal` is
+parsed from a name - `""` / `"reward"` / `"rewards"` / `"cost"`, or `"least-punished"` / `"least_punished"` /
+`"punished"` / `"punish"` / `"blame"` - and reaches the search through `PredictOptions.Traversal`,
+`GenerateOptions.Traversal`, `BeamOptions.Traversal` and `SampleWalkBy`.  The CLI carries it on `predict`, `generate`
+and `bench` as `--traversal`.
+
+**The punishment of a step** is `punish(prev, e) = reward_scale · max(0, -edge_reward[e]) + path_scale ·
+log1p(incorrect(prev, e))`, where `incorrect(prev, e)` is the failure count of the judged path context (section 16.5)
+and is `0` where the walk's caller is unknown or the context has never been judged.  Both terms are **one-sided**:
+the first ignores a positive reward, the second counts the failures *against nothing* (the cost function's path term
+is the one that weighs them against the successes, and stays as it is).  `EdgePunishment` is the first term,
+`StepPunishment` both, `PathIncorrect` the counter behind the second; `ChildCost.Punish` carries the answer beside
+the cost, filled per edge by `ensureCosts` and per judged context by `ensureContextCosts`.
+
+**A path's punishment is the maximum over its steps**, not the sum - the same reading the guard's `peak` takes
+(section 24.7).  Both quantities a partial path carries are therefore monotone along it (a sum of non-negative costs,
+a running maximum), which is what keeps the beam's early exit valid.
+
+**The order is lexicographic**, `(punishment, cost)`, and under `ByReward` the first component is 0 on every path, so
+the comparison is the cost order the beam has always used.  Concretely, in `runBeam`: a kept path is a
+`(first, second, entry)` key whose `first` is `-punish · sign` only under `ByLeastPunished` and `0` otherwise; the
+frontier sorts by `lessState` with punishment ahead of cost; the bottom beam reverses both, so the k worst paths are
+the **most punished** ones; and the early exit stops when the best partial path is no better than the k-th finished
+one on that same order.  Two punishments within `PunishTolerance` (`1e-12`) are the same punishment.
+
+**A node offers fewer children.**  `Onward` drops a hand-over to `BACK` as before; under `ByLeastPunished`
+`LeastPunished` then keeps only the children whose punishment is the minimum at that node, and returns the slice
+untouched when they all tie (which is every node of a graph nothing was punished on, so the filter costs one pass and
+no allocation there).  `SampleWalkBy` samples from the softmax over exactly those children: punishment decides what
+may be walked, the cost decides which of them it is.
+
+**What a walk reports.**  `PathResult.Punish` is its worst step, and `Prediction.Traversal` names the search when it
+was not the ordinary one.  Both are omitted from JSON when zero or empty, so a reader of today's prediction sees no
+new field.  Nothing in the traversal writes to the graph, and nothing about it touches the model file.
+
+**Tests** `go/radixnet/traversal_test.go` and `rust/tests/model.rs`: identical answers, costs and expansions where
+nothing is punished; the blamed step left even when it is five times rewarded and an order of magnitude cheaper; 50
+units of reward failing to buy the blame off; the filter's minimum, tolerance and infinity; the names.
+
+**Not in Python.**  `search.py` and `beam.py` would take the same change and have not had it, so no `--traversal`
+flag appears on the Python CLI.
+
+## 32. The Rust port (`rust/`) and the cross-language benchmark (`bench/`)
+
+`rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
+graph and its structural operations, the dual frequency weight function, the judged path contexts, both traversals,
+training, prediction, generation, scoring and reward / punish / 2NRL.  `src/bin/radixnet-bench.rs` is its only
+binary.  Not ported, and undone rather than deliberate: the model file format, the HTTP server, the negative network
+and every teaching loop.
+
+What the port has to get right, beyond the algorithm:
+
+* **Counting is atomic** (`AtomicI64`, relaxed), the equivalent of Go's `--exact`.  A benchmark of Go's
+  racy-by-design counting (D-038) would be measuring the race.
+* **The order of every sum is the Python one** - the left-to-right row total in `recomputeRow`, `fsum` over the step
+  costs, insertion-ordered adjacency - because the benchmark's parity check compares the *cost of a path* to the bit.
+* **The fan-out is a thread pool**, not a thread per text: `parallel_for` / `parallel_fill` hand each worker a block
+  of the chunk, `workers = 1` runs everything on the calling thread.  The two beams of a prediction run in turn on
+  the calling thread; Go runs them on two goroutines unless `--workers 1`, which was changed to match so a
+  one-worker row means the same thing on both sides.
+* **The one `unsafe`** is `parallel::Disjoint`, a raw view of a slice shared by the weight and cost recomputes, which
+  fan out over nodes and write per-edge values.  Every edge belongs to exactly one node (an invariant
+  `check_invariants` proves), so no two threads write one index; the contract is written out where it is defined.
+
+**`bench/`** is the comparison.  `make_corpus.py` writes `corpus.txt` and `corpus.prefixes.txt` once - neither
+language can reproduce the other's RNG, so neither generates the corpus - and `compare.py` builds both, runs six
+builds (Go racy, Go exact, Rust; one worker and all cores) under both traversals, repeats each and reports the
+median into `RESULTS.md`.
+
+**The parity check is a precondition, not a test.**  Before any timing is printed, the Go and Rust runs of each
+configuration must agree exactly on `chars`, `texts`, `nodes`, `edges`, `trigrams`, `transitions`,
+`dijkstra_expansions`, `punished_texts` and `punished_edges`; to `1e-9` on `compression_ratio`, `loss` and
+`edge_reward_negative`; and on the sample prediction's continuation and its cost.  A disagreement stops the run and
+names what differs.  `--punish-every N` punishes every Nth text before the predictions are timed, because a model
+nothing was ever punished for gives the two traversals nothing to disagree about.

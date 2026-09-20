@@ -151,18 +151,39 @@ type BenchOptions struct {
 	CorpusPath  string // the sample corpus to build sentences out of
 	Workers     int
 	Exact       bool
+	// Texts and Prefixes replace the synthetic corpus and the prefixes cut out
+	// of it.  The cross-language benchmark (../../bench) hands the Go and the
+	// Rust port the same two files, so neither is measured on work the other
+	// did not do; Chars and Predictions are then whatever the files hold.
+	Texts    []string
+	Prefixes []string
+	// Traversal is the search the prediction phase times: "" / "reward" for the
+	// walk by cost, "least-punished" for the walk that follows the blame.
+	Traversal string
+	// PunishEvery punishes every Nth text of the corpus (one pass, strength 1)
+	// before the predictions are timed - 0 leaves the model as training left it.
+	// A model nothing was ever punished for has no blame to walk by, so the
+	// least-punished traversal would have nothing to do and both searches would
+	// measure the same thing.
+	PunishEvery int
 }
 
 // RunBenchmark trains on a synthetic corpus, then predicts, and reports the
 // rates - the same keys the Python benchmark reports.
 func RunBenchmark(o BenchOptions) (map[string]any, error) {
-	if o.Chars < 1 {
+	if o.Chars < 1 && len(o.Texts) == 0 {
 		return nil, fmt.Errorf("chars must be >= 1, got %d", o.Chars)
 	}
 	if o.Epochs < 1 {
 		return nil, fmt.Errorf("epochs must be >= 1, got %d", o.Epochs)
 	}
+	if _, err := ParseTraversal(o.Traversal); err != nil {
+		return nil, err
+	}
 	predictions := o.Predictions
+	if len(o.Prefixes) > 0 {
+		predictions = len(o.Prefixes)
+	}
 	if predictions == 0 {
 		predictions = o.Chars / 2
 		if predictions < benchMinPredicts {
@@ -175,9 +196,13 @@ func RunBenchmark(o BenchOptions) (map[string]any, error) {
 	if predictions < 1 {
 		return nil, fmt.Errorf("predictions must be >= 1, got %d", predictions)
 	}
-	texts, err := SyntheticCorpus(o.Chars, o.Seed, BenchLines(o.CorpusPath))
-	if err != nil {
-		return nil, err
+	texts := o.Texts
+	if len(texts) == 0 {
+		var err error
+		texts, err = SyntheticCorpus(o.Chars, o.Seed, BenchLines(o.CorpusPath))
+		if err != nil {
+			return nil, err
+		}
 	}
 	totalChars := 0
 	for _, text := range texts {
@@ -198,16 +223,29 @@ func RunBenchmark(o BenchOptions) (map[string]any, error) {
 	}
 	trainSeconds := time.Since(started).Seconds()
 
-	prefixes, err := BenchPrefixes(texts, predictions, o.Seed)
-	if err != nil {
-		return nil, err
+	punished := []string{}
+	if o.PunishEvery > 0 {
+		for i := o.PunishEvery - 1; i < len(texts); i += o.PunishEvery {
+			punished = append(punished, texts[i])
+		}
+		if _, err := model.Punish(punished, 1, 1.0); err != nil {
+			return nil, err
+		}
+	}
+
+	prefixes := o.Prefixes
+	if len(prefixes) == 0 {
+		prefixes, err = BenchPrefixes(texts, predictions, o.Seed)
+		if err != nil {
+			return nil, err
+		}
 	}
 	model.G.Prepare()
 	expansions := 0
 	var sample *Prediction
 	started = time.Now()
 	for i, prefix := range prefixes {
-		result, err := model.Predict(prefix, PredictOptions{Length: BenchPredictLength, Mode: "beam", K: 1})
+		result, err := model.Predict(prefix, PredictOptions{Length: BenchPredictLength, Mode: "beam", K: 1, Traversal: o.Traversal})
 		if err != nil {
 			return nil, err
 		}
@@ -219,8 +257,10 @@ func RunBenchmark(o BenchOptions) (map[string]any, error) {
 	predictSeconds := time.Since(started).Seconds()
 
 	transitions := int64(0)
+	loss := 0.0
 	for _, record := range records {
 		transitions += int64(intOf(record["transitions"]))
+		loss = toFloat(record["loss"])
 	}
 	g := model.G
 	out := map[string]any{
@@ -232,6 +272,11 @@ func RunBenchmark(o BenchOptions) (map[string]any, error) {
 		"predictions_per_sec":         rate(float64(predictions), predictSeconds),
 		"dijkstra_expansions":         expansions,
 		"dijkstra_expansions_per_sec": rate(float64(expansions), predictSeconds),
+		"traversal":                   traversalName(o.Traversal),
+		"loss":                        loss,
+		"punished_texts":              len(punished),
+		"punished_edges":              punishedEdges(g),
+		"edge_reward_negative":        negativeReward(g),
 		"nodes":                       g.NumNodes(),
 		"edges":                       g.NumEdges(),
 		"trigrams":                    g.NumTrigrams(),
@@ -246,6 +291,33 @@ func RunBenchmark(o BenchOptions) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+// traversalName is the traversal's canonical name, for the report.
+func traversalName(name string) string {
+	t, err := ParseTraversal(name)
+	if err != nil {
+		return name
+	}
+	return t.String()
+}
+
+// punishedEdges is how many alive edges carry a penalty - how much blame the
+// least-punished traversal has to steer by.
+func punishedEdges(g *Graph) int {
+	n := 0
+	for e, ok := range g.EdgeAlive {
+		if ok && g.EdgeReward[e] < 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// negativeReward is the total penalty on the graph.
+func negativeReward(g *Graph) float64 {
+	_, neg := g.TotalReward()
+	return neg
 }
 
 // rate is count/seconds, or 0 when no time passed at all.

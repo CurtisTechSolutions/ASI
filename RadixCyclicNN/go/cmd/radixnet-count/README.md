@@ -36,7 +36,15 @@ radixnet-count --model model.count.json predict --prefix "the cat" --k 5
 radixnet-count --model model.count.json negative filter --count 3   # write, then veto
 radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame
 radixnet-count --seed 1 bench --chars 200000
+radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished
 ```
+
+`--traversal least-punished` on `predict`, `generate` and `bench` walks by the
+blame on a step rather than by its cost (`../../../SPEC-LeastPunished.md`); the
+`bench` command also takes `--texts` / `--prefixes` to be handed a corpus rather
+than build one, and `--punish-every N` to punish every Nth text before the
+predictions are timed, which is how `../../../bench/compare.py` runs it against
+the Rust port.
 
 `../../../README.md` § *Go implementation of the count / reward model* has the
 full command list, the flags and the Ctrl-C behaviour of the long-running loops.

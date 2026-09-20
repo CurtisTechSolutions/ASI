@@ -3,7 +3,86 @@ package radixnet
 import (
 	"fmt"
 	"math"
+	"strings"
 )
+
+// Traversal is how a walk chooses its way through the graph.
+//
+// The model has always searched by what went *right*: an edge's weight is a
+// function of how often the corpus traversed it and of the reward it collected,
+// and the cheapest path is the likeliest one.  ByLeastPunished searches by what
+// went *wrong* instead - it ranks a step by the blame on it and lets the
+// ordinary cost decide only between steps nothing is held against.  See
+// SPEC-LeastPunished.md.
+type Traversal int
+
+const (
+	// ByReward is the original search: -log softmax of the dual frequency weight.
+	ByReward Traversal = iota
+	// ByLeastPunished ranks a step by its punishment first (EdgePunishment plus
+	// what the walks through its context got wrong) and by cost only to break
+	// ties, and ranks a whole path by its *worst* step.
+	ByLeastPunished
+)
+
+// String is the traversal's name as the CLI and the API spell it.
+func (t Traversal) String() string {
+	if t == ByLeastPunished {
+		return "least-punished"
+	}
+	return "reward"
+}
+
+// ParseTraversal reads a traversal name: "", "reward" or "rewards" for the
+// original search, "least-punished" (also "least_punished", "punished",
+// "punish") for the one that follows the blame.
+func ParseTraversal(name string) (Traversal, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "reward", "rewards", "cost":
+		return ByReward, nil
+	case "least-punished", "least_punished", "leastpunished", "punished", "punish", "blame":
+		return ByLeastPunished, nil
+	}
+	return ByReward, fmt.Errorf("unknown traversal %q; expected 'reward' or 'least-punished'", name)
+}
+
+// PunishTolerance is how close two punishments have to be to count as equal:
+// the same penalty applied in a different order can land a bit or two apart,
+// and a walk is not "more punished" for that.
+const PunishTolerance = 1e-12
+
+// LeastPunished keeps the children the model has the least against - the whole
+// of the change, in one function.  Where nothing at this node was ever punished
+// (every step of an untutored graph) every child ties at zero and the slice
+// comes back untouched, so the walk costs exactly what it always did; where
+// something *was* punished, the steps that carry more blame than the cleanest
+// one here are not options any more, however well rewarded they are.
+func LeastPunished(costs []ChildCost) []ChildCost {
+	if len(costs) < 2 {
+		return costs
+	}
+	low := costs[0].Punish
+	same := true
+	for _, it := range costs[1:] {
+		if it.Punish != costs[0].Punish {
+			same = false
+		}
+		if it.Punish < low {
+			low = it.Punish
+		}
+	}
+	if same {
+		return costs
+	}
+	keep := low + PunishTolerance
+	out := make([]ChildCost, 0, len(costs))
+	for _, it := range costs {
+		if it.Punish <= keep {
+			out = append(out, it)
+		}
+	}
+	return out
+}
 
 // PathResult is the outcome of a prediction / generation walk: Text is the
 // emitted continuation, Labels / NodeIDs the path (sentinels included), Cost
@@ -18,6 +97,9 @@ type PathResult struct {
 	Expanded   int       `json:"expanded"`
 	ReachedEnd bool      `json:"reached_end"`
 	FullText   string    `json:"full_text"`
+	// Punish is the walk's worst step under the least-punished traversal
+	// (0 everywhere nothing was ever punished).
+	Punish float64 `json:"punish,omitempty"`
 }
 
 // Probability is exp(-cost) (0 for an infinite cost).
@@ -119,6 +201,14 @@ func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxC
 // temperature); temperature 0 is greedy.  maxChars < 0 means no limit; rng nil
 // uses the graph's own generator.
 func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool) (*PathResult, error) {
+	return g.SampleWalkBy(startNode, startOffset, maxChars, temperature, rng, includeContext, ByReward)
+}
+
+// SampleWalkBy is SampleWalk under a chosen traversal.  ByLeastPunished keeps
+// only the least punished children at every node and then samples among them
+// exactly as before: punishment decides *what* may be walked, the cost decides
+// which of those it is.
+func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, traversal Traversal) (*PathResult, error) {
 	if temperature < 0 {
 		return nil, fmt.Errorf("temperature must be >= 0")
 	}
@@ -133,6 +223,7 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 	node := startNode
 	nodeIDs := []int{node}
 	stepCosts := []float64{}
+	punish := 0.0
 	steps := 0
 	cameFrom := -1
 	if startNode == Start {
@@ -144,6 +235,9 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 		}
 		// a node the model expects to go round offers nothing
 		costs := Onward(g.ChildCostsFrom(node, cameFrom))
+		if traversal == ByLeastPunished {
+			costs = LeastPunished(costs)
+		}
 		if len(costs) == 0 {
 			break
 		}
@@ -179,6 +273,9 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 			}
 		}
 		stepCosts = append(stepCosts, pick.Cost)
+		if pick.Punish > punish {
+			punish = pick.Punish // a walk is as punished as its worst step
+		}
 		nodeIDs = append(nodeIDs, pick.Child)
 		if pick.Child != End {
 			chars += g.labelLen[pick.Child] - Overlap
@@ -187,5 +284,7 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 		node = pick.Child
 		steps++
 	}
-	return buildResult(g, nodeIDs, stepCosts, startOffset, maxChars, steps, includeContext), nil
+	walk := buildResult(g, nodeIDs, stepCosts, startOffset, maxChars, steps, includeContext)
+	walk.Punish = punish
+	return walk, nil
 }

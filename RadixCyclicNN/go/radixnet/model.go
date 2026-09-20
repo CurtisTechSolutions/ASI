@@ -898,6 +898,9 @@ type PredictOptions struct {
 	Temperature float64
 	ToEnd       bool
 	MaxLength   int
+	// Traversal is "" / "reward" for the search by cost, or "least-punished"
+	// for the search that follows the blame (see search.go).
+	Traversal string
 }
 
 // DefaultPredictOptions mirror the Python defaults.
@@ -938,11 +941,21 @@ func (m *Model) Predict(prefix string, o PredictOptions) (*Prediction, error) {
 	if mode != "beam" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
-	return m.search(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, nil)
+	traversal, err := ParseTraversal(o.Traversal)
+	if err != nil {
+		return nil, err
+	}
+	return m.searchBy(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, nil, traversal)
 }
 
-// search is the prediction engine shared by Predict, Generate and Converse.
+// search is the prediction engine shared by Predict, Generate and Converse; it
+// walks by cost, the way the model always has.
 func (m *Model) search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937) (*Prediction, error) {
+	return m.searchBy(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, ByReward)
+}
+
+// searchBy is search under a chosen traversal.
+func (m *Model) searchBy(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, traversal Traversal) (*Prediction, error) {
 	g := m.G
 	node, offset, lead := m.prefixStart(prefix)
 	leadLen := runeLen(lead)
@@ -968,7 +981,7 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 				maxChars = want
 			}
 		}
-		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd})
+		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Traversal: traversal})
 		if err != nil {
 			return nil, err
 		}
@@ -985,7 +998,7 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 		if maxChars < 0 {
 			maxChars = 0
 		}
-		walk, err := g.SampleWalk(node, offset, maxChars, temperature, rng, nil)
+		walk, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, traversal)
 		if err != nil {
 			return nil, err
 		}
@@ -1018,6 +1031,9 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 		best.FullText = prefix + best.Text
 	}
 	pred := &Prediction{PathResult: *best, Top: top, Bottom: bottom, K: k, Beam: width, Mode: mode}
+	if traversal != ByReward {
+		pred.Traversal = traversal.String()
+	}
 	pred.Expanded = expanded
 	pred.Labels = append([]string(nil), best.Labels...)
 	pred.NodeIDs = append([]int(nil), best.NodeIDs...)
@@ -1035,6 +1051,8 @@ type GenerateOptions struct {
 	Prefix      string
 	StepPenalty float64
 	Beam        int
+	// Traversal is "" / "reward" or "least-punished" (see PredictOptions).
+	Traversal string
 }
 
 // DefaultGenerateOptions mirror the Python defaults.
@@ -1060,6 +1078,10 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode != "beam" && mode != "dijkstra" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
+	traversal, err := ParseTraversal(o.Traversal)
+	if err != nil {
+		return nil, err
+	}
 	whole := func(r *PathResult) *PathResult {
 		r.FullText = o.Prefix + r.Text
 		r.Text = r.FullText
@@ -1075,7 +1097,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 		}
 		results := make([]*PathResult, 0, o.Count)
 		for i := 0; i < o.Count; i++ {
-			walk, err := m.search(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng)
+			walk, err := m.searchBy(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, traversal)
 			if err != nil {
 				return nil, err
 			}
@@ -1087,7 +1109,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	if mode == "dijkstra" {
 		k = 1
 	}
-	found, err := m.search(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, nil)
+	found, err := m.searchBy(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, nil, traversal)
 	if err != nil {
 		return nil, err
 	}

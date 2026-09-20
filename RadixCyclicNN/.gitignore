@@ -20,3 +20,7 @@ build/
 dist/
 !frontend/dist/
 go/bin/
+rust/target/
+bench/corpus.txt
+bench/corpus.prefixes.txt
+bench/predictions.*.txt
