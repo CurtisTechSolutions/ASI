@@ -1,0 +1,77 @@
+# The agent, and a browser it is allowed to drive.
+#
+#   docker compose up -d            the agent on http://127.0.0.1:8765
+#   docker compose --profile ollama up -d    ... with a local model attached
+#   docker compose run --rm test    the suite, inside the image
+#
+# The browser is the reason this file exists. `distil/browser.py` drives Chrome
+# over WebDriver, and a driven browser runs whatever the pages it visits contain,
+# in a process the agent does not control. Running chromedriver on the host would
+# put that next to your files. Here it is a separate container on an internal
+# network, and the agent reaches it by service name.
+
+services:
+  agent:
+    build: .
+    ports:
+      # 127.0.0.1 on purpose. The UI drives an agent that writes files and
+      # executes generated code, and it has no authentication -- publishing this
+      # on 0.0.0.0 would hand both to anyone who can reach the host.
+      - "127.0.0.1:8765:8765"
+    environment:
+      DISTIL_HOME: /data
+      DISTIL_PROVIDER: ${DISTIL_PROVIDER:-local}
+      DISTIL_WEBDRIVER: http://chrome:4444
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - state:/data
+    depends_on:
+      chrome:
+        condition: service_healthy
+    restart: unless-stopped
+
+  chrome:
+    # Standalone Chrome speaks W3C WebDriver on 4444, which is all
+    # distil/browser.py needs -- no Selenium client, no Python dependency.
+    image: selenium/standalone-chrome:127.0
+    shm_size: 2gb              # Chrome crashes on the default 64MB /dev/shm
+    environment:
+      SE_NODE_MAX_SESSIONS: 2
+      SE_NODE_SESSION_TIMEOUT: 120
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4444/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Optional: a local model, so nothing leaves the machine.
+  #   docker compose --profile ollama up -d
+  #   docker compose exec ollama ollama pull gemma4
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - models:/root/.ollama
+    restart: unless-stopped
+
+  test:
+    build: .
+    profiles: ["test"]
+    command: ["python3", "-m", "tests.test_distil"]
+    environment:
+      DISTIL_HOME: /tmp/distil-test
+
+# Every service shares the default bridge, so the agent addresses `chrome` and
+# `ollama` by name and Chrome can still reach the web -- which is the entire
+# point of driving it. An `internal: true` network would have cut that off, and a
+# browser that cannot load a page is not contained, it is broken.
+#
+# What actually contains the browser is that its port is never published: nothing
+# on the host can reach 4444, and the agent's own port is bound to loopback.
+
+volumes:
+  state:
+  models:
