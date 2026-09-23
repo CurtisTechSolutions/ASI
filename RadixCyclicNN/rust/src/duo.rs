@@ -678,7 +678,7 @@ impl Service {
     }
 
     /// Runs `f` on the server's negative network, loading it first if need
-    /// be ([`Service::ensure_negative`]).  Inside [`Service::with_model`] call
+    /// be ([`Service::ensure_negative`]).  Inside `Service::with_model` call
     /// it only once the negative network is loaded - and never when the
     /// negative network is the selected kind, which is the running model.
     pub fn with_negative<T>(&self, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {

@@ -1,4 +1,5 @@
-//! BLAKE2b (RFC 7693), written out - what the resonant model hashes a gram with.
+//! BLAKE2b (RFC 7693), written out - what the resonant model hashes a gram
+//! with, and what names an utterance's `<speech:digest>` token.
 //!
 //! The phase model gives every gram a phase of its own, and it must be the
 //! same phase in every process and in every implementation: Python's `hash()`
@@ -104,9 +105,31 @@ pub fn blake2b(data: &[u8], outlen: usize) -> Vec<u8> {
     out
 }
 
+/// [`blake2b`] as lower-case hex: `hashlib.blake2b(data, digest_size=outlen).hexdigest()`.
+pub fn hexdigest(data: &[u8], outlen: usize) -> String {
+    blake2b(data, outlen).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn it_matches_hashlib_across_block_edges() {
+        assert_eq!(
+            hexdigest(b"", 64),
+            "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419\
+             d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+        );
+        // the utterance token's digest: hashlib.blake2b(b"example", digest_size=4).hexdigest()
+        assert_eq!(hexdigest(b"example", 4), "0da00195");
+        // longer than one block, exactly one block, one byte past it, exactly two
+        let long: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
+        assert_eq!(hexdigest(&long, 4), "dd84ce7c");
+        assert_eq!(hexdigest(&long[..128], 8), "c2d13df1b6617e82");
+        assert_eq!(hexdigest(&long[..129], 8), "f667e47a6d5350a6");
+        assert_eq!(hexdigest(&long[..256], 16), "c2472c0ac37a8dbdb25f05ada0d82643");
+    }
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()

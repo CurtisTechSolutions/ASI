@@ -215,7 +215,7 @@ pub fn transcribe(data: &[u8], o: &AsrOptions) -> Result<Transcript, String> {
 /// A `multipart/form-data` body of plain fields and one file (`speech._multipart`).
 fn multipart_body(fields: &[(&str, &str)], file_field: &str, filename: &str, data: &[u8]) -> (Vec<u8>, String) {
     let head = &data[..data.len().min(4096)];
-    let boundary = format!("----radixnet-{}", super::blake2b::hexdigest(head, 8));
+    let boundary = format!("----radixnet-{}", crate::blake2b::hexdigest(head, 8));
     let mut body = Vec::with_capacity(data.len() + 512);
     for (name, value) in fields {
         body.extend_from_slice(

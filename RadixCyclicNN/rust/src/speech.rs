@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The token is `<speech>` with a short BLAKE2b digest of the waveform text
-//! folded in ([`blake2b`]), so it is unique to that recording and identical in
+//! folded in ([`crate::blake2b`]), so it is unique to that recording and identical in
 //! both texts: in the cyclic graph the words and the sound leave the *same*
 //! node, which is what ties one to the other.  The waveform text is the
 //! recording itself - mixed to mono, resampled and quantised to one byte per
@@ -41,7 +41,6 @@
 //! listen` records with `arecord` / `sox` / `ffmpeg`, as Python does.
 
 pub mod asr;
-pub mod blake2b;
 
 use std::sync::Arc;
 
@@ -199,7 +198,7 @@ pub fn utterance_token(payload: &str, unique: bool) -> String {
     if !unique {
         return SPEECH_TOKEN.to_string();
     }
-    let digest = blake2b::hexdigest(payload.as_bytes(), TOKEN_DIGITS.div_ceil(2));
+    let digest = crate::blake2b::hexdigest(payload.as_bytes(), TOKEN_DIGITS.div_ceil(2));
     format!(
         "{}:{}>",
         &SPEECH_TOKEN[..SPEECH_TOKEN.len() - 1],
