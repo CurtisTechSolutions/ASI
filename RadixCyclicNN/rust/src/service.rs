@@ -95,12 +95,9 @@ pub struct Service {
     pub checkpoint_dir: Option<String>,
     pub seed: i64,
     pub workers: usize,
-    // (read by the areas being ported - the allow goes when they land)
-    #[allow(dead_code)]
     /// The negative network this server guards its output paths with, loaded
     /// from beside the model file the first time something needs it.
     pub(crate) negative: Mutex<Option<Model>>,
-    #[allow(dead_code)]
     /// How strictly the negative network guards the output paths.
     pub(crate) guard: Mutex<crate::duo::FilterConfig>,
     // what each area keeps between requests; an area's routes own its state
@@ -680,7 +677,34 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     let prefix = r.text("prefix", "");
     let (kind, ..) = svc.active_kind();
-    let found = svc.with_model(|m| m.predict(&prefix, &opts))?;
+    // the negative network guards the answer: the best continuation it does
+    // not veto is the one that comes back, and when it vetoes every one the
+    // continuation is empty and `guard` says why (`guard: false` turns it off)
+    let guarded = if r.flag("guard", true) {
+        svc.guard(|pair| -> Result<(crate::beam::Prediction, Json), String> {
+            let found = pair.positive.predict(&prefix, &opts)?;
+            let (ranked, verdicts) = pair.rank(&prefix, &found);
+            let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
+            let report = crate::duo::guard_report(
+                pair,
+                &verdicts,
+                vec![
+                    ("candidates", Json::Int(verdicts.len() as i64)),
+                    ("kept", Json::Int(kept as i64)),
+                ],
+            );
+            Ok((ranked, report))
+        })?
+    } else {
+        None
+    };
+    let (found, guard) = match guarded {
+        Some(outcome) => {
+            let (found, report) = outcome?;
+            (found, report)
+        }
+        None => (svc.with_model(|m| m.predict(&prefix, &opts))?, Json::Null),
+    };
     Ok(Json::obj([
         ("prefix", Json::str(prefix)),
         ("kind", Json::str(kind)),
@@ -699,7 +723,7 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         ("beam", Json::Int(found.beam as i64)),
         ("top", Json::Arr(found.top.iter().map(path_json).collect())),
         ("bottom", Json::Arr(found.bottom.iter().map(path_json).collect())),
-        ("guard", Json::Null),
+        ("guard", guard),
     ]))
 }
 
@@ -719,10 +743,34 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
         penalty_scale,
         merit_scale,
     };
-    let samples = svc.with_model(|m| m.generate(&opts))?;
+    // the negative network guards the texts: the model is asked for
+    // `over_sample` times as many and what the negative half recognises as
+    // failure never reaches the answer (fewer come back when it vetoed a lot)
+    let guarded = if r.flag("guard", true) {
+        svc.guard(|pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
+            let outcome = pair.generate(opts.count, &opts)?;
+            let report = crate::duo::guard_report(
+                pair,
+                &outcome.verdicts,
+                vec![
+                    ("candidates", Json::Int(outcome.candidates as i64)),
+                    ("kept", Json::Int(outcome.kept.len() as i64)),
+                    ("asked", Json::Int(outcome.asked as i64)),
+                    ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
+                ],
+            );
+            Ok((outcome.results, report))
+        })?
+    } else {
+        None
+    };
+    let (samples, guard) = match guarded {
+        Some(outcome) => outcome?,
+        None => (svc.with_model(|m| m.generate(&opts))?, Json::Null),
+    };
     Ok(Json::obj([
         ("samples", Json::Arr(samples.iter().map(path_json).collect())),
-        ("guard", Json::Null),
+        ("guard", guard),
     ]))
 }
 

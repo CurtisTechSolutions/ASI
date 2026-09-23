@@ -579,6 +579,19 @@ class TestRustNegativeParity(unittest.TestCase):
             self.assertNotIn("reward", doc["graph"]["edges"], side)
             self.assertEqual(doc["graph"]["weights"]["function"], "blame", side)
 
+    def test_the_rest_of_the_file_is_pythons_too(self):
+        # the meta block, the history records and the journal - every field
+        # but the clock's
+        clockless = lambda meta: {k: v for k, v in meta.items() if k != "created"}  # noqa: E731
+        self.assertEqual(list(self.py_doc["meta"]), list(self.rs_doc["meta"]))
+        self.assertEqual(clockless(self.py_doc["meta"]), clockless(self.rs_doc["meta"]))
+        timeless = lambda records: [{k: v for k, v in r.items() if k != "seconds"} for r in records]  # noqa: E731
+        self.assertEqual(timeless(self.py_doc["history"]), timeless(self.rs_doc["history"]))
+        self.assertEqual(self.rs_doc["history"][-1]["edges_touched"], self.py_doc["history"][-1]["edges_touched"])
+        undated = lambda log: [{k: v for k, v in e.items() if k != "at"} for e in log]  # noqa: E731
+        self.assertEqual(undated(self.py_doc["log"]), undated(self.rs_doc["log"]))
+        self.assertEqual(self.py_doc["filter"], self.rs_doc["filter"])
+
     def test_the_same_verdict_on_the_same_text(self):
         for text in ("the cat sat on the sky", "water boils at 50 degrees", "a sentence nothing has failed on",
                      "the cat sat on the mat"):

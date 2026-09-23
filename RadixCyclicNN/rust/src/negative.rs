@@ -508,9 +508,23 @@ impl Graph {
         }
     }
 
-    /// Every reason, most blamed first.
+    /// Every reason, most blamed first (ties by name, as Python sorts them),
+    /// with how many live edges carry it.
     pub fn reason_table(&self) -> Vec<ReasonRow> {
         let Some(neg) = &self.neg else { return Vec::new() };
+        let mut edges = vec![0usize; neg.reason_names.len()];
+        for (e, reasons) in neg.reasons.iter().enumerate() {
+            if !self.edge_alive[e] {
+                continue;
+            }
+            for r in reasons {
+                if r.id < edges.len() {
+                    edges[r.id] += 1;
+                }
+            }
+        }
+        let total: f64 = neg.reason_blame.iter().sum();
+        let total = if total == 0.0 { 1.0 } else { total };
         let mut rows: Vec<ReasonRow> = neg
             .reason_names
             .iter()
@@ -521,18 +535,15 @@ impl Graph {
                 blame: neg.reason_blame[id],
                 fails: neg.reason_fails[id],
                 fails_resets: neg.reason_fails_resets.get(&id).copied().unwrap_or(0),
-                share: if neg.total_blame > 0.0 {
-                    neg.reason_blame[id] / neg.total_blame
-                } else {
-                    0.0
-                },
+                edges: edges[id],
+                share: neg.reason_blame[id] / total,
             })
             .collect();
         rows.sort_by(|a, b| {
             b.blame
                 .partial_cmp(&a.blame)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.id.cmp(&b.id))
+                .then_with(|| a.reason.cmp(&b.reason))
         });
         rows
     }
@@ -552,6 +563,7 @@ impl Graph {
                 blame: r.blame,
                 fails: 0,
                 fails_resets: 0,
+                edges: 0,
                 share: if total > 0.0 { r.blame / total } else { 0.0 },
             })
             .collect();
@@ -559,7 +571,7 @@ impl Graph {
             b.blame
                 .partial_cmp(&a.blame)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.id.cmp(&b.id))
+                .then_with(|| a.reason.cmp(&b.reason))
         });
         rows
     }
@@ -613,7 +625,25 @@ pub struct ReasonRow {
     pub blame: f64,
     pub fails: i64,
     pub fails_resets: i64,
+    /// How many live edges carry this reason (the reason table only).
+    pub edges: usize,
     pub share: f64,
+}
+
+impl ReasonRow {
+    /// `{"reason", "blame", "fails", "fails_resets", "edges", "share"}` - a
+    /// row of the reason table as Python's `reason_table` writes it.
+    pub fn to_json(&self) -> crate::json::Json {
+        use crate::json::Json;
+        Json::obj([
+            ("reason", Json::str(self.reason.clone())),
+            ("blame", Json::Num(self.blame)),
+            ("fails", Json::Int(self.fails)),
+            ("fails_resets", Json::Int(self.fails_resets)),
+            ("edges", Json::Int(self.edges as i64)),
+            ("share", Json::Num(self.share)),
+        ])
+    }
 }
 
 /// One failure the journal remembers.
@@ -1667,6 +1697,7 @@ impl Model {
                 id: 0,
                 reason,
                 blame,
+                edges: 0,
                 fails: 0,
                 fails_resets: 0,
                 share: blame / total,
@@ -1812,4 +1843,104 @@ pub fn python_repr(text: &str) -> String {
     }
     out.push(quote);
     out
+}
+
+/// A negative network's statistics, with the keys Python's `NegativeNet.stats`
+/// reports - what `/api/negative`, the CLI and the frontend's Negative tab read.
+pub fn stats_json(model: &Model) -> Json {
+    let g = &model.g;
+    let enc = g.enc;
+    let Some(neg) = model.neg.as_ref() else {
+        return Json::Obj(Vec::new());
+    };
+    let Some(data) = g.neg.as_ref() else {
+        return Json::Obj(Vec::new());
+    };
+    let mut pairs: Vec<(String, Json)> = vec![
+        ("kind".to_string(), Json::str(model.kind())),
+        ("nodes".to_string(), Json::Int(g.num_nodes() as i64)),
+        ("edges".to_string(), Json::Int(g.num_edges() as i64)),
+        ("trigrams".to_string(), Json::Int(g.num_trigrams() as i64)),
+        ("grams".to_string(), Json::Int(g.num_trigrams() as i64)),
+        ("encoding".to_string(), Json::str(enc.to_string())),
+        ("unit".to_string(), Json::str(enc.unit.name())),
+        ("units".to_string(), Json::str(enc.units_name())),
+        ("ngram".to_string(), Json::Int(enc.n as i64)),
+        ("stride".to_string(), Json::Int(enc.stride as i64)),
+        ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
+        ("inverted".to_string(), Json::Bool(g.inverted)),
+        ("backend".to_string(), Json::str("rust")),
+        ("device".to_string(), Json::str(model.device_label())),
+    ];
+    for (key, counter) in [
+        ("epochs_total", model.meta.epochs_total),
+        ("trained_chars", model.meta.trained_chars),
+        ("trained_texts", model.meta.trained_texts),
+        ("twonrl_runs", model.meta.twonrl_runs),
+        ("failures_total", neg.failures_total),
+        ("cleared_total", neg.cleared_total),
+        ("judgements", neg.judgements),
+        ("rejected", neg.rejected),
+    ] {
+        pairs.push((key.to_string(), Json::Int(counter.value)));
+        pairs.push((format!("{key}_resets"), Json::Int(counter.resets)));
+    }
+    let resets: Vec<(String, Json)> = neg
+        .sources
+        .iter()
+        .filter(|(_, c)| c.resets != 0)
+        .map(|(name, c)| (name.clone(), Json::Int(c.resets)))
+        .collect();
+    pairs.extend([
+        ("history_len".to_string(), Json::Int(model.history.len() as i64)),
+        (
+            "last_loss".to_string(),
+            model.history.last().map(|r| Json::Num(r.loss)).unwrap_or(Json::Null),
+        ),
+        ("blame_total".to_string(), Json::Num(neg.blame_total)),
+        (
+            "sources".to_string(),
+            Json::Obj(
+                neg.sources
+                    .iter()
+                    .map(|(name, c)| (name.clone(), Json::Int(c.value)))
+                    .collect(),
+            ),
+        ),
+        ("sources_resets".to_string(), Json::Obj(resets)),
+        ("edge_fails_total".to_string(), Json::Int(data.total_fails.value)),
+        (
+            "edge_fails_total_resets".to_string(),
+            Json::Int(data.total_fails.resets),
+        ),
+        ("edge_blame_total".to_string(), Json::Num(data.total_blame)),
+        ("edge_clear_total".to_string(), Json::Num(data.total_clear)),
+        ("reason_count".to_string(), Json::Int(data.reason_names.len() as i64)),
+        (
+            "top_reasons".to_string(),
+            Json::Arr(g.reason_table().iter().take(5).map(|r| r.to_json()).collect()),
+        ),
+        ("threshold".to_string(), Json::Num(neg.threshold)),
+        ("min_coverage".to_string(), Json::Num(neg.min_coverage)),
+        ("share_scale".to_string(), Json::Num(data.share_scale)),
+        ("blame_scale".to_string(), Json::Num(data.blame_scale)),
+        ("clear_scale".to_string(), Json::Num(data.clear_scale)),
+        ("log_entries".to_string(), Json::Int(neg.log.len() as i64)),
+    ]);
+    Json::Obj(pairs)
+}
+
+impl LogEntry {
+    /// A journal entry as Python keeps it: `{"at", "text", "reason",
+    /// "severity", "source", "note"}`.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("at", Json::str(self.at.clone())),
+            ("text", Json::str(self.text.clone())),
+            ("reason", Json::str(self.reason.clone())),
+            ("severity", Json::Num(self.severity)),
+            ("source", Json::str(self.source.clone())),
+            ("note", Json::str(self.note.clone())),
+        ])
+    }
 }

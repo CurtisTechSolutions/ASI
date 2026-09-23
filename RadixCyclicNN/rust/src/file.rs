@@ -577,21 +577,40 @@ impl Model {
         Json::Obj(pairs)
     }
 
-    /// The meta block, with the negative network's own counters folded in.
+    /// The meta block, with the negative network's own counters folded in,
+    /// in the order Python's `NegativeNet` writes it: the count model's
+    /// reward counters are not a negative network's, so they are left out.
     fn negative_meta(&self) -> Json {
         let base = self.meta.to_json();
         let Some(neg) = &self.neg else { return base };
-        let Json::Obj(mut pairs) = base else { return base };
+        let Json::Obj(base) = base else { return base };
+        // the count model's reward counters are not a negative network's, and
+        // the negative counters are written below from the live values - a
+        // file read back carries stale copies of them in `meta.extra`
+        const NOT_OURS: [&str; 16] = [
+            "rewards_total",
+            "penalties_total",
+            "feedback_passes",
+            "feedback_passes_resets",
+            "path_scale",
+            "blame_total",
+            "sources",
+            "sources_resets",
+            "failures_total",
+            "failures_total_resets",
+            "cleared_total",
+            "cleared_total_resets",
+            "judgements",
+            "judgements_resets",
+            "rejected",
+            "rejected_resets",
+        ];
+        let mut pairs: Vec<(String, Json)> = base
+            .into_iter()
+            .filter(|(k, _)| !NOT_OURS.contains(&k.as_str()))
+            .collect();
         let mut put = |key: &str, value: Json| pairs.push((key.to_string(), value));
-        put("failures_total", Json::Int(neg.failures_total.value));
-        put("failures_total_resets", Json::Int(neg.failures_total.resets));
         put("blame_total", Json::Num(neg.blame_total));
-        put("cleared_total", Json::Int(neg.cleared_total.value));
-        put("cleared_total_resets", Json::Int(neg.cleared_total.resets));
-        put("judgements", Json::Int(neg.judgements.value));
-        put("judgements_resets", Json::Int(neg.judgements.resets));
-        put("rejected", Json::Int(neg.rejected.value));
-        put("rejected_resets", Json::Int(neg.rejected.resets));
         put(
             "sources",
             Json::Obj(
@@ -611,6 +630,14 @@ impl Model {
                     .collect(),
             ),
         );
+        put("failures_total", Json::Int(neg.failures_total.value));
+        put("failures_total_resets", Json::Int(neg.failures_total.resets));
+        put("cleared_total", Json::Int(neg.cleared_total.value));
+        put("cleared_total_resets", Json::Int(neg.cleared_total.resets));
+        put("judgements", Json::Int(neg.judgements.value));
+        put("judgements_resets", Json::Int(neg.judgements.resets));
+        put("rejected", Json::Int(neg.rejected.value));
+        put("rejected_resets", Json::Int(neg.rejected.resets));
         Json::Obj(pairs)
     }
 

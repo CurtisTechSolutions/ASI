@@ -29,6 +29,7 @@ use std::process::ExitCode;
 use radixnet::cli::{
     dispatch, negative_stats, parse_args, path_json, read_named, read_texts, verdict_json, Ctx, COMMANDS,
 };
+use radixnet::duo::{guard_report, Filter, FilterConfig};
 use radixnet::encoding::{parse_encoding, Unit};
 use radixnet::file::read_document;
 use radixnet::json::Json;
@@ -196,7 +197,24 @@ fn run() -> Result<(), String> {
                 penalty_scale: args.float("penalty-scale", 1.0)?,
                 merit_scale: args.float("merit-scale", 1.0)?,
             };
-            let found = model.predict(&prefix, &opts)?;
+            let mut found = model.predict(&prefix, &opts)?;
+            // the guard re-ranks what the search already offered: the best
+            // continuation the negative network does not veto
+            let mut guard = Json::Null;
+            if let Some((mut negative, config)) = ctx.open_guard()? {
+                let mut pair = Filter::new(&mut model, &mut negative, config)?;
+                let (ranked, verdicts) = pair.rank(&prefix, &found);
+                let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
+                guard = guard_report(
+                    &pair,
+                    &verdicts,
+                    vec![
+                        ("candidates", Json::Int(verdicts.len() as i64)),
+                        ("kept", Json::Int(kept as i64)),
+                    ],
+                );
+                found = ranked;
+            }
             let mut doc = vec![
                 ("prefix".to_string(), Json::str(prefix)),
                 ("kind".to_string(), Json::str(model.kind())),
@@ -222,6 +240,7 @@ fn run() -> Result<(), String> {
                 ),
             ];
             doc.push(("traversal".to_string(), Json::str(found.traversal.clone())));
+            doc.push(("guard".to_string(), guard));
             emit(Json::Obj(doc));
         }
         "generate" => {
@@ -240,7 +259,26 @@ fn run() -> Result<(), String> {
                 penalty_scale: args.float("penalty-scale", 1.0)?,
                 merit_scale: args.float("merit-scale", 1.0)?,
             };
-            let samples = model.generate(&opts)?;
+            // the pair: the model over-samples, the negative network vetoes,
+            // the cleanest survivors come back
+            let (samples, guard) = match ctx.open_guard()? {
+                Some((mut negative, config)) => {
+                    let mut pair = Filter::new(&mut model, &mut negative, config)?;
+                    let outcome = pair.generate(opts.count, &opts)?;
+                    let report = guard_report(
+                        &pair,
+                        &outcome.verdicts,
+                        vec![
+                            ("candidates", Json::Int(outcome.candidates as i64)),
+                            ("asked", Json::Int(outcome.asked as i64)),
+                            ("kept", Json::Int(outcome.kept.len() as i64)),
+                            ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
+                        ],
+                    );
+                    (outcome.results, report)
+                }
+                None => (model.generate(&opts)?, Json::Null),
+            };
             emit(Json::obj([
                 ("samples", Json::Arr(samples.iter().map(path_json).collect())),
                 ("count", Json::Int(samples.len() as i64)),
@@ -248,6 +286,8 @@ fn run() -> Result<(), String> {
                 ("prefix", Json::str(opts.prefix.clone())),
                 ("max_length", Json::Int(opts.max_length as i64)),
                 ("temperature", Json::Num(opts.temperature)),
+                ("traversal", Json::str(opts.traversal.clone())),
+                ("guard", guard),
             ]));
         }
         "score" => {
@@ -532,10 +572,65 @@ fn run() -> Result<(), String> {
                         ("saved", Json::str(saved)),
                     ]));
                 }
-                "" => return Err("negative needs an action: blame, clear, why, reasons, forget, settings".to_string()),
+                "filter" => {
+                    // the pair at work: the positive model writes, the
+                    // negative one vetoes - or the given texts are judged
+                    let mut negative = open_negative(true)?;
+                    let mut positive = open(true)?;
+                    let config = FilterConfig {
+                        threshold: args.maybe_float("threshold")?,
+                        min_coverage: args.maybe_float("min-coverage")?,
+                        ratio: if args.on("no-ratio") {
+                            None
+                        } else {
+                            Some(args.float("ratio", 0.0)?)
+                        },
+                        peak: args.maybe_float("peak")?,
+                        over_sample: args.usize("over-sample", 3)?.max(1),
+                        strict: args.on("strict"),
+                        spans: args.usize("spans", 3)?,
+                        learn: args.on("learn"),
+                        reason: args.str("reason", "filtered"),
+                    };
+                    let given = read_texts(&args)?;
+                    let mut pair = Filter::new(&mut positive, &mut negative, config)?;
+                    let outcome = if given.is_empty() {
+                        pair.generate(
+                            args.usize("count", 3)?,
+                            &GenerateOptions {
+                                max_length: args.usize("max-length", 60)?,
+                                mode: args.str("mode", "sample"),
+                                temperature: args.float("temperature", 1.0)?,
+                                prefix: args.str("prefix", ""),
+                                seed: args.get("seed").map(|_| seed),
+                                step_penalty: args.float("step-penalty", 0.0)?,
+                                beam: args.usize("beam", 0)?,
+                                ..Default::default()
+                            },
+                        )?
+                    } else {
+                        pair.filter(&given)?
+                    };
+                    let learn = pair.config.learn;
+                    let described = pair.describe();
+                    let Json::Obj(mut doc) = outcome.to_json() else { unreachable!() };
+                    if learn {
+                        negative.save(&path)?;
+                        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        doc.push((
+                            "saved".to_string(),
+                            Json::obj([("path", Json::str(path.clone())), ("bytes", Json::Int(bytes as i64))]),
+                        ));
+                    }
+                    doc.push(("pair".to_string(), described));
+                    emit(Json::Obj(doc));
+                }
+                "" => {
+                    return Err("negative needs an action: blame, clear, why, reasons, forget, settings, filter".to_string())
+                }
                 other => {
                     return Err(format!(
-                        "unknown negative action {other:?}; expected blame, clear, why, reasons, forget or settings"
+                        "unknown negative action {other:?}; expected blame, clear, why, reasons, forget, settings or filter"
                     ))
                 }
             }

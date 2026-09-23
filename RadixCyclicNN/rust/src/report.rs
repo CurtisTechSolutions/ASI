@@ -8,6 +8,9 @@ use crate::model::Model;
 
 /// `stats()` as the CLI and the HTTP API report it.
 pub fn stats(model: &Model) -> Json {
+    if model.is_negative() {
+        return crate::negative::stats_json(model);
+    }
     let g = &model.g;
     let (pos, neg) = g.total_reward();
     let paths = g.path_totals();

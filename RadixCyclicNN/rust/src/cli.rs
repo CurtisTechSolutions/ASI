@@ -276,6 +276,42 @@ impl Ctx {
     }
 }
 
+impl Ctx {
+    /// The negative network guarding the output of `--model`, with the filter
+    /// settings of `--threshold`, `--min-coverage` and `--over-sample`; `None`
+    /// when `--no-guard` was given, when there is no negative network beside
+    /// the model, or when the one there has never been taught a failure and
+    /// so would veto nothing (Python's `open_guard`).
+    pub fn open_guard(&self) -> Result<Option<(Model, crate::duo::FilterConfig)>, String> {
+        if self.args.on("no-guard") {
+            return Ok(None);
+        }
+        let path = self.negative_path();
+        if !std::path::Path::new(&path).is_file() {
+            return Ok(None);
+        }
+        let negative = self.open_negative(true)?;
+        if !crate::duo::ready(&negative) {
+            return Ok(None);
+        }
+        let config = crate::duo::FilterConfig {
+            threshold: self.args.maybe_float("threshold")?,
+            min_coverage: self.args.maybe_float("min-coverage")?,
+            over_sample: self.args.usize("over-sample", 3)?,
+            ..Default::default()
+        };
+        if let Some(g) = negative.g.neg.as_ref() {
+            crate::log_info!(
+                "negative",
+                "guard: {path} ({} blame over {} reasons)",
+                crate::json::py_repr(g.total_blame),
+                g.reason_names.len()
+            );
+        }
+        Ok(Some((negative, config)))
+    }
+}
+
 /// A command a module answers.
 pub type Command = fn(&Ctx) -> Result<(), String>;
 
@@ -462,20 +498,10 @@ pub fn verdict_json(v: &Verdict) -> Json {
     ])
 }
 
-/// The statistics of a negative model, as the CLI and the API report them.
+/// The statistics of a negative model, as the CLI and the API report them
+/// (Python's `NegativeNet.stats`).
 pub fn negative_stats(model: &mut Model) -> Json {
-    let base = stats(model);
-    let Some(neg) = &model.neg else { return base };
-    let Json::Obj(mut pairs) = base else { return base };
-    pairs.push(("failures_total".to_string(), Json::Int(neg.failures_total.value)));
-    pairs.push(("blame_total".to_string(), Json::Num(neg.blame_total)));
-    pairs.push(("cleared_total".to_string(), Json::Int(neg.cleared_total.value)));
-    pairs.push(("judgements".to_string(), Json::Int(neg.judgements.value)));
-    pairs.push(("rejected".to_string(), Json::Int(neg.rejected.value)));
-    pairs.push(("threshold".to_string(), Json::Num(neg.threshold)));
-    pairs.push(("min_coverage".to_string(), Json::Num(neg.min_coverage)));
-    pairs.push(("reasons".to_string(), Json::Int(model.g.reason_table().len() as i64)));
-    Json::Obj(pairs)
+    stats(model)
 }
 
 /// One walk, as the CLI reports it.
