@@ -1402,6 +1402,22 @@ pub(crate) fn toolbox_from(svc: &Service, r: &Request) -> Result<ToolBox, ApiErr
     state.toolbox(svc.upload_dir.as_deref()).map_err(ApiError::bad_request)
 }
 
+/// The `tools` block of Python's `/api/status`: the names on offer, sorted,
+/// then the settings (`{"names": [...], "offline": ..., ...}`).
+pub fn status_json(svc: &Service) -> Json {
+    let mut names = svc
+        .tools
+        .toolbox(svc.upload_dir.as_deref())
+        .map(|toolbox| toolbox.names())
+        .unwrap_or_default();
+    names.sort();
+    let mut pairs = vec![("names".to_string(), Json::strs(names))];
+    if let Json::Obj(options) = svc.tools.options_json() {
+        pairs.extend(options);
+    }
+    Json::Obj(pairs)
+}
+
 /// `GET /api/tools`: what the network may call, and how.
 fn tools_route(svc: &Arc<Service>, _r: &Request) -> Answer {
     let toolbox = svc
@@ -1797,6 +1813,12 @@ mod tests {
             doc.at("names"),
             &Json::strs(["web_search", "web_fetch", "web_links", "calculator"])
         );
+        let status = status_json(&svc);
+        assert_eq!(
+            status.at("names"),
+            &Json::strs(["calculator", "web_fetch", "web_links", "web_search"])
+        );
+        assert_eq!(status.at("allow_private"), &Json::Bool(true));
         assert_eq!(doc.at("tools").as_array()[0].at("name").as_str(), Some("web_search"));
         assert!(doc.at("call_format").as_str().unwrap().contains("<tool>"));
         assert_eq!(doc.at("options").at("allow_private"), &Json::Bool(true));

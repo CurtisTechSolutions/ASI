@@ -695,9 +695,35 @@ mod tests {
             // the POST, the redirect and the page it points at
             for _ in 0..3 {
                 let (mut s, _) = listener.accept().unwrap();
+                // the whole request, head and body: the body can arrive in a
+                // segment of its own, and answering before it has would close
+                // the socket on unread data (a reset, not an answer)
+                let mut raw = Vec::new();
                 let mut buf = vec![0u8; 4096];
-                let n = s.read(&mut buf).unwrap();
-                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                loop {
+                    let n = s.read(&mut buf).unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                        if n == 0 {
+                            break;
+                        }
+                        continue;
+                    };
+                    let wanted = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(str::to_string)
+                        })
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if n == 0 || body.len() >= wanted {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&raw).into_owned();
                 let answer = if req.starts_with("GET /moved") {
                     "HTTP/1.1 302 Found\r\nLocation: /here\r\nContent-Length: 0\r\n\r\n".to_string()
                 } else {
