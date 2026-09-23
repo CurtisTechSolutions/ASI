@@ -45,7 +45,7 @@ and an optional GPU backend (torch) are built in.
 | Word n-grams | the same count / reward model over an alphabet of **words** (`--encoding word:3:1`, the Words tab): the encoding's `unit` dial, not a second model, so a gram is three words and compression turns a repeated phrase into one node. There is no vocabulary to freeze or learn - a gram is text, so the alphabet is whatever the grams are made of; lengths, counts and scores are per word. |
 | Resonant model | a fourth algorithm on the same graph (`--kind resonant`): a walk carries an analog **phase** advanced by every trigram (a position clock plus a hash kick), edges learn the phase at which they fire and how **coherently**, and the score adds `resonance_scale · coherence · cos(phase − mu)` to the edge's share of its node. Prediction searches `(node, chars, phase)`. A **phase-locked** cycle - back to the same node at the same phase - hands the decision to a metacognitive layer that learned from the corpus whether to ride the loop, escape it or stop. |
 | Go port of the count / reward model and the negative network | `go/`: the same model in Go with one goroutine per text (lines, paragraphs or pages), counters bumped without locks (racy by default, `--exact` for atomics), parallel weight and cost recomputes, the two beams of a prediction side by side, and corpora of any size streamed through in chunks (ZIP archives entry by entry); model files are interchangeable with Python (same structure, counts, sliding window and even the Mersenne Twister state). The negative network is ported too: blame, corrections from a diff, verdicts, the filter, the `negative` command group and the `/api/negative/*` endpoints, with model files interchangeable both ways. The punishment traversal is ported as well, and the parity suite requires both sides to walk the same least-punished paths at the same costs. |
-| Rust port of the count / reward model | `rust/`: the same model again - the graph, the weight function, the path contexts, all three traversals, the encoding dial, training, prediction, generation, scoring, 2NRL, **the model file** (`radixnet-count`, gzipped or not: byte for byte what Python writes on every dial setting, but for the `version` cache stamp), the CLI and **the HTTP server the frontend runs against** - with no dependencies, atomic counting and a thread pool in place of a goroutine per text. What it does not have yet: the negative network, the teaching loops, the agent and the LLM clients (those last need HTTPS, which the no-dependency rule rules out). `tests/test_rust_parity.py` holds it to Python the way `test_go_parity.py` holds Go, and it is 2.2-2.8x faster than Go at counting and 3.8-6.2x at predicting on the same corpus (`bench/RESULTS.md`, `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). |
+| Rust port of the whole package | `rust/`: everything the Python package does, again - every model kind (`count`, the sine-activation `radix`, the phase model `resonant`, the negative network), the encoding dial, all three traversals, **the model files** (byte for byte what Python writes, but for the `version` cache stamp), the negative network and the guard, every teaching loop (tutor, chat, critic, evolve, the recall tutor), the Ollama and ChatGPT clients, the tools, the sandbox, images and speech, the CLI and **the HTTP server the frontend runs against** - with no dependencies (HTTPS goes through the system `curl`, D-076), atomic counting and a thread pool in place of a goroutine per text. Deliberately not ported: the torch backend, the Stable Diffusion encoder and local Whisper (`rust/README.md` says why). `tests/test_rust_parity*.py` hold it to Python, one suite per area, and it is 2.2-2.8x faster than Go at counting and 3.8-6.2x at predicting on the same corpus (`bench/RESULTS.md`, `make bench-compare`, which refuses to report a timing until the two ports agree on the graph, the loss and the prediction). |
 | Judgements follow the path, not the edge | An edge is right in one sentence and wrong in the next, so a verdict is not filed against the edge but against the **caller that reached it**: the key is the node *before* the edge's parent, so `the cat -> sat` and `a cat -> sat` are counted apart (`paths`, `GET /api/paths`). A correction only rewards a path when the whole answer was right - one wrong word and nothing on that walk is rewarded - and each context keeps `correct`, `incorrect` and how often it has been walked since (`seen`). The search pays for what it learns there: `path_scale · log((correct + ½) / (incorrect + ½))` joins the edge weight before the softmax, so a step that was right *from here* is cheaper here and nowhere else. |
 | A node sees itself from where it stands | An edge's counters say what that step did, not what it did *here*, among the other ways out of the same node. `nodes` / `GET /api/nodes` / clicking a node in the Graph tab shares a node out both ways: a row per previous node and a row per next node, each with its share of that side's traffic, its **signed** share of that side's reward - a penalty reads as a negative share of the pressure on the node - and what the judged paths on it came to. The denominators are the side's own, not the node's visits: a node is entered without an in-edge whenever a text starts on it. |
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
@@ -120,7 +120,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
-| `make rust-build` / `rust-test` / `rust-parity` | build the Rust port's binaries / run its tests, clippy and the formatter check / hold it to the Python model |
+| `make rust-build` / `rust-test` / `rust-parity` | build the Rust port's binaries / run its tests, clippy and the formatter check / hold it to Python, every `tests/test_rust_parity*.py` |
 | `make rust-train` / `rust-predict` / `rust-serve` / ... | the Rust CLI, one target per subcommand (`make help` lists them; `RUST_KIND=count\|word`, `MODEL_RUST` is its file) |
 | `make bench-compare` | the Go port and the Rust port over one corpus, checked against each other, into `bench/RESULTS.md` (`BENCH_CHARS`, `BENCH_EPOCHS`, `BENCH_REPEAT`, `PUNISH_EVERY`) |
 | `make go-build` / `go-test` / `go-parity` / `go-negative` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model, blame a garbage file into the Go negative network and judge a text through it |
@@ -2226,18 +2226,20 @@ against the key sets the Python API tests assert on, loads the model it saves
 in Python, trains from a ZIP upload with `split: paragraphs`, and reads its
 checkpoints with the Python `CheckpointManager`.
 
-## Rust implementation of the count / reward model, and the two measured against each other
+## Rust implementation of the whole package, and the two ports measured against each other
 
-`rust/` is a third implementation of the same model - a standalone crate with no
-dependencies - written to find out how much of what this model costs is the
-model and how much is the language, and to build the least-punished traversal
-beside the Go one.  It ports the graph, the weight function, the judged path
-contexts, all three traversals, both alphabets, training, prediction,
-generation, scoring and 2NRL; it reads and writes the model file byte for byte
-as Python does; and `radixnet serve` answers the same JSON API the Python and Go
-servers answer, so `frontend/dist` runs against it unmodified.  It does **not**
-carry the negative network, the teaching loops, the agent or the LLM clients
-(see `rust/README.md`).
+`rust/` is a third implementation - a standalone crate with no dependencies -
+written first to find out how much of what this model costs is the model and
+how much is the language, and to build the least-punished traversal beside the
+Go one, and grown since into a port of the whole package: every model kind,
+the negative network, every teaching loop, the LLM clients, the tools, images
+and speech (code generation, the agent and MCP are the last area, in progress).
+It reads and writes every model file byte
+for byte as Python does, and `radixnet serve` answers the same JSON API the
+Python and Go servers answer, so `frontend/dist` runs against it unmodified -
+a tab appears when the route it needs is in `/api/status`.  `rust/README.md`
+lists every module and the three things deliberately not ported (the torch
+backend, the Stable Diffusion encoder, local Whisper).
 
 ```bash
 make rust-build        # -> rust/target/release/radixnet{,-bench} (needs Rust 1.82+)
@@ -2367,8 +2369,9 @@ RadixCyclicNN/
   frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
                       the panels' settings in localStorage, test/ holds its node --test suite)
   go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
-  rust/               Rust port of the count / reward model: src/ (crate, HTTP server included), src/bin (the CLI
-                      and the benchmark), tests/ (the model, the word alphabet and the server end to end)
+  rust/               Rust port of the whole package: src/ (crate, HTTP server and every area included), src/bin
+                      (the CLI and the benchmark), tests/ (the model, the encodings, the word alphabet and the
+                      server end to end)
   bench/              the two ports over one corpus: make_corpus.py, compare.py, RESULTS.md
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
                       sample_problems.* (codegen), sample_tasks.* (agent / explore)

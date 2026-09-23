@@ -25,19 +25,19 @@
 //! over any unit does not fit in an integer, so the index is keyed by the gram
 //! itself, as the other two key it.  `bench/RESULTS.md` says what that cost.
 //!
-//! # What is here, and what is not
+//! # What is here
 //!
-//! The model itself is here in full: the graph and its structural operations,
-//! the weight function, the path contexts, all three traversals, training,
-//! prediction, generation, scoring, the character and **word** alphabets, the
-//! JSON model file (byte for byte what Python and Go read and write), the
-//! benchmark, the CLI (`src/bin/radixnet.rs`) and the HTTP API the frontend talks to
-//! ([`http`], [`service`]).
-//!
-//! What is **not** here is everything the Python package grew around the model:
-//! the negative network, the tutor and the other teaching loops, the agent and
-//! its tools, the LLM clients, images and speech, and MCP.  The LLM clients in
-//! particular need HTTPS, which the no-dependency rule rules out.
+//! All of the Python package: the model of every kind - the count / reward
+//! model, the sine-activation `radix` model ([`radix`]), the phase model
+//! ([`resonance`]) and the negative network ([`negative`], [`duo`]) - with the
+//! JSON model files byte for byte what Python writes, and around it every
+//! teaching loop (the tutor, the chat, the critic, evolve, the recall tutor),
+//! the LLM clients ([`llm`], [`ollama`], [`chatgpt`]), the tools, images and
+//! speech (code generation, the agent and MCP are the last area, in progress),
+//! the CLI ([`cli`], `src/bin/radixnet.rs`) and the
+//! HTTP API the frontend talks to ([`http`], [`service`]).  `rust/README.md`
+//! lists every module, and what is deliberately not ported (torch, the Stable
+//! Diffusion encoder, local Whisper) and why.
 //!
 //! ```
 //! use radixnet::{GraphOptions, Model, PredictOptions, TrainOptions, REWARD};

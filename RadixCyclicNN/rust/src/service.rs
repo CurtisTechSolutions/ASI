@@ -1,10 +1,10 @@
 //! The HTTP API of the Rust port: the same JSON contract as the Python and Go
 //! servers, so `frontend/dist` runs against it unchanged.
 //!
-//! What it serves is what this crate *has*, and it says so: a route that is
-//! not here answers the one line that says which server to ask instead, and a
-//! frontend tab that needs one is hidden when `engine` is `rust`
-//! (`frontend/src/App.jsx`).
+//! The model's own routes are here; every other area of the crate answers its
+//! own (`crate::duo::routes`, `crate::tutor::routes`, ...), wired in [`build`].
+//! `/api/status` lists every route the server has, and the frontend shows a
+//! tab when the route it needs is in that list (`frontend/src/App.jsx`).
 //!
 //! It runs every kind Python's service runs - `radix`, `count`, `negative`
 //! and `resonant` ([`crate::kinds`]) - and a word model is a count model over a
