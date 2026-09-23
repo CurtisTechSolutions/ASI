@@ -901,7 +901,11 @@ mod tests {
         assert!(form.int("attempts", 1).is_err());
         assert_eq!(form.int("length", 0).unwrap(), 0);
         assert_eq!(form.int("length", 7).unwrap(), 7, "a falsy 0 reads as the default");
-        assert_eq!(form.exact_int("length", 7).unwrap(), 0, "unless the option is read exactly");
+        assert_eq!(
+            form.exact_int("length", 7).unwrap(),
+            0,
+            "unless the option is read exactly"
+        );
         assert_eq!(form.int("lead", 0).unwrap(), 2, "int() truncates");
         assert_eq!(form.float("threshold", 6.0).unwrap(), 7.5);
         assert!(form.flag("blame", false), "1 reads as true");
