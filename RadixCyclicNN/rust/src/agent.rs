@@ -2412,66 +2412,19 @@ fn train_negative_phase(
 }
 
 /// Python's `model.invert_paths(bad, mode=blatant_mode, amounts=...)` on
-/// whichever kind is loaded, as `(flipped, amount_mean)`: the sine model moves
-/// every other node of a failed path toward its negation, the phase model
-/// rotates or decoheres the path's edges, the count model takes reward off
-/// them (at its default strength 2) and the negative network blames them.
+/// whichever kind is loaded ([`kinds::invert_paths`]), as `(flipped,
+/// amount_mean)`: the sine model moves every other node of a failed path
+/// toward its negation, the phase model rotates or decoheres the path's edges,
+/// the count model takes reward off them and the negative network blames them,
+/// each at its own default strength, since Python's agent passes none (2 for
+/// the count model, 1 for the negative network).
 fn invert_paths(model: &mut Model, texts: &[String], mode: &str, amounts: &[f64]) -> Result<(i64, f64), String> {
-    let pair = |outcome: Json| {
-        (
-            outcome.at("flipped").as_i64().unwrap_or(0),
-            outcome.at("amount_mean").as_f64().unwrap_or(0.0),
-        )
-    };
-    match model.kind() {
-        "radix" => model.radix_invert_paths(texts, mode, Some(amounts)).map(pair),
-        "resonant" => model.resonant_invert_paths(texts, mode, Some(amounts)).map(pair),
-        "negative" => negative_invert_paths(model, texts, amounts),
-        _ => crate::gan::invert_paths(model, texts, amounts, 2.0).map(|o| (o.flipped as i64, o.amount_mean)),
-    }
-}
-
-/// `NegativeNet.invert_paths`: every failed path blamed by its amount (reason
-/// `blatant`, source `evolve`, one pass each), the edges it touched counted.
-fn negative_invert_paths(model: &mut Model, texts: &[String], amounts: &[f64]) -> Result<(i64, f64), String> {
-    let enc = model.encoding();
-    let texts: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
-    if amounts.len() != texts.len() {
-        return Err(format!(
-            "amounts has {} entries for {} texts",
-            amounts.len(),
-            texts.len()
-        ));
-    }
-    if let Some(bad) = amounts.iter().find(|a| !(0.0..=1.0).contains(*a)) {
-        return Err(format!("amounts must lie in [0, 1], got {bad}"));
-    }
-    let mut touched = 0i64;
-    for (text, &amount) in texts.iter().zip(amounts) {
-        if amount <= 0.0 {
-            continue;
-        }
-        let options = crate::negative::BlameOptions {
-            reason: "blatant".to_string(),
-            severity: amount,
-            source: "evolve".to_string(),
-            epochs: 1,
-            ..Default::default()
-        };
-        let records = model.blame_with(std::slice::from_ref(*text), &options, &mut |_| true)?;
-        touched += records
-            .last()
-            .and_then(|r| r.extra_value("edges_touched"))
-            .and_then(Json::as_i64)
-            .unwrap_or(0);
-    }
-    let applied: Vec<f64> = amounts.iter().copied().filter(|&a| a > 0.0).collect();
-    let mean = if applied.is_empty() {
-        0.0
-    } else {
-        applied.iter().sum::<f64>() / applied.len() as f64
-    };
-    Ok((touched, mean))
+    let strength = if model.kind() == "negative" { 1.0 } else { 2.0 };
+    let outcome = kinds::invert_paths(model, texts, mode, Some(amounts), strength)?;
+    Ok((
+        outcome.at("flipped").as_i64().unwrap_or(0),
+        outcome.at("amount_mean").as_f64().unwrap_or(0.0),
+    ))
 }
 
 // -- the command line ------------------------------------------------------------------------------

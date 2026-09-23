@@ -9,14 +9,18 @@
 //! miss, 1 for a hopeless one) and a passed one kept by how good it was
 //! ([`TutorTrainer::reward_of`]: its mark over 10), while what the teacher
 //! wrote - a correction, a model answer, a drill - is correct by construction
-//! and always weighs [`TEACHER_WEIGHT`].  The weights reach the graph as one
-//! reward or penalty pass per group of equally weighted texts
-//! ([`two_nrl_weighted`]), which is how Python's count model applies them.
+//! and always weighs [`TEACHER_WEIGHT`].  The weights reach the graph through
+//! the model's own kind ([`crate::kinds`]): one pass per group of equally
+//! weighted texts, the count and phase models' reward or penalty scaled by
+//! the weight, the sine model's learning rates - as each of Python's kinds
+//! applies them.
 //!
-//! A failure the teacher corrected is not 2NRL at all: the sentence and its
-//! correction are aligned and only what changed moves (`Model::correct`,
-//! `diff_corrections`), so the words the network got right keep what they
-//! earned.
+//! A failure the teacher corrected is not 2NRL at all on the count model: the
+//! sentence and its correction are aligned and only what changed moves
+//! (`Model::correct`, `diff_corrections`), so the words the network got right
+//! keep what they earned.  The sine and phase models have no `correct` in
+//! Python, so there a corrected failure is 2NRL garbage and its correction
+//! good English, as with `--no-diff-corrections`.
 //!
 //! # The auto run (D-052)
 //!
@@ -44,9 +48,11 @@ use crate::blame::{TeachOptions, TeachReport};
 use crate::checkpoint::Checkpoints;
 use crate::correct::{CorrectOptions, Correction};
 use crate::json::Json;
+use crate::kinds;
 use crate::llm::{normalise_provider, LlmClient, DEFAULT_PROVIDER, PROVIDERS};
 use crate::model::{EpochRecord, Model, PredictOptions};
 use crate::plan::{count_of, mark_of, plan_lessons, LessonPlan, PlanRequest, DEFAULT_PLAN_LESSONS};
+use crate::radix::Feedback;
 use crate::review::ReviewError;
 use crate::service::Service;
 
@@ -123,11 +129,13 @@ pub struct TutorConfig {
     pub min_weight: f64,
     pub neg_epochs: usize,
     pub pos_epochs: usize,
-    /// Accepted for parity with the sine network and ignored here.
+    /// The sine model's learning rates (the count and phase models have none).
     pub neg_lr: f64,
     pub pos_lr: f64,
+    /// Transitions per backend step on the sine model.
     pub batch_size: usize,
-    /// The magnitude of a penalty or reward (`None` = 1).
+    /// The magnitude of a penalty or reward on the count and phase models
+    /// (`None` = 1).
     pub strength: Option<f64>,
     /// Keep teaching earlier corrections.
     pub replay: bool,
@@ -344,6 +352,27 @@ impl TutorConfig {
     fn base_strength(&self) -> f64 {
         self.strength.unwrap_or(1.0)
     }
+
+    /// What one set of grades teaches, for the model's kind to read: the
+    /// epochs, rates, batch size and strength of every pass, and the marks
+    /// as weights (Python's `two_nrl(..., bad_weights=bad_weights or None,
+    /// good_weights=... or None)`: no marks, no weights).
+    fn feedback(&self, bad_weights: &[f64], good_weights: &[f64]) -> Feedback {
+        let given = |weights: &[f64]| (!weights.is_empty()).then(|| weights.to_vec());
+        Feedback {
+            neg_epochs: self.neg_epochs,
+            pos_epochs: self.pos_epochs,
+            neg_lr: self.neg_lr,
+            pos_lr: self.pos_lr,
+            strength: self.base_strength(),
+            batch_size: Some(self.batch_size),
+            auto_compress: None,
+            clip: None,
+            shuffle: None,
+            good_weights: given(good_weights),
+            bad_weights: given(bad_weights),
+        }
+    }
 }
 
 // -- where the networks live ----------------------------------------------------------------------
@@ -435,88 +464,6 @@ pub fn weight_groups(texts: &[String], weights: &[f64], name: &str) -> Result<Ve
     }
     groups.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(groups)
-}
-
-/// Tags every record of a weighted pass with its weight, as Python's do.
-fn tagged(mut records: Vec<EpochRecord>, weight: f64) -> Vec<EpochRecord> {
-    for record in &mut records {
-        record.extra.push(("weight".to_string(), Json::Num(weight)));
-    }
-    records
-}
-
-/// Rewards every text in proportion to its weight (a rating out of 1 rather
-/// than a single like): one pass per group of equally rated texts, each
-/// rewarded by `weight * |strength|`.
-pub fn reward_weighted(
-    model: &mut Model,
-    texts: &[String],
-    weights: &[f64],
-    epochs: usize,
-    strength: f64,
-    stop: &dyn Fn() -> bool,
-) -> Result<Vec<EpochRecord>, String> {
-    let base = strength.abs();
-    let mut records = Vec::new();
-    for (weight, group) in weight_groups(texts, weights, "weights")? {
-        if stop() {
-            break;
-        }
-        records.extend(tagged(model.reward(&group, epochs, base * weight)?, weight));
-    }
-    Ok(records)
-}
-
-/// Penalises every text in proportion to its weight: the worse a failure,
-/// the larger the penalty.
-pub fn punish_weighted(
-    model: &mut Model,
-    texts: &[String],
-    weights: &[f64],
-    epochs: usize,
-    strength: f64,
-    stop: &dyn Fn() -> bool,
-) -> Result<Vec<EpochRecord>, String> {
-    let base = strength.abs();
-    let mut records = Vec::new();
-    for (weight, group) in weight_groups(texts, weights, "weights")? {
-        if stop() {
-            break;
-        }
-        records.extend(tagged(model.punish(&group, epochs, base * weight)?, weight));
-    }
-    Ok(records)
-}
-
-/// 2NRL with a rating per text: `bad_weights` scale the penalties (the worse
-/// a failure, the harder it is pushed away) and `good_weights` the rewards
-/// (the better a text, the more of it is kept).
-#[allow(clippy::too_many_arguments)]
-pub fn two_nrl_weighted(
-    model: &mut Model,
-    bad: &[String],
-    bad_weights: &[f64],
-    good: &[String],
-    good_weights: &[f64],
-    neg_epochs: usize,
-    pos_epochs: usize,
-    strength: f64,
-    stop: &dyn Fn() -> bool,
-) -> Result<(Vec<EpochRecord>, Vec<EpochRecord>), String> {
-    let mut negative = Vec::new();
-    for (weight, group) in weight_groups(bad, bad_weights, "bad_weights")? {
-        if stop() {
-            break;
-        }
-        negative.extend(tagged(model.punish(&group, neg_epochs, strength * weight)?, weight));
-    }
-    let positive = if stop() {
-        Vec::new()
-    } else {
-        reward_weighted(model, good, good_weights, pos_epochs, strength, stop)?
-    };
-    model.meta.twonrl_runs.add(1);
-    Ok((negative, positive))
 }
 
 /// The loss of the last record, `None` when there is none.
@@ -619,10 +566,13 @@ fn join_actions(actions: &[String]) -> Option<String> {
     (!out.is_empty()).then(|| out.join("+"))
 }
 
-/// Whether this model can be taught a correction from its diff: the count
-/// model can, while the negative network learns one by blaming it instead.
+/// Whether this model can be taught a correction from its diff - Python's
+/// `callable(getattr(model, "correct", None))`: the count model can; the sine
+/// and phase models have no `correct`, so their corrected failures go through
+/// 2NRL whole; and the negative network learns a correction by blaming it
+/// instead, which the tutor does beside the model.
 fn can_correct(model: &Model) -> bool {
-    !model.is_negative()
+    model.kind() == "count"
 }
 
 /// Teaches one correction from its diff (`Model::correct`): the steps of the
@@ -1017,37 +967,22 @@ impl<'a> TutorTrainer<'a> {
             self.trim_replay();
             return Ok(result);
         }
+        // every pass through the model's own kind, the marks as weights; the
+        // stop is looked at after every epoch, as Python's stop event is
         let stop = &self.stop;
+        let feedback = cfg.feedback(&graded.bad_weights, &good_all_weights);
+        let mut go_on = |_: &EpochRecord| !stop();
         if !graded.bad.is_empty() && !good_all.is_empty() {
-            let (negative, positive) = two_nrl_weighted(
-                model,
-                &graded.bad,
-                &graded.bad_weights,
-                &good_all,
-                &good_all_weights,
-                cfg.neg_epochs,
-                cfg.pos_epochs,
-                strength,
-                &|| stop(),
-            )?;
+            let (negative, positive) = kinds::two_nrl(model, &graded.bad, &good_all, &feedback, &mut go_on)?;
             actions.push("2nrl".to_string());
             result.neg_loss = last_loss(&negative);
             result.pos_loss = last_loss(&positive);
         } else if !good_all.is_empty() {
-            let records = reward_weighted(model, &good_all, &good_all_weights, cfg.pos_epochs, strength, &|| {
-                stop()
-            })?;
+            let records = kinds::reward(model, &good_all, &feedback, &mut go_on)?;
             actions.push("reward".to_string());
             result.pos_loss = last_loss(&records);
         } else {
-            let records = punish_weighted(
-                model,
-                &graded.bad,
-                &graded.bad_weights,
-                cfg.neg_epochs,
-                strength,
-                &|| stop(),
-            )?;
+            let records = kinds::punish(model, &graded.bad, &feedback, &mut go_on)?;
             actions.push("punish".to_string());
             result.neg_loss = last_loss(&records);
         }

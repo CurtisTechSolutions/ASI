@@ -199,11 +199,14 @@ impl Graph {
         }
         let dirty: Vec<usize> = self.dirty.drain().collect();
         if self.neg.is_some() {
-            // a negative network's rows are the blame distribution, as in
-            // `recompute_weights`: the count weights would undo a clear made
-            // in the same process as the blame before it
+            // the blame distribution's rows, not the count / reward ones: a
+            // negative network that keeps learning in memory (an evolve run's,
+            // the tutor's) would otherwise have its touched rows rewritten by
+            // the count model's function, which reads traversals it never has
             for p in dirty {
-                self.recompute_negative_row(p);
+                if p < self.labels.len() {
+                    self.recompute_negative_row(p);
+                }
             }
             self.version.add(1);
             return;

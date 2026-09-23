@@ -51,11 +51,13 @@ use crate::dialogue::{repeats, reply, Heard, ReplyOptions, Turn, EXPLORE};
 use crate::duo::{Filter, FilterConfig};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
+use crate::kinds;
 use crate::llm::fields::Fields;
 use crate::llm::{new_client, normalise_provider, LlmClient, CHATGPT, DEFAULT_PROVIDER, PROVIDERS};
 use crate::model::Model;
 use crate::mt19937::Mt19937;
 use crate::negative::python_repr;
+use crate::radix::Feedback;
 use crate::review::{chat_line, review_conversation, teach_reviews, Review, ReviewSummary, CHAT_SPEAKERS};
 use crate::service::Service;
 use crate::tutor::Networks;
@@ -115,11 +117,13 @@ pub struct ChatConfig {
     pub explore: usize,
     pub neg_epochs: usize,
     pub pos_epochs: usize,
-    /// Accepted for parity with the sine network and ignored here.
+    /// The sine model's learning rates (the count and phase models have none).
     pub neg_lr: f64,
     pub pos_lr: f64,
+    /// Transitions per backend step on the sine model.
     pub batch_size: usize,
-    /// The magnitude of a penalty or reward (`None` = 1).
+    /// The magnitude of a penalty or reward on the count and phase models
+    /// (`None` = 1).
     pub strength: Option<f64>,
     /// Blame epochs per conversation.
     pub epochs: usize,
@@ -645,22 +649,34 @@ impl<'a> Chat<'a> {
             .into_iter()
             .filter(|t| !good.contains(t))
             .collect();
-        let strength = cfg.strength.unwrap_or(1.0);
+        // every pass through the model's own kind (Python's `two_nrl(...,
+        // neg_lr=, pos_lr=, strength=, batch_size=, stop_event=)`): the sine
+        // model reads the rates and batch size, the count and phase models the
+        // strength
+        let o = Feedback {
+            neg_epochs: cfg.neg_epochs,
+            pos_epochs: cfg.pos_epochs,
+            neg_lr: cfg.neg_lr,
+            pos_lr: cfg.pos_lr,
+            strength: cfg.strength.unwrap_or(1.0),
+            batch_size: Some(cfg.batch_size),
+            ..Feedback::two_nrl()
+        };
+        let mut go_on = |_: &crate::model::EpochRecord| !self.stopped();
         let (action, neg_loss, pos_loss) = if bad.is_empty() && good.is_empty() {
             (None, None, None)
         } else if !bad.is_empty() && !good.is_empty() {
-            let (negative, positive) =
-                nets.with_model(|m| m.two_nrl(&bad, &good, cfg.neg_epochs, cfg.pos_epochs, strength))?;
+            let (negative, positive) = nets.with_model(|m| kinds::two_nrl(m, &bad, &good, &o, &mut go_on))?;
             (
                 Some("2nrl"),
                 negative.last().map(|r| r.loss),
                 positive.last().map(|r| r.loss),
             )
         } else if !good.is_empty() {
-            let records = nets.with_model(|m| m.reward(&good, cfg.pos_epochs, strength))?;
+            let records = nets.with_model(|m| kinds::reward(m, &good, &o, &mut go_on))?;
             (Some("reward"), None, records.last().map(|r| r.loss))
         } else {
-            let records = nets.with_model(|m| m.punish(&bad, cfg.neg_epochs, strength))?;
+            let records = nets.with_model(|m| kinds::punish(m, &bad, &o, &mut go_on))?;
             (Some("punish"), records.last().map(|r| r.loss), None)
         };
         let num = |x: Option<f64>| x.map(Json::Num).unwrap_or(Json::Null);

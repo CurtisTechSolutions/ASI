@@ -31,7 +31,7 @@ use crate::llm::{
     clip_chars, count_flag, env, http_reason, nonneg_flag, saved, seconds, timeout_flag, LlmClient, LlmError,
     LlmOptions, OLLAMA,
 };
-use crate::model::TrainOptions;
+use crate::radix::Feedback;
 use crate::report::stats;
 use crate::review::{self, ReviewOptions};
 use crate::service::Service;
@@ -324,12 +324,14 @@ fn corpus_cli(ctx: &Ctx) -> Result<(), String> {
         let existed = std::path::Path::new(&ctx.model_path).exists();
         let mut model = ctx.open(false)?;
         let target = args.str("model-out", &ctx.model_path);
-        let records = model.train(
+        // as its kind learns: a prompt corpus is small, so the sine model's
+        // rate is high (Python's `--lr 0.5 --batch-size 4`)
+        let records = crate::kinds::train_at(
+            &mut model,
             &texts,
-            &TrainOptions {
-                epochs: count_flag(ctx, "epochs", 10, 0)?,
-                ..Default::default()
-            },
+            count_flag(ctx, "epochs", 10, 0)?,
+            nonneg_flag(ctx, "lr", 0.5)?,
+            count_flag(ctx, "batch-size", 4, 1)?,
         )?;
         model.save(&target)?;
         doc[7].1 = Json::obj([
@@ -434,13 +436,19 @@ fn review_cli(ctx: &Ctx) -> Result<(), String> {
             return Err("no text passed the review and no --good file was given for the positive phase".to_string());
         }
         let model = model.as_mut().expect("--2nrl opens the model");
-        let (negative, positive) = model.two_nrl(
-            &bad,
-            &good,
-            count_flag(ctx, "neg-epochs", 3, 0)?,
-            count_flag(ctx, "pos-epochs", 3, 0)?,
-            args.float("strength", 1.0)?,
-        )?;
+        // 2NRL through the model's own kind: the sine model reads the rates
+        // and the batch size (4: a review is a handful of texts), the count
+        // and phase models the strength
+        let o = Feedback {
+            neg_epochs: count_flag(ctx, "neg-epochs", 3, 0)?,
+            pos_epochs: count_flag(ctx, "pos-epochs", 3, 0)?,
+            neg_lr: nonneg_flag(ctx, "neg-lr", 0.05)?,
+            pos_lr: nonneg_flag(ctx, "pos-lr", 0.01)?,
+            strength: args.float("strength", 1.0)?,
+            batch_size: Some(count_flag(ctx, "batch-size", 4, 1)?),
+            ..Feedback::two_nrl()
+        };
+        let (negative, positive) = crate::kinds::two_nrl(model, &bad, &good, &o, &mut |_| true)?;
         let out = args.str("out", &ctx.model_path);
         model.save(&out)?;
         let slot = doc.len() - 2;
@@ -525,8 +533,13 @@ fn corpus_route(svc: &Arc<Service>, r: &Request) -> Answer {
     }
     let train = f.flag("train", false)?;
     let client = client_of_request(svc, &f)?;
-    let epochs = f.count_or("epochs", 5, 0)?;
-    let auto_compress = f.flag("auto_compress", true)?;
+    // Python's `_train_config(f)`: every kind's settings, each kind reading
+    // what applies to it
+    let config = crate::service::train_config(r)?;
+    let every = config.checkpoint_every;
+    if train && every > 0 {
+        crate::checkpoint::require(svc, "checkpoint_every")?;
+    }
     let save_as = f.text("save_as")?.filter(|name| !name.is_empty());
     if train {
         // an LLM call is not spent on a request that cannot start its job
@@ -561,14 +574,13 @@ fn corpus_route(svc: &Arc<Service>, r: &Request) -> Answer {
     }
     svc.ensure_idle()?;
     svc.start_job("train");
-    let opts = TrainOptions {
-        epochs,
-        auto_compress,
+    let settings = crate::kinds::TrainSettings {
+        config,
         ..Default::default()
     };
     let worker = Arc::clone(svc);
     std::thread::spawn(move || {
-        let outcome = worker.with_model(|m| m.train(&texts, &opts));
+        let outcome = crate::checkpoint::train_job(&worker, &texts, &settings, every);
         if outcome.is_ok() {
             worker.autosave();
         }
@@ -719,14 +731,49 @@ fn review_route(svc: &Arc<Service>, r: &Request) -> Answer {
             "no text passed the review and no good texts were given for the positive phase",
         ));
     }
-    let neg_epochs = f.count_or("neg_epochs", 3, 0)?;
-    let pos_epochs = f.count_or("pos_epochs", 3, 0)?;
-    let strength = f.number_or("strength", 1.0, Some(0.0))?;
+    // Python's `start_two_nrl(bad, good, neg_epochs=3, pos_epochs=3,
+    // neg_lr=0.05, pos_lr=0.01, **_train_overrides(f))`, through the model's
+    // own kind; `strength` is this port's knob for the count and phase models
+    let present = |name: &str| f.present(name);
+    let o = Feedback {
+        neg_epochs: f.count_or("neg_epochs", 3, 0)?,
+        pos_epochs: f.count_or("pos_epochs", 3, 0)?,
+        neg_lr: f.number_or("neg_lr", 0.05, Some(0.0))?,
+        pos_lr: f.number_or("pos_lr", 0.01, Some(0.0))?,
+        strength: f.number_or("strength", 1.0, Some(0.0))?,
+        batch_size: if present("batch_size") {
+            Some(f.count_or("batch_size", 1, 1)?)
+        } else {
+            None
+        },
+        auto_compress: if present("auto_compress") {
+            Some(f.flag("auto_compress", true)?)
+        } else {
+            None
+        },
+        clip: if present("clip") {
+            Some(f.number_or("clip", 5.0, None)?)
+        } else {
+            None
+        },
+        shuffle: if present("shuffle") {
+            Some(f.flag("shuffle", true)?)
+        } else {
+            None
+        },
+        ..Feedback::two_nrl()
+    };
     svc.ensure_idle()?;
     svc.start_job("2nrl");
     let worker = Arc::clone(svc);
     std::thread::spawn(move || {
-        let outcome = worker.with_model(|m| m.two_nrl(&bad, &good, neg_epochs, pos_epochs, strength));
+        let outcome = worker.with_model(|m| {
+            let mut watch = |record: &crate::model::EpochRecord| {
+                worker.job_progress(record.to_json());
+                !worker.stopping()
+            };
+            crate::kinds::two_nrl(m, &bad, &good, &o, &mut watch)
+        });
         worker.finish_job(
             outcome.map(|(negative, positive)| negative.iter().chain(positive.iter()).map(|r| r.to_json()).collect()),
         );

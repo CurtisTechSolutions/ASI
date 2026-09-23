@@ -6,17 +6,42 @@
 //!
 //! 1. the generator samples `samples` fakes (its own seeded RNG, so a run is
 //!    the same run every time);
-//! 2. the discriminator - a second count model on the generator's encoding -
-//!    runs 2NRL over the fakes (bad) and a sample of the real corpus (good),
-//!    then scores both sides *per character*, so long and short texts compare;
+//! 2. the discriminator - a fresh network of the generator's own kind, on the
+//!    generator's encoding - runs 2NRL over the fakes (bad) and a sample of
+//!    the real corpus (good), then scores both sides *per character*, so long
+//!    and short texts compare;
 //! 3. the fakes it scores below the real texts are the **failures**, and how
 //!    far below (the gap, in nats per character) is how bad each one is;
 //! 4. the blatant mode decides what the generator does with them - `none`:
 //!    the worst half of the fakes is ordinary 2NRL garbage; `fail_invert`:
-//!    every failure is penalised in proportion to how bad it is; `activation`
-//!    / `state`: the count model has no activation to flip, so every edge of a
-//!    failed path loses reward in proportion to its gap, and the blatant ones
-//!    (past the margin) leave the 2NRL garbage set.
+//!    every failure is trained on with a weight that grows with its gap before
+//!    the inversion turns it into avoidance; `activation` / `state`: only the
+//!    failed paths move (`invert_paths`), the worse the more, and the blatant
+//!    ones (past the margin) leave the 2NRL garbage set.
+//!
+//! # Every kind learns its own way
+//!
+//! Python's loop is written once against the model interface - `two_nrl`,
+//! `reward`, `invert_paths`, `score` - and each kind answers it its own way,
+//! so this one hands every one of those calls to [`crate::kinds`] instead of
+//! calling the count model's code.  What that changes per kind:
+//!
+//! * the **sine model** (`radix`) learns with the loop's learning rates and
+//!   batch size (`neg_lr`, `pos_lr`, `batch_size` - the count model ignores
+//!   them), `fail_invert` scales each failure's learning rates by its weight
+//!   and then inverts the whole network, and the local modes flip every other
+//!   *node* of a failed path (so `flipped` counts nodes);
+//! * the **phase model** (`resonant`) learns the garbage phases and all,
+//!   inverts by rotating every lock by pi, and the local modes rotate
+//!   (`activation`) or decohere (`state`) a failed path's *edges*;
+//! * the **count model** penalises and rewards by `strength`, never inverts,
+//!   and the local modes take reward from a failed path's edges at Python's
+//!   strength (2, so a full failure costs an edge 4).
+//!
+//! The critic is the generator's kind too, built with that kind's defaults,
+//! and learns with the discriminator's epochs and the loop's batch size at
+//! the 2NRL defaults' learning rates - Python's `disc.two_nrl(...)`, which
+//! passes no rate.
 //!
 //! With `blame`, the discriminator is also the **negative network's tutor**:
 //! every failure is blamed (`discriminator`, or `blatant` past the margin) by
@@ -25,10 +50,10 @@
 //!
 //! It is Python's loop to the number: the real texts are drawn the way
 //! `random.Random(seed).sample` draws them, the means are `fsum` means, and
-//! `invert_paths` penalises at Python's strength (2, so a full failure costs
-//! an edge 4) - so an evolve run here and one in Python write the same
-//! generator, the same discriminator and the same negative network.  (Go
-//! draws with its own generator and penalises at half that.)
+//! every kind's own update is the one Python's kind makes - so an evolve run
+//! here and one in Python write the same generator, the same discriminator
+//! and the same negative network.  (Go draws with its own generator and
+//! penalises at half the count model's strength.)
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -42,9 +67,9 @@ use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::model::{EpochRecord, GenerateOptions, Model};
 use crate::mt19937::Mt19937;
+use crate::radix::Feedback;
 use crate::report::stats;
 use crate::service::Service;
-use crate::GraphOptions;
 
 /// What the loop's lines are filed under.
 const LOG: &str = "evolve";
@@ -54,6 +79,7 @@ pub const BLATANT_MODES: &[&str] = &["none", "fail_invert", "activation", "state
 
 /// The strength `invert_paths` penalises a failed path at on the count model
 /// (Python's default): a failure of amount 1 costs each edge `2 * 2 = 4`.
+/// The other kinds' local modes take no strength.
 const INVERT_STRENGTH: f64 = 2.0;
 
 /// The loop's hyper-parameters (Python's `EvolveConfig`).
@@ -69,13 +95,16 @@ pub struct EvolveConfig {
     /// The generator's 2NRL epochs.
     pub neg_epochs: usize,
     pub pos_epochs: usize,
-    /// Accepted for the interface's sake; the count model has no learning rate.
+    /// The generator's 2NRL learning rates: the sine model's (the positive
+    /// phase's activations learn at a tenth of `pos_lr`); the count and phase
+    /// models have none and ignore them.
     pub neg_lr: f64,
     pub pos_lr: f64,
     /// The discriminator's 2NRL epochs.
     pub disc_neg_epochs: usize,
     pub disc_pos_epochs: usize,
-    /// Accepted for the interface's sake; the count model has no batches.
+    /// Transitions per backend step in every 2NRL phase, the generator's and
+    /// the critic's: the sine model's; the count and phase models ignore it.
     pub batch_size: usize,
     /// Checkpoint the generator every N generations (0 = off).
     pub checkpoint_every: usize,
@@ -84,9 +113,12 @@ pub struct EvolveConfig {
     pub blatant_mode: String,
     /// The per-character gap past which a failure is blatant.
     pub blatant_margin: f64,
-    /// `fail_invert`: the largest multiplier a failure's penalty gets.
+    /// `fail_invert`: the largest weight a failure gets - a multiplier of its
+    /// learning rates on the sine and phase models, of its penalty on the count
+    /// model.
     pub blatant_boost: f64,
-    /// The reward / penalty of one 2NRL pass (Go's knob; 1 is Python's).
+    /// The reward / penalty of one 2NRL pass on the count and phase models
+    /// (Go's knob; 1 is Python's); the sine model learns by its rates instead.
     pub strength: f64,
 }
 
@@ -179,6 +211,35 @@ impl EvolveConfig {
             ("strength", Json::Num(self.strength)),
         ])
     }
+
+    /// The generator's 2NRL, thumbs up and rated 2NRL: its epochs, its
+    /// learning rates and batch size, and `strength` - each kind reads what
+    /// applies to it (Python's `generator.two_nrl(..., neg_lr=, pos_lr=,
+    /// batch_size=)`).
+    fn generator_feedback(&self) -> Feedback {
+        Feedback {
+            neg_epochs: self.neg_epochs,
+            pos_epochs: self.pos_epochs,
+            neg_lr: self.neg_lr,
+            pos_lr: self.pos_lr,
+            strength: self.strength,
+            batch_size: Some(self.batch_size),
+            ..Feedback::two_nrl()
+        }
+    }
+
+    /// The critic's 2NRL: the discriminator's epochs and the loop's batch
+    /// size at the 2NRL defaults' learning rates, since Python's
+    /// `disc.two_nrl(...)` passes none.
+    fn critic_feedback(&self) -> Feedback {
+        Feedback {
+            neg_epochs: self.disc_neg_epochs,
+            pos_epochs: self.disc_pos_epochs,
+            strength: self.strength,
+            batch_size: Some(self.batch_size),
+            ..Feedback::two_nrl()
+        }
+    }
 }
 
 // -- Python's arithmetic ------------------------------------------------------------------------
@@ -241,68 +302,7 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
-/// `round(x, 3)`: the nearest three-decimal number, as the decimal string rounds it.
-fn round3(x: f64) -> f64 {
-    format!("{x:.3}").parse().unwrap_or(x)
-}
-
-// -- what the loop asks of the count model ---------------------------------------------------------
-
-/// `[(weight, texts)]`: the texts of equal (three-decimal) weight together,
-/// heaviest first; a weight of 0 drops its text (Python's `_weight_groups`).
-pub fn weight_groups(texts: &[String], weights: &[f64], name: &str) -> Result<Vec<(f64, Vec<String>)>, String> {
-    if weights.len() != texts.len() {
-        return Err(format!(
-            "{name} has {} entries for {} texts",
-            weights.len(),
-            texts.len()
-        ));
-    }
-    let mut groups: Vec<(f64, Vec<String>)> = Vec::new();
-    for (text, &weight) in texts.iter().zip(weights) {
-        if !weight.is_finite() || weight < 0.0 {
-            return Err(format!("{name} must be finite and >= 0, got {weight}"));
-        }
-        if weight > 0.0 {
-            let key = round3(weight);
-            match groups.iter_mut().find(|(w, _)| *w == key) {
-                Some((_, group)) => group.push(text.clone()),
-                None => groups.push((key, vec![text.clone()])),
-            }
-        }
-    }
-    groups.sort_by(|a, b| b.0.total_cmp(&a.0));
-    Ok(groups)
-}
-
-/// 2NRL with a mark per failure: each group of equally bad texts is punished
-/// at `strength * weight` (its records carry the weight), then the good ones
-/// are counted and rewarded - the count model's `two_nrl(bad_weights=...)`.
-pub fn two_nrl_weighted(
-    model: &mut Model,
-    bad: &[String],
-    weights: &[f64],
-    good: &[String],
-    neg_epochs: usize,
-    pos_epochs: usize,
-    strength: f64,
-) -> Result<(Vec<EpochRecord>, Vec<EpochRecord>), String> {
-    let mut negative = Vec::new();
-    for (weight, group) in weight_groups(bad, weights, "bad_weights")? {
-        let mut records = model.punish(&group, neg_epochs, strength * weight)?;
-        // the weight goes into the history too: Python tags the one record it
-        // keeps in both places, and the pass's records are the history's last
-        let first = model.history.len() - records.len().min(model.history.len());
-        for (record, kept) in records.iter_mut().zip(&mut model.history[first..]) {
-            record.extra.push(("weight".to_string(), Json::Num(weight)));
-            kept.extra.push(("weight".to_string(), Json::Num(weight)));
-        }
-        negative.extend(records);
-    }
-    let positive = model.reward(good, pos_epochs, strength)?;
-    model.meta.twonrl_runs.add(1);
-    Ok((negative, positive))
-}
+// -- the count model's local inversion ---------------------------------------------------------------
 
 /// What [`invert_paths`] did.
 #[derive(Clone, Debug, PartialEq)]
@@ -426,9 +426,10 @@ pub struct Pending {
 }
 
 impl Evolver {
-    /// Builds the loop over `corpus`; without a `discriminator` a fresh count
-    /// model is made on the generator's encoding (two networks on different
-    /// encodings judge different grams), seeded one past the loop's seed.
+    /// Builds the loop over `corpus`; without a `discriminator` a fresh model
+    /// of the generator's own kind (with that kind's defaults) is made on the
+    /// generator's encoding - two networks on different encodings judge
+    /// different grams - seeded one past the loop's seed.
     pub fn new(
         generator: &Model,
         corpus: &[String],
@@ -436,7 +437,7 @@ impl Evolver {
         config: EvolveConfig,
     ) -> Result<Evolver, String> {
         if generator.is_negative() {
-            return Err("the evolve loop improves the count model, not the negative network".to_string());
+            return Err("the evolve loop improves a model that writes text, not the negative network".to_string());
         }
         let enc = generator.encoding();
         config.validate(&enc)?;
@@ -451,13 +452,8 @@ impl Evolver {
         let discriminator = match discriminator {
             Some(d) => d,
             None => {
-                let mut fresh = Model::new(
-                    config.seed + 1,
-                    GraphOptions {
-                        encoding: enc,
-                        ..Default::default()
-                    },
-                )?;
+                // `type(generator)(seed=seed + 1, encoding=...)`
+                let mut fresh = crate::kinds::new_model(generator.kind(), config.seed + 1, enc, &[])?;
                 fresh.workers = generator.workers;
                 fresh.g.workers = generator.workers;
                 fresh
@@ -518,7 +514,7 @@ impl Evolver {
             .collect();
         // the critic learns real from fake, then marks both
         let disc = &mut self.discriminator;
-        disc.two_nrl(&fakes, &real, cfg.disc_neg_epochs, cfg.disc_pos_epochs, cfg.strength)?;
+        crate::kinds::two_nrl(disc, &fakes, &real, &cfg.critic_feedback(), &mut |_| true)?;
         let scores: Vec<f64> = fakes.iter().map(|f| disc.score(f).per_char).collect();
         let real_scores: Vec<f64> = real.iter().map(|r| disc.score(r).per_char).collect();
         let (fake_mean, real_mean) = (fmean(&scores), fmean(&real_scores));
@@ -554,21 +550,20 @@ impl Evolver {
         let (mut twonrl, mut flipped) = (false, 0usize);
         let (mut boost_mean, mut boost_max) = (0.0f64, 0.0f64);
         let positive: Vec<EpochRecord>;
+        let feedback = cfg.generator_feedback();
         if mode == "fail_invert" && !failures.is_empty() {
-            // blatantly fail on purpose: the worse the fake, the harder it is pushed away
+            // train on the failures - blatantly fail on purpose: the worse the
+            // fake, the larger its weight - then (the sine and phase models)
+            // invert and fine-tune on the real texts
             let weights: Vec<f64> = gaps
                 .iter()
                 .map(|gap| cfg.blatant_boost.min(1.0 + gap / cfg.blatant_margin))
                 .collect();
-            let (_, pos) = two_nrl_weighted(
-                generator,
-                &failures,
-                &weights,
-                &real,
-                cfg.neg_epochs,
-                cfg.pos_epochs,
-                cfg.strength,
-            )?;
+            let rated = Feedback {
+                bad_weights: Some(weights.clone()),
+                ..feedback.clone()
+            };
+            let (_, pos) = crate::kinds::two_nrl(generator, &failures, &real, &rated, &mut |_| true)?;
             positive = pos;
             worst = failures.clone();
             twonrl = true;
@@ -584,19 +579,25 @@ impl Evolver {
                     .iter()
                     .map(|gap| 1.0f64.min(gap / (2.0 * cfg.blatant_margin)))
                     .collect();
-                let outcome = invert_paths(generator, &failures, &amounts, INVERT_STRENGTH * cfg.strength)?;
-                flipped = outcome.flipped;
-                boost_mean = outcome.amount_mean;
+                let outcome = crate::kinds::invert_paths(
+                    generator,
+                    &failures,
+                    mode,
+                    Some(&amounts),
+                    INVERT_STRENGTH * cfg.strength,
+                )?;
+                flipped = outcome.at("flipped").as_i64().unwrap_or(0) as usize;
+                boost_mean = outcome.at("amount_mean").as_f64().unwrap_or(0.0);
                 boost_max = amounts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 worst.retain(|w| !blatant.contains(w));
             }
             if !worst.is_empty() {
-                let (_, pos) = generator.two_nrl(&worst, &real, cfg.neg_epochs, cfg.pos_epochs, cfg.strength)?;
+                let (_, pos) = crate::kinds::two_nrl(generator, &worst, &real, &feedback, &mut |_| true)?;
                 positive = pos;
                 twonrl = true;
             } else {
-                // nothing left for the negative pass: only the fine-tune pass
-                positive = generator.reward(&real, cfg.pos_epochs, cfg.strength)?;
+                // nothing left for the negative pass: only the fine-tune pass on real texts, no inversion
+                positive = crate::kinds::reward(generator, &real, &feedback, &mut |_| true)?;
             }
         }
         self.generation += 1;
@@ -1172,6 +1173,7 @@ mod tests {
     use super::*;
     use crate::model::TrainOptions;
     use crate::negative::NegativeOptions;
+    use crate::GraphOptions;
 
     const CORPUS: [&str; 5] = [
         "the cat sat on the mat",
@@ -1232,7 +1234,6 @@ mod tests {
         assert_eq!(median(&[4.0, 1.0, 2.0, 3.0]), 2.5);
         assert_eq!(fmean(&[0.1, 0.2, 0.3]), Some(0.6 / 3.0));
         assert_eq!(fmean(&[]), None);
-        assert_eq!(round3(1.23456), 1.235);
     }
 
     #[test]
@@ -1381,20 +1382,56 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_is_judged_by_its_own_kind_and_learns_its_own_way() {
+        for (kind, unit) in [("radix", "nodes"), ("resonant", "edges")] {
+            for mode in ["fail_invert", "activation", "state"] {
+                let mut g = crate::kinds::new_model(kind, 3, Encoding::default(), &[]).unwrap();
+                let settings = crate::kinds::TrainSettings {
+                    config: crate::radix::TrainConfig {
+                        epochs: 2,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                crate::kinds::train(&mut g, &corpus(), &settings, &mut |_| true).unwrap();
+                let config = EvolveConfig {
+                    blatant_margin: 0.01,
+                    ..small(mode)
+                };
+                let mut loop_ = Evolver::new(&g, &corpus(), None, config).unwrap();
+                assert_eq!(loop_.discriminator.kind(), kind, "the critic is the generator's kind");
+                let record = loop_.run_generation(&mut g, None).unwrap();
+                let failures = record.at("failures").as_i64().unwrap();
+                if mode == "fail_invert" && failures > 0 {
+                    assert!(
+                        g.history.iter().any(|h| h.extra_value("weight").is_some()),
+                        "{kind}: the failures' weights are in the history"
+                    );
+                }
+                if mode != "fail_invert" && failures > 0 {
+                    // the kind's own local inversion, counted in its own unit
+                    let fakes: Vec<String> = vec![record.at("sample").as_str().unwrap_or("").to_string()];
+                    let outcome = crate::kinds::invert_paths(&mut g, &fakes, mode, None, 2.0).unwrap();
+                    assert_eq!(outcome.at("unit").as_str(), Some(unit), "{kind}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn weighted_2nrl_groups_by_the_mark() {
         let texts: Vec<String> = ["aaa bbb", "ccc ddd", "eee fff"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let groups = weight_groups(&texts, &[1.0, 2.0004, 0.0], "w").unwrap();
-        assert_eq!(
-            groups,
-            vec![(2.0, vec!["ccc ddd".to_string()]), (1.0, vec!["aaa bbb".to_string()])]
-        );
-        assert!(weight_groups(&texts, &[1.0], "w").is_err());
-        assert!(weight_groups(&texts, &[1.0, -1.0, 1.0], "w").is_err());
         let mut g = generator();
-        let (neg, pos) = two_nrl_weighted(&mut g, &texts, &[2.0, 1.0, 1.0], &corpus(), 1, 1, 1.0).unwrap();
+        let rated = Feedback {
+            neg_epochs: 1,
+            pos_epochs: 1,
+            bad_weights: Some(vec![2.0, 1.0, 1.0]),
+            ..small("fail_invert").generator_feedback()
+        };
+        let (neg, pos) = crate::kinds::two_nrl(&mut g, &texts, &corpus(), &rated, &mut |_| true).unwrap();
         assert_eq!(neg.len(), 2);
         assert_eq!(neg[0].extra_value("weight").and_then(|w| w.as_f64()), Some(2.0));
         assert_eq!(neg[0].reward, -2.0, "the heavier failure is punished harder");
@@ -1499,7 +1536,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let job = svc.job_json();
-        assert_eq!(job.at("state").as_str(), Some("finished"), "{}", job.render(0));
+        assert_eq!(job.at("state").as_str(), Some("done"), "{}", job.render(0));
         assert_eq!(job.at("history").as_array().len(), 2);
         let kept = history(&svc, &Request::json("GET", "/", Json::Null)).unwrap();
         assert_eq!(kept.at("history").as_array().len(), 2);

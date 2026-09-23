@@ -150,7 +150,11 @@ impl Graph {
                 blame.push(neg.blame[e]);
                 fails.push(neg.fails[e]);
                 clear.push(neg.clear[e]);
-                let pairs: Vec<Json> = neg.reasons[e]
+                // `sorted(edge_reasons[e].items())`: by reason id, not in the
+                // order the edge was blamed for them
+                let mut held: Vec<&crate::negative::ReasonBlame> = neg.reasons[e].iter().collect();
+                held.sort_by_key(|r| r.id);
+                let pairs: Vec<Json> = held
                     .iter()
                     .map(|r| Json::Arr(vec![Json::Int(r.id as i64), Json::Num(r.blame)]))
                     .collect();
