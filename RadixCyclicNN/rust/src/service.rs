@@ -462,6 +462,12 @@ impl Service {
             .as_ref()
             .ok_or_else(|| ApiError::bad_request("no upload directory is configured"))?;
         let path = safe_upload(dir, name)?;
+        // a ZIP archive is kept whole and its text entries unpacked here (D-034)
+        if let Some(texts) = crate::source::upload_texts(&path, whole, self.workers)
+            .map_err(|err| ApiError::bad_request(format!("{name}: {err}")))?
+        {
+            return Ok(texts);
+        }
         let content = std::fs::read_to_string(&path)
             .map_err(|err| ApiError::bad_request(format!("cannot read upload {name:?}: {err}")))?;
         if whole {
@@ -899,13 +905,18 @@ fn train(svc: &Arc<Service>, r: &Request) -> Answer {
         chunk_size: r.usize("chunk", 0)?,
         phase: None,
     };
+    // checkpoints every N epochs, into the server's --checkpoint-dir
+    let every = r.usize("checkpoint_every", 0)?;
+    if every > 0 {
+        crate::checkpoint::require(svc, "checkpoint_every")?;
+    }
     svc.start_job("train");
     // the run holds the model for as long as it takes, which is what makes a
     // second request wait; the answer goes out now, and the frontend follows the
     // run on /api/job - the same 202 the Python and Go servers answer with
     let worker = Arc::clone(svc);
     std::thread::spawn(move || {
-        let outcome = worker.with_model(|m| m.train(&texts, &opts));
+        let outcome = crate::checkpoint::train_job(&worker, &texts, &opts, every);
         if outcome.is_ok() {
             worker.autosave();
         }
@@ -1266,9 +1277,17 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
     };
     let mut rows: Vec<Json> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
+        // in name order, as the Python service lists them
+        let mut entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
             let path = entry.path();
             if !path.is_file() {
+                continue;
+            }
+            // an archive reports the lines of its text entries, not its bytes read as text
+            if let Some(record) = crate::source::archive_record(&path, svc.workers) {
+                rows.push(record);
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();

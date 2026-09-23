@@ -156,7 +156,17 @@ fn run() -> Result<(), String> {
 
     match command.as_str() {
         "train" => {
-            let mut model = open(false)?;
+            // --checkpoint-dir / --checkpoint-every / --keep, and --resume from the latest
+            let schedule = radixnet::checkpoint::Schedule::from_args(&args)?;
+            let resumed = if args.on("resume") {
+                schedule.resume(&ctx)?
+            } else {
+                None
+            };
+            let mut model = match resumed {
+                Some(model) => model,
+                None => open(false)?,
+            };
             let texts = read_texts(&args)?;
             let opts = TrainOptions {
                 epochs: args.usize("epochs", 5)?,
@@ -164,9 +174,16 @@ fn run() -> Result<(), String> {
                 chunk_size: args.usize("chunk", 0)?,
                 phase: None,
             };
-            let records = model.train(&texts, &opts)?;
+            let records = radixnet::checkpoint::train(
+                &mut model,
+                &texts,
+                &opts,
+                schedule.manager(),
+                schedule.every,
+                &mut |_| true,
+            )?;
             let saved = save(&mut model)?;
-            emit(Json::obj([
+            let mut doc = Json::obj([
                 ("texts", Json::Int(texts.len() as i64)),
                 ("split", Json::str(args.str("split", "lines"))),
                 (
@@ -178,7 +195,11 @@ fn run() -> Result<(), String> {
                 ("records", Json::Arr(records.iter().map(|r| r.to_json()).collect())),
                 ("saved", Json::str(saved)),
                 ("stats", stats(&model)),
-            ]));
+            ]);
+            if let Json::Obj(pairs) = &mut doc {
+                pairs.extend(schedule.report());
+            }
+            emit(doc);
         }
         "predict" => {
             let mut model = open(true)?;
