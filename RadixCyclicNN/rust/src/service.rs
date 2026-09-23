@@ -544,6 +544,8 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
     ));
     // the LLM providers' defaults, which the Ollama tab reads its own from
     pairs.extend(svc.llm.status_fields());
+    // the tools the network may call, and the server's settings for them
+    pairs.push(("tools".to_string(), crate::tools::status_json(svc)));
     pairs.push(("engine".to_string(), Json::str(ENGINE)));
     pairs.push(("workers".to_string(), Json::Int(svc.workers as i64)));
     pairs.push(("counting".to_string(), Json::str("exact")));
