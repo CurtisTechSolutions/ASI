@@ -11,6 +11,12 @@ pub fn stats(model: &Model) -> Json {
     if model.is_negative() {
         return crate::negative::stats_json(model);
     }
+    if model.g.is_radix() {
+        return crate::radix::stats_json(model);
+    }
+    if model.is_resonant() {
+        return crate::resonance::stats_json(model);
+    }
     let g = &model.g;
     let (pos, neg) = g.total_reward();
     let paths = g.path_totals();

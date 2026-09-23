@@ -1121,12 +1121,20 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
 // -- the route ------------------------------------------------------------------------------------
 
 fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
+    // a partner of another kind is the model of that kind kept in memory (Python's `converse`)
     let partner = r.text("partner", "");
-    if !partner.is_empty() && partner.trim().to_lowercase() != "count" {
-        return Err(ApiError::bad_request(format!(
-            "no {partner} model in memory to converse with; this server runs the count model"
-        )));
-    }
+    let active = svc.with_model(|m| m.kind());
+    let partner_kind = if partner.trim().is_empty() || partner.trim().to_lowercase() == active {
+        None
+    } else {
+        let kind = crate::kinds::parse_kind(&partner).map_err(ApiError::bad_request)?;
+        if svc.with_parked_kind(kind, |_| ()).is_none() {
+            return Err(ApiError::bad_request(format!(
+                "no {kind} model in memory to converse with; select that kind once to load it"
+            )));
+        }
+        Some(kind)
+    };
     let speakers: Vec<String> = match r.body.get("speakers") {
         Some(Json::Arr(items)) => items
             .iter()
@@ -1166,28 +1174,43 @@ fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
         learn: r.flag("learn", true),
     };
     let opening = r.text("opening", "");
-    let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(Vec<Turn>, Json), String> {
-            let outcome = converse_guarded(pair, None, &opening, &o)?;
-            // `vetoed` counts the distinct texts refused, `refusals` how often one was
-            let report = guard_report(
-                pair,
-                &outcome.verdicts,
-                vec![("refusals", Json::Int(outcome.vetoed as i64))],
-            );
-            Ok((outcome.turns, report))
-        })?
-    } else {
-        None
+    let guard_on = r.flag("guard", true);
+    // one conversation, with or without a partner: the parked partner's lock is
+    // taken first, then the running model's, then the guard's
+    let talk = |partner: Option<&mut Model>| -> Result<(Vec<Turn>, Json), ApiError> {
+        let mut partner = partner;
+        let guarded = if guard_on {
+            svc.guard(|pair| -> Result<(Vec<Turn>, Json), String> {
+                let outcome = converse_guarded(pair, partner.as_deref_mut(), &opening, &o)?;
+                // `vetoed` counts the distinct texts refused, `refusals` how often one was
+                let report = guard_report(
+                    pair,
+                    &outcome.verdicts,
+                    vec![("refusals", Json::Int(outcome.vetoed as i64))],
+                );
+                Ok((outcome.turns, report))
+            })?
+        } else {
+            None
+        };
+        Ok(match guarded {
+            Some(outcome) => outcome?,
+            None => (
+                svc.with_model(|m| converse(m, partner, &opening, &o, None))?,
+                Json::Null,
+            ),
+        })
     };
-    let (turns, guard) = match guarded {
-        Some(outcome) => outcome?,
-        None => (svc.with_model(|m| converse(m, None, &opening, &o, None))?, Json::Null),
+    let (turns, guard) = match partner_kind {
+        None => talk(None)?,
+        Some(kind) => svc
+            .with_parked_kind(kind, |other| talk(Some(other)))
+            .ok_or_else(|| ApiError::bad_request(format!("no {kind} model in memory to converse with")))??,
     };
     let kind = svc.with_model(|m| m.kind());
     Ok(Json::obj([
         ("kind", Json::str(kind)),
-        ("partner", Json::Null),
+        ("partner", partner_kind.map(Json::str).unwrap_or(Json::Null)),
         ("speakers", Json::strs(speakers)),
         ("turns", turns_json(&turns)),
         ("count", Json::Int(turns.len() as i64)),

@@ -655,6 +655,10 @@ impl Service {
     /// first time, else created empty.  Takes the negative network's lock
     /// only - pair it with [`Service::with_model`] *outside* it, never inside.
     pub fn with_negative<T>(&self, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {
+        if self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            // selected as a kind, the negative network is the running model
+            return Ok(self.with_model(f));
+        }
         let mut slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(self.load_negative()?);
@@ -662,7 +666,7 @@ impl Service {
         Ok(f(slot.as_mut().expect("a negative network")))
     }
 
-    fn load_negative(&self) -> Result<Model, ApiError> {
+    pub(crate) fn load_negative(&self) -> Result<Model, ApiError> {
         let path = self.negative_path();
         let mut model = if !path.is_empty() && std::path::Path::new(&path).is_file() {
             let m = Model::load(&path)?;
@@ -692,6 +696,9 @@ impl Service {
     /// or one saved beside the model - never created here (an answer is not
     /// the place to bring one into being) - that has been taught a failure.
     pub fn guard_ready(&self) -> bool {
+        if self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            return false; // the running model is the negative network: it cannot filter itself
+        }
         {
             let slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(neg) = slot.as_ref() {
@@ -968,22 +975,35 @@ fn filter(svc: &Arc<Service>, r: &Request) -> Answer {
         beam: r.usize("beam", 0)?,
         ..Default::default()
     };
+    let run = |positive: &mut Model, negative: &mut Model| -> Result<Json, String> {
+        let mut pair = Filter::new(positive, negative, config)?;
+        let outcome = if texts.is_empty() {
+            pair.generate(count, &generate)?
+        } else {
+            pair.filter(&texts)?
+        };
+        let Json::Obj(mut pairs) = outcome.to_json() else {
+            unreachable!()
+        };
+        pairs.push(("pair".to_string(), pair.describe()));
+        Ok(Json::Obj(pairs))
+    };
+    if svc.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+        // the negative network is the running model: the positive half is one kept in memory
+        let answer = svc
+            .with_parked_positive(|positive| svc.with_model(|negative| run(positive, negative)))
+            .ok_or_else(|| {
+                ApiError::conflict(
+                    "the negative network is the active model and no positive model is in memory; select the \
+                     radix or count kind first (POST /api/model/select)",
+                )
+            })?;
+        return answer.map_err(ApiError::bad_request);
+    }
     let mut failure = None;
     let mut out = Json::Null;
     svc.with_model(|positive| {
-        let answer = svc.with_negative(|negative| -> Result<Json, String> {
-            let mut pair = Filter::new(positive, negative, config)?;
-            let outcome = if texts.is_empty() {
-                pair.generate(count, &generate)?
-            } else {
-                pair.filter(&texts)?
-            };
-            let Json::Obj(mut pairs) = outcome.to_json() else {
-                unreachable!()
-            };
-            pairs.push(("pair".to_string(), pair.describe()));
-            Ok(Json::Obj(pairs))
-        });
+        let answer = svc.with_negative(|negative| run(positive, negative));
         match answer {
             Ok(Ok(doc)) => out = doc,
             Ok(Err(why)) => failure = Some(ApiError::bad_request(why)),
@@ -1066,7 +1086,12 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     fresh.workers = svc.workers;
     fresh.g.workers = svc.workers;
     let stats = crate::report::stats(&fresh);
-    *svc.negative.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
+    if svc.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+        // selected as a kind, the negative network is the running model: that is the one replaced
+        svc.install(fresh);
+    } else {
+        *svc.negative.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
+    }
     Ok(Json::obj([
         ("stats", stats),
         ("reasons", Json::Arr(Vec::new())),

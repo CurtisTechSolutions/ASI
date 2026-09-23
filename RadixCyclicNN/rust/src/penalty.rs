@@ -89,6 +89,10 @@ impl Graph {
     /// what says the step was right here is merit, what says it was wrong here
     /// is penalty - so the punishment traversal never sees a reward at all.
     pub fn child_evidence(&self, p: usize, prev: Option<usize>) -> Vec<EdgeEvidence> {
+        if self.radix.is_some() {
+            // the sine model's ledger is its score: the negative part is the punishment
+            return self.radix_evidence(p);
+        }
         let rs = self.reward_scale;
         let ps = self.path_scale;
         let context = prev.is_some() && ps != 0.0 && !self.paths_empty();

@@ -136,11 +136,16 @@ fn the_model_endpoints_answer_the_same_contract() {
     assert_eq!(stats.at("units").as_str(), Some("chars"));
     assert_eq!(stats.at("engine").as_str(), Some("rust"));
     assert!(stats.at("nodes").as_i64().unwrap_or(0) > 3);
-    assert_eq!(
-        stats.at("kinds").as_array().len(),
-        1,
-        "words are an encoding, not a second kind"
-    );
+    // every kind Python's service runs; words are an encoding, not a kind
+    let kinds: Vec<String> = stats
+        .at("kinds")
+        .as_array()
+        .iter()
+        .filter_map(|k| k.at("kind").as_str().map(str::to_string))
+        .collect();
+    assert_eq!(kinds, vec!["radix", "count", "negative", "resonant"]);
+    assert_eq!(stats.at("backends").at("torch").as_bool(), Some(false));
+    assert_eq!(stats.at("backends").at("rust").as_bool(), Some(true));
 
     let (status, model) = get(port, "/api/model");
     assert_eq!(status, 200);
@@ -368,13 +373,119 @@ fn what_it_does_not_serve_says_so() {
         "{says}"
     );
 
-    // a kind no Rust server runs
-    let (status, error) = post(port, "/api/model/select", r#"{"kind":"resonant"}"#);
+    // a kind no server runs, in Python's words
+    let (status, error) = post(port, "/api/model/select", r#"{"kind":"sine"}"#);
     assert_eq!(status, 400);
-    assert!(error.at("error").as_str().unwrap_or("").contains("Python server"));
+    assert!(error
+        .at("error")
+        .as_str()
+        .unwrap_or("")
+        .contains("unknown model kind 'sine'; expected one of: radix, count, negative, resonant"));
+    // and what only the count model keeps
+    post(port, "/api/model/select", r#"{"kind":"radix"}"#);
+    let (status, error) = get(port, "/api/paths");
+    assert_eq!(status, 400);
+    assert_eq!(error.at("error").as_str(), Some("the radix model does not count paths"));
 
     // and a route that is not here at all
     let (status, error) = get(port, "/api/tutor/report");
     assert_eq!(status, 404);
     assert!(error.at("error").as_str().unwrap_or("").contains("no route"));
+}
+
+/// Every kind is selectable, as it is on the Python server: the model that was
+/// running is parked with its unsaved work, a reset makes a fresh one of the
+/// kind asked for (with its score function), and each answers the routes the
+/// frontend's tabs use.
+#[test]
+fn every_kind_is_selected_trained_and_reset() {
+    let dir = temp_dir("kinds");
+    let port = serve(trained(false), &format!("{dir}/model.count.json"));
+    let texts = r#"{"texts":["the cat sat on the mat","the dog sat on the log"],"epochs":2}"#;
+    for kind in ["radix", "resonant", "negative"] {
+        let (status, chosen) = post(port, "/api/model/select", &format!(r#"{{"kind":"{kind}"}}"#));
+        assert_eq!(status, 200, "{kind}: {chosen:?}");
+        assert_eq!(chosen.at("kind").as_str(), Some(kind));
+        assert_eq!(chosen.at("origin").as_str(), Some("new"));
+        let expected = format!("{dir}/model.count.{kind}.json");
+        assert_eq!(chosen.at("model_path").as_str(), Some(expected.as_str()), "{kind}");
+        let (status, _) = post(port, "/api/train", texts);
+        assert_eq!(status, 202, "{kind}");
+        for _ in 0..500 {
+            if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"), "{kind}");
+        let (_, status_doc) = get(port, "/api/status");
+        assert_eq!(status_doc.at("kind").as_str(), Some(kind));
+        assert!(
+            status_doc.at("epochs_total").as_i64().unwrap_or(0) > 0 || kind == "negative",
+            "{kind}"
+        );
+        let (status, graph) = get(port, "/api/graph?limit=5");
+        assert_eq!(status, 200, "{kind}");
+        assert!(graph.at("edges").as_array().iter().all(|e| e.get("source").is_some()));
+    }
+    // the count model comes back as it was left
+    let (_, back) = post(port, "/api/model/select", r#"{"kind":"count"}"#);
+    assert_eq!(back.at("origin").as_str(), Some("memory"));
+    assert_eq!(back.at("kind").as_str(), Some("count"));
+    let memory = back.at("in_memory").to_strings();
+    for key in ["char:3:1", "radix", "resonant", "negative"] {
+        assert!(memory.iter().any(|k| k == key), "{key} not in {memory:?}");
+    }
+    let (_, again) = post(port, "/api/model/select", r#"{"kind":"resonant"}"#);
+    assert_eq!(again.at("origin").as_str(), Some("memory"));
+    assert!(again.at("stats").at("epochs_total").as_i64().unwrap_or(0) > 0);
+
+    // a reset takes the kind and its score function; the wrong settings are refused as Python refuses them
+    let (status, reset) = post(
+        port,
+        "/api/reset",
+        r#"{"kind":"resonant","buckets":12,"kick_scale":0.5}"#,
+    );
+    assert_eq!(status, 200, "{reset:?}");
+    let (_, model) = get(port, "/api/model");
+    assert_eq!(model.at("weights").at("buckets").as_i64(), Some(12));
+    assert_eq!(model.at("weights").at("kick_scale").as_f64(), Some(0.5));
+    let (status, error) = post(port, "/api/reset", r#"{"kind":"radix","window":5}"#);
+    assert_eq!(status, 400);
+    assert_eq!(
+        error.at("error").as_str(),
+        Some("weight options (window) do not apply to the radix model")
+    );
+    let (status, weights) = post(port, "/api/model/weights", r#"{"resonance_scale":2}"#);
+    assert_eq!(status, 200, "{weights:?}");
+    assert_eq!(weights.at("weights").at("resonance_scale").as_f64(), Some(2.0));
+    post(port, "/api/model/select", r#"{"kind":"radix"}"#);
+    let (status, error) = post(port, "/api/model/weights", r#"{"reward_scale":2}"#);
+    assert_eq!(status, 400);
+    assert!(error
+        .at("error")
+        .as_str()
+        .unwrap_or("")
+        .contains("no configurable weight function"));
+
+    // the schedule language the Train tab previews
+    let (_, schedule) = get(port, "/api/schedule");
+    assert!(!schedule.at("presets").as_array().is_empty());
+    let (status, preview) = post(
+        port,
+        "/api/schedule/preview",
+        r#"{"lr_schedule":"linear(lr0, 4 * lr0)","epochs":3,"lr":0.1}"#,
+    );
+    assert_eq!(status, 200);
+    let lrs: Vec<f64> = preview
+        .at("points")
+        .as_array()
+        .iter()
+        .filter_map(|p| p.at("lr").as_f64())
+        .collect();
+    assert_eq!(lrs.len(), 3);
+    assert!((lrs[2] - 0.4).abs() < 1e-12);
+    let (status, error) = post(port, "/api/schedule/preview", r#"{"lr_schedule":"lr0 +"}"#);
+    assert_eq!(status, 400);
+    assert!(error.at("error").as_str().unwrap_or("").contains("invalid syntax"));
 }

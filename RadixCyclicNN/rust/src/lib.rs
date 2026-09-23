@@ -109,6 +109,18 @@ pub mod web;
 pub mod weights;
 pub mod words;
 pub mod zip;
+// the sine-activation and phase models (radix / resonant) and what they stand on
+pub mod activation;
+pub mod backend;
+pub mod blake2b;
+pub mod dijkstra;
+pub mod kinds;
+pub mod metacog;
+pub mod phasesearch;
+pub mod pyheap;
+pub mod radix;
+pub mod resonance;
+pub mod schedule;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;

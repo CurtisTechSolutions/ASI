@@ -1,5 +1,10 @@
 //! `Model` - the count / reward model: train, predict, generate, score,
 //! feedback / 2NRL and the statistics.
+//!
+//! The other kinds hang what they keep beside the graph on it - the negative
+//! network on `neg`, the phase model on `res`, the sine model on the graph
+//! alone - and the entry points below hand a call to their own code
+//! ([`crate::radix`], [`crate::resonance`]) when the kind has its own answer.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
@@ -164,8 +169,28 @@ impl EpochRecord {
         self.extra.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    /// The layout of this record's `history` entry: the phase model writes
+    /// its walk counts between `transitions` and `seconds`, the sine model its
+    /// learning rates after `skipped_short`, and every other kind the count
+    /// model's `traversed` / `reward`.  Told apart by the keys only that kind
+    /// writes.
+    fn layout(&self) -> &'static str {
+        if matches!(self.extra_value("traversed"), Some(Json::Int(_))) && self.extra_value("cycles").is_some() {
+            "resonant"
+        } else if self.extra_value("lr").is_some() && self.extra_value("act_lr").is_some() && !self.is_negative_pass() {
+            "radix"
+        } else {
+            "count"
+        }
+    }
+
     /// The record as a `history` entry.
     pub fn to_json(&self) -> Json {
+        match self.layout() {
+            "resonant" => return self.keyed_json(&["traversed", "reward", "cycles", "signatures"], false),
+            "radix" => return self.keyed_json(&["lr", "act_lr"], true),
+            _ => {}
+        }
         let mut pairs: Vec<(String, Json)> = vec![
             ("epoch".to_string(), Json::Int(self.epoch)),
             ("loss".to_string(), Json::Num(self.loss)),
@@ -192,6 +217,48 @@ impl EpochRecord {
         Json::Obj(pairs)
     }
 
+    /// A radix or resonant entry, in Python's key order: the common fields to
+    /// `transitions`, then `own` (read from the extras, `reward` from the
+    /// field) either after `skipped_short` (`own_last`) or before `seconds`,
+    /// then the phase and whatever else the record carries (`weight`).
+    fn keyed_json(&self, own: &[&str], own_last: bool) -> Json {
+        let mut pairs: Vec<(String, Json)> = vec![
+            ("epoch".to_string(), Json::Int(self.epoch)),
+            ("loss".to_string(), Json::Num(self.loss)),
+            ("perplexity".to_string(), Json::Num(self.perplexity)),
+            ("nodes".to_string(), Json::Int(self.nodes as i64)),
+            ("edges".to_string(), Json::Int(self.edges as i64)),
+            ("trigrams".to_string(), Json::Int(self.trigrams as i64)),
+            ("compression_ratio".to_string(), Json::Num(self.compression_ratio)),
+            ("merges".to_string(), Json::Int(self.merges as i64)),
+            ("transitions".to_string(), Json::Int(self.transitions)),
+        ];
+        let own_pairs: Vec<(String, Json)> = own
+            .iter()
+            .map(|&key| {
+                let value = if key == "reward" {
+                    Json::Num(self.reward)
+                } else {
+                    self.extra_value(key).cloned().unwrap_or(Json::Null)
+                };
+                (key.to_string(), value)
+            })
+            .collect();
+        if !own_last {
+            pairs.extend(own_pairs.iter().cloned());
+        }
+        pairs.push(("seconds".to_string(), Json::Num(self.seconds)));
+        pairs.push(("skipped_short".to_string(), Json::Int(self.skipped_short as i64)));
+        if own_last {
+            pairs.extend(own_pairs);
+        }
+        if let Some(phase) = &self.phase {
+            pairs.push(("phase".to_string(), Json::str(phase.clone())));
+        }
+        pairs.extend(self.extra.iter().filter(|(k, _)| !own.contains(&k.as_str())).cloned());
+        Json::Obj(pairs)
+    }
+
     /// One `history` entry, keeping any field this implementation does not write.
     pub fn from_json(doc: &Json) -> EpochRecord {
         const KNOWN: [&str; 14] = [
@@ -213,7 +280,8 @@ impl EpochRecord {
         let extra = match doc {
             Json::Obj(pairs) => pairs
                 .iter()
-                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                // the phase model's `traversed` is a count, not the flag: kept as it is
+                .filter(|(k, v)| !KNOWN.contains(&k.as_str()) || (k == "traversed" && !matches!(v, Json::Bool(_))))
                 .cloned()
                 .collect(),
             _ => Vec::new(),
@@ -273,6 +341,9 @@ pub struct Model {
     /// The journal and judgement settings of the *negative* network
     /// ([`crate::negative`]); `None` on a count / reward model.
     pub neg: Option<Box<crate::negative::Negative>>,
+    /// The metacognitive layer and cycle settings of the *phase* model
+    /// ([`crate::resonance`]); `None` on every other kind.
+    pub res: Option<Box<crate::resonance::ResonantModel>>,
     pub g: Graph,
     pub history: Vec<EpochRecord>,
     pub meta: Meta,
@@ -295,6 +366,7 @@ impl Model {
             meta: Meta::new(seed),
             workers: 0,
             neg: None,
+            res: None,
         }
     }
 
@@ -306,6 +378,10 @@ impl Model {
     pub fn kind(&self) -> &'static str {
         if self.is_negative() {
             "negative"
+        } else if self.g.is_radix() {
+            "radix"
+        } else if self.g.is_resonant() {
+            "resonant"
         } else {
             "count"
         }
@@ -315,6 +391,10 @@ impl Model {
     pub fn format(&self) -> &'static str {
         if self.is_negative() {
             crate::negative::NEGATIVE_FORMAT
+        } else if self.g.is_radix() {
+            crate::radix::RADIX_FORMAT
+        } else if self.g.is_resonant() {
+            crate::resonance::RESONANT_FORMAT
         } else {
             crate::file::MODEL_FORMAT
         }
@@ -370,11 +450,39 @@ impl Model {
 
     /// Counts one traversal of every text's path per epoch.
     pub fn train(&mut self, texts: &[String], opts: &TrainOptions) -> Result<Vec<EpochRecord>, String> {
+        if self.g.is_radix() {
+            let cfg = crate::radix::TrainConfig {
+                epochs: opts.epochs,
+                auto_compress: opts.auto_compress,
+                ..Default::default()
+            };
+            return self.radix_train(texts, &cfg, opts.phase.as_deref(), &mut |_| true);
+        }
+        if self.is_resonant() {
+            return self.resonant_train(
+                texts,
+                opts.epochs,
+                opts.auto_compress,
+                opts.phase.as_deref(),
+                &mut |_| true,
+            );
+        }
         self.passes(texts, opts, true, 0.0)
     }
 
     /// Thumbs up: `epochs` passes that traverse and reward (+`strength`) every path.
     pub fn reward(&mut self, texts: &[String], epochs: usize, strength: f64) -> Result<Vec<EpochRecord>, String> {
+        if self.g.is_radix() {
+            let o = crate::radix::Feedback {
+                pos_epochs: epochs,
+                strength,
+                ..crate::radix::Feedback::two_nrl()
+            };
+            return self.radix_reward(texts, &o, &mut |_| true);
+        }
+        if self.is_resonant() {
+            return self.resonant_reward(texts, epochs, strength, None, &mut |_| true);
+        }
         let opts = TrainOptions {
             epochs,
             phase: Some("positive".into()),
@@ -386,6 +494,17 @@ impl Model {
     /// Thumbs down: `epochs` passes that penalise (-`strength`) every path; no
     /// traversal is counted.
     pub fn punish(&mut self, texts: &[String], epochs: usize, strength: f64) -> Result<Vec<EpochRecord>, String> {
+        if self.g.is_radix() {
+            let o = crate::radix::Feedback {
+                neg_epochs: epochs,
+                strength,
+                ..crate::radix::Feedback::two_nrl()
+            };
+            return self.radix_punish(texts, &o, &mut |_| true);
+        }
+        if self.is_resonant() {
+            return self.resonant_punish(texts, epochs, strength, None, &mut |_| true);
+        }
         let opts = TrainOptions {
             epochs,
             phase: Some("negative".into()),
@@ -403,14 +522,32 @@ impl Model {
         pos_epochs: usize,
         strength: f64,
     ) -> Result<(Vec<EpochRecord>, Vec<EpochRecord>), String> {
+        if self.g.is_radix() {
+            let o = crate::radix::Feedback {
+                neg_epochs,
+                pos_epochs,
+                strength,
+                ..crate::radix::Feedback::two_nrl()
+            };
+            return self.radix_two_nrl(bad, good, &o, &mut |_| true);
+        }
+        if self.is_resonant() {
+            return self.resonant_two_nrl(bad, good, neg_epochs, pos_epochs, strength, None, None, &mut |_| true);
+        }
         let negative = self.punish(bad, neg_epochs, strength)?;
         let positive = self.reward(good, pos_epochs, strength)?;
         self.meta.twonrl_runs.add(1);
         Ok((negative, positive))
     }
 
-    /// Flips the sign of every reward.
+    /// Flips the sign of every reward - or, on the sine model, of every
+    /// weight and activation, and on the phase model rotates every lock by pi
+    /// and inverts the layer.
     pub fn invert(&mut self) {
+        if self.is_resonant() {
+            self.resonant_invert();
+            return;
+        }
         self.g.invert();
     }
 
@@ -790,6 +927,12 @@ impl Model {
     /// Continues `prefix`: the K most likely and the K least likely
     /// continuations in one beam search, or one stochastic walk.
     pub fn predict(&mut self, prefix: &str, o: &PredictOptions) -> Result<Prediction, String> {
+        if self.g.is_radix() {
+            return self.radix_predict(prefix, o);
+        }
+        if self.is_resonant() {
+            return self.resonant_predict(prefix, o, None);
+        }
         let mode = match o.mode.as_str() {
             "" | "dijkstra" | "beam" => "beam",
             "sample" => "sample",
@@ -840,6 +983,23 @@ impl Model {
         penalty_scale: f64,
         merit_scale: f64,
     ) -> Result<Prediction, String> {
+        if self.is_resonant() {
+            // the phase model's search: the phase and the layer are part of every walk
+            let o = PredictOptions {
+                length,
+                mode: mode.to_string(),
+                k: k.max(1),
+                beam,
+                step_penalty,
+                temperature,
+                to_end,
+                max_length,
+                traversal: traversal.to_string(),
+                penalty_scale,
+                merit_scale,
+            };
+            return self.resonant_predict(prefix, &o, rng);
+        }
         // the traversal is two independent things: a cost function (the punishment
         // one prices a step) and a ranking (the least-punished one orders the walks)
         let name = crate::penalty::resolve_traversal(traversal)?;
@@ -935,6 +1095,9 @@ impl Model {
     /// Generates whole texts with the prediction search, from `START` or
     /// continuing a prefix.
     pub fn generate(&mut self, o: &GenerateOptions) -> Result<Vec<PathResult>, String> {
+        if self.is_resonant() {
+            return self.resonant_generate(o);
+        }
         let mode = if o.mode.is_empty() { "sample" } else { o.mode.as_str() };
         if !matches!(mode, "beam" | "dijkstra" | "sample") {
             return Err(format!(
@@ -970,6 +1133,32 @@ impl Model {
                 whole(&mut found.best);
                 results.push(found.best);
             }
+            return Ok(results);
+        }
+        if self.g.is_radix() {
+            // the sine model's own predict: its dijkstra is the exact cheapest path
+            let found = self.radix_predict(
+                &o.prefix,
+                &PredictOptions {
+                    length: 0,
+                    mode: mode.to_string(),
+                    k: o.count,
+                    beam: o.beam,
+                    step_penalty: o.step_penalty,
+                    to_end: true,
+                    max_length: Some(o.max_length),
+                    traversal: o.traversal.clone(),
+                    penalty_scale: o.penalty_scale,
+                    merit_scale: o.merit_scale,
+                    ..Default::default()
+                },
+            )?;
+            let mut results = if mode == "dijkstra" {
+                vec![found.best]
+            } else {
+                found.top
+            };
+            results.iter_mut().for_each(whole);
             return Ok(results);
         }
         let k = if mode == "dijkstra" { 1 } else { o.count };
@@ -1009,6 +1198,9 @@ impl Model {
     /// The log-probability of a text: unknown trigrams, missing edges and
     /// transitions that would need a split cost `log(UNKNOWN_PROB)`.
     pub fn score(&mut self, text: &str) -> Score {
+        if self.is_resonant() {
+            return self.resonant_score(text);
+        }
         self.g.prepare();
         // `chars` and `per_char` are in the encoding's units: characters by
         // default, words under a word encoding, where a word the model has never

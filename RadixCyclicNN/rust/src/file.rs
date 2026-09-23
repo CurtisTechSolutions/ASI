@@ -90,13 +90,17 @@ impl Graph {
             count_resets.push(self.count_resets.get(&old).copied().unwrap_or(0));
         }
         let n = order.len();
+        // the sine model's parameters are learned; every other kind's are the constant-1 activation
+        let [z, a, b, h, k] = self
+            .radix_arrays(&order)
+            .unwrap_or_else(|| [z, vec![0.0; n], vec![DEFAULT_B; n], vec![DEFAULT_H; n], vec![1.0; n]]);
         let mut nodes = vec![
             ("labels".to_string(), Json::strs(labels)),
             ("z".to_string(), Json::nums(z)),
-            ("a".to_string(), Json::nums(vec![0.0; n])),
-            ("b".to_string(), Json::nums(vec![DEFAULT_B; n])),
-            ("h".to_string(), Json::nums(vec![DEFAULT_H; n])),
-            ("k".to_string(), Json::nums(vec![1.0; n])),
+            ("a".to_string(), Json::nums(a)),
+            ("b".to_string(), Json::nums(b)),
+            ("h".to_string(), Json::nums(h)),
+            ("k".to_string(), Json::nums(k)),
             ("count".to_string(), Json::ints(count)),
         ];
         // the reset counts ride along only once something has actually wrapped
@@ -156,7 +160,14 @@ impl Graph {
             edges.push(("fails".to_string(), Json::ints(fails)));
             edges.push(("clear".to_string(), Json::nums(clear)));
             edges.push(("reasons".to_string(), Json::Arr(reasons)));
-        } else {
+        } else if let Some([cx, cy, cw, reward]) = self.resonant_arrays(&alive_edges) {
+            // the phase model's circular accumulators, then its rewards
+            edges.push(("cx".to_string(), Json::nums(cx)));
+            edges.push(("cy".to_string(), Json::nums(cy)));
+            edges.push(("cw".to_string(), Json::nums(cw)));
+            edges.push(("reward".to_string(), Json::nums(reward)));
+        } else if self.radix.is_none() {
+            // (the sine model keeps no rewards: its failures are trained in and inverted)
             edges.push(("reward".to_string(), Json::nums(reward)));
         }
 
@@ -173,6 +184,8 @@ impl Graph {
             })
             .collect();
         let weights = match &self.neg {
+            None if self.radix.is_some() => Json::Null, // learned weights: no function to write
+            None if self.res.is_some() => self.resonant_weights_doc().unwrap_or(Json::Null),
             Some(neg) => Json::obj([
                 ("function", Json::str("blame")),
                 ("share_scale", Json::Num(neg.share_scale)),
@@ -232,8 +245,10 @@ impl Graph {
         ]);
 
         // a negative graph has no judged path contexts: blame is per edge, and
-        // Python writes no `paths` block for one
-        let negative = self.neg.is_some();
+        // Python writes no `paths` block for one - nor for the sine and phase
+        // graphs, which judge no paths either
+        let negative = self.neg.is_some() || self.res.is_some();
+        let radix = self.radix.is_some();
         let graph = Json::obj([
             ("format", Json::str(GRAPH_FORMAT)),
             ("format_version", Json::Int(GRAPH_FORMAT_VERSION)),
@@ -251,6 +266,8 @@ impl Graph {
             ("weights", weights),
         ]);
         let graph = match (negative, graph) {
+            // the sine graph writes the base graph's document: no weight function, no paths
+            (_, Json::Obj(pairs)) if radix => Json::Obj(pairs.into_iter().filter(|(k, _)| k != "weights").collect()),
             (true, graph) => graph,
             (false, Json::Obj(mut pairs)) => {
                 pairs.push(("paths".to_string(), paths));
@@ -282,8 +299,18 @@ impl Graph {
     }
 
     /// Rebuilds a graph from a `radixnet-graph` document, upgrading one written
-    /// before the `BACK` sentinel existed.
+    /// before the `BACK` sentinel existed.  The weight function says the kind:
+    /// the blame one a negative graph, the resonant one a phase graph, anything
+    /// else a count graph ([`Graph::from_doc_as`] reads a sine graph, whose
+    /// document has no weight function to say so).
     pub fn from_doc(doc: &Json) -> Result<Graph, String> {
+        Graph::from_doc_as(doc, None)
+    }
+
+    /// [`Graph::from_doc`] for a graph whose kind the model document named:
+    /// `Some("radix")` reads the sine model's node parameters and learned
+    /// weights.
+    pub fn from_doc_as(doc: &Json, kind: Option<&str>) -> Result<Graph, String> {
         if doc.at("format").as_str() != Some(GRAPH_FORMAT) {
             return Err(format!("not a {GRAPH_FORMAT} document"));
         }
@@ -325,20 +352,27 @@ impl Graph {
         };
         // a blame weight function means a negative graph: the file says so, and
         // the arrays below are blame rather than reward
-        let mut g =
-            if weights.at("function").as_str() == Some("blame") || weights.at("kind").as_str() == Some("negative") {
-                Graph::new_negative(
-                    doc.at("seed").as_i64().unwrap_or(0),
-                    &crate::negative::NegativeOptions {
-                        share_scale: weights.at("share_scale").as_f64().unwrap_or(1.0),
-                        blame_scale: weights.at("blame_scale").as_f64().unwrap_or(0.0),
-                        clear_scale: weights.at("clear_scale").as_f64().unwrap_or(1.0),
-                        encoding: opts.encoding,
-                    },
-                )?
-            } else {
-                Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?
-            };
+        let mut g = if kind == Some("radix") {
+            Graph::new_radix(doc.at("seed").as_i64().unwrap_or(0), opts.encoding)?
+        } else if weights.at("kind").as_str() == Some("resonant") {
+            Graph::new_resonant(
+                doc.at("seed").as_i64().unwrap_or(0),
+                &crate::resonance::options_of(weights),
+                opts.encoding,
+            )?
+        } else if weights.at("function").as_str() == Some("blame") || weights.at("kind").as_str() == Some("negative") {
+            Graph::new_negative(
+                doc.at("seed").as_i64().unwrap_or(0),
+                &crate::negative::NegativeOptions {
+                    share_scale: weights.at("share_scale").as_f64().unwrap_or(1.0),
+                    blame_scale: weights.at("blame_scale").as_f64().unwrap_or(0.0),
+                    clear_scale: weights.at("clear_scale").as_f64().unwrap_or(1.0),
+                    encoding: opts.encoding,
+                },
+            )?
+        } else {
+            Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?
+        };
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
 
         // the three sentinels are already there; the rest of the file's nodes follow
@@ -348,6 +382,7 @@ impl Graph {
             return Err("node arrays have inconsistent lengths".to_string());
         }
         g.reset_nodes(&labels, &counts, &node_resets)?;
+        g.radix_read_params(nodes)?;
 
         let src = edges.at("src").to_i64s();
         let dst = edges.at("dst").to_i64s();
@@ -456,6 +491,7 @@ impl Graph {
                 incorrect.get(i).copied().unwrap_or(0),
             );
         }
+        g.resonant_read(edges, src.len())?;
         g.carry_counters(true); // normalise whatever the file carried, however it was written
         g.invalidate();
         g.recompute_weights();
@@ -531,8 +567,15 @@ fn with_back(doc: &Json) -> Json {
 }
 
 impl Model {
-    /// The model as a `radixnet-count` (or `radixnet-negative`) document.
+    /// The model as a `radixnet-count` (or `radixnet-negative`, `radixnet`,
+    /// `radixnet-resonant`) document.
     pub fn to_doc(&mut self) -> Json {
+        if self.g.is_radix() {
+            return crate::radix::model_doc(self);
+        }
+        if self.is_resonant() {
+            return crate::resonance::model_doc(self);
+        }
         let mut pairs = vec![
             ("format".to_string(), Json::str(self.format())),
             ("version".to_string(), Json::Int(MODEL_FORMAT_VERSION)),
@@ -641,21 +684,37 @@ impl Model {
         Json::Obj(pairs)
     }
 
-    /// Rebuilds a model from a `radixnet-count` document.
+    /// Rebuilds a model from a document of any kind - the format decides, as
+    /// Python's `model_from_dict` lets it.
     pub fn from_doc(doc: &Json) -> Result<Model, String> {
         let format = doc.at("format").as_str().unwrap_or("");
         let negative = format == crate::negative::NEGATIVE_FORMAT;
-        if format != MODEL_FORMAT && !negative {
+        let radix = format == crate::radix::RADIX_FORMAT;
+        let resonant = format == crate::resonance::RESONANT_FORMAT;
+        if format != MODEL_FORMAT && !negative && !radix && !resonant {
             return Err(format!(
-                "not a {MODEL_FORMAT} or {} model document",
-                crate::negative::NEGATIVE_FORMAT
+                "not a radixnet model document (format {}; expected one of: {}, {MODEL_FORMAT}, {}, {})",
+                match doc.get("format") {
+                    Some(Json::Str(s)) => crate::negative::python_repr(s),
+                    _ => "None".to_string(),
+                },
+                crate::radix::RADIX_FORMAT,
+                crate::negative::NEGATIVE_FORMAT,
+                crate::resonance::RESONANT_FORMAT
             ));
         }
         let version = doc.at("version").as_i64().unwrap_or(1);
         if version > MODEL_FORMAT_VERSION {
             return Err(format!("unsupported {format} model version {version}"));
         }
-        let g = Graph::from_doc(doc.get("graph").ok_or("model document has no graph")?)?;
+        let graph = doc.get("graph").ok_or("model document has no graph")?;
+        let g = Graph::from_doc_as(graph, radix.then_some("radix"))?;
+        if resonant != g.is_resonant() {
+            return Err(format!(
+                "a {} document holds a resonant graph, and only it does",
+                crate::resonance::RESONANT_FORMAT
+            ));
+        }
         let mut model = Model::from_graph(g);
         model.history = doc
             .at("history")
@@ -676,6 +735,9 @@ impl Model {
         }
         if negative {
             model.neg = Some(Box::new(read_negative(doc)));
+        }
+        if resonant {
+            crate::resonance::read_model(&mut model, doc);
         }
         Ok(model)
     }
