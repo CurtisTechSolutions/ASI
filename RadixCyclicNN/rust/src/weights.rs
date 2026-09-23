@@ -123,6 +123,18 @@ impl Graph {
     /// nodes for large graphs.
     pub fn recompute_weights(&mut self) {
         let n = self.labels.len();
+        if self.res.is_some() {
+            // the phase model's own function of the counts and rewards
+            self.resonant_recompute();
+            return;
+        }
+        if self.radix.is_some() {
+            // the sine model's weights are learned, not computed: nothing to write
+            self.dirty.clear();
+            self.dirty_all = false;
+            self.weights_structure = self.structure_version;
+            return;
+        }
         if self.neg.is_some() {
             // the blame distribution, not the count / reward one: it reads the
             // evidence of every edge leaving a node, so it is written row by row
@@ -165,6 +177,15 @@ impl Graph {
     /// Brings the weights up to date: every row after a structural change or a
     /// global change, otherwise only the rows of the touched parents.
     pub fn flush_weights(&mut self) {
+        if self.radix.is_some() || self.res.is_some() {
+            // learned weights, and the phase model's recomputed exactly where
+            // Python's are - a lazy recompute here would move its version, and
+            // with it which phase costs a training pass reads
+            self.dirty.clear();
+            self.dirty_all = false;
+            self.weights_structure = self.structure_version;
+            return;
+        }
         if self.dirty_all || self.weights_structure != self.structure_version {
             self.recompute_weights();
             return;
@@ -193,6 +214,9 @@ impl Graph {
 
     /// Whether [`Graph::prepare`] would change anything.
     pub fn weights_stale(&self) -> bool {
+        if self.radix.is_some() || self.res.is_some() {
+            return false;
+        }
         self.dirty_all || self.weights_structure != self.structure_version || !self.dirty.is_empty()
     }
 
@@ -229,6 +253,14 @@ impl Graph {
     /// Flips the sign of every reward - or, on a negative graph, swaps blame
     /// and clearing: what the tutor rejected becomes what it accepted.
     pub fn invert(&mut self) {
+        if self.radix.is_some() {
+            self.radix_invert();
+            return;
+        }
+        if self.res.is_some() {
+            self.resonant_invert();
+            return;
+        }
         if let Some(neg) = self.neg.as_mut() {
             std::mem::swap(&mut neg.blame, &mut neg.clear);
             std::mem::swap(&mut neg.total_blame, &mut neg.total_clear);
@@ -271,6 +303,9 @@ impl Graph {
     /// which is what lets the least-punished traversal rank walks by what went
     /// wrong on them instead of by what went well.
     pub fn edge_punishment(&self, e: usize) -> f64 {
+        if self.radix.is_some() || self.res.is_some() {
+            return 0.0; // no ledger of failures, as Python's base graph keeps none
+        }
         match self.edge_reward.get(e) {
             // not `(-r).max(0.0)`: that hands back a negative zero for a
             // rewarded edge, and a punishment reads as a number one prints
@@ -314,6 +349,9 @@ impl Graph {
         let n = self.labels.len();
         let mut edge_cost = std::mem::take(&mut self.edge_cost);
         let mut edge_punish = std::mem::take(&mut self.edge_punish);
+        // the sine model scores `w * f_p * f_c`; every other kind's activations are 1
+        let acts = self.activations();
+        let acts = acts.as_deref();
         {
             let costs = Disjoint::new(&mut edge_cost);
             let punish = Disjoint::new(&mut edge_punish);
@@ -322,22 +360,30 @@ impl Graph {
                 if adj.size() == 0 || !this.alive[p] {
                     return;
                 }
+                let score = |i: usize| -> f64 {
+                    let e = adj.edges[i];
+                    match acts {
+                        Some(acts) => this.edge_w[e] * acts[p] * acts[adj.order[i]],
+                        None => this.edge_w[e],
+                    }
+                };
                 let mut m = f64::NEG_INFINITY;
-                for &e in &adj.edges {
-                    if this.edge_w[e] > m {
-                        m = this.edge_w[e];
+                for i in 0..adj.size() {
+                    let s = score(i);
+                    if s > m {
+                        m = s;
                     }
                 }
                 let mut sum = 0.0;
-                for &e in &adj.edges {
-                    sum += (this.edge_w[e] - m).exp();
+                for i in 0..adj.size() {
+                    sum += (score(i) - m).exp();
                 }
                 let lse = m + sum.ln();
-                for &e in &adj.edges {
+                for (i, &e) in adj.edges.iter().enumerate() {
                     // SAFETY: every edge belongs to exactly one parent, so no
                     // other thread writes these indices.
                     unsafe {
-                        costs.set(e, lse - this.edge_w[e]);
+                        costs.set(e, lse - score(i));
                         punish.set(e, this.edge_punishment(e));
                     }
                 }

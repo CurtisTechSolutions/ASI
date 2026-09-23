@@ -13,7 +13,6 @@ use crate::model::Model;
 use crate::negative::{NegativeOptions, Verdict};
 use crate::report::{split_texts, stats};
 use crate::search::PathResult;
-use crate::GraphOptions;
 
 /// The command line: global flags, a command, and that command's flags.
 #[derive(Clone, Debug, Default)]
@@ -206,22 +205,28 @@ impl Ctx {
     /// The model at `--model`; a fresh one when there is none and `must_exist`
     /// is false.
     pub fn open(&self, must_exist: bool) -> Result<Model, String> {
+        // `--kind` is the kind of a NEW model (count unless it says otherwise)
+        let wanted = self.args.str("kind", "");
         if std::path::Path::new(&self.model_path).exists() {
             let mut m = Model::load(&self.model_path)?;
             m.workers = self.workers;
             m.g.workers = self.workers;
+            if !wanted.trim().is_empty() && crate::kinds::parse_kind(&wanted).is_ok_and(|k| k != m.kind()) {
+                // the file's own kind wins, as it does in Python
+                crate::log_warn!(
+                    "model",
+                    "note: {} holds a {} model; --kind {} applies to new models only",
+                    self.model_path,
+                    m.kind(),
+                    wanted.trim()
+                );
+            }
             return Ok(m);
         }
         if must_exist {
             return Err(format!("no model at {}", self.model_path));
         }
-        let mut m = Model::new(
-            self.seed,
-            GraphOptions {
-                encoding: self.encoding,
-                ..Default::default()
-            },
-        )?;
+        let mut m = crate::kinds::new_model(crate::kinds::parse_kind(&wanted)?, self.seed, self.encoding, &[])?;
         m.workers = self.workers;
         m.g.workers = self.workers;
         Ok(m)

@@ -653,7 +653,8 @@ impl Service {
 
     /// Loads the server's negative network if it is not in memory yet: from
     /// its file beside the model, else an empty one in the running model's
-    /// encoding.
+    /// encoding.  Nothing to load when the negative network is the selected
+    /// kind: then it *is* the running model.
     ///
     /// The one rule that keeps the two locks from deadlocking: the model's
     /// lock is taken *before* the negative network's (the guard and the
@@ -662,6 +663,9 @@ impl Service {
     /// caller that is about to take the model lock loads the negative network
     /// first - after that, [`Service::with_negative`] never touches the model.
     pub fn ensure_negative(&self) -> Result<(), ApiError> {
+        if self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         if self.negative.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return Ok(());
         }
@@ -675,14 +679,21 @@ impl Service {
 
     /// Runs `f` on the server's negative network, loading it first if need
     /// be ([`Service::ensure_negative`]).  Inside [`Service::with_model`] call
-    /// it only once the negative network is loaded.
+    /// it only once the negative network is loaded - and never when the
+    /// negative network is the selected kind, which is the running model.
     pub fn with_negative<T>(&self, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {
+        if self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            // selected as a kind, the negative network is the running model
+            return Ok(self.with_model(f));
+        }
         self.ensure_negative()?;
         let mut slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
         Ok(f(slot.as_mut().expect("loaded by ensure_negative")))
     }
 
-    fn load_negative(&self, encoding: crate::encoding::Encoding) -> Result<Model, ApiError> {
+    /// The negative network from its file beside the model, else an empty one
+    /// in `encoding`.  Takes no lock.
+    pub(crate) fn load_negative(&self, encoding: crate::encoding::Encoding) -> Result<Model, ApiError> {
         let path = self.negative_path();
         let mut model = if !path.is_empty() && std::path::Path::new(&path).is_file() {
             let m = Model::load(&path)?;
@@ -712,6 +723,9 @@ impl Service {
     /// or one saved beside the model - never created here (an answer is not
     /// the place to bring one into being) - that has been taught a failure.
     pub fn guard_ready(&self) -> bool {
+        if self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            return false; // the running model is the negative network: it cannot filter itself
+        }
         {
             let slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(neg) = slot.as_ref() {
@@ -988,24 +1002,37 @@ fn filter(svc: &Arc<Service>, r: &Request) -> Answer {
         beam: r.usize("beam", 0)?,
         ..Default::default()
     };
+    let run = |positive: &mut Model, negative: &mut Model| -> Result<Json, String> {
+        let mut pair = Filter::new(positive, negative, config)?;
+        let outcome = if texts.is_empty() {
+            pair.generate(count, &generate)?
+        } else {
+            pair.filter(&texts)?
+        };
+        let Json::Obj(mut pairs) = outcome.to_json() else {
+            unreachable!()
+        };
+        pairs.push(("pair".to_string(), pair.describe()));
+        Ok(Json::Obj(pairs))
+    };
+    if svc.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+        // the negative network is the running model: the positive half is one kept in memory
+        let answer = svc
+            .with_parked_positive(|positive| svc.with_model(|negative| run(positive, negative)))
+            .ok_or_else(|| {
+                ApiError::conflict(
+                    "the negative network is the active model and no positive model is in memory; select the \
+                     radix or count kind first (POST /api/model/select)",
+                )
+            })?;
+        return answer.map_err(ApiError::bad_request);
+    }
     // loaded before the model's lock is taken: see `Service::ensure_negative`
     svc.ensure_negative()?;
     let mut failure = None;
     let mut out = Json::Null;
     svc.with_model(|positive| {
-        let answer = svc.with_negative(|negative| -> Result<Json, String> {
-            let mut pair = Filter::new(positive, negative, config)?;
-            let outcome = if texts.is_empty() {
-                pair.generate(count, &generate)?
-            } else {
-                pair.filter(&texts)?
-            };
-            let Json::Obj(mut pairs) = outcome.to_json() else {
-                unreachable!()
-            };
-            pairs.push(("pair".to_string(), pair.describe()));
-            Ok(Json::Obj(pairs))
-        });
+        let answer = svc.with_negative(|negative| run(positive, negative));
         match answer {
             Ok(Ok(doc)) => out = doc,
             Ok(Err(why)) => failure = Some(ApiError::bad_request(why)),
@@ -1088,7 +1115,12 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     fresh.workers = svc.workers;
     fresh.g.workers = svc.workers;
     let stats = crate::report::stats(&fresh);
-    *svc.negative.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
+    if svc.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+        // selected as a kind, the negative network is the running model: that is the one replaced
+        svc.install(fresh);
+    } else {
+        *svc.negative.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
+    }
     Ok(Json::obj([
         ("stats", stats),
         ("reasons", Json::Arr(Vec::new())),

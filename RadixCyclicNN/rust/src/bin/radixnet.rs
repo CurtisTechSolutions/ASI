@@ -1,13 +1,16 @@
-//! `radixnet` - the CLI of the Rust count / reward model.
+//! `radixnet` - the CLI of the Rust port.
 //!
 //! The same commands as `python -m radixnet` and `go/cmd/radixnet-count`, over
 //! the same model file, so the three can be pointed at one model and compared
-//! (`../../../tests/test_rust_parity.py` does exactly that).
+//! (`../../../tests/test_rust_parity.py` does exactly that).  `--kind radix |
+//! count | negative | resonant` picks the kind of a *new* model - count is this
+//! port's default, radix Python's - and a loaded file's own kind always wins
+//! ([`radixnet::kinds`]).
 //!
 //! ```text
-//! radixnet [--model PATH] [--encoding SPEC] [--json] [--seed N] [--workers N] [--out PATH] <command> [flags]
+//! radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] [--workers N] [--out PATH] <command>
 //!
-//!   train      count one traversal of every text's path per epoch
+//!   train      train on texts the way the kind learns (counting, gradient descent, blame)
 //!   predict    continue a prefix: the K likeliest and the K least likely
 //!   generate   whole texts, by beam, by the single cheapest path, or sampled
 //!   score      the log-probability of a text under the model
@@ -16,6 +19,7 @@
 //!   invert     flip the sign of every reward
 //!   compress   merge every unary chain
 //!   weights    read or change the weight function's scales and window
+//!   schedule   preview a learning-rate schedule (the radix model's)
 //!   paths      what the judged walks did, per context
 //!   nodes      one node against its neighbours
 //!   words      the word model's alphabet, most read first
@@ -33,18 +37,21 @@ use radixnet::duo::{guard_report, Filter, FilterConfig};
 use radixnet::encoding::{parse_encoding, Unit};
 use radixnet::file::read_document;
 use radixnet::json::Json;
+use radixnet::kinds::TrainSettings;
 use radixnet::log::{self, Level};
-use radixnet::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
+use radixnet::model::{GenerateOptions, Model, PredictOptions};
 use radixnet::negative::{BlameOptions as NegBlameOptions, JudgeOptions};
 use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
+use radixnet::radix::{Feedback, TrainConfig};
 use radixnet::report::{node_rows, path_rows, stats};
 use radixnet::service::Service;
-use radixnet::Graph;
 
-const USAGE: &str = "usage: radixnet [--model PATH] [--encoding SPEC] [--json] [--seed N] [--workers N] \
-     [--out PATH] <command>\n\
-     commands: train predict generate score feedback 2nrl invert compress weights paths nodes words info serve \
-     version\n\
+const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] \
+     [--workers N] [--out PATH] <command>\n\
+     commands: train predict generate score feedback 2nrl invert compress weights schedule paths nodes words info \
+     serve version\n\
+     --kind radix | count | negative | resonant: the algorithm of a NEW model (count is this port's default); a \
+     loaded file's own kind always wins.\n\
      --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word), how many units a gram holds \
      and how far apart\n\
      consecutive grams start (1 = the sliding window, n = non-overlapping groups).  char:3:1 is the default, \
@@ -73,6 +80,18 @@ fn usage() -> String {
 
 const DEFAULT_COUNT_MODEL: &str = "model.count.json";
 const DEFAULT_WORD_MODEL: &str = "model.word.json";
+
+/// The default `--model` of the other kinds, Python's: one kind never
+/// overwrites another's default file.
+fn default_model(kind: &str, words: bool) -> &'static str {
+    match kind {
+        "radix" => "model.json",
+        "negative" => "model.negative.json",
+        "resonant" => "model.resonant.json",
+        _ if words => DEFAULT_WORD_MODEL,
+        _ => DEFAULT_COUNT_MODEL,
+    }
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -105,18 +124,17 @@ fn run() -> Result<(), String> {
     if let Some(spec) = args.get("log") {
         log::configure(spec)?;
     }
-    // the kind is the one this port has; the *encoding* is the dial - what one
-    // unit is, how many units a gram holds, and how far apart grams start
-    match args.str("kind", "count").as_str() {
-        "" | "count" => {}
-        "word" => {
-            return Err(
+    // the kind of a new model (count unless --kind says otherwise); words are
+    // not one - they are the *encoding*, the dial of what one unit is, how many
+    // units a gram holds, and how far apart grams start
+    let kind =
+        match args.str("kind", "").trim().to_lowercase().as_str() {
+            "word" | "words" => return Err(
                 "words are an encoding, not a kind: use --encoding word:3:1 (or --units word) instead of --kind word"
                     .to_string(),
-            )
-        }
-        other => return Err(format!("unknown model kind {other:?}; this port has 'count'")),
-    }
+            ),
+            other => radixnet::kinds::parse_kind(other)?,
+        };
     let mut encoding = parse_encoding(&args.str("encoding", ""))?;
     if let Some(name) = args.get("units") {
         encoding.unit = Unit::parse(name).ok_or_else(|| format!("--units must be char or word, got {name:?}"))?;
@@ -128,14 +146,7 @@ fn run() -> Result<(), String> {
         encoding.stride = args.usize("stride", encoding.stride)?;
     }
     encoding.validate()?;
-    let model_path = args.str(
-        "model",
-        if encoding.unit == Unit::Words {
-            DEFAULT_WORD_MODEL
-        } else {
-            DEFAULT_COUNT_MODEL
-        },
-    );
+    let model_path = args.str("model", default_model(kind, encoding.unit == Unit::Words));
     let out_path = args.get("out").map(str::to_string);
     let seed = args.int("seed", 0)?;
     let workers = args.usize("workers", 0)?;
@@ -168,30 +179,35 @@ fn run() -> Result<(), String> {
                 None => open(false)?,
             };
             let texts = read_texts(&args)?;
-            let opts = TrainOptions {
-                epochs: args.usize("epochs", 5)?,
-                auto_compress: !args.on("no-compress"),
+            // every kind's settings; each kind reads what applies to it
+            let settings = TrainSettings {
+                config: train_config(&args, args.usize("epochs", 5)?)?,
                 chunk_size: args.usize("chunk", 0)?,
-                phase: None,
+                reason: args.str("reason", ""),
+                severity: args.float("severity", 1.0)?,
+                source: args.str("source", ""),
+                note: args.str("note", ""),
             };
             let records = radixnet::checkpoint::train(
                 &mut model,
                 &texts,
-                &opts,
-                schedule.manager(),
+                &settings,
+                schedule.shared(),
                 schedule.every,
                 &mut |_| true,
             )?;
             let saved = save(&mut model)?;
             let mut doc = Json::obj([
+                ("kind", Json::str(model.kind())),
                 ("texts", Json::Int(texts.len() as i64)),
                 ("split", Json::str(args.str("split", "lines"))),
                 (
                     "chunk",
-                    Json::Int(opts.chunk_size.max(radixnet::model::DEFAULT_CHUNK_SIZE) as i64),
+                    Json::Int(settings.chunk_size.max(radixnet::model::DEFAULT_CHUNK_SIZE) as i64),
                 ),
                 ("workers", Json::Int(workers as i64)),
                 ("counting", Json::str(model.counting())),
+                ("config", settings.config.to_json()),
                 ("records", Json::Arr(records.iter().map(|r| r.to_json()).collect())),
                 ("saved", Json::str(saved)),
                 ("stats", stats(&model)),
@@ -205,9 +221,11 @@ fn run() -> Result<(), String> {
             let mut model = open(true)?;
             let prefix = args.str("prefix", "");
             let max_length = args.int("max-length", -1)?;
+            // Python's default is dijkstra; the count model's dijkstra is its beam
+            let default_mode = if model.kind() == "count" { "beam" } else { "dijkstra" };
             let opts = PredictOptions {
                 length: args.usize("length", 20)?,
-                mode: args.str("mode", "beam"),
+                mode: args.str("mode", default_mode),
                 k: args.usize("k", 5)?,
                 beam: args.usize("beam", 0)?,
                 step_penalty: args.float("step-penalty", 0.0)?,
@@ -344,21 +362,26 @@ fn run() -> Result<(), String> {
             // 2NRL when both kinds are given, reward on good alone, punish on
             // bad alone - and the same epoch defaults Python and Go use
             let mut model = open(true)?;
-            let strength = args.float("strength", 1.0)?;
-            let neg_epochs = args.usize("neg-epochs", 2)?;
-            let pos_epochs = args.usize("pos-epochs", 3)?;
             let good = read_named(&args, "good")?;
             let bad = read_named(&args, "bad")?;
             if good.is_empty() && bad.is_empty() {
                 return Err("nothing to learn from: give --good (thumbs up) and / or --bad (thumbs down)".to_string());
             }
-            let (action, negative, positive) = match (good.is_empty(), bad.is_empty()) {
-                (false, false) => {
-                    let (negative, positive) = model.two_nrl(&bad, &good, neg_epochs, pos_epochs, strength)?;
-                    ("2nrl", negative, positive)
-                }
-                (false, true) => ("reward", Vec::new(), model.reward(&good, pos_epochs, strength)?),
-                _ => ("punish", model.punish(&bad, neg_epochs, strength)?, Vec::new()),
+            // rated sets are small: the feedback defaults, and a mark out of 10 per text
+            let mut o = feedback_options(&args, Feedback::rated())?;
+            o.good_weights = radixnet::kinds::marks(&args.str("good-ratings", ""), good.len(), "--good-ratings")?;
+            o.bad_weights = radixnet::kinds::marks(&args.str("bad-ratings", ""), bad.len(), "--bad-ratings")?;
+            let action = radixnet::kinds::feedback_action(&good, &bad).unwrap_or("punish");
+            let (negative, positive) = match action {
+                "2nrl" => radixnet::kinds::two_nrl(&mut model, &bad, &good, &o, &mut |_| true)?,
+                "reward" => (
+                    Vec::new(),
+                    radixnet::kinds::reward(&mut model, &good, &o, &mut |_| true)?,
+                ),
+                _ => (
+                    radixnet::kinds::punish(&mut model, &bad, &o, &mut |_| true)?,
+                    Vec::new(),
+                ),
             };
             let inverted = model.g.inverted;
             let saved = save(&mut model)?;
@@ -378,13 +401,8 @@ fn run() -> Result<(), String> {
             let bad = read_named(&args, "bad")?;
             let good = read_named(&args, "good")?;
             // the standalone command's defaults are 3 and 3; `feedback` uses 2 and 3
-            let (negative, positive) = model.two_nrl(
-                &bad,
-                &good,
-                args.usize("neg-epochs", 3)?,
-                args.usize("pos-epochs", 3)?,
-                args.float("strength", 1.0)?,
-            )?;
+            let o = feedback_options(&args, Feedback::two_nrl())?;
+            let (negative, positive) = radixnet::kinds::two_nrl(&mut model, &bad, &good, &o, &mut |_| true)?;
             let inverted = model.g.inverted;
             let saved = save(&mut model)?;
             emit(Json::obj([
@@ -416,28 +434,102 @@ fn run() -> Result<(), String> {
         }
         "weights" => {
             let mut model = open(true)?;
-            let mut changed = false;
-            for (flag, apply) in weight_flags() {
-                if let Some(text) = args.get(flag) {
-                    let value: f64 = text.parse().map_err(|_| format!("--{flag} needs a number"))?;
+            let kind = model.kind();
+            let Some(mine) = radixnet::kinds::cli_weight_names(kind) else {
+                return Err(format!(
+                    "{model_path} holds a {kind} model; the weight function belongs to the count and resonant \
+                     models (--kind count / --kind resonant)"
+                ));
+            };
+            let flag = |name: &str| format!("--{}", name.replace('_', "-"));
+            let mut stray: Vec<&str> = radixnet::kinds::WEIGHT_FIELDS
+                .iter()
+                .copied()
+                .filter(|name| !mine.contains(name) && args.get(&flag(name)[2..]).is_some())
+                .collect();
+            stray.sort_unstable();
+            if !stray.is_empty() {
+                return Err(format!(
+                    "{} do(es) not apply to the {kind} model; it takes {}",
+                    stray.iter().map(|n| flag(n)).collect::<Vec<_>>().join(", "),
+                    mine.iter().map(|n| flag(n)).collect::<Vec<_>>().join(", ")
+                ));
+            }
+            let mut changes: Vec<(String, f64)> = Vec::new();
+            for name in mine {
+                if let Some(text) = args.get(&flag(name)[2..]) {
+                    let value: f64 = text.parse().map_err(|_| format!("{} needs a number", flag(name)))?;
                     if !value.is_finite() {
-                        return Err(format!("--{flag} must be a finite number"));
+                        return Err(format!("{} must be a finite number", flag(name)));
                     }
-                    apply(&mut model.g, value)?;
-                    changed = true;
+                    changes.push((name.to_string(), value));
                 }
             }
-            if changed {
-                model.g.invalidate();
-                model.g.recompute_weights();
-                let saved = save(&mut model)?;
-                emit(Json::obj([("saved", Json::str(saved)), ("stats", stats(&model))]));
+            let mut saved = Json::Null;
+            if !changes.is_empty() {
+                radixnet::kinds::configure_weights(&mut model, &changes)?;
+                let path = save(&mut model)?;
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                saved = Json::obj([("path", Json::str(path)), ("bytes", Json::Int(bytes as i64))]);
+            }
+            emit(Json::obj([
+                ("weights", radixnet::kinds::weight_config(&model)),
+                (
+                    "changed",
+                    Json::Obj(changes.iter().map(|(k, v)| (k.clone(), Json::Num(*v))).collect()),
+                ),
+                ("saved", saved),
+                ("stats", stats(&model)),
+            ]));
+        }
+        "schedule" => {
+            // the radix model's learning rates as a graph function of the epoch
+            let lr_schedule = args.get("lr-schedule").map(str::to_string).filter(|s| !s.is_empty());
+            let act_lr_schedule = args
+                .get("act-lr-schedule")
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+            if lr_schedule.is_none() && act_lr_schedule.is_none() {
+                let info = radixnet::schedule::describe();
+                emit(Json::obj([
+                    ("presets", info.at("presets").clone()),
+                    ("variables", info.at("variables").clone()),
+                    ("functions", info.at("functions").clone()),
+                    ("helpers", info.at("helpers").clone()),
+                ]));
             } else {
-                emit(Json::obj([("stats", stats(&model))]));
+                let epochs = args.usize("epochs", 10)?;
+                let lr = args.float("lr", TrainConfig::default().lr)?;
+                let act_lr = args.float("act-lr", TrainConfig::default().act_lr)?;
+                let reverse = args.on("reverse-schedule");
+                let points = radixnet::schedule::preview_points(
+                    lr_schedule.as_deref(),
+                    act_lr_schedule.as_deref(),
+                    epochs as i64,
+                    lr,
+                    act_lr,
+                    reverse,
+                )?;
+                let text = |s: &Option<String>| s.clone().map(Json::str).unwrap_or(Json::Null);
+                emit(Json::obj([
+                    ("lr_schedule", text(&lr_schedule)),
+                    ("act_lr_schedule", text(&act_lr_schedule)),
+                    ("epochs", Json::Int(epochs as i64)),
+                    ("lr", Json::Num(lr)),
+                    ("act_lr", Json::Num(act_lr)),
+                    ("reverse_schedule", Json::Bool(reverse)),
+                    ("points", Json::Arr(points.iter().map(|p| p.to_json()).collect())),
+                ]));
             }
         }
         "paths" => {
             let model = open(true)?;
+            if model.kind() != "count" {
+                return Err(format!(
+                    "{model_path} holds a {} model; path counters belong to the count model",
+                    model.kind()
+                ));
+            }
             let node = args.get("node").map(|n| n.parse::<usize>().unwrap_or(usize::MAX));
             let mut doc = match path_rows(&model.g, args.usize("limit", 20)?, node) {
                 Json::Obj(pairs) => pairs,
@@ -448,6 +540,12 @@ fn run() -> Result<(), String> {
         }
         "nodes" => {
             let model = open(true)?;
+            if model.kind() != "count" {
+                return Err(format!(
+                    "{model_path} holds a {} model; node ratios belong to the count model",
+                    model.kind()
+                ));
+            }
             let node = args.get("node").map(|n| n.parse::<usize>().unwrap_or(usize::MAX));
             emit(Json::obj([
                 ("nodes", node_rows(&model.g, args.usize("limit", 20)?, node)),
@@ -720,7 +818,7 @@ fn run() -> Result<(), String> {
             emit(Json::obj([
                 ("model", Json::str(model_path.clone())),
                 ("stats", stats(&model)),
-                ("meta", model.meta.to_json()),
+                ("meta", radixnet::kinds::meta_json(&model)),
                 ("history_len", Json::Int(model.history.len() as i64)),
                 (
                     "history",
@@ -753,39 +851,45 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-type WeightSetter = (&'static str, fn(&mut Graph, f64) -> Result<(), String>);
+/// The radix model's training settings from the flags (`--lr`, `--act-lr`,
+/// the schedules, `--batch-size`, `--no-compress`, `--backend`), checked as
+/// Python checks them; the other kinds read only `epochs` and compression.
+fn train_config(args: &radixnet::cli::Args, epochs: usize) -> Result<TrainConfig, String> {
+    radixnet::backend::resolve(&args.str("backend", "auto"))?;
+    let base = TrainConfig::default();
+    let text = |flag: &str| args.get(flag).map(str::to_string).filter(|s| !s.trim().is_empty());
+    let cfg = TrainConfig {
+        epochs,
+        lr: args.float("lr", base.lr)?,
+        act_lr: args.float("act-lr", base.act_lr)?,
+        batch_size: args.usize("batch-size", base.batch_size)?,
+        auto_compress: !args.on("no-compress"),
+        lr_schedule: text("lr-schedule"),
+        act_lr_schedule: text("act-lr-schedule"),
+        reverse_schedule: args.on("reverse-schedule"),
+        ..base
+    };
+    cfg.validate()?;
+    Ok(cfg)
+}
 
-/// The weight function's knobs, as the `weights` command sets them.
-fn weight_flags() -> Vec<WeightSetter> {
-    vec![
-        ("count-scale", |g, v| {
-            g.count_scale = v;
-            Ok(())
-        }),
-        ("global-scale", |g, v| {
-            g.global_scale = v;
-            Ok(())
-        }),
-        ("window-scale", |g, v| {
-            g.window_scale = v;
-            Ok(())
-        }),
-        ("reward-scale", |g, v| {
-            g.reward_scale = v;
-            Ok(())
-        }),
-        ("path-scale", |g, v| {
-            g.path_scale = v;
-            Ok(())
-        }),
-        ("window", |g, v| {
-            if v < 1.0 {
-                return Err(format!("window must be >= 1, got {v}"));
-            }
-            g.set_window(v as usize);
-            Ok(())
-        }),
-    ]
+/// A feedback command's settings over the command's defaults: the epochs and
+/// strength every kind reads, the learning rates and batch size the radix
+/// model reads.
+fn feedback_options(args: &radixnet::cli::Args, base: Feedback) -> Result<Feedback, String> {
+    radixnet::backend::resolve(&args.str("backend", "auto"))?;
+    Ok(Feedback {
+        neg_epochs: args.usize("neg-epochs", base.neg_epochs)?,
+        pos_epochs: args.usize("pos-epochs", base.pos_epochs)?,
+        neg_lr: args.float("neg-lr", base.neg_lr)?,
+        pos_lr: args.float("pos-lr", base.pos_lr)?,
+        strength: args.float("strength", base.strength)?,
+        batch_size: match args.get("batch-size") {
+            Some(_) => Some(args.usize("batch-size", 1)?),
+            None => base.batch_size,
+        },
+        ..base
+    })
 }
 
 /// Reads a document without building a model - what `--json` callers use to

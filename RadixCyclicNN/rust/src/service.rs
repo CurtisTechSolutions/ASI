@@ -1,12 +1,16 @@
 //! The HTTP API of the Rust port: the same JSON contract as the Python and Go
 //! servers, so `frontend/dist` runs against it unchanged.
 //!
-//! What it serves is what this crate *has* - the model, both traversals, the
-//! word alphabet, the judged paths, the graph and the model file - and it says
-//! so: the kinds it offers are `count` and `word`, and a request for the
-//! negative network, a tutor or an LLM is answered with the one line that says
-//! which server to ask instead.  A frontend tab that needs one of those is
-//! hidden when `engine` is `rust` (`frontend/src/App.jsx`).
+//! What it serves is what this crate *has*, and it says so: a route that is
+//! not here answers the one line that says which server to ask instead, and a
+//! frontend tab that needs one is hidden when `engine` is `rust`
+//! (`frontend/src/App.jsx`).
+//!
+//! It runs every kind Python's service runs - `radix`, `count`, `negative`
+//! and `resonant` ([`crate::kinds`]) - and a word model is a count model over a
+//! word encoding.  Selecting another kind parks the running model with its
+//! unsaved work, as Python's `ModelService` parks it; the negative network,
+//! when it is not the running model, is the one the guard filters with.
 //!
 //! One model, one lock.  A training run holds it for as long as it takes, so a
 //! second request waits rather than reading a half-built graph; the job it
@@ -17,12 +21,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::clock::utc_now;
 use crate::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
-use crate::graph::{END, FIRST, START};
+use crate::graph::{END, START};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
-use crate::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
+use crate::kinds;
+use crate::model::{GenerateOptions, Model, PredictOptions};
 use crate::penalty::{resolve_traversal, DEFAULT_TRAVERSAL, TRAVERSALS};
-use crate::report::{configure_weight, node_rows, path_rows, split_texts, stats, weight_config};
+use crate::radix::{Feedback, TrainConfig};
+use crate::report::{node_rows, path_rows, split_texts, stats};
 use crate::search::PathResult;
 use crate::GraphOptions;
 
@@ -87,6 +93,12 @@ pub struct Service {
     /// The encoding this server was started on: the one whose file is
     /// `model_path` rather than a name derived from it.
     born_with: Encoding,
+    /// The kind this server was started on, whose file `model_path` is.
+    born_kind: &'static str,
+    /// Whether the negative network is the running model (selected as a
+    /// kind).  The negative routes then reach it through the model's lock,
+    /// and the guard stands down: a network cannot filter itself.
+    pub(crate) negative_active: AtomicBool,
     job: Mutex<Option<Job>>,
     stop: AtomicBool,
     jobs: AtomicUsize,
@@ -119,10 +131,14 @@ impl Service {
     /// The service around a model already loaded (or created).
     pub fn new(model: Model, model_path: String, seed: i64, workers: usize) -> Service {
         let born_with = model.encoding();
+        let born_kind = model.kind();
+        let negative_active = AtomicBool::new(model.is_negative());
         Service {
             model: Mutex::new(model),
             parked: Mutex::new(Vec::new()),
             born_with,
+            born_kind,
+            negative_active,
             job: Mutex::new(None),
             stop: AtomicBool::new(false),
             jobs: AtomicUsize::new(0),
@@ -235,7 +251,7 @@ impl Service {
 
     /// Saves the active kind to its own file, and says whether it landed.
     pub(crate) fn autosave(&self) -> bool {
-        let path = self.model_path_for(self.active_encoding());
+        let path = self.active_path();
         if path.is_empty() {
             return false;
         }
@@ -271,34 +287,71 @@ impl Service {
         }
     }
 
-    /// The kinds this server offers: the count model, and the same model over words.
+    /// The kinds this server runs - every kind Python's does (`model_kinds()`).
     fn kinds(&self) -> Json {
-        Json::Arr(vec![Json::obj([
-            ("kind", Json::str("count")),
-            ("label", Json::str("Count / reward (Rust)")),
-            ("units", Json::str("chars")),
-            (
-                "description",
-                Json::str(
-                    "edge weight = the edge's share of its node's traversals, all time and inside a sliding window, \
-                     plus rewards - penalties; no learning rate; beam prediction with the top-K and bottom-K \
-                     continuations (Rust implementation)",
-                ),
-            ),
-        ])])
+        kinds::kinds_json()
     }
 
-    /// The one kind this server runs, with what the running model counts in.
+    /// The running model's kind, its label and what it counts in.
     ///
     /// Words are not a kind - they are an encoding - so the units follow the
-    /// encoding while the kind stays `count`.
+    /// encoding while the kind stays what it is.
     fn active_kind(&self) -> (&'static str, &'static str, &'static str) {
-        let words = self.with_model(|m| m.encoding().unit == Unit::Words);
-        if words {
-            (KIND_COUNT.0, KIND_COUNT.1, "words")
-        } else {
-            KIND_COUNT
+        let (kind, words) = self.with_model(|m| (m.kind(), m.encoding().unit == Unit::Words));
+        (kind, kinds::label(kind), if words { "words" } else { "chars" })
+    }
+
+    /// Where a model of `kind` (and `encoding`, for a count model) is saved
+    /// by default: `model_path` for the kind and encoding the server was
+    /// started on, `<stem>.<kind><ext>` for another kind - Python's
+    /// `model_path_for` - and the `.count` / `.word` pair for the count model.
+    pub(crate) fn path_for_kind(&self, kind: &str, encoding: Encoding) -> String {
+        if self.model_path.is_empty() {
+            return String::new();
         }
+        if kind == "count" && self.born_kind == "count" {
+            return self.model_path_for(encoding);
+        }
+        if kind == self.born_kind && (kind != "count" || encoding == self.born_with) {
+            return self.model_path.clone();
+        }
+        if kind == "negative" {
+            return self.negative_path(); // the one the guard reads, beside the model
+        }
+        let (stem, ext) = split_extension(&self.model_path);
+        let tag = match kind {
+            "count" if encoding.unit == Unit::Words => "word",
+            other => other,
+        };
+        format!("{stem}.{tag}{ext}")
+    }
+
+    /// The running model's own file.
+    pub(crate) fn active_path(&self) -> String {
+        let (kind, encoding) = self.with_model(|m| (m.kind(), m.encoding()));
+        self.path_for_kind(kind, encoding)
+    }
+
+    /// Runs `f` on a positive model kept in memory while the negative network
+    /// is the running one - the born kind's first, then radix, count and
+    /// resonant (Python's `positive_model`); `None` when none is parked.
+    /// Takes the parked models' lock, then whatever `f` takes.
+    pub(crate) fn with_parked_positive<T>(&self, f: impl FnOnce(&mut Model) -> T) -> Option<T> {
+        let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        let order = [self.born_kind, "radix", "count", "resonant"];
+        let at = order
+            .iter()
+            .find_map(|kind| parked.iter().position(|(_, m)| m.kind() == *kind && !m.is_negative()))?;
+        Some(f(&mut parked[at].1))
+    }
+
+    /// Runs `f` on the parked model of `kind` (a count model under any
+    /// encoding); `None` when there is none.  Takes the parked models' lock,
+    /// then whatever `f` takes.
+    pub(crate) fn with_parked_kind<T>(&self, kind: &str, f: impl FnOnce(&mut Model) -> T) -> Option<T> {
+        let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        let at = parked.iter().position(|(_, m)| m.kind() == kind)?;
+        Some(f(&mut parked[at].1))
     }
 
     /// The encoding the running model was built with.
@@ -356,11 +409,19 @@ impl Service {
         format!("{stem}.{tag}{ext}")
     }
 
-    /// The encodings this server has a model for right now, active one first.
+    /// The models this server has in memory right now, active one first: a
+    /// count model by its encoding, any other by its kind - and the negative
+    /// network the guard holds, once it has been loaded.
     fn in_memory(&self) -> Vec<String> {
-        let mut out = vec![self.active_encoding().to_string()];
-        let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
-        out.extend(parked.iter().map(|(enc, _)| enc.clone()));
+        let mut out = vec![self.with_model(|m| park_key(m))];
+        {
+            let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            out.extend(parked.iter().map(|(key, _)| key.clone()));
+        }
+        let guard_loaded = self.negative.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if guard_loaded && !out.iter().any(|k| k == "negative") {
+            out.push("negative".to_string());
+        }
         out
     }
 
@@ -372,55 +433,147 @@ impl Service {
     /// the parked model of that encoding, its own file, and a fresh one -
     /// which is what lets the frontend switch to words and back without losing
     /// a training run.
-    fn select_encoding(&self, encoding: Encoding, seed: i64) -> Result<&'static str, ApiError> {
+    fn select(&self, target: Target, seed: i64) -> Result<&'static str, ApiError> {
         self.ensure_idle()?;
-        let active = self.active_encoding();
-        if encoding == active {
+        let active = self.with_model(|m| park_key(m));
+        let key = match target {
+            Target::Count(encoding) => encoding.to_string(),
+            Target::Kind(kind) => kind.to_string(),
+        };
+        if key == active {
             return Ok("active");
         }
-        let key = encoding.to_string();
-        let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
-        let (origin, mut wanted) = match parked.iter().position(|(name, _)| *name == key) {
-            Some(at) => ("memory", parked.remove(at).1),
-            None => {
-                // the default path is a convention, not a claim: a file there
-                // built under another encoding is simply not this one's, so it
-                // is left alone rather than refused
-                let path = self.model_path_for(encoding);
-                let on_disk = if path.is_empty() || !std::path::Path::new(&path).is_file() {
-                    None
-                } else {
-                    Model::load(&path).ok().filter(|m| m.encoding() == encoding)
-                };
-                if let Some(found) = on_disk {
-                    ("file", found)
-                } else {
+        // no two locks are ever held here: each is taken, used and let go
+        let (origin, mut wanted) = if let Target::Kind("negative") = target {
+            // the one negative network: the guard's, else its file, else a fresh one
+            let held = self.negative.lock().unwrap_or_else(|e| e.into_inner()).take();
+            match held {
+                Some(model) => ("memory", model),
+                None => {
+                    let path = self.negative_path();
+                    let on_disk = !path.is_empty() && std::path::Path::new(&path).is_file();
                     (
-                        "new",
-                        Model::new(
-                            seed,
-                            GraphOptions {
-                                encoding,
-                                ..Default::default()
-                            },
-                        )?,
+                        if on_disk { "file" } else { "new" },
+                        self.load_negative(self.active_encoding())?,
                     )
                 }
             }
+        } else {
+            let found = {
+                let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+                parked
+                    .iter()
+                    .position(|(name, _)| *name == key)
+                    .map(|at| parked.remove(at).1)
+            };
+            match (found, target) {
+                (Some(model), _) => ("memory", model),
+                (None, Target::Count(encoding)) => {
+                    // the default path is a convention, not a claim: a file there
+                    // built under another encoding is simply not this one's, so it
+                    // is left alone rather than refused
+                    let path = self.path_for_kind("count", encoding);
+                    let on_disk = if path.is_empty() || !std::path::Path::new(&path).is_file() {
+                        None
+                    } else {
+                        Model::load(&path)
+                            .ok()
+                            .filter(|m| m.encoding() == encoding && m.kind() == "count")
+                    };
+                    match on_disk {
+                        Some(found) => ("file", found),
+                        None => (
+                            "new",
+                            Model::new(
+                                seed,
+                                GraphOptions {
+                                    encoding,
+                                    ..Default::default()
+                                },
+                            )?,
+                        ),
+                    }
+                }
+                (None, Target::Kind(kind)) => {
+                    let path = self.path_for_kind(kind, Encoding::default());
+                    if !path.is_empty() && std::path::Path::new(&path).is_file() {
+                        let found = Model::load(&path)?;
+                        if found.kind() != kind {
+                            return Err(ApiError::bad_request(format!(
+                                "{path} holds a {} model, not a {kind} one",
+                                found.kind()
+                            )));
+                        }
+                        ("file", found)
+                    } else {
+                        ("new", kinds::new_model(kind, seed, Encoding::default(), &[])?)
+                    }
+                }
+            }
         };
-        let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
-        wanted.workers = model.workers;
-        wanted.g.workers = model.workers;
-        let previous = std::mem::replace(&mut *model, wanted);
-        crate::log_info!(LOG, "encoding {active} -> {encoding} ({origin}); {active} parked");
-        parked.push((active.to_string(), previous));
+        wanted.workers = self.workers;
+        wanted.g.workers = self.workers;
+        let now_negative = wanted.is_negative();
+        let previous = self.with_model(|m| std::mem::replace(m, wanted));
+        self.negative_active.store(now_negative, Ordering::Relaxed);
+        crate::log_info!(LOG, "model {active} -> {key} ({origin}); {active} kept in memory");
+        self.keep(previous);
         Ok(origin)
+    }
+
+    /// Makes `model` the running model (a reset or a load): a model of
+    /// another kind that was running is kept in memory, one of the same kind is
+    /// replaced - Python's `_replace_model`.
+    pub(crate) fn install(&self, mut model: Model) {
+        model.workers = self.workers;
+        model.g.workers = self.workers;
+        let key = park_key(&model);
+        let now_negative = model.is_negative();
+        let previous = self.with_model(|m| std::mem::replace(m, model));
+        self.negative_active.store(now_negative, Ordering::Relaxed);
+        if now_negative {
+            // there is one negative network: the new one replaces the guard's
+            *self.negative.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        } else {
+            let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            parked.retain(|(name, _)| *name != key);
+        }
+        if previous.kind() != self.with_model(|m| m.kind()) {
+            self.keep(previous);
+        }
+    }
+
+    /// Keeps a model that stopped running: the negative network where the
+    /// guard finds it, any other among the parked ones.
+    fn keep(&self, model: Model) {
+        if model.is_negative() {
+            *self.negative.lock().unwrap_or_else(|e| e.into_inner()) = Some(model);
+        } else {
+            let key = park_key(&model);
+            let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            parked.retain(|(name, _)| *name != key);
+            parked.push((key, model));
+        }
     }
 }
 
-/// The one kind this server runs: the id, the label and what it counts in by
-/// default.  The units follow the running model's encoding.
-const KIND_COUNT: (&str, &str, &str) = ("count", "Count / reward (Rust)", "chars");
+/// What `POST /api/model/select` asks for: a count model over an encoding
+/// (the word model is one), or a kind.
+#[derive(Clone, Copy)]
+enum Target {
+    Count(Encoding),
+    Kind(&'static str),
+}
+
+/// The name a model is kept under: its encoding for a count model, its kind
+/// for any other.
+fn park_key(m: &Model) -> String {
+    if m.kind() == "count" {
+        m.encoding().to_string()
+    } else {
+        m.kind().to_string()
+    }
+}
 
 /// `("model.count", ".json")`, with `.json.gz` kept whole.
 fn split_extension(path: &str) -> (&str, &str) {
@@ -516,18 +669,9 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
         "routes".to_string(),
         Json::strs(svc.routes.get().cloned().unwrap_or_default()),
     ));
-    pairs.push((
-        "backends".to_string(),
-        Json::obj([
-            ("python", Json::Bool(false)),
-            ("torch", Json::Bool(false)),
-            ("cuda", Json::Bool(false)),
-            ("mps", Json::Bool(false)),
-            ("rust", Json::Bool(true)),
-            ("default", Json::str(ENGINE)),
-        ]),
-    ));
-    pairs.push(("model_path".to_string(), Json::str(svc.model_path.clone())));
+    // honestly: the radix model's learning rule runs in Rust here; torch is not ported
+    pairs.push(("backends".to_string(), crate::backend::describe_backends()));
+    pairs.push(("model_path".to_string(), Json::str(svc.active_path())));
     pairs.push((
         "checkpoint_dir".to_string(),
         match &svc.checkpoint_dir {
@@ -554,10 +698,23 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
 
 fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
     let (kind, label, units) = svc.active_kind();
-    let weights = svc.with_model(|m| weight_config(&m.g));
+    let weights = svc.with_model(|m| kinds::weight_config(m));
     let enc = svc.active_encoding();
     let chars = Encoding::default();
     let words = Encoding::new(Unit::Words, enc.n, enc.stride).expect("a valid word encoding");
+    // every kind's default file (Python's `paths`), and the word model's
+    let mut paths: Vec<(String, Json)> = kinds::KINDS
+        .iter()
+        .map(|k| {
+            let path = if k.kind == "count" {
+                svc.path_for_kind("count", chars)
+            } else {
+                svc.path_for_kind(k.kind, enc)
+            };
+            (k.kind.to_string(), Json::str(path))
+        })
+        .collect();
+    paths.push(("word".to_string(), Json::str(svc.path_for_kind("count", words))));
     Ok(Json::obj([
         ("kind", Json::str(kind)),
         ("label", Json::str(label)),
@@ -567,14 +724,8 @@ fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
         ("unit", Json::str(enc.unit.name())),
         ("ngram", Json::Int(enc.n as i64)),
         ("stride", Json::Int(enc.stride as i64)),
-        ("model_path", Json::str(svc.model_path_for(enc))),
-        (
-            "paths",
-            Json::obj([
-                ("count", Json::str(svc.model_path_for(chars))),
-                ("word", Json::str(svc.model_path_for(words))),
-            ]),
-        ),
+        ("model_path", Json::str(svc.active_path())),
+        ("paths", Json::Obj(paths)),
         ("in_memory", Json::strs(svc.in_memory())),
         ("weights", weights),
         ("engine", Json::str(ENGINE)),
@@ -584,30 +735,28 @@ fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
 /// `POST /api/model/select`: the kind, and - the dial being what words are now
 /// - the encoding.
 ///
-/// Words are not a kind, so `{"kind": "word"}` is read as a request for a word
-/// *encoding* and answered by switching to one; the model that was running is
-/// parked with its unsaved work. `{"encoding": "word:2:1"}` says it directly.
+/// `{"kind": "radix" | "count" | "negative" | "resonant"}` makes that kind the
+/// running model: the one kept in memory, else its file, else a fresh one,
+/// with the model that was running parked with its unsaved work (Python's
+/// `select_kind`).  Words are not a kind, so `{"kind": "word"}` is read as a
+/// request for a word *encoding* of the count model;
+/// `{"encoding": "word:2:1"}` says it directly.
 fn model_select(svc: &Arc<Service>, r: &Request) -> Answer {
     let spec = r.text("encoding", "");
-    let wanted = if !spec.is_empty() {
-        parse_encoding(&spec)?
+    let target = if !spec.is_empty() {
+        Target::Count(parse_encoding(&spec)?)
     } else {
-        let kind = r.text("kind", KIND_COUNT.0).to_ascii_lowercase();
+        let kind = r.text("kind", kinds::DEFAULT_KIND).trim().to_ascii_lowercase();
         if kind.is_empty() {
             return Err(ApiError::bad_request("'kind' must not be empty"));
         }
         match kind.as_str() {
-            "count" | "char" | "chars" => svc.encoding_for_unit(Unit::Chars),
-            "word" | "words" => svc.encoding_for_unit(Unit::Words),
-            other => {
-                return Err(ApiError::bad_request(format!(
-                    "the Rust server runs the count / reward model only, over any encoding \
-                     (kind {other:?} is served by the Python server)"
-                )))
-            }
+            "count" | "char" | "chars" => Target::Count(svc.encoding_for_unit(Unit::Chars)),
+            "word" | "words" => Target::Count(svc.encoding_for_unit(Unit::Words)),
+            other => Target::Kind(kinds::parse_kind(other).map_err(ApiError::bad_request)?),
         }
     };
-    let origin = svc.select_encoding(wanted, svc.seed)?;
+    let origin = svc.select(target, svc.seed)?;
     let mut doc = model_info(svc, r)?;
     if let Json::Obj(pairs) = &mut doc {
         pairs.push(("origin".to_string(), Json::str(origin)));
@@ -616,22 +765,33 @@ fn model_select(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(doc)
 }
 
-fn model_weights(svc: &Arc<Service>, r: &Request) -> Answer {
-    svc.ensure_idle()?;
-    let mut options: Vec<(String, f64)> = Vec::new();
-    if let Json::Obj(pairs) = &r.body {
-        for (key, value) in pairs {
-            if let Some(number) = value.as_f64() {
-                options.push((key.clone(), number));
+/// The score-function settings a request body carries - every kind's, as
+/// Python's `_weight_options` reads them; the model refuses the ones it does
+/// not have.
+fn weight_options(r: &Request) -> Result<Vec<(String, f64)>, ApiError> {
+    let mut options = Vec::new();
+    for name in kinds::WEIGHT_FIELDS {
+        match r.body.get(name) {
+            None | Some(Json::Null) => {}
+            Some(value) => {
+                let number = value
+                    .as_f64()
+                    .ok_or_else(|| ApiError::bad_request(format!("'{name}' must be a number")))?;
+                options.push((name.to_string(), number));
             }
         }
     }
+    Ok(options)
+}
+
+/// `POST /api/model/weights`: the running model's score function, changed
+/// (`configure_weights`); the sine model has none.
+fn model_weights(svc: &Arc<Service>, r: &Request) -> Answer {
+    svc.ensure_idle()?;
+    let options = weight_options(r)?;
     let out = svc.with_model(|m| -> Result<Json, String> {
-        for (key, value) in &options {
-            configure_weight(&mut m.g, key, *value)?;
-        }
-        m.g.recompute_weights();
-        Ok(Json::obj([("weights", weight_config(&m.g)), ("stats", stats(m))]))
+        let weights = kinds::configure_weights(m, &options)?;
+        Ok(Json::obj([("weights", weights), ("stats", stats(m))]))
     })?;
     Ok(out)
 }
@@ -672,7 +832,8 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     let max_length = r.body.at("max_length").as_i64();
     let opts = PredictOptions {
         length: r.usize("length", 20)?,
-        mode: r.text("mode", "beam"),
+        // Python's default; the count model's dijkstra is its beam
+        mode: r.text("mode", "dijkstra"),
         k: r.usize("k", 5)?,
         beam: r.usize("beam", 0)?,
         step_penalty: r.number("step_penalty", 0.0)?,
@@ -834,15 +995,27 @@ fn feedback(svc: &Arc<Service>, r: &Request) -> Answer {
     }
     let strength = r.number("strength", 1.0)?;
     let epochs = r.usize("epochs", 1)?;
+    // the other kinds learn a rating the way Python's feedback route teaches it
+    let mut o = feedback_options(r, Feedback::rated())?;
+    o.good_weights = ratings(r, "good", good.len())?;
+    o.bad_weights = ratings(r, "bad", bad.len())?;
     let out = svc.with_model(|m| -> Result<Json, String> {
         let mut records: Vec<Json> = Vec::new();
-        if !bad.is_empty() {
+        if m.kind() != "count" {
+            let (negative, positive) = match kinds::feedback_action(&good, &bad) {
+                Some("2nrl") => kinds::two_nrl(m, &bad, &good, &o, &mut |_| true)?,
+                Some("reward") => (Vec::new(), kinds::reward(m, &good, &o, &mut |_| true)?),
+                _ => (kinds::punish(m, &bad, &o, &mut |_| true)?, Vec::new()),
+            };
+            records.extend(negative.iter().chain(positive.iter()).map(|r| r.to_json()));
+        } else if !bad.is_empty() {
             records.extend(m.punish(&bad, epochs, strength)?.iter().map(|r| r.to_json()));
         }
-        if !good.is_empty() {
+        if m.kind() == "count" && !good.is_empty() {
             records.extend(m.reward(&good, epochs, strength)?.iter().map(|r| r.to_json()));
         }
         Ok(Json::obj([
+            ("action", Json::str(kinds::feedback_action(&good, &bad).unwrap_or(""))),
             ("good", Json::Int(good.len() as i64)),
             ("bad", Json::Int(bad.len() as i64)),
             ("strength", Json::Num(strength)),
@@ -860,13 +1033,27 @@ fn two_nrl(svc: &Arc<Service>, r: &Request) -> Answer {
     if bad.is_empty() && good.is_empty() {
         return Err(ApiError::bad_request("2NRL needs 'bad' and / or 'good' texts"));
     }
-    let strength = r.number("strength", 1.0)?;
-    let neg_epochs = r.usize("neg_epochs", 2)?;
-    let pos_epochs = r.usize("pos_epochs", 3)?;
+    // the count model's defaults are this port's; the other kinds' Python's
+    let count = svc.with_model(|m| m.kind() == "count");
+    let mut o = feedback_options(
+        r,
+        Feedback {
+            neg_epochs: if count { 2 } else { 3 },
+            ..Feedback::two_nrl()
+        },
+    )?;
+    o.good_weights = ratings(r, "good", good.len())?;
+    o.bad_weights = ratings(r, "bad", bad.len())?;
     svc.start_job("two_nrl");
     let worker = Arc::clone(svc);
     std::thread::spawn(move || {
-        let outcome = worker.with_model(|m| m.two_nrl(&bad, &good, neg_epochs, pos_epochs, strength));
+        let outcome = worker.with_model(|m| {
+            let mut watch = |record: &crate::model::EpochRecord| {
+                worker.job_progress(record.to_json());
+                !worker.stopping()
+            };
+            kinds::two_nrl(m, &bad, &good, &o, &mut watch)
+        });
         worker.finish_job(outcome.map(|(negative, positive)| {
             // one list, the negative phase first, because a job's records are a
             // list of epochs and 2NRL is two phases of them
@@ -901,11 +1088,31 @@ fn train(svc: &Arc<Service>, r: &Request) -> Answer {
              or 'files' (list of upload names)",
         ));
     }
-    let opts = TrainOptions {
-        epochs: r.usize("epochs", 5)?,
-        auto_compress: !r.flag("no_compress", false),
+    // every kind's settings (Python's `_train_config`); each kind reads what applies to it
+    let base = TrainConfig::default();
+    let text = |name: &str| Some(r.text(name, "").trim().to_string()).filter(|s| !s.is_empty());
+    let config = TrainConfig {
+        epochs: r.usize("epochs", base.epochs)?,
+        lr: r.number("lr", base.lr)?,
+        act_lr: r.number("act_lr", base.act_lr)?,
+        lr_schedule: text("lr_schedule"),
+        act_lr_schedule: text("act_lr_schedule"),
+        reverse_schedule: r.flag("reverse_schedule", false),
+        batch_size: r.usize("batch_size", base.batch_size)?,
+        clip: r.number("clip", base.clip)?,
+        auto_compress: r.flag("auto_compress", !r.flag("no_compress", false)),
+        shuffle: r.flag("shuffle", base.shuffle),
+        checkpoint_every: r.usize("checkpoint_every", 0)?,
+        ..base
+    };
+    config.validate().map_err(ApiError::bad_request)?;
+    let settings = kinds::TrainSettings {
+        config,
         chunk_size: r.usize("chunk", 0)?,
-        phase: None,
+        reason: r.text("reason", ""),
+        severity: r.number("severity", 1.0)?,
+        source: r.text("source", "api"),
+        note: r.text("note", ""),
     };
     // checkpoints every N epochs, into the server's --checkpoint-dir
     let every = r.usize("checkpoint_every", 0)?;
@@ -918,7 +1125,7 @@ fn train(svc: &Arc<Service>, r: &Request) -> Answer {
     // run on /api/job - the same 202 the Python and Go servers answer with
     let worker = Arc::clone(svc);
     std::thread::spawn(move || {
-        let outcome = crate::checkpoint::train_job(&worker, &texts, &opts, every);
+        let outcome = crate::checkpoint::train_job(&worker, &texts, &settings, every);
         if outcome.is_ok() {
             worker.autosave();
         }
@@ -940,58 +1147,147 @@ fn history(svc: &Arc<Service>, _r: &Request) -> Answer {
     Ok(svc.with_model(|m| Json::obj([("history", Json::Arr(m.history.iter().map(|r| r.to_json()).collect()))])))
 }
 
+/// `GET /api/graph`: the `limit` most visited nodes (ties: the lowest id)
+/// plus START and END, and the edges among them - Python's `_graph_view`, key
+/// for key, for every kind: the sine model's node parameters, the count
+/// model's shares and window, the phase model's advances and locks.
 fn graph_view(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 150)?;
     Ok(svc.with_model(|m| {
         m.g.prepare();
-        let mut real: Vec<usize> = (FIRST..m.g.num_node_ids()).filter(|&i| m.g.is_alive(i)).collect();
-        real.sort_by(|&a, &b| m.g.node_count(b).value.cmp(&m.g.node_count(a).value).then(a.cmp(&b)));
-        real.truncate(limit);
-        real.sort_unstable();
+        let g = &m.g;
+        let kind = m.kind();
+        // START and END lead; the rest are ranked from id 2, BACK included, as Python ranks them
+        let mut real: Vec<usize> = (END + 1..g.num_node_ids()).filter(|&i| g.is_alive(i)).collect();
+        if limit < real.len() {
+            // `nsmallest(limit, real, key=(-count, id))`: the most visited, ties to the lowest id
+            real.sort_by(|&a, &b| {
+                let (ca, cb) = (g.node_count(a), g.node_count(b));
+                if cb.less(ca) {
+                    std::cmp::Ordering::Less
+                } else if ca.less(cb) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(&b)
+                }
+            });
+            real.truncate(limit);
+            real.sort_unstable();
+        }
         let mut ids = vec![START, END];
         ids.extend(real);
+        let resonant = g.res.as_ref();
         let nodes: Vec<Json> = ids
             .iter()
             .map(|&i| {
-                Json::obj([
-                    ("id", Json::Int(i as i64)),
-                    ("label", Json::str(m.g.label(i).to_string())),
-                    ("count", Json::Int(m.g.node_count(i).value)),
-                    ("count_resets", Json::Int(m.g.node_count(i).resets)),
-                    ("activation", Json::Num(1.0)),
-                ])
+                let (z, a, b, h, k) = g.node_parameters(i);
+                let mut pairs = vec![
+                    ("id".to_string(), Json::Int(i as i64)),
+                    ("label".to_string(), Json::str(g.label(i).to_string())),
+                    ("count".to_string(), Json::Int(g.node_count(i).value)),
+                    ("count_resets".to_string(), Json::Int(g.node_count(i).resets)),
+                    ("activation".to_string(), Json::Num(g.activation_of(i))),
+                    ("z".to_string(), Json::Num(z)),
+                    ("a".to_string(), Json::Num(a)),
+                    ("b".to_string(), Json::Num(b)),
+                    ("h".to_string(), Json::Num(h)),
+                    ("k".to_string(), Json::Num(k)),
+                ];
+                if let Some(res) = resonant {
+                    pairs.push(("advance".to_string(), Json::Int(res.advance[i] as i64)));
+                }
+                Json::Obj(pairs)
             })
             .collect();
-        let chosen: Vec<usize> = ids.clone();
-        let mut edges: Vec<Json> = Vec::new();
+        let has_reward = kind == "count" || kind == "resonant";
+        let mut edges: Vec<(usize, usize, Json)> = Vec::new();
         for &p in &ids {
-            for cc in m.g.child_costs_from(p, None) {
-                if !chosen.contains(&cc.child) {
+            let shares: Vec<(usize, f64, f64)> = match kind {
+                "count" => g.shares(p).into_iter().map(|(_, e, x, y)| (e, x, y)).collect(),
+                "resonant" => {
+                    let res = resonant.expect("a phase graph");
+                    g.children_of(p)
+                        .into_iter()
+                        .map(|t| (t.e, res.coherence(t.e), res.mu(t.e)))
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            for cc in g.child_costs_from(p, None) {
+                if !ids.contains(&cc.child) {
                     continue;
                 }
-                edges.push(Json::obj([
-                    ("src", Json::Int(p as i64)),
-                    ("dst", Json::Int(cc.child as i64)),
-                    ("edge", Json::Int(cc.edge as i64)),
-                    ("cost", Json::Num(cc.cost)),
-                    ("weight", Json::Num(m.g.edge_w[cc.edge])),
-                    ("count", Json::Int(m.g.edge_traversals(cc.edge).value)),
-                    ("reward", Json::Num(m.g.edge_reward[cc.edge])),
-                    ("punish", Json::Num(cc.punish)),
-                ]));
+                let e = cc.edge;
+                let mut pairs = vec![
+                    ("source".to_string(), Json::Int(p as i64)),
+                    ("target".to_string(), Json::Int(cc.child as i64)),
+                    ("weight".to_string(), Json::Num(g.edge_w[e])),
+                    ("count".to_string(), Json::Int(g.edge_traversals(e).value)),
+                    ("count_resets".to_string(), Json::Int(g.edge_traversals(e).resets)),
+                    ("prob".to_string(), Json::Num((-cc.cost).exp())),
+                    ("cost".to_string(), Json::Num(cc.cost)),
+                ];
+                if has_reward {
+                    pairs.push(("reward".to_string(), Json::Num(g.edge_reward[e])));
+                }
+                let (first, second) = shares
+                    .iter()
+                    .find(|(edge, _, _)| *edge == e)
+                    .map(|&(_, x, y)| (x, y))
+                    .unwrap_or((0.0, 0.0));
+                if kind == "count" {
+                    pairs.push(("share".to_string(), Json::Num(first)));
+                    pairs.push(("recent_share".to_string(), Json::Num(second)));
+                    pairs.push(("recent_count".to_string(), Json::Int(g.window_edge_count[e])));
+                } else if kind == "resonant" {
+                    pairs.push(("coherence".to_string(), Json::Num(first)));
+                    pairs.push(("mu".to_string(), Json::Num(second)));
+                }
+                edges.push((p, cc.child, Json::Obj(pairs)));
             }
         }
-        Json::obj([
-            ("nodes", Json::Arr(nodes)),
-            ("edges", Json::Arr(edges)),
-            ("limit", Json::Int(limit as i64)),
-            ("total_nodes", Json::Int(m.g.num_nodes() as i64)),
-        ])
+        edges.sort_by_key(|(p, c, _)| (*p, *c));
+        let mut view = vec![
+            ("nodes".to_string(), Json::Arr(nodes)),
+            (
+                "edges".to_string(),
+                Json::Arr(edges.into_iter().map(|(_, _, e)| e).collect()),
+            ),
+            ("limit".to_string(), Json::Int(limit as i64)),
+            ("total_nodes".to_string(), Json::Int(g.num_nodes() as i64)),
+            ("total_edges".to_string(), Json::Int(g.num_edges() as i64)),
+        ];
+        if has_reward {
+            view.push(("total_traversals".to_string(), Json::Int(g.total_traversals().value)));
+            view.push((
+                "total_traversals_resets".to_string(),
+                Json::Int(g.total_traversals().resets),
+            ));
+        }
+        if kind == "count" {
+            view.push(("window_traversals".to_string(), Json::Int(g.window_traversals() as i64)));
+            view.push(("window".to_string(), Json::Int(g.window_size as i64)));
+        }
+        if let Some(res) = resonant {
+            view.push(("buckets".to_string(), Json::Int(res.buckets as i64)));
+        }
+        Json::Obj(view)
     }))
+}
+
+/// The count model keeps the judged paths and the node ratios; the other
+/// kinds say so, in Python's words.
+fn count_only(svc: &Arc<Service>, what: &str) -> Result<(), ApiError> {
+    let kind = svc.with_model(|m| m.kind());
+    if kind == "count" {
+        return Ok(());
+    }
+    Err(ApiError::bad_request(format!("the {kind} model does not count {what}")))
 }
 
 fn paths(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
+    count_only(svc, "paths")?;
     Ok(svc.with_model(|m| {
         let totals = m.g.path_totals();
         Json::obj([
@@ -1014,6 +1310,7 @@ fn paths(svc: &Arc<Service>, r: &Request) -> Answer {
 
 fn nodes(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 20)?;
+    count_only(svc, "node ratios")?;
     let wanted = r.query("node").map(|s| s.to_string());
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
         m.g.prepare();
@@ -1199,7 +1496,7 @@ fn save(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     // the active kind's own file, so saving a word model never lands on the
     // count model's - the rule the Python service saves by
-    let path = r.text("path", &svc.model_path_for(svc.active_encoding()));
+    let path = r.text("path", &svc.active_path());
     svc.with_model(|m| m.save(&path))?;
     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     Ok(Json::obj([
@@ -1210,14 +1507,9 @@ fn save(svc: &Arc<Service>, r: &Request) -> Answer {
 
 fn load(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
-    let path = r.text("path", &svc.model_path_for(svc.active_encoding()));
+    let path = r.text("path", &svc.active_path());
     let loaded = Model::load(&path)?;
-    svc.with_model(|m| {
-        let workers = m.workers;
-        *m = loaded;
-        m.workers = workers;
-        m.g.workers = workers;
-    });
+    svc.install(loaded);
     Ok(Json::obj([
         ("loaded", Json::str(path)),
         ("stats", svc.with_model(|m| stats(m))),
@@ -1250,19 +1542,14 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
         encoding.stride = stride.max(0) as usize;
     }
     encoding.validate()?;
-    let fresh = Model::new(
-        seed,
-        GraphOptions {
-            encoding,
-            ..Default::default()
-        },
-    )?;
-    svc.with_model(|m| {
-        let workers = m.workers;
-        *m = fresh;
-        m.workers = workers;
-        m.g.workers = workers;
-    });
+    // the kind (the running one unless the body names another) and its score function
+    let kind = match r.body.get("kind").and_then(|v| v.as_str()).map(str::trim) {
+        Some(name) if !name.is_empty() => kinds::parse_kind(name).map_err(ApiError::bad_request)?,
+        _ => svc.active_kind().0,
+    };
+    let options = weight_options(r)?;
+    let fresh = kinds::new_model(kind, seed, encoding, &options).map_err(ApiError::bad_request)?;
+    svc.install(fresh);
     let (kind, _, units) = svc.active_kind();
     Ok(Json::obj([
         ("reset", Json::Bool(true)),
@@ -1330,16 +1617,113 @@ fn upload_delete(svc: &Arc<Service>, r: &Request) -> Answer {
     uploads(svc, r)
 }
 
+/// `GET /api/schedule`: what a learning-rate schedule expression may use -
+/// variables, functions, helpers, presets (Python's `describe`).
 fn schedule(svc: &Arc<Service>, _r: &Request) -> Answer {
     let _ = svc;
-    // the count model has no learning rate to schedule, and says so rather than 404ing
+    Ok(crate::schedule::describe())
+}
+
+/// `POST /api/schedule/preview`: the per-epoch rates a pair of schedule
+/// expressions gives - the graph the frontend draws while one is typed.
+fn schedule_preview(svc: &Arc<Service>, r: &Request) -> Answer {
+    let _ = svc;
+    let base = TrainConfig::default();
+    let text = |name: &str| Some(r.text(name, "").trim().to_string()).filter(|s| !s.is_empty());
+    let (lr_schedule, act_lr_schedule) = (text("lr_schedule"), text("act_lr_schedule"));
+    let epochs = r.usize("epochs", base.epochs)?;
+    let lr = r.number("lr", base.lr)?;
+    let act_lr = r.number("act_lr", base.act_lr)?;
+    let reverse = r.flag("reverse_schedule", false);
+    let points = crate::schedule::preview_points(
+        lr_schedule.as_deref(),
+        act_lr_schedule.as_deref(),
+        epochs as i64,
+        lr,
+        act_lr,
+        reverse,
+    )
+    .map_err(ApiError::bad_request)?;
+    let name = |s: &Option<String>| s.clone().map(Json::str).unwrap_or(Json::Null);
     Ok(Json::obj([
-        ("schedules", Json::Arr(Vec::new())),
-        (
-            "note",
-            Json::str("the count / reward model learns by counting: there is no learning rate to schedule"),
-        ),
+        ("lr_schedule", name(&lr_schedule)),
+        ("act_lr_schedule", name(&act_lr_schedule)),
+        ("epochs", Json::Int(epochs as i64)),
+        ("lr", Json::Num(lr)),
+        ("act_lr", Json::Num(act_lr)),
+        ("reverse_schedule", Json::Bool(reverse)),
+        ("points", Json::Arr(points.iter().map(|p| p.to_json()).collect())),
     ]))
+}
+
+/// A feedback route's settings over its defaults: the epochs and strength
+/// every kind reads, the learning rates and batch settings the radix model
+/// reads (Python's `_train_overrides`).
+fn feedback_options(r: &Request, base: Feedback) -> Result<Feedback, ApiError> {
+    let present = |name: &str| !matches!(r.body.get(name), None | Some(Json::Null));
+    Ok(Feedback {
+        neg_epochs: r.usize("neg_epochs", base.neg_epochs)?,
+        pos_epochs: r.usize("pos_epochs", base.pos_epochs)?,
+        neg_lr: r.number("neg_lr", base.neg_lr)?,
+        pos_lr: r.number("pos_lr", base.pos_lr)?,
+        strength: r.number("strength", base.strength)?,
+        batch_size: if present("batch_size") {
+            Some(r.usize("batch_size", 1)?.max(1))
+        } else {
+            base.batch_size
+        },
+        auto_compress: if present("auto_compress") {
+            Some(r.flag("auto_compress", true))
+        } else {
+            base.auto_compress
+        },
+        clip: if present("clip") {
+            Some(r.number("clip", 5.0)?)
+        } else {
+            base.clip
+        },
+        shuffle: if present("shuffle") {
+            Some(r.flag("shuffle", true))
+        } else {
+            base.shuffle
+        },
+        ..base
+    })
+}
+
+/// One side's per-text weights: `<side>_weights` (shares of 1) or
+/// `<side>_ratings` (marks out of 10), never both - Python's `_ratings`.
+fn ratings(r: &Request, side: &str, texts: usize) -> Result<Option<Vec<f64>>, ApiError> {
+    let read = |key: &str, scale: f64| -> Result<Option<Vec<f64>>, ApiError> {
+        match r.body.get(key) {
+            None | Some(Json::Null) => Ok(None),
+            Some(Json::Arr(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let v = item
+                        .as_f64()
+                        .ok_or_else(|| ApiError::bad_request(format!("'{key}' must be a list of numbers")))?;
+                    out.push(v / scale);
+                }
+                if out.len() != texts {
+                    return Err(ApiError::bad_request(format!(
+                        "'{key}' has {} entries for {texts} texts",
+                        out.len()
+                    )));
+                }
+                Ok(Some(out))
+            }
+            Some(_) => Err(ApiError::bad_request(format!("'{key}' must be a list of numbers"))),
+        }
+    };
+    let weights = read(&format!("{side}_weights"), 1.0)?;
+    let marks = read(&format!("{side}_ratings"), 10.0)?;
+    if weights.is_some() && marks.is_some() {
+        return Err(ApiError::bad_request(format!(
+            "give '{side}_weights' or '{side}_ratings', not both"
+        )));
+    }
+    Ok(weights.or(marks))
 }
 
 fn traversals(svc: &Arc<Service>, _r: &Request) -> Answer {
@@ -1382,6 +1766,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("POST", "/api/uploads", upload);
     server.route("POST", "/api/uploads/delete", upload_delete);
     server.route("GET", "/api/schedule", schedule);
+    server.route("POST", "/api/schedule/preview", schedule_preview);
     server.route("GET", "/api/traversals", traversals);
     // every other area answers its own routes
     crate::duo::routes(&mut server);

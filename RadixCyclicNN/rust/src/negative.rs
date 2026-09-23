@@ -1420,6 +1420,7 @@ impl Model {
                 ],
             };
             self.history.push(record.clone());
+            self.epoch_done(&record)?;
             let go_on = on_epoch(&record);
             records.push(record);
             if !go_on {

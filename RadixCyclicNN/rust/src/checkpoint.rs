@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::cli::{Args, Ctx};
 use crate::http::{Answer, ApiError, Request, Server};
 use crate::json::Json;
-use crate::model::{EpochRecord, Model, TrainOptions};
+use crate::model::{EpochRecord, Model};
 use crate::report::stats;
 use crate::service::Service;
 
@@ -429,57 +429,45 @@ impl Checkpoints {
 
 // -- training that checkpoints ---------------------------------------------------------------------
 
-/// Trains `model` over `texts` and checkpoints it every `every` epochs
-/// (tag `epoch`, the step its lifetime epoch count, the epoch's record as the
-/// metrics) - Python's `train(checkpoint_manager=...)`.
+/// Trains `model` over `texts` the way its kind trains
+/// ([`crate::kinds::train`]) and checkpoints it every `every` epochs (tag
+/// `epoch`, the step its lifetime epoch count, the epoch's record as the
+/// metrics) - Python's `train(checkpoint_manager=...)`, for every kind.
 ///
-/// Without a manager (or with `every` 0) this is [`Model::train`] itself.
-/// With one it trains an epoch at a time, and the model it ends with is the
-/// model one call would have ended with: a later epoch finds the structure
-/// already built and compressed, so only the texts it would count a second
-/// time are put back.  `on_epoch` sees every record after its checkpoint;
-/// returning `false` stops the run there (a job's stop button).
+/// The checkpoint is written from *inside* the run, at the end of the epoch
+/// it records, through the model's epoch hook - so a run that dies keeps
+/// every checkpoint before it, and the model a run ends with is the one it
+/// would have ended with unwatched (the sine model's learning-rate schedule,
+/// read off the epoch's place in the run, included).  `on_epoch` sees every
+/// record after its checkpoint; returning `false` stops the run there.
 pub fn train(
     model: &mut Model,
     texts: &[String],
-    opts: &TrainOptions,
-    manager: Option<&Checkpoints>,
+    settings: &crate::kinds::TrainSettings,
+    manager: Option<Arc<Checkpoints>>,
     every: usize,
     on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
 ) -> Result<Vec<EpochRecord>, String> {
-    let Some(manager) = manager.filter(|_| every > 0 && opts.epochs > 0) else {
-        return model.train(texts, opts);
+    let Some(manager) = manager.filter(|_| every > 0) else {
+        return crate::kinds::train(model, texts, settings, on_epoch);
     };
-    let one = TrainOptions {
-        epochs: 1,
-        ..opts.clone()
-    };
-    let mut records = Vec::with_capacity(opts.epochs);
-    for epoch in 0..opts.epochs {
-        // a run counts the texts it reads once, however many epochs it takes
-        let counted = (model.meta.trained_texts, model.meta.trained_chars);
-        let mut done = model.train(texts, &one)?;
-        if epoch > 0 {
-            (model.meta.trained_texts, model.meta.trained_chars) = counted;
+    let every = every as i64;
+    model.epoch_hook = Some(Box::new(move |m: &mut Model, record: &EpochRecord| {
+        if record.epoch % every == 0 {
+            manager.save(m, record.epoch, "epoch", Some(record.to_json()))?;
         }
-        let Some(record) = done.pop() else { break };
-        if record.epoch % every as i64 == 0 {
-            manager.save(model, record.epoch, "epoch", Some(record.to_json()))?;
-        }
-        let go_on = on_epoch(&record);
-        records.push(record);
-        if !go_on {
-            break;
-        }
-    }
-    Ok(records)
+        Ok(())
+    }));
+    let outcome = crate::kinds::train(model, texts, settings, on_epoch);
+    model.epoch_hook = None;
+    outcome
 }
 
 /// The checkpoint options a training command takes: `--checkpoint-dir`,
 /// `--checkpoint-every` (every epoch or generation when a directory is given
 /// and this is not) and `--keep`.
 pub struct Schedule {
-    pub manager: Option<Checkpoints>,
+    pub manager: Option<Arc<Checkpoints>>,
     pub every: usize,
 }
 
@@ -487,7 +475,7 @@ impl Schedule {
     /// Reads the three flags, refusing `--checkpoint-every` without a directory.
     pub fn from_args(args: &Args) -> Result<Schedule, String> {
         let manager = match args.get("checkpoint-dir") {
-            Some(dir) if !dir.is_empty() => Some(Checkpoints::new(dir, args.usize("keep", DEFAULT_KEEP)?)?),
+            Some(dir) if !dir.is_empty() => Some(Arc::new(Checkpoints::new(dir, args.usize("keep", DEFAULT_KEEP)?)?)),
             _ => None,
         };
         let every = match args.get("checkpoint-every") {
@@ -505,7 +493,12 @@ impl Schedule {
 
     /// The manager, when checkpoints are on.
     pub fn manager(&self) -> Option<&Checkpoints> {
-        self.manager.as_ref().filter(|_| self.every > 0)
+        self.manager.as_deref().filter(|_| self.every > 0)
+    }
+
+    /// The manager, shared, for a run that writes its checkpoints as it goes.
+    pub fn shared(&self) -> Option<Arc<Checkpoints>> {
+        self.manager.clone().filter(|_| self.every > 0)
     }
 
     /// `checkpoint_dir` and `checkpoints` of a command's answer.
@@ -613,7 +606,7 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
 /// What the server keeps for checkpoints: the manager of `--checkpoint-dir`.
 #[derive(Default)]
 pub struct State {
-    manager: OnceLock<Option<Checkpoints>>,
+    manager: OnceLock<Option<Arc<Checkpoints>>>,
 }
 
 impl State {
@@ -621,7 +614,7 @@ impl State {
     pub fn configure(&mut self, args: &Args) -> Result<(), String> {
         if let Some(dir) = args.get("checkpoint-dir").filter(|d| !d.is_empty()) {
             let manager = Checkpoints::new(dir, args.usize("keep", DEFAULT_KEEP)?)?;
-            self.manager = OnceLock::from(Some(manager));
+            self.manager = OnceLock::from(Some(Arc::new(manager)));
         }
         Ok(())
     }
@@ -630,11 +623,17 @@ impl State {
 /// The server's checkpoint manager: the configured one, else one over
 /// `svc.checkpoint_dir` made the first time it is needed.
 pub(crate) fn manager(svc: &Service) -> Option<&Checkpoints> {
+    shared_manager(svc).map(|m| m.as_ref())
+}
+
+/// [`manager`], as the `Arc` the server keeps.
+fn shared_manager(svc: &Service) -> Option<&Arc<Checkpoints>> {
     svc.checkpoints
         .manager
         .get_or_init(|| {
             let dir = svc.checkpoint_dir.as_deref().filter(|d| !d.is_empty())?;
             Checkpoints::new(dir, DEFAULT_KEEP)
+                .map(Arc::new)
                 .map_err(|err| crate::log_error!(LOG, "{err}"))
                 .ok()
         })
@@ -656,15 +655,13 @@ pub(crate) fn require<'a>(svc: &'a Service, what: &str) -> Result<&'a Checkpoint
 pub(crate) fn train_job(
     svc: &Service,
     texts: &[String],
-    opts: &TrainOptions,
+    settings: &crate::kinds::TrainSettings,
     every: usize,
 ) -> Result<Vec<EpochRecord>, String> {
-    let manager = manager(svc).filter(|_| every > 0);
+    let manager = shared_manager(svc).cloned().filter(|_| every > 0);
     svc.with_model(|m| {
-        train(m, texts, opts, manager, every, &mut |record| {
-            if manager.is_some() {
-                svc.job_progress(record.to_json());
-            }
+        train(m, texts, settings, manager, every, &mut |record| {
+            svc.job_progress(record.to_json());
             !svc.stopping()
         })
     })
@@ -737,6 +734,7 @@ pub fn routes(server: &mut Server<Service>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::TrainOptions;
     use crate::GraphOptions;
 
     fn temp_dir(name: &str) -> String {
@@ -870,20 +868,30 @@ mod tests {
     #[test]
     fn a_run_that_checkpoints_ends_where_one_that_does_not_ends() {
         let dir = temp_dir("train");
-        let manager = Checkpoints::new(&dir, 10).unwrap();
-        let opts = TrainOptions {
-            epochs: 3,
+        let manager = Arc::new(Checkpoints::new(&dir, 10).unwrap());
+        let opts = crate::kinds::TrainSettings {
+            config: crate::radix::TrainConfig {
+                epochs: 3,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut plain = Model::new(1, GraphOptions::default()).unwrap();
-        let expected = plain.train(&texts(), &opts).unwrap();
+        let expected = crate::kinds::train(&mut plain, &texts(), &opts, &mut |_| true).unwrap();
         let mut stepped = Model::new(1, GraphOptions::default()).unwrap();
         stepped.meta.created = plain.meta.created.clone();
         let mut seen = 0;
-        let got = train(&mut stepped, &texts(), &opts, Some(&manager), 2, &mut |_| {
-            seen += 1;
-            true
-        })
+        let got = train(
+            &mut stepped,
+            &texts(),
+            &opts,
+            Some(Arc::clone(&manager)),
+            2,
+            &mut |_| {
+                seen += 1;
+                true
+            },
+        )
         .unwrap();
         assert_eq!(seen, 3);
         let strip = |r: &EpochRecord| {
@@ -909,8 +917,64 @@ mod tests {
         assert_eq!(first.at("epoch").as_i64(), Some(2));
         // and a stop after the first epoch is honoured
         let mut stopped = Model::new(1, GraphOptions::default()).unwrap();
-        let got = train(&mut stopped, &texts(), &opts, Some(&manager), 1, &mut |_| false).unwrap();
+        let got = train(
+            &mut stopped,
+            &texts(),
+            &opts,
+            Some(Arc::clone(&manager)),
+            1,
+            &mut |_| false,
+        )
+        .unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn a_scheduled_sine_run_checkpoints_without_changing_course() {
+        // the learning-rate schedule reads each epoch's place in the run, so a
+        // run checkpointed from inside must end where an unwatched one ends
+        let dir = temp_dir("radix");
+        let manager = Arc::new(Checkpoints::new(&dir, 10).unwrap());
+        let settings = crate::kinds::TrainSettings {
+            config: crate::radix::TrainConfig {
+                epochs: 4,
+                lr_schedule: Some("linear(lr0, 4 * lr0)".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let fresh = || crate::kinds::new_model("radix", 3, crate::Encoding::default(), &[]).unwrap();
+        let mut plain = fresh();
+        let expected = crate::kinds::train(&mut plain, &texts(), &settings, &mut |_| true).unwrap();
+        let mut watched = fresh();
+        watched.meta.created = plain.meta.created.clone();
+        let got = train(
+            &mut watched,
+            &texts(),
+            &settings,
+            Some(Arc::clone(&manager)),
+            2,
+            &mut |_| true,
+        )
+        .unwrap();
+        let lrs = |records: &[EpochRecord]| -> Vec<Json> {
+            records
+                .iter()
+                .map(|r| r.extra_value("lr").cloned().unwrap_or(Json::Null))
+                .collect()
+        };
+        assert_eq!(lrs(&got), lrs(&expected), "the schedule ran its course");
+        assert_eq!(watched.g.edge_w, plain.g.edge_w, "the same weights");
+        let names: Vec<String> = manager.list().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["ckpt-epoch-000002.json.gz", "ckpt-epoch-000004.json.gz"]);
+        assert!(watched.epoch_hook.is_none(), "the hook goes with the run");
+        let restored = manager.load(&names[0]).unwrap();
+        assert_eq!(restored.kind(), "radix");
+        assert_eq!(
+            restored.history.len(),
+            2,
+            "the checkpoint is the model as epoch 2 left it"
+        );
     }
 
     #[test]
