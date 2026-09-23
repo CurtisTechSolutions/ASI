@@ -1,11 +1,10 @@
 # rust
 
 A Rust port of **everything the Python package does** - every model kind, every
-teaching loop, the negative network, the LLM clients, the tools, images and
-speech, the CLI and the HTTP API the frontend talks to - held to Python by the
-cross-language suites in `../tests/test_rust_parity*.py`.  Code generation, the
-agent and MCP are the last area, being ported; until they land their commands
-answer that they are not in the Rust port yet.
+teaching loop, the negative network, the LLM clients, the agent and its tools,
+code generation, images and speech, MCP, the CLI and the HTTP API the frontend
+talks to - held to Python by the cross-language suites in
+`../tests/test_rust_parity*.py`.
 
 It began as a port of the **count / reward model** (`CountRewardNet`), written
 to answer one question - *how much of this model's cost is the language?* - and
@@ -77,6 +76,10 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/speech.rs`, `src/speech/asr.rs` | speech as text: WAV in every format Python reads, both codecs and the unique token; transcripts given or from an OpenAI-compatible server - `radixnet speech`, `/api/speech/*` |
 | `src/recall.rs` | the recall tutor over images and speech, and what it teaches the negative network |
 | `src/multipart.rs`, `src/multipart/base64.rs` | request bodies as Python reads them (multipart, raw, base64) and uploads stored as Python stores them, a ZIP kept whole |
+| `src/codegen.rs` | code generation: problems run in the sandbox, style-checked and judged, blame and 2NRL through the model's kind - `radixnet codegen`, `/api/codegen/*` |
+| `src/agent.rs` | tool use: criteria, mediated `<tool>` calls, judging, teaching, failure-first learning and exploring - `radixnet agent` / `explore`, `/api/agent/*` |
+| `src/mcp.rs`, `src/mcp/pyjson.rs` | the tools and the network over MCP (JSON-RPC 2.0 on stdio), Python's answers line for line, and JSON read the way `json.loads` reads it, down to its error messages - `radixnet mcp` |
+| `src/browser.rs` | Chrome over W3C WebDriver behind the web tools (`--browser`, `tools browser`) |
 
 ### The surfaces
 
@@ -93,9 +96,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 
 ## What is here, and what is not
 
-All of it but the last area (code generation, the agent, MCP and the WebDriver
-browser, in progress), and each area answers to Python through its own parity
-suite: the
+All of it, and each area answers to Python through its own parity suite: the
 same model files (byte for byte, but for the `version` cache stamp and the
 clock), the same predictions and scores, the same prompts sent to an LLM, the
 same marks, and the same model afterwards.  The frontend runs against
@@ -148,8 +149,8 @@ radixnet --quiet ...                             # nothing at all
 The default is `warn`, so a CLI run says nothing unless something is wrong;
 `serve` raises its own default to `info`, because a server that says nothing
 while it runs cannot be debugged. Targets: `http`, `model`, `train`, `negative`,
-`checkpoint`, `evolve`, `bench`, `llm`, `tools`, `media`, `tutor`, `chat` and
-`critic`.
+`checkpoint`, `evolve`, `bench`, `llm`, `tools`, `media`, `tutor`, `chat`,
+`critic`, `codegen`, `agent`, `mcp` and `browser`.
 
 **Every line goes to stderr**, and there is no way to configure one onto
 stdout. That is not a style choice: `--json` puts one document there, so a log

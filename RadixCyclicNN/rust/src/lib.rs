@@ -32,9 +32,8 @@
 //! ([`resonance`]) and the negative network ([`negative`], [`duo`]) - with the
 //! JSON model files byte for byte what Python writes, and around it every
 //! teaching loop (the tutor, the chat, the critic, evolve, the recall tutor),
-//! the LLM clients ([`llm`], [`ollama`], [`chatgpt`]), the tools, images and
-//! speech (code generation, the agent and MCP are the last area, in progress),
-//! the CLI ([`cli`], `src/bin/radixnet.rs`) and the
+//! the LLM clients ([`llm`], [`ollama`], [`chatgpt`]), the agent and its tools,
+//! code generation, images and speech, MCP, the CLI ([`cli`], `src/bin/radixnet.rs`) and the
 //! HTTP API the frontend talks to ([`http`], [`service`]).  `rust/README.md`
 //! lists every module, and what is deliberately not ported (torch, the Stable
 //! Diffusion encoder, local Whisper) and why.

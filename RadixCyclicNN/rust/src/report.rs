@@ -32,11 +32,17 @@ pub fn stats(model: &Model) -> Json {
         ("trigrams".to_string(), Json::Int(g.num_trigrams() as i64)),
         // `grams` is `trigrams` under the name that survives an encoding of any n
         ("grams".to_string(), Json::Int(g.num_trigrams() as i64)),
+        // what every number below is counted in, and the dial it was read
+        // with - a per-word number read as per-character is read wrong
+        ("encoding".to_string(), Json::str(g.enc.to_string())),
+        ("unit".to_string(), Json::str(g.enc.unit.name())),
+        ("units".to_string(), Json::str(model.units())),
+        ("ngram".to_string(), Json::Int(g.enc.n as i64)),
+        ("stride".to_string(), Json::Int(g.enc.stride as i64)),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),
         ("device".to_string(), Json::str(model.device_label())),
-        ("counting".to_string(), Json::str(model.counting())),
     ];
     for (key, counter) in [
         ("epochs_total", meta.epochs_total),
@@ -73,17 +79,13 @@ pub fn stats(model: &Model) -> Json {
         ),
         ("window_traversals".to_string(), Json::Int(g.window_traversals() as i64)),
     ]);
-    // what every number above is counted in, and the dial it was read with;
-    // a per-word number read as per-character is read wrong
-    pairs.push(("units".to_string(), Json::str(model.units())));
-    pairs.push(("encoding".to_string(), Json::str(g.enc.to_string())));
-    pairs.push(("unit".to_string(), Json::str(g.enc.unit.name())));
-    pairs.push(("ngram".to_string(), Json::Int(g.enc.n as i64)));
-    pairs.push(("stride".to_string(), Json::Int(g.enc.stride as i64)));
     if g.enc.unit == crate::encoding::Unit::Words {
         let words = crate::encoding::vocabulary(&g.enc, g.gram_index());
         pairs.push(("vocabulary".to_string(), Json::Int(words.len() as i64)));
     }
+    // this port's and Go's own: how the counters were bumped (the frontend's
+    // engine badge reads it); Python has no second way to count
+    pairs.push(("counting".to_string(), Json::str(model.counting())));
     Json::Obj(pairs)
 }
 

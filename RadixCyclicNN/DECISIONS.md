@@ -2887,10 +2887,10 @@ table for "Rust is 4x faster than Go" has been misled by it.
 * Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
   both sides, because a benchmark of a deliberate data race measures the race.
 
-* **Update, 2026-09-23.** The port now carries nearly the whole package - every
-  model kind, the negative network, the teaching loops, the LLM clients, the
-  tools, images and speech (code generation, the agent and MCP are the last
-  area, in progress) - and the "one gap is deliberate" above no
+* **Update, 2026-09-23.** The port now carries the whole package - every model
+  kind, the negative network, the teaching loops, the LLM clients, the tools,
+  code generation, the agent, images and speech, MCP and the WebDriver browser -
+  and the "one gap is deliberate" above no
   longer holds: D-076 has the LLM clients speak HTTPS through the system `curl`
   without taking a dependency. D-077 records how the rest was laid out.
 
@@ -2942,8 +2942,7 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
   a job it has started on a worker thread; and saves each kind to its own file.
 * The gap lists in `rust/README.md`, `go/README.md` and DESIGN §33 say which
   kind of gap each remaining item is.
-* **Update, 2026-09-23.** Rust's *undone* list is down to its last area (code
-  generation, the agent and MCP, in progress). What else remains is
+* **Update, 2026-09-23.** Rust's *undone* list is empty. What remains is
   deliberate and named in `rust/README.md`: the torch backend, the Stable
   Diffusion encoder and local Whisper (each needs Python packages or a GPU).
   The LLM clients left the deliberate list (D-076), and learning-rate schedules

@@ -48,7 +48,8 @@ use radixnet::service::Service;
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] \
      [--workers N] [--out PATH] <command>\n\
-     commands: train predict generate score feedback 2nrl invert compress weights schedule paths nodes words info \
+     commands: train predict generate score feedback 2nrl negative invert compress weights schedule paths nodes \
+     words info \
      serve version\n\
      --kind radix | count | negative | resonant: the algorithm of a NEW model (count is this port's default); a \
      loaded file's own kind always wins.\n\

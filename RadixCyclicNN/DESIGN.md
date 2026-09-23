@@ -3375,8 +3375,8 @@ graph and its structural operations, the dual frequency weight function, the jud
 traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished one in `src/search.rs`), training,
 prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file** - and,
 since D-077, the rest of the package: the sine-activation and phase models, the negative network and the guard,
-every teaching loop, the LLM clients (HTTPS through the system `curl`, D-076), the tools, images and speech - code
-generation, the agent and MCP being the last area, in progress - one module per area with one parity suite per area (`tests/test_rust_parity*.py`).  What it
+every teaching loop, the LLM clients (HTTPS through the system `curl`, D-076), the tools, code generation and the
+agent, images and speech, MCP and the WebDriver browser, one module per area with one parity suite per area (`tests/test_rust_parity*.py`).  What it
 deliberately leaves out - the torch backend, the Stable Diffusion encoder, local Whisper - `rust/README.md` names.
 
 The dial is the one place the port paid a representation for generality.  A trigram used to be three code points
