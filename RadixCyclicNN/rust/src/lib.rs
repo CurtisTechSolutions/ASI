@@ -121,6 +121,8 @@ pub mod pyheap;
 pub mod radix;
 pub mod resonance;
 pub mod schedule;
+// Chrome over WebDriver behind the web tools (`--browser`)
+pub mod browser;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;

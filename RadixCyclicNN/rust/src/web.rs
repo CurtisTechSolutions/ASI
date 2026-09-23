@@ -420,6 +420,9 @@ pub struct WebOptions {
     pub allow_private: bool,
     /// `None`: [`default_search_url`].
     pub search_url: Option<String>,
+    /// Draw pages in Chrome instead of fetching them (`--browser`,
+    /// [`crate::browser`]); the address guards run first either way.
+    pub browser: Option<std::sync::Arc<crate::browser::BrowserClient>>,
 }
 
 impl Default for WebOptions {
@@ -432,6 +435,7 @@ impl Default for WebOptions {
             user_agent: None,
             allow_private: false,
             search_url: None,
+            browser: None,
         }
     }
 }
@@ -505,6 +509,8 @@ pub struct WebClient {
     pub allow_private: bool,
     pub search_url: String,
     fetched: AtomicUsize,
+    /// When set, pages are drawn by Chrome ([`crate::browser`]).
+    pub browser: Option<std::sync::Arc<crate::browser::BrowserClient>>,
 }
 
 impl WebClient {
@@ -530,6 +536,7 @@ impl WebClient {
                 .filter(|u| !u.trim().is_empty())
                 .unwrap_or_else(default_search_url),
             fetched: AtomicUsize::new(0),
+            browser: o.browser,
         })
     }
 
@@ -599,6 +606,12 @@ impl WebClient {
     /// One document, following redirects by hand and checking every hop.
     pub fn fetch(&self, url: &str) -> Result<Fetched, String> {
         let mut target = self.check(url)?;
+        if let Some(browser) = &self.browser {
+            // Python's `_fetch_with_browser`: the page as Chrome drew it
+            let fetched = browser.fetch(&target, self.max_bytes)?;
+            self.fetched.fetch_add(1, Ordering::Relaxed);
+            return Ok(fetched);
+        }
         let mut seen = vec![target.clone()];
         for _hop in 0..=self.max_redirects {
             let mut request = fetch::Request::get(&request_target(&target))
