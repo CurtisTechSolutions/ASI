@@ -912,15 +912,10 @@ pub fn tutor_cli(
     let train = a.on("train");
     let mut model = ctx.open(false)?;
     if train {
-        let epochs = a.usize("epochs", 3)?;
-        crate::log_info!(LOG, "teaching it first: epochs={epochs}");
-        model.train(
-            texts,
-            &crate::model::TrainOptions {
-                epochs,
-                ..Default::default()
-            },
-        )?;
+        // as its kind learns: the rate and batch size are the sine model's
+        let (epochs, lr, batch_size) = (a.usize("epochs", 3)?, a.float("lr", 0.5)?, a.usize("batch-size", 8)?);
+        crate::log_info!(LOG, "teaching it first: epochs={epochs} lr={lr} batch={batch_size}");
+        crate::kinds::train_at(&mut model, texts, epochs, lr, batch_size)?;
     }
     let mut negative = if a.on("blame") {
         Some(ctx.open_negative(false)?)

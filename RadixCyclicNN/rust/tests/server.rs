@@ -186,11 +186,19 @@ fn the_traversals_are_all_three_and_each_one_answers() {
         vec!["reward", "punishment", "least-punished"]
     );
 
-    post(
+    let (status, _) = post(
         port,
         "/api/feedback",
         r#"{"bad":["the cat sat on the mat"],"strength":3}"#,
     );
+    assert_eq!(status, 202);
+    // the thumbs down is a job: the prices are read once it is done
+    for _ in 0..200 {
+        if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let mut costs = Vec::new();
     for traversal in ["reward", "punishment", "least-punished"] {
         let body = format!(r#"{{"prefix":"the cat","length":10,"traversal":"{traversal}","merit_scale":0}}"#);
@@ -314,15 +322,25 @@ the cat ate the rat","epochs":1}"#,
         assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"), "{body}");
     }
 
-    // feedback names its three good / good_text / good_files, and reads them the same way
+    // feedback names its three good / good_text / good_files, and reads them the same way;
+    // it is a job, as Python's is
     let (status, learned) = post(
         port,
         "/api/feedback",
         r#"{"good_text":"the cat sat on the mat","bad_text":"the cat ate the rat","strength":2}"#,
     );
-    assert_eq!(status, 200);
+    assert_eq!(status, 202);
     assert_eq!(learned.at("good").as_i64(), Some(1));
     assert_eq!(learned.at("bad").as_i64(), Some(1));
+    assert_eq!(learned.at("action").as_str(), Some("2nrl"));
+    assert_eq!(learned.at("job").at("type").as_str(), Some("feedback"));
+    for _ in 0..200 {
+        if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"));
 
     // an upload name that tries to leave the directory is refused
     let (status, error) = post(port, "/api/train", r#"{"files":["../secrets.txt"],"epochs":1}"#);

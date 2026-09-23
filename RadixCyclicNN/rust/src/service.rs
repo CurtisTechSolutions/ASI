@@ -984,48 +984,63 @@ fn score(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(Json::Obj(doc))
 }
 
+/// `POST /api/feedback`: rated texts as a background job (202), polled on
+/// `/api/job` - Python's `_r_feedback` / `start_feedback`, for every kind.
+///
+/// Both sets: 2NRL; only `good`: a thumbs up; only `bad`: a thumbs down -
+/// each through the model's own kind ([`crate::kinds`]): the sine model
+/// learns at `neg_lr` / `pos_lr` (0.5 / 0.1) in batches of 4 (rated sets are
+/// small), the count and phase models reward and penalise by `strength`.
+/// `<side>_weights` (shares) or `<side>_ratings` (marks out of 10) turn the
+/// thumbs into ratings.
 fn feedback(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     let good = svc.texts_of(r, "good", "good_text", "good_files")?;
     let bad = svc.texts_of(r, "bad", "bad_text", "bad_files")?;
-    if good.is_empty() && bad.is_empty() {
+    let Some(action) = kinds::feedback_action(&good, &bad) else {
         return Err(ApiError::bad_request(
-            "nothing to learn from: give 'good' (thumbs up) and / or 'bad' (thumbs down)",
+            "give 'good' (thumbs up) and/or 'bad' (thumbs down) texts: lists, good_text / bad_text (one per \
+             line) or good_files / bad_files (upload names)",
         ));
-    }
-    let strength = r.number("strength", 1.0)?;
-    let epochs = r.usize("epochs", 1)?;
-    // the other kinds learn a rating the way Python's feedback route teaches it
+    };
     let mut o = feedback_options(r, Feedback::rated())?;
     o.good_weights = ratings(r, "good", good.len())?;
     o.bad_weights = ratings(r, "bad", bad.len())?;
-    let out = svc.with_model(|m| -> Result<Json, String> {
-        let mut records: Vec<Json> = Vec::new();
-        if m.kind() != "count" {
-            let (negative, positive) = match kinds::feedback_action(&good, &bad) {
-                Some("2nrl") => kinds::two_nrl(m, &bad, &good, &o, &mut |_| true)?,
-                Some("reward") => (Vec::new(), kinds::reward(m, &good, &o, &mut |_| true)?),
-                _ => (kinds::punish(m, &bad, &o, &mut |_| true)?, Vec::new()),
+    validate_feedback(&o)?;
+    let weights = |w: &Option<Vec<f64>>| w.as_ref().map(|w| Json::nums(w.clone())).unwrap_or(Json::Null);
+    let (good_weights, bad_weights) = (weights(&o.good_weights), weights(&o.bad_weights));
+    let (good_count, bad_count) = (good.len(), bad.len());
+    svc.start_job("feedback");
+    let worker = Arc::clone(svc);
+    std::thread::spawn(move || {
+        let outcome = worker.with_model(|m| {
+            let mut watch = |record: &crate::model::EpochRecord| {
+                worker.job_progress(record.to_json());
+                !worker.stopping()
             };
-            records.extend(negative.iter().chain(positive.iter()).map(|r| r.to_json()));
-        } else if !bad.is_empty() {
-            records.extend(m.punish(&bad, epochs, strength)?.iter().map(|r| r.to_json()));
-        }
-        if m.kind() == "count" && !good.is_empty() {
-            records.extend(m.reward(&good, epochs, strength)?.iter().map(|r| r.to_json()));
-        }
-        Ok(Json::obj([
-            ("action", Json::str(kinds::feedback_action(&good, &bad).unwrap_or(""))),
-            ("good", Json::Int(good.len() as i64)),
-            ("bad", Json::Int(bad.len() as i64)),
-            ("strength", Json::Num(strength)),
-            ("records", Json::Arr(records)),
-            ("stats", stats(m)),
-        ]))
-    })?;
-    Ok(out)
+            match action {
+                "2nrl" => kinds::two_nrl(m, &bad, &good, &o, &mut watch),
+                "reward" => kinds::reward(m, &good, &o, &mut watch).map(|records| (Vec::new(), records)),
+                _ => kinds::punish(m, &bad, &o, &mut watch).map(|records| (records, Vec::new())),
+            }
+        });
+        worker.finish_job(
+            outcome.map(|(negative, positive)| negative.iter().chain(positive.iter()).map(|r| r.to_json()).collect()),
+        );
+    });
+    Ok(accepted(Json::obj([
+        ("job", svc.job_json()),
+        ("action", Json::str(action)),
+        ("good", Json::Int(good_count as i64)),
+        ("bad", Json::Int(bad_count as i64)),
+        ("good_weights", good_weights),
+        ("bad_weights", bad_weights),
+    ])))
 }
 
+/// `POST /api/2nrl`: 2NRL as a background job (202), through the model's own
+/// kind, over Python's defaults for every kind (`start_two_nrl`: 3 and 3
+/// epochs, rates 0.05 and 0.01).
 fn two_nrl(svc: &Arc<Service>, r: &Request) -> Answer {
     svc.ensure_idle()?;
     let bad = svc.texts_of(r, "bad", "bad_text", "bad_files")?;
@@ -1033,17 +1048,10 @@ fn two_nrl(svc: &Arc<Service>, r: &Request) -> Answer {
     if bad.is_empty() && good.is_empty() {
         return Err(ApiError::bad_request("2NRL needs 'bad' and / or 'good' texts"));
     }
-    // the count model's defaults are this port's; the other kinds' Python's
-    let count = svc.with_model(|m| m.kind() == "count");
-    let mut o = feedback_options(
-        r,
-        Feedback {
-            neg_epochs: if count { 2 } else { 3 },
-            ..Feedback::two_nrl()
-        },
-    )?;
+    let mut o = feedback_options(r, Feedback::two_nrl())?;
     o.good_weights = ratings(r, "good", good.len())?;
     o.bad_weights = ratings(r, "bad", bad.len())?;
+    validate_feedback(&o)?;
     svc.start_job("two_nrl");
     let worker = Arc::clone(svc);
     std::thread::spawn(move || {
@@ -1063,6 +1071,28 @@ fn two_nrl(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(accepted(Json::obj([("job", svc.job_json())])))
 }
 
+/// Refuses feedback settings no phase can train with before the job starts,
+/// as Python's `TrainConfig(...).validate()` of both phases does.
+fn validate_feedback(o: &Feedback) -> Result<(), ApiError> {
+    let base = TrainConfig::default();
+    for (epochs, lr, act_lr) in [
+        (o.neg_epochs, o.neg_lr, base.act_lr),
+        (o.pos_epochs, o.pos_lr, o.pos_lr / 10.0),
+    ] {
+        TrainConfig {
+            epochs,
+            lr,
+            act_lr,
+            batch_size: o.batch_size.unwrap_or(base.batch_size),
+            clip: o.clip.unwrap_or(base.clip),
+            ..base.clone()
+        }
+        .validate()
+        .map_err(ApiError::bad_request)?;
+    }
+    Ok(())
+}
+
 fn invert(svc: &Arc<Service>, _r: &Request) -> Answer {
     svc.ensure_idle()?;
     Ok(svc.with_model(|m| {
@@ -1079,16 +1109,10 @@ fn compress(svc: &Arc<Service>, _r: &Request) -> Answer {
     }))
 }
 
-fn train(svc: &Arc<Service>, r: &Request) -> Answer {
-    svc.ensure_idle()?;
-    let texts = svc.texts_of(r, "texts", "text", "files")?;
-    if texts.is_empty() {
-        return Err(ApiError::bad_request(
-            "missing field 'texts' (list of strings), 'text' (string, one text per line) \
-             or 'files' (list of upload names)",
-        ));
-    }
-    // every kind's settings (Python's `_train_config`); each kind reads what applies to it
+/// The training settings of a request body over Python's `TrainConfig`
+/// defaults (Python's `_train_config`): every kind's, each kind reading what
+/// applies to it - the routes that start a training job share it.
+pub(crate) fn train_config(r: &Request) -> Result<TrainConfig, ApiError> {
     let base = TrainConfig::default();
     let text = |name: &str| Some(r.text(name, "").trim().to_string()).filter(|s| !s.is_empty());
     let config = TrainConfig {
@@ -1106,6 +1130,19 @@ fn train(svc: &Arc<Service>, r: &Request) -> Answer {
         ..base
     };
     config.validate().map_err(ApiError::bad_request)?;
+    Ok(config)
+}
+
+fn train(svc: &Arc<Service>, r: &Request) -> Answer {
+    svc.ensure_idle()?;
+    let texts = svc.texts_of(r, "texts", "text", "files")?;
+    if texts.is_empty() {
+        return Err(ApiError::bad_request(
+            "missing field 'texts' (list of strings), 'text' (string, one text per line) \
+             or 'files' (list of upload names)",
+        ));
+    }
+    let config = train_config(r)?;
     let settings = kinds::TrainSettings {
         config,
         chunk_size: r.usize("chunk", 0)?,

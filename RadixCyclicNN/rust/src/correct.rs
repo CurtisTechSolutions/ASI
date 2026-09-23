@@ -135,12 +135,26 @@ impl Model {
     /// instead.  Both join the structure before either is measured: observing
     /// one can split a node the other's path runs through, and the split moves
     /// the very edge a penalty was meant for.
+    ///
+    /// Only the count model learns this way; the sine and phase models refuse,
+    /// as Python's (which have no `correct`) do, and the tutor teaches them a
+    /// corrected failure through 2NRL instead.
     pub fn correct(&mut self, wrong: &str, right: &str, o: &CorrectOptions) -> Result<Correction, String> {
         if self.is_negative() {
             return Err(
                 "the negative network learns a correction by blaming it (`radixnet correct --blame`), not from rewards"
                     .to_string(),
             );
+        }
+        if self.is_radix() || self.is_resonant() {
+            // Python's kinds without a `correct`: the sine model learns by its
+            // rates and the phase model by its locks, not by moving rewards
+            // along a diff (`cmd_correct`'s refusal)
+            let kind = self.kind();
+            return Err(format!(
+                "the {kind} ({}) model cannot learn from a diff; use feedback instead",
+                crate::kinds::label(kind)
+            ));
         }
         let base = o.strength.abs();
         let enc = self.g.enc;

@@ -373,6 +373,31 @@ pub fn train(
     }
 }
 
+/// Python's `model.train(texts, epochs=..., lr=..., batch_size=...)` on any
+/// kind - what the commands that teach a model a few texts on the side call
+/// (`image encode --train`, `speech teach --train`, the recall tutors'
+/// `--train`, `ollama corpus --train`): the sine model learns at that rate
+/// (its activations at the default `act_lr`) and batch size, the count and
+/// phase models count as they always do, and the negative network blames.
+pub fn train_at(
+    model: &mut Model,
+    texts: &[String],
+    epochs: usize,
+    lr: f64,
+    batch_size: usize,
+) -> Result<Vec<EpochRecord>, String> {
+    let settings = TrainSettings {
+        config: TrainConfig {
+            epochs,
+            lr,
+            batch_size,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    train(model, texts, &settings, &mut |_| true)
+}
+
 /// What feedback does with the texts it is given: `"2nrl"` (both), `"reward"`
 /// (good only), `"punish"` (bad only).
 pub fn feedback_action(good: &[String], bad: &[String]) -> Option<&'static str> {
@@ -414,13 +439,30 @@ pub fn two_nrl(
             Ok((negative, positive))
         }
         _ if o.bad_weights.is_some() || o.good_weights.is_some() => {
+            let stopped = std::cell::Cell::new(false);
+            let mut watch = |r: &EpochRecord| {
+                let go_on = on_epoch(r);
+                stopped.set(stopped.get() || !go_on);
+                go_on
+            };
             let negative = match &o.bad_weights {
                 None => model.punish(bad, o.neg_epochs, o.strength)?,
-                Some(w) => count_weighted(model, bad, w, "bad_weights", o.neg_epochs, o.strength, false)?,
+                Some(w) => count_weighted(
+                    model,
+                    bad,
+                    w,
+                    "bad_weights",
+                    o.neg_epochs,
+                    o.strength,
+                    false,
+                    &mut watch,
+                )?,
             };
+            // a stop after the negative phase skips the positive one, as Python's does
             let positive = match &o.good_weights {
+                _ if stopped.get() => Vec::new(),
                 None => model.reward(good, o.pos_epochs, o.strength)?,
-                Some(w) => count_weighted(model, good, w, "weights", o.pos_epochs, o.strength, true)?,
+                Some(w) => count_weighted(model, good, w, "weights", o.pos_epochs, o.strength, true, &mut watch)?,
             };
             model.meta.twonrl_runs.add(1);
             Ok((negative, positive))
@@ -432,6 +474,9 @@ pub fn two_nrl(
 /// The count model's rated passes: one per group of equally weighted texts
 /// (heaviest first), the reward or penalty scaled by the weight, and every
 /// record - the history's too - carrying `weight`, as Python stamps them.
+/// `on_epoch` sees every record once it is stamped; returning `false` stops
+/// the run before the next group, where Python's checks its stop event.
+#[allow(clippy::too_many_arguments)]
 fn count_weighted(
     model: &mut Model,
     texts: &[String],
@@ -440,6 +485,7 @@ fn count_weighted(
     epochs: usize,
     strength: f64,
     positive: bool,
+    on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
 ) -> Result<Vec<EpochRecord>, String> {
     let mut records = Vec::new();
     for (weight, group) in crate::radix::weight_groups(texts, weights, name)? {
@@ -450,11 +496,16 @@ fn count_weighted(
             model.punish(&group, epochs, amount)?
         };
         let first = model.history.len() - done.len();
+        let mut go_on = true;
         for (i, record) in done.iter_mut().enumerate() {
             record.extra.push(("weight".to_string(), Json::Num(weight)));
             model.history[first + i] = record.clone();
+            go_on &= on_epoch(record);
         }
         records.extend(done);
+        if !go_on {
+            break;
+        }
     }
     Ok(records)
 }
@@ -472,7 +523,7 @@ pub fn reward(
         "negative" => negative_clear(model, good, o, on_epoch),
         _ => match &o.good_weights {
             None => model.reward(good, o.pos_epochs, o.strength),
-            Some(w) => count_weighted(model, good, w, "weights", o.pos_epochs, o.strength, true),
+            Some(w) => count_weighted(model, good, w, "weights", o.pos_epochs, o.strength, true, on_epoch),
         },
     }
 }
@@ -490,9 +541,106 @@ pub fn punish(
         "negative" => negative_blame(model, bad, o, Some("thumbs-down"), "feedback", on_epoch),
         _ => match &o.bad_weights {
             None => model.punish(bad, o.neg_epochs, o.strength),
-            Some(w) => count_weighted(model, bad, w, "weights", o.neg_epochs, o.strength, false),
+            Some(w) => count_weighted(model, bad, w, "weights", o.neg_epochs, o.strength, false, on_epoch),
         },
     }
+}
+
+/// Failures made unlikely *locally* on any kind - Python's `invert_paths`,
+/// the local counterpart of 2NRL's global inversion: `amounts` (one per text
+/// long enough to hold a gram, in `[0, 1]`; `None` is 1 for all) says how far
+/// each text's path moves, and only those paths move.
+///
+/// Each kind answers its own way, and counts what it moved in its own unit -
+/// the answer's `"unit"`: the sine model moves every other *node* of a path
+/// toward its negation (`mode` `"activation"` or `"state"`); the phase model
+/// rotates a path's *edges* toward antiphase or decoheres them; the count
+/// model has nothing to flip and penalises the edges by `strength * 2 *
+/// amount` (Python's `strength` is 2 there); the negative network blames the
+/// path by `strength * amount` (Python's is 1).  Returns `{"texts",
+/// "flipped", "unit", "mode", "amount_mean"}`.
+pub fn invert_paths(
+    model: &mut Model,
+    texts: &[String],
+    mode: &str,
+    amounts: Option<&[f64]>,
+    strength: f64,
+) -> Result<Json, String> {
+    match model.kind() {
+        "radix" => model.radix_invert_paths(texts, mode, amounts),
+        "resonant" => model.resonant_invert_paths(texts, mode, amounts),
+        "negative" => negative_invert_paths(model, texts, amounts, strength),
+        _ => {
+            let enc = model.encoding();
+            let ones;
+            let amounts = match amounts {
+                Some(amounts) => amounts,
+                None => {
+                    ones = vec![1.0; texts.iter().filter(|t| enc.len(t) >= enc.n).count()];
+                    &ones
+                }
+            };
+            Ok(crate::gan::invert_paths(model, texts, amounts, strength)?.to_json())
+        }
+    }
+}
+
+/// The negative network's `invert_paths`: every failure is blamed
+/// (`blatant`, from `evolve`) at `strength * amount`, one text at a time;
+/// `flipped` is the edges the blame touched.
+fn negative_invert_paths(
+    model: &mut Model,
+    texts: &[String],
+    amounts: Option<&[f64]>,
+    strength: f64,
+) -> Result<Json, String> {
+    let enc = model.encoding();
+    let kept: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
+    let values = match amounts {
+        None => vec![1.0; kept.len()],
+        Some(values) if values.len() != kept.len() => {
+            return Err(format!("amounts has {} entries for {} texts", values.len(), kept.len()))
+        }
+        Some(values) => values.to_vec(),
+    };
+    if let Some(bad) = values.iter().find(|v| !(0.0..=1.0).contains(*v)) {
+        return Err(format!(
+            "amounts must lie in [0, 1], got {}",
+            crate::json::py_repr(*bad)
+        ));
+    }
+    let mut touched = 0i64;
+    for (text, &amount) in kept.iter().zip(&values) {
+        if amount <= 0.0 {
+            continue;
+        }
+        let o = crate::negative::BlameOptions {
+            reason: "blatant".to_string(),
+            severity: strength.abs() * amount,
+            source: "evolve".to_string(),
+            epochs: 1,
+            ..Default::default()
+        };
+        let records = model.blame_with(std::slice::from_ref(*text), &o, &mut |_| true)?;
+        touched += records
+            .last()
+            .and_then(|r| r.extra_value("edges_touched"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+    }
+    let applied: Vec<f64> = values.iter().copied().filter(|&v| v > 0.0).collect();
+    let mean = if applied.is_empty() {
+        0.0
+    } else {
+        applied.iter().fold(0.0, |acc, v| acc + v) / applied.len() as f64
+    };
+    Ok(Json::obj([
+        ("texts", Json::Int(kept.len() as i64)),
+        ("flipped", Json::Int(touched)),
+        ("unit", Json::str("edges")),
+        ("mode", Json::str("blame")),
+        ("amount_mean", Json::Num(mean)),
+    ]))
 }
 
 /// The negative network's thumbs down: blame, `strength` the severity, a
