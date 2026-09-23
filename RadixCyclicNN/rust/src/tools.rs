@@ -1069,6 +1069,15 @@ pub struct State {
     pub sandbox_timeout: f64,
     /// Run sandboxed programs in a network namespace of their own.
     pub network_isolation: bool,
+    /// Draw pages in Chrome ([`crate::browser`]).
+    pub browser: bool,
+    /// Seconds a page may take to draw.
+    pub page_timeout: f64,
+    /// Chrome without a window (a command line's `--no-headless` turns it
+    /// off; a server's browser is always headless, as Python's is).
+    pub headless: bool,
+    /// The one browser a server's requests share, started on first use.
+    pub drawn_by: crate::browser::Shared,
 }
 
 impl Default for State {
@@ -1083,6 +1092,10 @@ impl Default for State {
             python_tool: false,
             sandbox_timeout: 10.0,
             network_isolation: true,
+            browser: false,
+            page_timeout: crate::browser::DEFAULT_PAGE_TIMEOUT,
+            headless: true,
+            drawn_by: crate::browser::Shared::default(),
         }
     }
 }
@@ -1108,7 +1121,7 @@ fn float_flag(args: &Args, name: &str, fallback: f64, minimum: f64) -> Result<f6
 impl State {
     /// Reads the tool flags (`--offline`, `--allow-private`, `--search-url`,
     /// `--web-timeout`, `--max-bytes`, `--python-tool`, `--sandbox-timeout`,
-    /// `--no-network-isolation`) over these defaults.
+    /// `--no-network-isolation`, `--browser`, `--page-timeout`) over these defaults.
     pub fn configure(&mut self, args: &Args) -> Result<(), String> {
         self.offline = args.on("offline");
         self.allow_private = args.on("allow-private");
@@ -1130,14 +1143,12 @@ impl State {
         self.python_tool = args.on("python-tool");
         self.sandbox_timeout = float_flag(args, "sandbox-timeout", self.sandbox_timeout, 0.1)?;
         self.network_isolation = !args.on("no-network-isolation");
-        if args.on("browser") && !self.offline {
-            return Err(format!("--browser: {}", no_browser()));
-        }
+        self.browser = args.on("browser");
+        self.page_timeout = float_flag(args, "page-timeout", self.page_timeout, 1.0)?;
         Ok(())
     }
 
-    /// The settings as the API reports them, in Python's order (the browser
-    /// ones included, always off here).
+    /// The settings as the API reports them, in Python's order.
     pub fn options_json(&self) -> Json {
         Json::obj([
             ("offline", Json::Bool(self.offline)),
@@ -1147,8 +1158,8 @@ impl State {
             ("max_bytes", Json::Int(self.max_bytes as i64)),
             ("python_tool", Json::Bool(self.python_tool)),
             ("sandbox_timeout", Json::Num(self.sandbox_timeout)),
-            ("browser", Json::Bool(false)),
-            ("page_timeout", Json::Num(30.0)),
+            ("browser", Json::Bool(self.browser)),
+            ("page_timeout", Json::Num(self.page_timeout)),
         ])
     }
 
@@ -1166,8 +1177,13 @@ impl State {
     }
 
     /// The toolbox these settings build, `read_file` over `upload_dir` when
-    /// there is one.
+    /// there is one, its pages drawn in the shared browser when `browser` is on.
     pub fn toolbox(&self, upload_dir: Option<&str>) -> Result<ToolBox, String> {
+        let browser = if self.browser && !self.offline {
+            Some(self.drawn_by.get(self.page_timeout, self.headless)?)
+        } else {
+            None
+        };
         default_toolbox(ToolOptions {
             offline: self.offline,
             web: WebOptions {
@@ -1175,6 +1191,7 @@ impl State {
                 max_bytes: self.max_bytes,
                 allow_private: self.allow_private,
                 search_url: self.search_url.clone(),
+                browser,
                 ..Default::default()
             },
             sandbox: self.sandbox()?,
@@ -1184,41 +1201,32 @@ impl State {
     }
 }
 
-/// Why `--browser` does nothing here.
-fn no_browser() -> String {
-    "the Rust port does not drive a browser (pages that render themselves with JavaScript need the Python \
-     implementation's --browser)"
-        .to_string()
-}
-
-/// What `tools browser` and `/api/tools` say about the browser: Python's keys,
-/// and why there is none.
+/// What `tools browser` and `/api/tools` say about the browser: the
+/// chromedriver and Chrome found, their versions, and why they would not work.
 fn browser_json() -> Json {
-    Json::obj([
-        ("available", Json::Bool(false)),
-        ("chromedriver", Json::Null),
-        ("chrome", Json::Null),
-        ("chromedriver_version", Json::Null),
-        ("chrome_version", Json::Null),
-        ("headless", Json::Bool(true)),
-        ("error", Json::str(no_browser())),
-    ])
+    crate::browser::describe().to_json()
 }
 
 /// The toolbox a command-line run gets from its flags: browsing (unless
-/// `--offline`), the calculator, the sandbox (`--python-tool`) and the uploads
-/// (`--upload-dir`).  What `tools`, `agent`, `explore` and `mcp` share.
+/// `--offline`, drawn in Chrome with `--browser`), the calculator, the sandbox
+/// (`--python-tool`) and the uploads (`--upload-dir`).  What `tools`, `agent`,
+/// `explore` and `mcp` share.
 pub fn build_toolbox(args: &Args) -> Result<ToolBox, String> {
     let mut state = State::default();
     state.configure(args)?;
+    if state.browser && !state.offline {
+        state.headless = !args.on("no-headless");
+        let browser = crate::browser::from_flags(state.page_timeout, state.headless)?;
+        state.drawn_by = crate::browser::Shared::with(browser);
+    }
     state.toolbox(args.get("upload-dir"))
 }
 
 // -- the command line -------------------------------------------------------------------------------
 
 /// `radixnet tools list | describe | call | browser`: the tools, one in
-/// detail, one called directly (no model, no LLM), and the browser this port
-/// does not have.
+/// detail, one called directly (no model, no LLM), and the Chrome `--browser`
+/// would drive.
 pub fn cli(ctx: &Ctx) -> Result<(), String> {
     let args = &ctx.args;
     match args.action() {
@@ -1282,6 +1290,8 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
             Ok(())
         }
         "browser" => {
+            // the flags are read (and refused) first, as for every action
+            build_toolbox(args)?;
             ctx.emit(browser_json());
             Ok(())
         }
@@ -1384,11 +1394,8 @@ pub(crate) fn toolbox_from(svc: &Service, r: &Request) -> Result<ToolBox, ApiErr
     if let Some(python) = flag_field(r, "python_tool")? {
         state.python_tool = python;
     }
-    if flag_field(r, "browser")? == Some(true) && !state.offline {
-        return Err(ApiError::bad_request(format!(
-            "the browser is not available: {}",
-            no_browser()
-        )));
+    if let Some(browser) = flag_field(r, "browser")? {
+        state.browser = browser;
     }
     if let Some(url) = text_field(r, "search_url")? {
         state.search_url = Some(url).filter(|u| !u.trim().is_empty());

@@ -198,6 +198,16 @@ impl Graph {
             return;
         }
         let dirty: Vec<usize> = self.dirty.drain().collect();
+        if self.neg.is_some() {
+            // a negative network's rows are the blame distribution, as in
+            // `recompute_weights`: the count weights would undo a clear made
+            // in the same process as the blame before it
+            for p in dirty {
+                self.recompute_negative_row(p);
+            }
+            self.version.add(1);
+            return;
+        }
         let mut edge_w = std::mem::take(&mut self.edge_w);
         {
             let out = Disjoint::new(&mut edge_w);
