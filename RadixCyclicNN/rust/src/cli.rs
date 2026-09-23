@@ -345,6 +345,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
         crate::mcp::cli,
         "serve the tools and the network over the Model Context Protocol",
     ),
+    ("bench", crate::bench::cli, "throughput benchmark"),
 ];
 
 /// Runs a command from [`COMMANDS`]; `None` when no module answers the name.
@@ -373,9 +374,15 @@ pub fn read_named(args: &Args, flag: &str) -> Result<Vec<String>, String> {
     let Some(path) = args.get(flag) else {
         return Ok(Vec::new());
     };
-    let content = read_file_text(path)?;
     let unit = args.str("split", "lines");
     let page_lines = args.usize("page-lines", 0).unwrap_or(0);
+    // a ZIP archive (by its magic, whatever its name) is read entry by entry
+    if crate::zip::is_zip_file(path) {
+        let workers = args.usize("workers", 0).unwrap_or(0);
+        let source = crate::source::source_for_file(std::path::Path::new(path), &unit, page_lines, workers);
+        return crate::source::collect_texts(source.as_ref()).map_err(|err| format!("{path}: {err}"));
+    }
+    let content = read_file_text(path)?;
     Ok(split_texts(&content, &unit, page_lines))
 }
 

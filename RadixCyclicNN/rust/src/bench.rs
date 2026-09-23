@@ -291,6 +291,7 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
     }
 
     let transitions: i64 = records.iter().map(|r| r.transitions).sum();
+    let epoch_seconds: f64 = records.iter().map(|r| r.seconds).sum();
     let g = &model.g;
     let rate = |count: f64, seconds: f64| if seconds <= 0.0 { 0.0 } else { count / seconds };
     let mut out = vec![
@@ -334,6 +335,26 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
             "loss".to_string(),
             Json::Num(records.last().map(|r| r.loss).unwrap_or(0.0)),
         ),
+        // the rest of what Python's benchmark reports (`radixnet bench`)
+        ("device".to_string(), Json::str(model.device_label())),
+        (
+            "mean_fanout".to_string(),
+            // END has no out-edges
+            Json::Num(g.num_edges() as f64 / g.num_nodes().saturating_sub(1).max(1) as f64),
+        ),
+        (
+            "loss_first".to_string(),
+            Json::Num(records.first().map(|r| r.loss).unwrap_or(0.0)),
+        ),
+        (
+            "loss_last".to_string(),
+            Json::Num(records.last().map(|r| r.loss).unwrap_or(0.0)),
+        ),
+        ("epoch_seconds".to_string(), Json::Num(epoch_seconds)),
+        (
+            "backend_transitions_per_sec".to_string(),
+            Json::Num(rate(transitions as f64, epoch_seconds)),
+        ),
     ];
     if let Some(sample) = sample {
         out.push((
@@ -347,4 +368,148 @@ pub fn run_benchmark(o: &BenchOptions) -> Result<Json, String> {
         ));
     }
     Ok(Json::Obj(out))
+}
+
+// -- `radixnet bench` ----------------------------------------------------------------------------
+
+/// What this module's lines are filed under.
+const LOG: &str = "bench";
+
+/// The keys of Python's `run_benchmark`, in its order: the rest of this
+/// port's own follow them.
+const PYTHON_KEYS: &[&str] = &[
+    "backend",
+    "device",
+    "chars",
+    "texts",
+    "epochs",
+    "train_seconds",
+    "transitions",
+    "transitions_per_sec",
+    "chars_per_sec",
+    "predict_count",
+    "predict_seconds",
+    "predictions_per_sec",
+    "dijkstra_expansions_per_sec",
+    "nodes",
+    "edges",
+    "compression_ratio",
+    "sample_prediction",
+    "seed",
+    "trigrams",
+    "mean_fanout",
+    "loss_first",
+    "loss_last",
+    "epoch_seconds",
+    "backend_transitions_per_sec",
+    "dijkstra_expansions",
+];
+
+/// How many epochs `radixnet bench` times unless told otherwise - the Python
+/// command's three, not the module's two.
+const CLI_EPOCHS: usize = 3;
+
+/// One text per line of a file, blank lines dropped; an absent flag reads nothing.
+fn file_lines(path: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(path) = path.filter(|p| !p.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let data = std::fs::read_to_string(path).map_err(|err| format!("cannot read {path}: {err}"))?;
+    let lines: Vec<String> = data
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    if lines.is_empty() {
+        return Err(format!("{path} holds no usable line"));
+    }
+    Ok(lines)
+}
+
+/// `radixnet bench [--chars N] [--epochs N] [--predictions N] [--traversal T]
+/// [--texts FILE] [--prefixes FILE] [--punish-every N] [--data FILE]`: the
+/// throughput benchmark as Python's `bench` command reports it - its keys in
+/// its order, then what this port measures beside them (the traversal, the
+/// punishment, the workers).  `radixnet-bench` is the same benchmark with the
+/// comparison's own flags.
+pub fn cli(ctx: &crate::cli::Ctx) -> Result<(), String> {
+    let a = &ctx.args;
+    let chars = a.usize("chars", BENCH_DEFAULT_CHARS)?;
+    let epochs = a.usize("epochs", CLI_EPOCHS)?;
+    if chars < 1 {
+        return Err(format!("--chars must be a positive integer, got {chars}"));
+    }
+    if epochs < 1 {
+        return Err(format!("--epochs must be a positive integer, got {epochs}"));
+    }
+    let o = BenchOptions {
+        chars,
+        epochs,
+        seed: ctx.seed,
+        predictions: a.usize("predictions", 0)?,
+        corpus_path: a.str("data", &BenchOptions::default().corpus_path),
+        workers: ctx.workers,
+        texts: file_lines(a.get("texts"))?,
+        prefixes: file_lines(a.get("prefixes"))?,
+        traversal: crate::search::parse_traversal(&a.str("traversal", "reward"))?,
+        dump: a.str("dump", ""),
+        punish_every: a.usize("punish-every", 0)?,
+    };
+    crate::log_info!(
+        LOG,
+        "benchmark: {} chars, {} epoch(s), {} traversal, exact counting, {} worker(s)",
+        o.chars,
+        o.epochs,
+        o.traversal,
+        crate::parallel::effective_workers(o.workers)
+    );
+    let Json::Obj(mut pairs) = run_benchmark(&o)? else {
+        return Err("the benchmark reported nothing".to_string());
+    };
+    let mut ordered: Vec<(String, Json)> = Vec::with_capacity(pairs.len());
+    for key in PYTHON_KEYS {
+        if let Some(at) = pairs.iter().position(|(k, _)| k == key) {
+            ordered.push(pairs.remove(at));
+        }
+    }
+    ordered.extend(pairs);
+    ctx.emit(Json::Obj(ordered));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_reports_every_key_python_does() {
+        let o = BenchOptions {
+            chars: 400,
+            epochs: 2,
+            predictions: 5,
+            workers: 1,
+            corpus_path: "no such file".to_string(),
+            ..Default::default()
+        };
+        let result = run_benchmark(&o).unwrap();
+        for key in PYTHON_KEYS {
+            assert!(result.get(key).is_some(), "{key}");
+        }
+        assert_eq!(result.at("predict_count").as_i64(), Some(5));
+        assert_eq!(result.at("epochs").as_i64(), Some(2));
+        assert!(result.at("mean_fanout").as_f64().unwrap() > 0.0);
+        assert!(result.at("device").as_str().unwrap().starts_with("cpu"));
+        let sample = result.at("sample_prediction");
+        assert!(sample.get("prefix").is_some() && sample.get("reached_end").is_some());
+    }
+
+    #[test]
+    fn a_corpus_is_the_same_corpus_every_time() {
+        let base = bench_lines("no such file");
+        let a = synthetic_corpus(500, 3, &base).unwrap();
+        assert_eq!(a, synthetic_corpus(500, 3, &base).unwrap());
+        assert!(a.iter().map(|t| t.chars().count()).sum::<usize>() >= 500);
+        let prefixes = bench_prefixes(&a, 20, 3).unwrap();
+        assert!(prefixes.iter().all(|p| (3..=12).contains(&p.chars().count())));
+    }
 }
