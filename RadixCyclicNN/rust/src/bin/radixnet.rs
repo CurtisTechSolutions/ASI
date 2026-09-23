@@ -532,6 +532,8 @@ fn run() -> Result<(), String> {
                         ("saved", Json::str(saved)),
                     ]));
                 }
+                // the model writes, an LLM reviews, the failures blame (critic.rs)
+                "auto" => radixnet::critic::cli(&ctx)?,
                 "" => return Err("negative needs an action: blame, clear, why, reasons, forget, settings".to_string()),
                 other => {
                     return Err(format!(

@@ -14,6 +14,15 @@
 //! One request, one connection (`Connection: close`); a chunked or gzipped
 //! answer is decoded; redirects are followed only when asked, because the
 //! browsing tool checks every hop itself.
+//!
+//! # Headers never go on curl's command line
+//!
+//! A command line is public: every user on the machine can read it from
+//! `/proc/<pid>/cmdline` (or `ps`) for as long as the request runs, and an
+//! `Authorization: Bearer ...` header there is the API key handed out.  So
+//! curl reads the request's headers from a file only this user can read
+//! (`0600`, created exclusively, removed as soon as curl exits), and its
+//! command line carries nothing but the method, the URL and the knobs.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -36,6 +45,10 @@ pub struct Request {
     pub redirects: usize,
     /// The most body bytes to read; `0` is no limit.
     pub max_bytes: usize,
+    /// Whether the environment's proxy may carry the request (`HTTP_PROXY`,
+    /// `HTTPS_PROXY`).  Off for a server the caller knows is on this machine or
+    /// its network - a local Ollama - which a proxy could only fail to reach.
+    pub proxy: bool,
 }
 
 impl Request {
@@ -48,6 +61,7 @@ impl Request {
             timeout: DEFAULT_TIMEOUT,
             redirects: 0,
             max_bytes: 0,
+            proxy: true,
         }
     }
     pub fn get(url: &str) -> Request {
@@ -75,6 +89,11 @@ impl Request {
     }
     pub fn limit(mut self, max_bytes: usize) -> Request {
         self.max_bytes = max_bytes;
+        self
+    }
+    /// Never through a proxy, whatever the environment says (see [`Request::proxy`]).
+    pub fn direct(mut self) -> Request {
+        self.proxy = false;
         self
     }
 
@@ -314,7 +333,7 @@ fn http_proxy(host: &str) -> Option<Url> {
 }
 
 fn over_tcp(request: &Request, url: &Url) -> Result<Response, FetchError> {
-    let proxy = http_proxy(&url.host);
+    let proxy = if request.proxy { http_proxy(&url.host) } else { None };
     let (connect_host, connect_port, target) = match &proxy {
         Some(p) => (p.host.clone(), p.port, format!("{}{}", url.origin(), url.target)),
         None => (url.host.clone(), url.port, url.target.clone()),
@@ -371,8 +390,11 @@ fn over_tcp(request: &Request, url: &Url) -> Result<Response, FetchError> {
             FetchError::new(format!("{}: {err}", request.url))
         }
     };
-    stream.write_all(head.as_bytes()).map_err(io)?;
-    stream.write_all(&request.body).map_err(io)?;
+    // one write for the head and the body: two small writes wait on the
+    // delayed ACK of the first (Nagle), which every LLM call would pay
+    let mut message = head.into_bytes();
+    message.extend_from_slice(&request.body);
+    stream.write_all(&message).map_err(io)?;
     stream.flush().map_err(io)?;
     let mut raw = Vec::new();
     let cap = if request.max_bytes > 0 {
@@ -505,12 +527,24 @@ fn via_curl(request: &Request) -> Result<Response, FetchError> {
     if request.max_bytes > 0 {
         cmd.arg("--max-filesize").arg((request.max_bytes * 4).to_string());
     }
-    let mut has_agent = false;
-    for (name, value) in &request.headers {
-        has_agent |= name.eq_ignore_ascii_case("user-agent");
-        cmd.arg("--header").arg(format!("{name}: {value}"));
+    if !request.proxy {
+        cmd.arg("--noproxy").arg("*");
     }
-    if !has_agent {
+    // the headers go in a file only this user can read, never on the command
+    // line (see the module docs); the guard removes it when curl is done
+    let _headers = if request.headers.is_empty() {
+        None
+    } else {
+        let path = std::env::temp_dir().join(format!("radixnet-curl-{}-{n}.headers", std::process::id()));
+        let file = header_file(&request.headers, path)?;
+        cmd.arg("--header").arg(format!("@{}", file.0.display()));
+        Some(file)
+    };
+    if !request
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+    {
         cmd.arg("--user-agent")
             .arg(format!("radixnet-rust/{}", env!("CARGO_PKG_VERSION")));
     }
@@ -568,6 +602,51 @@ fn via_curl(request: &Request) -> Result<Response, FetchError> {
     Ok(response)
 }
 
+/// A file that is removed when it goes out of scope, however the request ends.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The request's headers as curl's `--header @file` reads them, one per line,
+/// in a file created exclusively with `0600` permissions.
+///
+/// A line break inside a name or a value would start a header of its own, so
+/// it is dropped rather than passed on.
+fn header_file(headers: &[(String, String)], path: std::path::PathBuf) -> Result<Scratch, FetchError> {
+    let open = |path: &std::path::Path| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    };
+    let mut file = match open(&path) {
+        Ok(file) => file,
+        // a file left behind by an earlier process that had this pid
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&path);
+            open(&path).map_err(|err| FetchError::new(format!("cannot write curl's headers: {err}")))?
+        }
+        Err(err) => return Err(FetchError::new(format!("cannot write curl's headers: {err}"))),
+    };
+    let guard = Scratch(path);
+    let clean = |text: &str| text.chars().filter(|c| *c != '\r' && *c != '\n').collect::<String>();
+    let mut text = String::new();
+    for (name, value) in headers {
+        text.push_str(&format!("{}: {}\n", clean(name), clean(value)));
+    }
+    file.write_all(text.as_bytes())
+        .map_err(|err| FetchError::new(format!("cannot write curl's headers: {err}")))?;
+    Ok(guard)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,9 +693,26 @@ mod tests {
             // the POST, the redirect and the page it points at
             for _ in 0..3 {
                 let (mut s, _) = listener.accept().unwrap();
+                // the whole request - a read may return the head before the body
+                let mut raw = Vec::new();
                 let mut buf = vec![0u8; 4096];
-                let n = s.read(&mut buf).unwrap();
-                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                loop {
+                    let n = s.read(&mut buf).unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw);
+                    let whole = text.split_once("\r\n\r\n").is_some_and(|(head, body)| {
+                        let length = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("Content-Length: "))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        body.len() >= length
+                    });
+                    if n == 0 || whole {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&raw).into_owned();
                 let answer = if req.starts_with("GET /moved") {
                     "HTTP/1.1 302 Found\r\nLocation: /here\r\nContent-Length: 0\r\n\r\n".to_string()
                 } else {
@@ -634,6 +730,63 @@ mod tests {
         let r = Request::get(&format!("{url}/moved")).follow(1).send().unwrap();
         assert_eq!(r.text(), "{\"got\": false}", "the redirect was followed");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_header_file_is_private_and_goes_away() {
+        let path = std::env::temp_dir().join(format!("radixnet-test-{}.headers", std::process::id()));
+        let headers = vec![
+            ("Authorization".to_string(), "Bearer sk-secret".to_string()),
+            ("X-Evil".to_string(), "a\r\nInjected: yes".to_string()),
+        ];
+        {
+            let file = header_file(&headers, path.clone()).unwrap();
+            let text = std::fs::read_to_string(&file.0).unwrap();
+            assert_eq!(text, "Authorization: Bearer sk-secret\nX-Evil: aInjected: yes\n");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&file.0).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "only this user may read the key");
+            }
+        }
+        assert!(!path.exists(), "removed when the request is done");
+    }
+
+    #[test]
+    fn curl_sends_the_headers_it_reads_from_the_file() {
+        if !curl_available() {
+            return;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            // up to the end of the head and the two-byte body
+            while !String::from_utf8_lossy(&raw).contains("\r\n\r\n{}") {
+                let n = s.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let body = "{\"ok\": true}";
+            let answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            s.write_all(answer.as_bytes()).unwrap();
+            String::from_utf8_lossy(&raw).into_owned()
+        });
+        // curl speaks plain HTTP too, which is what lets a test see what it sent
+        let doc = crate::json::parse("{}").unwrap();
+        let request = Request::post_json(&format!("http://127.0.0.1:{port}/v1/x"), &doc)
+            .header("Authorization", "Bearer sk-test")
+            .direct();
+        let response = via_curl(&request).unwrap();
+        assert_eq!(response.json().unwrap().at("ok").as_bool(), Some(true));
+        let seen = server.join().unwrap();
+        assert!(seen.contains("Authorization: Bearer sk-test"), "{seen}");
+        assert!(seen.contains("Content-Type: application/json"), "{seen}");
     }
 
     #[test]
