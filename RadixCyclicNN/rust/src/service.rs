@@ -187,7 +187,6 @@ impl Service {
 
     /// Adds one record to the running job, so `/api/job` shows it as progress
     /// before the job is done.
-    #[allow(dead_code)]
     pub(crate) fn job_progress(&self, record: Json) {
         let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = job.as_mut() {
@@ -198,7 +197,7 @@ impl Service {
     }
 
     /// The records the running job has reported so far.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // for a job route that reports its records before it is done
     pub(crate) fn job_records(&self) -> Vec<Json> {
         let job = self.job.lock().unwrap_or_else(|e| e.into_inner());
         job.as_ref().map(|j| j.records.clone()).unwrap_or_default()
@@ -206,7 +205,6 @@ impl Service {
 
     /// Whether `/api/job/stop` (or an area's own stop route) asked the running
     /// job to stop; a job checks between its steps.
-    #[allow(dead_code)]
     pub(crate) fn stopping(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }

@@ -606,6 +606,32 @@ mod tests {
         assert_eq!((r.text().as_str(), r.truncated), ("hell", true));
     }
 
+    /// One request as a test server must read it: the head, then as many body
+    /// bytes as it announced - a single `read` can return before the body has
+    /// arrived, and answering then resets the connection under the client.
+    fn read_whole_request(s: &mut std::net::TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = s.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            let Some(end) = find(&raw, b"\r\n\r\n") else { continue };
+            let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if raw.len() >= end + 4 + length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
     #[test]
     fn it_talks_to_a_plain_http_server() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -614,9 +640,7 @@ mod tests {
             // the POST, the redirect and the page it points at
             for _ in 0..3 {
                 let (mut s, _) = listener.accept().unwrap();
-                let mut buf = vec![0u8; 4096];
-                let n = s.read(&mut buf).unwrap();
-                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let req = read_whole_request(&mut s);
                 let answer = if req.starts_with("GET /moved") {
                     "HTTP/1.1 302 Found\r\nLocation: /here\r\nContent-Length: 0\r\n\r\n".to_string()
                 } else {
