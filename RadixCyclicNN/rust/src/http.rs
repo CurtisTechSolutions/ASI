@@ -32,11 +32,46 @@ pub struct Request {
     pub path: String,
     /// The query string as `[(key, value)]`, percent-decoded.
     pub query: Vec<(String, String)>,
-    /// The body parsed as JSON (`Json::Null` when there is none).
+    /// The body parsed as JSON (`Json::Null` when there is none, or when it
+    /// is not JSON - an upload arrives as multipart or as raw bytes).
     pub body: Json,
+    /// The body as it arrived.
+    pub raw: Vec<u8>,
+    /// The headers, names lower-cased, in the order sent.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Request {
+    /// A request with a JSON body and nothing else - what a route's own tests
+    /// build.
+    pub fn json(method: &str, path: &str, body: Json) -> Request {
+        Request {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: Vec::new(),
+            raw: body.render(0).into_bytes(),
+            body,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+        }
+    }
+
+    /// A header's value (the name is matched without regard to case).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// The media type the body was sent as, without its parameters.
+    pub fn content_type(&self) -> String {
+        self.header("content-type")
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    }
+
     /// A query parameter, last one wins.
     pub fn query(&self, key: &str) -> Option<&str> {
         self.query.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
@@ -121,6 +156,14 @@ impl ApiError {
             message: message.into(),
         }
     }
+    /// An error with any status: 502 for an upstream (an LLM) that failed,
+    /// 503 for one that is not there, 500 for the server's own fault.
+    pub fn with_status<S: Into<String>>(status: u16, message: S) -> ApiError {
+        ApiError {
+            status,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<String> for ApiError {
@@ -193,6 +236,16 @@ impl<S: Send + Sync + 'static> Server<S> {
     /// Adds one route; the first match wins.
     pub fn route(&mut self, method: &'static str, path: &'static str, handler: Handler<S>) {
         self.routes.push((method, path, handler));
+    }
+
+    /// Every route, as `"METHOD /path"`, in the order added.
+    pub fn routes(&self) -> Vec<String> {
+        self.routes.iter().map(|(m, p, _)| format!("{m} {p}")).collect()
+    }
+
+    /// The state the routes are answered from.
+    pub fn state(&self) -> &Arc<S> {
+        &self.state
     }
 
     /// The directory the static files are served from (the built frontend).
@@ -353,6 +406,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
         return Err("empty request line".to_string());
     }
     let mut length = 0usize;
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).map_err(|e| e.to_string())? == 0 {
@@ -366,6 +420,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
             if name.eq_ignore_ascii_case("content-length") {
                 length = value.trim().parse().unwrap_or(0);
             }
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
     if length > MAX_BODY {
@@ -379,15 +434,17 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
         Some((path, query)) => (path.to_string(), parse_query(query)),
         None => (target, Vec::new()),
     };
-    let body = match String::from_utf8(body) {
-        Ok(text) if !text.trim().is_empty() => parse(&text).unwrap_or(Json::Null),
+    let parsed = match std::str::from_utf8(&body) {
+        Ok(text) if !text.trim().is_empty() => parse(text).unwrap_or(Json::Null),
         _ => Json::Null,
     };
     Ok(Some(Request {
         method,
         path,
         query,
-        body,
+        body: parsed,
+        raw: body,
+        headers,
     }))
 }
 
@@ -463,11 +520,17 @@ fn write_bytes(stream: &mut TcpStream, status: u16, content_type: &str, body: &[
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "OK",
     }
 }

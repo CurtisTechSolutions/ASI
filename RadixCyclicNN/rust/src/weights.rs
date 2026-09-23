@@ -226,8 +226,17 @@ impl Graph {
         (pos, neg)
     }
 
-    /// Flips the sign of every reward.
+    /// Flips the sign of every reward - or, on a negative graph, swaps blame
+    /// and clearing: what the tutor rejected becomes what it accepted.
     pub fn invert(&mut self) {
+        if let Some(neg) = self.neg.as_mut() {
+            std::mem::swap(&mut neg.blame, &mut neg.clear);
+            std::mem::swap(&mut neg.total_blame, &mut neg.total_clear);
+            self.inverted = !self.inverted;
+            self.dirty_all = true;
+            self.recompute_weights();
+            return;
+        }
         for e in 0..self.edge_reward.len() {
             if self.edge_alive[e] {
                 self.edge_reward[e] = -self.edge_reward[e];

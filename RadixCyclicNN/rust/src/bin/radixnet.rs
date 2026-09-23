@@ -26,17 +26,19 @@
 
 use std::process::ExitCode;
 
+use radixnet::cli::{
+    dispatch, negative_stats, parse_args, path_json, read_named, read_texts, verdict_json, Ctx, COMMANDS,
+};
 use radixnet::encoding::{parse_encoding, Unit};
 use radixnet::file::read_document;
 use radixnet::json::Json;
 use radixnet::log::{self, Level};
 use radixnet::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
-use radixnet::negative::{BlameOptions as NegBlameOptions, JudgeOptions, NegativeOptions, Verdict};
+use radixnet::negative::{BlameOptions as NegBlameOptions, JudgeOptions};
 use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
-use radixnet::report::{node_rows, path_rows, split_texts, stats};
-use radixnet::search::PathResult;
+use radixnet::report::{node_rows, path_rows, stats};
 use radixnet::service::Service;
-use radixnet::{Graph, GraphOptions};
+use radixnet::Graph;
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--encoding SPEC] [--json] [--seed N] [--workers N] \
      [--out PATH] <command>\n\
@@ -56,97 +58,18 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--encoding SPEC] [--json] [
      off.  Nothing is ever\n\
      written to stdout, which is where --json puts its document.  Targets: http, model, train.";
 
-/// The negative model beside a model file: `model.count.json` ->
-/// `model.count.negative.json`, with `.gz` kept on the end.
-fn negative_path(model: &str) -> String {
-    let (stem, ext) = match model.strip_suffix(".gz") {
-        Some(head) => match head.rfind('.') {
-            Some(at) => (&head[..at], format!("{}.gz", &head[at..])),
-            None => (head, ".gz".to_string()),
-        },
-        None => match model.rfind('.') {
-            Some(at) => (&model[..at], model[at..].to_string()),
-            None => (model, String::new()),
-        },
-    };
-    if stem.ends_with(".negative") {
-        return model.to_string();
-    }
-    format!("{stem}.negative{ext}")
-}
-
-/// A verdict as the CLI and the API print it.
-fn verdict_json(v: &Verdict) -> Json {
-    Json::obj([
-        ("text", Json::str(v.text.clone())),
-        ("chars", Json::Int(v.chars as i64)),
-        ("transitions", Json::Int(v.transitions as i64)),
-        ("known", Json::Int(v.known as i64)),
-        ("blamed", Json::Int(v.blamed as i64)),
-        ("coverage", Json::Num(v.coverage)),
-        ("blame", Json::Num(v.blame)),
-        ("risk", Json::Num(v.risk)),
-        ("peak", Json::Num(v.peak)),
-        ("per_char", Json::Num(v.per_char)),
-        ("threshold", Json::Num(v.threshold)),
-        ("min_coverage", Json::Num(v.min_coverage)),
-        ("verdict", Json::str(v.verdict.clone())),
-        (
-            "reasons",
-            Json::Arr(
-                v.reasons
-                    .iter()
-                    .map(|r| {
-                        Json::obj([
-                            ("reason", Json::str(r.reason.clone())),
-                            ("blame", Json::Num(r.blame)),
-                            ("share", Json::Num(r.share)),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        (
-            "spans",
-            Json::Arr(
-                v.spans
-                    .iter()
-                    .map(|s| {
-                        Json::obj([
-                            ("start", Json::Int(s.start as i64)),
-                            ("end", Json::Int(s.end as i64)),
-                            ("fragment", Json::str(s.fragment.clone())),
-                            ("blame", Json::Num(s.blame)),
-                            ("fails", Json::Int(s.fails)),
-                            ("clear", Json::Num(s.clear)),
-                            ("reason", Json::str(s.reason.clone())),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        ("why", Json::str(v.why.clone())),
-    ])
-}
-
-/// The statistics of a negative model, as the CLI and the API report them.
-fn negative_stats(model: &mut Model) -> Json {
-    let base = stats(model);
-    let Some(neg) = &model.neg else { return base };
-    let Json::Obj(mut pairs) = base else { return base };
-    pairs.push(("failures_total".to_string(), Json::Int(neg.failures_total.value)));
-    pairs.push(("blame_total".to_string(), Json::Num(neg.blame_total)));
-    pairs.push(("cleared_total".to_string(), Json::Int(neg.cleared_total.value)));
-    pairs.push(("judgements".to_string(), Json::Int(neg.judgements.value)));
-    pairs.push(("rejected".to_string(), Json::Int(neg.rejected.value)));
-    pairs.push(("threshold".to_string(), Json::Num(neg.threshold)));
-    pairs.push(("min_coverage".to_string(), Json::Num(neg.min_coverage)));
-    pairs.push(("reasons".to_string(), Json::Int(model.g.reason_table().len() as i64)));
-    Json::Obj(pairs)
-}
-
 /// The default `--model` per unit, so a word model never overwrites a
 /// character model's file.
+/// The usage text: the model's own commands, then every area's.
+fn usage() -> String {
+    let mut text = USAGE.to_string();
+    text.push_str("\nmore commands:");
+    for (name, _, help) in COMMANDS {
+        text.push_str(&format!("\n  {name:<12} {help}"));
+    }
+    text
+}
+
 const DEFAULT_COUNT_MODEL: &str = "model.count.json";
 const DEFAULT_WORD_MODEL: &str = "model.word.json";
 
@@ -160,117 +83,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// The command line: global flags, a command, and that command's flags.
-struct Args {
-    flags: Vec<(String, String)>,
-    switches: Vec<String>,
-    /// Bare words after the command, for the commands that take an action
-    /// (`negative blame`, `negative why`, ...).
-    rest: Vec<String>,
-}
-
-impl Args {
-    /// A flag's value, or `None`.
-    fn get(&self, name: &str) -> Option<&str> {
-        self.flags
-            .iter()
-            .rev()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-    }
-    fn str(&self, name: &str, fallback: &str) -> String {
-        self.get(name).unwrap_or(fallback).to_string()
-    }
-    fn on(&self, name: &str) -> bool {
-        self.switches.iter().any(|s| s == name)
-    }
-    /// Every value of a repeatable flag, in the order given.
-    fn all(&self, name: &str) -> Vec<String> {
-        self.flags
-            .iter()
-            .filter(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
-            .collect()
-    }
-    /// The action word after the command, or `""`.
-    fn action(&self) -> &str {
-        self.rest.first().map(|s| s.as_str()).unwrap_or("")
-    }
-    fn int(&self, name: &str, fallback: i64) -> Result<i64, String> {
-        match self.get(name) {
-            Some(text) => text
-                .parse()
-                .map_err(|_| format!("--{name} needs a number, got {text:?}")),
-            None => Ok(fallback),
-        }
-    }
-    fn usize(&self, name: &str, fallback: usize) -> Result<usize, String> {
-        Ok(self.int(name, fallback as i64)?.max(0) as usize)
-    }
-    fn float(&self, name: &str, fallback: f64) -> Result<f64, String> {
-        match self.get(name) {
-            Some(text) => text
-                .parse()
-                .map_err(|_| format!("--{name} needs a number, got {text:?}")),
-            None => Ok(fallback),
-        }
-    }
-}
-
-/// Flags that take no value.
-const SWITCHES: [&str; 9] = [
-    "json",
-    "no-compress",
-    "to-end",
-    "seeded",
-    "quiet",
-    "verbose",
-    "resume",
-    "exact",
-    "no-guard",
-];
-
-fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
-    let mut command = String::new();
-    let mut args = Args {
-        flags: Vec::new(),
-        switches: Vec::new(),
-        rest: Vec::new(),
-    };
-    let mut i = 0;
-    while i < argv.len() {
-        let item = &argv[i];
-        if let Some(name) = item.strip_prefix("--") {
-            let (name, inline) = match name.split_once('=') {
-                Some((n, v)) => (n.to_string(), Some(v.to_string())),
-                None => (name.to_string(), None),
-            };
-            if SWITCHES.contains(&name.as_str()) && inline.is_none() {
-                args.switches.push(name);
-            } else {
-                let value = match inline {
-                    Some(v) => v,
-                    None => {
-                        i += 1;
-                        argv.get(i).cloned().ok_or_else(|| format!("--{name} needs a value"))?
-                    }
-                };
-                args.flags.push((name, value));
-            }
-        } else if command.is_empty() {
-            command = item.clone();
-        } else {
-            args.rest.push(item.clone());
-        }
-        i += 1;
-    }
-    Ok((command, args))
-}
-
 fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
-        println!("{USAGE}");
+        println!("{}", usage());
         return Ok(());
     }
     let (command, args) = parse_args(&argv)?;
@@ -323,39 +139,19 @@ fn run() -> Result<(), String> {
     let seed = args.int("seed", 0)?;
     let workers = args.usize("workers", 0)?;
 
-    let open = |must_exist: bool| -> Result<Model, String> {
-        if std::path::Path::new(&model_path).exists() {
-            let mut m = Model::load(&model_path)?;
-            m.workers = workers;
-            m.g.workers = workers;
-            return Ok(m);
-        }
-        if must_exist {
-            return Err(format!("no model at {model_path}"));
-        }
-        let mut m = Model::new(
-            seed,
-            GraphOptions {
-                encoding,
-                ..Default::default()
-            },
-        )?;
-        m.workers = workers;
-        m.g.workers = workers;
-        Ok(m)
+    let ctx = Ctx {
+        command: command.clone(),
+        args: args.clone(),
+        model_path: model_path.clone(),
+        encoding,
+        seed,
+        workers,
+        json: json_mode,
+        out: out_path.clone(),
     };
-    let save = |model: &mut Model| -> Result<String, String> {
-        let path = out_path.clone().unwrap_or_else(|| model_path.clone());
-        model.save(&path)?;
-        Ok(path)
-    };
-    let emit = |doc: Json| {
-        if json_mode {
-            println!("{}", doc.render(0));
-        } else {
-            println!("{}", doc.render(2));
-        }
-    };
+    let open = |must_exist: bool| ctx.open(must_exist);
+    let save = |model: &mut Model| ctx.save(model);
+    let emit = |doc: Json| ctx.emit(doc);
 
     match command.as_str() {
         "train" => {
@@ -600,34 +396,8 @@ fn run() -> Result<(), String> {
         "negative" => {
             // the negative model lives beside --model (model.count.json ->
             // model.count.negative.json) unless --negative says otherwise
-            let path = args.str("negative", &negative_path(&model_path));
-            let open_negative = |must_exist: bool| -> Result<Model, String> {
-                if std::path::Path::new(&path).exists() {
-                    let mut m = Model::load(&path)?;
-                    if !m.is_negative() {
-                        return Err(format!("{path} holds a {} model, not a negative one", m.kind()));
-                    }
-                    m.workers = workers;
-                    m.g.workers = workers;
-                    return Ok(m);
-                }
-                if must_exist {
-                    return Err(format!(
-                        "no negative model at {path} (teach it one first with \
-                         `radixnet negative blame --text '...' --reason gibberish`)"
-                    ));
-                }
-                let mut m = Model::new_negative(
-                    seed,
-                    &NegativeOptions {
-                        encoding,
-                        ..Default::default()
-                    },
-                )?;
-                m.workers = workers;
-                m.g.workers = workers;
-                Ok(m)
-            };
+            let path = ctx.negative_path();
+            let open_negative = |must_exist: bool| ctx.open_negative(must_exist);
             match args.action() {
                 "blame" => {
                     let texts = read_texts(&args)?;
@@ -807,6 +577,7 @@ fn run() -> Result<(), String> {
             let mut service = Service::new(model, model_path.clone(), seed, workers);
             service.upload_dir = args.get("upload-dir").map(str::to_string);
             service.checkpoint_dir = args.get("checkpoint-dir").map(str::to_string);
+            service.configure(&args)?;
             let frontend = if std::path::Path::new(&frontend).is_dir() {
                 Some(frontend)
             } else {
@@ -853,8 +624,11 @@ fn run() -> Result<(), String> {
             ("format", Json::str(radixnet::MODEL_FORMAT)),
             ("format_version", Json::Int(radixnet::MODEL_FORMAT_VERSION)),
         ])),
-        "" => return Err(format!("no command\n{USAGE}")),
-        other => return Err(format!("unknown command {other:?}\n{USAGE}")),
+        "" => return Err(format!("no command\n{}", usage())),
+        other => match dispatch(&ctx) {
+            Some(outcome) => outcome?,
+            None => return Err(format!("unknown command {other:?}\n{}", usage())),
+        },
     }
     Ok(())
 }
@@ -892,51 +666,6 @@ fn weight_flags() -> Vec<WeightSetter> {
             Ok(())
         }),
     ]
-}
-
-/// One walk, as the CLI reports it.
-fn path_json(result: &PathResult) -> Json {
-    let mut pairs = vec![
-        ("text".to_string(), Json::str(result.text.clone())),
-        ("labels".to_string(), Json::strs(result.labels.clone())),
-        (
-            "node_ids".to_string(),
-            Json::ints(result.node_ids.iter().map(|&n| n as i64)),
-        ),
-        ("cost".to_string(), Json::Num(result.cost)),
-        ("step_costs".to_string(), Json::nums(result.step_costs.clone())),
-        ("expanded".to_string(), Json::Int(result.expanded as i64)),
-        ("reached_end".to_string(), Json::Bool(result.reached_end)),
-        ("full_text".to_string(), Json::str(result.full_text.clone())),
-        ("probability".to_string(), Json::Num(result.probability())),
-    ];
-    if result.punish != 0.0 {
-        pairs.push(("punish".to_string(), Json::Num(result.punish)));
-    }
-    Json::Obj(pairs)
-}
-
-/// The texts of `--data` (or of a `--text`), split as `--split` asks.
-fn read_texts(args: &Args) -> Result<Vec<String>, String> {
-    let mut texts = args.all("text");
-    texts.extend(read_named(args, "data")?);
-    Ok(texts)
-}
-
-/// The texts of one named file flag; an absent flag reads as nothing.
-fn read_named(args: &Args, flag: &str) -> Result<Vec<String>, String> {
-    let Some(path) = args.get(flag) else {
-        return Ok(Vec::new());
-    };
-    let content = if path.ends_with(".gz") {
-        let bytes = std::fs::read(path).map_err(|err| format!("cannot read {path}: {err}"))?;
-        String::from_utf8(radixnet::gzip::decompress(&bytes)?).map_err(|err| format!("{path}: {err}"))?
-    } else {
-        std::fs::read_to_string(path).map_err(|err| format!("cannot read {path}: {err}"))?
-    };
-    let unit = args.str("split", "lines");
-    let page_lines = args.usize("page-lines", 0).unwrap_or(0);
-    Ok(split_texts(&content, &unit, page_lines))
 }
 
 /// Reads a document without building a model - what `--json` callers use to

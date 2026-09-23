@@ -168,8 +168,8 @@ rust-build: ## Build the Rust port's CLI and benchmark into rust/target/release 
 rust-test: ## Run the Rust tests, clippy and the formatter check
 	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 
-rust-parity: ## Cross-language parity of the Rust port against the Python model
-	$(PY) -m unittest tests.test_rust_parity -v
+rust-parity: ## Cross-language parity of the Rust port against the Python model (every tests/test_rust_parity*.py)
+	$(PY) -m unittest discover -s tests -p 'test_rust_parity*.py' -t . -v
 
 rust-train: rust-build ## Train the Rust model on DATA (RUST_ENC=char:3:1|word:3:1|..., MODEL_RUST is its file)
 	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) train --data $(DATA) --epochs $(EPOCHS)

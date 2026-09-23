@@ -95,6 +95,27 @@ pub struct Service {
     pub checkpoint_dir: Option<String>,
     pub seed: i64,
     pub workers: usize,
+    // (read by the areas being ported - the allow goes when they land)
+    #[allow(dead_code)]
+    /// The negative network this server guards its output paths with, loaded
+    /// from beside the model file the first time something needs it.
+    pub(crate) negative: Mutex<Option<Model>>,
+    #[allow(dead_code)]
+    /// How strictly the negative network guards the output paths.
+    pub(crate) guard: Mutex<crate::duo::FilterConfig>,
+    // what each area keeps between requests; an area's routes own its state
+    pub(crate) llm: crate::llm::State,
+    pub(crate) tools: crate::tools::State,
+    pub(crate) checkpoints: crate::checkpoint::State,
+    pub(crate) evolve: crate::gan::State,
+    pub(crate) tutor: crate::tutor::State,
+    pub(crate) critic: crate::critic::State,
+    pub(crate) chat: crate::chat::State,
+    pub(crate) codegen: crate::codegen::State,
+    pub(crate) agent: crate::agent::State,
+    /// Every route the server answers, filled in by [`build`]: `/api/status`
+    /// reports it, and the frontend shows a tab when its route is there.
+    routes: std::sync::OnceLock<Vec<String>>,
 }
 
 impl Service {
@@ -113,16 +134,46 @@ impl Service {
             checkpoint_dir: None,
             seed,
             workers,
+            negative: Mutex::new(None),
+            guard: Mutex::new(crate::duo::FilterConfig::default()),
+            llm: Default::default(),
+            tools: Default::default(),
+            checkpoints: Default::default(),
+            evolve: Default::default(),
+            tutor: Default::default(),
+            critic: Default::default(),
+            chat: Default::default(),
+            codegen: Default::default(),
+            agent: Default::default(),
+            routes: std::sync::OnceLock::new(),
         }
     }
 
-    fn with_model<T>(&self, f: impl FnOnce(&mut Model) -> T) -> T {
+    /// Reads the `serve` command's flags into every area's state.
+    pub fn configure(&mut self, args: &crate::cli::Args) -> Result<(), String> {
+        self.llm.configure(args)?;
+        self.tools.configure(args)?;
+        self.checkpoints.configure(args)?;
+        self.evolve.configure(args)?;
+        self.tutor.configure(args)?;
+        self.critic.configure(args)?;
+        self.chat.configure(args)?;
+        self.codegen.configure(args)?;
+        self.agent.configure(args)?;
+        Ok(())
+    }
+
+    /// Runs `f` on the running model, holding its lock for as long as `f` runs.
+    ///
+    /// A long job takes the lock once per step rather than once for the run,
+    /// so the frontend's reads get in between.
+    pub(crate) fn with_model<T>(&self, f: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut model)
     }
 
     /// Opens a job of `kind` and hands back its id; the caller finishes it.
-    fn start_job(&self, kind: &str) -> String {
+    pub(crate) fn start_job(&self, kind: &str) -> String {
         let id = format!("{kind}-{}", self.jobs.fetch_add(1, Ordering::Relaxed) + 1);
         let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
         *job = Some(Job {
@@ -137,8 +188,39 @@ impl Service {
         id
     }
 
+    /// Adds one record to the running job, so `/api/job` shows it as progress
+    /// before the job is done.
+    #[allow(dead_code)]
+    pub(crate) fn job_progress(&self, record: Json) {
+        let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(job) = job.as_mut() {
+            if job.state == "running" {
+                job.records.push(record);
+            }
+        }
+    }
+
+    /// The records the running job has reported so far.
+    #[allow(dead_code)]
+    pub(crate) fn job_records(&self) -> Vec<Json> {
+        let job = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        job.as_ref().map(|j| j.records.clone()).unwrap_or_default()
+    }
+
+    /// Whether `/api/job/stop` (or an area's own stop route) asked the running
+    /// job to stop; a job checks between its steps.
+    #[allow(dead_code)]
+    pub(crate) fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Asks the running job to stop.
+    pub(crate) fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     /// Closes the running job with what the work came back with.
-    fn finish_job(&self, outcome: Result<Vec<Json>, String>) {
+    pub(crate) fn finish_job(&self, outcome: Result<Vec<Json>, String>) {
         let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
         let Some(job) = job.as_mut() else { return };
         job.finished_at = Some(utc_now());
@@ -157,7 +239,7 @@ impl Service {
     }
 
     /// Saves the active kind to its own file, and says whether it landed.
-    fn autosave(&self) -> bool {
+    pub(crate) fn autosave(&self) -> bool {
         let path = self.model_path_for(self.active_encoding());
         if path.is_empty() {
             return false;
@@ -175,7 +257,7 @@ impl Service {
     }
 
     /// Refuses a second job while one is running, the way the Python service does.
-    fn ensure_idle(&self) -> Result<(), ApiError> {
+    pub(crate) fn ensure_idle(&self) -> Result<(), ApiError> {
         let job = self.job.lock().unwrap_or_else(|e| e.into_inner());
         match job.as_ref() {
             Some(job) if job.state == "running" => Err(ApiError::conflict(format!(
@@ -186,7 +268,7 @@ impl Service {
         }
     }
 
-    fn job_json(&self) -> Json {
+    pub(crate) fn job_json(&self) -> Json {
         let job = self.job.lock().unwrap_or_else(|e| e.into_inner());
         match job.as_ref() {
             Some(job) => job.to_json(),
@@ -225,7 +307,7 @@ impl Service {
     }
 
     /// The encoding the running model was built with.
-    fn active_encoding(&self) -> Encoding {
+    pub(crate) fn active_encoding(&self) -> Encoding {
         self.with_model(|m| m.encoding())
     }
 
@@ -261,7 +343,7 @@ impl Service {
     /// The server's own path for the encoding it was started on, and
     /// `<stem>.<unit><ext>` for the other - so switching to words and saving
     /// does not land on the character model's file.
-    fn model_path_for(&self, encoding: Encoding) -> String {
+    pub(crate) fn model_path_for(&self, encoding: Encoding) -> String {
         let path = self.model_path.as_str();
         if path.is_empty() {
             return String::new();
@@ -366,7 +448,7 @@ impl Service {
     ///
     /// `train` names its three `texts` / `text` / `files`, which is the one
     /// place the pattern is spelt differently; `one` and `files` say so.
-    fn texts_of(&self, r: &Request, list: &str, one: &str, files: &str) -> Result<Vec<String>, ApiError> {
+    pub(crate) fn texts_of(&self, r: &Request, list: &str, one: &str, files: &str) -> Result<Vec<String>, ApiError> {
         let mut texts = r.texts(list);
         texts.extend(r.texts(one));
         for name in r.texts(files) {
@@ -377,7 +459,7 @@ impl Service {
 
     /// One upload as training texts: the whole file as a single text, or a text
     /// per non-empty line.
-    fn upload_texts(&self, name: &str, whole: bool) -> Result<Vec<String>, ApiError> {
+    pub(crate) fn upload_texts(&self, name: &str, whole: bool) -> Result<Vec<String>, ApiError> {
         let dir = self
             .upload_dir
             .as_ref()
@@ -394,7 +476,7 @@ impl Service {
 
 /// An upload's path, with a name that tries to leave the directory refused -
 /// the same plain-name rule the upload and delete routes write by.
-fn safe_upload(dir: &str, name: &str) -> Result<std::path::PathBuf, ApiError> {
+pub(crate) fn safe_upload(dir: &str, name: &str) -> Result<std::path::PathBuf, ApiError> {
     if !plain_name(name) {
         return Err(ApiError::bad_request(format!("{name:?} is not an upload name")));
     }
@@ -429,6 +511,10 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
     pairs.push(("units".to_string(), Json::str(units)));
     pairs.push(("kinds".to_string(), svc.kinds()));
     pairs.push(("job".to_string(), svc.job_json()));
+    pairs.push((
+        "routes".to_string(),
+        Json::strs(svc.routes.get().cloned().unwrap_or_default()),
+    ));
     pairs.push((
         "backends".to_string(),
         Json::obj([
@@ -785,7 +871,7 @@ fn job(svc: &Arc<Service>, _r: &Request) -> Answer {
 }
 
 fn job_stop(svc: &Arc<Service>, _r: &Request) -> Answer {
-    svc.stop.store(true, Ordering::Relaxed);
+    svc.request_stop();
     Ok(svc.job_json())
 }
 
@@ -1232,6 +1318,22 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("POST", "/api/uploads/delete", upload_delete);
     server.route("GET", "/api/schedule", schedule);
     server.route("GET", "/api/traversals", traversals);
+    // every other area answers its own routes
+    crate::duo::routes(&mut server);
+    crate::critic::routes(&mut server);
+    crate::dialogue::routes(&mut server);
+    crate::checkpoint::routes(&mut server);
+    crate::gan::routes(&mut server);
+    crate::ollama::routes(&mut server);
+    crate::chatgpt::routes(&mut server);
+    crate::tools::routes(&mut server);
+    crate::vision::routes(&mut server);
+    crate::speech::routes(&mut server);
+    crate::tutor::routes(&mut server);
+    crate::chat::routes(&mut server);
+    crate::codegen::routes(&mut server);
+    crate::agent::routes(&mut server);
+    let _ = server.state().routes.set(server.routes());
     if let Some(dir) = frontend {
         server.frontend(dir);
     }

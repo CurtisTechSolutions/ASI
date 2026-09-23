@@ -152,6 +152,18 @@ pub struct EpochRecord {
 }
 
 impl EpochRecord {
+    /// Whether this is a negative network's blame or clearing pass.
+    pub fn is_negative_pass(&self) -> bool {
+        matches!(self.phase.as_deref(), Some("negative") | Some("clear"))
+            && !self.extra.is_empty()
+            && self.extra.iter().any(|(k, _)| k == "edges_touched")
+    }
+
+    /// A field the record carries beyond the common ones.
+    pub fn extra_value(&self, key: &str) -> Option<&Json> {
+        self.extra.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
     /// The record as a `history` entry.
     pub fn to_json(&self) -> Json {
         let mut pairs: Vec<(String, Json)> = vec![
@@ -166,9 +178,13 @@ impl EpochRecord {
             ("transitions".to_string(), Json::Int(self.transitions)),
             ("seconds".to_string(), Json::Num(self.seconds)),
             ("skipped_short".to_string(), Json::Int(self.skipped_short as i64)),
-            ("traversed".to_string(), Json::Bool(self.traversed)),
-            ("reward".to_string(), Json::Num(self.reward)),
         ];
+        // a negative network's passes neither traverse nor reward: their
+        // records carry what was blamed or cleared instead (Python's `_pass`)
+        if !self.is_negative_pass() {
+            pairs.push(("traversed".to_string(), Json::Bool(self.traversed)));
+            pairs.push(("reward".to_string(), Json::Num(self.reward)));
+        }
         if let Some(phase) = &self.phase {
             pairs.push(("phase".to_string(), Json::str(phase.clone())));
         }
@@ -396,6 +412,52 @@ impl Model {
     /// Flips the sign of every reward.
     pub fn invert(&mut self) {
         self.g.invert();
+    }
+
+    /// The steps of a traced text that wrote a unit inside one of `spans`, as
+    /// `(prev node, edge)`.
+    ///
+    /// Every step is charged with the units it adds to the text: the first
+    /// with the whole of its node's label, a later one with everything past
+    /// what it overlaps its parent by, and the step into END with the position
+    /// just past the last unit - where a sentence that stopped too early went
+    /// wrong.  Used to move only the nodes a correction's diff marks as
+    /// changed (`radixnet/model.py` `_steps_over`).
+    pub fn steps_over(&self, grams: &[String], length: usize, spans: &[crate::diff::Span]) -> Vec<(usize, usize)> {
+        let g = &self.g;
+        let Some(path) = g.node_path(grams) else {
+            return Vec::new();
+        };
+        if path.len() < 2 {
+            return Vec::new();
+        }
+        let overlap = g.enc.overlap();
+        let mut out = Vec::new();
+        // the gram index of the node being entered
+        let mut position = 0usize;
+        for index in 1..path.len() {
+            let node = path[index];
+            // who called the step: START begins every walk
+            let prev = if index >= 2 { path[index - 2] } else { START };
+            let edge = g.edge(path[index - 1], node);
+            if node == END {
+                if let Some(e) = edge {
+                    if crate::diff::spans_touch(length, length + 1, spans) {
+                        out.push((prev, e));
+                    }
+                }
+                break;
+            }
+            let size = g.label_len(node);
+            let lo = if index == 1 { 0 } else { position + overlap };
+            if let Some(e) = edge {
+                if crate::diff::spans_touch(lo, position + size, spans) {
+                    out.push((prev, e));
+                }
+            }
+            position = (position + size).saturating_sub(overlap);
+        }
+        out
     }
 
     fn passes(

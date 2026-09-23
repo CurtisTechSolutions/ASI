@@ -965,6 +965,7 @@ mod tests {
 
 // -- the model layer ------------------------------------------------------------------------------
 
+use crate::json::Json;
 use crate::model::Model;
 
 /// A text that carries, on average, a whole failure's worth of net evidence per
@@ -1081,6 +1082,39 @@ pub struct BlameOptions {
     pub no_compress: bool,
 }
 
+/// What one taught correction blamed and cleared.
+#[derive(Clone, Debug, Default)]
+pub struct Correction {
+    /// The first eight changes, for the record.
+    pub changes: Vec<crate::diff::Edit>,
+    /// How many changes there were in all.
+    pub edits: usize,
+    pub blamed: usize,
+    pub cleared: usize,
+    pub reason: String,
+    pub severity: f64,
+    pub wrong_chars: usize,
+    pub right_chars: usize,
+}
+
+impl Correction {
+    /// `{"changes", "edits", "blamed", "cleared", "reason", "severity",
+    /// "phase", "wrong_chars", "right_chars"}`, as Python's `correct` returns it.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("changes", Json::Arr(self.changes.iter().map(|e| e.to_json()).collect())),
+            ("edits", Json::Int(self.edits as i64)),
+            ("blamed", Json::Int(self.blamed as i64)),
+            ("cleared", Json::Int(self.cleared as i64)),
+            ("reason", Json::str(self.reason.clone())),
+            ("severity", Json::Num(self.severity)),
+            ("phase", Json::str("correction")),
+            ("wrong_chars", Json::Int(self.wrong_chars as i64)),
+            ("right_chars", Json::Int(self.right_chars as i64)),
+        ])
+    }
+}
+
 impl BlameOptions {
     fn severity(&self) -> f64 {
         if self.severity == 0.0 {
@@ -1180,90 +1214,226 @@ impl Model {
     ///
     /// This *is* the training pass of a negative network - there is nothing
     /// else to train it on, and training it on correct data would be a category
-    /// error.
+    /// error.  It is the only operation that adds structure to the network.
     pub fn blame(&mut self, texts: &[String], o: &BlameOptions) -> Result<Vec<crate::model::EpochRecord>, String> {
+        self.blame_with(texts, o, &mut |_| true)
+    }
+
+    /// [`Model::blame`], calling `on_epoch` after every epoch; returning
+    /// `false` from it stops the run (a job's stop button).
+    pub fn blame_with(
+        &mut self,
+        texts: &[String],
+        o: &BlameOptions,
+        on_epoch: &mut dyn FnMut(&crate::model::EpochRecord) -> bool,
+    ) -> Result<Vec<crate::model::EpochRecord>, String> {
         self.require_negative("blame")?;
         let severity = o.severity();
         let reason = clean_reason(&o.reason);
+        let records = self.blame_pass(texts, o, true, severity, &reason, on_epoch)?;
+        crate::log_info!(
+            "negative",
+            "blamed {} text(s) for {reason:?} at severity {severity}",
+            texts.len()
+        );
+        Ok(records)
+    }
+
+    /// The tutor passed these texts: credits the edges they share with known
+    /// failures, creating nothing.  A text the failure structure cannot walk
+    /// is counted as `unmatched` and changes nothing.
+    pub fn clear(
+        &mut self,
+        texts: &[String],
+        weight: f64,
+        epochs: usize,
+    ) -> Result<Vec<crate::model::EpochRecord>, String> {
+        self.clear_with(texts, weight, epochs, &mut |_| true)
+    }
+
+    /// [`Model::clear`] with a callback after every epoch, as
+    /// [`Model::blame_with`].
+    pub fn clear_with(
+        &mut self,
+        texts: &[String],
+        weight: f64,
+        epochs: usize,
+        on_epoch: &mut dyn FnMut(&crate::model::EpochRecord) -> bool,
+    ) -> Result<Vec<crate::model::EpochRecord>, String> {
+        self.require_negative("clear")?;
+        let o = BlameOptions {
+            epochs,
+            ..Default::default()
+        };
+        let records = self.blame_pass(texts, &o, false, weight.abs(), "", on_epoch)?;
+        crate::log_info!("negative", "cleared {} text(s)", texts.len());
+        Ok(records)
+    }
+
+    /// Clears `texts` and says how many edges it credited - the one-number
+    /// form the CLI's `negative clear` reports.
+    pub fn clear_text(&mut self, texts: &[String], weight: f64) -> Result<usize, String> {
+        let records = self.clear(texts, weight, 1)?;
+        Ok(records
+            .last()
+            .and_then(|r| r.extra_value("edges_touched"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize)
+    }
+
+    /// One routine for both halves, as Python's `_pass`: blame (which
+    /// registers and creates structure) and clearing (which only credits what
+    /// is already there), `o.epochs()` passes each.
+    fn blame_pass(
+        &mut self,
+        texts: &[String],
+        o: &BlameOptions,
+        blame: bool,
+        amount: f64,
+        reason: &str,
+        on_epoch: &mut dyn FnMut(&crate::model::EpochRecord) -> bool,
+    ) -> Result<Vec<crate::model::EpochRecord>, String> {
         let enc = self.g.enc;
-        let usable: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
-        let skipped_short = texts.len() - usable.len();
-        let grams: Vec<Vec<String>> = usable.iter().map(|t| enc.encode(t)).collect();
-
-        self.meta.trained_texts.add(usable.len() as i64);
-        self.meta
-            .trained_chars
-            .add(usable.iter().map(|t| enc.len(t) as i64).sum());
-        self.add_source(&o.source);
-        for text in &usable {
-            self.note(text, &reason, severity, &o.source, &o.note, 0);
+        let kept: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
+        let skipped_short = texts.len() - kept.len();
+        let grams: Vec<Vec<String>> = kept.iter().map(|t| enc.encode(t)).collect();
+        if blame {
+            self.meta.trained_texts.add(kept.len() as i64);
+            self.meta
+                .trained_chars
+                .add(kept.iter().map(|t| enc.len(t) as i64).sum());
+            for _ in &kept {
+                self.add_source(&o.source);
+            }
+            for text in &kept {
+                self.note(text, reason, amount, &o.source, &o.note, 0);
+            }
+            // settle the structure once, so every epoch walks the same
+            // transitions - and compress it *before* anything is blamed,
+            // because a blamed edge blocks its own merge and would otherwise
+            // freeze the structure at whatever the first pass built
+            self.register(&grams)?;
         }
-
-        // settle the structure once, so every epoch walks the same transitions -
-        // and compress it *before* anything is blamed, because a blamed edge
-        // blocks its own merge (`Graph::blocks_merge`) and would otherwise
-        // freeze the structure at whatever the first pass happened to build
-        self.register(&grams)?;
-        let mut pending_merges = if o.no_compress { 0 } else { self.g.compress() };
-
+        let mut pending_merges = if blame && !o.no_compress { self.g.compress() } else { 0 };
         let mut records = Vec::new();
         for _ in 0..o.epochs() {
             let started = std::time::Instant::now();
-            let per_text = self.register(&grams)?;
+            let per_text: Vec<Vec<crate::graph::Transition>> = if blame {
+                self.register(&grams)?
+            } else {
+                kept.iter().map(|t| self.shared_transitions(t)).collect()
+            };
             let mut touched = 0;
-            let mut matched = 0;
-            let mut flat = 0;
             for transitions in &per_text {
                 if transitions.is_empty() {
                     continue;
                 }
-                matched += 1;
-                flat += transitions.len();
                 let edges: Vec<usize> = transitions.iter().map(|t| t.e).collect();
-                touched += self.g.record_failure(&edges, severity, &reason);
+                touched += if blame {
+                    self.g.record_failure(&edges, amount, reason)
+                } else {
+                    self.g.record_clear(&edges, amount)
+                };
             }
+            let flat: Vec<crate::graph::Transition> = per_text.iter().flatten().copied().collect();
+            let matched = per_text.iter().filter(|t| !t.is_empty()).count();
             {
                 let neg = self.neg.as_mut().expect("a negative model");
-                neg.failures_total.add(matched as i64);
-                neg.blame_total += severity * touched as f64;
+                if blame {
+                    neg.failures_total.add(matched as i64);
+                    neg.blame_total += amount * touched as f64;
+                } else {
+                    neg.cleared_total.add(matched as i64);
+                }
             }
-            let merges = if o.no_compress { 0 } else { self.g.compress() } + pending_merges;
+            self.g.prepare();
+            let loss = self.mean_cost(&flat);
+            let merges = if blame && !o.no_compress { self.g.compress() } else { 0 } + pending_merges;
             pending_merges = 0;
+            // the epoch is over: wrap whatever reached the limit
             self.g.carry_counters(false);
             self.meta.epochs_total.add(1);
             self.g.prepare();
-            records.push(crate::model::EpochRecord {
+            let record = crate::model::EpochRecord {
                 epoch: self.meta.epochs_total.value,
-                loss: 0.0,
-                perplexity: 1.0,
+                loss,
+                perplexity: loss.min(700.0).exp(),
                 nodes: self.g.num_nodes(),
                 edges: self.g.num_edges(),
                 trigrams: self.g.num_trigrams(),
                 compression_ratio: self.g.compression_ratio(),
                 merges,
-                transitions: flat as i64,
+                transitions: flat.len() as i64,
                 seconds: started.elapsed().as_secs_f64(),
                 skipped_short,
                 traversed: false,
-                reward: -severity,
-                phase: Some("negative".to_string()),
-                extra: Vec::new(),
-            });
+                reward: 0.0,
+                phase: Some(if blame { "negative" } else { "clear" }.to_string()),
+                extra: vec![
+                    ("texts".to_string(), Json::Int(kept.len() as i64)),
+                    ("matched".to_string(), Json::Int(matched as i64)),
+                    ("unmatched".to_string(), Json::Int((kept.len() - matched) as i64)),
+                    ("edges_touched".to_string(), Json::Int(touched as i64)),
+                    ("reason".to_string(), if blame { Json::str(reason) } else { Json::Null }),
+                    (
+                        "severity".to_string(),
+                        if blame { Json::Num(amount) } else { Json::Null },
+                    ),
+                    (
+                        "source".to_string(),
+                        if o.source.is_empty() {
+                            Json::Null
+                        } else {
+                            Json::str(o.source.clone())
+                        },
+                    ),
+                ],
+            };
+            self.history.push(record.clone());
+            let go_on = on_epoch(&record);
+            records.push(record);
+            if !go_on {
+                break;
+            }
         }
-        crate::log_info!(
-            "negative",
-            "blamed {} text(s) for {reason:?} at severity {severity}",
-            usable.len()
-        );
         Ok(records)
+    }
+
+    /// The mean `-log P` of transitions under the current weights.
+    fn mean_cost(&self, transitions: &[crate::graph::Transition]) -> f64 {
+        if transitions.is_empty() {
+            return 0.0;
+        }
+        // a running sum, in order, as Python's `_mean_cost` adds them
+        let mut total = 0.0;
+        for t in transitions {
+            total += self.g.edge_cost(t.e);
+        }
+        total / transitions.len() as f64
+    }
+
+    /// The transitions a text shares with the failure structure (nothing is
+    /// created).  Cleared text is ordinary, correct text: it will not walk a
+    /// graph of failures end to end, so every crossing it *does* share counts
+    /// and the rest is skipped.
+    fn shared_transitions(&mut self, text: &str) -> Vec<crate::graph::Transition> {
+        self.crossings(text)
+            .iter()
+            .filter_map(|c| c.edge.map(|e| crate::graph::Transition { p: c.parent, e }))
+            .collect()
     }
 
     /// Registers encoded failures structurally and returns their transitions.
     ///
-    /// Two passes are needed where this is called twice: a text registered
-    /// later can split a node an earlier one pointed at, so the transitions are
-    /// re-derived once the structure has settled.
+    /// Two passes: a text registered later can split a node an earlier one
+    /// pointed at, so the transitions are re-derived once the structure has
+    /// settled (the second pass never splits again).
     fn register(&mut self, grams: &[Vec<String>]) -> Result<Vec<Vec<crate::graph::Transition>>, String> {
+        for gram in grams {
+            if !gram.is_empty() {
+                self.g.observe(gram, false)?;
+            }
+        }
         let mut out = Vec::with_capacity(grams.len());
         for gram in grams {
             if gram.is_empty() {
@@ -1275,26 +1445,76 @@ impl Model {
         Ok(out)
     }
 
-    /// Credits the transitions a *cleared* text shares with the failure
-    /// structure: the tutor looked at this one and passed it.
+    /// Learns one correction: blames only the units the tutor changed, and
+    /// clears what it kept.
     ///
-    /// Nothing is created - cleared text is ordinary, correct text and will not
-    /// walk a graph of failures end to end, so every crossing it does share
-    /// counts and the rest is skipped.
-    pub fn clear_text(&mut self, texts: &[String], weight: f64) -> Result<usize, String> {
-        self.require_negative("clear")?;
-        let mut touched = 0;
-        for text in texts {
-            let edges: Vec<usize> = self.crossings(text).iter().filter_map(|c| c.edge).collect();
-            touched += self.g.record_clear(&edges, weight);
+    /// `wrong` is the sentence the network wrote, `right` the one the teacher
+    /// wrote instead.  Only the steps of `wrong` that wrote a unit the teacher
+    /// struck out or replaced are blamed; the correction clears blame wherever
+    /// the failure structure already knows it (nothing is created); an edge
+    /// the correction walks too is never blamed.
+    pub fn blame_correction(
+        &mut self,
+        wrong: &str,
+        right: &str,
+        o: &BlameOptions,
+        clear: f64,
+    ) -> Result<Correction, String> {
+        self.require_negative("teaching a correction")?;
+        let reason = clean_reason(&o.reason);
+        let amount = o.severity();
+        let enc = self.g.enc;
+        let changes = crate::diff::summary(wrong, right, 0, &enc);
+        let (wrong_spans, right_spans) = crate::diff::changed_spans(wrong, right, &enc);
+        let mut out = Correction {
+            changes: changes.iter().take(8).cloned().collect(),
+            edits: changes.len(),
+            blamed: 0,
+            cleared: 0,
+            reason: reason.clone(),
+            severity: amount,
+            wrong_chars: wrong_spans.iter().map(|(lo, hi)| hi - lo).sum(),
+            right_chars: right_spans.iter().map(|(lo, hi)| hi - lo).sum(),
+        };
+        let grams = enc.encode(wrong);
+        if grams.is_empty() {
+            return Ok(out);
         }
-        if touched > 0 {
-            self.g.prepare();
+        // the failure joins the structure; the correction never does
+        self.register(std::slice::from_ref(&grams))?;
+        let mut cleared: Vec<usize> = Vec::new();
+        if !enc.encode(right).is_empty() {
+            for t in self.shared_transitions(right) {
+                if !cleared.contains(&t.e) {
+                    cleared.push(t.e);
+                }
+            }
         }
-        let neg = self.neg.as_mut().expect("a negative model");
-        neg.cleared_total.add(texts.len() as i64);
-        crate::log_info!("negative", "cleared {} text(s): {touched} edge(s)", texts.len());
-        Ok(touched)
+        let blamed: Vec<usize> = self
+            .steps_over(&grams, enc.len(wrong), &wrong_spans)
+            .into_iter()
+            .map(|(_, e)| e)
+            .filter(|e| !cleared.contains(e))
+            .collect();
+        if !blamed.is_empty() && amount != 0.0 {
+            out.blamed = self.g.record_failure(&blamed, amount, &reason);
+            {
+                let neg = self.neg.as_mut().expect("a negative model");
+                neg.failures_total.add(1);
+                neg.blame_total += amount * out.blamed as f64;
+            }
+            self.meta.trained_texts.add(1);
+            self.meta.trained_chars.add(wrong.chars().count() as i64);
+            self.add_source(&o.source);
+            self.note(wrong, &reason, amount, &o.source, &o.note, 0);
+        }
+        if !cleared.is_empty() && clear != 0.0 {
+            out.cleared = self.g.record_clear(&cleared, clear);
+            let neg = self.neg.as_mut().expect("a negative model");
+            neg.cleared_total.add(1);
+        }
+        self.g.prepare();
+        Ok(out)
     }
 
     /// Walks a text through the failure structure, in order.
