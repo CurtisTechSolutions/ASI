@@ -1305,19 +1305,15 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
     Ok(Json::obj([("uploads", Json::Arr(rows))]))
 }
 
+/// `POST /api/uploads`: every form Python's `_r_upload` takes - JSON `{name,
+/// content | content_base64}` or `{files: [...]}`, `multipart/form-data`, or a
+/// raw body named by `?name=` - answered with the records of what was stored.
 fn upload(svc: &Arc<Service>, r: &Request) -> Answer {
-    let Some(dir) = &svc.upload_dir else {
+    if svc.upload_dir.is_none() {
         return Err(ApiError::bad_request("no upload directory is configured"));
-    };
-    let name = r.text("name", "");
-    let content = r.text("content", "");
-    if !plain_name(&name) {
-        return Err(ApiError::bad_request("give a plain file name for the upload"));
     }
-    std::fs::create_dir_all(dir).map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let path = std::path::Path::new(dir).join(&name);
-    std::fs::write(&path, content.as_bytes()).map_err(|err| ApiError::bad_request(err.to_string()))?;
-    uploads(svc, r)
+    let files = crate::multipart::Form::read(r, None)?.files()?;
+    crate::multipart::store_all(svc, &files)
 }
 
 fn upload_delete(svc: &Arc<Service>, r: &Request) -> Answer {
