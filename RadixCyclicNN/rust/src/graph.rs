@@ -701,6 +701,53 @@ impl Graph {
         }
     }
 
+    /// Teaches what a voice learned by backing out of a repeat at `p`
+    /// (`RadixCyclicGraph.observe_back` and the count model's override).
+    ///
+    /// Nothing in a corpus says where a walk loops, so this is the one thing
+    /// the graph learns from *experience*: `p -> BACK` is created on first use
+    /// and counted like any traversal, rewarded by `amount`, so every hand-over
+    /// raises the model's own estimate that walks through `p` go round; `went`
+    /// (the child it was about to loop through) is punished by `amount`, and
+    /// `instead` (the child it took after backing up) rewarded.  Returns the
+    /// `BACK` edge.
+    pub fn observe_back(
+        &mut self,
+        p: usize,
+        went: Option<usize>,
+        instead: Option<usize>,
+        amount: f64,
+    ) -> Result<usize, String> {
+        if p < FIRST || p >= self.labels.len() || !self.alive[p] {
+            return Err(format!("node {p} is not a real node to go back from"));
+        }
+        if amount < 0.0 {
+            return Err(format!("amount must be >= 0, got {amount}"));
+        }
+        let e = match self.edge(p, BACK) {
+            Some(e) => e,
+            None => self.new_edge(p, BACK, 0, 0),
+        };
+        self.count[BACK].fetch_add(1, Ordering::Relaxed);
+        self.edge_count[e].fetch_add(1, Ordering::Relaxed);
+        self.traversals.add(1);
+        self.version.add(1);
+        self.record_traversals(&[e]);
+        // the hand-over itself, learned the way this model learns everything
+        self.add_reward(&[e], amount);
+        for (child, sign) in [(went, -1.0), (instead, 1.0)] {
+            let Some(child) = child else { continue };
+            if child < FIRST || child == BACK {
+                continue;
+            }
+            if let Some(edge) = self.edge(p, child) {
+                self.add_reward(&[edge], sign * amount);
+            }
+        }
+        self.recompute_weights();
+        Ok(e)
+    }
+
     /// Registers a training sequence `START -> g0 -> ... -> gn -> END`,
     /// splitting nodes so every transition runs from the last gram of one node
     /// to the first of another over an edge created on demand.  `count` also

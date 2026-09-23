@@ -776,7 +776,7 @@ impl Model {
 
     /// `(node, offset, lead)`: where the prefix ends and the unmatched
     /// remainder of the located trigram, which every predicted path starts with.
-    fn prefix_start(&self, prefix: &str) -> (usize, usize, String) {
+    pub(crate) fn prefix_start(&self, prefix: &str) -> (usize, usize, String) {
         let (node, offset, matched) = self.locate(prefix);
         let enc = self.g.enc;
         let lead = if node != START && matched < enc.n {
@@ -824,7 +824,7 @@ impl Model {
 
     /// The prediction engine shared by [`Model::predict`] and [`Model::generate`].
     #[allow(clippy::too_many_arguments)]
-    fn search(
+    pub(crate) fn search(
         &mut self,
         prefix: &str,
         length: usize,
