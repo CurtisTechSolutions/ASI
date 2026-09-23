@@ -1465,7 +1465,7 @@ fn arithmetic(op: Op, a: Num, b: Num) -> Eval<Num> {
                 if y == 0 {
                     return Err(Fail::Zero);
                 }
-                Ok(Num::F(x as f64 / y as f64))
+                Ok(Num::F(int_true_div(x, y)))
             }
             Op::FloorDiv => {
                 if y == 0 {
@@ -1483,6 +1483,13 @@ fn arithmetic(op: Op, a: Num, b: Num) -> Eval<Num> {
             }
             Op::Pow => {
                 if y >= 0 {
+                    // 0, 1 and -1 stay small whatever the exponent
+                    match x {
+                        0 => return Ok(Num::I(i128::from(y == 0))),
+                        1 => return Ok(Num::I(1)),
+                        -1 => return Ok(Num::I(if y % 2 == 0 { 1 } else { -1 })),
+                        _ => {}
+                    }
                     let exponent = u32::try_from(y).map_err(|_| too_big())?;
                     return x.checked_pow(exponent).map(Num::I).ok_or_else(too_big);
                 }
@@ -1507,6 +1514,63 @@ fn arithmetic(op: Op, a: Num, b: Num) -> Eval<Num> {
         Op::Mod => float_divmod(x, y).map(|(_, m)| Num::F(m)),
         Op::Pow => float_pow(x, y),
         _ => fail("unknown operator"),
+    }
+}
+
+/// `x / y` for two integers, correctly rounded as Python's `long_true_divide`
+/// rounds it.  Converting both to floats first rounds twice once either is
+/// past 2**53, so the quotient is built bit by bit instead: its first 55
+/// significant bits and whether anything was left over, then one rounding to
+/// even.
+fn int_true_div(x: i128, y: i128) -> f64 {
+    const EXACT: u128 = 1 << 53;
+    let (a, b) = (x.unsigned_abs(), y.unsigned_abs());
+    if a <= EXACT && b <= EXACT {
+        return x as f64 / y as f64;
+    }
+    let negative = (x < 0) != (y < 0);
+    if a == 0 {
+        // nothing to build bits from: a zero, signed as Python signs it
+        return if negative { -0.0 } else { 0.0 };
+    }
+    let bits = |n: u128| 128 - n.leading_zeros();
+    let mut m = a / b;
+    let mut r = a % b;
+    let mut e: i32 = 0;
+    let mut sticky = false;
+    while bits(m) < 55 {
+        // r < b <= 2**127, so doubling it cannot overflow
+        r <<= 1;
+        m <<= 1;
+        if r >= b {
+            r -= b;
+            m |= 1;
+        }
+        e -= 1;
+    }
+    if bits(m) > 55 {
+        let extra = bits(m) - 55;
+        sticky |= m & ((1u128 << extra) - 1) != 0;
+        m >>= extra;
+        e += extra as i32;
+    }
+    sticky |= r != 0;
+    // 55 bits to 53: the two dropped bits and the sticky one decide
+    let dropped = m & 3;
+    m >>= 2;
+    e += 2;
+    if dropped & 2 != 0 && (dropped & 1 != 0 || sticky || m & 1 != 0) {
+        m += 1;
+        if m == EXACT {
+            m >>= 1;
+            e += 1;
+        }
+    }
+    let value = m as f64 * 2f64.powi(e);
+    if negative {
+        -value
+    } else {
+        value
     }
 }
 
@@ -1976,7 +2040,15 @@ fn call(name: &str, args: Vec<Value>) -> Eval<Value> {
                     args[0].type_name()
                 )),
             },
-            2 => fail("int() can't convert non-string with explicit base"),
+            // the base is checked before the number is
+            2 => match int_of(&args[1]) {
+                None => fail(format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    args[1].type_name()
+                )),
+                Some(base) if (base != 0 && base < 2) || base > 36 => fail("int() base must be >= 2 and <= 36, or 0"),
+                Some(_) => fail("int() can't convert non-string with explicit base"),
+            },
             _ => fail(format!("int() takes at most 2 arguments ({n} given)")),
         },
         "float" => match n {
@@ -2078,6 +2150,10 @@ fn round(args: Vec<Value>) -> Eval<Value> {
     }
     if n > 2 {
         return fail(format!("round() takes at most 2 arguments ({n} given)"));
+    }
+    // the number is asked for its __round__ before the digits are read
+    if !matches!(args[0].num(), Some(Num::I(_) | Num::F(_))) {
+        return fail(format!("type {} doesn't define __round__ method", args[0].type_name()));
     }
     let digits = match args.get(1) {
         None => None,
@@ -2380,6 +2456,19 @@ mod tests {
             err("10 ** 40").contains("2**127"),
             "an honest limit, not a wrong answer"
         );
+    }
+
+    #[test]
+    fn integer_division_is_rounded_once() {
+        assert_eq!(ok("(2**100 + 1) / (2**53 + 1)"), "140737488355327.98");
+        assert_eq!(ok("(2**60 + 1) / 3"), "3.843071682022823e+17");
+        assert_eq!(ok("-(2**70 + 1) / 2"), "-5.902958103587057e+20");
+        assert_eq!(ok("1 / 2**126"), "1.1754943508222875e-38");
+        assert_eq!(ok("0 / 1000000000000000007"), "0.0");
+        assert_eq!(ok("0 / -1000000000000000007"), "-0.0");
+        assert_eq!(ok("(2**126 - 1) / 3"), "2.8356863910078204e+37");
+        assert_eq!(ok("(2**126 + 2**73 + 1) / 2**73"), "9007199254740994.0");
+        assert_eq!(ok("(2**126 + 2**73) / 2**73"), "9007199254740992.0");
     }
 
     #[test]
