@@ -82,7 +82,8 @@ D-075 the least-punished traversal
 **Part XVI — The encoding** · D-071 the encoding is a dial, and it belongs to the model ·
 D-073 words as symbols (superseded by it)
 
-**Part XVII — A third implementation** · D-072 the Rust port · D-074 how parity is measured
+**Part XVII — A third implementation** · D-072 the Rust port · D-074 how parity is measured ·
+D-076 HTTPS through the system curl
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2937,6 +2938,49 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
 
 **Lives in** `go/radixnet/mcp.go`, `go/cmd/radixnet-count/mcp.go`,
 `rust/src/service.rs`, `rust/src/http.rs`, `Makefile` (`go-mcp`)
+
+---
+
+### D-076 — The Rust port speaks HTTPS through the system `curl`, and still depends on nothing
+
+**Status** Accepted · 2026-09-23 · **Layer** platform · **Beside** D-072, D-074
+
+**Context** D-072 kept the Rust crate free of dependencies and recorded the
+price: the LLM clients need HTTPS, a crate with no dependencies cannot speak it,
+so "porting them is not a task, it is a proposal to drop the no-dependency
+rule". Then the port was asked for *all* of Python's functionality - the tutor,
+the chat, the critic, the agent and its browsing tool, every one of which talks
+to an LLM or a web page, and most of them over TLS.
+
+**Decision** `rust/src/fetch.rs` is the port's one HTTP client. Plain `http://`
+- a local Ollama, a transcription server, a test's own listener - is written
+out over `TcpStream` and never leaves the process. `https://` is handed to the
+system's `curl`, run as a child process with the request body on its stdin and
+the answer on its stdout. The crate's `Cargo.lock` still holds nothing but the
+crate.
+
+**Rationale** A TLS stack is not a thing to write out the way the gzip inflate,
+the Mersenne Twister and the HTTP server were: it is security code, and a
+hand-rolled one would be worse than no HTTPS at all. Taking a TLS crate would
+end D-072's rule for the sake of one feature and pull a dependency tree into a
+crate whose point is that it has none. `curl` is already on every machine the
+port runs on, already honours `HTTPS_PROXY`, `NO_PROXY` and `CURL_CA_BUNDLE`
+the way every other tool there does, and is the client an operator already
+trusts. The cost is a process per HTTPS request, which is noise next to an LLM
+completion.
+
+**Consequences**
+* The LLM clients, the teaching loops and browsing are portable after all:
+  D-072's "one gap is deliberate" no longer holds, and D-074's list of
+  deliberate gaps loses its first entry.
+* HTTPS needs `curl` on the `PATH`; without it an `https://` request fails
+  with an error that says so, and plain HTTP is unaffected.
+* An API key never goes on a command line (where the process list would show
+  it): headers reach `curl` the way `fetch.rs` documents.
+* Redirects are followed only when asked, because the browsing tool checks
+  every hop against the private-address rule itself.
+
+**Lives in** `rust/src/fetch.rs`
 
 ---
 
