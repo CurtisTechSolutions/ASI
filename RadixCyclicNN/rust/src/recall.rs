@@ -999,33 +999,8 @@ fn quiz_options_api<'a>(form: &Form, modality: &str) -> Result<QuizOptions<'a>, 
 /// The service's negative network: the one in memory, else the file beside
 /// the model, else a fresh one in the running model's encoding.
 fn with_negative<T>(svc: &Service, f: impl FnOnce(&mut Model) -> Result<T, String>) -> Result<T, ApiError> {
-    let mut slot = svc.negative.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.is_none() {
-        let path = crate::cli::negative_path(&svc.model_path);
-        let found = if !svc.model_path.is_empty() && std::path::Path::new(&path).is_file() {
-            let m = Model::load(&path)?;
-            if !m.is_negative() {
-                return Err(ApiError::bad_request(format!(
-                    "{path} holds a {} model, not a negative one",
-                    m.kind()
-                )));
-            }
-            crate::log_info!(LOG, "negative model loaded from {path}");
-            m
-        } else {
-            let encoding = svc.active_encoding();
-            Model::new_negative(
-                svc.seed,
-                &crate::negative::NegativeOptions {
-                    encoding,
-                    ..Default::default()
-                },
-            )?
-        };
-        *slot = Some(found);
-    }
-    let negative = slot.as_mut().expect("the negative network was just made");
-    Ok(f(negative)?)
+    // the shared loader keeps the model and negative locks in one order
+    Ok(svc.with_negative(f)??)
 }
 
 /// `POST /api/images/tutor` and `POST /api/speech/tutor` once the texts are in

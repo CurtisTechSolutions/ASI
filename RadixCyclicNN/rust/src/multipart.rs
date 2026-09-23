@@ -719,41 +719,104 @@ pub fn store_text(svc: &Service, name: &str, content: &str) -> Result<Json, ApiE
     Ok(doc)
 }
 
-/// Stores a binary upload (`ModelService.upload_bytes`): UTF-8 text with the
-/// byte-order mark dropped and undecodable bytes replaced.  Answers
-/// `{"uploads": [record]}`.
-///
-/// A ZIP archive is refused rather than stored as text: unpacking one is
-/// `crate::zip`'s, which is not in the Rust port yet.
+/// Stores a binary upload (`ModelService.upload_bytes`): a ZIP archive is
+/// kept whole as one upload (D-034), anything else is stored as UTF-8 text
+/// with the byte-order mark dropped and undecodable bytes replaced.  Answers
+/// `{"uploads": [record]}`, plus `"archives": [summary]` for an archive.
 pub fn store_bytes(svc: &Service, name: &str, data: &[u8]) -> Result<Json, ApiError> {
-    const ZIP_MAGIC: [&[u8; 4]; 3] = [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"];
-    if data.len() >= 4 && ZIP_MAGIC.iter().any(|m| &data[..4] == *m) {
-        return Err(ApiError::bad_request(format!(
-            "{name}: ZIP archive uploads are not in the Rust port yet (crate::zip); send the text files themselves"
-        )));
+    if crate::zip::is_zip(data) {
+        return store_archive(svc, name, data);
     }
     let data = data.strip_prefix(b"\xef\xbb\xbf".as_slice()).unwrap_or(data);
     let text = String::from_utf8_lossy(data);
     Ok(Json::obj([("uploads", Json::Arr(vec![store_text(svc, name, &text)?]))]))
 }
 
+/// Keeps a ZIP archive as a single upload; its text entries are unpacked in
+/// memory whenever it is used (`ModelService.store_archive`).  A corrupt
+/// archive, or one without a single text entry, is refused (400); the
+/// entries passed over are listed with their reasons in the summary.
+pub fn store_archive(svc: &Service, name: &str, data: &[u8]) -> Result<Json, ApiError> {
+    let dir = upload_dir(svc)?;
+    let mut archive_name = sanitize_upload_name(name)?;
+    if !archive_name.to_lowercase().ends_with(".zip") {
+        archive_name.push_str(".zip");
+    }
+    let mut archive = crate::zip::Archive::from_bytes(data.to_vec())
+        .map_err(|err| ApiError::bad_request(format!("{archive_name}: {err}")))?;
+    let mut extracted = 0usize;
+    let skipped = crate::source::walk_texts(&mut archive, svc.workers, &mut |_, _, _| {
+        extracted += 1;
+        std::ops::ControlFlow::Continue(())
+    });
+    if extracted == 0 {
+        let reasons: Vec<String> = skipped
+            .iter()
+            .take(8)
+            .map(|s| format!("{}: {}", s.path, s.reason))
+            .collect();
+        let why = if reasons.is_empty() {
+            " (it is empty)".to_string()
+        } else {
+            format!(" ({})", reasons.join("; "))
+        };
+        return Err(ApiError::bad_request(format!(
+            "{archive_name} holds no text files to train on{why}"
+        )));
+    }
+    let path = std::path::Path::new(&dir).join(&archive_name);
+    let replaced = path.is_file();
+    let part = path.with_extension("zip.part");
+    std::fs::write(&part, data)
+        .and_then(|_| std::fs::rename(&part, &path))
+        .map_err(|err| ApiError::with_status(500, format!("cannot store {}: {err}", path.display())))?;
+    let mut record = crate::source::archive_record(&path, svc.workers)
+        .ok_or_else(|| ApiError::with_status(500, format!("{} is not a ZIP archive", path.display())))?;
+    if let Json::Obj(pairs) = &mut record {
+        pairs.push(("replaced".to_string(), Json::Bool(replaced)));
+    }
+    let summary = Json::obj([
+        ("name", Json::str(archive_name.clone())),
+        ("bytes", Json::Int(data.len() as i64)),
+        ("entries", Json::Int((extracted + skipped.len()) as i64)),
+        ("extracted", Json::Int(extracted as i64)),
+        ("skipped", Json::Arr(skipped.iter().map(|s| s.to_json()).collect())),
+    ]);
+    crate::log_info!(
+        LOG,
+        "upload {archive_name} ({} bytes; {extracted} text file(s) inside, {} skipped)",
+        data.len(),
+        skipped.len()
+    );
+    Ok(Json::obj([
+        ("uploads", Json::Arr(vec![record])),
+        ("archives", Json::Arr(vec![summary])),
+    ]))
+}
+
 /// Stores every file of an upload request: `{"uploads": [records]}` - the
 /// body of `POST /api/uploads` (`api._r_upload`).
 pub fn store_all(svc: &Service, files: &[Upload]) -> Result<Json, ApiError> {
     let mut records = Vec::new();
+    let mut archives: Vec<Json> = Vec::new();
     for file in files {
         match &file.payload {
             Payload::Text(text) => records.push(store_text(svc, &file.name, text)?),
             Payload::Bytes(data) => {
                 let stored = store_bytes(svc, &file.name, data)?;
                 records.extend(stored.at("uploads").as_array().iter().cloned());
+                archives.extend(stored.at("archives").as_array().iter().cloned());
             }
         }
     }
     if records.is_empty() {
         return Err(ApiError::bad_request("nothing was uploaded"));
     }
-    Ok(Json::obj([("uploads", Json::Arr(records))]))
+    let mut body = vec![("uploads".to_string(), Json::Arr(records))];
+    if !archives.is_empty() {
+        body.push(("archives".to_string(), Json::Arr(archives)));
+    }
+    Ok(Json::Obj(body))
 }
 
 /// Starts a training job on `texts` and hands back the job, as the train route

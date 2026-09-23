@@ -542,6 +542,42 @@ class TestRustMediaServer(unittest.TestCase):
         status, listing, _ = self.server.get("/api/uploads")
         self.assertLessEqual({"multi.txt", "raw.txt", "a.txt", "b.txt"}, {u["name"] for u in listing["uploads"]})
 
+    def test_a_zip_upload_is_kept_whole_as_python_keeps_it(self):
+        import io
+        import zipfile
+
+        from radixnet.api import ModelService
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("corpus/a.txt", "the cat sat on the mat\nthe dog sat on the log\n")
+            zf.writestr("corpus/b.txt", "a bird sang in the tree\n")
+            zf.writestr("corpus/", "")
+            zf.writestr("__MACOSX/._a.txt", "junk")
+            zf.writestr("picture.png", b"\x89PNG\r\n\x1a\n\x00\x00")
+        data = buf.getvalue()
+        py_dir = os.path.join(self.dir, "py-uploads")
+        expected = ModelService(os.path.join(self.dir, "py.count.json"), kind="count", upload_dir=py_dir, quiet=True).upload_bytes(
+            "corpus", data)
+        status, doc, _ = self.multipart("/api/uploads", "corpus", data, "application/zip")
+        self.assertEqual(status, 200, doc)
+        self.assertEqual(doc["archives"], expected["archives"])
+        record, want = doc["uploads"][0], expected["uploads"][0]
+        for key in ("name", "archive", "files", "lines", "chars", "skipped", "replaced"):
+            self.assertEqual(record.get(key), want.get(key), key)
+        self.assertTrue(os.path.isfile(os.path.join(self.uploads, "corpus.zip")), "kept whole, not unpacked")
+        # and it trains like any other upload
+        status, job, _ = self.server.post("/api/train", {"files": ["corpus.zip"], "epochs": 1})
+        self.assertEqual(status, 202, job)
+        self.assertEqual(self.server.wait_job()["state"], "finished")
+        # an archive with no text in it is refused, as Python refuses it
+        empty = io.BytesIO()
+        with zipfile.ZipFile(empty, "w") as zf:
+            zf.writestr("only.png", b"\x89PNG\r\n\x1a\n\x00\x00")
+        status, doc, _ = self.multipart("/api/uploads", "empty.zip", empty.getvalue(), "application/zip")
+        self.assertEqual(status, 400, doc)
+        self.assertIn("holds no text files to train on", doc["error"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

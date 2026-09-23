@@ -14,6 +14,7 @@ tested - and ported - one at a time.  ``make rust-parity`` runs them all.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
@@ -69,6 +70,7 @@ def tmpdir() -> str:
     global _TMP
     if _TMP is None:
         _TMP = tempfile.TemporaryDirectory(prefix="radixnet-rust-")
+        atexit.register(_TMP.cleanup)
     return _TMP.name
 
 
@@ -161,13 +163,17 @@ class Server:
         raise AssertionError("the job did not finish")
 
     def close(self) -> str:
+        """Stops the server; returns the tail of what it logged."""
         if self.proc.poll() is None:
             self.proc.terminate()
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        return (self.proc.stderr.read() if self.proc.stderr else "")[-4000:]
+        try:
+            _out, err = self.proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            _out, err = self.proc.communicate()
+        except ValueError:  # closed already: a second close
+            err = ""
+        return (err or "")[-4000:]
 
 
 def serve(test_case, model: str, *extra: str, env: dict | None = None) -> Server:
