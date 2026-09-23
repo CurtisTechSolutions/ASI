@@ -542,6 +542,8 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
             None => Json::Null,
         },
     ));
+    // the LLM providers' defaults, which the Ollama tab reads its own from
+    pairs.extend(svc.llm.status_fields());
     pairs.push(("engine".to_string(), Json::str(ENGINE)));
     pairs.push(("workers".to_string(), Json::Int(svc.workers as i64)));
     pairs.push(("counting".to_string(), Json::str("exact")));

@@ -198,5 +198,24 @@ class TestRustServerNegative(unittest.TestCase):
         self.assertIn("min_coverage", data["error"])
 
 
+
+class TestRustNegativeFirstUse(unittest.TestCase):
+    """The negative network is loaded on first use, from any route - without taking the locks out of order."""
+
+    def test_the_filter_can_be_the_first_thing_asked(self):
+        root = os.path.join(tmpdir(), "first-use")
+        os.makedirs(root, exist_ok=True)
+        model = os.path.join(root, "model.count.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 1, model=model)
+        server = serve(self, model)
+        # the filter holds the model while it loads the negative network: this used to hang
+        status, data, _ = server.post("/api/negative/filter", {"texts": ["the cat sat on the mat"]})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([v["decision"] for v in data["verdicts"]], ["pass"])
+        status, data, _ = server.post("/api/predict", {"prefix": "the "})
+        self.assertEqual(status, 200, data)
+        self.assertIsNone(data["guard"], "an empty negative network guards nothing")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -646,12 +646,16 @@ fn run() -> Result<(), String> {
                     doc.push(("pair".to_string(), described));
                     emit(Json::Obj(doc));
                 }
+                // the model writes, an LLM reviews, the failures blame (critic.rs)
+                "auto" => radixnet::critic::cli(&ctx)?,
                 "" => {
-                    return Err("negative needs an action: blame, clear, why, reasons, forget, settings, filter".to_string())
+                    return Err(
+                        "negative needs an action: blame, clear, why, reasons, forget, settings, filter, auto".to_string(),
+                    )
                 }
                 other => {
                     return Err(format!(
-                        "unknown negative action {other:?}; expected blame, clear, why, reasons, forget, settings or filter"
+                        "unknown negative action {other:?}; expected blame, clear, why, reasons, forget, settings, filter or auto"
                     ))
                 }
             }

@@ -42,7 +42,6 @@ use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::model::{EpochRecord, GenerateOptions, Model};
 use crate::mt19937::Mt19937;
-use crate::negative::NegativeOptions;
 use crate::report::stats;
 use crate::service::Service;
 use crate::GraphOptions;
@@ -1010,36 +1009,7 @@ fn owner_of(model: &Model) -> String {
 /// evolve run blames with it: from beside the model file, else empty, on the
 /// running model's encoding.
 fn ensure_negative(svc: &Service) -> Result<(), ApiError> {
-    // the encoding first: the model lock is never taken under the negative one here
-    let encoding = svc.active_encoding();
-    let mut slot = svc.negative.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.is_some() {
-        return Ok(());
-    }
-    let path = crate::cli::negative_path(&svc.model_path);
-    let mut model = if !svc.model_path.is_empty() && Path::new(&path).is_file() {
-        let found = Model::load(&path)?;
-        if !found.is_negative() {
-            return Err(ApiError::bad_request(format!(
-                "{path} holds a {} model, not a negative one",
-                found.kind()
-            )));
-        }
-        crate::log_info!(LOG, "negative model loaded from {path}");
-        found
-    } else {
-        Model::new_negative(
-            svc.seed,
-            &NegativeOptions {
-                encoding,
-                ..Default::default()
-            },
-        )?
-    };
-    model.workers = svc.workers;
-    model.g.workers = svc.workers;
-    *slot = Some(model);
-    Ok(())
+    svc.ensure_negative()
 }
 
 /// The loop's settings from a request body, over Python's defaults (the seed
@@ -1201,6 +1171,7 @@ pub fn routes(server: &mut Server<Service>) {
 mod tests {
     use super::*;
     use crate::model::TrainOptions;
+    use crate::negative::NegativeOptions;
 
     const CORPUS: [&str; 5] = [
         "the cat sat on the mat",

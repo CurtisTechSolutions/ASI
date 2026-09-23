@@ -651,18 +651,38 @@ impl Service {
         crate::cli::negative_path(&self.model_path)
     }
 
-    /// Runs `f` on the server's negative network: loaded from its file the
-    /// first time, else created empty.  Takes the negative network's lock
-    /// only - pair it with [`Service::with_model`] *outside* it, never inside.
-    pub fn with_negative<T>(&self, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {
+    /// Loads the server's negative network if it is not in memory yet: from
+    /// its file beside the model, else an empty one in the running model's
+    /// encoding.
+    ///
+    /// The one rule that keeps the two locks from deadlocking: the model's
+    /// lock is taken *before* the negative network's (the guard and the
+    /// filter hold the model while they judge), never inside it.  So the
+    /// encoding is read, and the file is read, with no lock held, and a
+    /// caller that is about to take the model lock loads the negative network
+    /// first - after that, [`Service::with_negative`] never touches the model.
+    pub fn ensure_negative(&self) -> Result<(), ApiError> {
+        if self.negative.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return Ok(());
+        }
+        let model = self.load_negative(self.active_encoding())?;
         let mut slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
-            *slot = Some(self.load_negative()?);
+            *slot = Some(model);
         }
-        Ok(f(slot.as_mut().expect("a negative network")))
+        Ok(())
     }
 
-    fn load_negative(&self) -> Result<Model, ApiError> {
+    /// Runs `f` on the server's negative network, loading it first if need
+    /// be ([`Service::ensure_negative`]).  Inside [`Service::with_model`] call
+    /// it only once the negative network is loaded.
+    pub fn with_negative<T>(&self, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {
+        self.ensure_negative()?;
+        let mut slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(f(slot.as_mut().expect("loaded by ensure_negative")))
+    }
+
+    fn load_negative(&self, encoding: crate::encoding::Encoding) -> Result<Model, ApiError> {
         let path = self.negative_path();
         let mut model = if !path.is_empty() && std::path::Path::new(&path).is_file() {
             let m = Model::load(&path)?;
@@ -678,7 +698,7 @@ impl Service {
             Model::new_negative(
                 self.seed,
                 &NegativeOptions {
-                    encoding: self.active_encoding(),
+                    encoding,
                     ..Default::default()
                 },
             )?
@@ -968,6 +988,8 @@ fn filter(svc: &Arc<Service>, r: &Request) -> Answer {
         beam: r.usize("beam", 0)?,
         ..Default::default()
     };
+    // loaded before the model's lock is taken: see `Service::ensure_negative`
+    svc.ensure_negative()?;
     let mut failure = None;
     let mut out = Json::Null;
     svc.with_model(|positive| {
