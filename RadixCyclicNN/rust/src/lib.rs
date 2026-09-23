@@ -70,6 +70,7 @@ pub mod json;
 pub mod log;
 pub mod model;
 pub mod mt19937;
+pub mod negative;
 pub mod parallel;
 pub mod paths;
 pub mod penalty;

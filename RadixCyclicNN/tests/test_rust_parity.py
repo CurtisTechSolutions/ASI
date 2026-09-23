@@ -540,6 +540,119 @@ class TestRustWordParity(unittest.TestCase):
                 self.assertEqual(strip(a), strip(b), spec)
 
 
+class TestRustNegativeParity(unittest.TestCase):
+    """The negative network: the same blame, the same verdicts, the same file.
+
+    Every node and edge of this model exists because something went wrong, so
+    what has to agree is the evidence itself - how much blame a text carries,
+    which reasons carry it, which fragments are worst, and the one sentence the
+    verdict rests on, character for character.
+    """
+
+    FAILURES = [
+        ("the cat sat on the sky", "nonsense"),
+        ("water boils at 50 degrees", "wrong fact"),
+        ("the the the the the", "repetition"),
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.py_model = os.path.join(TMP.name, "py.negative.json")
+        cls.rs_model = os.path.join(TMP.name, "rs.negative.json")
+        for text, reason in cls.FAILURES:
+            py("--kind", "count", "--seed", 1, "negative", "blame", "--text", text, "--reason", reason,
+               "--severity", 2, "--source", "test", "--negative", cls.py_model, model=cls.py_model + ".count")
+            rust("--seed", 1, "negative", "blame", "--text", text, "--reason", reason,
+                 "--severity", 2, "--source", "test", "--negative", cls.rs_model, model=cls.rs_model + ".count")
+        cls.py_doc = load_json(cls.py_model)
+        cls.rs_doc = load_json(cls.rs_model)
+
+    def test_the_negative_document_is_pythons_byte_for_byte(self):
+        strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
+        self.assertEqual(strip(self.py_doc), strip(self.rs_doc))
+        self.assertEqual(self.py_doc["format"], "radixnet-negative")
+        self.assertEqual(self.rs_doc["format"], "radixnet-negative")
+        self.assertEqual((self.py_doc["kind"], self.rs_doc["kind"]), ("negative", "negative"))
+        # blame rides on the edges where the count model keeps rewards
+        for doc, side in ((self.py_doc, "python"), (self.rs_doc, "rust")):
+            self.assertIn("blame", doc["graph"]["edges"], side)
+            self.assertNotIn("reward", doc["graph"]["edges"], side)
+            self.assertEqual(doc["graph"]["weights"]["function"], "blame", side)
+
+    def test_the_same_verdict_on_the_same_text(self):
+        for text in ("the cat sat on the sky", "water boils at 50 degrees", "a sentence nothing has failed on",
+                     "the cat sat on the mat"):
+            with self.subTest(text=text):
+                a = py("negative", "why", "--text", text, "--negative", self.py_model,
+                       model=self.py_model + ".count")["verdicts"][0]
+                b = rust("negative", "why", "--text", text, "--negative", self.rs_model,
+                         model=self.rs_model + ".count")["verdicts"][0]
+                self.assertEqual(a["verdict"], b["verdict"])
+                self.assertEqual(a["why"], b["why"])  # the sentence, character for character
+                self.assertLessEqual(abs(a["blame"] - b["blame"]), 1e-12)
+                self.assertLessEqual(abs(a["risk"] - b["risk"]), 1e-12)
+                self.assertLessEqual(abs(a["coverage"] - b["coverage"]), 1e-12)
+                self.assertEqual(a["blamed"], b["blamed"])
+                self.assertEqual([r["reason"] for r in a["reasons"]], [r["reason"] for r in b["reasons"]])
+                self.assertEqual([s["fragment"] for s in a["spans"]], [s["fragment"] for s in b["spans"]])
+
+    def test_the_same_reasons_in_the_same_order(self):
+        a = py("negative", "reasons", "--negative", self.py_model, model=self.py_model + ".count")
+        b = rust("negative", "reasons", "--negative", self.rs_model, model=self.rs_model + ".count")
+        self.assertEqual([(r["reason"], r["blame"]) for r in a["reasons"]],
+                         [(r["reason"], r["blame"]) for r in b["reasons"]])
+        self.assertEqual(len(a["journal"]), len(b["journal"]))
+        self.assertEqual([e["reason"] for e in a["journal"]], [e["reason"] for e in b["journal"]])
+
+    def test_clearing_and_forgetting_agree(self):
+        """Blame taken back has to be taken back the same way on both sides."""
+        py_copy = os.path.join(TMP.name, "py.cleared.json")
+        rs_copy = os.path.join(TMP.name, "rs.cleared.json")
+        shutil.copyfile(self.py_model, py_copy)
+        shutil.copyfile(self.rs_model, rs_copy)
+        for _ in range(3):
+            py("negative", "clear", "--text", "the cat sat on the sky", "--negative", py_copy,
+               model=py_copy + ".count")
+            rust("negative", "clear", "--text", "the cat sat on the sky", "--negative", rs_copy,
+                 model=rs_copy + ".count")
+        a = py("negative", "why", "--text", "the cat sat on the sky", "--negative", py_copy,
+               model=py_copy + ".count")["verdicts"][0]
+        b = rust("negative", "why", "--text", "the cat sat on the sky", "--negative", rs_copy,
+                 model=rs_copy + ".count")["verdicts"][0]
+        self.assertLessEqual(abs(a["blame"] - b["blame"]), 1e-12)
+        self.assertEqual(a["verdict"], b["verdict"])
+
+        # and forgetting one reason removes the same blame on both
+        a = py("negative", "forget", "--reason", "nonsense", "--negative", py_copy, model=py_copy + ".count")
+        b = rust("negative", "forget", "--reason", "nonsense", "--negative", rs_copy, model=rs_copy + ".count")
+        self.assertEqual(a["edges"], b["edges"])
+        self.assertLessEqual(abs(a["blame_removed"] - b["blame_removed"]), 1e-12)
+
+    def test_each_side_reads_the_other_s_negative_model(self):
+        a = py("negative", "why", "--text", "the cat sat on the sky", "--negative", self.rs_model,
+               model=self.rs_model + ".count")["verdicts"][0]
+        b = rust("negative", "why", "--text", "the cat sat on the sky", "--negative", self.py_model,
+                 model=self.py_model + ".count")["verdicts"][0]
+        mine = py("negative", "why", "--text", "the cat sat on the sky", "--negative", self.py_model,
+                  model=self.py_model + ".count")["verdicts"][0]
+        # Python reading Rust's file, and Rust reading Python's, both agree with
+        # Python reading its own
+        self.assertEqual(a["why"], mine["why"])
+        self.assertEqual(b["why"], mine["why"])
+        self.assertLessEqual(abs(a["blame"] - mine["blame"]), 1e-12)
+        self.assertLessEqual(abs(b["blame"] - mine["blame"]), 1e-12)
+
+    def test_the_file_says_which_model_it_is(self):
+        """A reader has to be able to tell the two apart before it reads them."""
+        out = rust("info", model=self.rs_model)
+        self.assertEqual(out["stats"]["kind"], "negative")
+        self.assertEqual(self.rs_doc["format"], "radixnet-negative")
+        # and an ordinary count model still says count
+        count = os.path.join(TMP.name, "plain.count.json")
+        rust("--seed", 1, "train", "--data", CORPUS, "--epochs", 1, model=count)
+        self.assertEqual(rust("info", model=count)["stats"]["kind"], "count")
+
+
 class TestRustFileFormat(unittest.TestCase):
     """The reader's side: what the Rust port does with a file it did not write."""
 
@@ -572,9 +685,14 @@ class TestRustFileFormat(unittest.TestCase):
     def test_a_file_it_cannot_read_is_an_error_not_a_crash(self):
         broken = os.path.join(TMP.name, "broken.count.json")
         with open(broken, "w", encoding="utf-8") as fh:
-            fh.write('{"format":"radixnet-negative","version":1}')
+            fh.write('{"format":"radixnet-bogus","version":1}')
         out = rust("info", model=broken, expect=1)
         self.assertIn("radixnet-count", out["error"])
+        # a format it knows, with the graph missing, is still an error
+        hollow = os.path.join(TMP.name, "hollow.negative.json")
+        with open(hollow, "w", encoding="utf-8") as fh:
+            fh.write('{"format":"radixnet-negative","version":1}')
+        self.assertIn("graph", rust("info", model=hollow, expect=1)["error"])
         truncated = os.path.join(TMP.name, "truncated.count.json")
         with open(truncated, "w", encoding="utf-8") as fh:
             fh.write('{"format":"radixnet-count","graph":{')

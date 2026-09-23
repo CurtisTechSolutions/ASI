@@ -123,6 +123,18 @@ impl Graph {
     /// nodes for large graphs.
     pub fn recompute_weights(&mut self) {
         let n = self.labels.len();
+        if self.neg.is_some() {
+            // the blame distribution, not the count / reward one: it reads the
+            // evidence of every edge leaving a node, so it is written row by row
+            for p in 0..n {
+                self.recompute_negative_row(p);
+            }
+            self.dirty.clear();
+            self.dirty_all = false;
+            self.weights_structure = self.structure_version;
+            self.version.add(1);
+            return;
+        }
         let mut edge_w = std::mem::take(&mut self.edge_w);
         {
             let out = Disjoint::new(&mut edge_w);

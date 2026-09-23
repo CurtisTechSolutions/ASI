@@ -254,6 +254,9 @@ const LOG: &str = "train";
 /// which is the mode the two are compared in, because a benchmark of a
 /// deliberate data race measures the race.
 pub struct Model {
+    /// The journal and judgement settings of the *negative* network
+    /// ([`crate::negative`]); `None` on a count / reward model.
+    pub neg: Option<Box<crate::negative::Negative>>,
     pub g: Graph,
     pub history: Vec<EpochRecord>,
     pub meta: Meta,
@@ -275,20 +278,30 @@ impl Model {
             history: Vec::new(),
             meta: Meta::new(seed),
             workers: 0,
+            neg: None,
         }
     }
 
     /// The model kind shared with the Python and Go implementations.
     ///
     /// Words are not a kind: they are an encoding, so a word model is this
-    /// model with `unit = word` and nothing else changed.
+    /// model with `unit = word` and nothing else changed.  The negative network
+    /// *is* a kind - it keeps blame where this keeps counts and rewards.
     pub fn kind(&self) -> &'static str {
-        "count"
+        if self.is_negative() {
+            "negative"
+        } else {
+            "count"
+        }
     }
 
-    /// The file format, which the encoding never changes.
+    /// The file format: the encoding never changes it, but the kind does.
     pub fn format(&self) -> &'static str {
-        crate::file::MODEL_FORMAT
+        if self.is_negative() {
+            crate::negative::NEGATIVE_FORMAT
+        } else {
+            crate::file::MODEL_FORMAT
+        }
     }
 
     /// How this model reads a text and writes one back.

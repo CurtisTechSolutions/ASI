@@ -110,12 +110,15 @@ impl Graph {
         let mut edge_count = Vec::new();
         let mut edge_resets = Vec::new();
         let mut reward = Vec::new();
+        // the edges in file order, so a negative graph's parallel arrays line up
+        let mut alive_edges: Vec<usize> = Vec::new();
         let mut edge_index = vec![usize::MAX; self.edge_w.len()];
         for &old in &order {
             let adj = &self.children[old];
             for (i, &c) in adj.order.iter().enumerate() {
                 let e = adj.edges[i];
                 edge_index[e] = src.len();
+                alive_edges.push(e);
                 src.push(remap[old] as i64);
                 dst.push(remap[c] as i64);
                 w.push(self.edge_w[e]);
@@ -133,7 +136,29 @@ impl Graph {
         if edge_resets.iter().any(|&r| r != 0) {
             edges.push(("count_resets".to_string(), Json::ints(edge_resets)));
         }
-        edges.push(("reward".to_string(), Json::nums(reward)));
+        if let Some(neg) = &self.neg {
+            // a negative graph keeps blame where the count model keeps rewards
+            let mut blame = Vec::with_capacity(order.len());
+            let mut fails = Vec::with_capacity(order.len());
+            let mut clear = Vec::with_capacity(order.len());
+            let mut reasons: Vec<Json> = Vec::with_capacity(order.len());
+            for &e in &alive_edges {
+                blame.push(neg.blame[e]);
+                fails.push(neg.fails[e]);
+                clear.push(neg.clear[e]);
+                let pairs: Vec<Json> = neg.reasons[e]
+                    .iter()
+                    .map(|r| Json::Arr(vec![Json::Int(r.id as i64), Json::Num(r.blame)]))
+                    .collect();
+                reasons.push(Json::Arr(pairs));
+            }
+            edges.push(("blame".to_string(), Json::nums(blame)));
+            edges.push(("fails".to_string(), Json::ints(fails)));
+            edges.push(("clear".to_string(), Json::nums(clear)));
+            edges.push(("reasons".to_string(), Json::Arr(reasons)));
+        } else {
+            edges.push(("reward".to_string(), Json::nums(reward)));
+        }
 
         let (words, index) = self.rng.state();
         let mut state: Vec<Json> = words.iter().map(|&x| Json::Int(x as i64)).collect();
@@ -147,20 +172,42 @@ impl Graph {
                 _ => None,
             })
             .collect();
-        let weights = Json::obj([
-            ("function", Json::str("dual-frequency")),
-            ("count_scale", Json::Num(self.count_scale)),
-            ("global_scale", Json::Num(self.global_scale)),
-            ("window_scale", Json::Num(self.window_scale)),
-            ("reward_scale", Json::Num(self.reward_scale)),
-            ("path_scale", Json::Num(self.path_scale)),
-            ("window", Json::Int(self.window_size as i64)),
-            ("smoothing", Json::Num(SMOOTHING)),
-            ("kind", Json::str("count-reward")),
-            ("total_traversals", Json::Int(self.total_traversals().value)),
-            ("total_traversals_resets", Json::Int(self.total_traversals().resets)),
-            ("window_events", Json::ints(events)),
-        ]);
+        let weights = match &self.neg {
+            Some(neg) => Json::obj([
+                ("function", Json::str("blame")),
+                ("share_scale", Json::Num(neg.share_scale)),
+                ("blame_scale", Json::Num(neg.blame_scale)),
+                ("clear_scale", Json::Num(neg.clear_scale)),
+                ("smoothing", Json::Num(SMOOTHING)),
+                ("kind", Json::str("negative")),
+                ("total_blame", Json::Num(neg.total_blame)),
+                ("total_fails", Json::Int(neg.total_fails.value)),
+                ("total_fails_resets", Json::Int(neg.total_fails.resets)),
+                ("total_clear", Json::Num(neg.total_clear)),
+                (
+                    "reasons",
+                    Json::obj([
+                        ("labels", Json::strs(neg.reason_names.clone())),
+                        ("blame", Json::nums(neg.reason_blame.clone())),
+                        ("fails", Json::ints(neg.reason_fails.clone())),
+                    ]),
+                ),
+            ]),
+            None => Json::obj([
+                ("function", Json::str("dual-frequency")),
+                ("count_scale", Json::Num(self.count_scale)),
+                ("global_scale", Json::Num(self.global_scale)),
+                ("window_scale", Json::Num(self.window_scale)),
+                ("reward_scale", Json::Num(self.reward_scale)),
+                ("path_scale", Json::Num(self.path_scale)),
+                ("window", Json::Int(self.window_size as i64)),
+                ("smoothing", Json::Num(SMOOTHING)),
+                ("kind", Json::str("count-reward")),
+                ("total_traversals", Json::Int(self.total_traversals().value)),
+                ("total_traversals_resets", Json::Int(self.total_traversals().resets)),
+                ("window_events", Json::ints(events)),
+            ]),
+        };
 
         // the three implementations keep their tables in different orders; the file has one
         let mut rows: Vec<(i64, i64, i64, i64, i64)> = self
@@ -184,6 +231,9 @@ impl Graph {
             ("incorrect", Json::ints(rows.iter().map(|r| r.4))),
         ]);
 
+        // a negative graph has no judged path contexts: blame is per edge, and
+        // Python writes no `paths` block for one
+        let negative = self.neg.is_some();
         let graph = Json::obj([
             ("format", Json::str(GRAPH_FORMAT)),
             ("format_version", Json::Int(GRAPH_FORMAT_VERSION)),
@@ -199,8 +249,15 @@ impl Graph {
             ("edges", Json::Obj(edges)),
             ("rng_state", rng_state),
             ("weights", weights),
-            ("paths", paths),
         ]);
+        let graph = match (negative, graph) {
+            (true, graph) => graph,
+            (false, Json::Obj(mut pairs)) => {
+                pairs.push(("paths".to_string(), paths));
+                Json::Obj(pairs)
+            }
+            (false, other) => other,
+        };
         if self.enc.is_default() {
             return graph; // an ordinary file is byte for byte what it always was
         }
@@ -266,7 +323,22 @@ impl Graph {
             window,
             encoding: read_encoding(doc)?,
         };
-        let mut g = Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?;
+        // a blame weight function means a negative graph: the file says so, and
+        // the arrays below are blame rather than reward
+        let mut g =
+            if weights.at("function").as_str() == Some("blame") || weights.at("kind").as_str() == Some("negative") {
+                Graph::new_negative(
+                    doc.at("seed").as_i64().unwrap_or(0),
+                    &crate::negative::NegativeOptions {
+                        share_scale: weights.at("share_scale").as_f64().unwrap_or(1.0),
+                        blame_scale: weights.at("blame_scale").as_f64().unwrap_or(0.0),
+                        clear_scale: weights.at("clear_scale").as_f64().unwrap_or(1.0),
+                        encoding: opts.encoding,
+                    },
+                )?
+            } else {
+                Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?
+            };
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
 
         // the three sentinels are already there; the rest of the file's nodes follow
@@ -283,6 +355,10 @@ impl Graph {
         let edge_count = edges.at("count").to_i64s();
         let edge_resets = edges.at("count_resets").to_i64s();
         let reward = edges.at("reward").to_f64s();
+        let blame = edges.at("blame").to_f64s();
+        let fails = edges.at("fails").to_i64s();
+        let clear = edges.at("clear").to_f64s();
+        let edge_reasons = edges.at("reasons").as_array().to_vec();
         if src.len() != dst.len() || w.len() != src.len() || edge_count.len() != src.len() {
             return Err("edge arrays have inconsistent lengths".to_string());
         }
@@ -300,6 +376,38 @@ impl Graph {
             let e = g.new_edge(p, c, edge_count[i], edge_resets.get(i).copied().unwrap_or(0));
             g.edge_w[e] = w[i];
             g.edge_reward[e] = reward.get(i).copied().unwrap_or(0.0);
+            let row = edge_reasons.get(i).map(|r| r.as_array()).unwrap_or_default();
+            let pairs: Vec<crate::negative::ReasonBlame> = row
+                .iter()
+                .filter_map(|pair| {
+                    let pair = pair.as_array();
+                    Some(crate::negative::ReasonBlame {
+                        id: pair.first()?.as_i64()? as usize,
+                        blame: pair.get(1)?.as_f64()?,
+                    })
+                })
+                .collect();
+            if let Some(neg) = g.neg.as_mut() {
+                neg.blame[e] = blame.get(i).copied().unwrap_or(0.0);
+                neg.fails[e] = fails.get(i).copied().unwrap_or(0);
+                neg.clear[e] = clear.get(i).copied().unwrap_or(0.0);
+                neg.reasons[e] = pairs;
+            }
+        }
+        if let Some(neg) = g.neg.as_mut() {
+            let table = weights.at("reasons");
+            neg.reason_names = table.at("labels").to_strings();
+            neg.reason_blame = table.at("blame").to_f64s();
+            neg.reason_fails = table.at("fails").to_i64s();
+            neg.reason_blame.resize(neg.reason_names.len(), 0.0);
+            neg.reason_fails.resize(neg.reason_names.len(), 0);
+            neg.reindex_reasons();
+            neg.total_blame = weights.at("total_blame").as_f64().unwrap_or(0.0);
+            neg.total_fails = Counter::new(
+                weights.at("total_fails").as_i64().unwrap_or(0),
+                weights.at("total_fails_resets").as_i64().unwrap_or(0),
+            );
+            neg.total_clear = weights.at("total_clear").as_f64().unwrap_or(0.0);
         }
 
         let state = doc.at("rng_state");
@@ -423,27 +531,98 @@ fn with_back(doc: &Json) -> Json {
 }
 
 impl Model {
-    /// The model as a `radixnet-count` document.
+    /// The model as a `radixnet-count` (or `radixnet-negative`) document.
     pub fn to_doc(&mut self) -> Json {
-        Json::obj([
-            ("format", Json::str(self.format())),
-            ("version", Json::Int(MODEL_FORMAT_VERSION)),
-            ("saved_at", Json::str(utc_now())),
-            ("kind", Json::str(self.kind())),
-            ("meta", self.meta.to_json()),
+        let mut pairs = vec![
+            ("format".to_string(), Json::str(self.format())),
+            ("version".to_string(), Json::Int(MODEL_FORMAT_VERSION)),
+            ("saved_at".to_string(), Json::str(utc_now())),
+            ("kind".to_string(), Json::str(self.kind())),
+            ("meta".to_string(), self.negative_meta()),
             (
-                "history",
+                "history".to_string(),
                 Json::Arr(self.history.iter().map(EpochRecord::to_json).collect()),
             ),
-            ("graph", self.g.to_doc()),
-        ])
+        ];
+        // the journal and the filter sit between the history and the graph,
+        // where Python and Go write them
+        if let Some(neg) = &self.neg {
+            pairs.push((
+                "log".to_string(),
+                Json::Arr(
+                    neg.log
+                        .iter()
+                        .map(|entry| {
+                            Json::obj([
+                                ("at", Json::str(entry.at.clone())),
+                                ("text", Json::str(entry.text.clone())),
+                                ("reason", Json::str(entry.reason.clone())),
+                                ("severity", Json::Num(entry.severity)),
+                                ("source", Json::str(entry.source.clone())),
+                                ("note", Json::str(entry.note.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ));
+            pairs.push((
+                "filter".to_string(),
+                Json::obj([
+                    ("threshold", Json::Num(neg.threshold)),
+                    ("min_coverage", Json::Num(neg.min_coverage)),
+                ]),
+            ));
+        }
+        pairs.push(("graph".to_string(), self.g.to_doc()));
+        Json::Obj(pairs)
+    }
+
+    /// The meta block, with the negative network's own counters folded in.
+    fn negative_meta(&self) -> Json {
+        let base = self.meta.to_json();
+        let Some(neg) = &self.neg else { return base };
+        let Json::Obj(mut pairs) = base else { return base };
+        let mut put = |key: &str, value: Json| pairs.push((key.to_string(), value));
+        put("failures_total", Json::Int(neg.failures_total.value));
+        put("failures_total_resets", Json::Int(neg.failures_total.resets));
+        put("blame_total", Json::Num(neg.blame_total));
+        put("cleared_total", Json::Int(neg.cleared_total.value));
+        put("cleared_total_resets", Json::Int(neg.cleared_total.resets));
+        put("judgements", Json::Int(neg.judgements.value));
+        put("judgements_resets", Json::Int(neg.judgements.resets));
+        put("rejected", Json::Int(neg.rejected.value));
+        put("rejected_resets", Json::Int(neg.rejected.resets));
+        put(
+            "sources",
+            Json::Obj(
+                neg.sources
+                    .iter()
+                    .map(|(name, c)| (name.clone(), Json::Int(c.value)))
+                    .collect(),
+            ),
+        );
+        put(
+            "sources_resets",
+            Json::Obj(
+                neg.sources
+                    .iter()
+                    .filter(|(_, c)| c.resets != 0)
+                    .map(|(name, c)| (name.clone(), Json::Int(c.resets)))
+                    .collect(),
+            ),
+        );
+        Json::Obj(pairs)
     }
 
     /// Rebuilds a model from a `radixnet-count` document.
     pub fn from_doc(doc: &Json) -> Result<Model, String> {
         let format = doc.at("format").as_str().unwrap_or("");
-        if format != MODEL_FORMAT {
-            return Err(format!("not a {MODEL_FORMAT} model document"));
+        let negative = format == crate::negative::NEGATIVE_FORMAT;
+        if format != MODEL_FORMAT && !negative {
+            return Err(format!(
+                "not a {MODEL_FORMAT} or {} model document",
+                crate::negative::NEGATIVE_FORMAT
+            ));
         }
         let version = doc.at("version").as_i64().unwrap_or(1);
         if version > MODEL_FORMAT_VERSION {
@@ -458,6 +637,19 @@ impl Model {
             .map(EpochRecord::from_json)
             .collect();
         model.meta.merge_json(doc.at("meta")); // a file may carry a counter that was never wrapped
+        if model.g.is_negative() != negative {
+            return Err(if negative {
+                format!("{} document without a negative graph", crate::negative::NEGATIVE_FORMAT)
+            } else {
+                format!(
+                    "a negative graph belongs to a {} document, not {format}",
+                    crate::negative::NEGATIVE_FORMAT
+                )
+            });
+        }
+        if negative {
+            model.neg = Some(Box::new(read_negative(doc)));
+        }
         Ok(model)
     }
 
@@ -476,6 +668,58 @@ impl Model {
     /// Reads a model file written by any of the three implementations.
     pub fn load(path: &str) -> Result<Model, String> {
         Model::from_doc(&read_document(path)?)
+    }
+}
+
+/// The journal, the filter and the counters of a negative model document.
+fn read_negative(doc: &Json) -> crate::negative::Negative {
+    use crate::negative::{LogEntry, Negative, DEFAULT_MIN_COVERAGE, DEFAULT_THRESHOLD};
+    let meta = doc.at("meta");
+    let filter = doc.at("filter");
+    let counter = |key: &str| {
+        Counter::new(
+            meta.at(key).as_i64().unwrap_or(0),
+            meta.at(&format!("{key}_resets")).as_i64().unwrap_or(0),
+        )
+    };
+    let resets = meta.at("sources_resets");
+    let sources = match meta.at("sources") {
+        Json::Obj(pairs) => pairs
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    Counter::new(value.as_i64().unwrap_or(0), resets.at(name).as_i64().unwrap_or(0)),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Negative {
+        log: doc
+            .at("log")
+            .as_array()
+            .iter()
+            .map(|entry| LogEntry {
+                at: entry.at("at").as_str().unwrap_or("").to_string(),
+                text: entry.at("text").as_str().unwrap_or("").to_string(),
+                reason: entry.at("reason").as_str().unwrap_or("").to_string(),
+                severity: entry.at("severity").as_f64().unwrap_or(0.0),
+                source: entry.at("source").as_str().unwrap_or("").to_string(),
+                note: entry.at("note").as_str().unwrap_or("").to_string(),
+                // the file does not record it: the journal is what was said,
+                // not how many edges it touched
+                edges: 0,
+            })
+            .collect(),
+        threshold: filter.at("threshold").as_f64().unwrap_or(DEFAULT_THRESHOLD),
+        min_coverage: filter.at("min_coverage").as_f64().unwrap_or(DEFAULT_MIN_COVERAGE),
+        sources,
+        failures_total: counter("failures_total"),
+        blame_total: meta.at("blame_total").as_f64().unwrap_or(0.0),
+        cleared_total: counter("cleared_total"),
+        judgements: counter("judgements"),
+        rejected: counter("rejected"),
     }
 }
 

@@ -201,6 +201,10 @@ pub struct Graph {
     pub path_scale: f64,
 
     pub(crate) index: Map<String, Loc>,
+    /// The blame arrays and reason registry of a *negative* graph
+    /// ([`crate::negative`]); `None` on a count / reward graph, which therefore
+    /// pays nothing for it.
+    pub neg: Option<Box<crate::negative::NegativeData>>,
     /// How a text becomes grams; fixed when the graph is created.
     pub enc: Encoding,
     pub inverted: bool,
@@ -264,6 +268,7 @@ impl Graph {
             window_scale: opts.window_scale,
             path_scale: opts.path_scale,
             index: map(),
+            neg: None,
             inverted: false,
             version: Counter::default(),
             structure_version: Counter::default(),
@@ -384,6 +389,9 @@ impl Graph {
         self.edge_parent.push(p);
         self.edge_reward.push(0.0);
         self.window_edge_count.push(0);
+        if let Some(neg) = self.neg.as_mut() {
+            neg.append_edge();
+        }
         self.children[p].set(c, e);
         self.parents[c].set(p, e);
         self.n_alive_edges += 1;
@@ -605,6 +613,11 @@ impl Graph {
         }
         let c = self.children[p].order[0];
         if c == p || c < FIRST || self.parents[c].size() != 1 {
+            return false;
+        }
+        // a step *inside* a node has no edge to carry blame, so a merged
+        // correction would be forgotten (crate::negative)
+        if self.blocks_merge(self.children[p].edges[0]) {
             return false;
         }
         let enc = self.enc;

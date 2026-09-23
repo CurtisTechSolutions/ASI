@@ -31,6 +31,7 @@ use radixnet::file::read_document;
 use radixnet::json::Json;
 use radixnet::log::{self, Level};
 use radixnet::model::{GenerateOptions, Model, PredictOptions, TrainOptions};
+use radixnet::negative::{BlameOptions as NegBlameOptions, JudgeOptions, NegativeOptions, Verdict};
 use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
 use radixnet::report::{node_rows, path_rows, split_texts, stats};
 use radixnet::search::PathResult;
@@ -55,6 +56,95 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--encoding SPEC] [--json] [
      off.  Nothing is ever\n\
      written to stdout, which is where --json puts its document.  Targets: http, model, train.";
 
+/// The negative model beside a model file: `model.count.json` ->
+/// `model.count.negative.json`, with `.gz` kept on the end.
+fn negative_path(model: &str) -> String {
+    let (stem, ext) = match model.strip_suffix(".gz") {
+        Some(head) => match head.rfind('.') {
+            Some(at) => (&head[..at], format!("{}.gz", &head[at..])),
+            None => (head, ".gz".to_string()),
+        },
+        None => match model.rfind('.') {
+            Some(at) => (&model[..at], model[at..].to_string()),
+            None => (model, String::new()),
+        },
+    };
+    if stem.ends_with(".negative") {
+        return model.to_string();
+    }
+    format!("{stem}.negative{ext}")
+}
+
+/// A verdict as the CLI and the API print it.
+fn verdict_json(v: &Verdict) -> Json {
+    Json::obj([
+        ("text", Json::str(v.text.clone())),
+        ("chars", Json::Int(v.chars as i64)),
+        ("transitions", Json::Int(v.transitions as i64)),
+        ("known", Json::Int(v.known as i64)),
+        ("blamed", Json::Int(v.blamed as i64)),
+        ("coverage", Json::Num(v.coverage)),
+        ("blame", Json::Num(v.blame)),
+        ("risk", Json::Num(v.risk)),
+        ("peak", Json::Num(v.peak)),
+        ("per_char", Json::Num(v.per_char)),
+        ("threshold", Json::Num(v.threshold)),
+        ("min_coverage", Json::Num(v.min_coverage)),
+        ("verdict", Json::str(v.verdict.clone())),
+        (
+            "reasons",
+            Json::Arr(
+                v.reasons
+                    .iter()
+                    .map(|r| {
+                        Json::obj([
+                            ("reason", Json::str(r.reason.clone())),
+                            ("blame", Json::Num(r.blame)),
+                            ("share", Json::Num(r.share)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "spans",
+            Json::Arr(
+                v.spans
+                    .iter()
+                    .map(|s| {
+                        Json::obj([
+                            ("start", Json::Int(s.start as i64)),
+                            ("end", Json::Int(s.end as i64)),
+                            ("fragment", Json::str(s.fragment.clone())),
+                            ("blame", Json::Num(s.blame)),
+                            ("fails", Json::Int(s.fails)),
+                            ("clear", Json::Num(s.clear)),
+                            ("reason", Json::str(s.reason.clone())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("why", Json::str(v.why.clone())),
+    ])
+}
+
+/// The statistics of a negative model, as the CLI and the API report them.
+fn negative_stats(model: &mut Model) -> Json {
+    let base = stats(model);
+    let Some(neg) = &model.neg else { return base };
+    let Json::Obj(mut pairs) = base else { return base };
+    pairs.push(("failures_total".to_string(), Json::Int(neg.failures_total.value)));
+    pairs.push(("blame_total".to_string(), Json::Num(neg.blame_total)));
+    pairs.push(("cleared_total".to_string(), Json::Int(neg.cleared_total.value)));
+    pairs.push(("judgements".to_string(), Json::Int(neg.judgements.value)));
+    pairs.push(("rejected".to_string(), Json::Int(neg.rejected.value)));
+    pairs.push(("threshold".to_string(), Json::Num(neg.threshold)));
+    pairs.push(("min_coverage".to_string(), Json::Num(neg.min_coverage)));
+    pairs.push(("reasons".to_string(), Json::Int(model.g.reason_table().len() as i64)));
+    Json::Obj(pairs)
+}
+
 /// The default `--model` per unit, so a word model never overwrites a
 /// character model's file.
 const DEFAULT_COUNT_MODEL: &str = "model.count.json";
@@ -74,6 +164,9 @@ fn main() -> ExitCode {
 struct Args {
     flags: Vec<(String, String)>,
     switches: Vec<String>,
+    /// Bare words after the command, for the commands that take an action
+    /// (`negative blame`, `negative why`, ...).
+    rest: Vec<String>,
 }
 
 impl Args {
@@ -90,6 +183,18 @@ impl Args {
     }
     fn on(&self, name: &str) -> bool {
         self.switches.iter().any(|s| s == name)
+    }
+    /// Every value of a repeatable flag, in the order given.
+    fn all(&self, name: &str) -> Vec<String> {
+        self.flags
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+    /// The action word after the command, or `""`.
+    fn action(&self) -> &str {
+        self.rest.first().map(|s| s.as_str()).unwrap_or("")
     }
     fn int(&self, name: &str, fallback: i64) -> Result<i64, String> {
         match self.get(name) {
@@ -130,6 +235,7 @@ fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
     let mut args = Args {
         flags: Vec::new(),
         switches: Vec::new(),
+        rest: Vec::new(),
     };
     let mut i = 0;
     while i < argv.len() {
@@ -154,7 +260,7 @@ fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
         } else if command.is_empty() {
             command = item.clone();
         } else {
-            return Err(format!("unexpected argument {item:?}\n{USAGE}"));
+            args.rest.push(item.clone());
         }
         i += 1;
     }
@@ -491,6 +597,179 @@ fn run() -> Result<(), String> {
                 ("stats", stats(&model)),
             ]));
         }
+        "negative" => {
+            // the negative model lives beside --model (model.count.json ->
+            // model.count.negative.json) unless --negative says otherwise
+            let path = args.str("negative", &negative_path(&model_path));
+            let open_negative = |must_exist: bool| -> Result<Model, String> {
+                if std::path::Path::new(&path).exists() {
+                    let mut m = Model::load(&path)?;
+                    if !m.is_negative() {
+                        return Err(format!("{path} holds a {} model, not a negative one", m.kind()));
+                    }
+                    m.workers = workers;
+                    m.g.workers = workers;
+                    return Ok(m);
+                }
+                if must_exist {
+                    return Err(format!(
+                        "no negative model at {path} (teach it one first with \
+                         `radixnet negative blame --text '...' --reason gibberish`)"
+                    ));
+                }
+                let mut m = Model::new_negative(
+                    seed,
+                    &NegativeOptions {
+                        encoding,
+                        ..Default::default()
+                    },
+                )?;
+                m.workers = workers;
+                m.g.workers = workers;
+                Ok(m)
+            };
+            match args.action() {
+                "blame" => {
+                    let texts = read_texts(&args)?;
+                    if texts.is_empty() {
+                        return Err("give the failed text with --text or --data".to_string());
+                    }
+                    let mut model = open_negative(false)?;
+                    let records = model.blame(
+                        &texts,
+                        &NegBlameOptions {
+                            reason: args.str("reason", "unspecified"),
+                            severity: args.float("severity", 1.0)?,
+                            source: args.str("source", "cli"),
+                            note: args.str("note", ""),
+                            epochs: args.usize("epochs", 1)?,
+                            no_compress: args.on("no-compress"),
+                        },
+                    )?;
+                    let saved = args.str("out", &path);
+                    model.save(&saved)?;
+                    emit(Json::obj([
+                        ("blamed", Json::Int(texts.len() as i64)),
+                        (
+                            "reason",
+                            Json::str(radixnet::negative::clean_reason(&args.str("reason", "unspecified"))),
+                        ),
+                        ("severity", Json::Num(args.float("severity", 1.0)?)),
+                        ("saved", Json::str(saved)),
+                        ("records", Json::Arr(records.iter().map(|r| r.to_json()).collect())),
+                        ("stats", negative_stats(&mut model)),
+                    ]));
+                }
+                "clear" => {
+                    let texts = read_texts(&args)?;
+                    if texts.is_empty() {
+                        return Err("give the passed text with --text or --data".to_string());
+                    }
+                    let mut model = open_negative(true)?;
+                    let edges = model.clear_text(&texts, args.float("weight", 1.0)?)?;
+                    let saved = args.str("out", &path);
+                    model.save(&saved)?;
+                    emit(Json::obj([
+                        ("cleared", Json::Int(texts.len() as i64)),
+                        ("edges", Json::Int(edges as i64)),
+                        ("saved", Json::str(saved)),
+                        ("stats", negative_stats(&mut model)),
+                    ]));
+                }
+                "why" => {
+                    let texts = read_texts(&args)?;
+                    if texts.is_empty() {
+                        return Err("give a text to judge with --text or --data".to_string());
+                    }
+                    let mut model = open_negative(true)?;
+                    let opts = JudgeOptions {
+                        threshold: args.get("threshold").map(|t| t.parse().unwrap_or(f64::NAN)),
+                        min_coverage: args.get("min-coverage").map(|t| t.parse().unwrap_or(f64::NAN)),
+                        spans: args.usize("spans", 5)?,
+                    };
+                    let verdicts: Vec<Json> = texts
+                        .iter()
+                        .filter_map(|t| model.judge(t, &opts))
+                        .map(|v| verdict_json(&v))
+                        .collect();
+                    emit(Json::obj([
+                        ("verdicts", Json::Arr(verdicts.clone())),
+                        ("count", Json::Int(verdicts.len() as i64)),
+                        ("stats", negative_stats(&mut model)),
+                    ]));
+                }
+                "reasons" => {
+                    let mut model = open_negative(true)?;
+                    let limit = args.usize("limit", 20)?;
+                    let rows: Vec<Json> = model
+                        .reasons()
+                        .iter()
+                        .take(if limit == 0 { usize::MAX } else { limit })
+                        .map(|r| {
+                            Json::obj([
+                                ("reason", Json::str(r.reason.clone())),
+                                ("blame", Json::Num(r.blame)),
+                                ("fails", Json::Int(r.fails)),
+                                ("share", Json::Num(r.share)),
+                            ])
+                        })
+                        .collect();
+                    let journal: Vec<Json> = model
+                        .recent(limit)
+                        .iter()
+                        .map(|e| {
+                            Json::obj([
+                                ("at", Json::str(e.at.clone())),
+                                ("text", Json::str(e.text.clone())),
+                                ("reason", Json::str(e.reason.clone())),
+                                ("severity", Json::Num(e.severity)),
+                                ("source", Json::str(e.source.clone())),
+                                ("note", Json::str(e.note.clone())),
+                            ])
+                        })
+                        .collect();
+                    emit(Json::obj([
+                        ("reasons", Json::Arr(rows)),
+                        ("journal", Json::Arr(journal)),
+                        ("stats", negative_stats(&mut model)),
+                    ]));
+                }
+                "forget" => {
+                    let mut model = open_negative(true)?;
+                    let reason = args.get("reason").map(|s| s.to_string());
+                    let result = model.g.forget(reason.as_deref(), args.float("factor", 0.0)?)?;
+                    let saved = args.str("out", &path);
+                    model.save(&saved)?;
+                    emit(Json::obj([
+                        ("reason", Json::str(result.reason)),
+                        ("edges", Json::Int(result.edges as i64)),
+                        ("blame_removed", Json::Num(result.blame_removed)),
+                        ("saved", Json::str(saved)),
+                        ("stats", negative_stats(&mut model)),
+                    ]));
+                }
+                "settings" => {
+                    let mut model = open_negative(true)?;
+                    let threshold = args.get("threshold").map(|t| t.parse().unwrap_or(f64::NAN));
+                    let min_coverage = args.get("min-coverage").map(|t| t.parse().unwrap_or(f64::NAN));
+                    model.set_judgement(threshold, min_coverage)?;
+                    let saved = args.str("out", &path);
+                    model.save(&saved)?;
+                    let neg = model.neg.as_ref().expect("a negative model");
+                    emit(Json::obj([
+                        ("threshold", Json::Num(neg.threshold)),
+                        ("min_coverage", Json::Num(neg.min_coverage)),
+                        ("saved", Json::str(saved)),
+                    ]));
+                }
+                "" => return Err("negative needs an action: blame, clear, why, reasons, forget, settings".to_string()),
+                other => {
+                    return Err(format!(
+                        "unknown negative action {other:?}; expected blame, clear, why, reasons, forget or settings"
+                    ))
+                }
+            }
+        }
         "words" => {
             let mut model = open(true)?;
             let enc = model.encoding();
@@ -639,10 +918,9 @@ fn path_json(result: &PathResult) -> Json {
 
 /// The texts of `--data` (or of a `--text`), split as `--split` asks.
 fn read_texts(args: &Args) -> Result<Vec<String>, String> {
-    if let Some(text) = args.get("text") {
-        return Ok(vec![text.to_string()]);
-    }
-    read_named(args, "data")
+    let mut texts = args.all("text");
+    texts.extend(read_named(args, "data")?);
+    Ok(texts)
 }
 
 /// The texts of one named file flag; an absent flag reads as nothing.
