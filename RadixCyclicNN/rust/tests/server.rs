@@ -319,7 +319,7 @@ the cat ate the rat","epochs":1}"#,
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"), "{body}");
+        assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("done"), "{body}");
     }
 
     // feedback names its three good / good_text / good_files, and reads them the same way;
@@ -340,7 +340,7 @@ the cat ate the rat","epochs":1}"#,
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"));
+    assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("done"));
 
     // an upload name that tries to leave the directory is refused
     let (status, error) = post(port, "/api/train", r#"{"files":["../secrets.txt"],"epochs":1}"#);
@@ -435,7 +435,7 @@ fn every_kind_is_selected_trained_and_reset() {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("finished"), "{kind}");
+        assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("done"), "{kind}");
         let (_, status_doc) = get(port, "/api/status");
         assert_eq!(status_doc.at("kind").as_str(), Some(kind));
         assert!(

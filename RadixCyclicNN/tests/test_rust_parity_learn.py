@@ -311,7 +311,7 @@ class TestRustLearnServer(unittest.TestCase):
         status, doc, _ = self.server.post("/api/train", body)
         self.assertEqual(status, 202, doc)
         job = self.server.wait_job()
-        self.assertNotEqual(job["state"], "failed", job)
+        self.assertEqual(job["state"], "done", job)
         return job
 
     def test_1_the_routes_are_listed_for_the_frontend(self):

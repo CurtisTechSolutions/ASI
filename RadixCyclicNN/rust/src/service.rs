@@ -236,14 +236,23 @@ impl Service {
         let Some(job) = job.as_mut() else { return };
         job.finished_at = Some(utc_now());
         match outcome {
+            // the three ends Python's and Go's jobs have: `done`, `stopped` when
+            // it was asked to stop and did, `error` - what the frontend reads
             Ok(records) => {
-                crate::log_info!(LOG, "{} finished, {} record(s)", job.id, records.len());
-                job.state = "finished".to_string();
+                let stopped = self.stop.load(Ordering::Relaxed);
+                crate::log_info!(
+                    LOG,
+                    "{} {}, {} record(s)",
+                    job.id,
+                    if stopped { "stopped" } else { "done" },
+                    records.len()
+                );
+                job.state = if stopped { "stopped" } else { "done" }.to_string();
                 job.records = records;
             }
             Err(message) => {
                 crate::log_error!(LOG, "{} failed: {message}", job.id);
-                job.state = "failed".to_string();
+                job.state = "error".to_string();
                 job.error = Some(message);
             }
         }

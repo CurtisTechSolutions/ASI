@@ -245,7 +245,7 @@ class TestRoutesEveryKind(Same, unittest.TestCase):
             status, doc, _ = server.post(route, body)
             self.assertEqual(status, 202, doc)
             job = self.wait(server)
-            self.assertIn(job["state"], ("done", "finished"), job)
+            self.assertEqual(job["state"], "done", job)
             status, saved, _ = server.post("/api/save", {"path": model + ".saved.json"})
             self.assertEqual(status, 200, saved)
             answers.append((doc, job, server.get("/api/evolve/history")[1]))

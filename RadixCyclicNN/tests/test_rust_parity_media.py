@@ -569,7 +569,7 @@ class TestRustMediaServer(unittest.TestCase):
         # and it trains like any other upload
         status, job, _ = self.server.post("/api/train", {"files": ["corpus.zip"], "epochs": 1})
         self.assertEqual(status, 202, job)
-        self.assertEqual(self.server.wait_job()["state"], "finished")
+        self.assertEqual(self.server.wait_job()["state"], "done")
         # an archive with no text in it is refused, as Python refuses it
         empty = io.BytesIO()
         with zipfile.ZipFile(empty, "w") as zf:

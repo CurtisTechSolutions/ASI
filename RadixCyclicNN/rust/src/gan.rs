@@ -1536,7 +1536,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let job = svc.job_json();
-        assert_eq!(job.at("state").as_str(), Some("finished"), "{}", job.render(0));
+        assert_eq!(job.at("state").as_str(), Some("done"), "{}", job.render(0));
         assert_eq!(job.at("history").as_array().len(), 2);
         let kept = history(&svc, &Request::json("GET", "/", Json::Null)).unwrap();
         assert_eq!(kept.at("history").as_array().len(), 2);
