@@ -13,16 +13,24 @@
 //!
 //! One request, one connection (`Connection: close`); a chunked or gzipped
 //! answer is decoded; redirects are followed only when asked, because the
-//! browsing tool checks every hop itself.
+//! browsing tool checks every hop itself.  For the same tool a request can
+//! carry a [`PeerCheck`]: the address the name resolves to is checked *at
+//! connect time*, not only when the URL was vetted, so a name that resolved
+//! to a public address a moment ago and to a private one now is still refused
+//! (the check pins curl to the address it passed, with `--resolve`).
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::json::{parse, Json};
 
 /// The default time one request may take.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Vets the address a request is about to connect to: `Err` says why it may
+/// not.  Not applied to a proxy, which resolves the name itself.
+pub type PeerCheck = fn(IpAddr) -> Result<(), String>;
 
 /// One request.
 #[derive(Clone, Debug)]
@@ -36,6 +44,8 @@ pub struct Request {
     pub redirects: usize,
     /// The most body bytes to read; `0` is no limit.
     pub max_bytes: usize,
+    /// Refuses a peer before a byte is sent to it (`None`: any address).
+    pub peer: Option<PeerCheck>,
 }
 
 impl Request {
@@ -48,6 +58,7 @@ impl Request {
             timeout: DEFAULT_TIMEOUT,
             redirects: 0,
             max_bytes: 0,
+            peer: None,
         }
     }
     pub fn get(url: &str) -> Request {
@@ -75,6 +86,11 @@ impl Request {
     }
     pub fn limit(mut self, max_bytes: usize) -> Request {
         self.max_bytes = max_bytes;
+        self
+    }
+    /// Connects only to an address `check` lets through.
+    pub fn peer(mut self, check: PeerCheck) -> Request {
+        self.peer = Some(check);
         self
     }
 
@@ -297,6 +313,55 @@ fn no_proxy(host: &str) -> bool {
     })
 }
 
+/// The proxy an `https://` request to `host` goes through, when one is set
+/// (curl reads the same variables).
+fn https_proxy(host: &str) -> Option<String> {
+    if no_proxy(host) {
+        return None;
+    }
+    ["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+}
+
+/// The proxy a request to `url` would go through, or `None` when it goes out
+/// directly - in which case this process resolves the name itself, and a
+/// name it cannot resolve is a name it cannot fetch.
+pub fn proxy_for(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme == "https" {
+        https_proxy(&parsed.host)
+    } else {
+        http_proxy(&parsed.host).map(|p| p.origin())
+    }
+}
+
+/// The addresses of `host:port` a [`PeerCheck`] lets through, in the resolver's
+/// order; the first refusal when it lets none through.
+fn vetted(host: &str, port: u16, check: PeerCheck) -> Result<Vec<SocketAddr>, FetchError> {
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|err| FetchError::new(format!("cannot resolve {host}: {err}")))?
+        .collect();
+    let mut refused = None;
+    let kept: Vec<SocketAddr> = addrs
+        .into_iter()
+        .filter(|addr| match check(addr.ip()) {
+            Ok(()) => true,
+            Err(why) => {
+                refused.get_or_insert(why);
+                false
+            }
+        })
+        .collect();
+    if kept.is_empty() {
+        return Err(FetchError::new(
+            refused.unwrap_or_else(|| format!("cannot resolve {host}")),
+        ));
+    }
+    Ok(kept)
+}
+
 /// The proxy a plain-HTTP request to `host` goes through, when one is set.
 fn http_proxy(host: &str) -> Option<Url> {
     if no_proxy(host) {
@@ -319,10 +384,14 @@ fn over_tcp(request: &Request, url: &Url) -> Result<Response, FetchError> {
         Some(p) => (p.host.clone(), p.port, format!("{}{}", url.origin(), url.target)),
         None => (url.host.clone(), url.port, url.target.clone()),
     };
-    let addrs: Vec<_> = (connect_host.as_str(), connect_port)
-        .to_socket_addrs()
-        .map_err(|err| FetchError::new(format!("cannot resolve {connect_host}: {err}")))?
-        .collect();
+    let addrs: Vec<_> = match (&proxy, request.peer) {
+        // the peer is vetted where the connection is made, not where the URL was
+        (None, Some(check)) => vetted(&connect_host, connect_port, check)?,
+        _ => (connect_host.as_str(), connect_port)
+            .to_socket_addrs()
+            .map_err(|err| FetchError::new(format!("cannot resolve {connect_host}: {err}")))?
+            .collect(),
+    };
     let mut last = FetchError::new(format!("cannot resolve {connect_host}"));
     let mut stream = None;
     for addr in addrs {
@@ -517,6 +586,18 @@ fn via_curl(request: &Request) -> Result<Response, FetchError> {
     if !request.body.is_empty() || request.method == "POST" {
         cmd.arg("--data-binary").arg("@-");
     }
+    if let Some(check) = request.peer {
+        // curl resolves the name again: pin it to an address that passed
+        let url = Url::parse(&request.url)?;
+        if https_proxy(&url.host).is_none() {
+            let addr = vetted(&url.host, url.port, check)?[0];
+            let ip = match addr.ip() {
+                IpAddr::V6(v6) => format!("[{v6}]"),
+                v4 => v4.to_string(),
+            };
+            cmd.arg("--resolve").arg(format!("{}:{}:{ip}", url.host, url.port));
+        }
+    }
     cmd.arg("--").arg(&request.url);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
@@ -634,6 +715,32 @@ mod tests {
         let r = Request::get(&format!("{url}/moved")).follow(1).send().unwrap();
         assert_eq!(r.text(), "{\"got\": false}", "the redirect was followed");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_peer_check_refuses_before_connecting() {
+        fn no_loopback(ip: IpAddr) -> Result<(), String> {
+            if ip.is_loopback() {
+                Err(format!("{ip} is a loopback address"))
+            } else {
+                Ok(())
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let err = Request::get(&format!("http://127.0.0.1:{port}/"))
+            .peer(no_loopback)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .unwrap_err();
+        assert_eq!(err.message, "127.0.0.1 is a loopback address");
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "nothing was sent to the refused peer");
+        assert_eq!(
+            proxy_for("http://127.0.0.1:1/"),
+            None,
+            "loopback never goes through a proxy"
+        );
     }
 
     #[test]
