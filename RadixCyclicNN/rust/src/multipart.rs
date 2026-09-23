@@ -30,7 +30,6 @@ use std::sync::Arc;
 
 use crate::http::{accepted, Answer, ApiError, Request};
 use crate::json::Json;
-use crate::model::TrainOptions;
 use crate::service::Service;
 
 /// What this module's lines are filed under.
@@ -465,6 +464,15 @@ impl<'a> Form<'a> {
         }
     }
 
+    /// `float(_option(..., default))`: like [`Form::float`], but a given `0`
+    /// stays `0` (the learning rate of a training request is read this way).
+    pub fn exact_float(&self, name: &str, default: f64) -> Result<f64, String> {
+        match self.option(name) {
+            Some(Json::Null) | None => Ok(default),
+            Some(value) => python_float(&value),
+        }
+    }
+
     /// `float(_option(...) or default)`.
     pub fn float(&self, name: &str, default: f64) -> Result<f64, String> {
         match self.option(name) {
@@ -820,18 +828,15 @@ pub fn store_all(svc: &Service, files: &[Upload]) -> Result<Json, ApiError> {
 }
 
 /// Starts a training job on `texts` and hands back the job, as the train route
-/// does: the model is held for the run, saved when it succeeds, and the
-/// frontend follows it on `/api/job`.
-pub fn start_train(svc: &Arc<Service>, texts: Vec<String>, epochs: usize) -> Json {
+/// does: the model is held for the run and learns the way its kind learns
+/// ([`crate::kinds::train`], every epoch reported and the stop button
+/// honoured), is saved when it succeeds, and the frontend follows it on
+/// `/api/job`.
+pub fn start_train(svc: &Arc<Service>, texts: Vec<String>, settings: crate::kinds::TrainSettings) -> Json {
     svc.start_job("train");
     let worker = Arc::clone(svc);
-    let opts = TrainOptions {
-        epochs,
-        auto_compress: true,
-        ..Default::default()
-    };
     std::thread::spawn(move || {
-        let outcome = worker.with_model(|m| m.train(&texts, &opts));
+        let outcome = crate::checkpoint::train_job(&worker, &texts, &settings, 0);
         if outcome.is_ok() {
             worker.autosave();
         }
@@ -861,8 +866,22 @@ pub fn save_and_train(svc: &Arc<Service>, form: &Form, mut out: Json, texts: &[S
     if !form.flag("train", false) {
         return Ok(out);
     }
-    let epochs = form.exact_int("epochs", 3).map_err(ApiError::bad_request)?;
-    let job = start_train(svc, texts.to_vec(), epochs.max(0) as usize);
+    // `TrainConfig(epochs=3, lr=0.5, act_lr=..., batch_size=8)`: one long text
+    // (or a few), so the sine model's rate is high; the other kinds count
+    let base = crate::radix::TrainConfig::default();
+    let config = crate::radix::TrainConfig {
+        epochs: form.exact_int("epochs", 3).map_err(ApiError::bad_request)?.max(0) as usize,
+        lr: form.exact_float("lr", 0.5).map_err(ApiError::bad_request)?,
+        act_lr: form.exact_float("act_lr", base.act_lr).map_err(ApiError::bad_request)?,
+        batch_size: form.exact_int("batch_size", 8).map_err(ApiError::bad_request)?.max(0) as usize,
+        ..base
+    };
+    config.validate().map_err(ApiError::bad_request)?;
+    let settings = crate::kinds::TrainSettings {
+        config,
+        ..Default::default()
+    };
+    let job = start_train(svc, texts.to_vec(), settings);
     set(&mut out, "job", job);
     Ok(accepted(out))
 }

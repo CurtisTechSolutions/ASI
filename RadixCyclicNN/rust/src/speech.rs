@@ -984,16 +984,15 @@ pub(crate) fn save_model(model: &mut crate::model::Model, path: &str) -> Result<
 
 /// Trains the model at `--model` on `texts` and saves it to `--model-out` (or
 /// back): the `trained` document of `image encode --train` and `speech teach --train`.
+///
+/// The model learns the way its kind learns (`model.train(texts, epochs=,
+/// lr=, batch_size=)`): `--lr` (0.5 - one long text, so it is high) and
+/// `--batch-size` (8) are the sine model's; the count and phase models count.
 pub(crate) fn train_on(ctx: &Ctx, texts: &[String]) -> Result<Json, String> {
     let mut model = ctx.open(false)?;
-    let epochs = ctx.args.usize("epochs", 3)?;
-    let records = model.train(
-        texts,
-        &crate::model::TrainOptions {
-            epochs,
-            ..Default::default()
-        },
-    )?;
+    let a = &ctx.args;
+    let (epochs, lr, batch_size) = (a.usize("epochs", 3)?, a.float("lr", 0.5)?, a.usize("batch-size", 8)?);
+    let records = crate::kinds::train_at(&mut model, texts, epochs, lr, batch_size)?;
     let out = ctx.args.str("model-out", &ctx.model_path);
     let saved = save_model(&mut model, &out)?;
     crate::log_info!(

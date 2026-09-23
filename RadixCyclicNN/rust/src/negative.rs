@@ -658,13 +658,11 @@ pub struct LogEntry {
     pub edges: usize,
 }
 
-/// Clips a failing text to what the journal keeps.
+/// Clips a failing text to what the journal keeps: its first 160 characters
+/// as written (Python's `text[:160]`, Go's `truncateRunes`) - an evolve fake
+/// ends where the sampler stopped, trailing space and all.
 pub(crate) fn log_text(text: &str) -> String {
-    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_LOG_TEXT_CHARS {
-        return collapsed;
-    }
-    collapsed.chars().take(MAX_LOG_TEXT_CHARS).collect::<String>() + "..."
+    text.chars().take(MAX_LOG_TEXT_CHARS).collect()
 }
 
 #[cfg(test)]
@@ -805,6 +803,32 @@ mod tests {
             .expect("a blamed text");
         }
         m
+    }
+
+    #[test]
+    fn a_network_that_keeps_learning_in_memory_keeps_the_blame_weights() {
+        // an evolve run's or a tutor's network: blamed and cleared again and
+        // again without a reload, so only the touched rows are brought up to
+        // date - and they must come out as a full recompute writes them
+        let mut m = taught();
+        m.g.prepare();
+        for (text, clear) in [("the cat sat on the sky", false), ("the cat sat on the mat", true)] {
+            if clear {
+                m.clear_with(&[text.to_string()], 1.0, 1, &mut |_| true)
+                    .expect("a clearing pass");
+            } else {
+                m.blame(&[text.to_string()], &BlameOptions::default())
+                    .expect("a blamed text");
+            }
+            m.g.prepare();
+            let lazy = m.g.edge_w.clone();
+            m.g.recompute_weights();
+            assert_eq!(lazy, m.g.edge_w, "after {text:?}");
+        }
+        // and the journal keeps a text as it was written
+        m.blame(&["the dog sat on the  sky ".to_string()], &BlameOptions::default())
+            .expect("a blamed text");
+        assert_eq!(m.recent(1)[0].text, "the dog sat on the  sky ");
     }
 
     #[test]

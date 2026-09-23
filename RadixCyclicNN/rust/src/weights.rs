@@ -198,6 +198,19 @@ impl Graph {
             return;
         }
         let dirty: Vec<usize> = self.dirty.drain().collect();
+        if self.neg.is_some() {
+            // the blame distribution's rows, not the count / reward ones: a
+            // negative network that keeps learning in memory (an evolve run's,
+            // the tutor's) would otherwise have its touched rows rewritten by
+            // the count model's function, which reads traversals it never has
+            for p in dirty {
+                if p < self.labels.len() {
+                    self.recompute_negative_row(p);
+                }
+            }
+            self.version.add(1);
+            return;
+        }
         let mut edge_w = std::mem::take(&mut self.edge_w);
         {
             let out = Disjoint::new(&mut edge_w);
