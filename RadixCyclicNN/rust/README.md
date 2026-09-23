@@ -1,70 +1,124 @@
 # rust
 
-A Rust port of the **count / reward model** (`CountRewardNet`), written to
-answer one question — *how much of this model's cost is the language?* — and it
-answers to all three traversals the other two do: `reward`, the walk that
-follows what the model believes; `punishment`, the same graph priced by the
-penalties alone (`../radixnet/penalty.py`, DESIGN §31); and `least-punished`,
-the walk that ranks by the blame a path carries before it looks at the cost at
-all (`../SPEC-LeastPunished.md`).
+A Rust port of **everything the Python package does** - every model kind, every
+teaching loop, the negative network, the LLM clients, the tools, images and
+speech, the CLI and the HTTP API the frontend talks to - held to Python by the
+cross-language suites in `../tests/test_rust_parity*.py`.  Code generation, the
+agent and MCP are the last area, being ported; until they land their commands
+answer that they are not in the Rust port yet.
+
+It began as a port of the **count / reward model** (`CountRewardNet`), written
+to answer one question - *how much of this model's cost is the language?* - and
+it carries all three traversals: `reward`, the walk that follows what the model
+believes; `punishment`, the same graph priced by the penalties alone
+(`../radixnet/penalty.py`, DESIGN §31); and `least-punished`, the walk that
+ranks by the blame a path carries before it looks at the cost at all
+(`../SPEC-LeastPunished.md`).
 
 A standalone crate. The Python implementation in `../radixnet/` and the Go port
 in `../go/` are untouched by it.
 
 **No dependencies**, like the other two: the hash, the Mersenne Twister, the
-exact float sum and the worker pool are written out in `src/`. `Cargo.lock` has
-nothing in it but this crate.
+exact float sum, the worker pool, gzip, ZIP, PNG / JPEG / GIF, BLAKE2b, base64,
+multipart, HTTP/1.1 (server and client) and the logger are written out in
+`src/`. `Cargo.lock` has nothing in it but this crate. The one thing that is not
+written out is TLS: an `https://` request goes through the system's `curl`
+(`src/fetch.rs`, D-076).
 
 ## Contents
+
+### The model
 
 | file | what it is |
 |---|---|
 | `src/encoding.rs` | the encoding dial: what one unit is, how many units a gram holds, how far apart grams start |
 | `src/words.rs` | the word view of a word encoding: the alphabet its grams are made of (`radixnet words`) |
-| `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants |
+| `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants, and `observe_back` (what a voice backing out of a loop teaches it) |
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
 | `src/search.rs` | the traversals, what a node offers a walk, and the stochastic walk |
 | `src/penalty.rs` | the punishment traversal: the merit / penalty split, and the cost function it prices a step with |
-| `src/beam.rs` | the two beams — the k best paths and the k worst |
-| `src/model.rs` | train, predict, generate, score, reward / punish / 2NRL |
+| `src/beam.rs` | the two beams - the k best paths and the k worst |
+| `src/model.rs` | train, predict, generate, score, reward / punish / 2NRL, and the epoch hook checkpoints are written through |
+| `src/kinds.rs` | the model kinds - `count` (this port's default), `radix`, `resonant`, `negative` - and training, 2NRL, reward, punish and `invert_paths` dispatched to each |
+| `src/radix.rs`, `src/activation.rs`, `src/backend.rs`, `src/dijkstra.rs` | the sine-activation model: `f(z) = a*sin(b*(z-h)) + k` per node, a learned weight per edge, Python's one-hop learning rule over CSR, and the exact Dijkstra prediction |
+| `src/schedule.rs` | learning-rate schedules - a small arithmetic language, parsed rather than evaluated - `radixnet schedule`, `/api/schedule` and its preview |
+| `src/resonance.rs`, `src/phasesearch.rs`, `src/metacog.rs` | the phase model: edges learn the phase they fire at, the search runs over (node, units, phase), and a phase-locked cycle goes to the metacognitive layer |
+| `src/negative.rs` | the negative network: a model built only out of failures, blame and clearing, verdicts and the "why" sentence |
+| `src/duo.rs` | the pair on the way out: the positive model writes, the negative one vetoes; the guard on every answer and the `/api/negative` routes |
+| `src/blame.rs`, `src/diff.rs` | where the negative network's data comes from - verdicts turned into faults - and the unit diff that blames only what a teacher changed |
+| `src/correct.rs` | `Model::correct` and `radixnet correct`: teach one correction, only what changed moves |
+| `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round |
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
 | `src/parallel.rs` | the worker pool, and the one `unsafe` in the crate (with its contract) |
-| `src/fsum.rs`, `src/mt19937.rs`, `src/hash.rs` | the exact sum, the RNG and the hash, written out |
-| `src/file.rs` | the `radixnet-count` and `radixnet-word` model files: what Python and Go read and write |
+| `src/fsum.rs`, `src/mt19937.rs`, `src/hash.rs`, `src/pyheap.rs`, `src/blake2b.rs` | the exact sum, CPython's RNG, the hash, `heapq`'s array layout and BLAKE2b, written out |
+| `src/file.rs` | the model files of every kind - `radixnet-count`, `radixnet`, `radixnet-resonant`, `radixnet-negative` - what Python and Go read and write |
 | `src/json.rs` | JSON as Python writes it - compact, UTF-8, and floats rendered as `repr(float)` renders them |
-| `src/gzip.rs` | the gzip container, written out: inflate for reading, a stored-block writer for writing |
-| `src/clock.rs` | the one timestamp a model file carries |
-| `src/log.rs` | logging, written out: levels, targets, timestamps, and never a byte on stdout |
+| `src/gzip.rs`, `src/zip.rs`, `src/source.rs` | gzip written out, ZIP archives read with its inflate, and corpora streamed entry by entry with Python's skip rules |
+| `src/checkpoint.rs` | checkpoints in the Python `CheckpointManager` layout, written from inside a run of any kind; `radixnet checkpoints`, `/api/checkpoints/*` |
+| `src/gan.rs` | the evolve (GAN) loop on every kind - the same draws, generator, discriminator and negative network as Python: `radixnet evolve`, `/api/evolve/*` |
 | `src/report.rs` | the statistics, the judged paths, a node against its neighbours, and the weight knobs |
+| `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark (`radixnet bench`) and its binary |
+
+### The teachers and the tools
+
+| file | what it is |
+|---|---|
+| `src/fetch.rs` | the HTTP client: plain HTTP over `TcpStream`, HTTPS through the system `curl` with the headers (an API key) in a private file, a peer checked where it is connected to |
+| `src/llm.rs`, `src/llm/fields.rs` | what every LLM loop shares: `LlmClient` (models, generate, chat), options, errors, the server's teacher defaults, request fields read as the Python server reads them |
+| `src/ollama.rs`, `src/chatgpt.rs` | the two providers: `radixnet ollama models\|corpus\|review`, `radixnet chatgpt models\|ask`, `/api/ollama/*`, `/api/chatgpt/models` |
+| `src/review.rs` | a corpus from a prompt, the adversarial review and the conversation marking, with Python's prompts byte for byte |
+| `src/critic.rs` | the Negative tab's automatic loop: the model writes, an LLM reviews, the failures blame - `radixnet negative auto`, `/api/negative/auto` |
+| `src/tutor.rs`, `src/tutor/{trainer,serve}.rs`, `src/plan.rs` | the English tutor: exercises, marks, rewards weighted by the mark, the auto run and the lesson plan - `radixnet tutor`, `/api/tutor/*` |
+| `src/chat.rs` | an LLM converses with the model and marks every reply - `radixnet chat`, `/api/chat/*` |
+| `src/calc.rs`, `src/web.rs` | the calculator (Python's grammar, whitelist and error texts) and browsing (a client that refuses anything but a public page, every redirect hop re-checked) |
+| `src/tools.rs`, `src/toolbox.rs`, `src/toolbox/sandbox.rs` | the tool registry and the `<tool>` text format, the built-in tools, and the Python sandbox programs run in - `radixnet tools`, `/api/tools/*` |
+| `src/vision.rs`, `src/vision/{png,jpeg,gif}.rs` | images as text: the Go port's thumbnail encoder over PNG / JPEG / GIF decoders written out - `radixnet image`, `/api/images/*` |
+| `src/speech.rs`, `src/speech/asr.rs` | speech as text: WAV in every format Python reads, both codecs and the unique token; transcripts given or from an OpenAI-compatible server - `radixnet speech`, `/api/speech/*` |
+| `src/recall.rs` | the recall tutor over images and speech, and what it teaches the negative network |
+| `src/multipart.rs`, `src/multipart/base64.rs` | request bodies as Python reads them (multipart, raw, base64) and uploads stored as Python stores them, a ZIP kept whole |
+
+### The surfaces
+
+| file | what it is |
+|---|---|
+| `src/cli.rs` | the command line's plumbing, and the table that sends a command to the module that answers it |
+| `src/bin/radixnet.rs` | the CLI: the model's own commands, and every other module's through `cli::COMMANDS` |
 | `src/http.rs` | HTTP/1.1 written out: the requests, the routes, the static files and the SPA fallback |
-| `src/service.rs` | the API the frontend talks to — the same JSON contract as the Python and Go servers |
-| `src/bin/radixnet.rs` | the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes, words, info, serve |
-| `src/bench.rs`, `src/bin/radixnet-bench.rs` | the benchmark and its binary |
-| `tests/model.rs` | the model end to end, and all three traversals |
-| `tests/words.rs` | the word model: the alphabet, the phrases compression makes of it, and its file |
-| `tests/server.rs` | the HTTP API end to end: a real server on a real port, answering the JSON contract |
+| `src/service.rs` | the API the frontend talks to - the same JSON contract as the Python and Go servers; `/api/status` lists every route it serves |
+| `src/log.rs` | logging, written out: levels, targets, timestamps, and never a byte on stdout |
+| `src/clock.rs` | the one timestamp a model file carries |
+| `tests/*.rs` | the model, the encodings, the words and the HTTP API end to end |
+| `../tests/rust_harness.py`, `../tests/test_rust_parity*.py` | the contract with Python, one suite per area |
 
 ## What is here, and what is not
 
-The model is here in full: the graph and its structural operations, the weight
-function, the path contexts, all three traversals, training, prediction,
-generation, scoring, reward / punish / 2NRL, the `radixnet-count` **model file**,
-the CLI over all of it, and the **HTTP server** the frontend talks to — and, with
-`--encoding`, the same model over any n-gram of characters *or* words
-(`char:3:1` is the default, `char:5:5` groups of five letters, `word:3:1` the
-word trigram; `../SPEC-WordNGrams.md`). A model trained here continues in Python
-or in Go and back again, and `frontend/dist` runs against `radixnet serve` the
-same way it runs against the other two — including switching between a character
-and a word encoding from the model selector, which parks the model that was
-running rather than dropping it.
+All of it but the last area (code generation, the agent, MCP and the WebDriver
+browser, in progress), and each area answers to Python through its own parity
+suite: the
+same model files (byte for byte, but for the `version` cache stamp and the
+clock), the same predictions and scores, the same prompts sent to an LLM, the
+same marks, and the same model afterwards.  The frontend runs against
+`radixnet serve` unchanged: a tab is shown when the route it needs is in
+`/api/status`.
 
-Not ported: the negative network, the tutors and the other teaching loops, the
-agent and its tools, the LLM clients, images and speech, and MCP. The first
-group is a gap of the *undone* kind. The LLM clients are the deliberate kind:
-they need HTTPS, and a crate with no dependencies cannot speak it — porting them
-means giving up the rule in D-072, which is a decision to take rather than a
-thing to quietly do.
+**Deliberately not ported**, and why:
+
+* **the torch backend** (`backend_torch.py`) - it is torch on a GPU; the
+  sine model trains with Python's own CPU learning rule instead, and
+  `--backend torch` says so;
+* **the Stable Diffusion image encoder** - it needs torch; images go through the
+  Go port's thumbnail encoder, as they do against the Go server;
+* **local Whisper** (`faster-whisper`, `whisper`) - Python packages; speech is
+  transcribed from a given transcript or by an OpenAI-compatible transcription
+  server.
+
+**Where it differs on purpose:** `count` stays this port's default kind (Python's
+is `radix`); a CLI run cannot be interrupted with Ctrl-C (the standard library
+cannot catch it), so the long loops save as they go; the calculator's integers
+stop at 2**127; and where Python has a bug the port does what Python meant and
+says so in the code (the HTML reader and `<meta>`, a word model's corrections,
+the review's `lessons` key).
 
 ## Building and running
 
@@ -93,7 +147,9 @@ radixnet --quiet ...                             # nothing at all
 
 The default is `warn`, so a CLI run says nothing unless something is wrong;
 `serve` raises its own default to `info`, because a server that says nothing
-while it runs cannot be debugged. Targets are `http`, `model` and `train`.
+while it runs cannot be debugged. Targets: `http`, `model`, `train`, `negative`,
+`checkpoint`, `evolve`, `bench`, `llm`, `tools`, `media`, `tutor`, `chat` and
+`critic`.
 
 **Every line goes to stderr**, and there is no way to configure one onto
 stdout. That is not a style choice: `--json` puts one document there, so a log

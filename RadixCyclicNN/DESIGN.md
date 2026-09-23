@@ -3373,7 +3373,11 @@ model answers the two searches differently somewhere, so neither can pass by the
 `rust/` is a standalone crate (edition 2021, **no dependencies**) porting section 19's model a second time: the
 graph and its structural operations, the dual frequency weight function, the judged path contexts, **all three
 traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished one in `src/search.rs`), training,
-prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file**.
+prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file** - and,
+since D-077, the rest of the package: the sine-activation and phase models, the negative network and the guard,
+every teaching loop, the LLM clients (HTTPS through the system `curl`, D-076), the tools, images and speech - code
+generation, the agent and MCP being the last area, in progress - one module per area with one parity suite per area (`tests/test_rust_parity*.py`).  What it
+deliberately leaves out - the torch backend, the Stable Diffusion encoder, local Whisper - `rust/README.md` names.
 
 The dial is the one place the port paid a representation for generality.  A trigram used to be three code points
 packed into a `u64` - `Copy`, hashable, no allocation - which is why its encoding pass allocated nothing and is one
@@ -3381,15 +3385,15 @@ of the three reasons D-072 measured it faster than Go.  A gram of *any* n over *
 index is keyed by the gram as Python and Go key it, and what that costs is measured rather than argued
 (`bench/RESULTS.md`).  `src/encoding.rs` carries `Encoding{unit, n, stride}` and a `Units` view that indexes a text
 once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  Its binaries
-are `radixnet` (the CLI: train, predict, generate, score, feedback, 2nrl, invert, compress, weights, paths, nodes,
-words, info, serve) and `radixnet-bench`.
+are `radixnet` (the CLI: every command of Python's, the model's own in `src/bin/radixnet.rs` and every other area's
+through `cli::COMMANDS`) and `radixnet-bench`.
 
 **The server is here too** (`src/http.rs`, `src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
 line, the headers, `Content-Length`, the static files of `frontend/dist` with the SPA fallback, and a thread per
-connection - under the same 30-route JSON contract §12 defines and the Python and Go servers answer, down to
-`engine` naming which one is replying.  `frontend/dist` runs against `radixnet serve` unmodified; the tabs a Rust
-server cannot fill hide themselves on `engine == "rust"`, and what it will not serve says so with a 400 rather than
-a half answer (`/api/words` on a character model, `/api/model/select` for a kind no Rust server runs).
+connection - under the whole JSON contract §12 defines and the Python and Go servers answer, down to `engine` naming which one
+is replying.  `frontend/dist` runs against `radixnet serve` unmodified: `/api/status` lists every route the server
+has (`routes`) and a tab is shown against the Rust server when the route it needs is in that list, and what it
+will not serve says so with a 400 rather than a half answer (`/api/words` on a character model).
 
 Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
 of the port:

@@ -83,7 +83,7 @@ D-075 the least-punished traversal
 D-073 words as symbols (superseded by it)
 
 **Part XVII — A third implementation** · D-072 the Rust port · D-074 how parity is measured ·
-D-076 HTTPS through the system curl
+D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -2887,6 +2887,13 @@ table for "Rust is 4x faster than Go" has been misled by it.
 * Go keeps its racy-by-design counting (D-038); the comparison uses `--exact` on
   both sides, because a benchmark of a deliberate data race measures the race.
 
+* **Update, 2026-09-23.** The port now carries nearly the whole package - every
+  model kind, the negative network, the teaching loops, the LLM clients, the
+  tools, images and speech (code generation, the agent and MCP are the last
+  area, in progress) - and the "one gap is deliberate" above no
+  longer holds: D-076 has the LLM clients speak HTTPS through the system `curl`
+  without taking a dependency. D-077 records how the rest was laid out.
+
 **Lives in** `rust/`, `bench/`, `Makefile` (the `rust-*` targets, `bench-compare`)
 
 ---
@@ -2935,6 +2942,13 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
   a job it has started on a worker thread; and saves each kind to its own file.
 * The gap lists in `rust/README.md`, `go/README.md` and DESIGN §33 say which
   kind of gap each remaining item is.
+* **Update, 2026-09-23.** Rust's *undone* list is down to its last area (code
+  generation, the agent and MCP, in progress). What else remains is
+  deliberate and named in `rust/README.md`: the torch backend, the Stable
+  Diffusion encoder and local Whisper (each needs Python packages or a GPU).
+  The LLM clients left the deliberate list (D-076), and learning-rate schedules
+  are no longer "about a model the ports do not run": the Rust port runs the
+  sine-activation model and serves `radixnet schedule` and its preview.
 
 **Lives in** `go/radixnet/mcp.go`, `go/cmd/radixnet-count/mcp.go`,
 `rust/src/service.rs`, `rust/src/http.rs`, `Makefile` (`go-mcp`)
@@ -2981,6 +2995,57 @@ completion.
   every hop against the private-address rule itself.
 
 **Lives in** `rust/src/fetch.rs`
+
+---
+
+### D-077 — The rest of Python, ported by area: one module per area, a tab per route
+
+**Status** Accepted · 2026-09-23 · **Layer** platform · **Beside** D-072, D-074, D-076
+
+**Context** Everything the Rust port lacked was asked for at once: the negative
+network's filter, the conversation, the LLM clients, the tutor and chat, the
+critic, evolve, checkpoints, ZIP corpora, the tools and the sandbox, images and
+speech, the agent and MCP, and two whole model kinds. Written as one piece it
+would have been months of serial work through three shared files - the CLI's
+command match, the server's route table and its state.
+
+**Decision** The crate is laid out **by area**. `src/cli.rs` holds the command
+line in the library, with a table sending each command to the module that
+answers it; every area is a module that owns its commands (`cli(ctx)`), its
+routes (`routes(server)`) and its server state, wired into the service once.
+Each area has its own parity suite (`tests/test_rust_parity_<area>.py`, on
+`tests/rust_harness.py`). The areas were then ported in parallel and merged,
+and what only showed at the seams was fixed there:
+
+* **One loader for the server's negative network**, which takes the model's lock
+  before the negative network's and never the other way round - three areas had
+  each written their own, and the first one deadlocked when the filter was the
+  first thing asked of it.
+* **Checkpoints through an epoch hook the model carries**, run at the end of
+  every epoch by every kind's loop, instead of training an epoch at a time -
+  which kept the count model exact and would have broken the sine model's
+  learning-rate schedule.
+* **Every learning loop through `crate::kinds`**, because the loops were ported
+  against the count model and the sine and phase models arrived later.
+
+The frontend shows a tab against the Rust server when **the route it needs is in
+`/api/status`** (`routes`), instead of from a fixed list of what Rust "has".
+
+**Rationale** Parallel work only pays when it does not collide, and the
+collisions were all in three files; taking those apart first made every area a
+set of files nobody else touched. A tab gated on the route list cannot drift
+from the server: it appears the day the route does.
+
+**Consequences**
+* A new area is a module, one row in `cli::COMMANDS`, one `routes` call and one
+  parity suite.
+* `/api/status` carries `routes`; the frontend reads it only for the Rust engine.
+* Rust jobs end `done`, `stopped` or `error`, the words the other two servers
+  use (the Predict tab waited on `done`).
+
+**Lives in** `rust/src/cli.rs`, `rust/src/service.rs` (`build`), `rust/src/duo.rs`
+(`Service::ensure_negative`), `rust/src/checkpoint.rs`, `rust/src/kinds.rs`,
+`frontend/src/App.jsx`, `tests/rust_harness.py`
 
 ---
 
