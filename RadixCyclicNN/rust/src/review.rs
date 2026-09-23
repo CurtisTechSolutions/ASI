@@ -640,7 +640,8 @@ pub fn adversarial_review(
 ///
 /// The system prompt asks for short, plain lines ending on words that are easy
 /// to carry on from, because that is what a character-level model can
-/// actually reply to.  `temperature` 0 means the default 0.8.
+/// actually reply to.  `temperature` is sent as given - 0 is greedy, as
+/// Python's `chat_line` sends it (the default is the caller's: 0.8).
 pub fn chat_line(
     client: &dyn LlmClient,
     transcript: &[(String, String)],
@@ -671,7 +672,7 @@ pub fn chat_line(
     } else {
         "Open the conversation with one short, plain line.".to_string()
     };
-    let temperature = if temperature > 0.0 { temperature } else { 0.8 };
+    let temperature = temperature.max(0.0);
     let o = LlmOptions::default()
         .system(system)
         .model(model)
@@ -1182,7 +1183,7 @@ mod tests {
             ("Partner".to_string(), "hi".to_string()),
             ("Model".to_string(), "".to_string()),
         ];
-        let line = chat_line(&llm, &transcript, "food", "a cook", "", 0.0).unwrap();
+        let line = chat_line(&llm, &transcript, "food", "a cook", "", 0.8).unwrap();
         assert_eq!(line, "what did you eat today?");
         let asked = llm.asked.lock().unwrap();
         assert_eq!(

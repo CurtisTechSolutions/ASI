@@ -143,6 +143,10 @@ pub const SWITCHES: &[&str] = &[
     "whole-file",
 ];
 
+/// Flags whose value may be left out, with what a bare one means (Python's
+/// `nargs="?"` and `const`): `--plan` alone plans the default three lessons.
+pub const OPTIONAL_VALUES: &[(&str, &str)] = &[("plan", "3")];
+
 /// Splits a command line into the command and its flags.
 pub fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
     let mut command = String::new();
@@ -158,9 +162,14 @@ pub fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
             if SWITCHES.contains(&name.as_str()) && inline.is_none() {
                 args.switches.push(name);
             } else {
-                let value = match inline {
-                    Some(v) => v,
-                    None => {
+                let bare = OPTIONAL_VALUES.iter().find(|(flag, _)| *flag == name);
+                let value = match (inline, bare) {
+                    (Some(v), _) => v,
+                    // a bare optional flag: nothing follows, or another flag does
+                    (None, Some((_, meaning))) if argv.get(i + 1).is_none_or(|next| next.starts_with("--")) => {
+                        meaning.to_string()
+                    }
+                    (None, _) => {
                         i += 1;
                         argv.get(i).cloned().ok_or_else(|| format!("--{name} needs a value"))?
                     }
@@ -563,6 +572,13 @@ mod tests {
         assert_eq!(args.usize("epochs", 1).unwrap(), 3);
         assert_eq!(args.maybe_float("threshold").unwrap(), None);
         assert!(parse_args(&argv(&["train", "--epochs"])).is_err());
+        // a bare --plan means the default three lessons, as Python's const does
+        let (_, args) = parse_args(&argv(&["tutor", "--plan", "--rounds", "2"])).unwrap();
+        assert_eq!((args.get("plan"), args.get("rounds")), (Some("3"), Some("2")));
+        let (_, args) = parse_args(&argv(&["tutor", "--plan"])).unwrap();
+        assert_eq!(args.get("plan"), Some("3"));
+        let (_, args) = parse_args(&argv(&["tutor", "--plan", "5"])).unwrap();
+        assert_eq!(args.get("plan"), Some("5"));
     }
 
     #[test]
