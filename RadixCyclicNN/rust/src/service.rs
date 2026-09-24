@@ -888,9 +888,11 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     let (kind, ..) = svc.active_kind();
     // the negative network guards the answer: the best continuation it does
     // not veto is the one that comes back, and when it vetoes every one the
-    // continuation is empty and `guard` says why (`guard: false` turns it off)
+    // continuation is empty and `guard` says why (`guard: false` turns it off;
+    // `provenance: false` keeps the vetoes' reasons out of the answer)
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(crate::beam::Prediction, Json), String> {
+        svc.guard(provenance, |pair| -> Result<(crate::beam::Prediction, Json), String> {
             let found = pair.positive.predict(&prefix, &opts)?;
             let (ranked, verdicts) = pair.rank(&prefix, &found);
             let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
@@ -959,22 +961,27 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     // the negative network guards the texts: the model is asked for
     // `over_sample` times as many and what the negative half recognises as
-    // failure never reaches the answer (fewer come back when it vetoed a lot)
+    // failure never reaches the answer (fewer come back when it vetoed a lot;
+    // `provenance: false` reports how many were vetoed, not which or why)
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
-            let outcome = pair.generate(opts.count, &opts)?;
-            let report = crate::duo::guard_report(
-                pair,
-                &outcome.verdicts,
-                vec![
-                    ("candidates", Json::Int(outcome.candidates as i64)),
-                    ("kept", Json::Int(outcome.kept.len() as i64)),
-                    ("asked", Json::Int(outcome.asked as i64)),
-                    ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
-                ],
-            );
-            Ok((outcome.results, report))
-        })?
+        svc.guard(
+            provenance,
+            |pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
+                let outcome = pair.generate(opts.count, &opts)?;
+                let report = crate::duo::guard_report(
+                    pair,
+                    &outcome.verdicts,
+                    vec![
+                        ("candidates", Json::Int(outcome.candidates as i64)),
+                        ("kept", Json::Int(outcome.kept.len() as i64)),
+                        ("asked", Json::Int(outcome.asked as i64)),
+                        ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
+                    ],
+                );
+                Ok((outcome.results, report))
+            },
+        )?
     } else {
         None
     };

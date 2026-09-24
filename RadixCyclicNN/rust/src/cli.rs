@@ -93,6 +93,7 @@ pub const SWITCHES: &[&str] = &[
     "allow-word-repeats",
     "blame",
     "browser",
+    "correct",
     "dry-run",
     "exact",
     "json",
@@ -114,6 +115,7 @@ pub const SWITCHES: &[&str] = &[
     "no-learn",
     "no-model",
     "no-network-isolation",
+    "no-provenance",
     "no-ratio",
     "no-replay",
     "no-solve",
@@ -292,10 +294,11 @@ impl Ctx {
 
 impl Ctx {
     /// The negative network guarding the output of `--model`, with the filter
-    /// settings of `--threshold`, `--min-coverage` and `--over-sample`; `None`
-    /// when `--no-guard` was given, when there is no negative network beside
-    /// the model, or when the one there has never been taught a failure and
-    /// so would veto nothing (Python's `open_guard`).
+    /// settings of `--threshold`, `--min-coverage` and `--over-sample` (and
+    /// `--no-provenance`: veto without saying why); `None` when `--no-guard`
+    /// was given, when there is no negative network beside the model, or when
+    /// the one there has never been taught a failure and so would veto
+    /// nothing (Python's `open_guard`).
     pub fn open_guard(&self) -> Result<Option<(Model, crate::duo::FilterConfig)>, String> {
         if self.args.on("no-guard") {
             return Ok(None);
@@ -312,6 +315,7 @@ impl Ctx {
             threshold: self.args.maybe_float("threshold")?,
             min_coverage: self.args.maybe_float("min-coverage")?,
             over_sample: self.args.usize("over-sample", 3)?,
+            provenance: !self.args.on("no-provenance"),
             ..Default::default()
         };
         if let Some(g) = negative.g.neg.as_ref() {

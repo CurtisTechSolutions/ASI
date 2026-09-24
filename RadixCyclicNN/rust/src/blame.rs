@@ -11,10 +11,16 @@
 //! verdict on its own.
 //!
 //! This module is the core every tutor shares.  Each tutor turns its own
-//! records into faults beside its own types: the review in `review.rs`, the
-//! English lessons in `tutor.rs`, program attempts in `codegen.rs`, tool use
-//! in `agent.rs`, recall in `recall.rs`.
+//! records into faults beside its own types: the review and the copy editor
+//! in `review.rs`, the English lessons in `tutor.rs`, program attempts in
+//! `codegen.rs`, tool use in `agent.rs`, recall in `recall.rs`.
+//!
+//! The copy editor's vocabulary lives here too: [`CORRECTION_REASONS`] names
+//! what a smallest change put right, [`correction_reason`] picks one from the
+//! editor's own word, its note or - failing both - the shape of the diff
+//! ([`reason_from_changes`]).
 
+use crate::diff::Edit;
 use crate::json::Json;
 use crate::model::{EpochRecord, Model};
 use crate::negative::BlameOptions;
@@ -36,6 +42,82 @@ pub const REASONS: &[&str] = &[
     "off-topic",
     DEFAULT_REASON,
 ];
+
+/// Reason tags for a *corrected* text: what the copy editor's smallest change
+/// put right (`"none"`: nothing).
+pub const CORRECTION_REASONS: &[&str] = &[
+    "spelling",
+    "punctuation",
+    "capitalisation",
+    "spacing",
+    "agreement",
+    "tense",
+    "article",
+    "preposition",
+    "plural",
+    "pronoun",
+    "word-order",
+    "vocabulary",
+    "repetition",
+    "fragment",
+    "nonsense",
+    "grammar",
+    "none",
+];
+
+/// How heavily one correction is blamed: one ordinary failure per corrected
+/// text, placed only on its changed characters.
+pub const CORRECTION_SEVERITY: f64 = 1.0;
+
+/// The editor's other words for the tags of [`CORRECTION_REASONS`].
+const CORRECTION_ALIASES: &[(&str, &str)] = &[
+    ("typo", "spelling"),
+    ("misspelling", "spelling"),
+    ("misspelt", "spelling"),
+    ("spell", "spelling"),
+    ("capitalization", "capitalisation"),
+    ("case", "capitalisation"),
+    ("casing", "capitalisation"),
+    ("capital", "capitalisation"),
+    ("uppercase", "capitalisation"),
+    ("lowercase", "capitalisation"),
+    ("whitespace", "spacing"),
+    ("space", "spacing"),
+    ("spaces", "spacing"),
+    ("subject-verb", "agreement"),
+    ("verb-agreement", "agreement"),
+    ("conjugation", "agreement"),
+    ("articles", "article"),
+    ("prepositions", "preposition"),
+    ("plurals", "plural"),
+    ("number", "plural"),
+    ("pronouns", "pronoun"),
+    ("order", "word-order"),
+    ("word order", "word-order"),
+    ("syntax", "grammar"),
+    ("wording", "vocabulary"),
+    ("word-choice", "vocabulary"),
+    ("word choice", "vocabulary"),
+    ("word", "vocabulary"),
+    ("repeat", "repetition"),
+    ("repeated", "repetition"),
+    ("duplicate", "repetition"),
+    ("duplication", "repetition"),
+    ("incomplete", "fragment"),
+    ("truncated", "fragment"),
+    ("unfinished", "fragment"),
+    ("gibberish", "nonsense"),
+    ("meaningless", "nonsense"),
+    ("garbled", "nonsense"),
+    ("ok", "none"),
+    ("correct", "none"),
+    ("nothing", "none"),
+    ("unchanged", "none"),
+    ("no change", "none"),
+];
+
+/// What counts as punctuation when a diff is read for its kind.
+const PUNCTUATION: &str = ".,;:!?'\"-()[]{}\u{2018}\u{2019}\u{201c}\u{201d}\u{2013}\u{2014}/&";
 
 /// Reason tags for reviewed *programs*.
 pub const CODE_REASONS: &[&str] = &[
@@ -241,6 +323,120 @@ pub fn severity_of(table: &[(&str, f64)], reason: &str) -> f64 {
     table.iter().find(|(r, _)| *r == reason).map(|(_, s)| *s).unwrap_or(1.0)
 }
 
+fn is_punctuation(c: char) -> bool {
+    PUNCTUATION.contains(c)
+}
+
+/// Python's `str.isspace()`.
+fn is_space(c: char) -> bool {
+    crate::multipart::base64::is_python_space(c)
+}
+
+/// The reason a diff speaks for itself, from what its edits touched (`"none"`
+/// when nothing changed).
+///
+/// Every edit is read for what it moved and the widest kind wins: a whole
+/// word inserted or struck out is `grammar`, a change that only turns a word
+/// into another word is `spelling`, and one that only touches punctuation,
+/// letter case or spaces is that.
+pub fn reason_from_changes(changes: &[Edit]) -> String {
+    let mut kinds: Vec<&str> = Vec::new();
+    for edit in changes {
+        if edit.op == "equal" || edit.wrong == edit.right {
+            continue;
+        }
+        let kind = change_kind(&edit.wrong, &edit.right);
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    for kind in ["grammar", "spelling", "punctuation", "spacing", "capitalisation"] {
+        if kinds.contains(&kind) {
+            return kind.to_string();
+        }
+    }
+    "none".to_string()
+}
+
+/// What one edit moved: punctuation, spaces, letter case, letters inside a
+/// word, or a whole word.
+fn change_kind(wrong: &str, right: &str) -> &'static str {
+    let moved = format!("{wrong}{right}");
+    if !moved.is_empty() && moved.chars().all(is_punctuation) {
+        return "punctuation";
+    }
+    if !moved.is_empty() && moved.chars().all(is_space) {
+        return "spacing";
+    }
+    if wrong.to_lowercase() == right.to_lowercase() {
+        return "capitalisation";
+    }
+    let without = |s: &str| -> String { s.chars().filter(|&c| !is_punctuation(c) && !is_space(c)).collect() };
+    if without(wrong) == without(right) {
+        // only punctuation and spaces moved, however the letters were carried along
+        return if moved.chars().any(is_punctuation) {
+            "punctuation"
+        } else {
+            "spacing"
+        };
+    }
+    if wrong.chars().any(is_space) || right.chars().any(is_space) {
+        return "grammar"; // a space moved with the letters: a word was added, dropped or reordered
+    }
+    "spelling" // letters changed inside one word
+}
+
+/// The reason tag behind a copy editor's correction, out of
+/// [`CORRECTION_REASONS`].
+///
+/// The editor's own word wins when the vocabulary knows it (aliases such as
+/// `typo` or `capitalization` are accepted); failing that its note is read the
+/// way a critique is ([`classify`]), and failing that the diff decides
+/// ([`reason_from_changes`]).  `"none"` is only ever what the diff says about
+/// an unchanged text.
+pub fn correction_reason(reason: &str, note: &str, changes: &[Edit]) -> String {
+    let word = reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .trim_matches(|c| ".:;,\"'".contains(c))
+        .to_string();
+    let word = CORRECTION_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == word)
+        .map(|(_, tag)| tag.to_string())
+        .unwrap_or(word);
+    if word != "none" {
+        if CORRECTION_REASONS.contains(&word.as_str()) {
+            return word;
+        }
+        let hyphenated = word.replace(' ', "-");
+        if CORRECTION_REASONS.contains(&hyphenated.as_str()) {
+            return hyphenated;
+        }
+    }
+    // Python's `classify(note, default="")`: an empty default is this port's
+    // DEFAULT_REASON, which the vocabulary itself never produces
+    let spoken = classify(note, "", None, "");
+    if spoken != DEFAULT_REASON {
+        let mapped = match spoken.as_str() {
+            "gibberish" | "incoherent" => "nonsense",
+            "truncated" => "fragment",
+            other => other,
+        };
+        if CORRECTION_REASONS.contains(&mapped) {
+            return mapped.to_string();
+        }
+    }
+    let from_diff = reason_from_changes(changes);
+    if from_diff != "none" {
+        from_diff
+    } else {
+        "grammar".to_string()
+    }
+}
+
 /// One lesson for the negative network.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fault {
@@ -303,12 +499,19 @@ pub struct TeachReport {
     pub threshold: Option<f64>,
     pub faults: Vec<Fault>,
     pub passed: usize,
+    /// The copy editor's report (`teach_corrections`): the blame per
+    /// corrected text, the units it changed over all faults, and how many
+    /// texts it gave no usable answer for.
+    pub severity: Option<f64>,
+    pub edits: Option<usize>,
+    pub uncorrected: Option<usize>,
 }
 
 impl TeachReport {
     /// `{"blamed", "cleared", "unmatched", "edges", "reasons",
     /// "severity_mean", "records"}` and, when a tutor filled them in,
-    /// `source`, `threshold`, `faults` and `passed`.
+    /// `source`, `threshold` (or the copy editor's `severity`), `faults` and
+    /// `passed` (and the editor's `edits` and `uncorrected`).
     pub fn to_json(&self) -> Json {
         let mut pairs = vec![
             ("blamed".to_string(), Json::Int(self.blamed as i64)),
@@ -329,15 +532,24 @@ impl TeachReport {
         ];
         if !self.source.is_empty() {
             pairs.push(("source".to_string(), Json::str(self.source.clone())));
-            pairs.push((
-                "threshold".to_string(),
-                self.threshold.map(Json::Num).unwrap_or(Json::Null),
-            ));
+            match self.severity {
+                Some(severity) => pairs.push(("severity".to_string(), Json::Num(severity))),
+                None => pairs.push((
+                    "threshold".to_string(),
+                    self.threshold.map(Json::Num).unwrap_or(Json::Null),
+                )),
+            }
             pairs.push((
                 "faults".to_string(),
                 Json::Arr(self.faults.iter().map(|f| f.to_json()).collect()),
             ));
             pairs.push(("passed".to_string(), Json::Int(self.passed as i64)));
+            if let Some(edits) = self.edits {
+                pairs.push(("edits".to_string(), Json::Int(edits as i64)));
+            }
+            if let Some(uncorrected) = self.uncorrected {
+                pairs.push(("uncorrected".to_string(), Json::Int(uncorrected as i64)));
+            }
         }
         Json::Obj(pairs)
     }
@@ -467,6 +679,87 @@ mod tests {
         assert_eq!(classify("", "", Some(0.0), ""), "gibberish");
         assert_eq!(classify("meh", "", Some(3.0), "thumbs-down"), "thumbs-down");
         assert_eq!(classify("meh", "", None, ""), DEFAULT_REASON);
+    }
+
+    #[test]
+    fn the_diff_says_what_kind_of_mistake_it_was() {
+        let edit = |op: &'static str, wrong: &str, right: &str| Edit {
+            op,
+            a0: 0,
+            a1: 0,
+            b0: 0,
+            b1: 0,
+            wrong: wrong.to_string(),
+            right: right.to_string(),
+        };
+        assert_eq!(reason_from_changes(&[]), "none");
+        assert_eq!(reason_from_changes(&[edit("equal", "same", "same")]), "none");
+        assert_eq!(reason_from_changes(&[edit("delete", "?", "")]), "punctuation");
+        assert_eq!(reason_from_changes(&[edit("insert", "", " ")]), "spacing");
+        assert_eq!(reason_from_changes(&[edit("replace", "the", "The")]), "capitalisation");
+        assert_eq!(reason_from_changes(&[edit("replace", "howe", "how")]), "spelling");
+        assert_eq!(
+            reason_from_changes(&[edit("replace", "cat,dog", "cat, dog")]),
+            "punctuation"
+        );
+        assert_eq!(
+            reason_from_changes(&[edit("replace", "cat dog", "cat, dog")]),
+            "punctuation"
+        );
+        assert_eq!(reason_from_changes(&[edit("insert", "", " the")]), "grammar");
+        assert_eq!(
+            reason_from_changes(&[edit("delete", "?", ""), edit("replace", "howe", "how")]),
+            "spelling",
+            "the widest kind wins"
+        );
+        assert_eq!(
+            reason_from_changes(&[edit("replace", "a", "A"), edit("delete", " ", "")]),
+            "spacing"
+        );
+    }
+
+    #[test]
+    fn the_editors_word_wins_then_its_note_then_the_diff() {
+        let changes = [Edit {
+            op: "delete",
+            a0: 6,
+            a1: 7,
+            b0: 7,
+            b1: 7,
+            wrong: "e".to_string(),
+            right: String::new(),
+        }];
+        assert_eq!(correction_reason("spelling", "", &changes), "spelling");
+        assert_eq!(correction_reason(" Typo. ", "", &changes), "spelling");
+        assert_eq!(correction_reason("Capitalization", "", &[]), "capitalisation");
+        assert_eq!(correction_reason("word order", "", &[]), "word-order");
+        assert_eq!(
+            correction_reason("'subject verb'", "", &[]),
+            "grammar",
+            "not a tag: the note, then the diff"
+        );
+        assert_eq!(correction_reason("", "the text is cut off", &[]), "fragment");
+        assert_eq!(correction_reason("", "pure word salad", &[]), "nonsense");
+        assert_eq!(
+            correction_reason("", "it makes no sense", &[]),
+            "grammar",
+            "not a critique the vocabulary knows"
+        );
+        assert_eq!(correction_reason("", "the same word over and over", &[]), "repetition");
+        assert_eq!(
+            correction_reason("", "a false statement", &changes),
+            "spelling",
+            "not an editor's reason"
+        );
+        assert_eq!(
+            correction_reason("none", "", &changes),
+            "spelling",
+            "never none for a changed text"
+        );
+        assert_eq!(correction_reason("nothing", "", &[]), "grammar");
+        assert_eq!(correction_reason("", "", &[]), "grammar");
+        assert_eq!(CORRECTION_REASONS.len(), 17);
+        assert_eq!(CORRECTION_SEVERITY, 1.0);
     }
 
     #[test]

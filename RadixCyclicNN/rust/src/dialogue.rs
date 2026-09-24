@@ -1176,12 +1176,13 @@ fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     let opening = r.text("opening", "");
     let guard_on = r.flag("guard", true);
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     // one conversation, with or without a partner: the parked partner's lock is
     // taken first, then the running model's, then the guard's
     let talk = |partner: Option<&mut Model>| -> Result<(Vec<Turn>, Json), ApiError> {
         let mut partner = partner;
         let guarded = if guard_on {
-            svc.guard(|pair| -> Result<(Vec<Turn>, Json), String> {
+            svc.guard(provenance, |pair| -> Result<(Vec<Turn>, Json), String> {
                 let outcome = converse_guarded(pair, partner.as_deref_mut(), &opening, &o)?;
                 // `vetoed` counts the distinct texts refused, `refusals` how often one was
                 let report = guard_report(

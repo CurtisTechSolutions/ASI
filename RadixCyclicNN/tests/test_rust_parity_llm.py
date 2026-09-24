@@ -233,7 +233,7 @@ class TestRustCriticParity(unittest.TestCase):
         self.assertEqual(set(taught_a), set(taught_b))
         for key in ("blamed", "cleared", "edges", "edits", "reasons", "lessons"):
             self.assertEqual(taught_a[key], taught_b[key], key)
-        self.assertEqual((taught_b["blamed"], taught_b["cleared"]), (2, 1))
+        self.assertEqual((taught_b["blamed"], taught_b["cleared"]), (2, 0))  # the unchanged text shares no trigram with the failures
         self.assertEqual([r["reason"] for r in taught_b["reasons"]], ["spelling"])
         self.assertEqual(taught_b["lessons"][0]["severity"], 1.5)
         # only the changed characters are known failures on either side

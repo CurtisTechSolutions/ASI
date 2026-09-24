@@ -1,10 +1,11 @@
-//! The adversarial LLM review and the prompt-driven corpus, over any LLM
-//! client (`radixnet/ollama.py`, `go/radixnet/review.go`), and the bridge from
-//! a review to the negative network (`radixnet/blame.py`'s
-//! `faults_from_reviews` / `teach_reviews`).
+//! The adversarial LLM review, the letter-level LLM correction and the
+//! prompt-driven corpus, over any LLM client (`radixnet/ollama.py`,
+//! `go/radixnet/review.go`), and the bridges from a review or a correction to
+//! the negative network (`radixnet/blame.py`'s `faults_from_reviews` /
+//! `teach_reviews` and `faults_from_corrections` / `teach_corrections`).
 //!
-//! Two ways of hooking the network into an LLM, and they are the pair 2NRL
-//! wants:
+//! Three ways of hooking the network into an LLM; the first two are the pair
+//! 2NRL wants:
 //!
 //! * **A corpus from a prompt** - [`corpus_from_prompt`] asks for N lines about
 //!   a topic, either correct (`good`) or deliberately wrong (`garbage`).
@@ -15,12 +16,22 @@
 //!   passed and what did not; [`teach_reviews`] hands the failures to the
 //!   negative network, with the critique picking the reason and the mark
 //!   setting the severity.
+//! * **The copy editor** - [`correct_texts`] makes the LLM write each text
+//!   out correctly with the smallest possible change, and the diff between
+//!   the two ([`crate::diff::edits`]) is the lesson: [`teach_corrections`]
+//!   hands each changed text to the negative network as a [`Fault`] carrying
+//!   its `correction`, so only the characters the editor struck out or
+//!   replaced are blamed, under the editor's own word for the mistake
+//!   ([`crate::blame::correction_reason`]); a text handed back unchanged
+//!   clears blame, and one the answer said nothing usable about
+//!   (`uncorrected`) does neither.  [`adversarial_correction`] runs it over
+//!   the network's own samples (or given texts).
 //!
-//! Both only ever call [`LlmClient::generate`], so ChatGPT reviews as happily as
-//! a local model does.  The prompts are the Python ones byte for byte - the
-//! parity suite compares what a fake LLM receives from each port - which is
-//! why a pass mark is printed with [`format_g`] and the texts are numbered by
-//! their place in their batch, as Python numbers them.
+//! All three only ever call [`LlmClient::generate`], so ChatGPT reviews as
+//! happily as a local model does.  The prompts are the Python ones byte for
+//! byte - the parity suite compares what a fake LLM receives from each port -
+//! which is why a pass mark is printed with [`format_g`] and the texts are
+//! numbered by their place in their batch, as Python numbers them.
 //!
 //! The conversation marking ([`chat_line`], [`review_conversation`]) lives here
 //! too, beside the review it is a variant of, for the chat loop to build on.
@@ -34,7 +45,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::blame::{classify, severity_from_rating, teach, Fault, TeachOptions, TeachReport};
+use crate::blame::{
+    classify, correction_reason, severity_from_rating, teach, Fault, TeachOptions, TeachReport, CORRECTION_REASONS,
+};
+use crate::diff::Edit;
+use crate::encoding::Encoding;
 use crate::http::ApiError;
 use crate::json::Json;
 use crate::llm::fields::{py_str_of, truthy};
@@ -71,6 +86,21 @@ const REVIEW_SYSTEM: &str = "You are an adversarial reviewer of text produced by
      only, no prose, exactly of the form {\"reviews\": [{\"index\": <int>, \"rating\": <number>, \"verdict\": \
      \"pass\" or \"fail\", \"critique\": \"<one sentence naming the worst flaw, or 'no flaw found'>\"}, ...]} with \
      one entry per text, in the given order and with the given index.";
+
+const CORRECT_SYSTEM: &str = "You are a meticulous copy editor correcting short texts written by a small \
+     experimental character-level language model. For each text write the corrected text: the same text in correct, \
+     natural English with the SMALLEST possible change. Keep every character that is already right, keep the wording, \
+     the meaning and the length as they are, and change only what is actually wrong: a misspelt letter, a missing or \
+     doubled punctuation mark, a wrong ending, a missing word. Never rewrite, never add commentary, never quote. If a \
+     text is already correct, return it exactly as it is. Name the kind of mistake with one word from this list: \
+     {reasons}; use \"none\" for a text you did not change. Reply with JSON only, no prose, exactly of the form \
+     {\"corrections\": [{\"index\": <int>, \"correction\": \"<the corrected text>\", \"reason\": \"<one word from \
+     the list>\", \"note\": \"<one short sentence saying what was wrong, or 'nothing'>\"}, ...]} with one entry per \
+     text, in the given order and with the given index.";
+
+/// What the editor did with a text: changed it, handed it back as it was, or
+/// could not be understood about it.
+pub const CORRECTION_VERDICTS: [&str; 3] = ["corrected", "unchanged", "uncorrected"];
 
 const CHAT_SYSTEM: &str = "You are having a short, ordinary conversation with a very small character-level neural \
      network that is learning to talk. It answers by continuing the last few words you wrote, so every line you \
@@ -632,6 +662,416 @@ pub fn adversarial_review(
     Ok(summarise_reviews(source, reviewer, o.threshold, samples, reviews))
 }
 
+// -- the copy editor ----------------------------------------------------------------------------
+
+/// One text as the copy editor handed it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorrectionEntry {
+    /// Its place in the corrected set.
+    pub index: usize,
+    pub text: String,
+    /// The text written out correctly; `None`, with verdict `"uncorrected"`,
+    /// when the answer said nothing usable about it.
+    pub correction: Option<String>,
+    /// One of [`CORRECTION_VERDICTS`].
+    pub verdict: String,
+    /// The editor's word for the mistake, mapped onto [`CORRECTION_REASONS`]
+    /// (`"none"` for an unchanged text, `""` for an uncorrected one).
+    pub reason: String,
+    /// The editor's sentence about it.
+    pub note: String,
+    /// The edits of the alignment, equal runs left out.
+    pub changes: Vec<Edit>,
+    pub edits: usize,
+    /// Characters struck out or replaced, and characters written in their
+    /// place, over all the changes.
+    pub wrong_chars: usize,
+    pub right_chars: usize,
+}
+
+impl CorrectionEntry {
+    /// `{"index", "text", "correction", "verdict", "reason", "note",
+    /// "changes", "edits", "wrong_chars", "right_chars"}`.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("index", Json::Int(self.index as i64)),
+            ("text", Json::str(self.text.clone())),
+            (
+                "correction",
+                self.correction.clone().map(Json::str).unwrap_or(Json::Null),
+            ),
+            ("verdict", Json::str(self.verdict.clone())),
+            ("reason", Json::str(self.reason.clone())),
+            ("note", Json::str(self.note.clone())),
+            (
+                "changes",
+                Json::Arr(self.changes.iter().map(Edit::to_json_with_spans).collect()),
+            ),
+            ("edits", Json::Int(self.edits as i64)),
+            ("wrong_chars", Json::Int(self.wrong_chars as i64)),
+            ("right_chars", Json::Int(self.right_chars as i64)),
+        ])
+    }
+
+    /// A correction as it arrives in a request or a record (the inverse of
+    /// [`CorrectionEntry::to_json`]).
+    pub fn from_json(doc: &Json, position: usize) -> CorrectionEntry {
+        let count = |key: &str| doc.at(key).as_i64().unwrap_or(0).max(0) as usize;
+        CorrectionEntry {
+            index: doc.at("index").as_i64().map(|i| i.max(0) as usize).unwrap_or(position),
+            text: doc.at("text").as_str().unwrap_or("").to_string(),
+            correction: doc.at("correction").as_str().map(str::to_string),
+            verdict: doc.at("verdict").as_str().unwrap_or("").to_string(),
+            reason: doc.at("reason").as_str().unwrap_or("").to_string(),
+            note: doc.at("note").as_str().unwrap_or("").to_string(),
+            changes: doc.at("changes").as_array().iter().map(Edit::from_json).collect(),
+            edits: count("edits"),
+            wrong_chars: count("wrong_chars"),
+            right_chars: count("right_chars"),
+        }
+    }
+
+    /// One [`correct_texts`] result: the diff against the correction, and
+    /// what the editor said (Python's `_correction_entry`).
+    fn new(index: usize, text: &str, correction: Option<&str>, reason: &str, note: &str) -> CorrectionEntry {
+        let Some(correction) = correction else {
+            return CorrectionEntry {
+                index,
+                text: text.to_string(),
+                correction: None,
+                verdict: "uncorrected".to_string(),
+                reason: String::new(),
+                note: if note.is_empty() {
+                    "no correction returned".to_string()
+                } else {
+                    note.to_string()
+                },
+                changes: Vec::new(),
+                edits: 0,
+                wrong_chars: 0,
+                right_chars: 0,
+            };
+        };
+        let changes: Vec<Edit> = crate::diff::edits(text, correction, &Encoding::default())
+            .into_iter()
+            .filter(|e| e.op != "equal")
+            .collect();
+        let changed = correction != text;
+        CorrectionEntry {
+            index,
+            text: text.to_string(),
+            correction: Some(correction.to_string()),
+            verdict: if changed { "corrected" } else { "unchanged" }.to_string(),
+            reason: if changed {
+                correction_reason(reason, note, &changes)
+            } else {
+                "none".to_string()
+            },
+            note: if !note.is_empty() {
+                note.to_string()
+            } else if changed {
+                "corrected".to_string()
+            } else {
+                "nothing".to_string()
+            },
+            edits: changes.len(),
+            wrong_chars: changes.iter().map(|e| e.a1 - e.a0).sum(),
+            right_chars: changes.iter().map(|e| e.b1 - e.b0).sum(),
+            changes,
+        }
+    }
+}
+
+/// A copy-edited set, split into what was changed, what was right as it was,
+/// and what got no answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorrectionSummary {
+    /// `"model"` (the network's own samples) or `"given"`.
+    pub source: String,
+    /// The editor's model.
+    pub model: String,
+    pub texts: Vec<String>,
+    pub corrections: Vec<CorrectionEntry>,
+    pub corrected: Vec<String>,
+    pub unchanged: Vec<String>,
+    pub uncorrected: Vec<String>,
+    /// The changes, the characters struck out and the characters written in,
+    /// over all the corrections.
+    pub edits: usize,
+    pub wrong_chars: usize,
+    pub right_chars: usize,
+    /// The share of the answered texts the editor changed; `None` when it
+    /// answered none.
+    pub change_rate: Option<f64>,
+}
+
+impl CorrectionSummary {
+    /// `{"source", "model", "texts", "corrections", "corrected", "unchanged",
+    /// "uncorrected", "edits", "wrong_chars", "right_chars", "change_rate"}`.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("source", Json::str(self.source.clone())),
+            ("model", Json::str(self.model.clone())),
+            ("texts", Json::strs(self.texts.clone())),
+            (
+                "corrections",
+                Json::Arr(self.corrections.iter().map(CorrectionEntry::to_json).collect()),
+            ),
+            ("corrected", Json::strs(self.corrected.clone())),
+            ("unchanged", Json::strs(self.unchanged.clone())),
+            ("uncorrected", Json::strs(self.uncorrected.clone())),
+            ("edits", Json::Int(self.edits as i64)),
+            ("wrong_chars", Json::Int(self.wrong_chars as i64)),
+            ("right_chars", Json::Int(self.right_chars as i64)),
+            ("change_rate", self.change_rate.map(Json::Num).unwrap_or(Json::Null)),
+        ])
+    }
+}
+
+/// The system prompt of a correction: the editor's vocabulary is every
+/// [`CORRECTION_REASONS`] tag but `"none"`.
+pub fn correct_system() -> String {
+    let reasons: Vec<&str> = CORRECTION_REASONS.iter().copied().filter(|r| *r != "none").collect();
+    CORRECT_SYSTEM.replace("{reasons}", &reasons.join(", "))
+}
+
+/// `item.get(first, item.get(second, item.get(third)))`: the first key that is
+/// there at all (even as `null`), else the next.
+fn present_field<'a>(item: &'a Json, keys: &[&str]) -> Option<&'a Json> {
+    keys.iter().find_map(|k| item.get(k))
+}
+
+/// `{index: (correction, reason, note)}` for the entries of a correction
+/// answer that could be understood, whatever shape the model drifted into:
+/// `{"corrections": [...]}`, `{"results" | "items": [...]}`, a bare list (of
+/// objects, or of the corrected lines themselves), or one object when a
+/// single text was asked about; `corrected` / `text` stand in for
+/// `correction`, `error` for `reason`, and `critique` / `comment` for `note`.
+/// The correction is stripped of the quotes a model wraps it in; the reason
+/// comes back lower-cased and the note with its spaces collapsed.
+pub fn parse_corrections(raw: &str, count: usize) -> BTreeMap<usize, (String, String, String)> {
+    let mut parsed = BTreeMap::new();
+    let data = loads_lenient(raw);
+    let single;
+    let items: &[Json] = match &data {
+        Some(doc @ Json::Obj(_)) => {
+            let listed = doc
+                .get("corrections")
+                .filter(|v| !v.is_null())
+                .or_else(|| doc.get("results").or_else(|| doc.get("items")).filter(|v| !v.is_null()));
+            match listed {
+                Some(Json::Arr(items)) => items,
+                Some(_) => return parsed,
+                None if doc.get("correction").is_some() || doc.get("corrected").is_some() => {
+                    single = [doc.clone()];
+                    &single
+                }
+                None => return parsed,
+            }
+        }
+        Some(Json::Arr(items)) => items,
+        _ => return parsed,
+    };
+    for (position, item) in items.iter().enumerate() {
+        let line;
+        let item = match item {
+            // a bare list of corrected lines
+            Json::Str(text) => {
+                line = Json::obj([("correction", Json::str(text.clone()))]);
+                &line
+            }
+            Json::Obj(_) => item,
+            _ => continue,
+        };
+        let index = match item.get("index") {
+            None => position as i64,
+            Some(value) => py_int(value).unwrap_or(position as i64),
+        };
+        let Some(Json::Str(correction)) = present_field(item, &["correction", "corrected", "text"]) else {
+            continue;
+        };
+        let correction = correction
+            .trim()
+            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '\u{201c}' | '\u{201d}'))
+            .trim()
+            .to_string();
+        let reason = first_text(item, &["reason", "error"]).to_lowercase();
+        let note = first_text(item, &["note", "critique", "comment"])
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if index >= 0 && (index as usize) < count {
+            parsed.entry(index as usize).or_insert((correction, reason, note));
+        }
+    }
+    parsed
+}
+
+/// Asks the LLM to write every text out correctly, in input order, `batch`
+/// texts per call, and aligns each answer against its text.
+///
+/// A blank text is `uncorrected` without asking (`"empty output"`); so is a
+/// text the answer said nothing usable about (`"no correction returned"`) -
+/// nothing is known about either, so neither blames nor clears.  `model`
+/// overrides the client's own (`""` = its own); `context` tells the editor
+/// what the texts are meant to be.
+pub fn correct_texts(
+    client: &dyn LlmClient,
+    texts: &[String],
+    context: &str,
+    model: &str,
+    batch: usize,
+) -> Result<Vec<CorrectionEntry>, ReviewError> {
+    if batch < 1 {
+        return Err(invalid("batch must be >= 1"));
+    }
+    let system = correct_system();
+    let mut out = Vec::with_capacity(texts.len());
+    for (chunk_no, chunk) in texts.chunks(batch).enumerate() {
+        let start = chunk_no * batch;
+        let asked: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.trim().is_empty())
+            .map(|(i, t)| format!("[{i}] {t}"))
+            .collect();
+        let mut parsed = BTreeMap::new();
+        if !asked.is_empty() {
+            let mut user = String::new();
+            if !context.trim().is_empty() {
+                user.push_str(&format!("Context: {}\n\n", context.trim()));
+            }
+            user.push_str(&format!(
+                "Correct these {} texts:\n{}\n\nReturn the JSON now.",
+                asked.len(),
+                asked.join("\n")
+            ));
+            let o = LlmOptions::default()
+                .system(system.clone())
+                .model(model)
+                .json()
+                .temperature(0.0);
+            let raw = client.generate(&user, &o)?;
+            parsed = parse_corrections(&raw, chunk.len());
+        }
+        for (i, text) in chunk.iter().enumerate() {
+            let index = start + i;
+            out.push(if text.trim().is_empty() {
+                CorrectionEntry::new(index, text, None, "", "empty output")
+            } else if let Some((correction, reason, note)) = parsed.get(&i) {
+                CorrectionEntry::new(index, text, Some(correction), reason, note)
+            } else {
+                CorrectionEntry::new(index, text, None, "", "")
+            });
+        }
+    }
+    crate::log_debug!(LOG, "corrected {} text(s)", texts.len());
+    Ok(out)
+}
+
+/// Splits a copy-edited set into what was changed, what was right as it was,
+/// and what got no answer, and works out the change rate.
+///
+/// `change_rate` is the share of the answered texts the editor changed: the
+/// copy editor's counterpart of the reviewer's pass rate, falling as the
+/// model's writing improves.  Separate from [`adversarial_correction`] for
+/// the same reason [`summarise_reviews`] is: a server samples under its model
+/// lock and corrects outside it.
+pub fn summarise_corrections(
+    source: &str,
+    model: &str,
+    texts: Vec<String>,
+    corrections: Vec<CorrectionEntry>,
+) -> CorrectionSummary {
+    let with = |verdict: &str| -> Vec<String> {
+        corrections
+            .iter()
+            .filter(|c| c.verdict == verdict)
+            .map(|c| c.text.clone())
+            .collect()
+    };
+    let corrected = with("corrected");
+    let unchanged = with("unchanged");
+    let uncorrected = with("uncorrected");
+    let answered = corrected.len() + unchanged.len();
+    CorrectionSummary {
+        source: source.to_string(),
+        model: model.to_string(),
+        texts,
+        edits: corrections.iter().map(|c| c.edits).sum(),
+        wrong_chars: corrections.iter().map(|c| c.wrong_chars).sum(),
+        right_chars: corrections.iter().map(|c| c.right_chars).sum(),
+        change_rate: (answered > 0).then(|| corrected.len() as f64 / answered as f64),
+        corrections,
+        corrected,
+        unchanged,
+        uncorrected,
+    }
+}
+
+/// The knobs of one [`adversarial_correction`]: a review's, without a pass
+/// mark - the editor changes what is wrong and marks nothing.
+#[derive(Clone, Debug)]
+pub struct CorrectionOptions {
+    /// Samples to draw from the model.
+    pub count: usize,
+    /// Continue this instead of generating whole texts.
+    pub prefix: String,
+    pub max_length: usize,
+    pub temperature: f64,
+    /// Correct these instead of sampling from the model.
+    pub texts: Option<Vec<String>>,
+    /// What the texts are meant to be.
+    pub context: String,
+    /// The editor's model (`""` = the client's own).
+    pub model: String,
+    pub seed: Option<i64>,
+    /// Texts per call (0 = [`DEFAULT_BATCH`]).
+    pub batch: usize,
+}
+
+impl Default for CorrectionOptions {
+    /// The Python defaults: eight samples of sixty characters.
+    fn default() -> CorrectionOptions {
+        CorrectionOptions {
+            count: 8,
+            prefix: String::new(),
+            max_length: 60,
+            temperature: 1.0,
+            texts: None,
+            context: String::new(),
+            model: String::new(),
+            seed: None,
+            batch: 0,
+        }
+    }
+}
+
+/// Lets the LLM copy-edit the network's own output (or `o.texts`), letter by
+/// letter.
+pub fn adversarial_correction(
+    model: Option<&mut Model>,
+    client: &dyn LlmClient,
+    o: &CorrectionOptions,
+) -> Result<CorrectionSummary, ReviewError> {
+    let (samples, source) = match (&o.texts, model) {
+        (Some(texts), _) => (texts.clone(), "given"),
+        (None, Some(model)) => (
+            sample_texts(model, o.count, &o.prefix, o.max_length, o.temperature, o.seed).map_err(invalid)?,
+            "model",
+        ),
+        (None, None) => return Err(invalid("either a model to sample from or texts to correct is required")),
+    };
+    let batch = if o.batch == 0 { DEFAULT_BATCH } else { o.batch };
+    let corrections = correct_texts(client, &samples, &o.context, &o.model, batch)?;
+    let editor = if o.model.is_empty() {
+        client.model()
+    } else {
+        o.model.as_str()
+    };
+    Ok(summarise_corrections(source, editor, samples, corrections))
+}
+
 // -- conversing with the network, and marking the conversation ----------------------------------
 
 /// The next line of the LLM's side of a conversation with the network;
@@ -852,6 +1292,89 @@ pub fn teach_reviews(
     Ok(report)
 }
 
+/// `(faults, unchanged texts)` from a correction: every text the editor
+/// changed becomes a fault that carries its `correction`, so [`teach`] routes
+/// it through the negative network's correction path and only the characters
+/// the editor struck out or replaced are blamed; its reason is the editor's
+/// word for the mistake ([`correction_reason`]) and its note the editor's
+/// sentence.  The texts it handed back unchanged come back separately, to
+/// clear blame.  A text it gave no usable answer for (`uncorrected`) is
+/// neither: nobody said anything about it.
+pub fn faults_from_corrections(
+    corrections: &[CorrectionEntry],
+    severity: f64,
+    source: &str,
+) -> (Vec<Fault>, Vec<String>) {
+    let mut faults = Vec::new();
+    let mut unchanged = Vec::new();
+    let amount = severity.abs();
+    for entry in corrections {
+        let (Some(correction), false) = (&entry.correction, entry.text.is_empty()) else {
+            continue;
+        };
+        let verdict = entry.verdict.trim().to_lowercase();
+        if verdict == "unchanged" || (verdict.is_empty() && correction == &entry.text) {
+            unchanged.push(entry.text.clone());
+            continue;
+        }
+        if correction == &entry.text {
+            continue;
+        }
+        let mut reason = entry.reason.trim().to_lowercase();
+        if reason == "none" || !CORRECTION_REASONS.contains(&reason.as_str()) {
+            reason = correction_reason(&reason, &entry.note, &entry.changes);
+        }
+        let mut fault = Fault::new(&entry.text, &reason, amount, &entry.note, source);
+        fault.correction = correction.clone();
+        faults.push(fault);
+    }
+    (faults, unchanged)
+}
+
+/// Feeds a copy editor's corrections straight into the negative network: the
+/// changed characters of every corrected text blame it, and - with
+/// `clear_passes` - the unchanged texts take blame off what they share with
+/// known failures.  The report says which source and severity taught it,
+/// which faults, how many texts were unchanged (`passed`), how many units
+/// the editor changed over all faults (`edits`) and how many texts it gave
+/// no usable answer for (`uncorrected`).
+pub fn teach_corrections(
+    negative: &mut Model,
+    corrections: &[CorrectionEntry],
+    severity: f64,
+    clear_passes: bool,
+    source: &str,
+    o: &TeachOptions,
+) -> Result<TeachReport, String> {
+    let source = if source.is_empty() { "correction" } else { source };
+    let (faults, unchanged) = faults_from_corrections(corrections, severity, source);
+    let clearing: &[String] = if clear_passes { &unchanged } else { &[] };
+    let mut report = teach(negative, &faults, clearing, o)?;
+    report.source = source.to_string();
+    report.severity = Some(severity.abs());
+    report.edits = Some(
+        report
+            .records
+            .iter()
+            .filter(|r| r.at("phase").as_str() == Some("correction"))
+            .map(|r| r.at("edits").as_i64().unwrap_or(0).max(0) as usize)
+            .sum(),
+    );
+    report.uncorrected = Some(corrections.iter().filter(|c| c.verdict == "uncorrected").count());
+    report.faults = faults;
+    report.passed = unchanged.len();
+    crate::log_info!(
+        LOG,
+        "{source}: blamed {} correction(s) over {} edge(s) ({} changed unit(s)), cleared {} of {} unchanged",
+        report.blamed,
+        report.edges,
+        report.edits.unwrap_or(0),
+        report.cleared,
+        report.passed
+    );
+    Ok(report)
+}
+
 /// Everything a negative network has been blamed for, heaviest first -
 /// `[{"reason", "blame", "fails", "fails_resets", "edges", "share"}]`, the
 /// rows of Python's `NegativeNet.reasons()`, with how many live edges carry
@@ -918,6 +1441,39 @@ mod tests {
                 answer: Box::new(answer),
                 asked: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Copy-edits every `[i] text` line: "howe" becomes "how" and a
+        /// doubled "??" one "?", with a comma after a leading "Hi"; a line
+        /// that says "skip" gets no entry, the rest come back as they were.
+        pub(crate) fn editor() -> Scripted {
+            Scripted::new(|prompt, _| {
+                let mut entries = Vec::new();
+                for line in prompt.lines() {
+                    if let Some(rest) = line.strip_prefix('[') {
+                        if let Some((index, text)) = rest.split_once("] ") {
+                            if text.contains("skip") {
+                                continue;
+                            }
+                            let fixed = text.replace("howe", "how").replace("??", "?");
+                            let fixed = match fixed.strip_prefix("Hi ") {
+                                Some(rest) => format!("Hi, {rest}"),
+                                None => fixed,
+                            };
+                            let (reason, note) = if fixed == text {
+                                ("none", "nothing")
+                            } else {
+                                ("typo", "a misspelt word and a doubled question mark")
+                            };
+                            entries.push(format!(
+                                "{{\"index\": {index}, \"correction\": \"{fixed}\", \"reason\": \"{reason}\", \
+                                 \"note\": \"{note}\"}}"
+                            ));
+                        }
+                    }
+                }
+                format!("{{\"corrections\": [{}]}}", entries.join(", "))
+            })
         }
 
         /// Marks every `[i] text` line: 9 when it says "good", else 2.
@@ -1129,6 +1685,197 @@ mod tests {
         let prefixed = sample_texts(&mut model, 2, "a good", 30, 1.0, None).unwrap();
         assert!(prefixed.iter().all(|t| t.starts_with("a good")));
         assert!(sample_texts(&mut model, 0, "", 30, 1.0, None).is_err());
+    }
+
+    #[test]
+    fn editor_answers_are_read_whatever_shape_they_came_in() {
+        let raw = "{\"corrections\": [{\"index\": 0, \"correction\": \" \\\"Hi, how are you?\\\" \", \"reason\": \
+                   \" Typo \", \"note\": \"an  extra\\n letter\"}, {\"index\": 1, \"corrected\": \"two\", \"error\": \
+                   \"spacing\", \"critique\": \"x\"}, {\"index\": 2, \"correction\": null}, {\"index\": 7, \
+                   \"correction\": \"far\"}, {\"index\": \"x\", \"text\": \"by position\"}, 42, \"a bare line\"]}";
+        let parsed = parse_corrections(raw, 7);
+        assert_eq!(
+            parsed[&0],
+            (
+                "Hi, how are you?".to_string(),
+                "typo".to_string(),
+                "an extra letter".to_string()
+            )
+        );
+        assert_eq!(parsed[&1], ("two".to_string(), "spacing".to_string(), "x".to_string()));
+        assert!(!parsed.contains_key(&2), "a null correction is no correction");
+        assert!(!parsed.contains_key(&7), "out of range");
+        assert_eq!(parsed[&4].0, "by position", "the position stands in for a bad index");
+        assert_eq!(parsed[&6].0, "a bare line", "a bare list of lines is read too");
+        assert!(!parsed.contains_key(&5), "a number is not an entry");
+        assert!(parse_corrections("garbage", 3).is_empty());
+        assert_eq!(parse_corrections("[\"one\", \"two\"]", 2)[&1].0, "two");
+        assert_eq!(parse_corrections("{\"correction\": \"one\"}", 1)[&0].0, "one");
+        assert_eq!(parse_corrections("{\"corrected\": \"one\"}", 1)[&0].0, "one");
+        assert!(parse_corrections("{\"text\": \"one\"}", 1).is_empty());
+        assert!(parse_corrections("{\"results\": null, \"items\": [{\"correction\": \"x\"}]}", 1).is_empty());
+        // the first present key wins even when it is null
+        assert!(parse_corrections("[{\"correction\": null, \"corrected\": \"x\"}]", 1).is_empty());
+    }
+
+    #[test]
+    fn the_editor_is_asked_as_python_asks_it_and_the_diff_is_the_lesson() {
+        let llm = Scripted::editor();
+        let entries = correct_texts(
+            &llm,
+            &texts(&["Hi howe are you??", "the cat sat on the mat", "   ", "please skip me"]),
+            " short greetings ",
+            "",
+            DEFAULT_BATCH,
+        )
+        .unwrap();
+        let verdicts: Vec<&str> = entries.iter().map(|c| c.verdict.as_str()).collect();
+        assert_eq!(verdicts, vec!["corrected", "unchanged", "uncorrected", "uncorrected"]);
+        let first = &entries[0];
+        assert_eq!(first.correction.as_deref(), Some("Hi, how are you?"));
+        assert_eq!(
+            (first.reason.as_str(), first.edits, first.wrong_chars, first.right_chars),
+            ("spelling", 3, 2, 1)
+        );
+        assert_eq!(first.note, "a misspelt word and a doubled question mark");
+        let ops: Vec<(&str, &str, &str)> = first
+            .changes
+            .iter()
+            .map(|e| (e.op, e.wrong.as_str(), e.right.as_str()))
+            .collect();
+        assert_eq!(ops, vec![("insert", "", ","), ("delete", "e", ""), ("delete", "?", "")]);
+        assert_eq!(
+            first.to_json().at("changes").as_array()[0].render(0),
+            "{\"op\":\"insert\",\"wrong\":\"\",\"right\":\",\",\"at\":[2,2],\"to\":[2,3]}"
+        );
+        assert_eq!(
+            (entries[1].reason.as_str(), entries[1].note.as_str()),
+            ("none", "nothing")
+        );
+        assert_eq!(entries[2].note, "empty output");
+        assert!(entries[2].correction.is_none() && entries[2].reason.is_empty());
+        assert_eq!(entries[3].note, "no correction returned");
+        assert_eq!(entries[3].index, 3);
+        let asked = llm.asked.lock().unwrap();
+        let (prompt, o) = &asked[0];
+        assert_eq!(
+            prompt,
+            "Context: short greetings\n\nCorrect these 3 texts:\n[0] Hi howe are you??\n[1] the cat sat on the mat\n\
+             [3] please skip me\n\nReturn the JSON now."
+        );
+        assert!(o.json);
+        assert_eq!(o.options, vec![("temperature".to_string(), Json::Num(0.0))]);
+        assert!(o.system.starts_with("You are a meticulous copy editor"));
+        assert!(o.system.contains(
+            "from this list: spelling, punctuation, capitalisation, spacing, agreement, tense, article, \
+                       preposition, plural, pronoun, word-order, vocabulary, repetition, fragment, nonsense, grammar; \
+                       use \"none\""
+        ));
+        assert!(o
+            .system
+            .ends_with("with one entry per text, in the given order and with the given index."));
+        drop(asked);
+        assert_eq!(correct_texts(&llm, &texts(&["   "]), "", "", 20).unwrap().len(), 1);
+        assert_eq!(llm.asked.lock().unwrap().len(), 1, "blank texts are not sent");
+        assert!(correct_texts(&llm, &[], "", "", 0).is_err());
+        // the record round-trips
+        let back = CorrectionEntry::from_json(&first.to_json(), 9);
+        assert_eq!(&back, first);
+    }
+
+    #[test]
+    fn a_correction_summary_counts_what_changed() {
+        let llm = Scripted::editor();
+        let o = CorrectionOptions {
+            texts: Some(texts(&["Hi howe are you??", "fine as it is", "skip this", "howe??"])),
+            ..Default::default()
+        };
+        let result = adversarial_correction(None, &llm, &o).unwrap();
+        assert_eq!((result.source.as_str(), result.model.as_str()), ("given", "scripted"));
+        assert_eq!(result.corrected, texts(&["Hi howe are you??", "howe??"]));
+        assert_eq!(result.unchanged, texts(&["fine as it is"]));
+        assert_eq!(result.uncorrected, texts(&["skip this"]));
+        assert_eq!((result.edits, result.wrong_chars, result.right_chars), (4, 4, 1));
+        assert!((result.change_rate.unwrap() - 2.0 / 3.0).abs() < 1e-12);
+        let doc = result.to_json();
+        let keys: Vec<&str> = match &doc {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            keys,
+            vec![
+                "source",
+                "model",
+                "texts",
+                "corrections",
+                "corrected",
+                "unchanged",
+                "uncorrected",
+                "edits",
+                "wrong_chars",
+                "right_chars",
+                "change_rate"
+            ]
+        );
+        let silent = Scripted::new(|_, _| "no".to_string());
+        let none = adversarial_correction(None, &silent, &o).unwrap();
+        assert!(none.change_rate.is_none(), "nothing answered, no rate");
+        assert!(adversarial_correction(None, &llm, &CorrectionOptions::default()).is_err());
+    }
+
+    #[test]
+    fn corrections_blame_the_changed_characters_and_unchanged_texts_clear() {
+        let llm = Scripted::editor();
+        let entries = correct_texts(
+            &llm,
+            &texts(&["Hi howe are you??", "the cat sat on the mat", "howe now", "skip"]),
+            "",
+            "",
+            20,
+        )
+        .unwrap();
+        let (faults, unchanged) = faults_from_corrections(&entries, -1.5, "correction");
+        assert_eq!(unchanged, texts(&["the cat sat on the mat"]));
+        assert_eq!(faults.len(), 2);
+        assert_eq!(faults[0].correction, "Hi, how are you?");
+        assert_eq!((faults[0].reason.as_str(), faults[0].severity), ("spelling", 1.5));
+        assert_eq!(faults[0].note, "a misspelt word and a doubled question mark");
+        // a reason outside the vocabulary is worked out again from the note and the diff
+        let mut odd = entries[2].clone();
+        odd.reason = "weird".to_string();
+        odd.note = "it is truncated".to_string();
+        assert_eq!(faults_from_corrections(&[odd], 1.0, "x").0[0].reason, "fragment");
+        let mut same = entries[0].clone();
+        same.correction = Some(same.text.clone());
+        same.verdict = String::new();
+        assert_eq!(
+            faults_from_corrections(&[same], 1.0, "x").1.len(),
+            1,
+            "no verdict, no change: unchanged"
+        );
+        let mut negative = Model::new_negative(0, &Default::default()).unwrap();
+        let report = teach_corrections(&mut negative, &entries, 1.5, true, "critic", &TeachOptions::default()).unwrap();
+        assert_eq!((report.blamed, report.passed, report.cleared), (2, 1, 0));
+        assert_eq!(
+            (report.severity, report.edits, report.uncorrected),
+            (Some(1.5), Some(4), Some(1))
+        );
+        assert_eq!(report.reasons, vec![("spelling".to_string(), 2)]);
+        let doc = report.to_json();
+        assert!(doc.get("threshold").is_none());
+        assert_eq!(doc.at("severity").as_f64(), Some(1.5));
+        assert_eq!(doc.at("edits").as_i64(), Some(4));
+        assert_eq!(doc.at("uncorrected").as_i64(), Some(1));
+        assert_eq!(
+            doc.at("faults").as_array()[0].at("correction").as_str(),
+            Some("Hi, how are you?")
+        );
+        // only the changed characters are known failures
+        let verdict = negative.judge("Hi, how are you?", &Default::default()).unwrap();
+        assert_eq!(verdict.verdict, "pass");
+        let verdict = negative.judge("Hi howe are you??", &Default::default()).unwrap();
+        assert_eq!(verdict.reasons[0].reason, "spelling");
     }
 
     #[test]
