@@ -1,0 +1,376 @@
+{
+  "openings": 12,
+  "opening_plies": 4,
+  "opponent": {
+    "skill": 20,
+    "depth": 8,
+    "elo": null
+  },
+  "judge_depth": 6,
+  "head_to_head": {
+    "2nrl vs positive": {
+      "score": 0.22916666666666666,
+      "games": 72,
+      "stderr": 0.044748169626441715,
+      "ci95": 0.08770641246782576,
+      "wins": 12,
+      "draws": 9,
+      "losses": 51,
+      "pairings": 3,
+      "elo": -210.7
+    },
+    "2nrl vs 2nrl-worst": {
+      "score": 0.3402777777777778,
+      "games": 72,
+      "stderr": 0.04963551395764975,
+      "ci95": 0.09728560735699351,
+      "wins": 19,
+      "draws": 11,
+      "losses": 42,
+      "pairings": 3,
+      "elo": -115.0
+    },
+    "2nrl vs 2nrl-random": {
+      "score": 0.3888888888888889,
+      "games": 72,
+      "stderr": 0.05032769694689525,
+      "ci95": 0.09864228601591468,
+      "wins": 19,
+      "draws": 18,
+      "losses": 35,
+      "pairings": 3,
+      "elo": -78.5
+    },
+    "2nrl vs repulsion": {
+      "score": 0.3680555555555556,
+      "games": 72,
+      "stderr": 0.04263665630120993,
+      "ci95": 0.08356784635037146,
+      "wins": 12,
+      "draws": 29,
+      "losses": 31,
+      "pairings": 3,
+      "elo": -93.9
+    },
+    "positive vs 2nrl-worst": {
+      "score": 0.6319444444444444,
+      "games": 72,
+      "stderr": 0.04946625340009929,
+      "ci95": 0.09695385666419461,
+      "wins": 37,
+      "draws": 17,
+      "losses": 18,
+      "pairings": 3,
+      "elo": 93.9
+    },
+    "positive vs 2nrl-random": {
+      "score": 0.6666666666666666,
+      "games": 72,
+      "stderr": 0.052449397948329625,
+      "ci95": 0.10280081997872606,
+      "wins": 44,
+      "draws": 8,
+      "losses": 20,
+      "pairings": 3,
+      "elo": 120.4
+    },
+    "positive vs repulsion": {
+      "score": 0.5833333333333334,
+      "games": 72,
+      "stderr": 0.044677829258680954,
+      "ci95": 0.08756854534701466,
+      "wins": 27,
+      "draws": 30,
+      "losses": 15,
+      "pairings": 3,
+      "elo": 58.5
+    },
+    "2nrl-worst vs 2nrl-random": {
+      "score": 0.6527777777777778,
+      "games": 72,
+      "stderr": 0.053045658838700244,
+      "ci95": 0.10396949132385247,
+      "wins": 43,
+      "draws": 8,
+      "losses": 21,
+      "pairings": 3,
+      "elo": 109.7
+    },
+    "2nrl-worst vs repulsion": {
+      "score": 0.5069444444444444,
+      "games": 72,
+      "stderr": 0.05129741172624727,
+      "ci95": 0.10054292698344465,
+      "wins": 28,
+      "draws": 17,
+      "losses": 27,
+      "pairings": 3,
+      "elo": 4.8
+    },
+    "2nrl-random vs repulsion": {
+      "score": 0.3958333333333333,
+      "games": 72,
+      "stderr": 0.046132459699173504,
+      "ci95": 0.09041962101038006,
+      "wins": 17,
+      "draws": 23,
+      "losses": 32,
+      "pairings": 3,
+      "elo": -73.5
+    }
+  },
+  "common_opponent": {
+    "2nrl": {
+      "vs_stockfish": {
+        "score": 0.0,
+        "games": 72,
+        "stderr": 0.0,
+        "ci95": 0.0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 72,
+        "acpl": 562.8264923540966,
+        "plies": 20.51388888888889,
+        "refusals": 20.292188527249053,
+        "top1_legal": 0.8835037212005558,
+        "elo": null
+      },
+      "vs_random": {
+        "score": 0.24305555555555555,
+        "games": 72,
+        "stderr": 0.05047330331795302,
+        "ci95": 0.09892767450318792,
+        "wins": 17,
+        "draws": 1,
+        "losses": 54,
+        "acpl": 802.4296330406495,
+        "plies": 81.69444444444444,
+        "refusals": 5.31424725427516,
+        "top1_legal": 0.7571062088690654,
+        "elo": -197.3
+      },
+      "per_seed": [
+        {
+          "name": "2nrl/s0",
+          "score": 0.0,
+          "acpl": 569.220837842713
+        },
+        {
+          "name": "2nrl/s1",
+          "score": 0.0,
+          "acpl": 581.8994378306879
+        },
+        {
+          "name": "2nrl/s2",
+          "score": 0.0,
+          "acpl": 537.3592013888889
+        }
+      ]
+    },
+    "positive": {
+      "vs_stockfish": {
+        "score": 0.0,
+        "games": 72,
+        "stderr": 0.0,
+        "ci95": 0.0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 72,
+        "acpl": 486.6559116809117,
+        "plies": 21.041666666666668,
+        "refusals": 13.624151729553851,
+        "top1_legal": 0.8461544072715208,
+        "elo": null
+      },
+      "vs_random": {
+        "score": 0.5347222222222222,
+        "games": 72,
+        "stderr": 0.058443219481661375,
+        "ci95": 0.1145487101840563,
+        "wins": 37,
+        "draws": 3,
+        "losses": 32,
+        "acpl": 948.6810846869021,
+        "plies": 76.125,
+        "refusals": 3.5840558002693697,
+        "top1_legal": 0.7639377856527787,
+        "elo": 24.2
+      },
+      "per_seed": [
+        {
+          "name": "positive/s0",
+          "score": 0.0,
+          "acpl": 444.6826903998779
+        },
+        {
+          "name": "positive/s1",
+          "score": 0.0,
+          "acpl": 418.1135416666666
+        },
+        {
+          "name": "positive/s2",
+          "score": 0.0,
+          "acpl": 597.1715029761905
+        }
+      ]
+    },
+    "2nrl-worst": {
+      "vs_stockfish": {
+        "score": 0.0,
+        "games": 72,
+        "stderr": 0.0,
+        "ci95": 0.0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 72,
+        "acpl": 420.83008532748113,
+        "plies": 21.805555555555557,
+        "refusals": 9.143776474421635,
+        "top1_legal": 0.895758363500299,
+        "elo": null
+      },
+      "vs_random": {
+        "score": 0.3680555555555556,
+        "games": 72,
+        "stderr": 0.05717374594082555,
+        "ci95": 0.11206054204401807,
+        "wins": 26,
+        "draws": 1,
+        "losses": 45,
+        "acpl": 781.5373564383198,
+        "plies": 80.41666666666667,
+        "refusals": 2.307741136042048,
+        "top1_legal": 0.7851496714280484,
+        "elo": -93.9
+      },
+      "per_seed": [
+        {
+          "name": "2nrl-worst/s0",
+          "score": 0.0,
+          "acpl": 514.4638888888888
+        },
+        {
+          "name": "2nrl-worst/s1",
+          "score": 0.0,
+          "acpl": 379.3647088443963
+        },
+        {
+          "name": "2nrl-worst/s2",
+          "score": 0.0,
+          "acpl": 368.66165824915817
+        }
+      ]
+    },
+    "2nrl-random": {
+      "vs_stockfish": {
+        "score": 0.0,
+        "games": 72,
+        "stderr": 0.0,
+        "ci95": 0.0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 72,
+        "acpl": 491.20315130471386,
+        "plies": 19.375,
+        "refusals": 10.090620723175116,
+        "top1_legal": 0.9259557704360283,
+        "elo": null
+      },
+      "vs_random": {
+        "score": 0.3402777777777778,
+        "games": 72,
+        "stderr": 0.05477638997369875,
+        "ci95": 0.10736172434844954,
+        "wins": 22,
+        "draws": 5,
+        "losses": 45,
+        "acpl": 934.4306826568154,
+        "plies": 80.77777777777777,
+        "refusals": 3.352625696743344,
+        "top1_legal": 0.8268868658574541,
+        "elo": -115.0
+      },
+      "per_seed": [
+        {
+          "name": "2nrl-random/s0",
+          "score": 0.0,
+          "acpl": 602.5081762566138
+        },
+        {
+          "name": "2nrl-random/s1",
+          "score": 0.0,
+          "acpl": 420.0324945887446
+        },
+        {
+          "name": "2nrl-random/s2",
+          "score": 0.0,
+          "acpl": 451.06878306878315
+        }
+      ]
+    },
+    "repulsion": {
+      "vs_stockfish": {
+        "score": 0.0,
+        "games": 72,
+        "stderr": 0.0,
+        "ci95": 0.0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 72,
+        "acpl": 566.3892256683375,
+        "plies": 20.805555555555557,
+        "refusals": 35.04597844241802,
+        "top1_legal": 0.8049600766307373,
+        "elo": null
+      },
+      "vs_random": {
+        "score": 0.4652777777777778,
+        "games": 72,
+        "stderr": 0.05334128991575423,
+        "ci95": 0.10454892823487828,
+        "wins": 31,
+        "draws": 5,
+        "losses": 36,
+        "acpl": 748.712905208604,
+        "plies": 80.7361111111111,
+        "refusals": 17.159301627305904,
+        "top1_legal": 0.7119918111566806,
+        "elo": -24.2
+      },
+      "per_seed": [
+        {
+          "name": "repulsion/s0",
+          "score": 0.0,
+          "acpl": 671.9906746031746
+        },
+        {
+          "name": "repulsion/s1",
+          "score": 0.0,
+          "acpl": 503.7930886243386
+        },
+        {
+          "name": "repulsion/s2",
+          "score": 0.0,
+          "acpl": 523.3839137774993
+        }
+      ]
+    },
+    "random": {
+      "vs_stockfish": {
+        "score": 0.0,
+        "games": 72,
+        "stderr": 0.0,
+        "ci95": 0.0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 72,
+        "acpl": 397.46090140569305,
+        "plies": 19.777777777777775,
+        "refusals": 0.0,
+        "top1_legal": 1.0,
+        "elo": null
+      }
+    }
+  },
+  "seconds": 1168.1
+}
