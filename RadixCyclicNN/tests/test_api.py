@@ -485,6 +485,7 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual((info["stride"], info["overlap"]), (1, WINDOW - 1))
         self.assertEqual((info["start_label"], info["end_label"]), ("<s>", "</s>"))
         self.assertEqual(info["back_label"], "<back>")
+        self.assertEqual(info["think_label"], "<think>")
         self.assertEqual((info["encoding"], info["unit"], info["ngram"]), ("char:3:1", "char", WINDOW))
         self.assertTrue(info["configurable"])  # a choice, but one made when a model is created
         self.assertIn("fixed for a model's life", info["note"])
@@ -648,7 +649,7 @@ class TestEndpoints(unittest.TestCase):
         for turn in strict["turns"]:
             thought = turn["rethink"]
             if thought is not None:
-                self.assertEqual(set(thought), {"kind", "noticed", "cut", "steps", "explored", "found", "taught"})
+                self.assertEqual(set(thought), {"kind", "noticed", "cut", "steps", "explored", "found", "taught", "thought"})
                 self.assertIn(thought["kind"], ("stutter", "repeat"))
                 self.assertTrue(thought["noticed"])
                 if thought["found"]:

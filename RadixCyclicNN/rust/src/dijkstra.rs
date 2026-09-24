@@ -17,7 +17,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::graph::{Graph, END, START};
+use crate::graph::{Graph, END};
 use crate::hash::{map, Map};
 use crate::penalty::PenaltyCosts;
 use crate::search::{build_result, onward, start_emission, PathResult};
@@ -98,7 +98,7 @@ pub fn dijkstra_predict(
     heap.push(Entry {
         cost: 0.0,
         tie: 0,
-        came_from: (start_node == START).then_some(START),
+        came_from: crate::graph::is_origin(start_node).then_some(start_node),
         node: start_node,
         chars: start_chars,
     });

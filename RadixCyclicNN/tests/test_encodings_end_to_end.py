@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.encoding import CHARS, WORDS, Encoding  # noqa: E402
-from radixnet.graph import RadixCyclicGraph  # noqa: E402
+from radixnet.graph import FIRST, RadixCyclicGraph  # noqa: E402
 from radixnet.model import load_model, new_model  # noqa: E402
 
 EVERY_ENCODING = [
@@ -106,7 +106,7 @@ class TestModelsUnderEveryEncoding(unittest.TestCase):
         for result in pred.top:
             for word in result.text.split():
                 self.assertIn(word, corpus_words, f"predicted {word!r}, not a word of the corpus")
-        for label in net.graph.labels[3:]:
+        for label in net.graph.labels[FIRST:]:
             if label:
                 self.assertEqual(label, " ".join(label.split()), "a label is not a clean word sequence")
 
@@ -116,7 +116,7 @@ class TestModelsUnderEveryEncoding(unittest.TestCase):
         net.train(["abcdefghijkl", "abcdmnopijkl"], epochs=2)
         for gram in net.graph.trigram_index:
             self.assertEqual(len(gram), 4)
-        for label in net.graph.labels[3:]:
+        for label in net.graph.labels[FIRST:]:
             if label:
                 self.assertEqual(len(label) % 4, 0, f"{label!r} is not whole groups")
 

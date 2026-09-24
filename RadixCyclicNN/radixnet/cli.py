@@ -34,6 +34,7 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
+from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS
 from .encoding import WINDOW, WORDS, Encoding, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
@@ -930,6 +931,68 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_think(args: argparse.Namespace, console: Console) -> dict:
+    """The model thinks: one thought from the THINK sentinel, questioning itself where it has learned to."""
+    from .thinking import think
+
+    model, origin = open_model(args, console, required=True)
+    try:
+        thought = think(
+            model, about=args.about or "", mode=args.mode, k=args.k, beam=args.beam, max_length=args.max_length,
+            step_penalty=args.step_penalty, temperature=args.temperature, seed=args.seed, max_depth=args.depth,
+            max_questions=args.questions, learn=not args.no_learn,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    graph = model.graph
+    console.pairs([
+        ("model", origin.describe()),
+        ("about", quote(args.about) if args.about else "(nothing in particular)"),
+        ("at", quote(graph.text_of(graph.labels[thought.at])) if thought.at >= 0 else "-"),
+        ("thoughts known", _thought_openings(model)),
+    ])
+    console.say()
+    _say_thought(console, thought, 0)
+    if thought.stopped == "nothing" and not thought.text:
+        console.say()
+        console.say(f"(it has no thoughts to think with yet: `{PROG} ollama think --prompt TOPIC --train` teaches it some)")
+    learned = []
+    if thought.taught >= 0:
+        learned.append(f"to stop and think at {quote(graph.text_of(graph.labels[thought.taught]))}")
+    if thought.handed_over >= 0:
+        learned.append(f"to hand over at {quote(graph.text_of(graph.labels[thought.handed_over]))}")
+    saved = None
+    if learned and args.save:
+        saved = save_model(model, args.out or args.model)
+        console.say()
+        console.say(f"saved {saved['path']} ({saved['bytes']} bytes)")
+    elif learned:
+        console.say()
+        console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
+    return {"kind": model.kind, **thought.to_dict(), "saved": saved}
+
+
+def _thought_openings(model: GraphModel) -> int:
+    """How many ways the model knows to begin a thought: THINK's out-edges."""
+    from .graph import THINK
+
+    return len(model.graph.children[THINK])
+
+
+def _say_thought(console: Console, thought: Any, depth: int) -> None:
+    """A thought and its questions, indented one level per depth."""
+    pad = "    " * depth
+    console.say(f"{pad}{summarize_thought(thought)}")
+    for question in thought.questions:
+        _say_thought(console, question, depth + 1)
+
+
+def summarize_thought(thought: Any) -> str:
+    from .thinking import summarize
+
+    return summarize(thought)
+
+
 def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
     partner = None
@@ -943,7 +1006,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
-        explore=args.explore, learn=not args.no_learn,
+        explore=args.explore, learn=not args.no_learn, think=not args.no_think, think_depth=args.think_depth,
     )
     guard: dict | None = None
     if pair is None:
@@ -977,6 +1040,8 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
                 ending = "said it anyway" if turn.repeat else "took a lesser answer"
                 thought += f"; kept {quote(r.cut)}, weighed {r.explored} path(s), {ending}"
             console.say(thought)
+            if r.thought is not None:
+                console.say(f"    {summarize_thought(r.thought)}")
     if not turns:
         console.say("(nothing to say: train the model first)")
     if guard is not None:
@@ -986,11 +1051,20 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
         console.say("    radixnet feedback " + " ".join(f"--bad-text {quote(t)}" for t in said_twice))
     taught = sorted({t.rethink.taught for t in turns if t.rethink is not None and t.rethink.taught >= 0})
+    thought_at = sorted({
+        t.rethink.thought.taught for t in turns
+        if t.rethink is not None and t.rethink.thought is not None and t.rethink.thought.taught >= 0
+    })
     saved = None
-    if taught and args.save:
+    if (taught or thought_at) and args.save:
         saved = save_model(model, args.out or args.model)
-    elif taught:
-        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
+    elif taught or thought_at:
+        learned = []
+        if taught:
+            learned.append(f"to hand over at {len(taught)} node(s)")
+        if thought_at:
+            learned.append(f"to stop and think at {len(thought_at)} node(s)")
+        console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
     return {
         "guard": guard,
         "turns": [t.to_dict() for t in turns],
@@ -998,6 +1072,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         "speakers": speakers,
         "mode": args.mode,
         "opening": args.opening,
+        "thought_at": thought_at,
         "kind": model.kind,
         "partner_kind": partner.kind if partner is not None else None,
         "repeats": said_twice,
@@ -3259,6 +3334,98 @@ def cmd_ollama_corpus(args: argparse.Namespace, console: Console) -> dict:
     return doc
 
 
+def cmd_ollama_think(args: argparse.Namespace, console: Console) -> dict:
+    """Ollama thinks about a prompt, and the network is taught its thinking as thoughts of its own."""
+    from .ollama import OllamaError, think_value, thoughts_from_prompt
+    from .thinking import think_on
+
+    client = _ollama_client(args)
+    try:
+        think = think_value(args.think)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([
+        ("ollama", f"{client.model} at {client.url}"),
+        ("prompt", quote(clip(args.prompt, 60))),
+        ("questions", args.lines),
+        ("think", "the model's choice" if think is None else think),
+    ])
+    try:
+        thoughts = thoughts_from_prompt(
+            client, args.prompt, lines=args.lines, model=client.model, think=think, temperature=args.temperature,
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    if not thoughts:
+        raise CliError(f"Ollama model {client.model!r} wrote no questions to think about")
+    thinking = [t["thinking"] for t in thoughts if t["thinking"]]
+    console.say()
+    for i, entry in enumerate(thoughts, 1):
+        console.say(f"{i:3d}  {entry['question']}")
+        console.say(f"     thinking: {clip(entry['thinking'], 200) if entry['thinking'] else '(none: the model did not think)'}")
+        console.say(f"     answer:   {clip(entry['answer'], 200)}")
+    doc: dict[str, Any] = {
+        "url": client.url, "model": client.model, "prompt": args.prompt, "think": think, "count": len(thoughts),
+        "thinking": len(thinking), "thoughts": thoughts, "out": None, "trained": None,
+    }
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(thinking) + ("\n" if thinking else ""))
+        console.say()
+        console.say(f"wrote {len(thinking)} thought(s) to {args.out}")
+        doc["out"] = args.out
+    if args.train:
+        if not thinking:
+            raise CliError(
+                f"Ollama model {client.model!r} returned no thinking to train on: use a thinking model "
+                "(qwen3, deepseek-r1, gpt-oss, ...) on an Ollama that separates it, or --think true"
+            )
+        model, origin = open_model(args, console, required=False)
+        if model.kind == "negative":
+            raise CliError("the negative network judges; it does not think (--kind negative cannot be taught thoughts)")
+        target = args.model_out or args.model
+        console.say()
+        console.pairs([
+            ("model", origin.describe()),
+            ("backend", backend_label(model)),
+            ("training", f"thoughts={len(thinking)} epochs={args.epochs} lr={args.lr} batch={args.batch_size}"
+                         + (" +answers" if args.with_answers else "")),
+            ("output", target),
+        ])
+        console.say()
+        printer = EpochPrinter(console)
+        stop = threading.Event()
+
+        def run() -> dict:
+            learned = think_on(
+                model, thinking, questions=not args.no_questions, epochs=args.epochs, lr=args.lr,
+                batch_size=args.batch_size, progress=printer, stop_event=stop,
+            )
+            if args.with_answers and not stop.is_set():
+                answers = [t["answer"] for t in thoughts if t["answer"]]
+                if answers:
+                    learned["answers"] = model.train(
+                        answers, epochs=args.epochs, lr=args.lr, batch_size=args.batch_size, progress=printer,
+                        stop_event=stop,
+                    )
+            return learned
+
+        learned, interrupted = run_interruptible(run, stop, console, "epoch")
+        saved = _finish_training(console, model, target, interrupted, printer, "epoch")
+        learned = learned or {}
+        console.say(
+            f"taught {learned.get('thoughts', 0)} thought(s) and {learned.get('questions', 0)} question(s) "
+            f"it asked itself; it now stops to think at {learned.get('taught', 0)} more node(s)"
+        )
+        doc["trained"] = {
+            "model": origin.to_dict(), "out": target, "thoughts": learned.get("thoughts", 0),
+            "questions": learned.get("questions", 0), "taught": learned.get("taught", 0),
+            "epochs": learned.get("epochs", []), "answers": len(learned.get("answers", []) or []),
+            "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+        }
+    return doc
+
+
 def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     from .ollama import OllamaError, adversarial_review
 
@@ -3903,10 +4070,40 @@ def build_parser() -> argparse.ArgumentParser:
                         "(0 = not at all)")
     p.add_argument("--no-learn", action="store_true",
                    help="do not teach the graph where it goes round (leave the model exactly as it was)")
+    p.add_argument("--no-think", action="store_true",
+                   help="do not think before backing out of a repeat (teach BACK directly, as before the THINK sentinel)")
+    p.add_argument("--think-depth", type=nonneg_int, default=THINK_DEPTH, metavar="N",
+                   help="how deep a thought may question itself (0: never)")
     p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
     p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
+
+    # think ------------------------------------------------------------------
+    p = command(
+        "think", "the model thinks: one thought from the THINK sentinel, questioning itself where it learned to",
+        "A thought is the prediction search run from the THINK sentinel instead of START, in the language of\n"
+        "the thoughts the model was taught (`ollama think --train`).  --about TEXT thinks at the node where\n"
+        "that text ends and teaches the model to stop and think there; along its own path, wherever the model\n"
+        "has learned to think, the thought questions itself (--depth deep).  When it stops it says what it\n"
+        "triggered: a thought asked for ends, a thought a conversation had hands over to BACK.",
+    )
+    p.add_argument("--about", default="", metavar="TEXT", help="think at the node where this text ends (default: nowhere in particular)")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="the most likely thought, or a drawn one")
+    p.add_argument("--k", type=pos_int, default=5, help="thoughts weighed (beam: the K most likely; a question must say something new)")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * k, 16))")
+    p.add_argument("--max-length", type=nonneg_int, default=THINK_LENGTH, help="characters a thought may run to")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam: extra cost per edge")
+    p.add_argument("--depth", type=nonneg_int, default=THINK_DEPTH, metavar="N",
+                   help="how deep a thought may question itself (0: never)")
+    p.add_argument("--questions", type=nonneg_int, default=THINK_QUESTIONS, metavar="N",
+                   help="questions one thought may ask itself")
+    p.add_argument("--no-learn", action="store_true",
+                   help="do not teach the graph where it stopped to think (leave the model exactly as it was)")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    p.set_defaults(handler=cmd_think)
 
     # chat -------------------------------------------------------------------
     p = command(
@@ -4812,11 +5009,12 @@ def build_parser() -> argparse.ArgumentParser:
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
 
     p = command(
-        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review",
+        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review, thoughts",
         "Talk to an Ollama server (https://ollama.com).  `corpus` turns a prompt into training lines, correct\n"
         "or deliberately garbage (the two halves of 2NRL), and can train on them; `review` lets the LLM\n"
         "adversarially rate the network's own samples (or given texts) from 0 to 10 and, with --2nrl,\n"
-        "feeds the failed ones back as garbage and the passed ones as correct data.\n"
+        "feeds the failed ones back as garbage and the passed ones as correct data; `think` has a thinking\n"
+        "model think about a prompt and teaches the network its thinking as thoughts of its own.\n"
         f"Usage: {PROG} [global options] ollama [--url URL] [--ollama-model NAME] <action> [options]",
     )
     p.add_argument("--url", metavar="URL", help=f"Ollama base URL (default: $OLLAMA_HOST or {ollama_default_url})")
@@ -4848,6 +5046,31 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step with --train")
     a.add_argument("--model-out", metavar="PATH", help="where to save the trained model (default: --model)")
     a.set_defaults(handler=cmd_ollama_corpus)
+
+    a = actions.add_parser(
+        "think", help="have a thinking model think about a prompt, and teach the network its thinking as thoughts",
+        description="Ask the LLM for --lines short questions about --prompt, then for its thinking on each (Ollama's\n"
+                    "`think`: a thinking model such as qwen3, deepseek-r1 or gpt-oss returns its reasoning beside the\n"
+                    "answer; older models that write it between <think> tags are read too).  --train teaches the\n"
+                    "network the thinking as thoughts of its own - texts that begin at the THINK sentinel - and,\n"
+                    "wherever a thought questions itself, where to stop and think; --out writes the thoughts to a file.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--prompt", required=True, metavar="TEXT", help="what the questions should be about")
+    a.add_argument("--lines", type=pos_int, default=5, help="questions to ask for (one thought each)")
+    a.add_argument("--think", default="true", metavar="LEVEL",
+                   help="Ollama's think switch: true, false, or a level (low, medium, high); 'default' leaves it to the model")
+    a.add_argument("--temperature", type=nonneg_float, default=0.7, help="sampling temperature of the thinking")
+    a.add_argument("--out", metavar="FILE", help="also write the thoughts to FILE (one per line)")
+    a.add_argument("--train", action="store_true", help="teach the model the thoughts and save it")
+    a.add_argument("--with-answers", action="store_true", help="with --train, also train on the answers as ordinary texts")
+    a.add_argument("--no-questions", action="store_true",
+                   help="with --train, do not teach where a thought questions itself")
+    a.add_argument("--epochs", type=nonneg_int, default=10, help="training epochs with --train")
+    a.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train")
+    a.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step with --train")
+    a.add_argument("--model-out", metavar="PATH", help="where to save the trained model (default: --model)")
+    a.set_defaults(handler=cmd_ollama_think)
 
     a = actions.add_parser(
         "review", help="adversarial LLM review / rating of the network's output",

@@ -617,6 +617,7 @@ func (s *Service) Encoding() map[string]any {
 		"encoding": enc.String(), "unit": string(enc.Unit),
 		"window": enc.N, "ngram": enc.N, "stride": enc.Stride, "overlap": enc.Overlap(),
 		"start_label": radixnet.StartLabel, "end_label": radixnet.EndLabel, "back_label": radixnet.BackLabel,
+		"think_label":  radixnet.ThinkLabel,
 		"configurable": true,
 		"note": fmt.Sprintf(
 			"Text goes in as %s, and comes back out of the (possibly compressed) node labels along a "+
@@ -1257,6 +1258,49 @@ func (s *Service) Generate(o radixnet.GenerateOptions, guard bool) ([]*radixnet.
 func (s *Service) Score(text string) radixnet.Score {
 	out, _ := s.read(func(m *radixnet.Model) (any, error) { return m.Score(text), nil })
 	return out.(radixnet.Score)
+}
+
+// Think is POST /api/think: the active model thinks - one thought from the
+// Think sentinel (Model.Think).  With o.Learn (the default) the thought teaches
+// the model where it stopped to think, so - like a conversation - a thought
+// changes the model; the server keeps that in memory until something saves.
+// It takes the write lock and waits for it, as Python's session does: a running
+// job hands the lock over between epochs, so a thought never has to be refused.
+func (s *Service) Think(o radixnet.ThinkOptions) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thought, err := s.model.Think(o)
+	if err != nil {
+		return nil, badRequest("%v", err)
+	}
+	doc := thought.ToDict()
+	doc["kind"] = s.model.Kind()
+	return doc, nil
+}
+
+// StartTrainThoughts starts a train job that teaches thoughts as thoughts
+// (Model.ThinkOn: texts whose walk begins at the Think sentinel, and - with
+// questions - where a thought questions itself); answers, when given, are
+// trained as ordinary texts after them.
+func (s *Service) StartTrainThoughts(thoughts, answers []string, epochs int, questions bool) (map[string]any, error) {
+	if epochs < 0 {
+		return nil, badRequest("epochs must be >= 0, got %d", epochs)
+	}
+	if s.model.IsNegative() {
+		return nil, badRequest("the negative network judges; it does not think")
+	}
+	return s.startJob("train", func(job *Job, progress func(map[string]any), stop func() bool) error {
+		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: true, Progress: progress, Stop: stop}
+		if _, err := s.model.ThinkOn(thoughts, opts, questions, 1.0); err != nil {
+			return err
+		}
+		if len(answers) > 0 && !stop() {
+			if _, err := s.model.Train(answers, opts); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Service) Converse(opening string, o radixnet.ConverseOptions, guard bool) ([]*radixnet.Turn, map[string]any, error) {
