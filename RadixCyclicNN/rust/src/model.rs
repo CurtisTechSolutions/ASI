@@ -18,7 +18,7 @@ use crate::json::Json;
 use crate::mt19937::Mt19937;
 use crate::parallel::{effective_workers, parallel_fill};
 use crate::paths::PathOutcome;
-use crate::search::{parse_traversal, PathResult};
+use crate::search::{parse_traversal, PathResult, SamplingFilter};
 
 /// The probability charged for a transition the structure does not know.
 pub const UNKNOWN_PROB: f64 = 1e-6;
@@ -306,6 +306,16 @@ impl EpochRecord {
     }
 }
 
+/// The extra field of the record of the epoch that stops a run early -
+/// `"early_stop": true` - and no other record's.
+pub(crate) fn early_stop_extra(stopping: bool) -> Vec<(String, Json)> {
+    if stopping {
+        vec![("early_stop".to_string(), Json::Bool(true))]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The passes over the texts.
 #[derive(Clone, Debug)]
 pub struct TrainOptions {
@@ -314,6 +324,11 @@ pub struct TrainOptions {
     pub phase: Option<String>,
     /// The number of texts processed per chunk (0 = [`DEFAULT_CHUNK_SIZE`]).
     pub chunk_size: usize,
+    /// How the run walks its texts: the order, the curriculum, the rehearsal
+    /// of the replay buffer and the early stop, each off by default
+    /// ([`crate::training`], `../../SPEC-SearchAndTraining.md`).  Plain
+    /// training reads it; the feedback passes walk every text in corpus order.
+    pub plan: crate::training::Plan,
 }
 
 impl Default for TrainOptions {
@@ -324,6 +339,7 @@ impl Default for TrainOptions {
             auto_compress: true,
             phase: None,
             chunk_size: 0,
+            plan: crate::training::Plan::default(),
         }
     }
 }
@@ -353,6 +369,11 @@ pub struct Model {
     /// left it - what writes a checkpoint mid-run, as Python's training loops
     /// do (`crate::checkpoint::train`).  `None` outside such a run.
     pub(crate) epoch_hook: Option<EpochHook>,
+    /// The replay buffer: a uniform sample of every text this model was
+    /// trained on, rehearsed by a run with `replay > 0` - or `None`, and then
+    /// the file does not mention it (`../../SPEC-SearchAndTraining.md`
+    /// section 4).
+    pub replay: Option<crate::training::ReplayBuffer>,
 }
 
 /// What [`Model::epoch_hook`] runs: the model and the epoch's record.
@@ -385,7 +406,32 @@ impl Model {
             neg: None,
             res: None,
             epoch_hook: None,
+            replay: None,
         }
+    }
+
+    /// The seed the training plan keys its shuffle and its replay buffer
+    /// with: Python's `model.seed` - the graph's, or the phase model's meta
+    /// seed, which is where its constructor keeps it.
+    pub(crate) fn plan_seed(&self) -> i64 {
+        if self.is_resonant() {
+            self.meta.seed
+        } else {
+            self.g.seed
+        }
+    }
+
+    /// How one `train` call walks `texts` (already cleaned of the ones too
+    /// short for a gram): the order, the curriculum, the rehearsal, the stop.
+    pub(crate) fn training_plan(
+        &self,
+        texts: Vec<String>,
+        epochs: usize,
+        plan: &crate::training::Plan,
+    ) -> Result<crate::training::TrainingPlan, String> {
+        let enc = self.g.enc;
+        let lengths: Vec<usize> = texts.iter().map(|t| enc.len(t)).collect();
+        crate::training::TrainingPlan::new(texts, &lengths, self.plan_seed(), epochs, plan, self.replay.clone())
     }
 
     /// The model kind shared with the Python and Go implementations.
@@ -466,12 +512,14 @@ impl Model {
 
     // -- training -----------------------------------------------------------
 
-    /// Counts one traversal of every text's path per epoch.
+    /// Counts one traversal of every text's path per epoch, walking the texts
+    /// the way `opts.plan` says.
     pub fn train(&mut self, texts: &[String], opts: &TrainOptions) -> Result<Vec<EpochRecord>, String> {
         if self.g.is_radix() {
             let cfg = crate::radix::TrainConfig {
                 epochs: opts.epochs,
                 auto_compress: opts.auto_compress,
+                plan: opts.plan.clone(),
                 ..Default::default()
             };
             return self.radix_train(texts, &cfg, opts.phase.as_deref(), &mut |_| true);
@@ -482,10 +530,11 @@ impl Model {
                 opts.epochs,
                 opts.auto_compress,
                 opts.phase.as_deref(),
+                &opts.plan,
                 &mut |_| true,
             );
         }
-        self.passes(texts, opts, true, 0.0, &mut |_| true)
+        self.passes(texts, opts, true, 0.0, opts.phase.is_none(), &mut |_| true)
     }
 
     /// [`Model::train`] for the count model, calling `on_epoch` after every
@@ -496,7 +545,8 @@ impl Model {
         opts: &TrainOptions,
         on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
     ) -> Result<Vec<EpochRecord>, String> {
-        self.passes(texts, opts, true, 0.0, on_epoch)
+        // a pass stamped with a phase is feedback: corpus order, the buffer left alone
+        self.passes(texts, opts, true, 0.0, opts.phase.is_none(), on_epoch)
     }
 
     /// Thumbs up: `epochs` passes that traverse and reward (+`strength`) every path.
@@ -517,7 +567,7 @@ impl Model {
             phase: Some("positive".into()),
             ..Default::default()
         };
-        self.passes(texts, &opts, true, strength.abs(), &mut |_| true)
+        self.passes(texts, &opts, true, strength.abs(), false, &mut |_| true)
     }
 
     /// Thumbs down: `epochs` passes that penalise (-`strength`) every path; no
@@ -539,7 +589,7 @@ impl Model {
             phase: Some("negative".into()),
             ..Default::default()
         };
-        self.passes(texts, &opts, false, -strength.abs(), &mut |_| true)
+        self.passes(texts, &opts, false, -strength.abs(), false, &mut |_| true)
     }
 
     /// 2NRL: penalise the bad texts, then count and reward the good ones.
@@ -626,12 +676,18 @@ impl Model {
         out
     }
 
+    /// `opts.epochs` passes over `texts`: each traverses (`count`) and / or
+    /// rewards (`reward`) every path.  `planned` (plain training) walks them
+    /// the way `opts.plan` says - the order, the curriculum, the rehearsal of
+    /// the replay buffer and the early stop of `../../SPEC-SearchAndTraining.md`;
+    /// the feedback passes walk every text in corpus order, as they always have.
     fn passes(
         &mut self,
         texts: &[String],
         opts: &TrainOptions,
         count: bool,
         reward: f64,
+        planned: bool,
         on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
     ) -> Result<Vec<EpochRecord>, String> {
         // a rewarded path was judged correct, a penalised one wrong, a plain
@@ -663,10 +719,25 @@ impl Model {
             })
             .collect();
 
+        if planned {
+            opts.plan.check()?;
+        }
+        // a model that keeps a replay buffer offers every run's texts to it;
+        // with nothing set and no buffer the plan would change nothing
+        let mut plan = if planned && (opts.plan.active() || self.replay.is_some()) {
+            Some(self.training_plan(usable.iter().map(|t| (*t).clone()).collect(), opts.epochs, &opts.plan)?)
+        } else {
+            None
+        };
+        // the buffered texts a rehearsing run walks are observed after its own
+        let rehearsed = plan.as_ref().map(|p| p.replayed()).unwrap_or_default();
+        let own = usable.len();
+        let structure: Vec<&String> = usable.iter().copied().chain(rehearsed.iter()).collect();
+
         // build the structure first (no counting) and compress it, so every
         // pass - the first included - walks the same transitions
         let mut chars = 0i64;
-        for chunk in usable.chunks(chunk_size) {
+        for (c, chunk) in structure.chunks(chunk_size).enumerate() {
             let grams = self.encode_all(chunk);
             let mut novel = vec![false; chunk.len()];
             {
@@ -674,7 +745,10 @@ impl Model {
                 parallel_fill(&mut novel, workers, |i, slot| *slot = g.trace(&grams[i]).is_none());
             }
             for (i, &is_novel) in novel.iter().enumerate() {
-                chars += enc.len(chunk[i]) as i64;
+                // a rehearsed text is not new: it was counted when it was first read
+                if c * chunk_size + i < own {
+                    chars += enc.len(chunk[i]) as i64;
+                }
                 if is_novel {
                     self.g.observe(&grams[i], false)?;
                 }
@@ -687,13 +761,22 @@ impl Model {
         let mut pending_merges = if opts.auto_compress { self.g.compress() } else { 0 };
 
         let mut records = Vec::with_capacity(opts.epochs);
-        for _ in 0..opts.epochs {
+        for j in 0..opts.epochs {
             let started = Instant::now();
             let mut traversed: Vec<AtomicI64> = (0..self.g.num_edge_ids()).map(|_| AtomicI64::new(0)).collect();
             let mut extra: Map<usize, i64> = crate::hash::map();
             let mut total = 0i64;
+            // this epoch's texts: the order, the curriculum and the rehearsal
+            let planned_texts = match plan.as_ref() {
+                Some(p) if !p.plain() => Some(p.epoch_texts(j, self.meta.epochs_total.bumped(1).value)),
+                _ => None,
+            };
+            let walked: Vec<&String> = match &planned_texts {
+                Some(list) => list.iter().collect(),
+                None => usable.clone(),
+            };
 
-            for chunk in usable.chunks(chunk_size) {
+            for chunk in walked.chunks(chunk_size) {
                 let grams = self.encode_all(chunk);
                 let mut traced: Vec<Option<(Vec<Transition>, Vec<usize>)>> = vec![None; chunk.len()];
                 {
@@ -783,6 +866,7 @@ impl Model {
             }
             self.g.carry_counters(false); // the epoch is over: wrap whatever reached the limit
             self.meta.epochs_total.add(1);
+            let stopping = plan.as_mut().is_some_and(|p| p.stop(j, loss));
             let record = EpochRecord {
                 epoch: self.meta.epochs_total.value,
                 loss,
@@ -798,7 +882,7 @@ impl Model {
                 traversed: count,
                 reward,
                 phase: opts.phase.clone(),
-                extra: Vec::new(),
+                extra: early_stop_extra(stopping),
             };
             crate::log_debug!(
                 LOG,
@@ -815,9 +899,12 @@ impl Model {
             self.epoch_done(&record)?;
             let go_on = on_epoch(&record);
             records.push(record);
-            if !go_on {
+            if stopping || !go_on {
                 break;
             }
+        }
+        if let Some(p) = plan.as_mut() {
+            self.replay = p.finish();
         }
         crate::log_info!(
             LOG,
@@ -997,6 +1084,7 @@ impl Model {
             &o.traversal,
             o.penalty_scale,
             o.merit_scale,
+            o.tuning(),
         )
     }
 
@@ -1017,7 +1105,9 @@ impl Model {
         traversal: &str,
         penalty_scale: f64,
         merit_scale: f64,
+        tuning: SearchTuning,
     ) -> Result<Prediction, String> {
+        tuning.check()?;
         if self.is_resonant() {
             // the phase model's search: the phase and the layer are part of every walk
             let o = PredictOptions {
@@ -1032,6 +1122,10 @@ impl Model {
                 traversal: traversal.to_string(),
                 penalty_scale,
                 merit_scale,
+                top_k: tuning.filter.top_k,
+                top_p: tuning.filter.top_p,
+                min_p: tuning.filter.min_p,
+                diversity: tuning.diversity,
             };
             return self.resonant_predict(prefix, &o, rng);
         }
@@ -1066,6 +1160,7 @@ impl Model {
                 step_penalty,
                 to_end,
                 traversal,
+                diversity: tuning.diversity,
                 ..Default::default()
             };
             let (t, b, e) = self.g.beam_predict_by(node, offset, want, opts, costs)?;
@@ -1076,9 +1171,17 @@ impl Model {
         } else {
             cap = max_length.or(Some(length));
             let max_chars = cap.map(|c| c.saturating_sub(lead_len));
-            let walk = self
-                .g
-                .sample_walk(node, offset, max_chars, temperature, rng, None, costs, traversal)?;
+            let walk = self.g.sample_walk_filtered(
+                node,
+                offset,
+                max_chars,
+                temperature,
+                rng,
+                None,
+                costs,
+                traversal,
+                tuning.filter,
+            )?;
             expanded = walk.expanded;
             top = vec![walk];
             bottom = Vec::new();
@@ -1164,6 +1267,7 @@ impl Model {
                     &o.traversal,
                     o.penalty_scale,
                     o.merit_scale,
+                    o.tuning(),
                 )?;
                 whole(&mut found.best);
                 results.push(found.best);
@@ -1185,6 +1289,7 @@ impl Model {
                     traversal: o.traversal.clone(),
                     penalty_scale: o.penalty_scale,
                     merit_scale: o.merit_scale,
+                    diversity: o.diversity,
                     ..Default::default()
                 },
             )?;
@@ -1211,6 +1316,11 @@ impl Model {
             &o.traversal,
             o.penalty_scale,
             o.merit_scale,
+            SearchTuning {
+                // dijkstra is the single cheapest text, which a diverse pick would only reorder
+                diversity: if mode == "dijkstra" { 0.0 } else { o.diversity },
+                ..o.tuning()
+            },
         )?;
         let mut results = found.top;
         results.iter_mut().for_each(whole);
@@ -1347,6 +1457,15 @@ pub struct PredictOptions {
     /// The punishment traversal's scales; ignored by the other two.
     pub penalty_scale: f64,
     pub merit_scale: f64,
+    /// What a sampled step draws from (`../../SPEC-SearchAndTraining.md`
+    /// section 1): the `top_k` cheapest (0 = off), the nucleus holding `top_p`
+    /// of the mass (1 = off), the options at least `min_p` as likely as the
+    /// best (0 = off).
+    pub top_k: usize,
+    pub top_p: f64,
+    pub min_p: f64,
+    /// How far the beam's K are spread apart (section 2; 0 = off).
+    pub diversity: f64,
 }
 
 impl Default for PredictOptions {
@@ -1364,7 +1483,45 @@ impl Default for PredictOptions {
             traversal: crate::penalty::DEFAULT_TRAVERSAL.to_string(),
             penalty_scale: 1.0,
             merit_scale: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            diversity: 0.0,
         }
+    }
+}
+
+impl PredictOptions {
+    /// The sampling filter and the diversity these options ask for.
+    pub fn tuning(&self) -> SearchTuning {
+        SearchTuning {
+            filter: SamplingFilter {
+                top_k: self.top_k,
+                top_p: self.top_p,
+                min_p: self.min_p,
+            },
+            diversity: self.diversity,
+        }
+    }
+}
+
+/// The search's two new dials: the filter a sampled step draws through and the
+/// diversity the beam picks its K with - both off by default
+/// (`../../SPEC-SearchAndTraining.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SearchTuning {
+    pub filter: SamplingFilter,
+    pub diversity: f64,
+}
+
+impl SearchTuning {
+    /// The error for a setting out of range.
+    pub fn check(&self) -> Result<(), String> {
+        self.filter.check()?;
+        if self.diversity.is_nan() || self.diversity < 0.0 {
+            return Err(format!("diversity must be >= 0, got {}", self.diversity));
+        }
+        Ok(())
     }
 }
 
@@ -1383,6 +1540,25 @@ pub struct GenerateOptions {
     pub traversal: String,
     pub penalty_scale: f64,
     pub merit_scale: f64,
+    /// See [`PredictOptions::top_k`] and [`PredictOptions::diversity`].
+    pub top_k: usize,
+    pub top_p: f64,
+    pub min_p: f64,
+    pub diversity: f64,
+}
+
+impl GenerateOptions {
+    /// The sampling filter and the diversity these options ask for.
+    pub fn tuning(&self) -> SearchTuning {
+        SearchTuning {
+            filter: SamplingFilter {
+                top_k: self.top_k,
+                top_p: self.top_p,
+                min_p: self.min_p,
+            },
+            diversity: self.diversity,
+        }
+    }
 }
 
 impl Default for GenerateOptions {
@@ -1399,6 +1575,10 @@ impl Default for GenerateOptions {
             traversal: crate::penalty::DEFAULT_TRAVERSAL.to_string(),
             penalty_scale: 1.0,
             merit_scale: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            diversity: 0.0,
         }
     }
 }

@@ -519,6 +519,10 @@ pub struct TrainConfig {
     pub act_lr_schedule: Option<String>,
     /// Play the schedules backwards: a ramp up becomes a ramp down.
     pub reverse_schedule: bool,
+    /// How every kind that learns by walking a list of texts walks it: the
+    /// order, the curriculum, the rehearsal of the replay buffer and the
+    /// early stop ([`crate::training`], `../../SPEC-SearchAndTraining.md`).
+    pub plan: crate::training::Plan,
 }
 
 impl Default for TrainConfig {
@@ -537,6 +541,7 @@ impl Default for TrainConfig {
             lr_schedule: None,
             act_lr_schedule: None,
             reverse_schedule: false,
+            plan: crate::training::Plan::default(),
         }
     }
 }
@@ -577,13 +582,13 @@ impl TrainConfig {
         if self.clip.is_nan() || self.clip <= 0.0 {
             return Err(format!("clip must be > 0, got {}", crate::json::py_repr(self.clip)));
         }
-        Ok(())
+        self.plan.check()
     }
 
     /// `dataclasses.asdict(config)`, in field order.
     pub fn to_json(&self) -> Json {
         let text = |s: &Option<String>| s.as_ref().map(|s| Json::str(s.clone())).unwrap_or(Json::Null);
-        Json::obj([
+        let mut doc = Json::obj([
             ("epochs", Json::Int(self.epochs as i64)),
             ("lr", Json::Num(self.lr)),
             ("act_lr", Json::Num(self.act_lr)),
@@ -596,7 +601,11 @@ impl TrainConfig {
             ("lr_schedule", text(&self.lr_schedule)),
             ("act_lr_schedule", text(&self.act_lr_schedule)),
             ("reverse_schedule", Json::Bool(self.reverse_schedule)),
-        ])
+        ]);
+        if let Json::Obj(pairs) = &mut doc {
+            pairs.extend(self.plan.json_pairs());
+        }
+        doc
     }
 }
 
@@ -762,6 +771,12 @@ impl Model {
     /// the model's RNG and fed to the backend in batches, and the weights and
     /// node parameters written back.  `on_epoch` sees every record as it is
     /// made; returning `false` stops the run after that epoch.
+    ///
+    /// The texts are walked the way `cfg.plan` says - the order, the
+    /// curriculum, the rehearsal of the replay buffer and the early stop of
+    /// `../../SPEC-SearchAndTraining.md` - unless the call carries a `phase`:
+    /// a pass stamped `"negative"` or `"positive"` is feedback, walks every
+    /// text in corpus order and leaves the replay buffer alone.
     pub fn radix_train(
         &mut self,
         texts: &[String],
@@ -780,8 +795,21 @@ impl Model {
                 ok
             })
             .collect();
+        // a model that keeps a replay buffer offers every run's texts to it
+        let mut plan = if phase.is_none() && (cfg.plan.active() || self.replay.is_some()) {
+            Some(self.training_plan(kept.iter().map(|t| (*t).clone()).collect(), cfg.epochs, &cfg.plan)?)
+        } else {
+            None
+        };
         let grams: Vec<Vec<String>> = kept.iter().map(|t| enc.encode(t)).collect();
         let mut transitions = self.observe_grams(&grams, true)?;
+        let rehearsed = plan.as_ref().map(|p| p.replayed()).unwrap_or_default();
+        if !rehearsed.is_empty() {
+            // a rehearsed text is not new: nothing to count
+            let again: Vec<Vec<String>> = rehearsed.iter().map(|t| enc.encode(t)).collect();
+            self.observe_grams(&again, false)?;
+            transitions = self.observe_grams(&grams, false)?;
+        }
         let mut observed_version = self.g.structure_version;
         self.meta.trained_texts.add(kept.len() as i64);
         self.meta
@@ -793,9 +821,19 @@ impl Model {
         let mut arrays_version: Option<Counter> = None;
         let (mut parents_all, mut positions_all): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
         let mut records = Vec::with_capacity(cfg.epochs);
-        for &(lr, act_lr) in rates.iter().take(cfg.epochs) {
+        for (k, &(lr, act_lr)) in rates.iter().take(cfg.epochs).enumerate() {
             let started = Instant::now();
-            if self.g.structure_version != observed_version {
+            if let Some(p) = plan.as_ref().filter(|p| !p.plain()) {
+                // this epoch's texts: the order, the curriculum and the rehearsal
+                let walked: Vec<Vec<String>> = p
+                    .epoch_texts(k, self.meta.epochs_total.bumped(1).value)
+                    .iter()
+                    .map(|t| enc.encode(t))
+                    .collect();
+                transitions = self.observe_grams(&walked, false)?;
+                observed_version = self.g.structure_version;
+                arrays_version = None;
+            } else if self.g.structure_version != observed_version {
                 // a merge (or another structural change) moved edge ids
                 transitions = self.observe_grams(&grams, false)?;
                 observed_version = self.g.structure_version;
@@ -834,6 +872,12 @@ impl Model {
             let loss = if n > 0 { loss_sum / n as f64 } else { 0.0 };
             self.g.carry_counters(false); // the epoch is over: wrap whatever reached the limit
             self.meta.epochs_total.add(1);
+            let stopping = plan.as_mut().is_some_and(|p| p.stop(k, loss));
+            let mut extra = vec![
+                ("lr".to_string(), Json::Num(lr)),
+                ("act_lr".to_string(), Json::Num(act_lr)),
+            ];
+            extra.extend(crate::model::early_stop_extra(stopping));
             let record = EpochRecord {
                 epoch: self.meta.epochs_total.value,
                 loss,
@@ -849,10 +893,7 @@ impl Model {
                 traversed: true,
                 reward: 0.0,
                 phase: phase.map(str::to_string),
-                extra: vec![
-                    ("lr".to_string(), Json::Num(lr)),
-                    ("act_lr".to_string(), Json::Num(act_lr)),
-                ],
+                extra,
             };
             crate::log_debug!(
                 LOG,
@@ -868,9 +909,12 @@ impl Model {
             self.epoch_done(&record)?;
             let go_on = on_epoch(&record);
             records.push(record);
-            if !go_on {
+            if stopping || !go_on {
                 break;
             }
+        }
+        if let Some(p) = plan.as_mut() {
+            self.replay = p.finish();
         }
         crate::log_info!(
             LOG,
@@ -1134,6 +1178,7 @@ impl Model {
                 traversal,
                 o.penalty_scale,
                 o.merit_scale,
+                o.tuning(),
             );
         }
         let best = self.radix_dijkstra(

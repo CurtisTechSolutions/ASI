@@ -234,15 +234,15 @@ func init() {
 	route("POST", "/api/encoding/preview", rEncodingPreview)
 	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
 	route("POST", "/api/train", rTrain)
-	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts}; uploads stream through in chunks, whatever their size")
+	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off)}; uploads stream through in chunks, whatever their size - unless an order, a curriculum or a replay buffer needs the whole list first")
 	route("GET", "/api/job", rJob)
 	doc("GET", "/api/job", "status of the current / last job")
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), guard (default on: the negative network vetoes the continuations it recognises as failures)}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
 	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/score", rScore)
@@ -572,7 +572,16 @@ func rTrain(rq *request) (int, any, error) {
 	if _, _, err := rq.f.integer("batch_size", 256, intp(1)); err != nil {
 		return 0, nil, err
 	}
-	job, err := rq.svc.StartTrainSource(src, epochs, autoCompress, chunkSize, parallelParts, inflight)
+	for _, name := range []string{"shuffle"} {
+		if _, err := rq.f.flag(name, true); err != nil {
+			return 0, nil, err
+		}
+	}
+	plan, err := planFields(rq.f)
+	if err != nil {
+		return 0, nil, err
+	}
+	job, err := rq.svc.StartTrainPlanned(src, epochs, autoCompress, chunkSize, parallelParts, inflight, plan)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -616,6 +625,76 @@ func traversalFields(f fields) (name string, penaltyScale, meritScale float64, e
 	return name, penaltyScale, meritScale, nil
 }
 
+// planFields reads how a training run walks its texts: order, curriculum,
+// replay, replay_size, patience and min_delta (../../SPEC-SearchAndTraining.md
+// §3-6), each off when it is not given.
+func planFields(f fields) (radixnet.Plan, error) {
+	var p radixnet.Plan
+	var err error
+	if p.Order, err = f.optText("order", "corpus"); err != nil {
+		return p, err
+	}
+	p.Order = strings.ToLower(strings.TrimSpace(p.Order))
+	curriculum, present, err := f.number("curriculum", 1, nil)
+	if err != nil {
+		return p, err
+	}
+	if present && !(curriculum > 0 && curriculum <= 1) {
+		return p, badRequest("curriculum must lie in (0, 1], got %v", curriculum)
+	}
+	p.Curriculum = curriculum
+	if p.Replay, _, err = f.number("replay", 0, floatp(0)); err != nil {
+		return p, err
+	}
+	size, present, err := f.integer("replay_size", 0, intp(0))
+	if err != nil {
+		return p, err
+	}
+	if present {
+		p.ReplaySize = &size
+	}
+	if p.Patience, _, err = f.integer("patience", 0, intp(0)); err != nil {
+		return p, err
+	}
+	if p.MinDelta, _, err = f.number("min_delta", 0, floatp(0)); err != nil {
+		return p, err
+	}
+	if err := p.Check(); err != nil {
+		return p, badRequest("%v", err)
+	}
+	return p, nil
+}
+
+// searchFields reads the sampling filters and the beam's diversity, shared by
+// /api/predict and /api/generate (../../SPEC-SearchAndTraining.md §1-2), each
+// off when it is not given.
+func searchFields(f fields) (radixnet.SamplingFilter, float64, error) {
+	var filter radixnet.SamplingFilter
+	var err error
+	if filter.TopK, _, err = f.integer("top_k", 0, intp(0)); err != nil {
+		return filter, 0, err
+	}
+	topP, present, err := f.number("top_p", 1, nil)
+	if err != nil {
+		return filter, 0, err
+	}
+	if present && !(topP > 0 && topP <= 1) {
+		return filter, 0, badRequest("top_p must lie in (0, 1], got %v", topP)
+	}
+	filter.TopP = topP
+	if filter.MinP, _, err = f.number("min_p", 0, nil); err != nil {
+		return filter, 0, err
+	}
+	if err := filter.Check(); err != nil {
+		return filter, 0, badRequest("%v", err)
+	}
+	diversity, _, err := f.number("diversity", 0, floatp(0))
+	if err != nil {
+		return filter, 0, err
+	}
+	return filter, diversity, nil
+}
+
 func rPredict(rq *request) (int, any, error) {
 	f := rq.f
 	prefix, err := f.text("prefix", nil)
@@ -650,6 +729,11 @@ func rPredict(rq *request) (int, any, error) {
 	if o.Traversal, o.PenaltyScale, o.MeritScale, err = traversalFields(f); err != nil {
 		return 0, nil, err
 	}
+	filter, diversity, err := searchFields(f)
+	if err != nil {
+		return 0, nil, err
+	}
+	o.TopK, o.TopP, o.MinP, o.Diversity = filter.TopK, filter.TopP, filter.MinP, diversity
 	guard, err := f.flag("guard", true)
 	if err != nil {
 		return 0, nil, err
@@ -717,6 +801,11 @@ func rGenerate(rq *request) (int, any, error) {
 	if o.Traversal, o.PenaltyScale, o.MeritScale, err = traversalFields(f); err != nil {
 		return 0, nil, err
 	}
+	filter, diversity, err := searchFields(f)
+	if err != nil {
+		return 0, nil, err
+	}
+	o.TopK, o.TopP, o.MinP, o.Diversity = filter.TopK, filter.TopP, filter.MinP, diversity
 	guard, err := f.flag("guard", true)
 	if err != nil {
 		return 0, nil, err

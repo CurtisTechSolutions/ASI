@@ -43,11 +43,11 @@ import math
 import random
 from heapq import heappop, heappush
 
-from .beam import default_beam
+from .beam import default_beam, diverse_pick
 from .encoding import WINDOW
 from .graph import BACK, END, FIRST
 from .metacog import ABORT, ESCAPE, RIDE, cycle_signature
-from .search import CostFn, PathResult, _build_result, _start_emission, onward
+from .search import CostFn, PathResult, _build_result, _start_emission, check_sampling, onward, sampling_filter
 
 __all__ = ["phase_beam", "phase_dijkstra", "phase_kbest", "phase_walk", "start_bucket"]
 
@@ -391,6 +391,7 @@ def phase_beam(
     max_steps: int = 4_000,
     include_context: bool | None = None,
     costs: CostFn | None = None,
+    diversity: float = 0.0,
 ) -> tuple[list[PathResult], list[PathResult], int]:
     """The ``k`` cheapest and the ``k`` dearest complete paths, with metacognition on cycles.
 
@@ -399,8 +400,12 @@ def phase_beam(
     over the phase-unrolled graph.  Every entry carries the ``(node, phase)``
     states already on its path, so a cycle is detected per path and priced by
     ``meta``.  ``costs`` replaces the graph's own phase-aware cost function
-    (:mod:`radixnet.penalty`).
+    (:mod:`radixnet.penalty`).  ``diversity`` picks the ``k`` from a pool of
+    ``beam`` finished paths the way :func:`radixnet.beam.diverse_pick` does
+    (``../SPEC-SearchAndTraining.md`` §2).
     """
+    if not (diversity >= 0.0):
+        raise ValueError(f"diversity must be >= 0, got {diversity}")
     width = default_beam(k) if beam is None else int(beam)
     if width < 1:
         raise ValueError(f"beam must be >= 1, got {width}")
@@ -415,6 +420,7 @@ def phase_beam(
     bottom_beam = [root]
     top_done: list[tuple[float, int, _Entry]] = []
     bottom_done: list[tuple[float, int, _Entry]] = []
+    top_keep = max(k, width) if diversity > 0.0 and k > 0 else max(1, k)  # a diverse beam picks from a pool
     seq = 0
     expanded = 0
     depth = 0
@@ -448,7 +454,7 @@ def phase_beam(
                         seq += 1
                         done = top_done if side == 0 else bottom_done
                         score = child.cost if side == 0 else -child.cost
-                        if len(done) < max(1, k):
+                        if len(done) < (top_keep if side == 0 else max(1, k)):
                             heappush(done, (-score, seq, child))
                         elif -score > done[0][0]:
                             heappop(done)
@@ -460,11 +466,11 @@ def phase_beam(
         nxt_bottom.sort(key=lambda e: -e.cost)
         top_beam = nxt_top[:width]
         bottom_beam = nxt_bottom[:width]
-        if bottom_limit is None and len(top_done) >= max(1, k):
+        if bottom_limit is None and len(top_done) >= top_keep:
             # no cap and running to the end: keep the dearest paths roughly as long as the cheapest,
             # so "least likely" stays comparable instead of cycling for hundreds of steps
             bottom_limit = 2 * max(e.chars for _s, _q, e in top_done)
-        if len(top_done) >= max(1, k) and top_beam:
+        if len(top_done) >= top_keep and top_beam:
             worst_kept = max(-s for s, _, _ in top_done)
             if top_beam[0].cost >= worst_kept:
                 top_beam = []  # nothing left can beat the k-th finished path
@@ -477,7 +483,10 @@ def phase_beam(
             out.append(_build_result(graph, nodes, steps, start_offset, max_chars, expanded, include_context))
         return out
 
-    top = sorted(_results(top_done), key=lambda r: r.cost)[: max(0, k)]
+    top = sorted(_results(top_done), key=lambda r: r.cost)
+    if top_keep > max(1, k):
+        top = [top[i] for i in diverse_pick([(0.0, r.cost, list(r.node_ids)) for r in top], k, diversity)]
+    top = top[: max(0, k)]
     taken = {r.text for r in top}
     bottom = [r for r in sorted(_results(bottom_done), key=lambda r: -r.cost) if r.text not in taken][: max(0, k)]
     return top, bottom, expanded
@@ -495,6 +504,9 @@ def phase_walk(
     stop_at_end: bool = True,
     include_context: bool | None = None,
     costs: CostFn | None = None,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    min_p: float = 0.0,
 ) -> PathResult:
     """A stochastic walk over the phase-unrolled graph, metacognition included.
 
@@ -502,9 +514,13 @@ def phase_walk(
     the phase-aware one plus, at a phase-locked cycle, the layer's price for
     riding, escaping or aborting.  ``temperature == 0`` is greedy.  ``costs``
     replaces the graph's own phase-aware cost function (:mod:`radixnet.penalty`).
+    ``top_k`` / ``top_p`` / ``min_p`` narrow what a step draws from
+    (:func:`radixnet.search.sampling_filter`).
     """
     if temperature < 0:
         raise ValueError("temperature must be >= 0")
+    check_sampling(top_k, top_p, min_p)
+    filtering = top_k > 0 or top_p < 1.0 or min_p > 0.0
     if rng is None:
         rng = graph.rng
     labels = graph.labels
@@ -525,6 +541,8 @@ def phase_walk(
         if temperature == 0 or len(options) == 1:
             pick = min(options, key=lambda item: item[2])
         else:
+            if filtering:
+                options = sampling_filter(options, temperature, top_k, top_p, min_p)
             inv_t = 1.0 / temperature
             lowest = min(cst for _c, _e, cst, _p, _a in options)
             weights = [math.exp(-(cst - lowest) * inv_t) for _c, _e, cst, _p, _a in options]

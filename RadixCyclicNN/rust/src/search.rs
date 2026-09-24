@@ -242,6 +242,36 @@ impl Graph {
         costs: Option<&PenaltyCosts>,
         traversal: Traversal,
     ) -> Result<PathResult, String> {
+        self.sample_walk_filtered(
+            start_node,
+            start_offset,
+            max_chars,
+            temperature,
+            rng,
+            include_context,
+            costs,
+            traversal,
+            SamplingFilter::default(),
+        )
+    }
+
+    /// [`Graph::sample_walk`] with a [`SamplingFilter`]: every step draws from
+    /// what the filter keeps, with the one random number it always drew - off,
+    /// the walk is draw for draw the one it always was.
+    #[allow(clippy::too_many_arguments)] // the walk's knobs, one per knob
+    pub fn sample_walk_filtered(
+        &mut self,
+        start_node: usize,
+        start_offset: usize,
+        max_chars: Option<usize>,
+        temperature: f64,
+        rng: Option<&mut Mt19937>,
+        include_context: Option<bool>,
+        costs: Option<&PenaltyCosts>,
+        traversal: Traversal,
+        filter: SamplingFilter,
+    ) -> Result<PathResult, String> {
+        filter.check()?;
         self.prepare();
         match rng {
             Some(rng) => self.walk(
@@ -253,6 +283,7 @@ impl Graph {
                 include_context,
                 costs,
                 traversal,
+                filter,
             ),
             None => {
                 // the graph's own generator, lent to the walk and put back
@@ -266,6 +297,7 @@ impl Graph {
                     include_context,
                     costs,
                     traversal,
+                    filter,
                 );
                 self.rng = own;
                 walk
@@ -285,6 +317,7 @@ impl Graph {
         include_context: Option<bool>,
         walk_costs: Option<&PenaltyCosts>,
         traversal: Traversal,
+        filter: SamplingFilter,
     ) -> Result<PathResult, String> {
         if temperature < 0.0 {
             return Err("temperature must be >= 0".to_string());
@@ -320,6 +353,8 @@ impl Graph {
                 }
                 pick
             } else {
+                // the draw below still runs, however few options are left: one random number per step
+                filter.filter(&mut costs, temperature);
                 let inv_t = 1.0 / temperature;
                 let lowest = costs.iter().map(|c| c.cost).fold(f64::INFINITY, f64::min);
                 weights.clear();
@@ -359,5 +394,166 @@ impl Graph {
         );
         walk.punish = punish;
         Ok(walk)
+    }
+}
+
+/// What every step of a stochastic walk draws from (`../../SPEC-SearchAndTraining.md`
+/// section 1).  The default is off: `top_k` 0 keeps every option, `top_p` 1
+/// the whole mass, `min_p` 0 every weight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SamplingFilter {
+    /// The `top_k` cheapest options (0 = off).
+    pub top_k: usize,
+    /// Nucleus: the smallest set of cheapest options holding `top_p` of the mass (1 = off).
+    pub top_p: f64,
+    /// The options at least `min_p` times as likely as the best (0 = off).
+    pub min_p: f64,
+}
+
+impl Default for SamplingFilter {
+    fn default() -> SamplingFilter {
+        SamplingFilter {
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+        }
+    }
+}
+
+impl SamplingFilter {
+    /// Whether it keeps anything less than every option.
+    pub fn active(&self) -> bool {
+        self.top_k > 0 || self.top_p < 1.0 || self.min_p > 0.0
+    }
+
+    /// The error for a filter out of range: `top_p` outside `(0, 1]`, `min_p` outside `[0, 1)`.
+    pub fn check(&self) -> Result<(), String> {
+        if !(self.top_p > 0.0 && self.top_p <= 1.0) {
+            return Err(format!("top_p must lie in (0, 1], got {}", self.top_p));
+        }
+        if !(self.min_p >= 0.0 && self.min_p < 1.0) {
+            return Err(format!("min_p must lie in [0, 1), got {}", self.min_p));
+        }
+        Ok(())
+    }
+
+    /// Narrows `options` in place to what a stochastic step may draw from, in
+    /// the order the node offered them.  Options rank by `(cost, position)`;
+    /// `top_k`, then `min_p`, then `top_p`; the cheapest always survives, so
+    /// the weights the draw then uses are the numbers it would have used
+    /// unfiltered.
+    pub fn filter(&self, options: &mut Vec<ChildCost>, temperature: f64) {
+        self.filter_by(options, temperature, |o| o.cost);
+    }
+
+    /// [`SamplingFilter::filter`] over any list of options, `cost` reading an
+    /// option's cost - the phase walk's steps carry a phase beside theirs.
+    pub fn filter_by<T>(&self, options: &mut Vec<T>, temperature: f64, cost: impl Fn(&T) -> f64) {
+        let n = options.len();
+        if n <= 1 || temperature == 0.0 || !self.active() {
+            return;
+        }
+        let costs: Vec<f64> = options.iter().map(cost).collect();
+        let mut ranked: Vec<usize> = (0..n).collect();
+        // IEEE order, not `total_cmp`: -0 and 0 are one cost here, as they are in Python and Go
+        ranked.sort_by(|&a, &b| {
+            costs[a]
+                .partial_cmp(&costs[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        if self.top_k > 0 && self.top_k < n {
+            ranked.truncate(self.top_k);
+        }
+        let lowest = costs[ranked[0]];
+        let inv_t = 1.0 / temperature;
+        let mut weight = vec![0.0f64; n];
+        for &i in &ranked {
+            weight[i] = (-(costs[i] - lowest) * inv_t).exp();
+        }
+        if self.min_p > 0.0 {
+            ranked.retain(|&i| weight[i] >= self.min_p);
+        }
+        if self.top_p < 1.0 {
+            let ws: Vec<f64> = ranked.iter().map(|&i| weight[i]).collect();
+            let total = fsum(&ws);
+            let mut acc = 0.0;
+            let mut kept = 0;
+            for &i in &ranked {
+                kept += 1;
+                acc += weight[i];
+                if acc >= self.top_p * total {
+                    break;
+                }
+            }
+            ranked.truncate(kept);
+        }
+        if ranked.len() == n {
+            return;
+        }
+        let mut keep = vec![false; n];
+        for &i in &ranked {
+            keep[i] = true;
+        }
+        let mut at = 0;
+        options.retain(|_| {
+            let kept = keep[at];
+            at += 1;
+            kept
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(child, edge, cost)` options, child = position, as a node offers them.
+    fn options(costs: &[f64]) -> Vec<ChildCost> {
+        costs
+            .iter()
+            .enumerate()
+            .map(|(i, &cost)| ChildCost {
+                child: i,
+                edge: 100 + i,
+                cost,
+                punish: 0.0,
+            })
+            .collect()
+    }
+
+    fn kept(costs: &[f64], temperature: f64, top_k: usize, top_p: f64, min_p: f64) -> Vec<usize> {
+        let mut o = options(costs);
+        SamplingFilter { top_k, top_p, min_p }.filter(&mut o, temperature);
+        o.iter().map(|c| c.child).collect()
+    }
+
+    #[test]
+    fn off_or_greedy_keeps_every_option() {
+        assert_eq!(kept(&[0.5, 0.1, 2.0], 1.0, 0, 1.0, 0.0), vec![0, 1, 2]);
+        assert_eq!(kept(&[0.5, 0.1, 2.0], 0.0, 1, 1.0, 0.0), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn the_filters_keep_what_python_keeps() {
+        // the cases of tests/test_search_training.py, number for number
+        assert_eq!(kept(&[0.5, 0.1, 2.0, 0.3], 1.0, 2, 1.0, 0.0), vec![1, 3]);
+        assert_eq!(kept(&[0.2, 0.2, 0.2], 1.0, 2, 1.0, 0.0), vec![0, 1]);
+        assert_eq!(kept(&[0.1, 0.5, 2.0], 1.0, 0, 1.0, 0.5), vec![0, 1]);
+        assert_eq!(kept(&[0.1, 0.5, 2.0], 1.0, 0, 1.0, 0.9), vec![0]);
+        assert_eq!(kept(&[0.1, 0.5, 2.0], 10.0, 0, 1.0, 0.5), vec![0, 1, 2]);
+        assert_eq!(kept(&[0.0; 4], 1.0, 0, 0.5, 0.0).len(), 2);
+        assert_eq!(kept(&[0.0; 4], 1.0, 0, 0.51, 0.0).len(), 3);
+        assert_eq!(kept(&[0.0, 0.1, 0.2, 5.0, 6.0], 1.0, 4, 0.4, 0.5), vec![0, 1]);
+        for (top_k, top_p, min_p) in [(1, 1.0, 0.0), (0, 1e-9, 0.0), (0, 1.0, 0.999)] {
+            assert_eq!(kept(&[3.0, 0.7, 1.0], 1.0, top_k, top_p, min_p), vec![1]);
+        }
+    }
+
+    #[test]
+    fn out_of_range_is_refused() {
+        let bad = |top_p: f64, min_p: f64| SamplingFilter { top_k: 0, top_p, min_p }.check().is_err();
+        assert!(bad(0.0, 0.0) && bad(1.5, 0.0) && bad(f64::NAN, 0.0) && bad(1.0, 1.0) && bad(1.0, -0.1));
+        assert!(!bad(0.5, 0.99));
     }
 }

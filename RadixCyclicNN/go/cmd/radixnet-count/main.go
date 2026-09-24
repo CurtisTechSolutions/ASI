@@ -446,10 +446,12 @@ func cmdTrain(args []string) {
 	windowScale := fs.Float64("window-scale", -1, "weight of log(recent share) for a NEW model (default 0.5)")
 	rewardScale := fs.Float64("reward-scale", -1, "weight of the reward for a NEW model (default 1)")
 	countScale := fs.Float64("count-scale", -1, "weight of log(1 + traversals) for a NEW model (default 0)")
+	plan := planFlags(fs)
 	_ = fs.Parse(args)
 	if len(data) == 0 {
 		fail("train needs --data FILE")
 	}
+	trainPlan := plan()
 	source := sourcesFor(data, *unit, *pageLines)
 	radixnet.Workers = workers
 	var m *radixnet.Model
@@ -492,6 +494,7 @@ func cmdTrain(args []string) {
 	opts.ChunkSize = *chunk
 	opts.ParallelParts = *parallelParts
 	opts.Inflight = *inflight
+	opts.Plan = trainPlan
 	opts.Progress = func(r map[string]any) {
 		say("%5v %9.4f %10.3f %7v %7v %8v %6.2f %6v %11v %6v %8.3f", r["epoch"], r["loss"], r["perplexity"], r["nodes"], r["edges"], r["trigrams"], r["compression_ratio"], r["merges"], r["transitions"], r["chunks"], r["seconds"])
 	}
@@ -558,6 +561,56 @@ func traversalFlags(fs *flag.FlagSet) (*string, *float64, *float64) {
 	return traversal, penaltyScale, meritScale
 }
 
+// searchFlags adds the sampling filters and the beam's diversity
+// (../../../SPEC-SearchAndTraining.md), each off by default.
+func searchFlags(fs *flag.FlagSet) (*int, *float64, *float64, *float64) {
+	topK := fs.Int("top-k", 0, "sample: draw each step from the K cheapest options only (0 = off)")
+	topP := fs.Float64("top-p", 1, "sample: nucleus - the smallest set of cheapest options holding P of the mass (1 = off)")
+	minP := fs.Float64("min-p", 0, "sample: keep the options at least P times as likely as the best one (0 = off)")
+	diversity := fs.Float64("diversity", 0, "beam: pick the K by maximal marginal relevance, so a path that only varies the ending of one already chosen pays up to X (0 = off; costs are untouched)")
+	return topK, topP, minP, diversity
+}
+
+// checkedFilter is the flags' sampling filter, or the error that ends the command.
+func checkedFilter(topK int, topP, minP float64) radixnet.SamplingFilter {
+	if !(topP > 0 && topP <= 1) {
+		fail("--top-p must lie in (0, 1], got %v", topP)
+	}
+	f := radixnet.SamplingFilter{TopK: topK, TopP: topP, MinP: minP}
+	if err := f.Check(); err != nil {
+		fail("%v", err)
+	}
+	return f
+}
+
+// planFlags adds how a training run walks its texts
+// (../../../SPEC-SearchAndTraining.md §3-6), each off by default.
+func planFlags(fs *flag.FlagSet) func() radixnet.Plan {
+	order := fs.String("order", "corpus", "how every epoch walks the texts: corpus | shortest-first | longest-first | shuffle")
+	curriculum := fs.Float64("curriculum", 1, "the first epoch walks the first C of the ordered texts, the last all of them (1 = off)")
+	replay := fs.Float64("replay", 0, "every epoch also rehearses R times as many texts from the model's replay buffer, after the new ones (0 = off)")
+	replaySize := fs.Int("replay-size", 0, "keep a replay buffer of N texts, a uniform sample of everything trained on, saved with the model (0 drops it; left out: the model's buffer as it is)")
+	patience := fs.Int("patience", 0, "stop after N full epochs without the loss improving by --min-delta (0 = off)")
+	minDelta := fs.Float64("min-delta", 0, "how much the loss must fall below its best to count as an improvement")
+	return func() radixnet.Plan {
+		if !(*curriculum > 0 && *curriculum <= 1) {
+			fail("--curriculum must lie in (0, 1], got %v", *curriculum)
+		}
+		p := radixnet.Plan{Order: *order, Curriculum: *curriculum, Replay: *replay, Patience: *patience, MinDelta: *minDelta}
+		// only a size that was given changes the buffer; a negative one is an error, as everywhere
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "replay-size" {
+				size := *replaySize
+				p.ReplaySize = &size
+			}
+		})
+		if err := p.Check(); err != nil {
+			fail("%v", err)
+		}
+		return p
+	}
+}
+
 func cmdPredict(args []string) {
 	fs := subFlagSet("predict")
 	prefix := fs.String("prefix", "", "text to continue")
@@ -570,11 +623,14 @@ func cmdPredict(args []string) {
 	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
 	traversal, penaltyScale, meritScale := traversalFlags(fs)
+	topK, topP, minP, diversity := searchFlags(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
+	filter := checkedFilter(*topK, *topP, *minP)
 	m := openModel(true)
 	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength,
-		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale}
+		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale,
+		TopK: filter.TopK, TopP: filter.TopP, MinP: filter.MinP, Diversity: *diversity}
 	p, err := m.Predict(*prefix, opts)
 	if err != nil {
 		fail("%v", err)
@@ -627,11 +683,14 @@ func cmdGenerate(args []string) {
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
 	traversal, penaltyScale, meritScale := traversalFlags(fs)
+	topK, topP, minP, diversity := searchFlags(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
+	filter := checkedFilter(*topK, *topP, *minP)
 	m := openModel(true)
 	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam,
-		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale}
+		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale,
+		TopK: filter.TopK, TopP: filter.TopP, MinP: filter.MinP, Diversity: *diversity}
 	if *seeded {
 		s := seedFlag
 		opts.Seed = &s

@@ -39,12 +39,14 @@ use radixnet::file::read_document;
 use radixnet::json::Json;
 use radixnet::kinds::TrainSettings;
 use radixnet::log::{self, Level};
-use radixnet::model::{GenerateOptions, Model, PredictOptions};
+use radixnet::model::{GenerateOptions, Model, PredictOptions, SearchTuning};
 use radixnet::negative::{BlameOptions as NegBlameOptions, JudgeOptions};
 use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
 use radixnet::radix::{Feedback, TrainConfig};
 use radixnet::report::{node_rows, path_rows, stats};
+use radixnet::search::SamplingFilter;
 use radixnet::service::Service;
+use radixnet::training::Plan;
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] \
      [--workers N] [--out PATH] <command>\n\
@@ -65,7 +67,17 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      off), optionally\n\
      per target - 'info', 'warn,http=debug', 'info,train=trace'.  --verbose is --log debug and --quiet is --log \
      off.  Nothing is ever\n\
-     written to stdout, which is where --json puts its document.  Targets: http, model, train.";
+     written to stdout, which is where --json puts its document.  Targets: http, model, train.\n\
+     predict / generate: --top-k K, --top-p P, --min-p P narrow what a sampled step draws from (off at 0 / 1 / 0); \
+     --diversity X spreads\n\
+     the beam's K continuations apart (0 = off).  train: --order corpus | shortest-first | longest-first | \
+     shuffle, --curriculum C (the\n\
+     first epoch walks the first C of the ordered texts, the last all of them; 1 = off), --replay R (every epoch \
+     rehearses R times as\n\
+     many texts from the model's replay buffer; 0 = off), --replay-size N (the buffer's capacity; 0 drops it), \
+     --patience N and\n\
+     --min-delta X (stop after N full epochs without the loss improving by X; 0 = off).  \
+     ../SPEC-SearchAndTraining.md has the rules.";
 
 /// The default `--model` per unit, so a word model never overwrites a
 /// character model's file.
@@ -224,6 +236,7 @@ fn run() -> Result<(), String> {
             let max_length = args.int("max-length", -1)?;
             // Python's default is dijkstra; the count model's dijkstra is its beam
             let default_mode = if model.kind() == "count" { "beam" } else { "dijkstra" };
+            let tuning = search_tuning(&args)?;
             let opts = PredictOptions {
                 length: args.usize("length", 20)?,
                 mode: args.str("mode", default_mode),
@@ -236,6 +249,10 @@ fn run() -> Result<(), String> {
                 traversal: resolve_traversal(&args.str("traversal", DEFAULT_TRAVERSAL))?.to_string(),
                 penalty_scale: args.float("penalty-scale", 1.0)?,
                 merit_scale: args.float("merit-scale", 1.0)?,
+                top_k: tuning.filter.top_k,
+                top_p: tuning.filter.top_p,
+                min_p: tuning.filter.min_p,
+                diversity: tuning.diversity,
             };
             let mut found = model.predict(&prefix, &opts)?;
             // the guard re-ranks what the search already offered: the best
@@ -286,6 +303,7 @@ fn run() -> Result<(), String> {
         "generate" => {
             let mut model = open(true)?;
             let seeded = args.on("seeded");
+            let tuning = search_tuning(&args)?;
             let opts = GenerateOptions {
                 max_length: args.usize("max-length", 60)?,
                 mode: args.str("mode", "sample"),
@@ -298,6 +316,10 @@ fn run() -> Result<(), String> {
                 traversal: resolve_traversal(&args.str("traversal", DEFAULT_TRAVERSAL))?.to_string(),
                 penalty_scale: args.float("penalty-scale", 1.0)?,
                 merit_scale: args.float("merit-scale", 1.0)?,
+                top_k: tuning.filter.top_k,
+                top_p: tuning.filter.top_p,
+                min_p: tuning.filter.min_p,
+                diversity: tuning.diversity,
             };
             // the pair: the model over-samples, the negative network vetoes,
             // the cleanest survivors come back
@@ -868,10 +890,56 @@ fn train_config(args: &radixnet::cli::Args, epochs: usize) -> Result<TrainConfig
         lr_schedule: text("lr-schedule"),
         act_lr_schedule: text("act-lr-schedule"),
         reverse_schedule: args.on("reverse-schedule"),
+        plan: plan_flags(args)?,
         ..base
     };
     cfg.validate()?;
     Ok(cfg)
+}
+
+/// A count flag that refuses a negative value rather than reading it as 0 -
+/// `--replay-size -1` must not drop a buffer.
+fn count_flag(args: &radixnet::cli::Args, name: &str, fallback: usize) -> Result<usize, String> {
+    let value = args.int(name, fallback as i64)?;
+    if value < 0 {
+        return Err(format!("--{name} must be >= 0, got {value}"));
+    }
+    Ok(value as usize)
+}
+
+/// The sampling filters and the beam's diversity (`--top-k`, `--top-p`,
+/// `--min-p`, `--diversity`; `../SPEC-SearchAndTraining.md` sections 1-2),
+/// each off by default.
+fn search_tuning(args: &radixnet::cli::Args) -> Result<SearchTuning, String> {
+    let tuning = SearchTuning {
+        filter: SamplingFilter {
+            top_k: count_flag(args, "top-k", 0)?,
+            top_p: args.float("top-p", 1.0)?,
+            min_p: args.float("min-p", 0.0)?,
+        },
+        diversity: args.float("diversity", 0.0)?,
+    };
+    tuning.check()?;
+    Ok(tuning)
+}
+
+/// How a training run walks its texts (`--order`, `--curriculum`,
+/// `--replay`, `--replay-size`, `--patience`, `--min-delta`; the spec's
+/// sections 3-6), each off by default.
+fn plan_flags(args: &radixnet::cli::Args) -> Result<Plan, String> {
+    let plan = Plan {
+        order: args.str("order", "corpus"),
+        curriculum: args.float("curriculum", 1.0)?,
+        replay: args.float("replay", 0.0)?,
+        replay_size: match args.get("replay-size") {
+            Some(_) => Some(count_flag(args, "replay-size", 0)?),
+            None => None,
+        },
+        patience: count_flag(args, "patience", 0)?,
+        min_delta: args.float("min-delta", 0.0)?,
+    };
+    plan.check()?;
+    Ok(plan)
 }
 
 /// A feedback command's settings over the command's defaults: the epochs and

@@ -134,6 +134,8 @@ struct BeamRun<'a> {
     max_expansions: usize,
     worst: bool,
     traversal: Traversal,
+    /// The diverse top beam's trade of likelihood for novelty (0 = off).
+    diversity: f64,
 }
 
 /// One beam: the k best (or, with `worst`, the k worst) complete paths.
@@ -159,7 +161,13 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             entry,
         }
     };
-    let mut done: Vec<DoneKey> = Vec::with_capacity(o.k);
+    // a diverse top beam keeps a pool of `width` finished paths to pick its k from
+    let keep = if o.diversity > 0.0 && !o.worst && o.k > 0 && o.width > o.k {
+        o.width
+    } else {
+        o.k
+    };
+    let mut done: Vec<DoneKey> = Vec::with_capacity(keep);
     // the kept path that ranks last: the first to be replaced
     let worst_index = |done: &[DoneKey]| -> usize {
         let mut best = 0;
@@ -171,11 +179,11 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
         best
     };
     let offer = |done: &mut Vec<DoneKey>, cost: f64, punish: f64, entry: usize| {
-        if o.k == 0 {
+        if keep == 0 {
             return;
         }
         let key = key_of(cost, punish, entry);
-        if done.len() < o.k {
+        if done.len() < keep {
             done.push(key);
             return;
         }
@@ -266,7 +274,7 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
         // punishment the worst step so far - so once k paths finished and the
         // best partial one already ranks below the k-th of them, the best side
         // is settled
-        if !o.worst && o.k > 0 && done.len() == o.k && !frontier.is_empty() {
+        if !o.worst && o.k > 0 && done.len() == keep && !frontier.is_empty() {
             let w = worst_index(&done);
             let head = key_of(frontier[0].cost, frontier[0].punish, frontier[0].entry);
             if !head.better_than(done[w]) {
@@ -334,7 +342,8 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             });
         }
     }
-    let out = picks
+    let diverse = keep > o.k && !done.is_empty();
+    let mut out: Vec<Finished> = picks
         .into_iter()
         .map(|p| {
             let (ids, step) = path_of(p.entry);
@@ -346,7 +355,97 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             }
         })
         .collect();
+    if diverse {
+        // the diverse top beam: k of the pool, by maximal marginal relevance
+        let pool: Vec<DiverseCandidate> = out
+            .iter()
+            .map(|f| DiverseCandidate {
+                punish: if o.traversal == Traversal::LeastPunished {
+                    f.punish
+                } else {
+                    0.0
+                },
+                cost: f.cost,
+                ids: f.ids.clone(),
+            })
+            .collect();
+        let chosen = diverse_pick(&pool, o.k, o.diversity);
+        let mut slots: Vec<Option<Finished>> = out.into_iter().map(Some).collect();
+        out = chosen.into_iter().filter_map(|i| slots[i].take()).collect();
+    }
     (out, expanded)
+}
+
+/// How much of the shorter of two paths the other repeats from the start:
+/// shared leading nodes over its length.  Both are node ids from the same start
+/// node, which does not count; 1 for a path that is the other with more added,
+/// 0 for two that part at the first step.
+pub fn path_overlap(a: &[usize], b: &[usize]) -> f64 {
+    let shortest = a.len().min(b.len());
+    if shortest <= 1 {
+        return 0.0;
+    }
+    let shortest = shortest - 1;
+    let mut shared = 0usize;
+    for t in 1..=shortest {
+        if a[t] != b[t] {
+            break;
+        }
+        shared += 1;
+    }
+    shared as f64 / shortest as f64
+}
+
+/// One finished path a diverse beam can pick: what it was punished for (0
+/// unless the walks are ranked by blame), what it cost, and its nodes.
+#[derive(Clone, Debug)]
+pub struct DiverseCandidate {
+    pub punish: f64,
+    pub cost: f64,
+    pub ids: Vec<usize>,
+}
+
+/// Which `k` of `paths` a diverse beam hands back, as indices in the order it
+/// picks them.  `paths` are in the plain beam's order, best first.  The first
+/// pick is the best path; every later one takes the smallest
+/// `(punish, cost + diversity * overlap, position)`, where `overlap` is the
+/// largest [`path_overlap`] with a path already picked - maximal marginal
+/// relevance, in the beam's own currency (`../../SPEC-SearchAndTraining.md`
+/// section 2).
+pub fn diverse_pick(paths: &[DiverseCandidate], k: usize, diversity: f64) -> Vec<usize> {
+    if paths.is_empty() || k == 0 {
+        return Vec::new();
+    }
+    let mut picked = vec![0usize];
+    let mut taken = vec![false; paths.len()];
+    taken[0] = true;
+    while picked.len() < k && picked.len() < paths.len() {
+        let mut best: Option<(usize, f64, f64)> = None;
+        for (i, path) in paths.iter().enumerate() {
+            if taken[i] {
+                continue;
+            }
+            let mut overlap = 0.0f64;
+            for (n, &j) in picked.iter().enumerate() {
+                let o = path_overlap(&path.ids, &paths[j].ids);
+                if n == 0 || o > overlap {
+                    overlap = o;
+                }
+            }
+            let key = path.cost + diversity * overlap;
+            let better = match best {
+                None => true,
+                Some((_, punish, best_key)) => path.punish < punish || (path.punish == punish && key < best_key),
+            };
+            if better {
+                best = Some((i, path.punish, key));
+            }
+        }
+        let (i, _, _) = best.expect("an unpicked path remains");
+        picked.push(i);
+        taken[i] = true;
+    }
+    picked
 }
 
 /// The settings of a beam prediction.
@@ -365,6 +464,10 @@ pub struct BeamOptions {
     pub max_expansions: usize,
     /// How the two beams rank a path.
     pub traversal: Traversal,
+    /// Spreads the top beam out: it keeps a pool of `beam` finished paths and
+    /// picks the `k` from it by maximal marginal relevance ([`diverse_pick`];
+    /// 0 = off, costs untouched).
+    pub diversity: f64,
 }
 
 impl Default for BeamOptions {
@@ -378,6 +481,7 @@ impl Default for BeamOptions {
             max_steps: 0,
             max_expansions: 0,
             traversal: Traversal::Reward,
+            diversity: 0.0,
         }
     }
 }
@@ -411,6 +515,9 @@ impl Graph {
     ) -> Result<(Vec<PathResult>, Vec<PathResult>, usize), String> {
         if opts.step_penalty < 0.0 {
             return Err("step_penalty must be >= 0".to_string());
+        }
+        if opts.diversity.is_nan() || opts.diversity < 0.0 {
+            return Err(format!("diversity must be >= 0, got {}", opts.diversity));
         }
         let width = if opts.beam == 0 {
             default_beam(opts.k)
@@ -447,6 +554,7 @@ impl Graph {
             max_expansions: max_exp,
             worst: false,
             traversal: opts.traversal,
+            diversity: opts.diversity,
         };
         let (best, expanded) = run_beam(self, run);
         let mut bottom_cap = max_chars;
@@ -470,6 +578,7 @@ impl Graph {
             BeamRun {
                 cap: bottom_cap,
                 worst: true,
+                diversity: 0.0, // only the top side is spread out
                 ..run
             },
         );
@@ -493,5 +602,46 @@ impl Graph {
             bottom.push(result);
         }
         Ok((top, bottom, expanded))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(punish: f64, cost: f64, ids: &[usize]) -> DiverseCandidate {
+        DiverseCandidate {
+            punish,
+            cost,
+            ids: ids.to_vec(),
+        }
+    }
+
+    #[test]
+    fn path_overlap_counts_the_shared_start() {
+        assert_eq!(path_overlap(&[0, 1, 2, 3], &[0, 1, 2, 4]), 2.0 / 3.0);
+        assert_eq!(path_overlap(&[0, 1, 2], &[0, 1, 2, 3, 4]), 1.0);
+        assert_eq!(path_overlap(&[0, 5, 2], &[0, 1, 2]), 0.0);
+        assert_eq!(path_overlap(&[0], &[0, 1]), 0.0);
+    }
+
+    #[test]
+    fn diverse_pick_trades_cost_for_novelty() {
+        let paths = [
+            candidate(0.0, 1.0, &[0, 1, 2, 3]),
+            candidate(0.0, 1.1, &[0, 1, 2, 4]),
+            candidate(0.0, 1.5, &[0, 7, 8, 9]),
+        ];
+        assert_eq!(diverse_pick(&paths, 3, 0.0), vec![0, 1, 2]);
+        assert_eq!(diverse_pick(&paths, 2, 1.0), vec![0, 2]);
+        assert_eq!(diverse_pick(&paths, 3, 1.0), vec![0, 2, 1]);
+        assert!(diverse_pick(&paths, 0, 1.0).is_empty());
+        assert!(diverse_pick(&[], 3, 1.0).is_empty());
+        let punished = [
+            candidate(0.0, 1.0, &[0, 1]),
+            candidate(1.0, 0.5, &[0, 2]),
+            candidate(0.0, 9.0, &[0, 1, 3]),
+        ];
+        assert_eq!(diverse_pick(&punished, 3, 100.0), vec![0, 2, 1]);
     }
 }

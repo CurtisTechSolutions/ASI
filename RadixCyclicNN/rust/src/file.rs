@@ -572,14 +572,24 @@ fn with_back(doc: &Json) -> Json {
 
 impl Model {
     /// The model as a `radixnet-count` (or `radixnet-negative`, `radixnet`,
-    /// `radixnet-resonant`) document.
+    /// `radixnet-resonant`) document, with the replay buffer at its end when
+    /// the model keeps one (`../../SPEC-SearchAndTraining.md` section 4).
     pub fn to_doc(&mut self) -> Json {
-        if self.g.is_radix() {
-            return crate::radix::model_doc(self);
+        let mut doc = if self.g.is_radix() {
+            crate::radix::model_doc(self)
+        } else if self.is_resonant() {
+            crate::resonance::model_doc(self)
+        } else {
+            self.count_doc()
+        };
+        if let (Some(buffer), Json::Obj(pairs)) = (&self.replay, &mut doc) {
+            pairs.push(("replay".to_string(), buffer.to_json()));
         }
-        if self.is_resonant() {
-            return crate::resonance::model_doc(self);
-        }
+        doc
+    }
+
+    /// The count model's (and the negative network's) document.
+    fn count_doc(&mut self) -> Json {
         let mut pairs = vec![
             ("format".to_string(), Json::str(self.format())),
             ("version".to_string(), Json::Int(MODEL_FORMAT_VERSION)),
@@ -742,6 +752,10 @@ impl Model {
         }
         if resonant {
             crate::resonance::read_model(&mut model, doc);
+        }
+        // the priorities are recomputed from the model's seed, not trusted
+        if let Some(block @ Json::Obj(_)) = doc.get("replay") {
+            model.replay = Some(crate::training::ReplayBuffer::from_json(block, model.plan_seed())?);
         }
         Ok(model)
     }

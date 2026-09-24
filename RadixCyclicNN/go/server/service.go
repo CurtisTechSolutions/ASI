@@ -366,11 +366,22 @@ func (s *Service) StartTrain(texts []string, epochs int, autoCompress bool) (map
 // StartTrainSource starts a train job over a streaming source (uploads of any
 // size stream through in chunks of chunkSize texts; 0 = the default).
 func (s *Service) StartTrainSource(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int, parallelParts bool, inflight int) (map[string]any, error) {
+	return s.StartTrainPlanned(src, epochs, autoCompress, chunkSize, parallelParts, inflight, radixnet.Plan{})
+}
+
+// StartTrainPlanned is StartTrainSource with a training plan: the order, the
+// curriculum, the rehearsal of the replay buffer and the early stop
+// (../../SPEC-SearchAndTraining.md).  A plan out of range is a 400 before any
+// job starts.
+func (s *Service) StartTrainPlanned(src radixnet.TextSource, epochs int, autoCompress bool, chunkSize int, parallelParts bool, inflight int, plan radixnet.Plan) (map[string]any, error) {
 	if epochs < 0 {
 		return nil, badRequest("epochs must be >= 0, got %d", epochs)
 	}
+	if err := plan.Check(); err != nil {
+		return nil, badRequest("%v", err)
+	}
 	return s.startJob("train", func(job *Job, progress func(map[string]any), stop func() bool) error {
-		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize, ParallelParts: parallelParts, Inflight: inflight}
+		opts := radixnet.TrainOptions{Epochs: epochs, AutoCompress: autoCompress, Progress: progress, Stop: stop, ChunkSize: chunkSize, ParallelParts: parallelParts, Inflight: inflight, Plan: plan}
 		_, err := s.model.TrainSource(src, opts)
 		return err
 	})

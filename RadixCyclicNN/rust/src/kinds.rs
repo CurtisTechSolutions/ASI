@@ -349,7 +349,14 @@ pub fn train(
     s.config.validate()?;
     match model.kind() {
         "radix" => model.radix_train(texts, &s.config, None, on_epoch),
-        "resonant" => model.resonant_train(texts, s.config.epochs, s.config.auto_compress, None, on_epoch),
+        "resonant" => model.resonant_train(
+            texts,
+            s.config.epochs,
+            s.config.auto_compress,
+            None,
+            &s.config.plan,
+            on_epoch,
+        ),
         "negative" => {
             let o = crate::negative::BlameOptions {
                 reason: s.reason.clone(),
@@ -367,6 +374,7 @@ pub fn train(
                 auto_compress: s.config.auto_compress,
                 chunk_size: s.chunk_size,
                 phase: None,
+                plan: s.config.plan.clone(),
             };
             model.train_with(texts, &opts, on_epoch)
         }

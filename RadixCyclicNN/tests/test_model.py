@@ -79,6 +79,9 @@ class TestTrainConfig(unittest.TestCase):
                 "epochs": 5, "lr": 0.05, "act_lr": 0.005, "batch_size": 256, "clip": 5.0,
                 "auto_compress": True, "shuffle": True, "checkpoint_every": 0, "verbose": False,
                 "lr_schedule": None, "act_lr_schedule": None, "reverse_schedule": False,
+                # the training methods of ../SPEC-SearchAndTraining.md, every one of them off
+                "order": "corpus", "curriculum": 1.0, "replay": 0.0, "replay_size": None,
+                "patience": 0, "min_delta": 0.0,
             },
         )
         cfg.validate()
@@ -87,6 +90,8 @@ class TestTrainConfig(unittest.TestCase):
         for bad in (
             {"epochs": -1}, {"batch_size": 0}, {"lr": -0.1}, {"lr": float("nan")},
             {"act_lr": float("inf")}, {"clip": 0.0}, {"checkpoint_every": -2},
+            {"order": "alphabetical"}, {"curriculum": 0.0}, {"curriculum": 1.5}, {"replay": -0.5},
+            {"replay_size": -1}, {"patience": -1}, {"min_delta": -0.1},
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 TrainConfig(**bad).validate()

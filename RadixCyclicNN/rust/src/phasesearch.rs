@@ -34,7 +34,7 @@ use crate::metacog::{action_index, cycle_signature, MetaLayer, ABORT, ESCAPE, RI
 use crate::mt19937::Mt19937;
 use crate::pyheap::{heappop, heappush};
 use crate::resonance::PhasePenalty;
-use crate::search::{build_result, onward, start_emission, PathResult};
+use crate::search::{build_result, onward, start_emission, PathResult, SamplingFilter};
 use crate::weights::ChildCost;
 
 /// How many states [`phase_dijkstra`] and [`phase_kbest`] settle before they
@@ -469,6 +469,10 @@ fn sort_by_key(items: &mut [usize], key: impl Fn(usize) -> f64) {
 /// on cycles: a top beam of the cheapest partial paths and a bottom beam of
 /// the dearest, both `beam` wide (0: the default width), over the
 /// phase-unrolled graph.  Returns `(top, bottom, expansions)`.
+///
+/// `diversity` picks the `k` from a pool of `beam` finished paths the way
+/// [`crate::beam::diverse_pick`] does (`../../SPEC-SearchAndTraining.md`
+/// section 2).
 #[allow(clippy::too_many_arguments)] // the search's knobs, as in Python
 pub fn phase_beam(
     g: &Graph,
@@ -483,7 +487,11 @@ pub fn phase_beam(
     step_penalty: f64,
     to_end: bool,
     costs: Option<&PhasePenalty>,
+    diversity: f64,
 ) -> Result<(Vec<PathResult>, Vec<PathResult>, usize), String> {
+    if diversity.is_nan() || diversity < 0.0 {
+        return Err(format!("diversity must be >= 0, got {diversity}"));
+    }
     let width = if beam == 0 { crate::beam::default_beam(k) } else { beam };
     let max_chars = max_chars.map(|cap| cap.max(min_chars));
     let start_chars = start_emission(g, start_node, start_offset)?;
@@ -504,6 +512,8 @@ pub fn phase_beam(
     let mut top_done: Vec<(f64, u64, usize)> = Vec::new();
     let mut bottom_done: Vec<(f64, u64, usize)> = Vec::new();
     let keep = k.max(1);
+    // a diverse beam picks its `k` from a pool of finished paths
+    let top_keep = if diversity > 0.0 && k > 0 { k.max(width) } else { keep };
     let mut seq = 0u64;
     let mut expanded = 0usize;
     let mut depth = 0usize;
@@ -560,7 +570,7 @@ pub fn phase_beam(
                         } else {
                             -arena[child].cost
                         };
-                        if done.len() < keep {
+                        if done.len() < (if side == 0 { top_keep } else { keep }) {
                             heappush(done, (-score, seq, child), &done_less);
                         } else if -score > done[0].0 {
                             heappop(done, &done_less);
@@ -584,12 +594,12 @@ pub fn phase_beam(
         nxt_bottom.truncate(width);
         top_beam = nxt_top;
         bottom_beam = nxt_bottom;
-        if bottom_limit.is_none() && top_done.len() >= keep {
+        if bottom_limit.is_none() && top_done.len() >= top_keep {
             // no cap and running to the end: keep the dearest paths roughly as long as the cheapest
             let longest = top_done.iter().map(|&(_, _, e)| arena[e].chars).max().unwrap_or(0);
             bottom_limit = Some(2 * longest);
         }
-        if top_done.len() >= keep && !top_beam.is_empty() {
+        if top_done.len() >= top_keep && !top_beam.is_empty() {
             let mut worst_kept = -top_done[0].0;
             for &(s, _, _) in &top_done[1..] {
                 if -s > worst_kept {
@@ -614,6 +624,18 @@ pub fn phase_beam(
     };
     let mut top = results(&top_done);
     top.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
+    if top_keep > keep {
+        let pool: Vec<crate::beam::DiverseCandidate> = top
+            .iter()
+            .map(|r| crate::beam::DiverseCandidate {
+                punish: 0.0,
+                cost: r.cost,
+                ids: r.node_ids.clone(),
+            })
+            .collect();
+        let picks = crate::beam::diverse_pick(&pool, k, diversity);
+        top = picks.into_iter().map(|i| top[i].clone()).collect();
+    }
     top.truncate(k);
     let taken: Vec<String> = top.iter().map(|r| r.text.clone()).collect();
     let mut bottom = results(&bottom_done);
@@ -629,6 +651,7 @@ pub fn phase_beam(
 /// One stochastic walk over the phase-unrolled graph, the layer included:
 /// each child is drawn from `softmax(-cost / temperature)`, `temperature == 0`
 /// is greedy.  The walk stops at `END` or once it has emitted `max_chars`.
+/// `filter` narrows what a step draws from ([`SamplingFilter`]).
 #[allow(clippy::too_many_arguments)] // the search's knobs, as in Python
 pub fn phase_walk(
     g: &Graph,
@@ -640,10 +663,12 @@ pub fn phase_walk(
     temperature: f64,
     rng: &mut Mt19937,
     costs: Option<&PhasePenalty>,
+    filter: SamplingFilter,
 ) -> Result<PathResult, String> {
     if temperature < 0.0 {
         return Err("temperature must be >= 0".to_string());
     }
+    filter.check()?;
     let mut node = start_node;
     let mut phase = start_phase % buckets_of(g);
     let mut chars = start_emission(g, start_node, start_offset)?;
@@ -656,7 +681,7 @@ pub fn phase_walk(
         if node == END || max_chars.is_some_and(|cap| chars >= cap) {
             break;
         }
-        let options = expand(g, meta, node, phase, &depth, 0.0, costs);
+        let mut options = expand(g, meta, node, phase, &depth, 0.0, costs);
         if options.is_empty() {
             break;
         }
@@ -669,6 +694,8 @@ pub fn phase_walk(
             }
             pick
         } else {
+            // the draw below still runs, however few options are left: one draw per step
+            filter.filter_by(&mut options, temperature, |s| s.cost);
             let inv_t = 1.0 / temperature;
             let mut lowest = options[0].cost;
             for o in &options[1..] {
@@ -782,6 +809,7 @@ mod tests {
             0.0,
             true,
             None,
+            0.0,
         )
         .unwrap();
         assert!(n > 0);
@@ -796,9 +824,34 @@ mod tests {
         let m = trained();
         let mut rng = Mt19937::new(3);
         let before = rng.state();
-        let w = phase_walk(&m.g, None, crate::graph::START, 0, 0, Some(40), 0.0, &mut rng, None).unwrap();
+        let w = phase_walk(
+            &m.g,
+            None,
+            crate::graph::START,
+            0,
+            0,
+            Some(40),
+            0.0,
+            &mut rng,
+            None,
+            SamplingFilter::default(),
+        )
+        .unwrap();
         assert_eq!(rng.state(), before);
         assert!(!w.text.is_empty());
-        assert!(phase_walk(&m.g, None, crate::graph::START, 0, 0, Some(40), -1.0, &mut rng, None).is_err());
+        let filter = SamplingFilter::default();
+        assert!(phase_walk(
+            &m.g,
+            None,
+            crate::graph::START,
+            0,
+            0,
+            Some(40),
+            -1.0,
+            &mut rng,
+            None,
+            filter
+        )
+        .is_err());
     }
 }

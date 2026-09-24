@@ -2391,7 +2391,14 @@ fn train_negative_phase(
     let on_epoch = &mut |_: &EpochRecord| !stop();
     match model.kind() {
         "radix" => model.radix_train(texts, &config, Some("negative"), on_epoch),
-        "resonant" => model.resonant_train(texts, config.epochs, config.auto_compress, Some("negative"), on_epoch),
+        "resonant" => model.resonant_train(
+            texts,
+            config.epochs,
+            config.auto_compress,
+            Some("negative"),
+            &config.plan,
+            on_epoch,
+        ),
         "negative" => {
             let settings = kinds::TrainSettings {
                 config,
@@ -2405,6 +2412,7 @@ fn train_negative_phase(
                 auto_compress: config.auto_compress,
                 phase: Some("negative".to_string()),
                 chunk_size: 0,
+                plan: config.plan.clone(),
             };
             model.train_with(texts, &options, on_epoch)
         }

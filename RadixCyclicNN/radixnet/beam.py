@@ -30,7 +30,7 @@ from .search import (
     parse_traversal,
 )
 
-__all__ = ["Prediction", "beam_predict", "default_beam", "path_probability"]
+__all__ = ["Prediction", "beam_predict", "default_beam", "diverse_pick", "path_overlap", "path_probability"]
 
 _OV = WINDOW - 1  # the default overlap; a graph's own is graph.encoding.overlap
 
@@ -68,6 +68,54 @@ def default_beam(k: int) -> int:
     return max(4 * max(1, k), 16)
 
 
+def path_overlap(a: list[int], b: list[int]) -> float:
+    """How much of the shorter of two paths the other repeats from the start: shared leading nodes / its length.
+
+    Both are node ids from the same start node, which is not counted.  ``1.0``
+    for a path that is the other with more added, ``0.0`` for two that part at
+    the first step.
+    """
+    shortest = min(len(a), len(b)) - 1
+    if shortest <= 0:
+        return 0.0
+    shared = 0
+    for t in range(1, shortest + 1):
+        if a[t] != b[t]:
+            break
+        shared += 1
+    return shared / shortest
+
+
+def diverse_pick(paths: list[tuple[float, float, list[int]]], k: int, diversity: float) -> list[int]:
+    """Which ``k`` of ``paths`` a diverse beam hands back, as indices in the order it picks them.
+
+    ``paths`` are ``(punish, cost, node_ids)`` in the plain beam's order, best
+    first.  The first pick is the best path; every later one takes the
+    smallest ``(punish, cost + diversity * overlap, position)``, where
+    ``overlap`` is the largest :func:`path_overlap` with a path already
+    picked - maximal marginal relevance, in the beam's own currency.  A path
+    that only varies the ending of one already chosen pays up to
+    ``diversity``; one that goes somewhere else pays nothing
+    (``../SPEC-SearchAndTraining.md`` §2).
+    """
+    if not paths or k <= 0:
+        return []
+    picked = [0]
+    remaining = list(range(1, len(paths)))
+    while len(picked) < k and remaining:
+        best = -1
+        best_key: tuple | None = None
+        for i in remaining:
+            punish, cost, ids = paths[i]
+            overlap = max(path_overlap(ids, paths[j][2]) for j in picked)
+            key = (punish, cost + diversity * overlap, i)
+            if best_key is None or key < best_key:
+                best, best_key = i, key
+        picked.append(best)
+        remaining.remove(best)
+    return picked
+
+
 def path_probability(result: PathResult) -> float:
     """``exp(-cost)`` of a path (0 for an infinite cost)."""
     return math.exp(-result.cost) if math.isfinite(result.cost) else 0.0
@@ -88,6 +136,7 @@ def _run_beam(
     worst: bool,
     traversal: str = "reward",
     costs: CostFn | None = None,
+    diversity: float = 0.0,
 ) -> tuple[list[tuple[float, list[int], list[float], float]], int]:
     """One beam: the ``k`` cheapest (or, with ``worst``, dearest) complete paths
     as ``(cost, node_ids, step_costs, punish)``.
@@ -114,14 +163,16 @@ def _run_beam(
 
     # a bounded heap of (sign * -punish, sign * -cost, entry): the worst kept path
     # is at the top, and under the reward traversal the first component is 0.0 on
-    # every path, so the whole comparison is the cost order the beam has always used
+    # every path, so the whole comparison is the cost order the beam has always used.
+    # A diverse top beam keeps a pool of `width` finished paths to pick its k from.
+    keep = max(k, width) if diversity > 0.0 and not worst and k > 0 else k
     done: list[tuple[float, float, int]] = []
 
     def offer(punish: float, cost: float, entry: int) -> None:
-        if k == 0:
+        if keep == 0:
             return
         key = (-punish * sign if blamed else 0.0, -cost * sign, entry)
-        if len(done) < k:
+        if len(done) < keep:
             heapq.heappush(done, key)
         elif key[:2] > done[0][:2]:
             heapq.heapreplace(done, key)
@@ -167,7 +218,7 @@ def _run_beam(
         # neither number shrinks along a path - a cost is a sum of costs and a punishment the
         # worst step so far - so once k paths finished and the best partial one already ranks
         # below the k-th of them, the best side is settled
-        if not worst and k > 0 and len(done) == k and frontier:
+        if not worst and k > 0 and len(done) == keep and frontier:
             head = (-frontier[0][0] * sign if blamed else 0.0, -frontier[0][1] * sign)
             if head <= tuple(done[0][:2]):
                 break
@@ -189,6 +240,10 @@ def _run_beam(
         # 0.0 - x rather than -x: a negative zero reads as a punishment that is not there
         kept = [(0.0 - punish * sign, 0.0 - cost * sign, entry) for punish, cost, entry in done]
         finished = sorted(kept, key=lambda item: (item[0] * sign if blamed else 0.0, item[1] * sign, item[2]))
+        if keep > k:
+            # the diverse top beam: k of the pool, by maximal marginal relevance
+            pool = [(item[0] if blamed else 0.0, item[1], path_of(item[2])[0]) for item in finished]
+            finished = [finished[i] for i in diverse_pick(pool, k, diversity)]
     elif fallback:
         # nothing completed within the limits: the surviving partial paths, most characters first
         pick = heapq.nsmallest(
@@ -215,6 +270,7 @@ def beam_predict(
     include_context: bool | None = None,
     traversal: str = "reward",
     costs: CostFn | None = None,
+    diversity: float = 0.0,
 ) -> tuple[list[PathResult], list[PathResult], int]:
     """``(top, bottom, expanded)``: the ``k`` cheapest and the ``k`` most expensive complete paths.
 
@@ -232,10 +288,16 @@ def beam_predict(
     ``traversal="least-punished"`` does something else again: it ranks a path by
     the blame on its worst step before its cost, and lets a node offer only the
     children it has the least against (``../SPEC-LeastPunished.md``).
+    ``diversity`` spreads the top beam out: a partial path pays that much per
+    path already kept at the same step that ends in the same node, so the ``k``
+    continuations differ in more than their last word; costs are not touched
+    (:func:`diverse_frontier`, ``../SPEC-SearchAndTraining.md`` §2).
     """
     traversal = parse_traversal(traversal)
     if k < 0:
         raise ValueError(f"k must be >= 0, got {k}")
+    if not (diversity >= 0.0):
+        raise ValueError(f"diversity must be >= 0, got {diversity}")
     if step_penalty < 0:
         raise ValueError("step_penalty must be >= 0")
     width = default_beam(k) if beam is None else int(beam)
@@ -250,7 +312,7 @@ def beam_predict(
         return [], [], 0
     common = (graph, start_node, start_chars, min_chars)
     limits = (k, width, step_penalty, to_end, max_steps, max_expansions)
-    best, expanded = _run_beam(*common, max_chars, *limits, False, traversal, costs)
+    best, expanded = _run_beam(*common, max_chars, *limits, False, traversal, costs, diversity)
     bottom_cap = max_chars
     if bottom_cap is None and to_end:
         longest = max((graph.label_len(n) for _, ids, _, _ in best for n in ids[1:]), default=0)

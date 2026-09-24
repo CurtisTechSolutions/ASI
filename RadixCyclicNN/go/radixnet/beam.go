@@ -72,7 +72,7 @@ func lessState(a, b beamState, traversal Traversal) bool {
 // instead reads as "least punished, and cheapest among those": a path is ranked
 // by its worst step first and by its summed cost only where two paths carry the
 // same worst step, and the blame is read off the graph itself.
-func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepPenalty float64, toEnd bool, maxSteps, maxExpansions int, worst bool, costs CostFn, traversal Traversal) ([]finished, int) {
+func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepPenalty float64, toEnd bool, maxSteps, maxExpansions int, worst bool, costs CostFn, traversal Traversal, diversity float64) ([]finished, int) {
 	if traversal == ByLeastPunished {
 		costs = nil
 	}
@@ -112,7 +112,12 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 		}
 		return a.second > b.second
 	}
-	done := make([]doneKey, 0, k)
+	// a diverse top beam keeps a pool of `width` finished paths to pick its k from
+	keep := k
+	if diversity > 0 && !worst && k > 0 && width > k {
+		keep = width
+	}
+	done := make([]doneKey, 0, keep)
 	worstIndex := func() int { // the kept path that ranks last: the first to be replaced
 		best := 0
 		for i := 1; i < len(done); i++ {
@@ -136,11 +141,11 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 		return best
 	}
 	offer := func(cost, punish float64, entry int) {
-		if k == 0 {
+		if keep == 0 {
 			return
 		}
 		key := keyOf(cost, punish, entry)
-		if len(done) < k {
+		if len(done) < keep {
 			done = append(done, key)
 			return
 		}
@@ -212,7 +217,7 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 		// neither number shrinks along a path - a cost is a sum of costs and a
 		// punishment the worst step so far - so once k paths finished and the best
 		// partial one already ranks below the k-th of them, the best side is settled
-		if !worst && k > 0 && len(done) == k && len(frontier) > 0 {
+		if !worst && k > 0 && len(done) == keep && len(frontier) > 0 {
 			w := worstIndex()
 			head := keyOf(frontier[0].cost, frontier[0].punish, frontier[0].entry)
 			if !betterThan(head, done[w]) {
@@ -291,7 +296,93 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 		ids, st := pathOf(p.entry)
 		out = append(out, finished{p.cost, ids, st, p.punish})
 	}
+	if keep > k && len(done) > 0 {
+		// the diverse top beam: k of the pool, by maximal marginal relevance
+		pool := make([]DiverseCandidate, len(out))
+		for i, f := range out {
+			punish := 0.0
+			if traversal == ByLeastPunished {
+				punish = f.punish
+			}
+			pool[i] = DiverseCandidate{Punish: punish, Cost: f.cost, IDs: f.ids}
+		}
+		chosen := DiversePick(pool, k, diversity)
+		kept := make([]finished, len(chosen))
+		for i, c := range chosen {
+			kept[i] = out[c]
+		}
+		out = kept
+	}
 	return out, expanded
+}
+
+// PathOverlap is how much of the shorter of two paths the other repeats from
+// the start: shared leading nodes over its length.  Both are node ids from the
+// same start node, which does not count; 1 for a path that is the other with
+// more added, 0 for two that part at the first step.
+func PathOverlap(a, b []int) float64 {
+	shortest := len(a)
+	if len(b) < shortest {
+		shortest = len(b)
+	}
+	shortest--
+	if shortest <= 0 {
+		return 0
+	}
+	shared := 0
+	for t := 1; t <= shortest; t++ {
+		if a[t] != b[t] {
+			break
+		}
+		shared++
+	}
+	return float64(shared) / float64(shortest)
+}
+
+// DiverseCandidate is one finished path a diverse beam can pick: what it was
+// punished for (0 unless the walks are ranked by blame), what it cost, and its
+// nodes.
+type DiverseCandidate struct {
+	Punish float64
+	Cost   float64
+	IDs    []int
+}
+
+// DiversePick is which k of paths a diverse beam hands back, as indices in the
+// order it picks them.  paths are in the plain beam's order, best first.  The
+// first pick is the best path; every later one takes the smallest
+// (punish, cost + diversity * overlap, position), where overlap is the largest
+// PathOverlap with a path already picked - maximal marginal relevance, in the
+// beam's own currency (../../SPEC-SearchAndTraining.md §2).
+func DiversePick(paths []DiverseCandidate, k int, diversity float64) []int {
+	if len(paths) == 0 || k <= 0 {
+		return nil
+	}
+	picked := []int{0}
+	taken := make([]bool, len(paths))
+	taken[0] = true
+	for len(picked) < k && len(picked) < len(paths) {
+		best := -1
+		var bestPunish, bestKey float64
+		for i := range paths {
+			if taken[i] {
+				continue
+			}
+			overlap := 0.0
+			for n, j := range picked {
+				if o := PathOverlap(paths[i].IDs, paths[j].IDs); n == 0 || o > overlap {
+					overlap = o
+				}
+			}
+			key := paths[i].Cost + diversity*overlap
+			if best < 0 || paths[i].Punish < bestPunish || (paths[i].Punish == bestPunish && key < bestKey) {
+				best, bestPunish, bestKey = i, paths[i].Punish, key
+			}
+		}
+		picked = append(picked, best)
+		taken[best] = true
+	}
+	return picked
 }
 
 // BeamOptions configure BeamPredict.
@@ -310,6 +401,11 @@ type BeamOptions struct {
 	// Traversal is how the two beams rank a path: ByReward (the default) by
 	// cost, ByLeastPunished by the blame on its worst step first.
 	Traversal Traversal
+	// Diversity spreads the top beam out: it keeps a pool of Beam finished
+	// paths and picks the K from it by maximal marginal relevance, so a path
+	// that only varies the ending of one already chosen pays up to Diversity
+	// (DiversePick; 0 = off, costs untouched).
+	Diversity float64
 }
 
 // BeamPredict returns the k cheapest complete paths (rising cost) and the k
@@ -321,6 +417,9 @@ func (g *Graph) BeamPredict(startNode, startOffset, minChars int, opts BeamOptio
 	}
 	if opts.StepPenalty < 0 {
 		return nil, nil, 0, fmt.Errorf("step_penalty must be >= 0")
+	}
+	if !(opts.Diversity >= 0) {
+		return nil, nil, 0, fmt.Errorf("diversity must be >= 0, got %v", opts.Diversity)
 	}
 	width := opts.Beam
 	if width == 0 {
@@ -359,7 +458,7 @@ func (g *Graph) BeamPredict(startNode, startOffset, minChars int, opts BeamOptio
 	if (bottomCap < 0 && opts.ToEnd) || g.Workers == 1 {
 		// the bottom cap depends on the best side, or one worker was asked for:
 		// run the two beams in turn
-		best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false, opts.Costs, opts.Traversal)
+		best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false, opts.Costs, opts.Traversal, opts.Diversity)
 		if bottomCap < 0 && opts.ToEnd {
 			longest, emitted := 0, 0
 			for _, f := range best {
@@ -384,17 +483,17 @@ func (g *Graph) BeamPredict(startNode, startOffset, minChars int, opts BeamOptio
 				bottomCap = 16
 			}
 		}
-		worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true, opts.Costs, opts.Traversal)
+		worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true, opts.Costs, opts.Traversal, 0)
 	} else {
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false, opts.Costs, opts.Traversal)
+			best, expanded = runBeam(g, startNode, startChars, minChars, maxChars, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, false, opts.Costs, opts.Traversal, opts.Diversity)
 		}()
 		go func() {
 			defer wg.Done()
-			worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true, opts.Costs, opts.Traversal)
+			worstPaths, expandedWorst = runBeam(g, startNode, startChars, minChars, bottomCap, opts.K, width, opts.StepPenalty, opts.ToEnd, maxSteps, maxExp, true, opts.Costs, opts.Traversal, 0)
 		}()
 		wg.Wait()
 	}
