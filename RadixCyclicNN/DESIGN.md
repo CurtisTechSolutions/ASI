@@ -65,6 +65,9 @@ RadixCyclicNN/
     dialogue.py             Turn, Heard, stutter, backtrack, teach_back, Rethink, reply, converse, repeats -
                             the model conversing with itself, thinking twice about a repeat, and teaching the
                             graph where it goes round (section 22)
+    thinking.py             Thought, think, think_on, questions_in, place, summarize - the THINK sentinel at
+                            work: what makes the model think, what it thinks, how a thought questions itself
+                            and what it triggers when it stops (section 36)
     chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
                             (ported to Go as go/radixnet/chat.go, section 28.1)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
@@ -270,6 +273,40 @@ it alone.
 Graph format 3 carries it. Files written at format 1 or 2 gain an unvisited `BACK` on load and their node ids
 shift up by one (`_with_back`, mirrored by the Go `withBack`); the sentinel takes `START`'s activation
 parameters, so a count model's stays 1 and a sine model's stays the default.
+
+### 5.1.2 The fourth sentinel: `THINK`, where the graph has learned to stop and think - and how thoughts begin
+
+`THINK` (node id 3; `FIRST`, the first real node id, is now 4) faces both ways, and that is the whole idea.
+
+Its **in-edges** are `BACK`'s twin: an edge `p -> THINK` means *something at `p` made me stop and think*, and it
+is taught by experience - `observe_think(p, amount)` creates it on first use and bumps it like an observed
+transition (the sine model nudges its weight, the count and resonant models reward it), so it competes for `p`'s
+probability with the real children. The events that teach it are what section 36 calls **triggers**: a voice
+that caught itself repeating, a question asked of the model about a text, a thought questioning itself, a
+question an LLM asked itself in its own thinking. `think_cost(p)` reads it back and `thinks_at(p)` says whether it
+has become the cheapest way on from `p` (`BACK` does not count: it is not a way on).
+
+Its **out-edges** are how *thoughts* begin. A thought is a text whose walk starts at `THINK` instead of `START`:
+`observe_sequence(trigrams, origin=THINK)`, `trace(..., origin)`, `node_path(..., origin)` and
+`GraphModel.train(texts, origin=THINK)` run the same structure, the same counting or gradient and the same
+compression from the other sentinel, and only the first edge differs (`ORIGINS = (START, THINK)`). So the model
+learns how its thoughts open and go on without a word of them leaking into what it says from `START`: a thought
+and a text may share every node after their first, but `generate` never begins with a thought and a thought never
+begins with a text.
+
+The search treats the two sentinels differently on purpose (`search.onward`, section 7). `BACK` hands a branch
+over when it is the cheapest child. `THINK` is dropped from the continuations and hands nothing over: where the
+model has learned to stop and think, the walk carries on and the *thought* is somebody else's business -
+`thinking.think` asks `thinks_at` along a finished path (section 36). Neither sentinel appears in a path; a walk
+started at `THINK` is decoded exactly like one started at `START` (`_build_result` includes the context for both
+origins, and the judged costs read `came_from = origin`).
+
+`THINK`'s state is fixed at the *other* edge of the drawn range (`THINK_Z = -Z_RANGE`; `BACK_Z = +Z_RANGE`), so
+adding it moved no random stream and its activation is as firmly non-zero as `BACK`'s. Graph format 4 carries it:
+files written at format 3 gain an unvisited `THINK` on load and their real node ids shift up by one, older files
+gain `BACK` first and then `THINK` (`_with_sentinel`, mirrored by the Go `withSentinels` and the Rust
+`with_sentinels`); the sentinel takes `START`'s activation parameters, as `BACK` did. `check_invariants` now asks
+for four live sentinels, and for `BACK` to have no children (it never continues).
 
 ### 5.2 Public API
 
@@ -689,9 +726,10 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/job/stop` | | sets the stop event; returns job status |
 | POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
-| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
+| POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn","think","think_depth"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22); `think` (default on) has a voice that caught itself repeating think before it backs up, `think_depth` deep, and its `rethink` carries the `thought` (section 36) |
+| POST `/api/think` | `{"about","mode","k","beam","max_length","temperature","step_penalty","seed","depth","questions","learn"}` | `{"kind", **Thought.to_dict()}` — one thought from the `THINK` sentinel (`thinking.think`, section 36): `about` thinks at the node where that text ends and teaches the model to stop and think there (`learn`, default on - a thought changes the model); `depth` / `questions` bound how it questions itself; 400 for a mode, a depth or a node that is not one |
 | POST `/api/score` | `{"text"}` | score dict |
-| GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
+| GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","think_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
 | POST `/api/encoding/preview` | `{"text"}` | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
@@ -856,6 +894,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   at the first pass, the stop event, progress, a capped quiz marked against what it asked for), the report card, the
   faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
   neither Pillow nor a transcriber, so nothing in it is skipped.
+* `test_thinking.py` — `questions_in` (sentences ending in `?`, a terminator run with no sentence, a comma question), `place` (the node cut so the prefix ends there; an unknown text and an empty prefix place nowhere), `think` (a model taught no thoughts has nothing to think with; asking about a text teaches the node to think and ends; learning off writes nothing; `think_on` teaches thoughts from `THINK` and not from `START`, and the questions they asked themselves; a thought questions itself where the model learned to think, once, one level down, saying something new, bounded by depth and count; a thought out of a repeat hands over to `BACK`; validation; the model file keeps its thoughts), `POST /api/think` and the conversation's thoughts, the `think` and `converse --no-think` commands.
 * `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
@@ -925,6 +964,17 @@ def adversarial_review(model, client, *, count=8, prefix="", max_length=60, temp
     #  "good": passed texts, "bad": failed + unrated texts}
 ```
 
+**Thinking.** A thinking model (qwen3, deepseek-r1, gpt-oss, ...) reasons before it answers, and Ollama hands
+the reasoning back beside the answer - as a `thinking` field when the server separates it, or inline between
+`<think>` tags when the model wrote it into its answer. `OllamaClient.complete(prompt, think=...)` returns both
+(`{"response", "thinking"}`; `split_thinking` cuts the inline form out, `think_value` reads the flag leniently:
+`true` / `false` / a level `low` | `medium` | `high`, `None` leaves it to the model), and `generate` is `complete`
+keeping only the answer. `thoughts_from_prompt(client, prompt, lines, think=, temperature=)` is two calls a
+question: `questions_from_prompt` has the LLM write `lines` short questions about the prompt, and `complete`
+answers each one with its thinking; every entry is `{"question", "thinking", "answer"}`, the thinking collapsed
+to one line and `""` for a model that does not think. That thinking is what section 36 teaches the network as
+thoughts of its own.
+
 CLI: `radixnet [globals] ollama [--url URL] [--ollama-model NAME] [--timeout S] <action>`:
 
 | action | options | behaviour |
@@ -932,6 +982,7 @@ CLI: `radixnet [globals] ollama [--url URL] [--ollama-model NAME] [--timeout S] 
 | `models` | | list installed models |
 | `corpus` | `--prompt TEXT`, `--lines 20`, `--style good\|garbage`, `--out FILE`, `--train`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | prints the lines; writes / trains on them |
 | `review` | `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--text ...` / `--data FILE`, `--threshold 6`, `--context`, `--2nrl`, `--good FILE`, 2NRL options, `--out` | table of ratings + summary; `--2nrl` runs failed→invert→passed and saves |
+| `think` | `--prompt TEXT`, `--lines 5` (questions to think about), `--think true\|false\|low\|medium\|high`, `--temperature 0.7`, `--out FILE`, `--train`, `--with-answers`, `--no-questions`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | asks for `--lines` questions about the prompt and has the model *think* about each one; prints question, thinking and answer; `--train` teaches the thinking as thoughts and the questions it asked itself as places to stop and think (`thinking.think_on`, section 36), `--with-answers` the answers as texts |
 
 `serve --ollama-url --ollama-model` set the API defaults.
 
@@ -942,12 +993,13 @@ API (`ollama_url` / `ollama_model` on `ModelService` / `create_server`; `/api/st
 | GET `/api/ollama/models?url=` | | 200 always: `{"available", "url", "model", "models": [...], "error": null\|str}` |
 | POST `/api/ollama/corpus` | `{prompt, lines=20, style="good", model?, url?, timeout?, save_as?: upload name, train=false, epochs, lr, act_lr, batch_size}` | `{"prompt","style","model","url","lines","texts","upload": record\|null,"job": job\|null}`; 202 when a train job started; 400 bad input; 409 job running; 502 Ollama failure |
 | POST `/api/ollama/review` | `{count=8, prefix="", max_length=60, temperature=1, texts?\|text?, threshold=6, context?, model?, url?, apply="none"\|"2nrl", good?, good_text?, good_files?, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size}` | `adversarial_review` result + `"url"` + `"job"`; `apply="2nrl"` starts a 2NRL job with bad = failed+unrated and good = passed + given (400 when either set is empty) |
+| POST `/api/ollama/think` | `{prompt, lines=5, think=true\|false\|"low"\|"medium"\|"high", temperature=0.7, model?, url?, timeout?, save_as?, train=false, with_answers=false, questions=true, epochs, lr, batch_size}` | `{"prompt","model","url","think","count","thinking","thoughts": [{"question","thinking","answer"}],"upload","job"}`; 202 when a train job started (`thinking.think_on`, section 36); 400 bad input or a negative network; 502 when Ollama fails, writes no questions, or - with `train` - returned no thinking |
 
 Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from a prompt" (generate → train / save as upload / hold as 2NRL bad or good) and "Adversarial review" (ratings table, summary, apply as 2NRL with extra good files).
 
 Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
 
-Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, configurable failures) and `/api/chat`.
+Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
 
 ### 16.2 ChatGPT (`chatgpt.py`) — the hosted alternative, same interface
 
@@ -1642,6 +1694,14 @@ Two consequences worth stating plainly. **A conversation changes the model**: tw
 differ, because the first one taught it something (the determinism that remains is "a model in the same state
 says the same thing"). And the learning lives wherever the model does - the server keeps it in memory until
 something saves, and the CLI says *it learned to hand over at N node(s); --save writes that into the model*.
+
+Since the `THINK` sentinel (section 36) a rethink **thinks before it backs up** (`think_back`, on by default;
+`think=False`, `--no-think`, `"think": false`): the node it backed up to is the node it thinks at, the rethink is
+the thought's trigger (`"stutter"` or `"repeat"`), and when the thought stops it hands over to `BACK` with exactly
+the lesson `teach_back` used to write directly - the three edges still move, only *after* thinking rather than in
+place of it. `Rethink.thought` carries the `Thought` record (`None` when the voice did not think, or could not
+place the repeat), the CLI prints its summary under the rethink's line and adds *it learned ... to stop and think
+at M node(s)*; `learn=False` still thinks, and teaches nothing.
 
 When they are all duplicates the best one is spoken anyway — the cheapest candidate that was never said word for
 word, else the cheapest of all — and the turn is flagged `repeat=True`. Saying that same duplicate a second time
@@ -3296,7 +3356,7 @@ setting**.
 | **This model** | nothing: it reports | `/api/status` - the kind, the encoding, the size, the file and `replay` (`{size, texts, seen}` or null, all three servers) |
 | **New model** | a fresh model | `POST /api/reset {kind, encoding, seed}` - two clicks, since it replaces the model of that kind in memory; the encoding presets and the three dials by hand, checked (`encodingSpec`) before anything is sent |
 | **Score function** | the active kind's weight function | `GET /api/model` → `weights` on mount and after every change, `POST /api/model/weights` to apply. The count model's `global_scale / window_scale / reward_scale / count_scale / path_scale / window`, the resonant model's `buckets / period / kick_scale / resonance_scale / amp_scale / reward_scale / concentration`. A kind without one - the sine model, whose score is learned rather than set, and the negative network, whose blame function is on its own tab - gets the sentence saying so and where to look instead |
-| **Encoder / decoder** | nothing: it reports | `GET /api/encoding` for the unit, the n, the stride, the overlap and the three sentinels; `POST /api/encoding/preview` for a text the user types - the grams it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than one gram is a merged radix chain |
+| **Encoder / decoder** | nothing: it reports | `GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels; `POST /api/encoding/preview` for a text the user types - the grams it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than one gram is a merged radix chain |
 
 The decisions worth stating:
 
@@ -3598,3 +3658,74 @@ HTTP API and the CLI), `tests/test_rust_parity_methods.py` (Rust against Python 
 history and replay block byte for byte - the filters and the diverse beam, and the server),
 `tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`, `go/radixnet/sampling_test.go`,
 the `training`, `search` and `beam` unit tests in Rust, and `frontend/test/settings.test.mjs`.
+
+## 36. Thinking (`radixnet/thinking.py`, `go/radixnet/thinking.go`, `rust/src/thinking.rs`) — the `THINK` sentinel at work
+
+Section 5.1.2 gives the graph a fourth sentinel that faces both ways: `p -> THINK` is where the model has learned
+to stop and think, `THINK -> ...` is how its thoughts begin. This section is what happens between the two - what
+triggers a thought, what a thought is, how it questions itself, and what it triggers when it stops - and where
+the thoughts come from in the first place.
+
+### 36.1 Triggers, and the four things a thought does
+
+`think(model, about=..., at=..., trigger=...)` is one thought, and it is always **triggered** by an event:
+
+| trigger | the event | when the thought stops it triggers |
+|---|---|---|
+| `asked` | somebody asked (`radixnet think`, `POST /api/think`) | `end` - the thought ends |
+| `stutter` / `repeat` | a voice caught itself repeating (`dialogue.think_back`, section 22) | `back` - `observe_back` on the node, with the step it was about to loop through and the one it took instead |
+| `questioned` | a thought asked itself | `think` - it returns to the thought that asked |
+
+In order: (1) it **teaches where** - `observe_think(at)` on the node the event happened at (`about` locates it:
+`place` finds the node the text ends at and splits it so the text ends exactly there), unless the thought is a
+question the model asked itself, which already knows to think there - that is why it asked; (2) it **thinks** -
+the prediction search run from `THINK` to the end of a text (`_search(..., origin=THINK)`; beam for the most
+likely thought, sample for a drawn one), so the thought is in the language of the thoughts it was taught, and
+nothing when it was taught none (`stopped: "nothing"` - the honest answer rather than a made-up one); (3) it may
+**question itself** - along its own `node_ids`, at every node where `thinks_at` is true, a nested thought with
+trigger `questioned`, one level deeper, that must say something the chain of thoughts above it has not (up to
+`max_depth`, default 2, and `max_questions` per thought, default 1, so a thought cannot spend itself questioning);
+(4) it **stops**, and triggers the sentinel in the table. Every thought is a `Thought` record - `trigger`, `at`,
+`about`, `text`, `depth`, `stopped` (`end` / `length` / `nothing`), `then`, `taught`, `handed_over`, `cost`,
+`probability`, `expanded`, `questioned`, `questions` (the same records, nested), the path - and `learn=False`
+thinks without writing anything into the model.
+
+### 36.2 Where thoughts come from: an LLM's thinking (`think_on`, `ollama think`)
+
+A model cannot think in words it has not learned, and no corpus is written in thoughts. Section 16.1's
+`thoughts_from_prompt` asks a thinking model for questions about a topic and captures the *thinking* behind each
+answer; `think_on(model, thoughts, questions=True)` trains every thought from `THINK` (`train(origin=THINK)`) and,
+with `questions`, reads the thoughts for the sentences that end in `?` (`questions_in`): the node before each one
+is taught to stop and think (`observe_think`, on the node `place` cut to end exactly there) and the question is
+trained as a thought of its own. So a thought that later passes that node may question itself with it - the
+network learns to question where its teacher did. `radixnet ollama think --prompt TOPIC --train` (`POST
+/api/ollama/think {"train": true}`) is the whole pipeline; `--with-answers` trains the answers as ordinary texts
+too, and the negative network refuses thoughts (it judges; it does not think).
+
+### 36.3 What it touches, and the three ports
+
+* `graph.py`: `THINK`, `FIRST`, `ORIGINS`, `THINK_Z`, `observe_think`, `think_cost`, `thinks_at`, `origin` on
+  `observe_sequence` / `trace` / `node_path`, graph format 4 (section 5.1.2); `countnet.py` and `resonance.py`
+  override `observe_think` the way they override `observe_back`, and thread `origin` through their passes.
+* `search.py` (`onward` drops `THINK`; both origins decode alike), `beam.py`, `phasesearch.py`,
+  `countnet._walks` / `record_path` (a path's first context is its origin).
+* `model.py`: `_walk_start(prefix, origin)` (a located prefix wins over the origin), `origin` on `_search`,
+  `_observe` and `train`.
+* `dialogue.py`: `think_back`, `Rethink.thought`, `think` / `think_depth` on `backtrack`, `reply`, `converse`.
+* `ollama.py`: `complete`, `think_value`, `split_thinking`, `questions_from_prompt`, `thoughts_from_prompt`, the
+  `think` field on `generate` / `chat`.
+* `cli.py`: `think`, `ollama think`, `converse --no-think --think-depth` (and *it learned to stop and think at N
+  node(s)*); `api.py`: `POST /api/think`, `POST /api/ollama/think`, `think` / `think_depth` on `/api/converse`,
+  `think_label` on `/api/encoding`.
+* Go - `thinking.go` (`Model.Think`, `ThinkOn`, `Place`, `QuestionsIn`, `Summarize`, `ThoughtsOf`), `graph.go`
+  (`Think`, `First`, `IsOrigin`, `ThinkZ`, `ObserveThink`, `ThinkCost`, `ThinksAt`, `ObserveFrom` / `TraceFrom` /
+  `NodePathFrom`), `json.go` (`withSentinels`), `search.go`, `model.go` (`TrainOptions.Origin`, `walkStart`),
+  `dialogue.go` (`ThinkBack`, `Rethink.Thought`), `ollama.go` (`Complete`, `ThinkValue`, `SplitThinking`,
+  `QuestionsFromPrompt`, `ThoughtsFromPrompt`), the same routes in `server/` and the same commands in
+  `cmd/radixnet-count` - and Rust (`thinking.rs`, `graph.rs`, `file.rs`, `search.rs`, `model.rs`, `dialogue.rs`,
+  `ollama.rs`, the `think` command and routes) produce the same records: the Go parity tests compare the
+  rethinks' thoughts field for field, the Rust ones the model files byte for byte.
+* Tests: `tests/test_thinking.py`, `TestThinkSentinel` in `test_graph.py`, the origin cases in `test_search.py`,
+  `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py`;
+  `go/radixnet/thinking_test.go`, `go/server/thinking_test.go`; the unit tests in `rust/src/thinking.rs` and
+  `rust/src/ollama.rs`.
