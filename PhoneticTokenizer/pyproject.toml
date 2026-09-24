@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phonetok"
+version = "0.1.0"
+description = "A phonetic tokenizer: text as the sounds it is made of - phonemes, syllable parts or syllables - with the phonotactics that say which sounds go well together to build words. Pure Python, standard library only."
+readme = "README.md"
+requires-python = ">=3.11"
+# Licensed under the custom source-available license in ../LICENSE (repository root).
+# The bundled core lexicon is a subset of the CMU Pronouncing Dictionary (phonetok/data/LICENSE-cmudict).
+dependencies = []
+
+[project.optional-dependencies]
+# The full 135 000-word CMU Pronouncing Dictionary; without it the core lexicon and the rules do the work.
+cmudict = ["cmudict"]
+
+[project.scripts]
+phonetok = "phonetok.cli:main"
+
+[tool.setuptools]
+packages = ["phonetok"]
+
+[tool.setuptools.package-data]
+phonetok = ["data/*"]
