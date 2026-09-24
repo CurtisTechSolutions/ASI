@@ -10,7 +10,7 @@ use phonetok::mt::{Mt, Rng};
 use phonetok::phones::{strip_stress, to_ipa};
 use phonetok::rules::letter_to_sound;
 use phonetok::syllables::{rhymes, syllabify};
-use phonetok::synth::{wav_bytes, wav_header, Synthesizer, VoiceSettings, RATE};
+use phonetok::synth::{find_player, wav_bytes, wav_header, Synthesizer, VoiceSettings, RATE};
 use phonetok::tokenizer::{Level, Tokenizer};
 
 const USAGE: &str = "usage: phonetok <command> [options] [args]
@@ -686,28 +686,6 @@ fn run(args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// A command that plays a WAV from stdin, if one is installed.
-fn find_player() -> Option<Vec<String>> {
-    let candidates: [&[&str]; 5] = [
-        &["aplay", "-q", "-"],
-        &["paplay"],
-        &["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
-        &["play", "-q", "-t", "wav", "-"],
-        &["afplay"],
-    ];
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    for c in candidates {
-        for dir in path_var.split(':') {
-            let full = std::path::Path::new(dir).join(c[0]);
-            if full.is_file() {
-                let mut cmd = vec![full.to_string_lossy().to_string()];
-                cmd.extend(c[1..].iter().map(|s| s.to_string()));
-                return Some(cmd);
-            }
-        }
-    }
-    None
-}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

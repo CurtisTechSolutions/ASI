@@ -4,11 +4,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -19,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CurtisTechSolutions/ASI/PhoneticTokenizer/go/phonetok"
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/server"
 )
@@ -65,7 +68,7 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&memLimit, "memlimit", memLimit, "soft memory limit, e.g. 2GiB (default: 80% of the container / machine memory; \"off\" to let the heap grow freely)")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
 	fs.StringVar(&encSpec, "encoding", encSpec, "encoding of a NEW model, unit[:n[:stride]] (default char:3:1); also trigram | bigram | word-bigram | word-trigram")
-	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word (default char)")
+	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word | phone | syllable (default char)")
 	fs.IntVar(&ngramFlag, "ngram", ngramFlag, "units per gram of a NEW model: the n of the n-gram (default 3)")
 	fs.IntVar(&strideFlag, "stride", strideFlag, "units between consecutive grams of a NEW model: 1 = sliding window, n = groups of n (default 1)")
 }
@@ -266,6 +269,7 @@ commands:
   train      count traversals of the texts of --data files (text or ZIP, any size; lines, paragraphs or pages)
   predict    top-K / bottom-K continuations of --prefix (beam) or a stochastic walk
   generate   whole texts from the prediction search (beam / sample / dijkstra)
+  speak      hear the model walk: speech synthesized as it traverses the graph, closed by the END sentinel
   score      log-probability of --text or every text of --data
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
@@ -356,6 +360,8 @@ func main() {
 		cmdPredict(rest)
 	case "generate":
 		cmdGenerate(rest)
+	case "speak":
+		cmdSpeak(rest)
 	case "score":
 		cmdScore(rest)
 	case "feedback":
@@ -672,6 +678,89 @@ func cmdPredict(args []string) {
 	}
 }
 
+// cmdSpeak samples walks and speaks them as they go: every step's units reach
+// the formant synthesizer the moment the walk takes them, and the END sentinel
+// closes each utterance.
+func cmdSpeak(args []string) {
+	fs := subFlagSet("speak")
+	prefix := fs.String("prefix", "", "start every walk with this")
+	count := fs.Int("count", 1, "walks to speak, one utterance each")
+	maxLength := fs.Int("max-length", 60, "units per walk at most")
+	temperature := fs.Float64("temperature", 1.0, "softmax temperature of the walk (0 = greedy)")
+	seeded := fs.Bool("seeded", false, "walk with a private RNG seeded by --seed (reproducible)")
+	// --out is the global "where to save the model"; speak saves no model, so
+	// here it is the WAV to write (speech.wav by default), as in the Python CLI
+	outFlag := fs.Lookup("out")
+	outFlag.Usage, outFlag.DefValue = "the WAV to write", "speech.wav"
+	play := fs.Bool("play", false, "stream to a player (aplay, paplay, ffplay, play or afplay) as the walk goes")
+	raw := fs.Bool("raw", false, "stream 16-bit mono PCM to stdout as the walk goes")
+	rate := fs.Int("rate", phonetok.Rate, "sample rate")
+	pitch := fs.Float64("pitch", 120, "the voice's base pitch in Hz")
+	tempo := fs.Float64("tempo", 1, "the voice's pace")
+	gain := fs.Float64("gain", 0.5, "peak level as a share of full scale")
+	_ = fs.Parse(args)
+	if outPath == "" {
+		outPath = "speech.wav"
+	}
+	m := openModel(true)
+	opts := radixnet.SpeakOptions{Prefix: *prefix, Count: *count, MaxLength: *maxLength, Temperature: *temperature,
+		Rate: *rate, Pitch: *pitch, Tempo: *tempo, Gain: *gain}
+	if *seeded {
+		s := seedFlag
+		opts.Seed = &s
+	}
+	var said []map[string]any
+	record := func(i int, text, spelled string) {
+		said = append(said, map[string]any{"text": text, "spelled": spelled})
+	}
+	total := 0
+	sink := outPath
+	var err error
+	switch {
+	case *play:
+		player := phonetok.FindPlayer()
+		if player == nil {
+			fail("no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw")
+		}
+		cmd := exec.Command(player[0], player[1:]...)
+		stdin, perr := cmd.StdinPipe()
+		if perr != nil {
+			fail("%v", perr)
+		}
+		if perr := cmd.Start(); perr != nil {
+			fail("%v", perr)
+		}
+		stdin.Write(phonetok.WavHeader(*rate, -1))
+		err = m.SpeakWalks(opts, func(chunk []byte) { stdin.Write(chunk); total += len(chunk) }, record)
+		stdin.Close()
+		cmd.Wait()
+		sink = player[0]
+	case *raw:
+		w := bufio.NewWriter(os.Stdout)
+		err = m.SpeakWalks(opts, func(chunk []byte) { w.Write(chunk); w.Flush(); total += len(chunk) }, record)
+		sink = "stdout"
+	default:
+		var pcm []byte
+		err = m.SpeakWalks(opts, func(chunk []byte) { pcm = append(pcm, chunk...) }, record)
+		if err == nil {
+			if werr := os.WriteFile(outPath, phonetok.WavBytes(pcm, *rate), 0o644); werr != nil {
+				fail("%v", werr)
+			}
+		}
+		total = len(pcm)
+	}
+	if err != nil {
+		fail("%v", err)
+	}
+	if said == nil {
+		said = []map[string]any{}
+	}
+	if !*raw {
+		emit(map[string]any{"prefix": *prefix, "utterances": said, "seconds": float64(total) / 2 / float64(*rate),
+			"rate": *rate, "sink": sink, "count": len(said), "encoding": m.Encoding().String()})
+	}
+}
+
 func cmdGenerate(args []string) {
 	fs := subFlagSet("generate")
 	count := fs.Int("count", 1, "texts to generate (beam: the K most likely)")
@@ -948,7 +1037,7 @@ func cmdWords(args []string) {
 	_ = fs.Parse(args)
 	m := openModel(true)
 	enc := m.Encoding()
-	if enc.Unit != radixnet.Words {
+	if enc.Unit == radixnet.Chars {
 		fail("%s counts in %s, so it has no words to list; a word alphabet needs a word encoding "+
 			"(train a new model with --encoding word:%d:%d)", modelPath, enc.UnitsName(), enc.N, enc.Stride)
 	}

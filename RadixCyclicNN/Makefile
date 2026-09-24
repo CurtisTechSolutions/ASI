@@ -93,6 +93,7 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
+        phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play phone-go phone-rust phone-parity \
         rust-build rust-test rust-parity bench-compare train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
@@ -303,6 +304,54 @@ word-rust: ## The Rust port over words: train on DATA and continue WORD_PREFIX (
 
 word-parity: ## Cross-language parity of the word model (Go and Rust against Python)
 	$(PY) -m unittest tests.test_go_parity.TestGoWordParity tests.test_rust_parity.TestRustWordParity -v
+
+# ---- the phonetic units: the text read as sounds (../PhoneticTokenizer) ------------
+PHONE_ENC   ?= phone:3:1
+MODEL_PHONE ?= model.phone.json
+PHONE       := --model $(MODEL_PHONE) --kind count --encoding $(PHONE_ENC) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
+PHONE_PREFIX ?= the cat sat
+PHONE_LENGTH ?= 8
+SPEECH      ?= speech.wav
+export PYTHONPATH := $(PYTHONPATH):../PhoneticTokenizer
+
+phone-train: ## Train a model over sounds on DATA (PHONE_ENC = phone:3:1 | syllable:2:1; MODEL_PHONE is its file)
+	$(RADIXNET) $(PHONE) train --data $(DATA) --epochs $(EPOCHS) --checkpoint-dir $(CKPT_DIR)
+
+phone-predict: ## Continue PHONE_PREFIX with PHONE_LENGTH sounds, and say what they spell
+	$(RADIXNET) $(PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH) --mode beam
+
+phone-generate: ## Generate COUNT texts of at most MAX_LENGTH sounds each, spelled back into words
+	$(RADIXNET) $(PHONE) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam
+
+phone-words: ## The sounds the model has read, most read first
+	$(RADIXNET) $(PHONE) words --limit $(WORD_LIMIT)
+
+phone-test: ## The phonetic units' tests (Python), and the encoding suites they ride in
+	$(PY) -m unittest tests.test_phonetic tests.test_voice tests.test_encoding tests.test_encodings_end_to_end -v
+
+phone-demo: ## Train a model over sounds on the sample corpus, then predict, generate, list its sounds and speak
+	$(MAKE) phone-train
+	$(MAKE) phone-predict
+	$(MAKE) phone-generate
+	$(MAKE) phone-words
+	$(MAKE) speak
+
+speak: ## Hear the model walk: COUNT utterances from PHONE_PREFIX, synthesized as it traverses, into SPEECH
+	$(RADIXNET) --model $(MODEL_PHONE) --seed $(SEED) speak --prefix "$(PHONE_PREFIX)" --count $(COUNT) --max-length $(MAX_LENGTH) --out $(SPEECH)
+
+speak-play: ## The same, streamed to a player (aplay, paplay, ffplay, play or afplay) as the walk goes
+	$(RADIXNET) --model $(MODEL_PHONE) --seed $(SEED) speak --prefix "$(PHONE_PREFIX)" --count $(COUNT) --max-length $(MAX_LENGTH) --play
+
+phone-go: ## The Go port over sounds: train on DATA and continue PHONE_PREFIX (needs `make go-build`)
+	go/bin/radixnet-count --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	go/bin/radixnet-count --model $(MODEL_PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH)
+
+phone-rust: ## The Rust port over sounds: train on DATA and continue PHONE_PREFIX (needs `make rust-build`)
+	rust/target/release/radixnet --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	rust/target/release/radixnet --model $(MODEL_PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH)
+
+phone-parity: ## Cross-language parity of the models over sounds (Go and Rust against Python)
+	$(PY) -m unittest tests.test_go_parity.TestGoEncodingParity tests.test_rust_parity.TestRustWordParity.test_the_other_dials_agree_too -v
 
 ##@ The negative network (failures only; it filters the positive model)
 negative-blame: ## Blame every line of GARBAGE for REASON with SEVERITY (the negative model is NEGATIVE)

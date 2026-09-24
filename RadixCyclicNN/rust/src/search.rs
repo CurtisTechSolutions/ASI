@@ -7,6 +7,11 @@ use crate::mt19937::Mt19937;
 use crate::penalty::PenaltyCosts;
 use crate::weights::ChildCost;
 
+/// A listener a sampled walk calls at every step it takes: the node stepped
+/// onto and its label - the sentinels included, so END is heard as the walk
+/// reaches it (`radixnet/voice.rs` speaks from one).
+pub type StepListener<'a> = &'a mut dyn FnMut(usize, &str);
+
 /// How a walk chooses its way through the graph.
 ///
 /// The model has always searched by what went *right*: an edge's weight is a
@@ -271,6 +276,38 @@ impl Graph {
         traversal: Traversal,
         filter: SamplingFilter,
     ) -> Result<PathResult, String> {
+        self.sample_walk_listening(
+            start_node,
+            start_offset,
+            max_chars,
+            temperature,
+            rng,
+            include_context,
+            costs,
+            traversal,
+            filter,
+            None,
+        )
+    }
+
+    /// [`Graph::sample_walk_filtered`] with a listener: `on_step` is told every
+    /// node the walk steps onto, with its label, as it steps onto it - END
+    /// included, which is the walk's own final sentinel - so a listener can act
+    /// on the walk while it is walking (`voice.rs` speaks it).
+    #[allow(clippy::too_many_arguments)] // the walk's knobs, one per knob
+    pub fn sample_walk_listening(
+        &mut self,
+        start_node: usize,
+        start_offset: usize,
+        max_chars: Option<usize>,
+        temperature: f64,
+        rng: Option<&mut Mt19937>,
+        include_context: Option<bool>,
+        costs: Option<&PenaltyCosts>,
+        traversal: Traversal,
+        filter: SamplingFilter,
+        on_step: Option<StepListener<'_>>,
+    ) -> Result<PathResult, String> {
         filter.check()?;
         self.prepare();
         match rng {
@@ -284,6 +321,7 @@ impl Graph {
                 costs,
                 traversal,
                 filter,
+                on_step,
             ),
             None => {
                 // the graph's own generator, lent to the walk and put back
@@ -298,6 +336,7 @@ impl Graph {
                     costs,
                     traversal,
                     filter,
+                    on_step,
                 );
                 self.rng = own;
                 walk
@@ -318,6 +357,7 @@ impl Graph {
         walk_costs: Option<&PenaltyCosts>,
         traversal: Traversal,
         filter: SamplingFilter,
+        mut on_step: Option<StepListener<'_>>,
     ) -> Result<PathResult, String> {
         if temperature < 0.0 {
             return Err("temperature must be >= 0".to_string());
@@ -378,6 +418,9 @@ impl Graph {
             node_ids.push(pick.child);
             if pick.child != END {
                 chars += self.label_len(pick.child) - self.enc.overlap();
+            }
+            if let Some(listener) = on_step.as_deref_mut() {
+                listener(pick.child, self.label(pick.child));
             }
             came_from = Some(node);
             node = pick.child;

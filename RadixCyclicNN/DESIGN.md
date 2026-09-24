@@ -134,6 +134,7 @@ the full account of the dial in both implementations. Everything below is that d
 ```python
 WINDOW = 3               # the default n of the n-gram
 CHARS, WORDS = "char", "word"   # what one unit is
+PHONES, SYLLABLES = "phone", "syllable"   # ... or a sound, or a syllable: the text read through ../PhoneticTokenizer
 START_LABEL = "<s>"      # reserved label of the START node (id 0)
 END_LABEL   = "</s>"     # reserved label of the END node   (id 1)
 
@@ -145,7 +146,12 @@ class Encoding:          # unit x n x stride; the zero value is the trigram
     # overlap == n - stride; encode / decode_path / decode_grams / normalize / units / piece / join /
     # truncate / has_unit_prefix / to_dict / from_dict
 
-def parse_encoding(spec: str) -> Encoding   # "word:2:1", "char:5:groups", "trigram", ...
+def parse_encoding(spec: str) -> Encoding   # "word:2:1", "char:5:groups", "trigram", "phone:3:1", "syllable:2:1", ...
+def phonetic_tokenizer(unit) -> PhoneticTokenizer   # the phonetok tokenizer a phonetic unit reads through, made once,
+                                                    # over the portable lexicon (the core + PHONETOK_LEXICON)
+# Encoding.phonetic, Encoding.spell(text): the words a text of sounds spells.  A phonetic unit's units(text) is
+# split_words(tokenizer.text(text)): a word becomes its sounds, punctuation a pause, the gap between words "#",
+# and text that is already sounds passes through - so a label cuts into the units it was made of (section 36).
 
 class Encoder:           # the encoder half of an Encoding, kept as an object
     def __init__(self, window: int = WINDOW, encoding: Encoding | None = None)
@@ -193,6 +199,20 @@ The tail shared by the *media* text formats (`img:...`, section 21, and `aud:...
 network **predicted** is rarely clean, so characters outside the alphabet are dropped, a single dangling character
 goes with them, the padding is completed and `repaired` reports whether any of that changed the text. The payload is
 returned as it decodes; each format pads or truncates it to the length it needs.
+
+---
+
+### 4.1 `voice.py` — the model heard as it walks
+
+```python
+class Speaker:                          # what a model emits -> the tokens of the phonetic tokenizer -> the voice
+    def __init__(self, encoding, rate=16000, pitch=120.0, tempo=1.0, gain=0.5)
+    def feed(self, piece: str) -> bytes  # sounds pass through; words are transcribed; letters gather into words
+    def end(self) -> bytes               # the final sentinel: the utterance is closed
+def speak_walks(model, prefix="", count=1, max_length=60, temperature=1.0, seed=None, ...) -> Iterator[bytes]
+    # sample `count` walks; every step's units reach the voice as the walk takes them (search.sample_walk's
+    # on_step); END closes each utterance (D-081).  The CLI's `speak` writes the chunks to a WAV, a player or stdout.
+```
 
 ---
 
@@ -3598,3 +3618,38 @@ HTTP API and the CLI), `tests/test_rust_parity_methods.py` (Rust against Python 
 history and replay block byte for byte - the filters and the diverse beam, and the server),
 `tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`, `go/radixnet/sampling_test.go`,
 the `training`, `search` and `beam` unit tests in Rust, and `frontend/test/settings.test.mjs`.
+
+## 36. The phonetic units (`../PhoneticTokenizer`, `radixnet/encoding.py`, `go/radixnet/phonetic.go`, `rust/src/phonetic.rs`) — the same graph over an alphabet of sounds
+
+Section 34's argument again, one alphabet over: not one structural rule of the graph mentions a character, so a
+model over *sounds* is this model over a different alphabet. The alphabet is the phonetic tokenizer's - the ARPAbet
+with stress, `#` between words, three pauses - and the unit is a **dial setting** (D-071's mechanism, D-080's
+decision): `--encoding phone:3:1` or `syllable:2:1`, nothing new in the graph, the weights, the search or the file.
+
+**How a text becomes units.** `Encoding.units(text)` for a phonetic unit is `split_words(tokenizer.text(text))`:
+the tokenizer's *text form*, tokens joined by single spaces, cut by the word rule. The text form is idempotent on
+any run of tokens - the tokenizer passes through a token that is already a sound, a `#` and a pause wherever they
+are - so a label (a run of units) cuts into the units it was made of, a gram of `DH AH0 #` is three units, and the
+round trip `decode(encode(t)) == normalize(t)` holds against the text of sounds. `join` writes single spaces and
+turns any piece given as text into sounds first, so `full_text` is all sounds; `has_unit_prefix` matches a prefix
+given as text by the sounds it makes; `spell` gives the words back (the lexicon, the tokenizer's memory of what it
+read, a respelling for the rest).
+
+**One tokenizer per unit, per process**, made on first use and kept (`phonetic_tokenizer`), so that what it
+remembers of the words it sounded out can spell them back. Its lexicon is the *portable* one: the bundled core plus
+the file `PHONETOK_LEXICON` names, which is what the Go and Rust ports read too. Both ports read the tokenizer's
+ports beside them (a Go module by `replace`, a Rust crate by path; no third-party dependency), behind a mutex,
+since training reads from many goroutines and threads.
+
+**What the ports had to agree on.** The tokenizer's fixture (`../PhoneticTokenizer/tests/parity.json`) holds the
+three ports to one token stream; this project's parity suites (`TestGoEncodingParity`, `test_the_other_dials_agree_too`)
+then hold the three graphs built over it to one file and one prediction, and a Python model of sounds is read and
+continued by Go and Rust. Every branch on the word unit that meant "not letters" - the alphabet listing, the
+vocabulary count, the diff of a correction - now says `!= Chars`.
+
+**The voice** (section 4.1, D-081): `radixnet speak` walks the model and speaks it as it goes; the graph's END
+sentinel closes each utterance.
+
+**Costs.** A text of sounds keeps no letters and no layout (the word unit's cost); an unread word is sounded out by
+rules, which are a guess; a model means the sounds its lexicon gave it, so the same lexicon must serve training and
+prediction. The frontend still names the units of a model of sounds *characters* - a gap for the next frontend build.

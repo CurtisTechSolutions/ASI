@@ -92,6 +92,8 @@ pub mod ollama;
 pub mod parallel;
 pub mod paths;
 pub mod penalty;
+pub mod phonetic;
+pub mod voice;
 pub mod plan;
 pub mod recall;
 pub mod report;

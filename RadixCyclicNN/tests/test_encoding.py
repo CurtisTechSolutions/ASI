@@ -17,6 +17,10 @@ EVERY_ENCODING = [
     Encoding(unit=WORDS, n=2), Encoding(unit=WORDS, n=3), Encoding(unit=WORDS, n=2, stride=2),
 ]
 """The encodings the tests drive end to end."""
+try:  # the sounds, when the phonetic tokenizer (../PhoneticTokenizer) is importable
+    EVERY_ENCODING += [Encoding(unit="phone"), Encoding(unit="syllable", n=2)]
+except ValueError:  # pragma: no cover
+    pass
 
 
 class TestEncoder(unittest.TestCase):
@@ -189,9 +193,11 @@ class TestEncodingDial(unittest.TestCase):
             text = "the quick brown fox jumps"
             view = enc.units(text)
             self.assertEqual(len(view), enc.length(text), str(enc))
-            self.assertEqual(enc.piece(text, 0), text if enc.unit == CHARS else " ".join(text.split()))
+            # a word encoding writes single spaces; a phonetic one writes the sounds
+            normalised = text if enc.unit == CHARS else " ".join(text.split()) if enc.unit == WORDS else " ".join(view)
+            self.assertEqual(enc.piece(text, 0), normalised)
             self.assertEqual(enc.piece(text, 2, 2), "")
-            whole = " ".join(text.split()) if enc.unit == WORDS else text
+            whole = normalised
             self.assertEqual(enc.join(*[enc.piece(text, i, i + 1) for i in range(len(view))]), whole)
 
     def test_unit_prefix_stops_at_a_word_boundary(self):

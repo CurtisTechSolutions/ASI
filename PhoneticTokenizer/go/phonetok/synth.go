@@ -7,9 +7,23 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"math"
+	"os/exec"
 	"strconv"
 	"strings"
 )
+
+// FindPlayer is a command that plays a WAV from stdin, if one is installed:
+// the first of aplay, paplay, ffplay, play (sox) and afplay found on the PATH,
+// with its arguments, ready for exec.Command.  Nil when there is none.
+func FindPlayer() []string {
+	for _, c := range [][]string{{"aplay", "-q", "-"}, {"paplay"}, {"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"},
+		{"play", "-q", "-t", "wav", "-"}, {"afplay"}} {
+		if path, err := exec.LookPath(c[0]); err == nil {
+			return append([]string{path}, c[1:]...)
+		}
+	}
+	return nil
+}
 
 //go:embed data/voice.tsv
 var voiceText string

@@ -87,7 +87,7 @@ from .codegen import (
     parse_problems,
 )
 from .encoding import (
-    BACK_LABEL, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
+    BACK_LABEL, END_LABEL, START_LABEL, WINDOW, CHARS, WORDS, Decoder, Encoder, Encoding, parse_encoding,
     word_rows,
 )
 from .gan import EvolveConfig, Evolver
@@ -942,11 +942,11 @@ class ModelService:
             raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
         with self.session() as model:
             encoding = model.encoding
-            if encoding.unit != WORDS:
+            if encoding.unit == CHARS:
                 raise ApiError(
                     400,
                     f"this model counts in {encoding.units_name}, so it has no words to list; "
-                    f"a word alphabet needs a word encoding (--encoding word:{encoding.n}:{encoding.stride})",
+                    f"an alphabet needs a word, phone or syllable encoding (--encoding word:{encoding.n}:{encoding.stride})",
                 )
             rows = word_rows(encoding, model.graph.trigram_index)
             return {

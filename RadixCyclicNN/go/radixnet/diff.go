@@ -56,8 +56,8 @@ func Edits(wrong, right string) []Edit { return DefaultEncoding().Edits(wrong, r
 // and a correction blames the steps the mistake really ran through.
 func (e Encoding) Edits(wrong, right string) []Edit {
 	e = e.WithDefaults()
-	if e.Unit == Words {
-		return alignAtoms(wordAtoms(wrong), wordAtoms(right), joinWords, e.N)
+	if e.Unit != Chars { // words, or sounds: whole units, never letters
+		return alignAtoms(wordAtoms(e.Units(wrong).Text()), wordAtoms(e.Units(right).Text()), joinWords, e.N)
 	}
 	return alignAtoms([]rune(wrong), []rune(right), joinRunes, e.N)
 }

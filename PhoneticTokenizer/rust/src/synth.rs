@@ -6,6 +6,31 @@ use crate::tokenizer::parse_token;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+/// A command that plays a WAV from stdin, if one is installed: the first of
+/// aplay, paplay, ffplay, play (sox) and afplay found on the PATH, with its
+/// arguments, ready for `Command`.
+pub fn find_player() -> Option<Vec<String>> {
+    let candidates: [&[&str]; 5] = [
+        &["aplay", "-q", "-"],
+        &["paplay"],
+        &["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+        &["play", "-q", "-t", "wav", "-"],
+        &["afplay"],
+    ];
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    for c in candidates {
+        for dir in path_var.split(':') {
+            let full = std::path::Path::new(dir).join(c[0]);
+            if full.is_file() {
+                let mut cmd = vec![full.to_string_lossy().to_string()];
+                cmd.extend(c[1..].iter().map(|s| s.to_string()));
+                return Some(cmd);
+            }
+        }
+    }
+    None
+}
+
 /// The voice table: the very file the Python package reads.
 pub const VOICE_TEXT: &str = include_str!("../../phonetok/data/voice.tsv");
 

@@ -306,8 +306,8 @@ impl Service {
     /// Words are not a kind - they are an encoding - so the units follow the
     /// encoding while the kind stays what it is.
     fn active_kind(&self) -> (&'static str, &'static str, &'static str) {
-        let (kind, words) = self.with_model(|m| (m.kind(), m.encoding().unit == Unit::Words));
-        (kind, kinds::label(kind), if words { "words" } else { "chars" })
+        let (kind, units) = self.with_model(|m| (m.kind(), m.encoding().units_name()));
+        (kind, kinds::label(kind), units)
     }
 
     /// Where a model of `kind` (and `encoding`, for a count model) is saved
@@ -1464,7 +1464,7 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
         let enc = m.encoding();
-        if enc.unit != Unit::Words {
+        if enc.unit == Unit::Chars {
             return Err(ApiError::bad_request(format!(
                 "this model counts in {}, so it has no words to list; a word alphabet needs a word encoding \
                  (--encoding word:{}:{})",
@@ -1638,7 +1638,7 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     if let Some(name) = r.body.get("unit").and_then(|v| v.as_str()) {
         encoding.unit = Unit::parse(name)
-            .ok_or_else(|| ApiError::bad_request(format!("unit must be char or word, got {name:?}")))?;
+            .ok_or_else(|| ApiError::bad_request(format!("unit must be char, word, phone or syllable, got {name:?}")))?;
     }
     if let Some(n) = r.body.get("ngram").and_then(|v| v.as_i64()) {
         encoding.n = n.max(0) as usize;

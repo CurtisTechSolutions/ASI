@@ -490,7 +490,7 @@ impl Model {
     /// and Go one, word for word, so three implementations list one alphabet.
     pub fn top_words(&mut self, limit: usize) -> Vec<crate::words::WordRow> {
         self.g.prepare();
-        if self.g.enc.unit != crate::encoding::Unit::Words {
+        if self.g.enc.unit == crate::encoding::Unit::Chars {
             return Vec::new();
         }
         let grams = self.g.gram_index();
@@ -1618,7 +1618,7 @@ pub fn stats(model: &Model) -> Vec<(String, String)> {
     put("unit", g.enc.unit.name().to_string());
     put("ngram", g.enc.n.to_string());
     put("stride", g.enc.stride.to_string());
-    if g.enc.unit == crate::encoding::Unit::Words {
+    if g.enc.unit != crate::encoding::Unit::Chars {
         put(
             "vocabulary",
             crate::encoding::vocabulary(&g.enc, g.gram_index()).len().to_string(),

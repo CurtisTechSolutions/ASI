@@ -788,7 +788,7 @@ class TestEncodingIsAChoice(unittest.TestCase):
 
     def test_an_encoding_that_cannot_be(self):
         before = self.service.model.encoding
-        for bad in ({"encoding": "rune:3"}, {"unit": "syllable"}, {"ngram": 3, "stride": 4}, {"ngram": 0}):
+        for bad in ({"encoding": "rune:3"}, {"unit": "rune"}, {"ngram": 3, "stride": 4}, {"ngram": 0}):
             with self.subTest(body=bad):
                 status, _, _ = self.client.post("/api/reset", bad)
                 self.assertEqual(status, 400)

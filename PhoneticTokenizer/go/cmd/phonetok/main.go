@@ -326,7 +326,7 @@ func run(args []string) int {
 		}
 		switch {
 		case *play:
-			player := findPlayer()
+			player := phonetok.FindPlayer()
 			if player == nil {
 				fmt.Fprintln(os.Stderr, "phonetok: no player found (aplay, paplay, ffplay, play or afplay)")
 				return 2
@@ -481,17 +481,6 @@ func min3(a, b, c int) int {
 		a = c
 	}
 	return a
-}
-
-// findPlayer is a command that plays a WAV from stdin, if one is installed.
-func findPlayer() []string {
-	for _, c := range [][]string{{"aplay", "-q", "-"}, {"paplay"}, {"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"},
-		{"play", "-q", "-t", "wav", "-"}, {"afplay"}} {
-		if path, err := exec.LookPath(c[0]); err == nil {
-			return append([]string{path}, c[1:]...)
-		}
-	}
-	return nil
 }
 
 type goRng struct{ r *rand.Rand }

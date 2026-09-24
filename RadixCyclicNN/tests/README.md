@@ -28,6 +28,8 @@ A few cover a behaviour rather than a module:
 | `test_feedback.py` | ratings and the 2NRL phases they drive |
 | `test_api_uploads.py` | uploads through the API, including ZIP archives kept as one entry and unpacked behind the scenes |
 | `test_penalty.py` | the **punishment traversal** (`../radixnet/penalty.py`): the merit / penalty split per model kind, that the rewards really do leave the score, that the cheapest path is the least punished one, and the option's way through every search mode, the CLI and the HTTP API |
+| `test_phonetic.py` | the **phonetic units** (`../PhoneticTokenizer`, D-080): the text read as sounds, a label cut into the units it was made of, a prefix matched by its sounds, a prediction spelled back into words; skipped when the tokenizer is not importable |
+| `test_voice.py` | the **voice** (D-081): a walk reports every step and its END sentinel, and is heard as it goes; words and letters are read through the tokenizer; the `speak` command writes a WAV |
 | `test_search_training.py` | the **search and training methods** (`../SPEC-SearchAndTraining.md`): the sampling filters, the diverse beam, the keys (pinned - Go and Rust assert the same numbers), the curriculum, the replay buffer and early stopping on every kind that learns by walking texts, the rule that a feedback pass never touches the buffer, and the settings through the HTTP API and the CLI |
 | `test_rust_parity_methods.py` | the same methods against the Rust port: six training plans on three kinds, held to Python's graph, history and `replay` block byte for byte; the filters and the diverse beam, text for text; the server's 400s and a planned run over HTTP (`test_go_parity.py::TestGoSearchAndTraining` does the same for Go) |
 
