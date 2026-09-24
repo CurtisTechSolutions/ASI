@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -201,6 +202,17 @@ func (rq *request) queryValue(name string) (string, bool) {
 
 type routeFn func(rq *request) (int, any, error)
 
+// A streamResponse is a route's answer written as it happens: one JSON object
+// per line (application/x-ndjson).  run does the work and hands every event to
+// write; the handler sends the headers with the first one and flushes the rest
+// out as they come, so a client reads the events while the model is still
+// talking.  A request refused before the first event is an ordinary 4xx JSON
+// error; a failure after it is the stream's last event, {"event": "error"},
+// because the status line has already gone.
+type streamResponse struct {
+	run func(write func(any) error) error
+}
+
 var routes = map[string]map[string]routeFn{}
 
 func route(method, p string, fn routeFn) {
@@ -245,6 +257,8 @@ func init() {
 	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
 	route("POST", "/api/converse", rConverse)
 	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	route("POST", "/api/converse/stream", rConverseStream)
+	doc("POST", "/api/converse/stream", "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the first line is {event: error, error}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -821,47 +835,48 @@ func rGenerate(rq *request) (int, any, error) {
 	return 200, map[string]any{"samples": samples, "guard": report}, nil
 }
 
-func rConverse(rq *request) (int, any, error) {
+// converseRequest reads the one conversation POST /api/converse and POST
+// /api/converse/stream both take from a body.
+func converseRequest(rq *request) (opening string, o radixnet.ConverseOptions, guard bool, err error) {
 	f := rq.f
-	opening, err := f.optText("opening", "")
-	if err != nil {
-		return 0, nil, err
+	if opening, err = f.optText("opening", ""); err != nil {
+		return "", o, false, err
 	}
-	o := radixnet.DefaultConverseOptions()
+	o = radixnet.DefaultConverseOptions()
 	if o.Turns, _, err = f.integer("turns", 6, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	partner, err := f.optText("partner", "")
 	if err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if partner != "" && strings.ToLower(partner) != "count" {
-		return 0, nil, badRequest("no %s model in memory to converse with; the Go server runs the count / reward model only", partner)
+		return "", o, false, badRequest("no %s model in memory to converse with; the Go server runs the count / reward model only", partner)
 	}
 	if o.Mode, err = f.optText("mode", "beam"); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.MaxLength, _, err = f.integer("max_length", 60, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Context, _, err = f.integer("context", 12, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Temperature, _, err = f.number("temperature", 1.0, floatp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.K, _, err = f.integer("k", 5, intp(1)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.StepPenalty, _, err = f.number("step_penalty", 0, floatp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	seed, present, err := f.integer("seed", 0, nil)
 	if err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if present {
 		s := int64(seed)
@@ -869,27 +884,44 @@ func rConverse(rq *request) (int, any, error) {
 	}
 	speakers, err := f.names("speakers")
 	if err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if len(speakers) > 0 {
 		o.Speakers = speakers
 	}
 	if o.History, err = f.textsOptional("history", "history_text"); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.AvoidRepeats, err = f.flag("avoid_repeats", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.AvoidWordRepeats, err = f.flag("avoid_word_repeats", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Explore, _, err = f.integer("explore", radixnet.Explore, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Learn, err = f.flag("learn", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
-	guard, err := f.flag("guard", true)
+	if guard, err = f.flag("guard", true); err != nil {
+		return "", o, false, err
+	}
+	return opening, o, guard, nil
+}
+
+// converseDocument is what a conversation is answered with, by both routes.
+func converseDocument(o radixnet.ConverseOptions, turns []*radixnet.Turn, report map[string]any) map[string]any {
+	if turns == nil {
+		turns = []*radixnet.Turn{}
+	}
+	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
+	return map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}
+}
+
+func rConverse(rq *request) (int, any, error) {
+	opening, o, guard, err := converseRequest(rq)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -897,12 +929,39 @@ func rConverse(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	if turns == nil {
-		turns = []*radixnet.Turn{}
+	return 200, converseDocument(o, turns, report), nil
+}
+
+// rConverseStream is the same conversation streamed as it happens
+// (radixnet.Stream): every event is one JSON line, "turn" events are the
+// answer and the rest is the window a backtrack may still rewrite, and the last
+// line is {"event": "done", ...} carrying the document /api/converse answers
+// with.
+func rConverseStream(rq *request) (int, any, error) {
+	opening, o, guard, err := converseRequest(rq)
+	if err != nil {
+		return 0, nil, err
 	}
-	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
-	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
-		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}, nil
+	return 200, &streamResponse{run: func(write func(any) error) error {
+		// a client that goes away mid-conversation does not stop the conversation, which finishes under the
+		// model lock as it would have; its events are simply not written any more
+		var gone error
+		o.Stream = func(event map[string]any) {
+			if gone == nil {
+				gone = write(event)
+			}
+		}
+		turns, report, err := rq.svc.Converse(opening, o, guard)
+		if err != nil {
+			return err
+		}
+		if gone != nil {
+			return nil
+		}
+		doc := converseDocument(o, turns, report)
+		doc["event"] = "done"
+		return write(doc)
+	}}, nil
 }
 
 func rScore(rq *request) (int, any, error) {
@@ -1392,10 +1451,63 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 	if err != nil {
 		return h.writeError(w, r, err)
 	}
+	if streamed, ok := payload.(*streamResponse); ok {
+		return h.writeStream(w, r, streamed)
+	}
 	if payload == nil {
 		return writeJSON(w, status, nil, r.Method)
 	}
 	return writeJSON(w, status, payload, r.Method)
+}
+
+// writeStream answers with a streamResponse: chunked application/x-ndjson, one
+// event per line, each flushed as it is written.  The headers wait for the
+// first event, so a request refused before anything was streamed still gets
+// its 4xx JSON; a failure after that is the stream's last event.
+func (h *Handler) writeStream(w http.ResponseWriter, r *http.Request, streamed *streamResponse) int {
+	flusher, _ := w.(http.Flusher)
+	started := false
+	head := func() {
+		started = true
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(200)
+	}
+	write := func(event any) error {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(event); err != nil {
+			buf.Reset()
+			buf.WriteString(`{"event":"error","error":"event is not serialisable"}` + "\n")
+		}
+		if !started {
+			head()
+		}
+		if _, err := w.Write(buf.Bytes()); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+	if err := streamed.run(write); err != nil {
+		if !started {
+			return h.writeError(w, r, err)
+		}
+		message := err.Error()
+		var ae *apiError
+		if errors.As(err, &ae) {
+			message = ae.message
+		}
+		_ = write(map[string]any{"event": "error", "error": message})
+	}
+	if !started {
+		head()
+	}
+	return 200
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) int {

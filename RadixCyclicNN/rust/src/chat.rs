@@ -415,6 +415,7 @@ impl<'a> Chat<'a> {
                     } else {
                         None
                     },
+                    stream: None,
                 };
                 reply(model, None, &line, options, &mut rng)
             })??;

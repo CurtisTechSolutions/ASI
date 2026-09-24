@@ -64,7 +64,8 @@ RadixCyclicNN/
                             and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, Heard, stutter, backtrack, teach_back, Rethink, reply, converse, repeats -
                             the model conversing with itself, thinking twice about a repeat, and teaching the
-                            graph where it goes round (section 22)
+                            graph where it goes round (section 22); StreamFn, the events a conversation is
+                            watched through as it happens (section 22.1)
     chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
                             (ported to Go as go/radixnet/chat.go, section 28.1)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
@@ -655,7 +656,7 @@ output only, one JSON document on stdout).
 | `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
 | `score` | `--text` or `--data FILE` | log-prob per text |
-| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript` |
+| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out`, `--stream` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript`. `--stream` prints the conversation as it happens (section 22.1): each turn the moment it is spoken and, dimmed on a terminal, the window before it - the context it continues, the draft it caught itself on, where it backed up to, what it found; with `--json` one JSON object per line and the document last, as `{"event": "done", ...}` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
 | `compress` | `--out` | compresses and saves, prints merges |
@@ -690,6 +691,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
 | POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22) |
+| POST `/api/converse/stream` | the same body as `/api/converse` | the same conversation as it happens (section 22.1): `application/x-ndjson`, one JSON object per line - `look` / `draft` / `caught` / `backtrack` / `found` / `stuck` (the window) and `turn` (the answer), each with `index` and `speaker`, then `{"event": "done", ...}` with the `/api/converse` document; a request refused before the first line is an ordinary 400, a failure after it the last line `{"event": "error", "error"}`. `ApiHandler._send_stream` writes it chunked, the headers waiting for the first event (`StreamedResponse`) |
 | POST `/api/score` | `{"text"}` | score dict |
 | GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
 | POST `/api/encoding/preview` | `{"text"}` | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
@@ -739,7 +741,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
 * `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
 * `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`).
-* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked.
+* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked. "Stream" (on by default) runs `POST /api/converse/stream` instead (`api.converseStream`, section 22.1): every `turn` event is appended the moment it is spoken, and while a voice speaks a `LiveTurn` sits at the top of the list - the draft it caught itself on with what it backed out of struck through and the way on it found underlined, its meta line saying what it is doing (`applyEvent` in `src/stream.js` folds the events into that state; `LineParser` there cuts the chunks into lines, both with tests in `test/stream.test.mjs`). A committed turn keeps the draft it caught itself on in its meta line. A server without the route answers 404 and the panel falls back to `POST /api/converse`.
 * `ChatPanel.jsx` — the model in conversation with an LLM that marks it (section 28): the settings, the live transcript, the table of conversations and the report card. Its transcript is **newest first** too - a new exchange is appended to the top of the `<ol reversed>` and pushes the older ones down, so a running conversation never has to be scrolled to (the partner's line stays directly above the reply it drew) - and a line above it says how many replies were duplicates punished with the failures.
 * `RatingsCard.jsx` — shared by Generate and Converse: `useRatings()` (one rating per distinct text, toggling; `punish(texts)` marks a whole batch thumbs-down without toggling and returns how many), `RateButtons` (the thumbs pair) and the "Ratings → 2NRL" card (rated texts, the action that will run, epochs / learning rates / strength, Train on ratings → `POST /api/feedback` through the panel's `useJob("feedback")`, the job's phase table).
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
@@ -856,7 +858,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   at the first pass, the stop event, progress, a capped quiz marked against what it asked for), the report card, the
   faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
   neither Pillow nor a transcriber, so nothing in it is skipped.
-* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation; `stream` (section 22.1): the turns streamed are the turns returned, the window between two turns belongs to the one that follows and shows the backing up event for event against the rethink record, a `backtrack` streamed on its own, and streaming changing nothing (the same turns and the same graph afterwards). `test_api.py::test_converse_stream` reads the route's JSON Lines, `test_cli.py` the `--stream` output in both modes, and the Go / Rust sides are held to the same events by `test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py`.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
 ---
@@ -1662,6 +1664,62 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 previous, ...)` is one turn of that loop on its own, and is what section 28 calls when the other voice is an LLM
 rather than a model.
 
+### 22.1 Streaming the conversation: the turns, and the window between them
+
+A conversation can be watched as it happens: `converse(..., stream=fn)` (and `reply`, `backtrack`) hand every
+event to `fn` the moment it occurs (`StreamFn`, a callable taking one dict).  `converse --stream` prints them,
+`POST /api/converse/stream` writes them as `application/x-ndjson` (one JSON object per line, chunked, each line
+flushed as it is written) and the Converse tab's "Stream" draws them.  Streaming is a *view* of the conversation
+and not a second procedure: the events are emitted from inside the one search `converse` always ran, the turns
+returned are exactly the ones streamed, and a conversation streamed teaches the graph exactly what a silent one
+does (`TestStream.test_streaming_changes_nothing`).
+
+The stream has two layers, and the split is the design.
+
+* **The committed layer is the answer.** `{"event": "turn", "index", "speaker", "turn": {...}}` is a turn the
+  moment it is spoken - the opening included - and a turn is never taken back: `converse` only ever *adds* turns,
+  so a client can append them to a transcript as they arrive.  The `turn` field is `Turn.to_dict()`, the document
+  `/api/converse` writes.
+* **Everything between two turns is the window - what a backtrack may still rewrite.** A voice about to
+  speak looks for continuations of a context (`look`, `from`: the context, `""` for a fresh text from START), and
+  the context loses a word at a time while nothing new follows it - so there is one `look` per context tried.
+  A candidate caught repeating is streamed as the `draft` it was about to say (`text`, `cost`), then `caught`
+  (`kind`, `noticed`, and `cut`: what it keeps, `""` when it cannot back up - the exploring is off, the repeat
+  lies in the words it picked up, or nothing of its own comes before it), one `backtrack` per step back (`step`,
+  `cut`, `wider`: the candidates it weighs from there), and `found` (`text`, `cost`, `explored`) or `stuck`
+  (`explored`).  Every window event carries the `index` and `speaker` of the turn it belongs to, which is the
+  turn event that follows it.
+
+Why the window is the whole turn rather than the last few words: the obvious reading of "stream the text but
+hold back a window the backtracking can rewrite" would commit a draft's beginning and keep only its tail open.
+That would lie.  A stutter is cut where the walk went round, which can be anywhere in the draft; a repeat of a
+line already heard is cut at its last word and then a word further back per step; and a voice that finds
+nothing from any cut does not keep the draft's beginning either - it drops the draft altogether, tries a
+shorter context, and finally changes the subject with a fresh text from START.  Nothing in a draft is certain
+until the turn is spoken, so nothing in it is streamed as the answer.  The response streams by the turn, the
+window streams apart from it, and a client that only wants the answer ignores everything but `turn`.
+
+What the window buys is the point of streaming this model at all: the backtracking can be seen in action.
+The CLI prints the window dimmed and indented above the turn it belongs to (*was about to say "ha ha"* / *caught
+itself saying "ha" twice* / *backs up to "ha " and weighs up to 10 paths (step 1)* / *found another way on: "ha
+and the cat sat" (3 path(s) weighed)*, then `A: ha and the cat sat`); the tab shows the draft with what it backed
+out of struck through and the way on underlined, then commits the turn with its draft kept in the meta line.
+
+The transport is the same on the three servers: chunked NDJSON, the headers sent with the first event so a
+request refused before anything was streamed (a bad `k`, a partner not in memory) is an ordinary 400, and a
+failure after the first line the stream's last event, `{"event": "error", "error"}` - the status line has
+already gone.  The last line of a good stream is `{"event": "done", ...}` carrying the document `/api/converse`
+answers with, so a client has the transcript, the repeats and the guard's report without a second request.
+The conversation runs under the model lock and writes to the socket between searches; a client that goes away
+does not stop it (Go and Rust remember the failed write and drop what follows; Python's `BrokenPipeError` ends
+the request), and the model comes out of it as any conversation leaves it.
+
+The Go port (`Stream func(map[string]any)` on `ConverseOptions` / `ReplyOptions` / `BacktrackOptions`,
+`rConverseStream`, `converse -stream`) and the Rust port (`Stream`, a `dyn FnMut(Json)`; `Server::stream_route`
+and a `Sink` that chunks the lines; `converse --stream`) emit the same events with the same fields, and
+`test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py` hold all three to
+one stream, event for event, the costs to `1e-9`.  D-080 records the decision.
+
 ## 23. The count / reward model in Go (`go/`) — goroutines over lines, paragraphs and pages
 
 (The negative network is ported too; section 24.5 covers what it adds to the types below.)
@@ -1732,8 +1790,8 @@ Python dict order decides the softmax summation order -, trigram index, `Split` 
 `ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`, `Reply`,
-`Heard`, `Stutter`, `Backtrack`, `TeachBack`, `Rethink`, `Repeats` - the same duplicate rules, second thoughts
-and learning as Python, checked by `test_go_parity.py`),
+`Heard`, `Stutter`, `Backtrack`, `TeachBack`, `Rethink`, `Repeats`, `Stream` - the same duplicate rules, second thoughts,
+learning and stream of events as Python, checked by `test_go_parity.py`),
 `json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`), `counter.go` (the
 cyclic counters of section 28, identical to `radixnet/counter.py`).
 

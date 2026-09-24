@@ -680,6 +680,44 @@ class TestEndpoints(unittest.TestCase):
         status, data, _ = self.client.post("/api/converse", {"partner": "count"})
         self.assertIn("in memory", data["error"])
 
+    def test_converse_stream(self):
+        body = {"opening": "the cat sat on the mat", "turns": 4, "learn": False}
+        status, raw, headers = self.client.post("/api/converse/stream", body)
+        self.assertEqual(status, 200, raw)
+        self.assertTrue(headers.get("Content-Type", "").startswith("application/x-ndjson"), headers)
+        self.assertIsInstance(raw, bytes)
+        lines = raw.decode("utf-8").splitlines()
+        events = [json.loads(line) for line in lines]
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["event"], "done")
+        for event in events[:-1]:
+            self.assertIn(event["event"], ("look", "draft", "caught", "backtrack", "found", "stuck", "turn"))
+            self.assertIn("index", event)
+            self.assertIn("speaker", event)
+        # the answer is the turn events; the last line is the document /api/converse answers with
+        status, plain, _ = self.client.post("/api/converse", body)
+        self.assertEqual(status, 200, plain)
+        done = {k: v for k, v in events[-1].items() if k != "event"}
+        self.assertEqual(set(done), {"kind", "partner", "speakers", "turns", "count", "repeats", "guard"})
+        self.assertEqual(done, plain)
+        spoken = [e["turn"] for e in events if e["event"] == "turn"]
+        self.assertEqual(spoken, plain["turns"])
+        self.assertEqual(len(spoken), 5)
+        self.assertTrue(spoken[0]["given"])
+        # a request refused before anything was streamed is an ordinary 400
+        status, data, headers = self.client.post("/api/converse/stream", {"k": 0})
+        self.assertEqual(status, 400, data)
+        self.assertTrue(headers.get("Content-Type", "").startswith("application/json"))
+        self.assertIn("error", data)
+        status, data, _ = self.client.post("/api/converse/stream", {"partner": "count"})
+        self.assertEqual(status, 400, data)
+        # nothing to say: only the done line
+        status, raw, _ = self.client.post("/api/converse/stream", {"turns": 0})
+        self.assertEqual(status, 200)
+        events = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+        self.assertEqual([e["event"] for e in events], ["done"])
+        self.assertEqual(events[0]["turns"], [])
+
     def test_score(self):
         status, good, _ = self.client.post("/api/score", {"text": CORPUS[0]})
         self.assertEqual(status, 200)

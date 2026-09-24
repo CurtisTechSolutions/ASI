@@ -29,7 +29,12 @@ it noticed and whether it found one. With "Learn where it goes round" on (the
 default) what a rethink finds out is taught to the graph, so the model itself
 hands over there next time - which means a conversation changes the model. The
 duplicates it could not avoid come back flagged, and "Punish duplicates" marks
-them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
+them 👎 so "Train on ratings" runs the 2NRL negative phase on them. With
+"Stream" on (the default) the conversation arrives as it happens over
+`POST /api/converse/stream`: every turn the moment it is spoken, and above it
+the turn being spoken - the draft the voice caught itself on with what it backed
+out of struck through and the way on it found underlined - so the backtracking
+can be watched; a committed turn keeps that draft in its meta line.
 
 The Chat panel (`POST /api/chat/start`) has an LLM converse with the model and
 mark every reply; its transcript reads newest first as well, it has the same
@@ -188,7 +193,8 @@ The old `#network` link opens Model settings.
     vite.config.js              dev proxy + build output
     src/main.jsx                React root
     src/App.jsx                 header, status bar, tabbed panels
-    src/api.js                  fetch wrapper (JSON + {"error": ...} handling)
+    src/api.js                  fetch wrapper (JSON + {"error": ...} handling), and the JSON Lines reader of a streamed route
+    src/stream.js               a streamed conversation: the line parser, and the window one turn goes through (pure)
     src/util.js                 parsing / formatting helpers
     src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)

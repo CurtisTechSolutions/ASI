@@ -331,6 +331,26 @@ class TestInference(unittest.TestCase):
         self.assertEqual(run_json("converse", "--turns", 0, model=MODEL)["turns"], [])
         proc = run_cli("converse", "--partner", os.path.join(TMP.name, "missing.json"), model=MODEL, expect=1)
         self.assertIn("partner model file not found", proc.stderr)
+        # --stream: the conversation as it happens - the window (what the voice does before it speaks) and the
+        # turns, in the order they happen; with --json one event per line and the usual document last
+        live = run_cli("converse", "--turns", 4, "--stream", "--no-learn", model=ways, json_mode=False).stdout
+        self.assertIn("was about to say ", live)
+        self.assertIn("caught itself", live)
+        self.assertIn("backs up to ", live)
+        self.assertRegex(live, r"found another way on: |nothing new in \d+ path")
+        self.assertRegex(live, r"(?m)^B: ")
+        self.assertLess(live.index("was about to say "), live.rindex("B: "))  # the window comes before its turn
+        proc = run_cli("converse", "--turns", 4, "--stream", "--no-learn", model=ways)
+        lines = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertTrue(lines)
+        self.assertEqual(lines[-1]["event"], "done")
+        kinds = {line["event"] for line in lines[:-1]}
+        self.assertTrue(kinds <= {"look", "draft", "caught", "backtrack", "found", "stuck", "turn"}, kinds)
+        self.assertIn("turn", kinds)
+        self.assertIn("caught", kinds)
+        quiet = run_json("converse", "--turns", 4, "--no-learn", model=ways)
+        self.assertEqual({k: v for k, v in lines[-1].items() if k != "event"}, quiet)
+        self.assertEqual([line["turn"] for line in lines if line["event"] == "turn"], quiet["turns"])
 
     def test_score(self):
         good = run_json("score", "--text", "the cat sat on the mat", model=MODEL)
