@@ -25,19 +25,18 @@
 //! over any unit does not fit in an integer, so the index is keyed by the gram
 //! itself, as the other two key it.  `bench/RESULTS.md` says what that cost.
 //!
-//! # What is here, and what is not
+//! # What is here
 //!
-//! The model itself is here in full: the graph and its structural operations,
-//! the weight function, the path contexts, all three traversals, training,
-//! prediction, generation, scoring, the character and **word** alphabets, the
-//! JSON model file (byte for byte what Python and Go read and write), the
-//! benchmark, the CLI (`src/bin/radixnet.rs`) and the HTTP API the frontend talks to
-//! ([`http`], [`service`]).
-//!
-//! What is **not** here is everything the Python package grew around the model:
-//! the negative network, the tutor and the other teaching loops, the agent and
-//! its tools, the LLM clients, images and speech, and MCP.  The LLM clients in
-//! particular need HTTPS, which the no-dependency rule rules out.
+//! All of the Python package: the model of every kind - the count / reward
+//! model, the sine-activation `radix` model ([`radix`]), the phase model
+//! ([`resonance`]) and the negative network ([`negative`], [`duo`]) - with the
+//! JSON model files byte for byte what Python writes, and around it every
+//! teaching loop (the tutor, the chat, the critic, evolve, the recall tutor),
+//! the LLM clients ([`llm`], [`ollama`], [`chatgpt`]), the agent and its tools,
+//! code generation, images and speech, MCP, the CLI ([`cli`], `src/bin/radixnet.rs`) and the
+//! HTTP API the frontend talks to ([`http`], [`service`]).  `rust/README.md`
+//! lists every module, and what is deliberately not ported (torch, the Stable
+//! Diffusion encoder, local Whisper) and why.
 //!
 //! ```
 //! use radixnet::{GraphOptions, Model, PredictOptions, TrainOptions, REWARD};
@@ -55,28 +54,74 @@
 //! assert!(found.best.full_text.starts_with("the cat"));
 //! ```
 
+pub mod agent;
 pub mod beam;
 pub mod bench;
+pub mod blame;
+pub mod calc;
+pub mod chat;
+pub mod chatgpt;
+pub mod checkpoint;
+pub mod cli;
 pub mod clock;
+pub mod codegen;
+pub mod correct;
 pub mod counter;
+pub mod critic;
+pub mod dialogue;
+pub mod diff;
+pub mod duo;
 pub mod encoding;
+pub mod fetch;
 pub mod file;
 pub mod fsum;
+pub mod gan;
 pub mod graph;
 pub mod gzip;
 pub mod hash;
 pub mod http;
 pub mod json;
+pub mod llm;
+pub mod log;
+pub mod mcp;
 pub mod model;
 pub mod mt19937;
+pub mod multipart;
+pub mod negative;
+pub mod ollama;
 pub mod parallel;
 pub mod paths;
 pub mod penalty;
+pub mod plan;
+pub mod recall;
 pub mod report;
+pub mod review;
 pub mod search;
 pub mod service;
+pub mod source;
+pub mod speech;
+pub mod toolbox;
+pub mod tools;
+pub mod tutor;
+pub mod vision;
+pub mod web;
 pub mod weights;
 pub mod words;
+pub mod zip;
+// the sine-activation and phase models (radix / resonant) and what they stand on
+pub mod activation;
+pub mod backend;
+pub mod blake2b;
+pub mod dijkstra;
+pub mod kinds;
+pub mod metacog;
+pub mod phasesearch;
+pub mod pyheap;
+pub mod radix;
+pub mod resonance;
+pub mod schedule;
+// Chrome over WebDriver behind the web tools (`--browser`)
+pub mod browser;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;

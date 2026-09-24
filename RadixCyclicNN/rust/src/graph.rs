@@ -161,7 +161,9 @@ impl Default for GraphOptions {
     }
 }
 
-/// The self-compressing cyclic trigram graph of the count / reward model.
+/// The self-compressing cyclic trigram graph every kind stands on - the count
+/// / reward model's, with what the negative, radix and resonant kinds keep
+/// beside it hung on `neg`, `radix` and `res`.
 /// Storage is flat vectors indexed by node id / edge id; removed nodes and
 /// edges are tombstoned and their ids are never reused.
 pub struct Graph {
@@ -201,6 +203,16 @@ pub struct Graph {
     pub path_scale: f64,
 
     pub(crate) index: Map<String, Loc>,
+    /// The blame arrays and reason registry of a *negative* graph
+    /// ([`crate::negative`]); `None` on a count / reward graph, which therefore
+    /// pays nothing for it.
+    pub neg: Option<Box<crate::negative::NegativeData>>,
+    /// The node parameters of a *radix* graph ([`crate::radix`]); `None` on
+    /// every other kind.
+    pub radix: Option<Box<crate::radix::RadixData>>,
+    /// The phase and accumulators of a *resonant* graph
+    /// ([`crate::resonance`]); `None` on every other kind.
+    pub res: Option<Box<crate::resonance::ResonantData>>,
     /// How a text becomes grams; fixed when the graph is created.
     pub enc: Encoding,
     pub inverted: bool,
@@ -264,6 +276,9 @@ impl Graph {
             window_scale: opts.window_scale,
             path_scale: opts.path_scale,
             index: map(),
+            neg: None,
+            radix: None,
+            res: None,
             inverted: false,
             version: Counter::default(),
             structure_version: Counter::default(),
@@ -367,15 +382,17 @@ impl Graph {
         self.n_alive_nodes += 1;
         self.version.add(1);
         self.structure_version.add(1);
+        self.radix_node_added();
+        self.resonant_refresh(nid);
         nid
     }
 
     pub(crate) fn new_edge(&mut self, p: usize, c: usize, count: i64, count_resets: i64) -> usize {
-        // the sine network draws a weight here; the count model recomputes the
-        // weight but consumes the same random number
-        self.rng.uniform(W_LOW, W_HIGH);
+        // the sine network draws a weight here and keeps it; the other kinds
+        // compute theirs but consume the same random number
+        let drawn = self.rng.uniform(W_LOW, W_HIGH);
         let e = self.edge_w.len();
-        self.edge_w.push(0.0);
+        self.edge_w.push(self.fresh_edge_weight(drawn));
         self.edge_count.push(AtomicI64::new(count));
         if count_resets != 0 {
             self.edge_count_resets.insert(e, count_resets);
@@ -384,6 +401,10 @@ impl Graph {
         self.edge_parent.push(p);
         self.edge_reward.push(0.0);
         self.window_edge_count.push(0);
+        if let Some(neg) = self.neg.as_mut() {
+            neg.append_edge();
+        }
+        self.resonant_edge_added();
         self.children[p].set(c, e);
         self.parents[c].set(p, e);
         self.n_alive_edges += 1;
@@ -395,6 +416,7 @@ impl Graph {
 
     fn create_gram_node(&mut self, gram: &str) -> usize {
         let nid = self.new_node(gram.to_string(), 0, 0);
+        self.radix_gram_created(nid); // a new gram's sine state is drawn
         self.index.insert(gram.to_string(), Loc { node: nid, off: 0 });
         nid
     }
@@ -563,6 +585,7 @@ impl Graph {
         let a_resets = self.count_resets.get(&a).copied().unwrap_or(0);
         let a_count = self.count[a].load(Ordering::Relaxed);
         let b = self.new_node(label.slice(i, length), a_count, a_resets);
+        self.radix_split(a, b); // the new half keeps the node's activation
 
         let moved: Vec<usize> = self.children[a].edges.clone();
         let pairs: Vec<(usize, usize)> = self.children[a]
@@ -590,6 +613,8 @@ impl Graph {
         self.dirty_all = true;
         let bridge = self.children[a].get(b);
         self.split_paths(a, b, &moved, bridge); // q -> P -> c is now q -> A -> B -> c
+        self.resonant_refresh(a);
+        self.resonant_refresh(b);
         Ok((a, b))
     }
 
@@ -607,6 +632,11 @@ impl Graph {
         if c == p || c < FIRST || self.parents[c].size() != 1 {
             return false;
         }
+        // a step *inside* a node has no edge to carry blame, so a merged
+        // correction would be forgotten (crate::negative)
+        if self.blocks_merge(self.children[p].edges[0]) {
+            return false;
+        }
         let enc = self.enc;
         let lp: Units = enc.units(&self.labels[p]);
         let lc: Units = enc.units(&self.labels[c]);
@@ -617,7 +647,10 @@ impl Graph {
         self.parents[c].clear();
         self.edge_alive[e] = false;
         self.n_alive_edges -= 1;
-        // activations are the constant 1: no rescale of the moved edges is needed
+        // a sine graph keeps every score `w * f_p * f_c` by rescaling one side;
+        // on the other kinds the activations are the constant 1 and nothing moves
+        let out_ratio = self.merge_rescale(p, c);
+        let rescale = self.radix.is_some();
         let pairs: Vec<(usize, usize)> = self.children[c]
             .order
             .iter()
@@ -630,6 +663,9 @@ impl Graph {
             self.parents[target].set(p, e2);
             self.children[p].set(target, e2);
             self.edge_parent[e2] = p;
+            if rescale {
+                self.edge_w[e2] *= out_ratio;
+            }
         }
         self.children[c].clear();
         let mut j = 0;
@@ -666,6 +702,7 @@ impl Graph {
         self.structure_version.add(1);
         self.dirty_all = true;
         self.merge_paths(p, c, e, &moved_out); // the chain was unary: what its contexts knew was never a choice
+        self.resonant_refresh(p);
         true
     }
 
@@ -686,6 +723,60 @@ impl Graph {
             }
             merges += done;
         }
+    }
+
+    /// Teaches what a voice learned by backing out of a repeat at `p`
+    /// (`RadixCyclicGraph.observe_back` and the count model's override).
+    ///
+    /// Nothing in a corpus says where a walk loops, so this is the one thing
+    /// the graph learns from *experience*: `p -> BACK` is created on first use
+    /// and counted like any traversal, rewarded by `amount`, so every hand-over
+    /// raises the model's own estimate that walks through `p` go round; `went`
+    /// (the child it was about to loop through) is punished by `amount`, and
+    /// `instead` (the child it took after backing up) rewarded.  Returns the
+    /// `BACK` edge.
+    pub fn observe_back(
+        &mut self,
+        p: usize,
+        went: Option<usize>,
+        instead: Option<usize>,
+        amount: f64,
+    ) -> Result<usize, String> {
+        // the sine model nudges its weights, the phase model counts - each learns it its own way
+        if self.radix.is_some() {
+            return self.radix_observe_back(p, went, instead, amount);
+        }
+        if self.res.is_some() {
+            return self.resonant_observe_back(p, went, instead, amount);
+        }
+        if p < FIRST || p >= self.labels.len() || !self.alive[p] {
+            return Err(format!("node {p} is not a real node to go back from"));
+        }
+        if amount < 0.0 {
+            return Err(format!("amount must be >= 0, got {amount}"));
+        }
+        let e = match self.edge(p, BACK) {
+            Some(e) => e,
+            None => self.new_edge(p, BACK, 0, 0),
+        };
+        self.count[BACK].fetch_add(1, Ordering::Relaxed);
+        self.edge_count[e].fetch_add(1, Ordering::Relaxed);
+        self.traversals.add(1);
+        self.version.add(1);
+        self.record_traversals(&[e]);
+        // the hand-over itself, learned the way this model learns everything
+        self.add_reward(&[e], amount);
+        for (child, sign) in [(went, -1.0), (instead, 1.0)] {
+            let Some(child) = child else { continue };
+            if child < FIRST || child == BACK {
+                continue;
+            }
+            if let Some(edge) = self.edge(p, child) {
+                self.add_reward(&[edge], sign * amount);
+            }
+        }
+        self.recompute_weights();
+        Ok(e)
     }
 
     /// Registers a training sequence `START -> g0 -> ... -> gn -> END`,

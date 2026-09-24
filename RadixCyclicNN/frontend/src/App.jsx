@@ -31,27 +31,27 @@ import { NetworkSettingsProvider } from "./hooks/useNetworkSettings.jsx";
 // anyway; a tab that still needed the Python server would carry `pythonOnly: true` and be hidden when the Go
 // server (`radixnet-count serve`) answers.
 //
-// The Rust server (`radixnet serve`) is the model and nothing around it - no negative network, no teaching
-// loops, no LLM clients - so the tabs it can serve carry `model: true` and the rest are hidden when it
-// answers. That is the honest shape of the port, not a limit of this page: see `rust/README.md`.
+// The Rust server (`radixnet serve`) lists the routes it answers in `/api/status` (`routes`), and a tab whose
+// `route` is not among them is hidden when it answers - so a tab appears the moment the port serves it, and
+// never before. The model's own tabs (`model: true`) are always there.
 const TABS = [
   { id: "train", label: "Train", Component: TrainPanel, model: true },
   { id: "predict", label: "Predict", Component: PredictPanel, model: true },
   { id: "generate", label: "Generate", Component: GeneratePanel, model: true },
-  { id: "converse", label: "Converse", Component: ConversePanel },
-  { id: "chat", label: "Chat", Component: ChatPanel },
+  { id: "converse", label: "Converse", Component: ConversePanel, route: "/api/converse" },
+  { id: "chat", label: "Chat", Component: ChatPanel, route: "/api/chat/start" },
   { id: "score", label: "Score", Component: ScorePanel, model: true },
   { id: "words", label: "Words", Component: WordsPanel, wordOnly: true, model: true },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel, model: true },
-  { id: "negative", label: "Negative", Component: NegativePanel },
-  { id: "evolve", label: "Evolve", Component: EvolvePanel },
-  { id: "ollama", label: "Ollama", Component: OllamaPanel },
-  { id: "tutor", label: "Tutor", Component: TutorPanel },
-  { id: "code", label: "Code", Component: CodeGenPanel },
-  { id: "agent", label: "Agent", Component: AgentPanel },
-  { id: "images", label: "Images", Component: ImagesPanel },
-  { id: "speech", label: "Speech", Component: SpeechPanel },
-  { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },
+  { id: "negative", label: "Negative", Component: NegativePanel, route: "/api/negative" },
+  { id: "evolve", label: "Evolve", Component: EvolvePanel, route: "/api/evolve/start" },
+  { id: "ollama", label: "Ollama", Component: OllamaPanel, route: "/api/ollama/models" },
+  { id: "tutor", label: "Tutor", Component: TutorPanel, route: "/api/tutor/start" },
+  { id: "code", label: "Code", Component: CodeGenPanel, route: "/api/codegen/start" },
+  { id: "agent", label: "Agent", Component: AgentPanel, route: "/api/agent/start" },
+  { id: "images", label: "Images", Component: ImagesPanel, route: "/api/images" },
+  { id: "speech", label: "Speech", Component: SpeechPanel, route: "/api/speech" },
+  { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel, route: "/api/checkpoints" },
   { id: "network", label: "Network settings", Component: NetworkSettingsPanel, model: true },
   { id: "graph", label: "Graph", Component: GraphView, single: true, model: true },
 ];
@@ -95,14 +95,20 @@ export function engineOf(status, health) {
   return fromStatus || fromHealth || "python";
 }
 
+/** Whether the Rust server's `/api/status` lists `route` (as "GET /api/x" or "POST /api/x"). */
+export function rustServes(status, route) {
+  const routes = status && Array.isArray(status.routes) ? status.routes : [];
+  return Boolean(route) && routes.some((r) => typeof r === "string" && r.split(" ")[1] === route);
+}
+
 function tabsFor(engine, status) {
   // `wordOnly` belongs to the word model, whose symbols are words: there is no vocabulary to show anywhere else
   const words = wordKind(status);
   return TABS.filter(
     (t) =>
       !(engine === "go" && t.pythonOnly) &&
-      // the Rust server serves the model's own endpoints and says so; the rest would 404
-      !(engine === "rust" && !t.model) &&
+      // the Rust server lists the routes it answers; a tab it cannot serve would 404
+      !(engine === "rust" && !t.model && !rustServes(status, t.route)) &&
       !(t.wordOnly && !words),
   );
 }
@@ -173,10 +179,9 @@ export default function App() {
             {engine === "rust" ? (
               <span
                 className="badge engine"
-                title="This API is served by the Rust implementation of the count / reward model (radixnet serve): a thread pool over the texts, atomic counting, and no dependencies. It serves the model's own endpoints; the teaching loops, the negative network and the LLM clients are the Python and Go servers'."
+                title="This API is served by the Rust implementation of the count / reward model (radixnet serve): a thread pool over the texts, atomic counting, and no dependencies. The tabs shown are the routes it answers."
               >
-                Rust engine · {status && status.workers ? `${status.workers} threads` : "one thread per core"} · the
-                model's own endpoints
+                Rust engine · {status && status.workers ? `${status.workers} threads` : "one thread per core"}
               </span>
             ) : null}
           </div>
