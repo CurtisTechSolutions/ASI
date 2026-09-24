@@ -334,6 +334,11 @@ pub type Command = fn(&Ctx) -> Result<(), String>;
 pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("converse", crate::dialogue::cli, "the model converses with itself"),
     (
+        "talk",
+        crate::assistant::cli,
+        "talk to the model in today's format: messages in, a reply out, the thinking first, streamed",
+    ),
+    (
         "chat",
         crate::chat::cli,
         "an LLM converses with the model and marks every reply",

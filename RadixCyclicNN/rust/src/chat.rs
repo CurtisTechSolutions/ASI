@@ -415,6 +415,7 @@ impl<'a> Chat<'a> {
                     } else {
                         None
                     },
+                    trace: None,
                 };
                 reply(model, None, &line, options, &mut rng)
             })??;

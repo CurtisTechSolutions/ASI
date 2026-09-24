@@ -3598,3 +3598,177 @@ HTTP API and the CLI), `tests/test_rust_parity_methods.py` (Rust against Python 
 history and replay block byte for byte - the filters and the diverse beam, and the server),
 `tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`, `go/radixnet/sampling_test.go`,
 the `training`, `search` and `beam` unit tests in Rust, and `frontend/test/settings.test.mjs`.
+
+
+## 36. Today's format (`radixnet/assistant.py`, `go/radixnet/assistant.go`, `rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
+
+Every language model is talked to through one shape now - a list of `{"role", "content"}` messages in, an assistant
+message out, its *thinking* first and then the text, streamed over server-sent events - and every client, SDK and
+front end speaks it. This area gives the model that shape in the two dialects that cover the ecosystem: **OpenAI's Chat
+Completions** (`POST /v1/chat/completions`) and **Anthropic's Messages** (`POST /v1/messages`), with `GET /v1/models`
+and `POST /v1/messages/count_tokens` beside them, the `talk` command and the Talk tab. It adds no prompt, no template
+and no instruction following (D-080): everything it returns is a rendering of what §22's reply already produces.
+
+### 36.1 The request (`Ask`)
+
+`parse_openai(body)` / `parse_anthropic(body)` / `parse_request(body, dialect)` read a request into one `Ask`; a bad one
+raises `AskError(message, param)`, `param` naming the field to blame.
+
+* **`messages`** -> `Ask.messages`, a list of `Message(role, text)` with `role` in `user` / `assistant` / `tool`, and
+  `Ask.system` (the `system` / `developer` lines joined by newlines - OpenAI - or the top-level `system` string or text
+  blocks - Anthropic). Content is a string or a list of parts: `text` (and OpenAI's `refusal`) is read; `thinking` and
+  `redacted_thinking` blocks are skipped (what the model thought is not what it said); an assistant's `tool_calls`
+  (OpenAI) or `tool_use` blocks (Anthropic) are rendered as the `<tool>name {...}</tool>` lines §27.1's `call_text`
+  writes; a `tool` message (OpenAI) or a `tool_result` block (Anthropic) as `result_text` (`<result>…</result>`, clipped
+  at `DEFAULT_OBSERVATION_CHARS`); an image, a document, audio or any other part is refused
+  (`content of type 'image_url' is not supported; this model reads text`). A message whose text is blank is dropped (it
+  says nothing and is not heard). Anthropic's list may only hold `user` and `assistant`. At least one message must remain.
+* **The caps and the sampling**: `max_tokens` (OpenAI also `max_completion_tokens`; default `DEFAULT_MAX_TOKENS` = 60,
+  the dialogue's `max_length`, in the model's *units*), `temperature` (≥ 0, default 1), `stop` (OpenAI: a string or a
+  list) / `stop_sequences` (Anthropic: a list) of non-empty strings, `n` (OpenAI, 1..8), `stream`,
+  `stream_options.include_usage` (OpenAI), `tools` (OpenAI `{"type": "function", "function": {"name", "description",
+  "parameters"}}`, Anthropic `{"name", "description", "input_schema"}`, normalised to `{"name", "description",
+  "parameters"}`; names must be identifiers and distinct), `tool_choice` (`"none"` / `{"type": "none"}` withdraws them;
+  anything else is accepted - the model cannot be forced to call), `thinking` (OpenAI: a boolean, or
+  `reasoning_effort: "none"` for off; Anthropic: `{"type": "enabled" | "disabled" | "adaptive"}` or a boolean; default on).
+* **The dialogue's dials**, by the names `/api/converse` uses, in either body: `mode` (`beam` | `sample`, `dijkstra`
+  reads as `beam`), `context` (12), `k` (5), `beam`, `step_penalty` (0), `explore` (3), `avoid_repeats` (true),
+  `avoid_word_repeats` (true), `learn` (true), `guard` (true), `seed`.
+* Everything else a client sends (`top_p`, `top_k`, `logprobs`, `user`, `metadata`, `response_format`, `logit_bias`,
+  `presence_penalty`, ...) is accepted and ignored.
+
+`Ask.previous` is the last message's text - the line the reply continues; `Ask.prefill` is whether that message is the
+assistant's own.
+
+### 36.2 The reply (`respond`)
+
+`respond(model, ask, *, pair=None, on_event=None, name=None) -> Reply` answers under whatever lock the caller holds
+(`ModelService.respond` takes the session; with `ask.learn` the model may change). For each choice `0 ≤ i < n`:
+
+1. `Heard` is every message's text (both sides of the conversation, the system prompt excluded); after each choice the
+   turn spoken is remembered, so `n` alternatives differ because each hears the last.
+2. `dialogue.reply(model, previous, heard=…, index=len(messages), speaker="assistant", rng=Random(seed), veto=…,
+   trace=…, **dials)` - §22's turn, unchanged. `veto` is the pair's judgement when a guard is given (§24.7: a candidate
+   is judged once; a rejected one is a line of the thinking, and with `pair.config.learn` the rejected texts are blamed
+   as `vetoed in conversation`, as `NegativeFilter.converse` does). `trace` is the hook below.
+3. The text is the turn's whole utterance (`turn.text`: the context picked up plus what was added), or - for a
+   prefill whose turn picked up a context - only what it added (`turn.reply`). The earliest stop sequence cuts it
+   (`stop_reason = stop_sequence`, `stop_sequence` set); a `<tool>` call at the front of what is left, parsed with
+   `tools.parse_call` and, when its name was offered, re-read against the offered tools' schemas (`offered_toolbox`: the
+   properties as `Param`s, so a bare value is the one argument of a one-argument tool), becomes a `ToolCall(token, name,
+   input)` and cuts the text before the call (`stop_reason = tool_use`); a call to a tool not offered, or one whose
+   arguments cannot be read, stays text and the thinking says why.
+4. `stop_reason`: `end_turn` when the walk reached END, else `max_tokens`; `stop_sequence` / `tool_use` as above;
+   `refusal` when the reply is `None` and something was vetoed (the guard vetoed everything it could say); `end_turn`
+   with an empty text when the graph has no way on at all.
+5. **Usage** is in the model's units (`Encoding.length`): `input_units` = the system prompt plus every message;
+   per choice `thinking_units` = the thinking's length and `output_units` = the text's plus the thinking's.
+
+`Reply(token, model, created, kind, units, input_units, choices, thinking)`; `Choice(index, thinking, text, tool_calls,
+stop_reason, stop_sequence, turn, guard, output_units, thinking_units)` with `turn` the `Turn.to_dict()` record and
+`guard` the `_guard_report` (`on`, `vetoed`, `rejected`, `verdicts`, `negative`, `config`) or `None`.
+
+### 36.3 The thinking: the search's trace (`dialogue.Trace`, `_Narrator`)
+
+`dialogue.reply` gained `trace: Callable[[dict], None] | None`. It receives, as they happen, `{"kind": "context",
+"context", "usable"}` for each tail of the line tried, `{"kind": "candidates", "context", "offered", "mode"}` for each
+search run from it, `{"kind": "pick", "skipped", "vetoed", "repeat", "spoken", "caught"}` for what one look through them
+came to, `{"kind": "rethink", "kind_of", "noticed", "cut", "steps", "explored", "found", "taught"}` for a §22
+`Rethink`, and `{"kind": "fresh"}` when the subject is changed. `converse` and the chat loop pass none; without one a
+reply is exactly what it was. Go's `ReplyOptions.Trace` and Rust's `ReplyOptions::trace` are the same hook.
+
+The narrator turns the trace into lines; the thinking is the lines joined by newlines, and the lines are **fixed
+formats every port writes character for character** (`q(x)` is the text in JSON double quotes, `N item(s)` the plural
+form, floats `%.4f`):
+
+| when | line |
+|---|---|
+| first | `answering q(previous)` or, for a prefill, `continuing its own last line q(previous)`; with earlier messages ` (N earlier line(s) heard)` |
+| a system prompt was given | `a system prompt was given; the network continues text and cannot follow instructions, so it is not read` |
+| tools were offered | `N tool(s) offered (name, name); a reply that writes one comes back as a tool call` |
+| `context`, not usable | `looking for q(ctx) in the graph: not there whole; dropping a word` |
+| `candidates` | `looking for q(ctx) in the graph: found, N path(s) weighed` (sample: `N walk(s) drawn`); from START `starting a fresh text from the beginning: …` |
+| a veto (from the guard, as it happens) | `the negative network vetoed q(text): <the verdict's why>` |
+| `pick` | `every path repeats something already said; the best of them is kept as a last resort`, else `skipped N (empty, or already said)` for `N = skipped − vetoed > 0` |
+| `rethink` | `caught itself saying q(noticed) twice` / `caught itself repeating q(noticed)`, then `; the words it picked up, not its own` (no steps), `; kept q(cut) and found another way on in N path(s)` (found) or `; kept q(cut), weighed N path(s), found nothing new`, plus ` (and learned to hand over there)` when it taught |
+| `fresh` | `nothing new follows the line; changing the subject with a fresh text` |
+| the turn | `saying q(text): cost C, probability P, reached the end of a text` / `cut at N units`, plus `; every path repeated something, so this is a repeat` |
+| no turn | `nothing to say: the guard vetoed everything it could say` / `nothing to say: the graph has no way on from here` |
+| a stop sequence | `stopped at the stop sequence q(seq)` |
+| a call | `wrote a tool call: <tool>name {…}</tool>`, `wrote a call to NAME, which was not offered; it stays text`, `wrote a call to NAME, but no tools were offered; it stays text`, `wrote a tool call it could not finish (ERR); it stays text`, `wrote a call to NAME it could not finish (ERR); it stays text` |
+
+### 36.4 The text, one node at a time (`deltas`)
+
+`deltas(encoding, labels, node_ids, text)` cuts the reply into what each node of the walk added, so the pieces join back
+into the text: the sentinels are dropped by id; every node after the first adds `piece(label, overlap)`; the first piece
+is whatever precedes their join (the context picked up plus the located node's remainder). Under a word encoding the
+later pieces carry their leading space. A text the walk does not line up with - one cut at the cap - is one piece. The
+window `[start, end)` of the final text (a prefill's start, a stop or a call's end) is cut out of those pieces.
+
+### 36.5 The events
+
+`on_event` receives, per choice: `start` (`index`, and the reply's `id`, `model`, `created`, `input_units`, `thinking`,
+so a streaming renderer can open the message); `thinking` deltas (`text`: the line, the second onwards led by a
+newline, so the deltas join into the thinking); `text` deltas (one per piece of §36.4); `tool_use` (`id`, `name`,
+`input`); `done` (`stop_reason`, `stop_sequence`, `output_units`, `thinking_units`, `turn`, `guard`). After the last
+choice, `end` with the reply's usage. `stream(model, ask)` is the same as a generator on a worker thread.
+
+### 36.6 The two documents and the two streams
+
+* `to_openai(reply)`: `{"id": "chatcmpl-…", "object": "chat.completion", "created", "model", "choices": [{"index",
+  "message": {"role": "assistant", "content" (null when there is only a call), "reasoning_content" (unless thinking is
+  off), "tool_calls": [{"id": "call_…", "type": "function", "function": {"name", "arguments": JSON string}}]},
+  "logprobs": null, "finish_reason"}], "usage": {"prompt_tokens", "completion_tokens", "total_tokens",
+  "completion_tokens_details": {"reasoning_tokens"}}, "radixnet": {"kind", "units", "choices": [{"index",
+  "stop_reason", "turn", "guard"}]}}`. `finish_reason` maps `end_turn` and `stop_sequence` to `stop`, `max_tokens`
+  to `length`, `tool_use` to `tool_calls`, `refusal` to `content_filter`.
+* `to_anthropic(reply)` (the first choice): `{"id": "msg_…", "type": "message", "role": "assistant", "model",
+  "content": [{"type": "thinking", "thinking", "signature": ""}, {"type": "text", "text"}, {"type": "tool_use", "id":
+  "toolu_…", "name", "input"}], "stop_reason", "stop_sequence", "usage": {"input_tokens", "output_tokens"},
+  "radixnet"}`.
+* `OpenAIStream.frames(event)`: `chat.completion.chunk` frames (`data: {…}\n\n`) - the first with `delta.role`,
+  then `delta.reasoning_content`, `delta.content`, `delta.tool_calls`, the finishing chunk with `finish_reason` and a
+  top-level `radixnet` (`stop_reason`, `turn`, `guard`), a usage chunk with `include_usage`, and `data: [DONE]`.
+* `AnthropicStream.frames(event)`: `event: message_start` (the empty message with `input_tokens`), a `thinking`
+  block (`content_block_start`, `thinking_delta`s, a `signature_delta`, `content_block_stop`), a `text` block
+  (`text_delta`s), a `tool_use` block (one `input_json_delta`), `message_delta` (`stop_reason`, `stop_sequence`,
+  `output_tokens`, `radixnet`) and `message_stop`. A reply with nothing to say still holds one empty text block.
+  Only the first choice is streamed: a Messages reply is one message.
+* A failure after the headers went out is one last frame: `{"error": {"message", "type": "server_error"}}` or
+  `event: error` `{"type": "error", "error": {"type": "api_error", "message"}}`.
+
+### 36.7 The routes, the errors, the CLI, the frontend
+
+`/v1/*` paths go through the same route table as `/api/*` on all three servers. A streamed answer is written from
+inside the search - the model lock is held for the whole stream - with `Content-Type: text/event-stream`,
+`Cache-Control: no-cache`, `X-Accel-Buffering: no` and (Python, Rust) `Connection: close`, since no length is known in
+advance. Errors take the dialect's envelope: OpenAI `{"error": {"message", "type": "invalid_request_error" |
+"server_error", "param", "code": "model_not_found" for a 404 on `model`}}`, Anthropic `{"type": "error", "error":
+{"type": "invalid_request_error" | "not_found_error" | "request_too_large" | "api_error", "message"}}` - for a bad
+request, an unknown `/v1` route, a wrong method and a failure alike. The CORS allow-list gains the headers these
+clients send (`Authorization`, `X-API-Key`, `anthropic-version`, `anthropic-beta`).
+
+`model` names a kind: `ModelService.voice_for` answers the active model for `""`, `radixnet`, `default` or the active
+kind's id, the parked model of another kind (`kind_of_id("radixnet-count") == "count"`; `word` is the count model
+under a word encoding), and 404 with the ids in memory otherwise - the Go server, which runs the count model only, answers
+the count model or 404. `GET /v1/models` lists the active model first, then every parked one (the negative network
+included once it is in memory), each `{"id", "object": "model", "created" (the service's start), "owned_by":
+"radixnet", "kind", "label", "encoding", "units", "active"}`.
+
+CLI: `talk` (§11) - `--message` (repeatable: one conversation, each reply heard by the next), `--request FILE` (a
+body in the dialect's shape, sent as it is), lines at the prompt otherwise; human mode prints `you: …`, the thinking
+lines as `  · …` as they arrive, `model: ` with the text as it streams and `[stop; N units said, M thought]`; `--json`
+prints the dialect's own document (a conversation: `{"format", "exchanges", "taught"}`); `--save` writes the model when a
+rethink taught it. The same command in Go (`radixnet-count talk`) and Rust (`radixnet talk`).
+
+Frontend: the Talk tab (`TalkPanel.jsx`, `src/sse.js`) streams `POST /v1/messages`, showing the thinking as a
+collapsible list that fills line by line and the text as it arrives, newest first, with the turn's cost, probability,
+context and rethink under it and the guard's report; the last card shows the `curl` for either dialect. The tab is shown
+against the Rust server when `POST /v1/messages` is in `/api/status`'s `routes`.
+
+Tests: `tests/test_assistant.py` (both requests, the reply, the thinking, the deltas, the guard, the tool calls, the
+documents, the streams, the trace), `tests/test_api.py::TestTodaysFormat`, `tests/test_cli.py::TestTalk`,
+`frontend/test/sse.test.mjs`, `go/radixnet/assistant_test.go`, `go/server/assistant_test.go`, the `assistant` tests
+and `tests/server.rs` in Rust, and the parity suites `tests/test_rust_parity_assistant.py` and
+`tests/test_go_parity.py::TestGoAssistantParity` (the same thinking, text, stop reason and units from the CLIs and the
+servers; ids and timestamps aside, the turn's floats to 1e-9).

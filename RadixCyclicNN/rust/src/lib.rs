@@ -55,6 +55,7 @@
 //! ```
 
 pub mod agent;
+pub mod assistant;
 pub mod beam;
 pub mod bench;
 pub mod blame;

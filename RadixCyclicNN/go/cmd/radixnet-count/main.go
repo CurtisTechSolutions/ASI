@@ -288,6 +288,7 @@ commands:
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
+  talk       talk to the model in today's format: messages in, a reply out, the thinking first, streamed
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
   ollama     a corpus written to order, and the adversarial review (models | corpus | review)
@@ -392,6 +393,8 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "talk":
+		cmdTalk(rest)
 	case "chat":
 		cmdChat(rest)
 	case "ollama":

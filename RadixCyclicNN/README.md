@@ -53,6 +53,7 @@ and an optional GPU backend (torch) are built in.
 | The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
 | The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the **speech and image tutors** compare what the network remembers of a recording or a picture with the original (`speech tutor --blame`, `image tutor --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
 | A tutor that needs no teacher | `recall.py`: an utterance and a picture were *encoded* into text before being trained on, so the right answer is on file and marking needs no LLM. The network is given the opening of a text it was taught - the utterance's own token, or an image header and a few characters - and asked to write the rest; what comes back is run back through the codec and compared with the original. The agreement over the payload is the mark out of 10, the single worst thing wrong with it is named (`silence`, `clipping`, `mishearing`, `blank`, `noise`, `truncated`, ...), and the original is the correction the negative network blames from. |
+| Today's format: messages in, thinking and a streamed reply out | `talk` / the **Talk** tab / `POST /v1/chat/completions` and `POST /v1/messages` (all three servers): a conversation of `{role, content}` messages goes in and an assistant message comes back the way every language model's does now, in OpenAI's dialect (`reasoning_content`, `chat.completion.chunk` events) and in Anthropic's (`thinking`, `text` and `tool_use` blocks, content-block events). Nothing in it is a prompt trick: the reply is what `converse` would say next after the last line, the **thinking** is the search's own trace streamed line by line as the search takes each step (what it looked for and whether the graph knew it, how many paths it weighed, what the negative network vetoed and why, where it caught itself repeating and how it backed out, what it said at what cost), the **text** streams one node of the walk at a time, a written `<tool>` call to an offered tool comes back as a tool call, and usage counts units of the model's encoding. Any client of those formats talks to this model by pointing at the server. See [Today's format](#todays-format-messages-in-thinking-and-a-streamed-reply-out). |
 | An LLM on the other side of the line | `chat` (the **Chat** tab): a local **Ollama** model - or ChatGPT - holds an actual conversation with the network. It says a short line, the network replies by continuing it (the same search `converse` uses, so a reply is a real walk of the graph), they take turns, and then the LLM marks every reply out of 10 *against the line it answered* and the conversation as a whole. The failures blame the negative network, the passes clear it, and 2NRL trains the model on both - with the partner's own lines joining the positive phase, because they are what a good reply there would have looked like, and a reply the model could only repeat punished whatever the judge made of it. It is the one thing a language model is for, and the first teacher here that answers back. |
 | The negative network feeds itself | `negative auto` (the Negative tab's *Automatic* card): the model writes texts of its own, a local **Ollama** model (or ChatGPT) marks each one out of 10 and says what is wrong with it, and everything below the pass mark blames the negative network - round after round, with nobody typing a failure in by hand. The positive model is only read from, so the loop can run beside whatever else is teaching it. |
 | Ask *why*, and see the mistake again | A mark says *that* a sentence is wrong. When the tutor is teaching a negative network (`tutor --blame`), every failed sentence goes back to the teacher one more time: it explains **why** it is wrong - the rule that was broken and the pattern behind it - and writes `--variants` more short sentences that make the **same** mistake, each with its own correct form. Those sentences are blamed under the same reason at `--variant-weight` of its severity, so the negative network learns the *error* instead of the one sentence it appeared in - and a sentence the network never wrote is already known to be wrong. Nothing synthetic reaches the model being taught. |
@@ -205,6 +206,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra\|kbest`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`, `--traversal reward\|punishment` with `--penalty-scale` / `--merit-scale`, `--top-k` / `--top-p` / `--min-p` (sample) and `--diversity` (beam); `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; `kbest` (the resonant model's default) returns the same list *exactly* and stops as soon as it has it; the guard flags below |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`, `--allow-word-repeats`, `--explore 3` (times a reply that caught itself repeating - its own words, or the conversation's - may back up and look for another way on), `--no-learn` (do not teach the graph where it goes round), `--save` / `--out` (write what it learned back); prints the transcript with cost, probability and the words each reply picked up, then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; the guard flags below |
+| `talk` | talk to the model in today's format: `--message TEXT` (repeatable: one conversation), `--system TEXT` (accepted, and not read), `--request FILE` (a request body in the dialect's own shape, sent as it is), `--format openai\|anthropic`, `--max-tokens 60` (units the reply may add), `--temperature`, `--stop SEQ` (repeatable), `--n` (openai: alternatives, each unheard by the last), `--tool NAME` (repeatable: a written call to it comes back as a tool call), `--no-thinking`, `--mode beam\|sample`, `--context 12`, `--k 5`, `--beam N`, `--step-penalty`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out`; with neither `--message` nor `--request`, lines typed at the prompt are the conversation. Prints the thinking as it happens and the reply as it streams; `--json` prints the dialect's own document, what the server's `/v1` route returns; the guard flags below |
 | `chat` | an LLM converses with the model and marks every reply (a reply it could only repeat is punished whatever the judge said): `--conversations 1` (0 = until Ctrl-C), `--turns 4` (replies per conversation), `--topic TEXT`, `--opening TEXT`, `--persona TEXT`, `--context 12`, `--max-length 60`, `--mode beam\|sample`, `--k 5`, `--temperature`, `--partner-temperature`, `--threshold 6` (pass mark), `--provider ollama\|chatgpt`, `--partner-model`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--no-guard` (do not veto a reply before it is spoken), `--no-blame`, `--no-clear`, `--no-learn` (mark it but do not train), `--no-teach-partner`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--negative PATH`, `--epochs`, 2NRL options, `--out` |
 | the guard (on `predict`, `generate`, `converse`) | the negative network filters what the model writes, by default: `--no-guard` (print it unfiltered), `--negative PATH` (default `model.negative.json` beside `--model`), `--threshold RISK`, `--min-coverage SHARE`, `--over-sample N`. It stands aside when there is no negative model file, or when the one there has never been taught a failure |
 | `weights` | show or change the score function of the kind that has one, then recompute every weight and save. Count model: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--path-scale` (how loudly the judged paths speak), `--window N`. Resonant model: `--buckets`, `--period`, `--kick-scale`, `--resonance-scale`, `--amp-scale`, `--reward-scale`, `--concentration`. Another kind's options are rejected by name |
@@ -293,6 +295,10 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/negative/judge` | `{"texts"\|"text","threshold","min_coverage","spans": 5}` -> `{"verdicts": [{"verdict": "reject"\|"suspect"\|"pass","risk","coverage","blame","reasons","spans": [{"start","end","fragment","blame","fails","reason"}],"why"}]}` |
 | `POST /api/negative/filter` | the pair: `{"count": 3,"prefix","mode","max_length","temperature","over_sample": 3,"threshold","min_coverage","ratio": 0,"no_ratio","peak","strict","learn"}` (or `{"texts"}` to judge given texts) -> `{"texts" (the cleanest survivors),"kept","rejected": [verdicts],"verdicts","candidates","asked","rate","pair"}` |
 | `POST /api/negative/forget` / `POST /api/negative/settings` / `POST /api/negative/reset` / `POST /api/negative/save` | drop or fade a reason `{"reason","factor"}` / `{"threshold","min_coverage","share_scale","blame_scale","clear_scale"}` / a fresh negative network `{"seed"}` / write it `{"path"}` |
+| `POST /v1/chat/completions` | today's format, OpenAI's dialect: `{"model": "radixnet-count"` (or `""` / `"radixnet"` for the active model)`, "messages": [{"role": "system"\|"user"\|"assistant"\|"tool", "content"}], "max_tokens": 60, "temperature", "stop", "n", "stream", "stream_options": {"include_usage"}, "tools", "tool_choice", "thinking": true, "reasoning_effort"}` plus the dialogue's dials by their `/api/converse` names (`mode`, `context`, `k`, `beam`, `step_penalty`, `explore`, `avoid_repeats`, `avoid_word_repeats`, `learn`, `guard`, `seed`) -> a `chat.completion` whose `message` carries `content`, `reasoning_content` (the thinking) and `tool_calls`, `finish_reason` `stop`\|`length`\|`tool_calls`\|`content_filter`, `usage` in the model's units (`completion_tokens_details.reasoning_tokens`) and `radixnet` (the kind, the units, every choice's `turn` record and `guard` report). With `"stream": true` the answer is `text/event-stream`: `chat.completion.chunk` events - `delta.reasoning_content` line by line as the search runs, `delta.content` one node of the walk at a time, `delta.tool_calls`, the finishing chunk carrying `radixnet`, a usage chunk with `include_usage` - then `data: [DONE]`. Errors are `{"error": {"message", "type", "param", "code"}}` (404 `model_not_found` for a kind not in memory) |
+| `POST /v1/messages` | today's format, Anthropic's dialect: `{"model", "system", "messages": [{"role": "user"\|"assistant", "content": a string, or text / tool_use / tool_result blocks}], "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "thinking": {"type": "enabled"\|"disabled"}}` plus the same dials -> a `message` of `thinking`, `text` and `tool_use` blocks, `stop_reason` `end_turn`\|`max_tokens`\|`stop_sequence`\|`tool_use`\|`refusal`, `usage` and `radixnet`; streamed: `message_start`, `content_block_start` / `content_block_delta` (`thinking_delta`, `text_delta`, `input_json_delta`) / `content_block_stop`, `message_delta` (the stop reason, the output units and `radixnet`), `message_stop`. Errors are `{"type": "error", "error": {"type", "message"}}` |
+| `POST /v1/messages/count_tokens` | `{"system", "messages"}` -> `{"input_tokens"}`: the units of the model's encoding the request holds |
+| `GET /v1/models` | the models in memory as an OpenAI model list: `{"object": "list", "data": [{"id": "radixnet-<kind>", "object": "model", "created", "owned_by": "radixnet", "kind", "label", "encoding", "units", "active"}]}`, the active one first |
 | `POST /api/chat/start` | start a chat job - an LLM converses with the model and marks every reply: `{"conversations": 1 (0 = until stopped),"turns": 4,"topic","opening","persona","context": 12,"max_length": 60,"mode": "beam"\|"sample","k": 5,"temperature","partner_temperature","threshold": 6,"provider": "ollama"\|"chatgpt","partner_model","judge_model","url","judge_url","timeout","guard": true,"blame": true,"clear_passes": true,"learn": true,"teach_partner": true,"avoid_repeats": true,"neg_epochs","pos_epochs","neg_lr","pos_lr","batch_size","strength","epochs","seed"}` -> 202 `{"job","config","url","partner","judge","speakers"}` |
 | `GET /api/chat/history` | the `exchange` records as they are spoken, then one `conversation` record each (its transcript, every review with the line it answered, the marks, what was blamed and what was learned) and a `report` at the end of a run |
 | `POST /api/negative/auto` / `GET /api/negative/auto/history` | the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every failure blame the negative network - `{rounds (0 = until stopped), count, prefix, max_length, temperature, threshold, context, provider: ollama\|chatgpt, reviewer_model, url, timeout, clear_passes, epochs, seed}` -> 202 `{"job","config","url","reviewer"}`; the history is its round / report records. The positive model is only read from |
@@ -322,6 +328,8 @@ curl -X POST localhost:8000/api/predict -H 'Content-Type: application/json' -d '
 curl -X POST localhost:8000/api/evolve/start -H 'Content-Type: application/json' \
      -d '{"corpus": ["the cat sat on the mat", "the dog runs in the park"], "generations": null}'
 curl -X POST localhost:8000/api/evolve/stop
+curl -N localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+     -d '{"model": "radixnet", "messages": [{"role": "user", "content": "tell me about the cat"}], "stream": true}'
 ```
 
 ## Frontend
@@ -351,7 +359,11 @@ rewards the shown text - a thumbs-up feedback job), Generate (whole texts from
 the prediction search - beam: the K most likely complete texts, optionally
 continuing a prefix; sample; dijkstra - with thumbs up / thumbs down ratings:
 "Train on ratings" runs 2NRL on them, thumbs down as the negative phase, thumbs
-up as the positive phase), Converse (the model talks to itself in a chat
+up as the positive phase), Talk (the model in today's format: type a line and
+the reply streams in - the thinking first, line by line as the search takes
+each step, then the text one node of the walk at a time - newest first, with
+the settings of the search beside it and, in the last card, the `curl` that
+reaches the same conversation from any client), Converse (the model talks to itself in a chat
 view that reads newest first - a new turn is appended to the top and pushes the
 older ones down, so nothing has to be scrolled to: an opening line, turns,
 context, beam / sample, the two voices' names, the other kind in memory as the
@@ -1679,6 +1691,113 @@ The Go port holds the same conversation: `radixnet-count chat`, `POST
 both CLIs against one fake partner and asserting the same prompts, the same
 transcripts, the same marks and the same two networks on disk afterwards.
 
+## Today's format: messages in, thinking and a streamed reply out
+
+Every language model is talked to the same way now: a list of `{"role",
+"content"}` messages goes in, an assistant message comes back, and while it is
+being written the client watches it arrive - the model's *thinking* first,
+then the answer, chunk by chunk, over server-sent events.  Two dialects of that
+format cover every client there is, and this model speaks both: OpenAI's Chat
+Completions at `POST /v1/chat/completions` and Anthropic's Messages at `POST
+/v1/messages`, on all three servers, with `GET /v1/models` and `POST
+/v1/messages/count_tokens` beside them, the `talk` command in every port and
+the **Talk** tab.
+
+```bash
+python -m radixnet --kind count talk --message "tell me about the cat"
+```
+
+```
+you: tell me about the cat
+  · answering "tell me about the cat"
+  · looking for "the cat" in the graph: found, 5 path(s) weighed
+  · saying "the cat night": cost 3.8022, probability 0.0223, reached the end of a text
+model: the cat night
+    [end_turn; 13 chars said, 177 thought]
+```
+
+Nothing in it is a prompt trick, and that is the whole of the design
+(`DECISIONS.md`, D-080):
+
+**A reply is a walk.**  The conversation's last line is answered exactly as the
+Converse and Chat tabs answer it (`dialogue.reply`): the tail of the line is
+located in the graph and continued, the context loses a word at a time while
+nothing follows it, and a voice with nothing left to add changes the subject.
+Everything the conversation has said, on both sides, counts as heard, so a
+reply does not echo it; with `learn` on - the default here, as in every
+conversation - a rethink teaches the graph where it goes round, so a
+conversation changes the model (`"learn": false` keeps it as it was).  A
+trailing assistant message is a prefill: the model continues its own line and
+returns only what it adds.  A system prompt is accepted and **not read** - the
+network continues text and cannot follow an instruction - and the thinking says
+so instead of pretending.
+
+**The thinking is the search's own trace.**  Every line of it is something the
+search did, written as the search does it (a `trace` hook in `dialogue.reply`
+sends each step out the moment it is taken): which tail of the line it looked
+for and whether the graph knew it whole, how many paths it weighed, what it
+skipped as already said, what the negative network vetoed and why (the verdict's
+own sentence), where it caught itself repeating and how it backed out, whether
+it changed the subject, and what it finally said at what cost and probability -
+then, when they apply, the stop sequence it stopped at and the tool call it
+wrote.  It is never prose the model did not produce, and the turn record it
+describes rides beside the answer (`radixnet.choices[].turn`), so every line can
+be checked.  The three ports write the same lines character for character.
+
+**The text streams one node of the walk at a time.**  The first chunk is the
+context the reply picked up plus the located node's remainder; every later
+chunk is what its node adds beyond the overlap - a merged node arrives as a
+word, an unmerged one as a letter - so the radix compression is visible as the
+reply is written.  A reply cut at the cap arrives whole.
+
+**A written call is a tool call.**  The agent writes its calls as text
+(`<tool>web_fetch {"url": "..."}</tool>`), so a reply that writes one comes back
+as a `tool_calls` entry (OpenAI) or a `tool_use` block (Anthropic) when the
+request offered that tool - by name, with the arguments read against the
+tool's schema the way the agent reads them - and the tool's answer goes back
+in, from a `tool` message or a `tool_result` block, as the `<result>` text the
+agent trains on.  A call to a tool that was not offered stays text, and the
+thinking says which.
+
+**How it ended, and what it cost.**  `end_turn` / `stop` when the walk reached
+the end of a text, `max_tokens` / `length` when it hit the cap, `stop_sequence`
+when it was cut at one, `tool_use` / `tool_calls` when it wrote a call, and
+`refusal` / `content_filter` when the guard vetoed everything it could say.
+Usage counts **units of the model's encoding**: a token is one character of a
+character model and one word of a word model - the units `max_tokens` caps -
+with the thinking counted in the output and reported on its own
+(`completion_tokens_details.reasoning_tokens`, `usage.thinking`).
+
+**From any client.**  Point one at the server:
+
+```bash
+curl -N localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+     -d '{"model": "radixnet", "messages": [{"role": "user", "content": "tell me about the cat"}], "stream": true}'
+curl localhost:8000/v1/messages -H 'Content-Type: application/json' \
+     -d '{"model": "radixnet-count", "max_tokens": 40, "messages": [{"role": "user", "content": "the dog runs"}]}'
+```
+
+```python
+from openai import OpenAI                      # any OpenAI-compatible client works the same way
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+for chunk in client.chat.completions.create(model="radixnet", stream=True,
+                                            messages=[{"role": "user", "content": "the cat sat"}]):
+    delta = chunk.choices[0].delta if chunk.choices else None
+    print(getattr(delta, "reasoning_content", None) or delta.content or "", end="", flush=True)
+```
+
+`model` names a kind (`radixnet-count`, `radixnet-radix`, `radixnet-resonant`,
+or just the kind); `""` and `"radixnet"` are whichever model is active, and a
+kind not in memory is a 404 saying which ones are.  The dialogue's own dials
+travel in the same body by the names `/api/converse` uses (`mode`, `context`,
+`k`, `explore`, `guard`, `learn`, ...); the fields a client sends that mean
+nothing here (`top_p`, `logprobs`, `user`, `response_format`, ...) are accepted
+and ignored.  Errors come back in each dialect's own envelope.  The Rust and Go
+servers answer the same routes with the same documents (`radixnet talk` and
+`radixnet-count talk` are the same command), and
+`tests/test_rust_parity_assistant.py` and `TestGoAssistantParity` hold them to
+Python's thinking and text.
+
 ## The negative network: what went wrong, and why
 
 The positive model learns what text looks like.  The **negative network**
@@ -2419,7 +2538,8 @@ RadixCyclicNN/
   radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, phasesearch, penalty, model,
                       countnet, negative, resonance, metacog, blame, duo, diff, schedule, gan, checkpoint, bench,
                       cli, api, llm, ollama, chatgpt, tutor, recall, critic, codegen, tools, agent, browser, mcp,
-                      vision, speech, dialogue, chat
+                      vision, speech, dialogue, chat, assistant (today's format: messages in, thinking and a
+                      streamed reply out)
   tests/              unittest suite
   frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
                       the panels' settings in localStorage, test/ holds its node --test suite)
@@ -2449,6 +2569,7 @@ RadixCyclicNN/
 * **The resonant model's phase is defined per trigram, not per node**, so a node's advance is the sum over the trigrams its label covers. A split and a merge move trigrams between labels but never change which trigrams exist, so compression leaves the phase exactly where it was - and the phase of any text is a function of the text alone, no walk needed.
 * **A phase-locked cycle is the only cycle worth a decision**: returning to a node at a new phase is progress, returning at the same phase repeats for ever. That is what the metacognitive layer is asked about, and its answer is a cost, never a prohibition.
 * **Metacognition and exactness are not a trade — the number of labels per state is.** One label per state makes a shortest path and makes it blind; K labels per state give the K cheapest walks exactly *and* give every label a path to look at. Dijkstra is the K=1 case of the search that replaced it, not a different algorithm.
+* **Today's format is a rendering, and the thinking is the search's trace.** The `/v1` routes and `talk` add no prompt, no template and no instruction following: a reply is `dialogue.reply`, the thinking is what that search did (streamed as it does it), the text streams per node of the walk, a token is a unit of the encoding. A system prompt is accepted and not read, and the thinking says so - the one place a language-model format would invite the system to pretend, it declines (D-080).
 * **Counters cycle rather than grow**: an integer that only counts up is a fault waiting to happen, so every one of them goes back to 0 at `10^15` and counts the reset. The pair is exact, both halves stay inside a double, and the wrapping is done by a sweep between epochs instead of a check on every increment - so the counting loops (and the Go port's goroutines) are untouched.
 
 ## License

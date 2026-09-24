@@ -195,6 +195,14 @@ pub fn accepted(doc: Json) -> Json {
     ])
 }
 
+/// A successful answer with any status: the document and the code it goes out with.
+pub fn answer_with(status: u16, doc: Json) -> Json {
+    Json::Obj(vec![
+        (STATUS_KEY.to_string(), Json::Int(status as i64)),
+        ("body".to_string(), doc),
+    ])
+}
+
 /// The key [`accepted`] marks a status with; no API document has a key like it.
 const STATUS_KEY: &str = "__status";
 
@@ -217,10 +225,31 @@ fn status_of(doc: Json) -> (u16, Json) {
 /// (which is how `train` and `2nrl` answer before the work is done).
 pub type Handler<S> = fn(&Arc<S>, &Request) -> Answer;
 
+/// What a streaming route answers with: a whole document after all, or the
+/// frames of a server-sent event stream, written by `run` as they are produced.
+///
+/// `run` gets a function that writes one frame; the headers are out by then,
+/// so an error it returns is written as `error(message)` - the frame the
+/// dialect reports a failure with - rather than as a status.
+pub enum Streamed {
+    Document(u16, Json),
+    Events { run: StreamRun, error: fn(&str) -> String },
+}
+
+/// Where a stream's frames go: one call per frame, in order.
+pub type FrameSink<'a> = dyn FnMut(&str) -> std::io::Result<()> + 'a;
+
+/// What writes a stream: it is handed the sink once the headers are out.
+pub type StreamRun = Box<dyn FnOnce(&mut FrameSink) -> Result<(), ApiError> + Send>;
+
+/// A route that may stream (the `/v1` routes: `stream: true` in the body decides).
+pub type StreamHandler<S> = fn(&Arc<S>, &Request) -> Result<Streamed, ApiError>;
+
 /// A server: the routes, and where the prebuilt frontend lives.
 pub struct Server<S> {
     state: Arc<S>,
     routes: Vec<(&'static str, &'static str, Handler<S>)>,
+    streams: Vec<(&'static str, &'static str, StreamHandler<S>)>,
     frontend: Option<PathBuf>,
 }
 
@@ -229,6 +258,7 @@ impl<S: Send + Sync + 'static> Server<S> {
         Server {
             state,
             routes: Vec::new(),
+            streams: Vec::new(),
             frontend: None,
         }
     }
@@ -238,9 +268,18 @@ impl<S: Send + Sync + 'static> Server<S> {
         self.routes.push((method, path, handler));
     }
 
-    /// Every route, as `"METHOD /path"`, in the order added.
+    /// Adds one route that may answer with a stream of server-sent events.
+    pub fn route_stream(&mut self, method: &'static str, path: &'static str, handler: StreamHandler<S>) {
+        self.streams.push((method, path, handler));
+    }
+
+    /// Every route, as `"METHOD /path"`, in the order added (the streaming ones last).
     pub fn routes(&self) -> Vec<String> {
-        self.routes.iter().map(|(m, p, _)| format!("{m} {p}")).collect()
+        self.routes
+            .iter()
+            .map(|(m, p, _)| format!("{m} {p}"))
+            .chain(self.streams.iter().map(|(m, p, _)| format!("{m} {p}")))
+            .collect()
     }
 
     /// The state the routes are answered from.
@@ -293,11 +332,14 @@ impl<S: Send + Sync + 'static> Server<S> {
             }
         };
         // an API route, the prebuilt frontend, or a 404 that says which
+        if let Some(handler) = self.match_stream(&request) {
+            return self.handle_stream(&mut stream, &request, handler, started);
+        }
         if let Some(handler) = self.match_route(&request) {
             let answer = handler(&self.state, &request);
             let (status, doc) = match answer {
                 Ok(doc) => status_of(doc),
-                Err(err) => (err.status, error_doc(&err.message)),
+                Err(err) => (err.status, error_doc_at(&request.path, err.status, &err.message)),
             };
             // one line per request, with what it cost: a 4xx or 5xx is worth a
             // warning because it is the server refusing, and a 2xx is the
@@ -317,13 +359,10 @@ impl<S: Send + Sync + 'static> Server<S> {
             );
             return write_json(&mut stream, status, &doc);
         }
-        if request.path.starts_with("/api/") {
+        if request.path.starts_with("/api/") || request.path.starts_with("/v1/") {
             crate::log_warn!(LOG, "404 no route {} {}", request.method, request.path);
-            return write_json(
-                &mut stream,
-                404,
-                &error_doc(&format!("no route {} {}", request.method, request.path)),
-            );
+            let message = format!("no route {} {}", request.method, request.path);
+            return write_json(&mut stream, 404, &error_doc_at(&request.path, 404, &message));
         }
         crate::log_trace!(LOG, "{} {} (static)", request.method, request.path);
         self.serve_static(&mut stream, &request)
@@ -334,6 +373,75 @@ impl<S: Send + Sync + 'static> Server<S> {
             .iter()
             .find(|(method, path, _)| *path == request.path && *method == request.method)
             .map(|(_, _, handler)| *handler)
+    }
+
+    fn match_stream(&self, request: &Request) -> Option<StreamHandler<S>> {
+        self.streams
+            .iter()
+            .find(|(method, path, _)| *path == request.path && *method == request.method)
+            .map(|(_, _, handler)| *handler)
+    }
+
+    /// A route that may stream: a document is written as any other answer; a
+    /// stream gets its headers, then every frame the moment it is produced,
+    /// and the connection closes at the end (no length can be known in
+    /// advance, and this server closes every connection anyway).
+    fn handle_stream(
+        &self,
+        stream: &mut TcpStream,
+        request: &Request,
+        handler: StreamHandler<S>,
+        started: std::time::Instant,
+    ) -> std::io::Result<()> {
+        let log = |status: u16, note: &str| {
+            let level = if status >= 400 { Level::Warn } else { Level::Debug };
+            crate::log_at!(
+                LOG,
+                level,
+                "{} {} -> {status} in {:.1}ms{note}",
+                request.method,
+                request.path,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        };
+        match handler(&self.state, request) {
+            Ok(Streamed::Document(status, doc)) => {
+                log(
+                    status,
+                    &doc.at("error")
+                        .at("message")
+                        .as_str()
+                        .map(|w| format!(": {w}"))
+                        .unwrap_or_default(),
+                );
+                write_json(stream, status, &doc)
+            }
+            Ok(Streamed::Events { run, error }) => {
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+                            Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n\
+                            Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+                stream.write_all(head.as_bytes())?;
+                stream.flush()?;
+                let mut sink = |frame: &str| -> std::io::Result<()> {
+                    stream.write_all(frame.as_bytes())?;
+                    stream.flush()
+                };
+                if let Err(err) = run(&mut sink) {
+                    // the headers are out: the failure goes down the stream in the dialect's own frame
+                    let _ = sink(&error(&err.message));
+                }
+                log(200, " (streamed)");
+                Ok(())
+            }
+            Err(err) => {
+                log(err.status, &format!(": {}", err.message));
+                write_json(
+                    stream,
+                    err.status,
+                    &error_doc_at(&request.path, err.status, &err.message),
+                )
+            }
+        }
     }
 
     fn serve_static(&self, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
@@ -494,6 +602,15 @@ fn percent_decode(text: &str) -> String {
 
 fn error_doc(message: &str) -> Json {
     Json::obj([("error", Json::str(message))])
+}
+
+/// An error as the client of `path` expects it: the API's `{"error": "..."}`,
+/// or - under `/v1` - the dialect's own envelope (`crate::assistant::shape_error`).
+fn error_doc_at(path: &str, status: u16, message: &str) -> Json {
+    if path == "/v1" || path.starts_with("/v1/") {
+        return crate::assistant::shape_error(crate::assistant::dialect_of(path), status, message, None);
+    }
+    error_doc(message)
 }
 
 fn write_json(stream: &mut TcpStream, status: u16, doc: &Json) -> std::io::Result<()> {

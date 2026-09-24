@@ -1321,11 +1321,24 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) (status int) {
 	if p == "/api" || strings.HasPrefix(p, "/api/") {
 		return h.serveAPI(w, r, strings.TrimRight(p, "/"))
 	}
+	if p == "/v1" || strings.HasPrefix(p, "/v1/") {
+		// today's format: the same table, its errors in the dialect's own envelope
+		return h.serveAPI(w, r, strings.TrimRight(p, "/"))
+	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return h.serveStatic(w, r, p)
 	}
 	w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 	return writeJSON(w, 405, map[string]any{"error": fmt.Sprintf("method %s is not allowed for %s", r.Method, p)}, r.Method)
+}
+
+// errorDoc is an error as the client of path expects it: the API's {"error": "..."},
+// or - under /v1 - the dialect's own envelope (radixnet.ShapeV1Error).
+func errorDoc(p string, status int, message, param string) map[string]any {
+	if p == "/v1" || strings.HasPrefix(p, "/v1/") {
+		return radixnet.ShapeV1Error(radixnet.DialectOf(p), status, message, param)
+	}
+	return map[string]any{"error": message}
 }
 
 func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int {
@@ -1339,7 +1352,7 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 				return writeJSON(w, 404, map[string]any{"error": fmt.Sprintf("%s is not available on the Go server (it serves the count / reward model only); use the Python server for it", p)}, r.Method)
 			}
 		}
-		return writeJSON(w, 404, map[string]any{"error": fmt.Sprintf("unknown API endpoint %s", p)}, r.Method)
+		return writeJSON(w, 404, errorDoc(p, 404, fmt.Sprintf("unknown API endpoint %s", p), ""), r.Method)
 	}
 	lookup := r.Method
 	if lookup == http.MethodHead {
@@ -1354,7 +1367,7 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 		sort.Strings(methods)
 		allow := strings.Join(append(methods, "OPTIONS"), ", ")
 		w.Header().Set("Allow", allow)
-		return writeJSON(w, 405, map[string]any{"error": fmt.Sprintf("method %s is not allowed for %s; use %s", r.Method, p, allow)}, r.Method)
+		return writeJSON(w, 405, errorDoc(p, 405, fmt.Sprintf("method %s is not allowed for %s; use %s", r.Method, p, allow), ""), r.Method)
 	}
 	if lookup == http.MethodPost && p == "/api/uploads" {
 		status, payload, err := h.streamUpload(r)
@@ -1375,11 +1388,11 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 		if len(strings.TrimSpace(string(body))) > 0 {
 			var parsed any
 			if err := json.Unmarshal(body, &parsed); err != nil {
-				return writeJSON(w, 400, map[string]any{"error": "request body is not valid JSON"}, r.Method)
+				return writeJSON(w, 400, errorDoc(p, 400, "request body is not valid JSON", ""), r.Method)
 			}
 			obj, isObj := parsed.(map[string]any)
 			if !isObj {
-				return writeJSON(w, 400, map[string]any{"error": "request body must be a JSON object"}, r.Method)
+				return writeJSON(w, 400, errorDoc(p, 400, "request body must be a JSON object", ""), r.Method)
 			}
 			rq.f = fields{obj}
 		} else {
@@ -1392,6 +1405,12 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 	if err != nil {
 		return h.writeError(w, r, err)
 	}
+	if es, ok := payload.(*eventStream); ok {
+		if r.Method == http.MethodHead {
+			return writeJSON(w, status, nil, r.Method)
+		}
+		return h.writeStream(w, es)
+	}
 	if payload == nil {
 		return writeJSON(w, status, nil, r.Method)
 	}
@@ -1399,14 +1418,19 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) int {
+	p := strings.TrimRight(r.URL.Path, "/")
+	var v1 *v1Error
+	if errors.As(err, &v1) {
+		return writeJSON(w, v1.status, radixnet.ShapeV1Error(v1.dialect, v1.status, v1.message, v1.param), r.Method)
+	}
 	var ae *apiError
 	if errors.As(err, &ae) {
-		return writeJSON(w, ae.status, map[string]any{"error": ae.message}, r.Method)
+		return writeJSON(w, ae.status, errorDoc(p, ae.status, ae.message, ""), r.Method)
 	}
 	if os.IsNotExist(err) {
-		return writeJSON(w, 404, map[string]any{"error": err.Error()}, r.Method)
+		return writeJSON(w, 404, errorDoc(p, 404, err.Error(), ""), r.Method)
 	}
-	return writeJSON(w, 400, map[string]any{"error": err.Error()}, r.Method)
+	return writeJSON(w, 400, errorDoc(p, 400, err.Error(), ""), r.Method)
 }
 
 // MaxJSONUploadBytes caps the JSON upload forms (inline content); multipart and

@@ -37,7 +37,7 @@ split or a merge) takes a write lock.
 
 | directory | what it is |
 |---|---|
-| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients and the MCP server (`mcp.go`) |
+| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients, the MCP server (`mcp.go`) and today's format (`assistant.go`) |
 | `server/` | the HTTP API — the same JSON contract as the Python server, so the prebuilt React frontend runs unchanged against it |
 | `cmd/radixnet-count/` | the CLI binary |
 | `go.mod` | the module — `github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, **no dependencies** |
@@ -64,6 +64,18 @@ is a prebuilt binary for convenience.
 
 `../README.md` § *Go implementation of the count / reward model* lists every
 command and every global flag, and says where the goroutines go.
+
+## Today's format
+
+`radixnet-count talk --message "tell me about the cat"` answers the way every
+language model is talked to now - the thinking first, line by line as the
+search takes each step, then the text one node of the walk at a time - and the
+server answers `POST /v1/chat/completions` (OpenAI's dialect) and `POST
+/v1/messages` (Anthropic's), streamed with `stream: true`, with `GET
+/v1/models` and `POST /v1/messages/count_tokens` beside them.  The same
+documents as the Python server's, held to them by
+`../tests/test_go_parity.py::TestGoAssistantParity`; `radixnet/assistant.go`,
+`server/assistant.go`, `cmd/radixnet-count/talk.go`.
 
 ## Search and training methods
 

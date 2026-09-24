@@ -628,6 +628,11 @@ type ReplyOptions struct {
 	Learn bool
 	// Veto is what the speaker may not say (see ConverseOptions.Veto).
 	Veto func(string) bool
+	// Trace hears every step of Reply as it is taken, with the events Python's dialogue.Trace sends -
+	// "context" (context, usable), "candidates" (context, offered, mode), "pick" (skipped, vetoed, repeat,
+	// spoken, caught), "rethink" (kind_of, noticed, cut, steps, explored, found, taught) and "fresh".  It is
+	// how the assistant format streams the thinking (assistant.go); without one a reply is what it always was.
+	Trace func(event map[string]any)
 }
 
 // DefaultReplyOptions mirror the Python defaults.
@@ -675,6 +680,16 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 	if mode == "sample" {
 		draws = o.K
 	}
+	notice := func(kind string, fields map[string]any) {
+		if o.Trace == nil {
+			return
+		}
+		event := map[string]any{"kind": kind}
+		for k, v := range fields {
+			event[k] = v
+		}
+		o.Trace(event)
+	}
 	// A candidate rejected for repeating - its own words, or the conversation's - is worth backing out of:
 	// keep what it said up to the repetition and look for another way on, once per turn.
 	thinkAgain := func(p picked, keep string) (*PathResult, bool, error) {
@@ -691,23 +706,42 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 		}
 		rethought = record
 		offered += record.Explored
+		notice("rethink", map[string]any{"kind_of": record.Kind, "noticed": record.Noticed, "cut": record.Cut,
+			"steps": record.Steps, "explored": record.Explored, "found": record.Found, "taught": record.Taught})
 		if found != nil {
 			return found, false, nil
 		}
 		return p.spoken, p.repeat, nil
 	}
+	// One look through what from offers: the candidates, the pick, and the rethink it may call for.
+	look := func(from string) (*PathResult, bool, error) {
+		cands, err := m.candidates(from, mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
+		if err != nil {
+			return nil, false, err
+		}
+		offered += len(cands)
+		notice("candidates", map[string]any{"context": from, "offered": len(cands), "mode": mode})
+		p := pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
+		skipped += p.skipped
+		vetoed += p.vetoed
+		var spokenText, caughtText any
+		if p.spoken != nil {
+			spokenText = p.spoken.FullText
+		}
+		if p.caught != nil {
+			caughtText = p.caught.FullText
+		}
+		notice("pick", map[string]any{"skipped": p.skipped, "vetoed": p.vetoed, "repeat": p.repeat,
+			"spoken": spokenText, "caught": caughtText})
+		return thinkAgain(p, from)
+	}
 	for ctx != "" {
-		if m.usable(ctx) {
+		known := m.usable(ctx)
+		notice("context", map[string]any{"context": ctx, "usable": known})
+		if known {
 			for d := 0; d < draws; d++ {
-				cands, err := m.candidates(ctx, mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
-				if err != nil {
-					return nil, err
-				}
-				offered += len(cands)
-				p := pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
-				skipped += p.skipped
-				vetoed += p.vetoed
-				if spoken, repeat, err = thinkAgain(p, ctx); err != nil {
+				var err error
+				if spoken, repeat, err = look(ctx); err != nil {
 					return nil, err
 				}
 				if spoken != nil && !repeat {
@@ -722,18 +756,12 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 	}
 	if spoken == nil || repeat {
 		// nothing (new) follows the previous line: change the subject with a fresh text
+		notice("fresh", nil)
 		var freshPick *PathResult
 		freshRepeat := false
 		for d := 0; d < draws; d++ {
-			cands, err := m.candidates("", mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
-			if err != nil {
-				return nil, err
-			}
-			offered += len(cands)
-			p := pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
-			skipped += p.skipped
-			vetoed += p.vetoed
-			if freshPick, freshRepeat, err = thinkAgain(p, ""); err != nil {
+			var err error
+			if freshPick, freshRepeat, err = look(""); err != nil {
 				return nil, err
 			}
 			if freshPick != nil && !freshRepeat {

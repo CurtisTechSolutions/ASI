@@ -117,6 +117,47 @@ fn get(port: u16, path: &str) -> (u16, Json) {
     request(port, "GET", path, None)
 }
 
+/// One request; returns the status, the headers and the raw body (for a stream).
+fn request_raw(port: u16, method: &str, path: &str, body: &str) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the server");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\
+         Content-Type: application/json\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("the request head");
+    stream.write_all(body.as_bytes()).expect("the request body");
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).expect("the answer");
+    let status: u16 = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let (headers, body) = answer.split_once("\r\n\r\n").unwrap_or(("", ""));
+    (status, headers.to_string(), body.to_string())
+}
+
+/// The frames of a server-sent event stream: `(event name, data)`, the data parsed where it is JSON.
+fn sse_frames(body: &str) -> Vec<(String, Json)> {
+    body.split("\n\n")
+        .filter(|frame| !frame.trim().is_empty())
+        .map(|frame| {
+            let mut event = String::new();
+            let mut data = Vec::new();
+            for line in frame.lines() {
+                if let Some(name) = line.strip_prefix("event: ") {
+                    event = name.to_string();
+                } else if let Some(text) = line.strip_prefix("data: ") {
+                    data.push(text.to_string());
+                }
+            }
+            let text = data.join("\n");
+            (event, parse(&text).unwrap_or(Json::Str(text)))
+        })
+        .collect()
+}
+
 fn post(port: u16, path: &str, body: &str) -> (u16, Json) {
     request(port, "POST", path, Some(body))
 }
@@ -506,4 +547,144 @@ fn every_kind_is_selected_trained_and_reset() {
     let (status, error) = post(port, "/api/schedule/preview", r#"{"lr_schedule":"lr0 +"}"#);
     assert_eq!(status, 400);
     assert!(error.at("error").as_str().unwrap_or("").contains("invalid syntax"));
+}
+
+#[test]
+fn todays_format_answers_in_both_dialects_and_streams() {
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("assistant")));
+
+    let (status, models) = get(port, "/v1/models");
+    assert_eq!(status, 200);
+    assert_eq!(models.at("object").as_str(), Some("list"));
+    let first = &models.at("data").as_array()[0];
+    assert_eq!(first.at("id").as_str(), Some("radixnet-count"));
+    assert_eq!(first.at("active").as_bool(), Some(true));
+
+    let body = r#"{"model": "radixnet-count", "messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": false}"#;
+    let (status, doc) = post(port, "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("object").as_str(), Some("chat.completion"));
+    let message = doc.at("choices").as_array()[0].at("message").clone();
+    let said = message.at("content").as_str().unwrap_or("").to_string();
+    assert!(!said.is_empty(), "{doc:?}");
+    assert!(message
+        .at("reasoning_content")
+        .as_str()
+        .unwrap_or("")
+        .starts_with("answering \"tell me about the cat\""));
+    assert_eq!(
+        doc.at("usage").at("prompt_tokens").as_i64(),
+        Some("tell me about the cat".len() as i64)
+    );
+    assert_eq!(
+        doc.at("radixnet").at("choices").as_array()[0]
+            .at("turn")
+            .at("text")
+            .as_str(),
+        Some(said.as_str())
+    );
+
+    let (status, msg) = post(
+        port,
+        "/v1/messages",
+        r#"{"system": "be brief", "messages": [{"role": "user", "content": "the dog sat"}], "max_tokens": 30, "learn": false}"#,
+    );
+    assert_eq!(status, 200, "{msg:?}");
+    assert_eq!(msg.at("type").as_str(), Some("message"));
+    let blocks = msg.at("content").as_array();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].at("type").as_str(), Some("thinking"));
+    assert!(blocks[0]
+        .at("thinking")
+        .as_str()
+        .unwrap_or("")
+        .contains("a system prompt was given"));
+    assert_eq!(blocks[1].at("type").as_str(), Some("text"));
+    let (status, counted) = post(
+        port,
+        "/v1/messages/count_tokens",
+        r#"{"system": "be brief", "messages": [{"role": "user", "content": "the dog sat"}]}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        counted.at("input_tokens").as_i64(),
+        Some(("be brief".len() + "the dog sat".len()) as i64)
+    );
+
+    // the errors take the dialect's shape
+    let (status, bad) = post(port, "/v1/chat/completions", r#"{"messages": "no"}"#);
+    assert_eq!(status, 400);
+    assert_eq!(bad.at("error").at("param").as_str(), Some("messages"));
+    assert_eq!(bad.at("error").at("type").as_str(), Some("invalid_request_error"));
+    let (status, bad) = post(
+        port,
+        "/v1/chat/completions",
+        r#"{"model": "radixnet-radix", "messages": [{"role": "user", "content": "x"}]}"#,
+    );
+    assert_eq!(status, 404, "{bad:?}");
+    assert_eq!(bad.at("error").at("code").as_str(), Some("model_not_found"));
+    let (status, bad) = post(
+        port,
+        "/v1/messages",
+        r#"{"model": "radix", "messages": [{"role": "user", "content": "x"}]}"#,
+    );
+    assert_eq!(status, 404);
+    assert_eq!(bad.at("type").as_str(), Some("error"));
+    assert_eq!(bad.at("error").at("type").as_str(), Some("not_found_error"));
+    let (status, bad) = get(port, "/v1/nothing");
+    assert_eq!(status, 404);
+    assert_eq!(bad.at("error").at("type").as_str(), Some("invalid_request_error"));
+
+    // the same reply, streamed: chunks that join into the text, then [DONE]
+    let (status, headers, body) = request_raw(
+        port,
+        "POST",
+        "/v1/chat/completions",
+        r#"{"messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": false, "stream": true, "stream_options": {"include_usage": true}}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(headers.contains("Content-Type: text/event-stream"), "{headers}");
+    let frames = sse_frames(&body);
+    assert_eq!(frames.last().map(|(_, d)| d.as_str()), Some(Some("[DONE]")));
+    let mut streamed = String::new();
+    for (_, chunk) in &frames[..frames.len() - 1] {
+        assert_eq!(chunk.at("object").as_str(), Some("chat.completion.chunk"));
+        for choice in chunk.at("choices").as_array() {
+            if let Some(text) = choice.at("delta").at("content").as_str() {
+                streamed.push_str(text);
+            }
+        }
+    }
+    assert_eq!(streamed, said);
+    assert_eq!(
+        frames[frames.len() - 2].1.at("usage").at("prompt_tokens").as_i64(),
+        Some(21)
+    );
+    let (status, _headers, body) = request_raw(
+        port,
+        "POST",
+        "/v1/messages",
+        r#"{"messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": false, "stream": true}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    let frames = sse_frames(&body);
+    let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names[0], "message_start");
+    assert_eq!(&names[names.len() - 2..], ["message_delta", "message_stop"]);
+    let mut streamed = String::new();
+    for (name, data) in &frames {
+        if name == "content_block_delta" && data.at("delta").at("type").as_str() == Some("text_delta") {
+            streamed.push_str(data.at("delta").at("text").as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(streamed, said);
+    // a model that is not here is a 404 document, not a stream
+    let (status, headers, _body) = request_raw(
+        port,
+        "POST",
+        "/v1/messages",
+        r#"{"model": "nope", "messages": [{"role": "user", "content": "x"}], "stream": true}"#,
+    );
+    assert_eq!(status, 404);
+    assert!(headers.contains("application/json"), "{headers}");
 }
