@@ -2,8 +2,8 @@
 
 A fake Ollama server (standard library) stands in for the real one: it answers
 ``/api/tags``, ``/api/generate`` (numbered lines for corpus prompts, JSON
-ratings for review prompts) and ``/api/chat``, records every request and can
-be switched into failure modes.
+ratings for review prompts, JSON corrections for copy-editing prompts) and
+``/api/chat``, records every request and can be switched into failure modes.
 """
 
 import json
@@ -26,9 +26,12 @@ from radixnet.ollama import (  # noqa: E402
     OllamaClient,
     OllamaError,
     _loads_lenient,
+    _parse_corrections,
     _parse_reviews,
+    adversarial_correction,
     adversarial_review,
     corpus_from_prompt,
+    correct_texts,
     normalise_url,
     parse_lines,
     review_texts,
@@ -101,6 +104,18 @@ class _FakeHandler(BaseHTTPRequestHandler):
     def _generate(self, body):
         prompt = body.get("prompt", "")
         system = body.get("system", "")
+        if body.get("format") == "json" and "Correct these" in prompt:  # a copy-editing request
+            if self.server.correction_response is not None:
+                return self.server.correction_response
+            corrections = []
+            for line in prompt.splitlines():
+                match = re.match(r"\[(\d+)\] (.*)", line)
+                if match:
+                    index, text = int(match.group(1)), match.group(2)
+                    corrected, reason = fake_copy_edit(text)
+                    corrections.append({"index": index, "correction": corrected, "reason": reason,
+                                        "note": "nothing" if reason == "none" else f"{reason} fixed"})
+            return json.dumps({"corrections": corrections})
         if body.get("format") == "json":  # a review request
             if self.server.review_response is not None:
                 return self.server.review_response
@@ -126,6 +141,26 @@ class _FakeHandler(BaseHTTPRequestHandler):
         return "\n".join(lines)
 
 
+def fake_copy_edit(text):
+    """The fake editor's whole craft: ``howe`` -> ``how``, ``??`` -> ``?``, a comma after an opening ``Hi``.
+
+    Returns ``(corrected, reason)``; a text it has nothing to fix in comes back
+    unchanged with the reason ``"none"``, as the real editor is told to do.
+    """
+    corrected = text
+    reason = "none"
+    if "howe" in corrected:
+        corrected = corrected.replace("howe", "how")
+        reason = "spelling"
+    if "??" in corrected:
+        corrected = re.sub(r"\?{2,}", "?", corrected)
+        reason = "punctuation" if reason == "none" else reason
+    if corrected.startswith("Hi ") and not corrected.startswith("Hi, "):
+        corrected = "Hi, " + corrected[3:]
+        reason = "punctuation" if reason == "none" else reason
+    return corrected, reason
+
+
 class FakeOllama(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -135,6 +170,7 @@ class FakeOllama(ThreadingHTTPServer):
         self.fail_with = None
         self.raw_response = None
         self.review_response = None
+        self.correction_response = None
 
     @property
     def url(self):
@@ -263,6 +299,28 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(_parse_reviews('[{"rating": 7}]', 1), {0: {"rating": 7.0, "critique": "no critique given"}})
         self.assertEqual(_parse_reviews('{"rating": 2, "critique": "bad"}', 1), {0: {"rating": 2.0, "critique": "bad"}})
 
+    def test_parse_corrections(self):
+        raw = json.dumps({"corrections": [
+            {"index": 0, "correction": "Hi, how are you?", "reason": "Spelling", "note": "howe is not a word"},
+            {"index": 1, "corrected": " \"the cat sat\" ", "error": "none"},
+            {"index": 7, "correction": "out of range"},
+            {"index": "x", "correction": "by position", "reason": ""},
+            "a bare corrected line",
+            {"index": 3, "correction": 42},
+            {"index": 4, "note": "no correction at all"},
+        ]})
+        parsed = _parse_corrections(raw, 6)
+        self.assertEqual(parsed[0], {"correction": "Hi, how are you?", "reason": "spelling", "note": "howe is not a word"})
+        self.assertEqual(parsed[1], {"correction": "the cat sat", "reason": "none", "note": ""})  # quotes stripped
+        self.assertNotIn(7, parsed)  # out of range
+        self.assertEqual(parsed[3]["correction"], "by position")  # position used when the index is unusable
+        self.assertEqual(parsed[4]["correction"], "a bare corrected line")
+        self.assertNotIn(5, parsed)  # a number is not a correction
+        self.assertEqual(_parse_corrections("garbage", 3), {})
+        self.assertEqual(_parse_corrections('{"correction": "one", "reason": "typo"}', 1),
+                         {0: {"correction": "one", "reason": "typo", "note": ""}})
+        self.assertEqual(_parse_corrections('["a", "b"]', 2)[1]["correction"], "b")
+
 
 # ---------------------------------------------------------------------------
 # corpus and review against the fake server
@@ -345,6 +403,83 @@ class CorpusAndReviewTests(unittest.TestCase):
         self.assertAlmostEqual(result["pass_rate"], 2 / 3)
         with self.assertRaises(ValueError):
             adversarial_review(None, self.client)
+
+    def test_correct_texts(self):
+        out = correct_texts(self.client, ["Hi howe are you??", "the cat sat on the mat", "   ", "howe now"])
+        self.assertEqual([c["index"] for c in out], [0, 1, 2, 3])
+        self.assertEqual([c["verdict"] for c in out], ["corrected", "unchanged", "uncorrected", "corrected"])
+        self.assertEqual(set(out[0]), {"index", "text", "correction", "verdict", "reason", "note", "changes",
+                                       "edits", "wrong_chars", "right_chars"})
+        first = out[0]
+        self.assertEqual(first["correction"], "Hi, how are you?")
+        self.assertEqual(first["reason"], "spelling")
+        # the diff, not the sentence: the comma the editor added, the e and the second ? it struck out
+        self.assertEqual([(c["op"], c["wrong"], c["right"]) for c in first["changes"]],
+                         [("insert", "", ","), ("delete", "e", ""), ("delete", "?", "")])
+        self.assertEqual([c["at"] for c in first["changes"]], [[2, 2], [6, 7], [15, 16]])
+        self.assertEqual([c["to"] for c in first["changes"]], [[2, 3], [7, 7], [15, 15]])
+        self.assertEqual((first["edits"], first["wrong_chars"], first["right_chars"]), (3, 2, 1))
+        self.assertEqual((out[1]["correction"], out[1]["reason"], out[1]["edits"]), ("the cat sat on the mat", "none", 0))
+        self.assertEqual((out[2]["correction"], out[2]["note"]), (None, "empty output"))
+        body = self.fake.requests[-1][2]
+        self.assertEqual(body["format"], "json")
+        self.assertIn("[0] Hi howe are you??", body["prompt"])
+        self.assertNotIn("[2]", body["prompt"])  # blank texts are not sent
+        self.assertIn("SMALLEST possible change", body["system"])
+        self.assertIn("spelling, punctuation", body["system"])  # the reason vocabulary is in the prompt
+        self.assertEqual(body["options"], {"temperature": 0.0})
+
+    def test_correct_context_and_reason_fallbacks(self):
+        correct_texts(self.client, ["Hi howe"], context="short greetings", model="other:7b")
+        body = self.fake.requests[-1][2]
+        self.assertIn("Context: short greetings", body["prompt"])
+        self.assertEqual(body["model"], "other:7b")
+        # an editor that names no reason: its note, else the shape of the diff
+        self.fake.correction_response = json.dumps({"corrections": [
+            {"index": 0, "correction": "Hi, how are you?", "reason": "", "note": ""},
+            {"index": 1, "correction": "the cat sat", "reason": "weird", "note": "it is cut off mid-sentence"},
+            {"index": 2, "correction": "The cat", "reason": "", "note": ""},
+        ]})
+        out = correct_texts(self.client, ["Hi howe are you??", "the cat sat on", "the cat"])
+        self.assertEqual([c["reason"] for c in out], ["spelling", "fragment", "capitalisation"])
+
+    def test_correct_batches_and_uncorrected(self):
+        texts = [f"line {i}" for i in range(45)]
+        out = correct_texts(self.client, texts, batch=20)
+        self.assertEqual(len(out), 45)
+        self.assertEqual(len([r for r in self.fake.requests if r[1] == "/api/generate"]), 3)
+        self.assertTrue(all(c["verdict"] == "unchanged" for c in out))
+        self.fake.correction_response = "I would rather not."
+        out = correct_texts(self.client, ["Hi howe", "fine"])
+        self.assertEqual([c["verdict"] for c in out], ["uncorrected", "uncorrected"])
+        self.assertTrue(all(c["correction"] is None for c in out))
+        self.assertEqual(out[0]["note"], "no correction returned")
+        with self.assertRaises(ValueError):
+            correct_texts(self.client, ["x"], batch=0)
+
+    def test_adversarial_correction_of_model_samples(self):
+        model = RadixNet(seed=1, backend="python")
+        model.train(["a good sentence about cats", "a good sentence about dogs"], **FAST)
+        result = adversarial_correction(model, self.client, count=3, max_length=40, seed=3)
+        self.assertEqual((result["source"], result["model"]), ("model", "fake:latest"))
+        self.assertEqual(len(result["texts"]), 3)
+        self.assertEqual(len(result["corrections"]), 3)
+        self.assertEqual(sorted(result["corrected"] + result["unchanged"] + result["uncorrected"]), sorted(result["texts"]))
+        with_prefix = adversarial_correction(model, self.client, count=2, prefix="a good", max_length=30)
+        self.assertTrue(all(t.startswith("a good") for t in with_prefix["texts"]))
+
+    def test_adversarial_correction_of_given_texts(self):
+        result = adversarial_correction(None, self.client, texts=["Hi howe are you??", "fine thanks", "howe??"])
+        self.assertEqual(result["source"], "given")
+        self.assertEqual(result["corrected"], ["Hi howe are you??", "howe??"])
+        self.assertEqual(result["unchanged"], ["fine thanks"])
+        self.assertEqual(result["uncorrected"], [])
+        # "howe??" -> "how?" is one change: the e and the ? are closer than a trigram, so they are one edit
+        self.assertEqual((result["edits"], result["wrong_chars"], result["right_chars"]), (3 + 1, 2 + 2, 1 + 0))
+        self.assertAlmostEqual(result["change_rate"], 2 / 3)
+        self.assertIsNone(adversarial_correction(None, self.client, texts=["   "])["change_rate"])
+        with self.assertRaises(ValueError):
+            adversarial_correction(None, self.client)
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +603,59 @@ class ApiTests(unittest.TestCase):
         status, data, _ = self.client.post("/api/ollama/review", {"texts": ["x"]})
         self.assertEqual(status, 502, data)
 
+    def test_correct_given_texts_and_blame(self):
+        body = {"texts": ["Hi howe are you??", "the cat sat on the mat"]}
+        status, data, _ = self.client.post("/api/ollama/correct", body)
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["source"], data["url"], data["model"]), ("given", self.fake.url, "fake:latest"))
+        self.assertEqual([c["verdict"] for c in data["corrections"]], ["corrected", "unchanged"])
+        self.assertEqual(data["corrections"][0]["correction"], "Hi, how are you?")
+        self.assertEqual(data["corrected"], ["Hi howe are you??"])
+        self.assertEqual(data["unchanged"], ["the cat sat on the mat"])
+        self.assertEqual((data["edits"], data["severity"], data["negative"]), (3, 1.0, None))
+
+        status, data, _ = self.client.post("/api/ollama/correct", {**body, "blame": True, "severity": 1.5})
+        self.assertEqual(status, 200, data)
+        negative = data["negative"]
+        self.assertEqual((negative["blamed"], negative["cleared"], negative["uncorrected"]), (1, 0, 0))
+        self.assertEqual(negative["reasons"], {"spelling": 1})
+        self.assertEqual(negative["lessons"][0]["correction"], "Hi, how are you?")
+        self.assertEqual(negative["severity_mean"], 1.5)
+        self.assertGreater(negative["edges"], 0)
+        # only the changed characters are known failures: the correction itself passes
+        status, judged, _ = self.client.post("/api/negative/judge", {"text": "Hi, how are you?"})
+        self.assertEqual(status, 200, judged)
+        self.assertEqual(judged["verdicts"][0]["verdict"], "pass")
+        status, judged, _ = self.client.post("/api/negative/judge", {"text": "Hi howe are you??"})
+        verdict = judged["verdicts"][0]
+        self.assertEqual(verdict["reasons"][0]["reason"], "spelling")
+        self.assertIn("howe", "".join(span["fragment"] for span in verdict["spans"]))
+        status, doc, _ = self.client.get("/api/negative")
+        self.assertEqual(doc["stats"]["sources"], {"correction": 1})
+
+    def test_correct_model_samples(self):
+        self.client.post("/api/train", {"texts": ["a good sentence about cats", "a good sentence about dogs"], **FAST})
+        wait_job(self.client)
+        status, data, _ = self.client.post("/api/ollama/correct", {"count": 3, "max_length": 40, "context": "cats"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["source"], "model")
+        self.assertEqual(len(data["corrections"]), 3)
+        self.assertIn("Context: cats", self.fake.requests[-1][2]["prompt"])
+        status, data, _ = self.client.post("/api/ollama/correct", {"count": 2, "prefix": "a good", "max_length": 30})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(all(t.startswith("a good") for t in data["texts"]))
+
+    def test_correct_errors(self):
+        status, data, _ = self.client.post("/api/ollama/correct", {"count": 0})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/ollama/correct", {"texts": ["x"], "severity": -1})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/ollama/correct", {"texts": ["x"], "url": "   "})
+        self.assertEqual(status, 400, data)
+        self.fake.fail_with = 503
+        status, data, _ = self.client.post("/api/ollama/correct", {"texts": ["x"]})
+        self.assertEqual(status, 502, data)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -529,6 +717,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["two_nrl"]["good_texts"], 2)
         self.assertEqual(doc["two_nrl"]["stats"]["twonrl_runs"], 1)
         self.run_cli("ollama", "review", "--text", "good only", "--2nrl", expect=1)
+
+    def test_correct_and_blame(self):
+        doc = self.run_cli("ollama", "correct", "--text", "Hi howe are you??", "--text", "fine thanks")
+        self.assertEqual(doc["source"], "given")
+        self.assertEqual([c["verdict"] for c in doc["corrections"]], ["corrected", "unchanged"])
+        self.assertEqual(doc["corrections"][0]["correction"], "Hi, how are you?")
+        self.assertEqual((doc["corrected"], doc["unchanged"], doc["negative"]), (["Hi howe are you??"], ["fine thanks"], None))
+        # sampling needs a trained model
+        self.run_cli("ollama", "correct", "--count", "2", expect=1)
+        self.run_cli("train", "--data", os.path.join(ROOT, "data", "sample_corpus.txt"), "--epochs", "1",
+                     "--lr", "0.5", "--batch-size", "4")
+        doc = self.run_cli("ollama", "correct", "--count", "2", "--max-length", "30")
+        self.assertEqual(doc["source"], "model")
+        self.assertEqual(len(doc["corrections"]), 2)
+        data = os.path.join(self.dir, "wrong.txt")
+        with open(data, "w", encoding="utf-8") as fh:
+            fh.write("Hi howe are you??\nthe cat sat on the mat\n")
+        negative = os.path.join(self.dir, "model.negative.json")
+        doc = self.run_cli("ollama", "correct", "--data", data, "--blame", "--severity", "2")
+        self.assertEqual((doc["negative"]["blamed"], doc["negative"]["cleared"]), (1, 0))
+        self.assertEqual([r["reason"] for r in doc["negative"]["reasons"]], ["spelling"])  # the saved table
+        self.assertEqual(doc["negative"]["path"], negative)
+        self.assertTrue(os.path.isfile(negative))
+        self.assertEqual(doc["negative"]["stats"]["sources"], {"correction": 1})
+        self.assertEqual(doc["negative"]["lessons"][0]["severity"], 2.0)
+        verdict = self.run_cli("negative", "why", "--text", "Hi howe are you??")["verdicts"][0]
+        self.assertEqual(verdict["reasons"][0]["reason"], "spelling")
+        self.assertEqual(self.run_cli("negative", "why", "--text", "Hi, how are you?")["verdicts"][0]["verdict"], "pass")
 
 
 if __name__ == "__main__":

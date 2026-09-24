@@ -41,17 +41,33 @@ def model(seed=5):
 
 
 class Scripted:
-    """A reviewer that answers from a script; every call is recorded."""
+    """A reviewer that answers from a script; every call is recorded.
+
+    As a copy editor it strikes the last word of every text out (``fix_of``
+    says otherwise), which is a diff of a few characters at the end of each.
+    """
 
     provider, url, model = "ollama", "http://scripted", "scripted"
 
-    def __init__(self, rating_of=lambda text: 2, critique="it repeats the same word over and over"):
+    def __init__(self, rating_of=lambda text: 2, critique="it repeats the same word over and over", fix_of=None):
         self.rating_of = rating_of
         self.critique = critique
+        self.fix_of = fix_of or (lambda text: text.rsplit(" ", 1)[0] if " " in text.strip() else text)
         self.prompts = []
 
     def generate(self, prompt, *, system=None, model=None, json_mode=False, options=None, timeout=None):
         self.prompts.append(prompt)
+        if "Correct these" in prompt:
+            corrections = []
+            for line in prompt.splitlines():
+                if not line.startswith("["):
+                    continue
+                index = int(line[1 : line.index("]")])
+                text = line[line.index("]") + 2 :]
+                fixed = self.fix_of(text)
+                corrections.append({"index": index, "correction": fixed,
+                                    "reason": "none" if fixed == text else "vocabulary", "note": "the last word"})
+            return json.dumps({"corrections": corrections})
         reviews = []
         for line in prompt.splitlines():
             if not line.startswith("["):
@@ -83,7 +99,7 @@ class TestConfig(unittest.TestCase):
     def test_what_is_refused(self):
         for field, value in (
             ("rounds", -1), ("count", 0), ("max_length", -1), ("temperature", -1),
-            ("threshold", 11), ("threshold", -1), ("epochs", -1), ("provider", "gemini"),
+            ("threshold", 11), ("threshold", -1), ("epochs", -1), ("provider", "gemini"), ("severity", -1),
         ):
             with self.subTest(field=field, value=value):
                 with self.assertRaises(ValueError):
@@ -93,6 +109,7 @@ class TestConfig(unittest.TestCase):
         doc = json.loads(json.dumps(critic.CriticConfig(rounds=2, context="plain English").to_dict()))
         self.assertEqual(doc["rounds"], 2)
         self.assertEqual(doc["context"], "plain English")
+        self.assertEqual((doc["correct"], doc["severity"]), (False, 1.0))
 
 
 class TestLoop(unittest.TestCase):
@@ -204,6 +221,52 @@ class TestLoop(unittest.TestCase):
         after = (self.model.graph.num_nodes(), self.model.graph.num_edges(), self.model.meta["epochs_total"])
         self.assertEqual(before, after)
 
+    def test_a_correcting_round_blames_only_the_characters_the_editor_changed(self):
+        editor = Scripted()
+        record = self.critic(editor, correct=True, severity=1.5).run_round()
+        self.assertEqual((record["kind"], record["mode"], record["round"]), ("round", "correct", 1))
+        self.assertIn("Correct these", editor.prompts[-1])  # the editor's prompt, not the critic's
+        self.assertEqual(record["texts"], 4)
+        self.assertEqual(record["corrected"] + record["unchanged"] + record["uncorrected"], 4)
+        self.assertEqual(record["blamed"], record["corrected"])
+        self.assertEqual(record["severity"], 1.5)
+        self.assertEqual(len(record["corrections"]), 4)
+        self.assertNotIn("mean_rating", record)
+        for entry in record["corrections"]:
+            self.assertIn(entry["verdict"], ("corrected", "unchanged", "uncorrected"))
+        corrected = [c for c in record["corrections"] if c["verdict"] == "corrected"]
+        self.assertTrue(corrected, record["corrections"])
+        self.assertEqual(record["reasons"], {"vocabulary": len(corrected)})
+        self.assertEqual(record["edits"], sum(c["edits"] for c in corrected))
+        if record["unchanged"]:
+            self.assertAlmostEqual(record["change_rate"], record["corrected"] / (record["corrected"] + record["unchanged"]))
+        # the correction itself is never a failure
+        for entry in corrected:
+            self.assertEqual(self.negative.judge(entry["correction"])["verdict"], "pass", entry)
+        journal = self.negative.recent(1)[0]
+        self.assertEqual((journal["source"], journal["severity"], journal["note"]), ("critic", 1.5, "the last word"))
+        # a corrected text whose changed characters the correction also walks (a cycle) leaves no blame behind
+        self.assertLessEqual(self.negative.stats()["sources"].get("critic", 0), len(corrected))
+        self.assertGreater(self.negative.stats()["sources"].get("critic", 0), 0)
+
+    def test_an_editor_with_nothing_to_fix_only_clears(self):
+        record = self.critic(Scripted(fix_of=lambda text: text), correct=True).run_round()
+        self.assertEqual((record["corrected"], record["unchanged"], record["blamed"]), (0, 4, 0))
+        self.assertEqual(record["change_rate"], 0.0)
+        self.assertEqual(self.negative.graph.total_blame, 0.0)
+
+    def test_the_correcting_report_card_counts_the_changes(self):
+        records = self.critic(Scripted(), correct=True, rounds=2).run()
+        card = records[-1]
+        self.assertEqual(card["kind"], "report")
+        self.assertEqual(card["rounds"], 2)
+        self.assertEqual(card["corrected"], sum(r["corrected"] for r in records[:-1]))
+        self.assertEqual(card["edits"], sum(r["edits"] for r in records[:-1]))
+        self.assertEqual(card["blamed"], card["corrected"])
+        self.assertIsNotNone(card["change_rate"])
+        self.assertIn("change_trend", card)
+        self.assertIsNone(card["mean_rating"])  # nobody gave a mark
+
     def test_the_reviewer_is_told_the_context(self):
         reviewer = Scripted()
         self.critic(reviewer, context="plain English about cats").run_round()
@@ -245,6 +308,11 @@ class TestReportCard(unittest.TestCase):
         self.assertEqual(card["reviewed"], 4)
         self.assertEqual(card["reasons"], {"a": 2})
         self.assertEqual(card["stats"], {"x": 1})
+
+    def test_a_reviewing_run_has_no_editor_columns(self):
+        card = critic.report_card([{"kind": "round", "mode": "review", "texts": 2, "mean_rating": 5.0, "pass_rate": 0.5}])
+        self.assertNotIn("change_rate", card)
+        self.assertNotIn("corrected", card)
 
     def test_one_round_has_no_trend(self):
         self.assertIsNone(critic.report_card([{"kind": "round", "mean_rating": 5.0}])["trend"])
@@ -378,8 +446,24 @@ class TestApiHttp(unittest.TestCase):
         self.assertEqual(doc["stats"]["sources"].get("critic"), doc["stats"]["failures_total"])
         self.assertTrue(doc["journal"])
 
+    def test_the_editor_runs_over_http_and_only_the_diff_blames(self):
+        status, doc = self.call("POST", "/api/negative/auto", {"rounds": 1, "count": 3, "max_length": 24,
+                                                                "correct": True, "severity": 0.5})
+        self.assertEqual(status, 202, doc)
+        self.assertEqual((doc["config"]["correct"], doc["config"]["severity"]), (True, 0.5))
+        job = self.wait()
+        self.assertEqual(job["state"], "done", job.get("error"))
+        status, history = self.call("GET", "/api/negative/auto/history")
+        rounds = [r for r in history["history"] if r["kind"] == "round"]
+        self.assertEqual([r["mode"] for r in rounds], ["correct"])
+        self.assertEqual(len(rounds[0]["corrections"]), 3)
+        self.assertEqual(rounds[0]["blamed"], rounds[0]["corrected"])
+        self.assertIn("change_rate", history["history"][-1])
+
     def test_a_bad_option_is_a_400(self):
         status, doc = self.call("POST", "/api/negative/auto", {"count": 0})
+        self.assertEqual(status, 400, doc)
+        status, doc = self.call("POST", "/api/negative/auto", {"correct": True, "severity": -1})
         self.assertEqual(status, 400, doc)
 
     def test_an_unknown_provider_is_a_400(self):
@@ -429,6 +513,19 @@ class TestCli(unittest.TestCase):
         self.assertEqual([r["kind"] for r in doc["records"]], ["round", "report"])
         self.assertEqual(doc["report"]["rounds"], 1)
         self.assertIn("path", doc["negative"])
+
+    def test_the_editor_s_rounds_carry_the_corrections(self):
+        code, out, err = self.run_cli("--json", "negative", "auto", "--rounds", "1", "--count", "3",
+                                      "--max-length", "24", "--url", self.fake.url, "--correct", "--severity", "2")
+        self.assertEqual(code, 0, out + err)
+        doc = json.loads(out)
+        self.assertEqual((doc["config"]["correct"], doc["config"]["severity"]), (True, 2.0))
+        self.assertEqual([r["kind"] for r in doc["records"]], ["round", "report"])
+        self.assertEqual(doc["records"][0]["mode"], "correct")
+        self.assertEqual(len(doc["records"][0]["corrections"]), 3)
+        self.assertIn("corrected", doc["report"])
+        self.assertIn("corrected", err)  # the live progress speaks the editor's language
+        self.assertTrue(os.path.isfile(self.negative_path))
 
     def test_a_missing_model_is_an_error(self):
         from radixnet.cli import main

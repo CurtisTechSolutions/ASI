@@ -113,12 +113,13 @@ from .ollama import (
     STYLES as OLLAMA_STYLES,
     OllamaClient,
     OllamaError,
+    adversarial_correction,
     adversarial_review,
     corpus_from_prompt,
     normalise_url,
     sample_texts,
 )
-from .blame import teach_reviews
+from .blame import teach_corrections, teach_reviews
 from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
@@ -723,8 +724,13 @@ class ModelService:
         )
         return stats
 
-    def guard(self, model: GraphModel | None = None) -> NegativeFilter | None:
+    def guard(self, model: GraphModel | None = None, provenance: bool | None = None) -> NegativeFilter | None:
         """The pair on the way out: the negative network guarding ``model``'s output, or ``None``.
+
+        ``provenance`` overrides the server's own setting for this one answer
+        (``POST /api/negative/settings {"provenance": false}`` sets it for
+        every answer): off, the vetoes still apply but the report says how
+        many, not which or why.
 
         Every answer this service hands out - :meth:`generate`,
         :meth:`predict`, :meth:`converse` - goes through this filter, so the
@@ -751,13 +757,31 @@ class ModelService:
             negative = self.negative_model()  # loads it from that file and parks it
         if negative is model:
             return None
-        pair = NegativeFilter(model, negative, self.guard_config)
+        config = self.guard_config
+        if provenance is not None and bool(provenance) != config.provenance:
+            config = dataclasses.replace(config, provenance=bool(provenance))  # this answer's own choice
+        pair = NegativeFilter(model, negative, config)
         return pair if pair.ready else None
 
     @staticmethod
     def _guard_report(pair: NegativeFilter, verdicts: list[dict], **extra: Any) -> dict:
-        """What the guard did, for the caller to show: the vetoes, with the reason and the fragment behind each."""
+        """What the guard did, for the caller to show: the vetoes, with the reason and the fragment behind each.
+
+        Without provenance (``FilterConfig.provenance`` off) the report is the
+        counts alone - how many candidates were judged and how many vetoed -
+        and neither the vetoes nor the verdicts are listed.
+        """
         rejected = [v for v in verdicts if v["decision"] == "reject"]
+        if not pair.config.provenance:
+            return {
+                "on": True,
+                "provenance": False,
+                "judged": len(verdicts),
+                "vetoed": len(rejected),
+                "negative": pair.negative.stats(),
+                "config": pair.describe()["config"],
+                **extra,
+            }
         return {
             "on": True,
             "vetoed": len(rejected),
@@ -768,7 +792,7 @@ class ModelService:
             **extra,
         }
 
-    def predict(self, prefix: str, *, guard: bool = True, **options: Any) -> dict:
+    def predict(self, prefix: str, *, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
         """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each).
 
         The negative network guards the answer (:meth:`guard`): the best
@@ -779,7 +803,7 @@ class ModelService:
         """
         with self.session() as model:
             result = model.predict(prefix, **options)
-            pair = self.guard(model) if guard else None
+            pair = self.guard(model, provenance) if guard else None
             report = None
             if pair is not None:
                 result, verdicts = pair.rank(prefix, result)  # the survivors, best first
@@ -806,7 +830,7 @@ class ModelService:
             )
         return payload
 
-    def generate(self, guard: bool = True, **options: Any) -> dict:
+    def generate(self, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
         """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path.
 
         The negative network guards them (:meth:`guard`): the model is asked
@@ -817,7 +841,7 @@ class ModelService:
         ``guard=False`` returns what the positive model wrote, unfiltered.
         """
         with self.session() as model:
-            pair = self.guard(model) if guard else None
+            pair = self.guard(model, provenance) if guard else None
             if pair is None:
                 return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
             count = options.pop("count", 1)
@@ -831,7 +855,8 @@ class ModelService:
         }
 
     def converse(
-        self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True, **options: Any,
+        self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True,
+        provenance: bool | None = None, **options: Any,
     ) -> dict:
         """The active model converses with itself, or with the model of another kind kept in memory (``partner``).
 
@@ -852,7 +877,7 @@ class ModelService:
                     raise ApiError(
                         400, f"no {kind} model in memory to converse with; select that kind once to load it"
                     )
-            pair = self.guard(model) if guard else None
+            pair = self.guard(model, provenance) if guard else None
             report = None
             try:
                 if pair is None:
@@ -1074,7 +1099,10 @@ class ModelService:
                 "reasons": model.reasons(),
                 "journal": model.recent(20),
                 "weights": model.weight_config(),
-                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+                "settings": {
+                    "threshold": model.threshold, "min_coverage": model.min_coverage,
+                    "provenance": self.guard_config.provenance,
+                },
             }
 
     def _negative_result(self, model: NegativeNet, records: list[dict], **extra: Any) -> dict:
@@ -1167,13 +1195,17 @@ class ModelService:
             return self._negative_result(model, [], **result)
 
     def negative_settings(self, **options: Any) -> dict:
-        """Change how strictly the negative network judges (``threshold``, ``min_coverage``) and its weight scales."""
+        """Change how strictly the negative network judges (``threshold``, ``min_coverage``), its weight scales,
+        and whether the guard's vetoes carry their ``provenance`` (the rule, the reasons and the fragments behind
+        each) or only their count."""
         with self.mutating():
             model = self.negative_model()
             for name in ("threshold", "min_coverage"):
                 value = options.get(name)
                 if value is not None:
                     setattr(model, name, float(value))
+            if options.get("provenance") is not None:
+                self.guard_config.provenance = bool(options["provenance"])
             scales = {k: options.get(k) for k in ("share_scale", "blame_scale", "clear_scale")}
             if any(v is not None for v in scales.values()):
                 try:
@@ -1181,7 +1213,10 @@ class ModelService:
                 except ValueError as exc:
                     raise ApiError(400, str(exc)) from exc
             return {
-                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+                "settings": {
+                    "threshold": model.threshold, "min_coverage": model.min_coverage,
+                    "provenance": self.guard_config.provenance,
+                },
                 "weights": model.weight_config(),
                 "stats": model.stats(),
             }
@@ -1215,7 +1250,22 @@ class ModelService:
             report = teach_reviews(model, reviews, threshold=threshold, source=source)
             return {
                 "blamed": report["blamed"], "cleared": report["cleared"], "unmatched": report["unmatched"],
-                "edges": report["edges"], "reasons": report["reasons"], "lessons": report["lessons"],
+                "edges": report["edges"], "reasons": report["reasons"], "lessons": report["faults"],
+                "severity_mean": report["severity_mean"], "stats": model.stats(),
+                "reason_table": model.reasons(),
+            }
+
+    def negative_teach_corrections(
+        self, corrections: list[dict], severity: float = 1.0, source: str = "correction"
+    ) -> dict:
+        """Hand a copy editor's corrections to the negative network: only the characters it changed are blamed."""
+        with self.mutating():
+            model = self.negative_model()
+            report = teach_corrections(model, corrections, severity=severity, source=source)
+            return {
+                "blamed": report["blamed"], "cleared": report["cleared"], "unmatched": report["unmatched"],
+                "edges": report["edges"], "edits": report["edits"], "uncorrected": report["uncorrected"],
+                "reasons": report["reasons"], "lessons": report["faults"],
                 "severity_mean": report["severity_mean"], "stats": model.stats(),
                 "reason_table": model.reasons(),
             }
@@ -2542,6 +2592,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.predict(
         prefix,
         guard=f.flag("guard", True),
+        provenance=f.flag("provenance", None),
         length=f.integer("length", 20, minimum=0),
         mode=f.text("mode", "dijkstra"),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
@@ -2558,6 +2609,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.generate(
         guard=f.flag("guard", True),
+        provenance=f.flag("provenance", None),
         count=f.integer("count", 1, minimum=0),
         max_length=f.integer("max_length", 60, minimum=0),
         mode=f.text("mode", "sample"),
@@ -2578,6 +2630,7 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         turns=f.integer("turns", 6, minimum=0),
         partner=partner or None,
         guard=f.flag("guard", True),
+        provenance=f.flag("provenance", None),
         mode=f.text("mode", "beam"),
         max_length=f.integer("max_length", 60, minimum=0),
         context=f.integer("context", 12, minimum=0),
@@ -2796,6 +2849,7 @@ def _r_negative_filter(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]
         strict=f.flag("strict", False),
         spans=f.integer("spans", 3, minimum=0),
         learn=f.flag("learn", False),
+        provenance=f.flag("provenance", True),
         reason=f.text("reason", "filtered"),
         mode=f.text("mode", "sample"),
         max_length=f.integer("max_length", 60, minimum=0),
@@ -2818,6 +2872,7 @@ def _r_negative_settings(svc: ModelService, f: Fields, q: dict) -> tuple[int, An
         share_scale=f.number("share_scale", None),
         blame_scale=f.number("blame_scale", None),
         clear_scale=f.number("clear_scale", None),
+        provenance=f.flag("provenance", None),
     )
 
 
@@ -2843,6 +2898,8 @@ def _critic_config(f: Fields) -> Any:
         clear_passes=f.flag("clear_passes", d.clear_passes),
         epochs=f.integer("epochs", d.epochs, minimum=0),
         seed=f.integer("seed", d.seed),
+        correct=f.flag("correct", d.correct),
+        severity=f.number("severity", d.severity, minimum=0.0),
     )
     try:
         config.validate()
@@ -3382,6 +3439,35 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         **_train_overrides(f),
     )
     return 202, result
+
+
+def _r_ollama_correct(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The copy editor: the model's samples (or given texts) written out correctly; the diff can blame."""
+    given = f.texts_optional("texts", "text")
+    client = _ollama_client(svc, f)
+    severity = f.number("severity", 1.0, minimum=0.0)
+    if given:
+        samples, source = given, "given"
+    else:
+        samples = svc.sample_texts(
+            f.integer("count", 8, minimum=1), prefix=f.text("prefix", ""),
+            max_length=f.integer("max_length", 60, minimum=0), temperature=f.number("temperature", 1.0, minimum=0.0),
+            seed=f.integer("seed", None),
+        )
+        source = "model"
+    try:
+        result = adversarial_correction(
+            None, client, texts=samples, context=f.text("context", None), ollama_model=client.model,
+        )
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    result["source"] = source
+    result["url"] = client.url
+    result["severity"] = severity
+    result["negative"] = None
+    if f.flag("blame", False):
+        result["negative"] = svc.negative_teach_corrections(result["corrections"], severity=severity, source="correction")
+    return 200, result
 
 
 def _problems_from(svc: ModelService, f: Fields) -> list[Problem]:
@@ -3971,13 +4057,15 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at "
      "least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations spread out - "
      "a path pays diversity times its overlap with one already picked; off at 0), guard "
-     "(default on: the negative network vetoes the continuations it recognises as failures)}"),
+     "(default on: the negative network vetoes the continuations it recognises as failures), provenance (false: "
+     "the guard reports how many it vetoed, not which or why)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
      "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
      "penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), "
      "guard (default on: the model over-samples and the "
-     "negative network vetoes what it recognises as failure)}"),
+     "negative network vetoes what it recognises as failure), provenance (default: the server's setting; false "
+     "reports how many candidates the guard vetoed, not which or why)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
@@ -3986,7 +4074,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn "
      "(default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes "
      "round - a conversation with this on changes the model), "
-     "guard (default on: a reply the negative network vetoes is left unsaid)} "
+     "guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were "
+     "vetoed, not which or why)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl,
@@ -4039,11 +4128,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the reasons and the fragments to blame"),
     ("POST", "/api/negative/filter", _r_negative_filter,
      "the pair: the positive model writes, the negative one vetoes - {count, prefix, mode, max_length, temperature, "
-     "over_sample, threshold, min_coverage, ratio, no_ratio, peak (blame on a single fragment), strict, learn} or "
-     "{texts} to judge given texts"),
+     "over_sample, threshold, min_coverage, ratio, no_ratio, peak (blame on a single fragment), strict, learn, "
+     "provenance (false: verdicts carry the decision and the rule alone)} or {texts} to judge given texts"),
     ("POST", "/api/negative/forget", _r_negative_forget, "drop or fade the blame behind a reason: {reason, factor}"),
     ("POST", "/api/negative/settings", _r_negative_settings,
-     "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
+     "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale, provenance (whether "
+     "the guard's vetoes on every answer say why - the rule, the reasons, the blamed fragments - or only how many)}"),
     ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
     ("POST", "/api/chat/start", _r_chat_start,
      "start a chat job - an LLM converses with the model and marks every reply: {conversations (0 = until "
@@ -4059,7 +4149,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every "
      "failure blame the negative network - {rounds (0 = until stopped), count, prefix, max_length, temperature, "
      "threshold, context (what the texts are meant to be), provider: ollama|chatgpt, reviewer_model, url, timeout, "
-     "clear_passes, epochs, seed}; the positive model is only read from"),
+     "clear_passes, epochs, seed, correct (letter-level corrections instead of marks: only the characters the editor "
+     "changed are blamed), severity (blame per corrected text)}; the positive model is only read from"),
     ("GET", "/api/negative/auto/history", _r_negative_auto_history, "round / report records of all automatic runs"),
     ("POST", "/api/negative/save", _r_negative_save, "save the negative network: {path} (default: beside the model path)"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
@@ -4113,6 +4204,11 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/ollama/review", _r_ollama_review,
      "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, "
      "good, good_files, blame (teach the negative network what failed and why)}"),
+    ("POST", "/api/ollama/correct", _r_ollama_correct,
+     "letter-level LLM correction of the model's samples or {texts}: {count, prefix, max_length, temperature, seed, "
+     "context, model, url, timeout, blame (blame only the characters the editor changed in the negative network; "
+     "the unchanged texts clear blame), severity} -> {corrections: [{text, correction, verdict, reason, note, "
+     "changes}], corrected, unchanged, uncorrected, edits, change_rate}"),
     ("GET", "/api/chatgpt/models", _r_chatgpt_models,
      "is ChatGPT usable as a tutor here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails"),
     ("POST", "/api/codegen/start", _r_codegen_start,

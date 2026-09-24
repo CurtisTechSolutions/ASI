@@ -187,6 +187,8 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /** Letter-level corrections of the model's samples or `texts`; `blame` teaches the negative network the diff. */
+  ollamaCorrect: (body) => post("/api/ollama/correct", body),
   /** Images as text (see ImagesPanel): the Stable Diffusion VAE run backwards, quantised and base64-encoded. */
   images: () => get("/api/images"),
   imageEncode: (file, { size, encoder, train, saveAs } = {}) => {

@@ -929,6 +929,27 @@ class TestGoNegativeParity(unittest.TestCase):
         self.assertIsNone(a["guard"])
         self.assertIsNone(b["guard"])
 
+    def test_the_guard_can_keep_its_provenance_to_itself_on_both_sides(self):
+        self.teach(self.py_model)
+        self.teach(self.go_model)
+        py("--kind", "count", "train", "--data", CORPUS, "--epochs", 2, model=self.py_model)
+        go("train", "--data", CORPUS, "--epochs", 2, model=self.go_model)
+        a = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, "--no-provenance", model=self.py_model)
+        b = go("generate", "-count", 3, "-mode", "beam", "-max-length", 40, "-no-provenance", model=self.go_model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])  # still vetoed
+        for key in ("on", "provenance", "judged", "vetoed", "asked", "kept"):
+            self.assertEqual(a["guard"][key], b["guard"][key], key)
+        self.assertNotIn("verdicts", b["guard"])
+        self.assertNotIn("rejected", b["guard"])
+        self.assertFalse(b["guard"]["config"]["provenance"])
+        args = ("negative", "filter", "--text", "the the the the cat", "--text", "a rainy day in autumn",
+                "--no-provenance")
+        a = py(*args, model=self.py_model)
+        b = go(*args, model=self.go_model)
+        self.assertEqual(a["verdicts"], b["verdicts"])  # the decision and the rule, nothing else
+        self.assertEqual([set(v) for v in b["verdicts"]], [{"text", "decision", "rule"}] * 2)
+        self.assertEqual(a["kept"], b["kept"])
+
     def test_the_guard_ranks_the_same_continuations_and_replies(self):
         self.teach(self.py_model)
         self.teach(self.go_model)
@@ -1009,6 +1030,17 @@ class TestGoServerNegative(unittest.TestCase):
         self.assertEqual(data["kept"], ["an unseen line"])
         status, data, _ = self.client.post("/api/negative/settings", {"threshold": 2.0})
         self.assertEqual(data["settings"]["threshold"], 2.0)
+        # the provenance of the vetoes: off per answer, off for the server
+        status, data, _ = self.client.post("/api/negative/filter", {"texts": ["the the the the cat", "an unseen line"],
+                                                                     "provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([set(v) for v in data["verdicts"]], [{"text", "decision", "rule"}] * 2)
+        status, data, _ = self.client.post("/api/negative/settings", {"provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["settings"]["provenance"], False)
+        status, data, _ = self.client.get("/api/negative")
+        self.assertEqual(data["settings"]["provenance"], False)
+        self.client.post("/api/negative/settings", {"provenance": True})
         status, data, _ = self.client.post("/api/negative/save")
         self.assertEqual(status, 200, data)
         self.assertTrue(os.path.isfile(data["path"]))
@@ -1102,6 +1134,68 @@ class TestGoCriticParity(unittest.TestCase):
         self.assertEqual([r["rating"] for r in a["reviews"]], [r["rating"] for r in b["reviews"]])
         self.assertEqual(a["good"], b["good"])
         self.assertEqual(a["bad"], b["bad"])
+
+    def test_both_editors_correct_the_same_given_texts(self):
+        texts = ["Hi howe are you??", "the cat sat on the mat", "howe??", "   "]
+        options = ("ollama", "correct", "--context", "short greetings", *sum((("--text", t) for t in texts), ()))
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(py_prompts, self.prompts())  # the editor's prompt, byte for byte
+        for key in ("source", "texts", "corrected", "unchanged", "uncorrected", "edits", "wrong_chars", "right_chars",
+                    "change_rate"):
+            self.assertEqual(a[key], b[key], key)
+        for first, second in zip(a["corrections"], b["corrections"]):
+            for key in ("index", "text", "correction", "verdict", "reason", "changes", "edits", "wrong_chars",
+                        "right_chars"):
+                self.assertEqual(first[key], second[key], f"{first['text']!r}: {key}")
+        self.assertEqual([c["verdict"] for c in b["corrections"]], ["corrected", "unchanged", "corrected", "uncorrected"])
+
+    def test_a_blamed_correction_teaches_what_python_teaches(self):
+        texts = ["Hi howe are you??", "the cat sat on the mat", "howe now"]
+        options = ("ollama", "correct", *sum((("--text", t) for t in texts), ()), "--blame", "--severity", 1.5)
+        a = py(*options, model=self.py_path, env=self.env)
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        py_doc = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_doc = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual(py_doc["graph"]["nodes"]["labels"], go_doc["graph"]["nodes"]["labels"])
+        self.assertEqual(py_doc["graph"]["edges"]["blame"], go_doc["graph"]["edges"]["blame"])
+        self.assertEqual(py_doc["graph"]["edges"]["fails"], go_doc["graph"]["edges"]["fails"])
+        self.assertEqual(py_doc["graph"]["edges"]["clear"], go_doc["graph"]["edges"]["clear"])
+        self.assertEqual([r["reason"] for r in a["negative"]["reasons"]], [r["reason"] for r in b["negative"]["reasons"]])
+        for side, path in ((py, self.py_path), (go, self.go_path)):
+            verdicts = side("negative", "why", "--text", "Hi, how are you?", "--text", "Hi howe are you??",
+                            model=path, env=self.env)["verdicts"]
+            self.assertEqual(verdicts[0]["verdict"], "pass")
+            self.assertEqual(verdicts[1]["reasons"][0]["reason"], "spelling")
+
+    def test_both_correcting_loops_ask_the_same_and_blame_the_same(self):
+        options = ("negative", "auto", "--rounds", 2, "--count", 4, "--max-length", 40, "--correct", "--severity", 2)
+        a = py(*options, model=self.py_path, env=self.env)
+        py_prompts = self.prompts()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(py_prompts, self.prompts())
+        self.assertEqual(len(py_prompts), 2)
+        py_rounds = [r for r in a["records"] if r["kind"] == "round"]
+        go_rounds = [r for r in b["records"] if r["kind"] == "round"]
+        self.assertEqual(len(py_rounds), 2)
+        self.assertEqual(len(py_rounds), len(go_rounds))
+        for first, second in zip(py_rounds, go_rounds):
+            self.assertEqual(second["mode"], "correct")
+            for key in ("round", "texts", "corrected", "unchanged", "uncorrected", "edits", "blamed", "cleared",
+                        "edges", "reasons", "change_rate"):
+                self.assertEqual(first[key], second[key], f"round {first['round']}: {key}")
+            self.assertAlmostEqual(first["severity_mean"], second["severity_mean"], places=9)
+        for key in ("rounds", "reviewed", "blamed", "cleared", "edges", "reasons", "corrected", "edits", "change_rate"):
+            self.assertEqual(a["report"][key], b["report"][key], key)
+        py_doc = load_json(self.py_path.replace(".count.json", ".count.negative.json"))
+        go_doc = load_json(self.go_path.replace(".count.json", ".count.negative.json"))
+        self.assertEqual(py_doc["graph"]["nodes"]["labels"], go_doc["graph"]["nodes"]["labels"])
+        self.assertEqual(py_doc["graph"]["edges"]["blame"], go_doc["graph"]["edges"]["blame"])
+        self.assertEqual(py_doc["graph"]["edges"]["fails"], go_doc["graph"]["edges"]["fails"])
 
 
 class TestGoToolsParity(unittest.TestCase):

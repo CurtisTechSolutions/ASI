@@ -20,6 +20,13 @@ output and said it was wrong, and why:
 * the **adversarial reviewer** (:mod:`radixnet.ollama`): an Ollama model rates
   the network's own texts 0-10, passes or fails each one and writes a
   one-sentence critique;
+* the **copy editor** (:func:`radixnet.ollama.correct_texts`): the same LLM
+  writes each of the network's texts out correctly, changing as little as it
+  can, and the diff between the two is the lesson - ``"Hi howe are you??"``
+  against ``"Hi, how are you?"`` blames the ``e`` and the second ``?``, not
+  the sentence (:func:`faults_from_corrections`,
+  :meth:`radixnet.negative.NegativeNet.correct`); a text it handed back
+  unchanged clears blame;
 * the **code-generation teacher and judge** (:mod:`radixnet.codegen`): the
   sandbox says a program crashed, timed out or printed the wrong thing, the
   style checker names its issues and the LLM judge says whether the task was
@@ -47,6 +54,8 @@ __all__ = [
     "AGENT_SEVERITY",
     "CODE_REASONS",
     "CODE_SEVERITY",
+    "CORRECTION_REASONS",
+    "CORRECTION_SEVERITY",
     "DEFAULT_REASON",
     "IMAGE_REASONS",
     "REASONS",
@@ -57,17 +66,21 @@ __all__ = [
     "agent_reason",
     "classify",
     "code_reason",
+    "correction_reason",
     "faults_from_agent",
     "faults_from_attempts",
+    "faults_from_corrections",
     "faults_from_lessons",
     "faults_from_recall",
     "faults_from_reviews",
+    "reason_from_changes",
     "recall_reason",
     "severity_from_gap",
     "severity_from_rating",
     "teach",
     "teach_agent",
     "teach_attempts",
+    "teach_corrections",
     "teach_lessons",
     "teach_recall",
     "teach_reviews",
@@ -89,6 +102,45 @@ REASONS = (
     DEFAULT_REASON,
 )
 """Reason tags for reviewed *text* (the order is the order :func:`classify` tries them in)."""
+
+CORRECTION_REASONS = (
+    "spelling",
+    "punctuation",
+    "capitalisation",
+    "spacing",
+    "agreement",
+    "tense",
+    "article",
+    "preposition",
+    "plural",
+    "pronoun",
+    "word-order",
+    "vocabulary",
+    "repetition",
+    "fragment",
+    "nonsense",
+    "grammar",
+    "none",
+)
+"""Reason tags for a *corrected* text: what the copy editor's smallest change put right (``"none"``: nothing)."""
+
+CORRECTION_SEVERITY = 1.0
+"""How heavily one correction is blamed: one ordinary failure per corrected text, placed only on its changed characters."""
+
+_CORRECTION_ALIASES = {
+    "typo": "spelling", "misspelling": "spelling", "misspelt": "spelling", "spell": "spelling",
+    "capitalization": "capitalisation", "case": "capitalisation", "casing": "capitalisation",
+    "capital": "capitalisation", "uppercase": "capitalisation", "lowercase": "capitalisation",
+    "whitespace": "spacing", "space": "spacing", "spaces": "spacing",
+    "subject-verb": "agreement", "verb-agreement": "agreement", "conjugation": "agreement",
+    "articles": "article", "prepositions": "preposition", "plurals": "plural", "number": "plural",
+    "pronouns": "pronoun", "order": "word-order", "word order": "word-order", "syntax": "grammar",
+    "wording": "vocabulary", "word-choice": "vocabulary", "word choice": "vocabulary", "word": "vocabulary",
+    "repeat": "repetition", "repeated": "repetition", "duplicate": "repetition", "duplication": "repetition",
+    "incomplete": "fragment", "truncated": "fragment", "unfinished": "fragment",
+    "gibberish": "nonsense", "meaningless": "nonsense", "garbled": "nonsense",
+    "ok": "none", "correct": "none", "nothing": "none", "unchanged": "none", "no change": "none",
+}
 
 CODE_REASONS = (
     "timeout",
@@ -298,6 +350,74 @@ def severity_from_gap(gap: float | None, floor: float = 0.25, ceiling: float = 2
     return floor + (ceiling - floor) * max(0.0, min(1.0, float(gap)))
 
 
+_PUNCTUATION = set(".,;:!?'\"-()[]{}\u2018\u2019\u201c\u201d\u2013\u2014/&")
+
+
+def reason_from_changes(changes: Iterable[dict]) -> str:
+    """The reason a diff speaks for itself, from what its edits touched (``"none"`` when nothing changed).
+
+    ``changes`` are ``{"op", "wrong", "right"}`` edits (:func:`radixnet.diff.summary`
+    or the ``changes`` of :func:`radixnet.ollama.correct_texts`).  Every edit
+    is read for what it moved and the widest kind wins: a whole word inserted
+    or struck out is ``grammar``, a change that only turns a word into
+    another word is ``spelling``, and one that only touches punctuation,
+    letter case or spaces is that.
+    """
+    kinds: set[str] = set()
+    for edit in changes or []:
+        if not isinstance(edit, dict) or edit.get("op") == "equal":
+            continue
+        wrong, right = str(edit.get("wrong") or ""), str(edit.get("right") or "")
+        if wrong == right:
+            continue
+        kinds.add(_change_kind(wrong, right))
+    for kind in ("grammar", "spelling", "punctuation", "spacing", "capitalisation"):
+        if kind in kinds:
+            return kind
+    return "none"
+
+
+def _change_kind(wrong: str, right: str) -> str:
+    moved = wrong + right
+    if moved and all(ch in _PUNCTUATION for ch in moved):
+        return "punctuation"
+    if moved and all(ch.isspace() for ch in moved):
+        return "spacing"
+    if wrong.lower() == right.lower():
+        return "capitalisation"
+    without = lambda s: "".join(ch for ch in s if ch not in _PUNCTUATION and not ch.isspace())  # noqa: E731
+    if without(wrong) == without(right):
+        # only punctuation and spaces moved, however the letters were carried along
+        return "punctuation" if any(ch in _PUNCTUATION for ch in moved) else "spacing"
+    if any(ch.isspace() for ch in wrong) or any(ch.isspace() for ch in right):
+        return "grammar"  # a space moved with the letters: a word was added, dropped or reordered
+    return "spelling"  # letters changed inside one word
+
+
+def correction_reason(reason: str | None, note: str | None = None, changes: Iterable[dict] = ()) -> str:
+    """The reason tag behind a copy editor's correction, out of :data:`CORRECTION_REASONS`.
+
+    The editor's own word wins when the vocabulary knows it (aliases such as
+    ``typo`` or ``capitalization`` are accepted); failing that its note is read
+    the way a critique is (:func:`classify`), and failing that the diff
+    decides (:func:`reason_from_changes`).  ``"none"`` is only ever what the
+    diff says about an unchanged text.
+    """
+    word = " ".join(str(reason or "").split()).lower().strip(".:;,\"'")
+    word = _CORRECTION_ALIASES.get(word, word)
+    if word in CORRECTION_REASONS and word != "none":
+        return word
+    if word.replace(" ", "-") in CORRECTION_REASONS and word != "none":
+        return word.replace(" ", "-")
+    spoken = classify(note, default="")
+    if spoken:
+        mapped = {"gibberish": "nonsense", "truncated": "fragment", "incoherent": "nonsense"}.get(spoken, spoken)
+        if mapped in CORRECTION_REASONS:
+            return mapped
+    from_diff = reason_from_changes(changes)
+    return from_diff if from_diff != "none" else "grammar"
+
+
 def _fault(text: str, reason: str, severity: float, note: str, source: str) -> dict:
     return {"text": text, "reason": reason, "severity": float(severity), "note": note, "source": source}
 
@@ -332,6 +452,46 @@ def faults_from_reviews(reviews: Iterable[dict], threshold: float = 6.0, source:
             source,
         ))
     return faults, passed
+
+
+def faults_from_corrections(
+    corrections: Iterable[dict], severity: float = CORRECTION_SEVERITY, source: str = "correction"
+) -> tuple[list[dict], list[str]]:
+    """``(faults, unchanged_texts)`` from :func:`radixnet.ollama.correct_texts` entries.
+
+    Every text the editor changed becomes a fault that carries its
+    ``correction``, so :func:`teach` routes it through
+    :meth:`radixnet.negative.NegativeNet.correct` and only the characters the
+    editor struck out or replaced are blamed; its reason is the editor's word
+    for the mistake (:func:`correction_reason`) and its note the editor's
+    sentence.  The texts it handed back unchanged come back separately to
+    clear blame.  A text it gave no usable answer for (``"uncorrected"``) is
+    neither: nobody said anything about it.
+    """
+    faults: list[dict] = []
+    unchanged: list[str] = []
+    amount = abs(float(severity))
+    for entry in corrections or []:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text") or "")
+        correction = entry.get("correction")
+        if not text or not isinstance(correction, str):
+            continue
+        verdict = str(entry.get("verdict") or "").strip().lower()
+        if verdict == "unchanged" or (not verdict and correction == text):
+            unchanged.append(text)
+            continue
+        if correction == text:
+            continue
+        note = str(entry.get("note") or "")
+        reason = str(entry.get("reason") or "").strip().lower()
+        if reason not in CORRECTION_REASONS or reason == "none":
+            reason = correction_reason(reason, note, entry.get("changes") or ())
+        fault = _fault(text, reason, amount, note, source)
+        fault["correction"] = correction
+        faults.append(fault)
+    return faults, unchanged
 
 
 def faults_from_attempts(attempts: Iterable[Any], source: str = "codegen") -> tuple[list[dict], list[str]]:
@@ -644,6 +804,32 @@ def teach_reviews(negative: Any, reviews: Any, *, threshold: float = 6.0, clear_
     faults, passed = faults_from_reviews(entries, limit, source)
     report = teach(negative, faults, passed if clear_passes else (), **options)
     report.update(source=source, threshold=limit, faults=faults, passed=len(passed))
+    return report
+
+
+def _corrections_of(corrections: Any) -> list[dict]:
+    """Accept the ``corrections`` list or the whole :func:`radixnet.ollama.adversarial_correction` result."""
+    if isinstance(corrections, dict):
+        return list(corrections.get("corrections") or [])
+    return list(corrections or [])
+
+
+def teach_corrections(negative: Any, corrections: Any, *, severity: float = CORRECTION_SEVERITY,
+                      clear_passes: bool = True, source: str = "correction", **options: Any) -> dict:
+    """Feed a copy editor's corrections straight into the negative network (see :func:`faults_from_corrections`).
+
+    The report is :func:`teach`'s plus ``source``, ``severity``, ``faults``,
+    ``passed`` (unchanged texts), ``edits`` (the characters the editor changed
+    over all faults, in units of the network's encoding) and ``uncorrected``.
+    """
+    entries = _corrections_of(corrections)
+    faults, unchanged = faults_from_corrections(entries, severity, source)
+    report = teach(negative, faults, unchanged if clear_passes else (), **options)
+    report.update(
+        source=source, severity=abs(float(severity)), faults=faults, passed=len(unchanged),
+        edits=sum(int(r.get("edits") or 0) for r in report["records"] if r.get("phase") == "correction"),
+        uncorrected=sum(1 for e in entries if isinstance(e, dict) and e.get("verdict") == "uncorrected"),
+    )
     return report
 
 

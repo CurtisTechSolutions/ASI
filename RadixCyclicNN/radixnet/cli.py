@@ -891,7 +891,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
             bottom=[{**r.to_dict(), "probability": path_probability(r)} for r in result.bottom],
         )
     if guard is not None:
-        _print_vetoes(console, guard["verdicts"], "continuations")
+        _print_vetoes(console, guard, "continuations")
     doc["guard"] = guard
     return doc
 
@@ -917,7 +917,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
     console.table(("#", "cost", "prob", "end", "text"), rows)
     if guard is not None:
-        _print_vetoes(console, guard["verdicts"])
+        _print_vetoes(console, guard)
     return {
         "samples": [{**r.to_dict(), "probability": path_probability(r)} for r in results],
         "count": len(results),
@@ -980,7 +980,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
     if not turns:
         console.say("(nothing to say: train the model first)")
     if guard is not None:
-        _print_vetoes(console, guard["verdicts"], "replies")
+        _print_vetoes(console, guard, "replies")
     said_twice = dialogue_repeats(turns)
     if said_twice:
         console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
@@ -1946,6 +1946,9 @@ def add_guard_flags(p: argparse.ArgumentParser) -> None:
                        help="share of a text that must be known failure before any rule may veto it")
     group.add_argument("--over-sample", type=pos_int, metavar="N", default=3,
                        help="generate: candidates drawn per wanted text, so the guard has something to choose from")
+    group.add_argument("--no-provenance", action="store_true",
+                       help="veto without saying why: report how many candidates the guard stopped, not which "
+                            "nor the rule, the reasons and the fragments behind each")
 
 
 def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel) -> Any:
@@ -1972,6 +1975,7 @@ def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel)
     pair = NegativeFilter(positive, negative, FilterConfig(
         threshold=getattr(args, "threshold", None), min_coverage=getattr(args, "min_coverage", None),
         over_sample=getattr(args, "over_sample", None) or 3,
+        provenance=not getattr(args, "no_provenance", False),
     ))
     if not pair.ready:
         return None
@@ -1980,10 +1984,14 @@ def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel)
     return pair
 
 
-def _print_vetoes(console: Console, verdicts: list[dict], what: str = "candidates") -> None:
-    """The guard's work: what it let through, what it stopped and why."""
-    rejected = [v for v in verdicts if v["decision"] == "reject"]
+def _print_vetoes(console: Console, guard: dict, what: str = "candidates") -> None:
+    """The guard's work: what it let through, what it stopped and - with provenance - why."""
     console.say()
+    if not guard.get("provenance", True):
+        console.say(f"guard: {guard['judged'] - guard['vetoed']} of {guard['judged']} {what} passed the negative network")
+        return
+    verdicts = guard["verdicts"]
+    rejected = [v for v in verdicts if v["decision"] == "reject"]
     console.say(f"guard: {len(verdicts) - len(rejected)} of {len(verdicts)} {what} passed the negative network")
     if rejected:
         console.table(
@@ -1994,8 +2002,22 @@ def _print_vetoes(console: Console, verdicts: list[dict], what: str = "candidate
 
 
 def _guard_doc(pair: Any, verdicts: list[dict], **extra: Any) -> dict:
-    """The guard's report for ``--json``: every veto, with the reason and the fragment behind it."""
+    """The guard's report for ``--json``: every veto, with the reason and the fragment behind it.
+
+    With ``--no-provenance`` it is the counts alone: how many were judged and
+    how many vetoed, neither listed.
+    """
     rejected = [v for v in verdicts if v["decision"] == "reject"]
+    if not pair.config.provenance:
+        return {
+            "on": True,
+            "provenance": False,
+            "judged": len(verdicts),
+            "vetoed": len(rejected),
+            "negative": pair.negative.stats(),
+            "config": pair.describe()["config"],
+            **extra,
+        }
     return {
         "on": True,
         "vetoed": len(rejected),
@@ -2129,6 +2151,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
     config = FilterConfig(
         threshold=args.threshold, min_coverage=args.min_coverage, ratio=None if args.no_ratio else args.ratio,
         peak=args.peak, over_sample=args.over_sample, strict=args.strict, spans=args.spans, learn=args.learn,
+        provenance=not args.no_provenance,
     )
     pair = NegativeFilter(positive, negative, config)
     given = list(args.text or [])
@@ -2144,6 +2167,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
         ("peak", "off" if config.peak is None else f">= {fmt(config.peak)} blame on one fragment"),
         ("strict", config.strict),
         ("learn", config.learn),
+        ("provenance", config.provenance),
     ])
     if given:
         outcome = pair.filter(given)
@@ -2159,14 +2183,20 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
         )
         doc.pop("results")  # the walks behind the texts; the document carries the texts
     console.say()
-    console.table(
-        ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
-        [
-            [v["decision"], v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
-             v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))]
-            for v in doc["verdicts"]
-        ],
-    )
+    if config.provenance:
+        console.table(
+            ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
+            [
+                [v["decision"], v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
+                 v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))]
+                for v in doc["verdicts"]
+            ],
+        )
+    else:  # the decisions alone: what was kept and what was vetoed, not why
+        console.table(
+            ("decision", "rule", "text"),
+            [[v["decision"], v["rule"] or "-", quote(clip(v["text"], 60))] for v in doc["verdicts"]],
+        )
     console.say()
     returned = doc.get("texts") or []
     console.say(
@@ -2177,7 +2207,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
     for text in returned:
         console.say(f"  {quote(text)}")
     for verdict in doc["rejected"]:
-        console.say(f"  vetoed: {quote(clip(verdict['text'], 60))} - {verdict['why']}")
+        console.say(f"  vetoed: {quote(clip(verdict['text'], 60))}" + (f" - {verdict['why']}" if "why" in verdict else ""))
     if config.learn:
         saved = save_model(negative, negative_path(args))
         console.say(f"saved {saved['path']} ({saved['bytes']} bytes)")
@@ -2202,6 +2232,7 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
         temperature=args.temperature, threshold=args.threshold, context=args.context or "",
         provider=args.provider, reviewer_model=args.reviewer_model or "",
         clear_passes=not args.no_clear, epochs=args.epochs, seed=effective_seed(args),
+        correct=bool(args.correct), severity=args.severity,
     )
     try:
         config.validate()
@@ -2217,10 +2248,11 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("model", origin.describe()),
         ("negative network", neg_origin.describe()),
-        ("reviewer", f"{config.provider}: {client.model} at {client.url}"),
+        ("reviewer" if not config.correct else "editor", f"{config.provider}: {client.model} at {client.url}"),
         ("rounds", "until stopped (Ctrl-C)" if not config.rounds else config.rounds),
         ("per round", f"{config.count} text(s), {config.max_length} chars, temperature {config.temperature:g}"),
-        ("pass mark", f"{config.threshold:g}/10"),
+        ("pass mark", f"{config.threshold:g}/10") if not config.correct
+        else ("lesson", f"letter-level corrections, {config.severity:g} blame per corrected text"),
         ("context", clip(config.context, 60) if config.context else "-"),
         ("passes clear", not args.no_clear),
         ("output", out),
@@ -2232,10 +2264,21 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     def show(record: dict) -> None:
         if record.get("kind") != "round":
             return
+        reasons = ", ".join(f"{k} x{v}" for k, v in (record["reasons"] or {}).items()) or "-"
+        if config.correct:
+            rows.append([
+                record["round"], record["texts"], record["corrected"], record["unchanged"], record["edits"],
+                record["blamed"], record["cleared"], record["edges"], reasons,
+            ])
+            console.note(
+                f"round {record['round']}: {record['corrected']}/{record['texts']} corrected "
+                f"({record['edits']} change(s)), blamed {record['blamed']} over {record['edges']} edge(s), "
+                f"cleared {record['cleared']}"
+            )
+            return
         rows.append([
             record["round"], record["texts"], record["passed"], record["failed"],
-            fmt(record["mean_rating"]), record["blamed"], record["cleared"], record["edges"],
-            ", ".join(f"{k} x{v}" for k, v in (record["reasons"] or {}).items()) or "-",
+            fmt(record["mean_rating"]), record["blamed"], record["cleared"], record["edges"], reasons,
         ])
         console.note(
             f"round {record['round']}: {record['failed']}/{record['texts']} failed, "
@@ -2246,16 +2289,29 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     records, interrupted = run_interruptible(
         lambda: critic.run(progress=show, stop_event=stop), stop, console, "round",
     )
-    console.table(
-        ("round", "texts", "passed", "failed", "mean mark", "blamed", "cleared", "edges", "reasons"), rows,
-    )
+    if config.correct:
+        console.table(
+            ("round", "texts", "corrected", "unchanged", "changes", "blamed", "cleared", "edges", "reasons"), rows,
+        )
+    else:
+        console.table(
+            ("round", "texts", "passed", "failed", "mean mark", "blamed", "cleared", "edges", "reasons"), rows,
+        )
     card = records[-1] if records and records[-1].get("kind") == "report" else {}
     console.say()
-    console.say(
-        f"{card.get('rounds', 0)} round(s): reviewed {card.get('reviewed', 0)}, blamed {card.get('blamed', 0)}, "
-        f"cleared {card.get('cleared', 0)}; mean mark {fmt(card.get('mean_rating'))}/10"
-        + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
-    )
+    if config.correct:
+        console.say(
+            f"{card.get('rounds', 0)} round(s): corrected {card.get('corrected', 0)} of {card.get('reviewed', 0)} "
+            f"({card.get('edits', 0)} change(s)), blamed {card.get('blamed', 0)}, cleared {card.get('cleared', 0)}; "
+            f"change rate {fmt(card.get('change_rate'))}"
+            + (f", trend {card['change_trend']:+.2f}" if isinstance(card.get("change_trend"), float) else "")
+        )
+    else:
+        console.say(
+            f"{card.get('rounds', 0)} round(s): reviewed {card.get('reviewed', 0)}, blamed {card.get('blamed', 0)}, "
+            f"cleared {card.get('cleared', 0)}; mean mark {fmt(card.get('mean_rating'))}/10"
+            + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
+        )
     return {
         "config": config.to_dict(), "url": client.url, "reviewer": client.model,
         "records": records, "report": card, "interrupted": interrupted,
@@ -3259,6 +3315,81 @@ def cmd_ollama_corpus(args: argparse.Namespace, console: Console) -> dict:
     return doc
 
 
+def cmd_ollama_correct(args: argparse.Namespace, console: Console) -> dict:
+    """The LLM copy-edits the network's samples (or given texts); the diff is what the negative network learns."""
+    from .ollama import OllamaError, adversarial_correction
+
+    client = _ollama_client(args)
+    texts: list[str] | None = None
+    if args.text:
+        texts = list(args.text)
+    elif args.data:
+        texts = read_texts([args.data], what="correctable")
+    model = origin = None
+    if texts is None:
+        model, origin = open_model(args, console, required=True)
+    if texts is not None:
+        source = f"{len(texts)} given texts"
+    else:
+        source = f"{args.count} samples from {origin.describe()}" + (f" continuing {quote(args.prefix)}" if args.prefix else "")
+    console.pairs([("ollama", f"{client.model} at {client.url}"), ("source", source)])
+    try:
+        result = adversarial_correction(
+            model, client, count=args.count, prefix=args.prefix, max_length=args.max_length,
+            temperature=args.temperature, texts=texts, context=args.context, ollama_model=client.model,
+            seed=args.seed,
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    console.say()
+    rows = [
+        [
+            c["verdict"], quote(clip(c["text"], 40)),
+            quote(clip(c["correction"], 40)) if c["correction"] is not None else "-",
+            c["reason"] or "-", _changes_of(c["changes"]),
+        ]
+        for c in result["corrections"]
+    ]
+    console.table(("verdict", "text", "correction", "reason", "changes"), rows)
+    console.say()
+    console.say(
+        f"{len(result['corrections'])} texts: {len(result['corrected'])} corrected ({result['edits']} change(s), "
+        f"{result['wrong_chars']} wrong character(s)), {len(result['unchanged'])} unchanged, "
+        f"{len(result['uncorrected'])} uncorrected; change rate {fmt(result['change_rate'])}"
+    )
+    doc: dict[str, Any] = dict(result)
+    doc["negative"] = None
+    if args.blame:
+        from . import blame
+
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.say()
+        console.pairs([
+            ("negative model", neg_origin.describe()),
+            ("blaming", f"the changed characters of {len(result['corrected'])} corrected texts"),
+            ("severity", args.severity),
+        ])
+        report = blame.teach_corrections(negative, result, severity=args.severity, source="correction")
+        console.say(
+            f"blamed {report['blamed']} texts over {report['edges']} edges ({report['edits']} changed unit(s)), "
+            f"cleared {report['cleared']} of {report['passed']} unchanged"
+        )
+        doc["negative"] = {
+            "blamed": report["blamed"], "cleared": report["cleared"], "edges": report["edges"],
+            "edits": report["edits"], "reasons": report["reasons"], "lessons": report["faults"],
+            **_save_negative(console, negative, negative_path(args)),
+        }
+    return doc
+
+
+def _changes_of(changes: list[dict], limit: int = 4) -> str:
+    """``"e" -> "", "??" -> "?"`` - the edits of one correction, for a table cell."""
+    parts = [f"{quote(e['wrong'])} -> {quote(e['right'])}" for e in changes[:limit]]
+    if len(changes) > limit:
+        parts.append(f"+{len(changes) - limit}")
+    return ", ".join(parts) or "-"
+
+
 def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     from .ollama import OllamaError, adversarial_review
 
@@ -3308,7 +3439,7 @@ def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
         )
         doc["negative"] = {
             "blamed": report["blamed"], "cleared": report["cleared"], "edges": report["edges"],
-            "reasons": report["reasons"], "lessons": report["lessons"],
+            "reasons": report["reasons"], "lessons": report["faults"],
             **_save_negative(console, negative, negative_path(args)),
         }
     if args.apply_two_nrl:
@@ -4367,6 +4498,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--spans", type=nonneg_int, default=3, help="blamed fragments per verdict")
     a.add_argument("--learn", action="store_true",
                    help="blame what the filter rejects (off by default: the tutor supplies the negatives)")
+    a.add_argument("--no-provenance", action="store_true",
+                   help="report the decisions alone: no risk, no reasons, no blamed fragments behind a veto")
     _add_negative_option(a, top_level=False)
     a.set_defaults(handler=cmd_negative_filter)
 
@@ -4378,8 +4511,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "below the pass mark blames the negative network - the critique picks the reason, the mark\n"
                     "sets the severity - while the texts it passed take blame off what they share with known\n"
                     "failures.  Then it goes round again.  --rounds 0 keeps going until Ctrl-C, which finishes\n"
-                    "the round it is in and saves.  The positive model is only read from: nothing here trains,\n"
-                    "rewards or inverts it.",
+                    "the round it is in and saves.  With --correct the LLM is a copy editor instead of a critic:\n"
+                    "it writes each text out correctly changing as little as it can, and only the characters it\n"
+                    "changed are blamed.  The positive model is only read from: nothing here trains, rewards or\n"
+                    "inverts it.",
         formatter_class=_HelpFormatter,
     )
     a.add_argument("--rounds", type=nonneg_int, default=3, help="rounds to run (0: until Ctrl-C)")
@@ -4399,6 +4534,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--epochs", type=nonneg_int, default=1, help="blame epochs per round")
     a.add_argument("--no-clear", action="store_true",
                    help="do not let the texts it passed take blame off what they share")
+    a.add_argument("--correct", action="store_true",
+                   help="ask for letter-level corrections instead of marks: the LLM writes each text out correctly "
+                        "changing as little as it can, and only the characters it changed are blamed (the texts it "
+                        "handed back unchanged clear blame); no pass mark applies")
+    a.add_argument("--severity", type=nonneg_float, default=1.0, metavar="BLAME",
+                   help="blame per corrected text with --correct (1 = one ordinary failure)")
     a.add_argument("--out", metavar="PATH", help="where to save the negative network (default: --negative)")
     _add_negative_option(a, top_level=False)
     a.set_defaults(handler=cmd_negative_auto)
@@ -4812,11 +4953,12 @@ def build_parser() -> argparse.ArgumentParser:
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
 
     p = command(
-        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review",
+        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review, correction",
         "Talk to an Ollama server (https://ollama.com).  `corpus` turns a prompt into training lines, correct\n"
         "or deliberately garbage (the two halves of 2NRL), and can train on them; `review` lets the LLM\n"
         "adversarially rate the network's own samples (or given texts) from 0 to 10 and, with --2nrl,\n"
-        "feeds the failed ones back as garbage and the passed ones as correct data.\n"
+        "feeds the failed ones back as garbage and the passed ones as correct data; `correct` lets it write\n"
+        "the samples out correctly, letter by letter, and with --blame the diff teaches the negative network.\n"
         f"Usage: {PROG} [global options] ollama [--url URL] [--ollama-model NAME] <action> [options]",
     )
     p.add_argument("--url", metavar="URL", help=f"Ollama base URL (default: $OLLAMA_HOST or {ollama_default_url})")
@@ -4876,6 +5018,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_two_nrl_options(a, neg_epochs=3, pos_epochs=3, batch_size=4)
     a.add_argument("--out", metavar="PATH", help="where to save the model after --2nrl (default: --model)")
     a.set_defaults(handler=cmd_ollama_review)
+
+    a = actions.add_parser(
+        "correct", help="letter-level LLM correction of the network's output; the diff teaches the negative network",
+        description="The LLM plays the copy editor: every sample the network generates (or every given text) is\n"
+                    "written out correctly with as few characters changed as possible, and the diff between the\n"
+                    "two says which characters were the mistake - \"Hi howe are you??\" against \"Hi, how are\n"
+                    "you?\" is the e and the second ?, not the sentence.  With --blame only those characters are\n"
+                    "blamed in the negative network (the editor's word for the mistake is the reason) and the texts\n"
+                    "it handed back unchanged clear blame.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--count", type=pos_int, default=8, help="samples to draw from the model")
+    a.add_argument("--prefix", default="", metavar="TEXT", help="continue this prefix instead of generating from scratch")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per sample")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature")
+    a.add_argument("--text", action="append", metavar="TEXT", help="correct this text instead of sampling (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="correct the texts of FILE (one per line) instead of sampling")
+    a.add_argument("--context", metavar="TEXT", help="extra context for the editor (e.g. what the model was trained on)")
+    a.add_argument("--blame", action="store_true",
+                   help="teach the negative network: blame only the characters the editor changed, under its reason, "
+                        "and let the unchanged texts clear blame")
+    a.add_argument("--severity", type=nonneg_float, default=1.0, metavar="BLAME",
+                   help="blame per corrected text with --blame (1 = one ordinary failure)")
+    a.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    a.set_defaults(handler=cmd_ollama_correct)
 
     # serve ----------------------------------------------------------------
     p = command(

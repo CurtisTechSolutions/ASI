@@ -96,7 +96,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         rust-build rust-test rust-parity bench-compare train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
-        frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
+        frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-correct ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         speech-info speech-teach speech-listen speech-tutor speech-decode \
         tools agent explore explore-forever mcp \
@@ -372,6 +372,9 @@ ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pa
 
 ollama-blame: ## Review COUNT samples and teach the negative network why the failures failed (critique -> reason)
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --blame --negative $(NEGATIVE)
+
+ollama-correct: ## Copy-edit COUNT samples letter by letter and blame only the characters Ollama changed (SEVERITY per corrected text)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) correct --count $(COUNT) --max-length $(MAX_LENGTH) --blame --severity $(SEVERITY) --negative $(NEGATIVE)
 
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
