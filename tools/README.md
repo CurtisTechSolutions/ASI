@@ -6,7 +6,7 @@ runs straight out of a checkout with nothing to install.
 
 | file | what it is |
 |---|---|
-| `gutenberg_download.py` | plain-text books from [Project Gutenberg](https://www.gutenberg.org/), chosen by language, author, title, subject, bookshelf, Library of Congress class, release date or the authors' lifetimes |
+| `gutenberg_download.py` | plain-text books from [Project Gutenberg](https://www.gutenberg.org/) - by default the 100 most downloaded in English - chosen by language, author, title, subject, bookshelf, Library of Congress class, release date or the authors' lifetimes |
 | `wikipedia_download.py` | all of Wikipedia from the official dumps (resumable, checksummed) turned into plain text, or chosen articles through the API |
 | `common.py` | what the two share: a polite HTTP client, word matching, safe file names, atomic writes, manifests |
 | `tests/` | the tests - offline, a couple of seconds |
@@ -17,14 +17,22 @@ came from, a SHA-256 - so a corpus built with them can be checked and rebuilt.
 ## gutenberg_download.py
 
 ```bash
-python3 tools/gutenberg_download.py --facet bookshelf -l en             # what is there to filter on?
-python3 tools/gutenberg_download.py -l en -b "science fiction" --list   # what would I get?
-python3 tools/gutenberg_download.py -l en -b "science fiction" -n 20    # get twenty of them
+python3 tools/gutenberg_download.py                                   # the top 100 books in English
+python3 tools/gutenberg_download.py --list                            # ...shown, not downloaded
+python3 tools/gutenberg_download.py --facet bookshelf                 # what is there to filter on?
+python3 tools/gutenberg_download.py -b "science fiction" -n 20        # the 20 most popular science fiction books
 python3 tools/gutenberg_download.py -a "jane austen" --strip -o austen  # her books, without the licence
-python3 tools/gutenberg_download.py -l de --author-alive-to 1900 --sort random --seed 7 -n 100
+python3 tools/gutenberg_download.py -l de --author-alive-to 1900 --sort random --seed 7
 ```
 
-Choosing books asks nothing of the site: the filters run over Project
+With no options it downloads the 100 most downloaded books in English. Those
+are only defaults - `--language en`, `--sort popular` and `--limit 100` - and
+each gives way to what you ask: `-l fr` or `-l any` for other languages,
+`--sort id` for catalog order, `-n 20` or `-n 0` (no limit, which needs a
+filter). `--ids` names books exactly, so neither the language nor the limit is
+applied to it.
+
+Choosing books asks little of the site: the filters run over Project
 Gutenberg's own catalog, `pg_catalog.csv`, which is downloaded once and cached
 for a week (`--cache-dir`, default `~/.cache/gutenberg_download`; `--refresh`
 to fetch it again, `--catalog` to use a copy of your own).
@@ -54,13 +62,22 @@ must all hold. `--facet FIELD` counts the values of `language`, `author`,
 `subject`, `bookshelf`, `locc` or `type` among the matching books, which is how
 to find out what to type.
 
-The catalog carries no download counts, so "the most popular" is not something
-these filters can select.
+### Popular
+
+The catalog carries no download counts, so the popularity order comes from
+Project Gutenberg's [Top 100 page](https://www.gutenberg.org/browse/scores/top),
+fetched at most once a day: its list for the last 30 days leads, and the books
+only on the lists for the last 7 days and yesterday follow, which leaves more
+than a hundred English books to rank. Books on none of the lists come after
+them in catalog order - so with a filter, `popular` puts that filter's
+best-known books first and says how many of them were ranked. A fetched book's
+place in the ranking is kept in the manifest as `popularity_rank`.
 
 ### What you get
 
-`--sort id|title|author|released|random` picks the order (`--seed` makes a
-random sample repeatable) and `-n` stops once that many books are on disk.
+`--sort popular|id|title|author|released|random` picks the order (`--seed`
+makes a random sample repeatable) and `-n` stops once that many books are on
+disk.
 Each book is saved as `<id>-<title>.txt` - `--name-format` takes `{id}`,
 `{title}`, `{author}` and `{language}`, `/` for folders, and must keep `{id}` -
 as UTF-8 with `\n` line endings, whatever it was published in. `--strip` cuts
@@ -83,7 +100,7 @@ Requests go one at a time, `--delay` 2 seconds apart (their own example is
 stops the run at once rather than knock again. For thousands of books use
 `--mirror` (see [the list](https://www.gutenberg.org/MIRRORS.ALL)); for the whole
 collection, [mirror it](https://www.gutenberg.org/help/mirroring.html) - the tool
-will not download the whole catalog without a filter or `-n`.
+will not lift the limit (`-n 0`) without a filter.
 
 ## wikipedia_download.py
 

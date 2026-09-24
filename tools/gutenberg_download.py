@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """Download plain-text books from Project Gutenberg, chosen by filters.
 
-    python3 tools/gutenberg_download.py --facet bookshelf --language fr
-    python3 tools/gutenberg_download.py -l en -b "science fiction" --list
-    python3 tools/gutenberg_download.py -l en -b "science fiction" -n 20
+    python3 tools/gutenberg_download.py                          the top 100 books in English
+    python3 tools/gutenberg_download.py --facet bookshelf -l fr
+    python3 tools/gutenberg_download.py -b "science fiction" --list
+    python3 tools/gutenberg_download.py -b "science fiction" -n 20
     python3 tools/gutenberg_download.py -a "jane austen" --strip -o austen
 
-Choosing books asks nothing of the site: the filters run over Project
-Gutenberg's own catalog (``pg_catalog.csv``), which is downloaded once and
-cached for a week. Only the books themselves are fetched - one at a time,
-``--delay`` seconds apart, which is what the site asks of automated clients.
+With no options it downloads the 100 most downloaded books in English. The
+defaults are ``--language en``, ``--sort popular`` and ``--limit 100``, and any
+of them can be changed - ``-l any``, ``--sort id``, ``-n 0`` for no limit.
+
+Choosing books asks little of the site: the filters run over Project
+Gutenberg's own catalog (``pg_catalog.csv``), downloaded once and cached for a
+week, and the popularity order comes from its Top 100 page, fetched at most
+once a day. Only the books themselves are fetched - one at a time, ``--delay``
+seconds apart, which is what the site asks of automated clients.
 
 Every book is saved as UTF-8 with ``\\n`` line endings, whatever it was
 published in; ``--strip`` also cuts off Project Gutenberg's header and licence.
@@ -73,7 +79,17 @@ CATALOG_URLS = (
 CATALOG_MAX_AGE = 7 * 24 * 3600
 """Seconds a cached catalog is used before a fresh one is fetched."""
 
+TOP_URL = f"{SITE}/browse/scores/top"
+"""Project Gutenberg's Top 100: the most downloaded books yesterday, last week and last month."""
+TOP_LISTS = ("books-last30", "books-last7", "books-last1")
+"""The page's book lists, in the order they rank: the month leads, the shorter spans fill in."""
+TOP_MAX_AGE = 24 * 3600
+"""The lists change daily; a cached copy is used for a day."""
+
 USER_AGENT = f"gutenberg_download/{__version__} (Python urllib)"
+DEFAULT_LANGUAGE = "en"
+DEFAULT_LIMIT = 100
+DEFAULT_SORT = "popular"
 DEFAULT_OUTPUT = "gutenberg_books"
 DEFAULT_NAME = "{id}-{title}"
 DEFAULT_DELAY = 2.0
@@ -84,7 +100,7 @@ MANIFEST = "manifest.jsonl"
 FAILURES_BEFORE_STOPPING = 3
 """Books in a row that may fail before a run stops knocking."""
 
-SORTS = ("id", "title", "author", "released", "random")
+SORTS = ("popular", "id", "title", "author", "released", "random")
 FACETS = ("language", "author", "subject", "bookshelf", "locc", "type")
 NAME_FIELDS = ("id", "title", "author", "language")
 
@@ -332,6 +348,75 @@ def ensure_catalog(
     raise CatalogError(f"could not download the catalog: {problem}")
 
 
+_BOOK_LINK = re.compile(r'href="(?:https?://www\.gutenberg\.org)?/ebooks/(\d+)"')
+
+
+def parse_top(page: str) -> list[int]:
+    """The book numbers on Project Gutenberg's Top 100 page, most downloaded first.
+
+    The page ranks the books most downloaded over the last 30 days, the last 7
+    and yesterday. The 30-day list leads, being the steadiest, and books only on
+    the shorter lists follow it - so that a filter such as English, which drops
+    a few, still leaves a hundred to choose from. If the lists cannot be found,
+    the page's book links are taken in the order they appear.
+    """
+    ranking: list[int] = []
+    for anchor in TOP_LISTS:
+        heading = re.search(rf'(?:id|name)="{anchor}"', page)
+        listing = re.search(r"<ol\b.*?</ol>", page[heading.end() :], re.DOTALL | re.IGNORECASE) if heading else None
+        if listing:
+            ranking += [int(number) for number in _BOOK_LINK.findall(listing.group())]
+    if not ranking:
+        ranking = [int(number) for number in _BOOK_LINK.findall(page)]
+    return list(dict.fromkeys(ranking))
+
+
+def _read_ranking(path: str) -> list[int]:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return parse_top(fh.read())
+
+
+def ensure_ranking(
+    fetcher: Fetcher,
+    cache_dir: str,
+    *,
+    refresh: bool = False,
+    max_age: float = TOP_MAX_AGE,
+    log: Callable[[str], None] = lambda message: None,
+    warn: Callable[[str], None] = lambda message: None,
+    now: Callable[[], float] = time.time,
+) -> list[int]:
+    """Project Gutenberg's popularity ranking, from its Top 100 page, cached for a day.
+
+    The catalog has no download counts, so this page is the only place the
+    order comes from. A failed download falls back to the cached page with a
+    warning; with nothing cached it is an error, since "the most downloaded"
+    cannot be guessed.
+    """
+    path = os.path.join(cache_dir, "top100.html")
+    cached = os.path.isfile(path)
+    if cached and not refresh and now() - os.path.getmtime(path) < max_age:
+        return _read_ranking(path)
+    log(f"downloading the Top 100: {TOP_URL}")
+    problem: object
+    try:
+        data = fetcher.get(TOP_URL)
+    except FetchError as exc:
+        problem = exc
+    else:
+        ranking = parse_top(data.decode("utf-8", "replace"))
+        if ranking:
+            os.makedirs(cache_dir, exist_ok=True)
+            write_atomic(path, data)
+            return ranking
+        problem = f"{TOP_URL} lists no books"
+    if cached:
+        day = datetime.date.fromtimestamp(os.path.getmtime(path)).isoformat()
+        warn(f"warning: could not download the Top 100 ({problem}); using the one from {day}")
+        return _read_ranking(path)
+    raise CatalogError(f"could not download Project Gutenberg's Top 100 ({problem}); --sort id works without it")
+
+
 # ---------------------------------------------------------------------------
 # filters
 # ---------------------------------------------------------------------------
@@ -476,10 +561,11 @@ def filters_from_args(args: argparse.Namespace) -> Filters:
     if args.author_alive_from is not None and args.author_alive_to is not None:
         if args.author_alive_from > args.author_alive_to:
             raise ValueError("--author-alive-from is after --author-alive-to")
+    languages = {code.lower() for spec in args.language or () for code in _split(spec, ",;")}
     return Filters(
         ids=tuple(r for spec in args.ids or () for r in parse_ids(spec)),
         types=frozenset() if "any" in types else frozenset(types),
-        languages=frozenset(code.lower() for spec in args.language or () for code in _split(spec, ",;")),
+        languages=frozenset() if "any" in languages else frozenset(languages),
         locc=tuple(code.upper() for spec in args.locc or () for code in _split(spec, ",;")),
         released_from=released_from,
         released_to=released_to,
@@ -496,9 +582,39 @@ def filters_from_args(args: argparse.Namespace) -> Filters:
     )
 
 
-def sort_books(books: Iterable[Book], key: str = "id", *, reverse: bool = False, seed: int | None = None) -> list[Book]:
-    """``books`` in the order asked for. Books without the sort field go last, in number order."""
+def apply_defaults(args: argparse.Namespace, filters: Filters) -> Filters:
+    """Fill in what was not asked for: books in English, a hundred of them.
+
+    ``--limit 0`` means no limit. Naming books with ``--ids`` chooses them
+    exactly, so neither default applies there.
+    """
+    exact = bool(filters.ids)
+    if args.limit is None:
+        args.limit = None if exact else DEFAULT_LIMIT
+    elif args.limit == 0:
+        args.limit = None
+    if args.language is None and not exact:
+        return dataclasses.replace(filters, languages=frozenset({DEFAULT_LANGUAGE}))
+    return filters
+
+
+def sort_books(
+    books: Iterable[Book],
+    key: str = "id",
+    *,
+    reverse: bool = False,
+    seed: int | None = None,
+    ranking: Sequence[int] = (),
+) -> list[Book]:
+    """``books`` in the order asked for. Books without the sort field go last, in number order.
+
+    ``popular`` follows ``ranking``, the book numbers of :func:`ensure_ranking`.
+    """
     ordered = sorted(books, key=lambda b: b.id)
+    if key == "popular":
+        place = {number: index for index, number in enumerate(ranking)}
+        ranked = sorted((b for b in ordered if b.id in place), key=lambda b: place[b.id], reverse=reverse)
+        return ranked + [b for b in ordered if b.id not in place]
     if key == "random":
         random.Random(seed).shuffle(ordered)
     elif key != "id":
@@ -725,6 +841,7 @@ class Downloader:
         strip: bool = False,
         overwrite: bool = False,
         mirror: str | None = None,
+        ranking: Sequence[int] = (),
         log: Callable[[str], None] = print,
     ):
         self.fetcher = fetcher
@@ -733,6 +850,7 @@ class Downloader:
         self.strip = strip
         self.overwrite = overwrite
         self.mirror = mirror
+        self.ranks = {number: place for place, number in enumerate(ranking, 1)}
         self.log = log
         self.results: list[Result] = []
 
@@ -788,19 +906,20 @@ class Downloader:
         body = text.encode("utf-8")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         write_atomic(path, body)
-        manifest.add(
-            {
-                **book.metadata(),
-                "file": relative.replace(os.sep, "/"),
-                "url": url,
-                "encoding": encoding,
-                "stripped": stripped,
-                "chars": len(text),
-                "bytes": len(body),
-                "sha256": hashlib.sha256(body).hexdigest(),
-                "downloaded": utc_now(),
-            }
-        )
+        entry = {
+            **book.metadata(),
+            "file": relative.replace(os.sep, "/"),
+            "url": url,
+            "encoding": encoding,
+            "stripped": stripped,
+            "chars": len(text),
+            "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "downloaded": utc_now(),
+        }
+        if book.id in self.ranks:  # its place in the Top 100 lists on the day it was fetched
+            entry["popularity_rank"] = self.ranks[book.id]
+        manifest.add(entry)
         detail = human_bytes(len(body))
         if self.strip and not stripped:
             detail += ", no Gutenberg header found so kept whole"
@@ -840,6 +959,11 @@ def print_list(books: Sequence[Book], out: TextIO | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 EPILOG = """\
+With no options: the 100 most downloaded books in English. The defaults are
+--language en --sort popular --limit 100; change any of them (-l any for every
+language, -n 0 for no limit). --ids names books exactly, so the language and
+the limit are not applied to it.
+
 Text filters ignore case and accents and match words: every word you give must
 begin a word of the field, in any order - so --author "austen jane" finds
 "Austen, Jane, 1775-1817" and --subject detect finds "Detective and mystery
@@ -847,15 +971,18 @@ stories". Repeat an option to accept any of several values; different options
 must all match. --regex makes the text filters regular expressions instead.
 
 examples:
-  %(prog)s --facet bookshelf --language en        what is there to filter on?
-  %(prog)s -l en -b "science fiction" --list       what would I get?
-  %(prog)s -l en -b "science fiction" -n 20        get twenty of them
-  %(prog)s -a "jane austen" --strip -o austen      her books, without the licence
-  %(prog)s -l de --author-alive-to 1900 --sort random --seed 7 -n 100
+  %(prog)s                                        the top 100 books in English
+  %(prog)s --list                                 ...shown, not downloaded
+  %(prog)s --facet bookshelf                      what is there to filter on?
+  %(prog)s -b "science fiction" -n 20             the 20 most popular sci-fi books
+  %(prog)s -a "jane austen" --strip -o austen     her books, without the licence
+  %(prog)s -l de --author-alive-to 1900 --sort random --seed 7
 
-The catalog is downloaded once and cached for a week (--cache-dir). Books are
-fetched one at a time, --delay seconds apart, as Project Gutenberg asks of
-robots; for big jobs use a mirror (--mirror; see
+"Popular" is the order of Project Gutenberg's Top 100 lists (the last 30 days,
+then the last 7, then yesterday), fetched once a day; the books on none of them
+follow in catalog order. The catalog is downloaded once and cached for a week
+(--cache-dir). Books are fetched one at a time, --delay seconds apart, as
+Project Gutenberg asks of robots; for big jobs use a mirror (--mirror; see
 https://www.gutenberg.org/MIRRORS.ALL).
 """
 
@@ -863,14 +990,16 @@ https://www.gutenberg.org/MIRRORS.ALL).
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gutenberg_download.py",
-        description="Download plain-text books from Project Gutenberg, chosen by filters.",
+        description="Download plain-text books from Project Gutenberg, chosen by filters - by default the top 100 in English.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     pick = parser.add_argument_group("filters")
-    pick.add_argument("-l", "--language", action="append", metavar="CODE", help="language code: en, fr, de, ... (commas allowed)")
+    pick.add_argument(
+        "-l", "--language", action="append", metavar="CODE", help="language code (default: en): fr, de, ... commas allowed; 'any' for all"
+    )
     pick.add_argument("-a", "--author", action="append", metavar="TEXT", help="an author, translator, editor or illustrator")
     pick.add_argument("-t", "--title", action="append", metavar="TEXT", help="words of the title")
     pick.add_argument("-s", "--subject", action="append", metavar="TEXT", help="a Library of Congress subject heading")
@@ -889,10 +1018,14 @@ def build_parser() -> argparse.ArgumentParser:
     pick.add_argument("--regex", action="store_true", help="text filters are regular expressions, not words")
 
     order = parser.add_argument_group("choosing")
-    order.add_argument("--sort", choices=SORTS, default="id", help="order to take books in (default: id)")
+    order.add_argument(
+        "--sort", choices=SORTS, default=DEFAULT_SORT, help="order to take books in (default: popular, most downloaded first)"
+    )
     order.add_argument("--reverse", action="store_true", help="reverse that order")
     order.add_argument("--seed", type=int, help="seed for --sort random, to get the same books again")
-    order.add_argument("-n", "--limit", type=at_least(1), metavar="N", help="stop once N books are on disk (or list N)")
+    order.add_argument(
+        "-n", "--limit", type=at_least(0), metavar="N", help=f"stop once N books are on disk, or list N (default: {DEFAULT_LIMIT}; 0: no limit)"
+    )
 
     mode = parser.add_argument_group("instead of downloading").add_mutually_exclusive_group()
     mode.add_argument("--list", action="store_true", help="show the matching books and download nothing")
@@ -916,8 +1049,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     catalog = parser.add_argument_group("catalog")
     catalog.add_argument("--catalog", metavar="FILE|URL", help="use this pg_catalog.csv[.gz] instead of the cached official one")
-    catalog.add_argument("--cache-dir", default=default_cache_dir(), metavar="DIR", help="where the catalog is cached (default: %(default)s)")
-    catalog.add_argument("--refresh", action="store_true", help="download the catalog again even if the cached one is recent")
+    catalog.add_argument(
+        "--cache-dir", default=default_cache_dir(), metavar="DIR", help="where the catalog and the Top 100 are cached (default: %(default)s)"
+    )
+    catalog.add_argument("--refresh", action="store_true", help="download the catalog and the Top 100 again, however recent")
     return parser
 
 
@@ -931,11 +1066,7 @@ def _catalog_path(args: argparse.Namespace, fetcher: Fetcher, note: Callable[[st
 def main(argv: Sequence[str] | None = None, *, opener: Any = None, sleep: Callable[[float], None] = time.sleep) -> int:
     """Run the command line; returns the exit status. ``opener`` and ``sleep`` are for tests."""
     parser = build_parser()
-    argv = sys.argv[1:] if argv is None else list(argv)
-    if not argv:
-        parser.print_help()
-        return 0
-    args = parser.parse_args(argv)
+    args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
     try:
         filters = filters_from_args(args)
         check_name_format(args.name_format)
@@ -943,12 +1074,13 @@ def main(argv: Sequence[str] | None = None, *, opener: Any = None, sleep: Callab
             raise ValueError("--mirror must be an http:// or https:// URL")
     except ValueError as exc:
         parser.error(str(exc))
-    if not (args.list or args.facet) and not filters.narrows and args.limit is None:
+    if not (args.list or args.facet) and args.limit == 0 and not filters.narrows:
         parser.error(
-            "no filters given, and that is the whole catalog - some 70,000 books. Add a filter or "
-            "--limit (--list shows what would match). To copy everything, mirror the collection: "
+            "-n 0 lifts the limit, and with no filter that is tens of thousands of books. Add a filter "
+            "or a limit (--list shows what would match). To copy everything, mirror the collection: "
             "https://www.gutenberg.org/help/mirroring.html"
         )
+    filters = apply_defaults(args, filters)
 
     note = printer(sys.stderr, quiet=args.quiet)
     fetcher = Fetcher(
@@ -975,18 +1107,25 @@ def main(argv: Sequence[str] | None = None, *, opener: Any = None, sleep: Callab
             for value, count in rows[: args.limit] if args.limit else rows:
                 print(f"{count:>7}  {value}")
             return 0
+        if not args.list:
+            note(found)
+            if not matches:
+                return 0
         seed = args.seed
         if args.sort == "random" and seed is None:
             seed = random.randrange(1 << 32)
             note(f"random order, seed {seed} (pass --seed {seed} to get the same order again)")
-        matches = sort_books(matches, args.sort, reverse=args.reverse, seed=seed)
+        ranking: list[int] = []
+        if args.sort == "popular" and matches:
+            ranking = ensure_ranking(fetcher, args.cache_dir, refresh=args.refresh, log=note, warn=printer(sys.stderr))
+            ranked = len(set(ranking).intersection(book.id for book in matches))
+            if ranked < min(args.limit or len(matches), len(matches)):
+                note(f"{ranked:,} of the {len(matches):,} matching books are on the Top 100 lists; the rest follow in catalog order")
+        matches = sort_books(matches, args.sort, reverse=args.reverse, seed=seed, ranking=ranking)
         if args.list:
             shown = matches[: args.limit] if args.limit else matches
             print_list(shown)
             note(found + (f"; showing {len(shown):,}" if len(shown) < len(matches) else ""))
-            return 0
-        note(found)
-        if not matches:
             return 0
         downloader = Downloader(
             fetcher,
@@ -995,6 +1134,7 @@ def main(argv: Sequence[str] | None = None, *, opener: Any = None, sleep: Callab
             strip=args.strip,
             overwrite=args.overwrite,
             mirror=args.mirror,
+            ranking=ranking,
             log=printer(sys.stdout, quiet=args.quiet),
         )
         downloader.run(matches, args.limit)

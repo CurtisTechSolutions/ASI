@@ -14,10 +14,12 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,6 +59,47 @@ def modern(title: str, body: str = BODY) -> str:
         + f"\r\n\r\n\r\n*** END OF THE PROJECT GUTENBERG EBOOK {title.upper()} ***\r\n\r\n"
         "Updated editions will replace the previous one--the old editions will\r\nbe renamed.\r\n"
     )
+
+
+TOP_HTML = """\
+<!DOCTYPE html>
+<html lang="en"><head><title>Top 100 | Project Gutenberg</title></head><body>
+<div class="page_content">
+<h1>Top 100 EBooks</h1>
+<ul>
+<li><a href="#books-last1">Top 100 EBooks yesterday</a></li>
+<li><a href="#authors-last1">Top 100 Authors yesterday</a></li>
+<li><a href="#books-last7">Top 100 EBooks last 7 days</a></li>
+<li><a href="#books-last30">Top 100 EBooks last 30 days</a></li>
+</ul>
+<h2 id="books-last1">Top 100 EBooks yesterday</h2>
+<ol>
+<li><a href="/ebooks/70000">A Reader in Two Languages by Geoffrey Chaucer (901)</a></li>
+<li><a href="/ebooks/84">Frankenstein; Or, The Modern Prometheus by Mary Wollstonecraft Shelley (870)</a></li>
+</ol>
+<h2 id="authors-last1">Top 100 Authors yesterday</h2>
+<ol>
+<li><a href="/ebooks/author/61">Mary Wollstonecraft Shelley (1234)</a></li>
+</ol>
+<h2 id="books-last7">Top 100 EBooks last 7 days</h2>
+<ol>
+<li><a href="/ebooks/84">Frankenstein; Or, The Modern Prometheus by Mary Wollstonecraft Shelley (6021)</a></li>
+<li><a href="/ebooks/2600">War and Peace by graf Leo Tolstoy (5800)</a></li>
+<li><a href="/ebooks/1342">Pride and Prejudice by Jane Austen (5100)</a></li>
+</ol>
+<h2 id="books-last30">Top 100 EBooks last 30 days</h2>
+<ol>
+<li><a href="/ebooks/1342">Pride and Prejudice by Jane Austen (40210)</a></li>
+<li><a href="/ebooks/84">Frankenstein; Or, The Modern Prometheus by Mary Wollstonecraft Shelley (39000)</a></li>
+<li><a href="/ebooks/2000">Don Quijote by Miguel de Cervantes Saavedra (21000)</a></li>
+<li><a href="/ebooks/6130">The Iliad by Homer (20500)</a></li>
+</ol>
+</div></body></html>
+"""
+"""Project Gutenberg's Top 100 page, cut down to the fixture books."""
+
+RANKING = [1342, 84, 2000, 6130, 2600, 70000]
+"""TOP_HTML's order: the 30-day list, then the 7-day list's newcomers, then yesterday's."""
 
 
 def pg(number: int) -> str:
@@ -275,6 +318,68 @@ class TestSorting(unittest.TestCase):
         self.assertEqual(sorted(first), self.ids("id"))
         self.assertNotEqual(first, self.ids("random", seed=8))
 
+    def test_popular_follows_the_ranking_then_the_catalog(self):
+        unranked = [10, 1260, 17989, 19033]
+        self.assertEqual(self.ids("popular", ranking=RANKING), RANKING + unranked)
+        self.assertEqual(self.ids("popular", ranking=RANKING, reverse=True), RANKING[::-1] + unranked)
+        self.assertEqual(self.ids("popular"), self.ids("id"))  # no ranking: catalog order
+
+
+class TestTop100(unittest.TestCase):
+    def test_the_month_leads_and_the_shorter_lists_fill_in(self):
+        self.assertEqual(gd.parse_top(TOP_HTML), RANKING)  # and author links are not books
+
+    def test_a_page_whose_lists_cannot_be_found_still_yields_its_books_in_order(self):
+        page = '<p><a href="/ebooks/5">a</a> <a href="https://www.gutenberg.org/ebooks/7">b</a> <a href="/ebooks/5">c</a></p>'
+        self.assertEqual(gd.parse_top(page), [5, 7])
+        self.assertEqual(gd.parse_top("<html>Service unavailable</html>"), [])
+
+
+class TestTop100Cache(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cache = self._tmp.name
+        self.path = os.path.join(self.cache, "top100.html")
+        self.warnings = []
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def ensure(self, site, **options):
+        clock = FakeClock()
+        fetcher = Fetcher("t", delay=0, retries=0, opener=site, sleep=clock.sleep, clock=clock)
+        return gd.ensure_ranking(fetcher, self.cache, warn=self.warnings.append, **options)
+
+    def cached(self, page=TOP_HTML, age=0.0):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(page)
+        os.utime(self.path, (time.time() - age, time.time() - age))
+
+    def test_it_is_downloaded_and_kept_for_a_day(self):
+        site = FakeSite({gd.TOP_URL: TOP_HTML.encode()})
+        self.assertEqual(self.ensure(site), RANKING)
+        self.assertEqual(self.ensure(site), RANKING)
+        self.assertEqual(site.requests, [gd.TOP_URL])
+        self.assertEqual(self.ensure(site, refresh=True), RANKING)
+        self.assertEqual(len(site.requests), 2)
+
+    def test_a_stale_copy_is_replaced(self):
+        self.cached('<ol><li><a href="/ebooks/9">old</a></li></ol>', age=2 * 24 * 3600)
+        self.assertEqual(self.ensure(FakeSite({gd.TOP_URL: TOP_HTML.encode()})), RANKING)
+
+    def test_a_stale_copy_beats_no_ranking_at_all(self):
+        self.cached(age=2 * 24 * 3600)
+        self.assertEqual(self.ensure(FakeSite({gd.TOP_URL: http_error(gd.TOP_URL, 503)})), RANKING)
+        self.assertIn("using the one from", self.warnings[0])
+
+    def test_without_it_popularity_cannot_be_guessed(self):
+        with self.assertRaises(gd.CatalogError) as caught:
+            self.ensure(FakeSite({gd.TOP_URL: http_error(gd.TOP_URL, 503)}))
+        self.assertIn("--sort id", str(caught.exception))
+        with self.assertRaises(gd.CatalogError):
+            self.ensure(FakeSite({gd.TOP_URL: b"<html>Please try again later</html>"}))
+        self.assertFalse(os.path.exists(self.path))
+
 
 class TestStripping(unittest.TestCase):
     def test_todays_header_and_licence_come_off(self):
@@ -422,11 +527,17 @@ class CommandLineCase(unittest.TestCase):
                 pg(1342): modern("Pride and Prejudice").encode("utf-8"),
                 uploaded(1260): "Jane Eyre by Charlotte Brontë\n".encode("utf-8"),
                 pg(6130): http_error(pg(6130), 500),
+                gd.TOP_URL: TOP_HTML.encode("utf-8"),
             }
         )
 
     def tearDown(self):
         self._tmp.cleanup()
+
+    def books_asked_for(self, site=None):
+        """The numbers of the books whose text was requested, in order."""
+        found = (re.search(r"/cache/epub/(\d+)/pg", url) for url in (site or self.site).requests)
+        return [int(match.group(1)) for match in found if match]
 
     def run_cli(self, *argv, catalog=True, site=None):
         """Run the command line against the fake site: ``(exit status, stdout, stderr)``."""
@@ -458,6 +569,7 @@ class TestDownloading(CommandLineCase):
         self.assertEqual((entry["id"], entry["file"], entry["url"], entry["stripped"]), (84, name, pg(84), True))
         self.assertEqual(entry["sha256"], hashlib.sha256(data).hexdigest())
         self.assertEqual(entry["authors"], ["Shelley, Mary Wollstonecraft, 1797-1851"])
+        self.assertEqual(entry["popularity_rank"], 2)
         self.assertIn("1 saved", out)
 
     def test_without_strip_the_whole_file_is_kept(self):
@@ -487,7 +599,7 @@ class TestDownloading(CommandLineCase):
 
     def test_the_limit_counts_books_on_disk_not_books_tried(self):
         """War and Peace has no text here, so Pride and Prejudice takes its place; Frankenstein is never asked for."""
-        code, out, _ = self.run_cli("--ids", "84,1342,2600", "--reverse", "-n", "1")
+        code, out, _ = self.run_cli("--ids", "84,1342,2600", "--sort", "id", "--reverse", "-n", "1")
         self.assertEqual(code, 0)
         self.assertEqual(sorted(os.listdir(self.out)), ["1342-pride-and-prejudice.txt", gd.MANIFEST])
         self.assertEqual(self.site.asked_for("/84/"), [])
@@ -502,7 +614,7 @@ class TestDownloading(CommandLineCase):
 
     def test_a_refusal_stops_the_run_at_once(self):
         self.site.pages[pg(84)] = http_error(pg(84), 403)
-        code, out, err = self.run_cli("--ids", "84,1342")
+        code, out, err = self.run_cli("--ids", "84,1342", "--sort", "id")
         self.assertEqual(code, 1)
         self.assertEqual(self.site.requests, [pg(84)])
         self.assertIn("refuses", err)
@@ -511,7 +623,7 @@ class TestDownloading(CommandLineCase):
     def test_three_failures_in_a_row_stop_the_run(self):
         for number in (84, 1260, 1342, 2000, 2600):
             self.site.pages[pg(number)] = http_error(pg(number), 500)
-        code, _, err = self.run_cli("--ids", "84-3000")
+        code, _, err = self.run_cli("--ids", "84-3000", "--sort", "id")
         self.assertEqual(code, 1)
         self.assertEqual(len(self.site.requests), 3)
         self.assertIn("in a row", err)
@@ -531,18 +643,87 @@ class TestDownloading(CommandLineCase):
         self.assertEqual(again.requests, [])
 
 
+class TestDefaults(CommandLineCase):
+    def listed(self, *argv):
+        """The book numbers ``--list`` shows, in order."""
+        code, out, err = self.run_cli("--list", *argv)
+        self.assertEqual(code, 0, err)
+        return [int(line.split()[0]) for line in out.splitlines()[1:]]
+
+    def test_the_most_downloaded_english_books_come_first(self):
+        del self.site.pages[pg(6130)]  # a clean run: The Iliad simply has no text here
+        code, out, err = self.run_cli()
+        self.assertEqual(code, 0, err)
+        # ranked English books in Top 100 order (not 2000, in Spanish), then the others in catalog order
+        self.assertEqual(self.books_asked_for(), [1342, 84, 6130, 2600, 70000, 10, 1260])
+        ranks = {entry["id"]: entry.get("popularity_rank") for entry in self.manifest()}
+        self.assertEqual(ranks, {1342: 1, 84: 2, 1260: None})
+        self.assertIn("3 saved, 4 without a plain-text file", out)
+
+    def test_the_default_limit_is_a_hundred_and_can_be_changed(self):
+        self.assertEqual(self.listed("-n", "2"), [1342, 84])
+        self.assertEqual(len(self.listed()), 7)  # every English text in the fixture: fewer than 100
+        self.assertEqual(self.listed("-n", "0", "--released-from", "1990"), [1342, 84, 6130, 2600, 70000, 1260])
+
+    def test_the_defaults_give_way_to_what_is_asked(self):
+        self.assertEqual(self.listed("-l", "any"), [1342, 84, 2000, 6130, 2600, 70000, 10, 1260, 17989])
+        self.assertEqual(self.listed("-l", "fr"), [17989])
+        self.assertEqual(self.listed("--sort", "id"), [10, 84, 1260, 1342, 2600, 6130, 70000])
+        self.assertEqual(self.listed("--ids", "2000,17989"), [2000, 17989])  # named books: any language
+
+    def test_the_top_100_is_only_fetched_when_it_decides_the_order(self):
+        self.listed("--sort", "id")
+        self.run_cli("--facet", "language")
+        self.assertEqual(self.site.asked_for("scores/top"), [])
+        self.listed()
+        self.listed()
+        self.assertEqual(len(self.site.asked_for("scores/top")), 1)  # and then cached
+
+    def test_without_the_top_100_it_says_what_to_do(self):
+        del self.site.pages[pg(6130)]
+        self.site.pages[gd.TOP_URL] = http_error(gd.TOP_URL, 503)
+        code, _, err = self.run_cli()
+        self.assertEqual(code, 1)
+        self.assertIn("--sort id", err)
+        self.assertEqual(self.run_cli("--sort", "id")[0], 0)
+
+    def test_no_limit_needs_a_filter(self):
+        code, _, err = self.run_cli("-n", "0")
+        self.assertEqual(code, 2)
+        self.assertIn("mirror the collection", err)
+        self.assertEqual(self.run_cli("-n", "0", "-a", "austen")[0], 0)
+
+    def test_no_arguments_at_all_downloads_the_top_100_in_english(self):
+        """The whole command line is just the script's name."""
+        del self.site.pages[pg(6130)]
+        self.site.pages[gd.CATALOG_URLS[0]] = gzip.compress(CATALOG.encode())
+        home = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": self.cache}):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = gd.main([], opener=self.site, sleep=lambda seconds: None)
+        finally:
+            os.chdir(home)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(self.books_asked_for(), [1342, 84, 6130, 2600, 70000, 10, 1260])
+        saved = sorted(os.listdir(os.path.join(self.tmp, gd.DEFAULT_OUTPUT)))
+        self.assertEqual(saved[:3], ["1260-jane-eyre-an-autobiography.txt", "1342-pride-and-prejudice.txt", "84-frankenstein-or-the-modern-prometheus.txt"])
+
+
 class TestOtherModes(CommandLineCase):
-    def test_list_shows_the_matches_and_fetches_nothing(self):
+    def test_list_shows_the_matches_and_downloads_nothing(self):
         code, out, err = self.run_cli("-l", "fr", "--list")
         self.assertEqual(code, 0)
         self.assertIn("17989", out)
         self.assertIn("Dumas, Alexandre", out)
         self.assertIn("1 of 10 catalog entries match", err)
         self.assertFalse(os.path.exists(self.out))
-        self.assertEqual(self.site.requests, [])
+        self.assertEqual(self.books_asked_for(), [])
 
     def test_facets_count_what_there_is_to_filter_on(self):
-        code, out, _ = self.run_cli("--facet", "language")
+        code, out, _ = self.run_cli("--facet", "language", "-l", "any")
         self.assertEqual(code, 0)
         self.assertEqual(out.splitlines(), ["      7  en", "      1  es", "      1  fr", "      1  la"])
 
@@ -550,22 +731,8 @@ class TestOtherModes(CommandLineCase):
         first = self.run_cli("--list", "--sort", "random", "--seed", "3")[1]
         self.assertEqual(first, self.run_cli("--list", "--sort", "random", "--seed", "3")[1])
 
-    def test_downloading_everything_needs_a_filter_or_a_limit(self):
-        code, _, err = self.run_cli()
-        self.assertEqual(code, 2)
-        self.assertIn("whole catalog", err)
-        code, _, _ = self.run_cli("-n", "1")
-        self.assertEqual(code, 0)
-        self.assertEqual(len([n for n in os.listdir(self.out) if n.endswith(".txt")]), 1)
-
-    def test_no_arguments_prints_the_help(self):
-        out = io.StringIO()
-        with redirect_stdout(out):
-            self.assertEqual(gd.main([]), 0)
-        self.assertIn("usage:", out.getvalue())
-
     def test_bad_arguments_are_usage_errors(self):
-        for argv in (("-t", "x", "--name-format", "{title}"), ("-t", "x", "--mirror", "ftp://x"), ("-n", "0")):
+        for argv in (("-t", "x", "--name-format", "{title}"), ("-t", "x", "--mirror", "ftp://x"), ("-n", "-1")):
             with self.subTest(argv=argv):
                 self.assertEqual(self.run_cli(*argv)[0], 2)
 
@@ -581,7 +748,7 @@ class TestOverRealHttp(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp, LocalServer(pages) as server:
             argv = [
-                "-l", "en", "--released-from", "1998", "--released-to", "1998", "--strip",
+                "-l", "en", "--released-from", "1998", "--released-to", "1998", "--strip", "--sort", "id",
                 "--mirror", server.url, "--catalog", server.url + "/cache/epub/feeds/pg_catalog.csv.gz",
                 "--cache-dir", os.path.join(tmp, "cache"), "-o", os.path.join(tmp, "out"), "--delay", "0",
             ]  # fmt: skip
