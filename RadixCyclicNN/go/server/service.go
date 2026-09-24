@@ -1264,20 +1264,18 @@ func (s *Service) Score(text string) radixnet.Score {
 // Think sentinel (Model.Think).  With o.Learn (the default) the thought teaches
 // the model where it stopped to think, so - like a conversation - a thought
 // changes the model; the server keeps that in memory until something saves.
+// It takes the write lock and waits for it, as Python's session does: a running
+// job hands the lock over between epochs, so a thought never has to be refused.
 func (s *Service) Think(o radixnet.ThinkOptions) (map[string]any, error) {
-	out, err := s.mutate(func(m *radixnet.Model) (any, error) {
-		thought, err := m.Think(o)
-		if err != nil {
-			return nil, badRequest("%v", err)
-		}
-		doc := thought.ToDict()
-		doc["kind"] = m.Kind()
-		return doc, nil
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thought, err := s.model.Think(o)
 	if err != nil {
-		return nil, err
+		return nil, badRequest("%v", err)
 	}
-	return out.(map[string]any), nil
+	doc := thought.ToDict()
+	doc["kind"] = s.model.Kind()
+	return doc, nil
 }
 
 // StartTrainThoughts starts a train job that teaches thoughts as thoughts

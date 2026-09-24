@@ -192,6 +192,28 @@ func TestOllamaThinkTeachesThoughts(t *testing.T) {
 	}
 }
 
+func TestOllamaThinkNullAsksForThinkingAndDefaultLeavesItToTheModel(t *testing.T) {
+	e, fake := criticEnv(t)
+	// a null field is a missing one, so null asks the model to think as leaving it out does; "default" leaves the
+	// choice to the model: no think field goes out with the answers, and none comes back
+	for _, c := range []struct{ value, sent any }{{nil, true}, {"default", nil}} {
+		before := len(fake.bodies)
+		status, doc := e.post("/api/ollama/think", map[string]any{"prompt": "the sea", "lines": 1, "think": c.value})
+		if status != 200 || doc["think"] != c.sent {
+			t.Fatalf("think %v: %d %+v", c.value, status, doc)
+		}
+		answers := fake.bodies[before+1:]
+		if len(answers) == 0 {
+			t.Fatalf("think %v: no answer was asked for", c.value)
+		}
+		for _, body := range answers {
+			if body["think"] != c.sent {
+				t.Fatalf("think %v: the answer was sent think %v: %v", c.value, body["think"], body)
+			}
+		}
+	}
+}
+
 func TestOllamaThinkErrors(t *testing.T) {
 	e, fake := criticEnv(t)
 	if status, doc := e.post("/api/ollama/think", map[string]any{"lines": 3}); status != 400 {

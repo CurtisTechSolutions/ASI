@@ -537,6 +537,19 @@ class ApiTests(unittest.TestCase):
         status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x"})
         self.assertEqual(status, 502, data)
 
+    def test_null_asks_for_thinking_and_default_leaves_it_to_the_model(self):
+        # a null field is a missing one, so null asks the model to think as leaving it out does; "default" leaves
+        # the choice to the model: no think field goes out with the answers, and none comes back
+        for value, sent in ((None, True), ("default", None)):
+            with self.subTest(think=value):
+                self.fake.requests.clear()
+                status, data, _ = self.client.post("/api/ollama/think", {"prompt": "the sea", "lines": 1, "think": value})
+                self.assertEqual(status, 200, data)
+                self.assertEqual(data["think"], sent)
+                answers = [body for _method, path, body in self.fake.requests if path == "/api/generate"][1:]
+                self.assertTrue(answers)
+                self.assertTrue(all(body.get("think") == sent for body in answers), answers)
+
     def test_corpus_errors(self):
         status, data, _ = self.client.post("/api/ollama/corpus", {"lines": 3})
         self.assertEqual(status, 400, data)

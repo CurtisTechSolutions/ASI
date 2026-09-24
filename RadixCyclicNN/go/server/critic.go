@@ -308,8 +308,9 @@ func rOllamaThink(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	// missing - or null, which the API reads as missing - asks the model to think; "default" leaves it to the model
 	var level any = true
-	if raw, present := f.lookup("think"); present {
+	if raw, present := f.lookup("think"); present && raw != nil {
 		if level, err = radixnet.ThinkValue(raw); err != nil {
 			return 0, nil, badRequest("%v", err)
 		}

@@ -366,8 +366,12 @@ a reply from saying the same words twice in a row, "Explore" is how many times
 a voice that catches itself repeating - its own words, or the conversation's -
 may back up and look for another way on -
 each turn saying what it noticed and found - "Learn where it goes round" teaches
-the graph what each rethink found out, and "Punish duplicates" marks
-the repeats the model could not avoid 👎 for the 2NRL negative phase), Chat (an
+the graph what each rethink found out, "Think before backing up" has a voice
+think first and shows the thought under its turn (💭), and "Punish duplicates" marks
+the repeats the model could not avoid 👎 for the 2NRL negative phase), Think (one
+thought from the THINK sentinel per press, about a text or nothing in particular,
+with the questions it asked itself nested under it, what it triggered when it
+stopped and what it taught), Chat (an
 LLM converses with the model and marks every reply; its transcript reads newest
 first too, it has the same "Avoid repeated words" and "Explore" settings, and
 the replies the model could only repeat are punished with the failures), Score,
@@ -379,7 +383,8 @@ why, judge a text with its blamed fragments marked, blame or clear texts by
 hand, and the table of everything the tutor has blamed with the journal of what
 it said),
 Evolve (live chart of the discriminator gap), Ollama (corpus from a prompt,
-adversarial review), Tutor (automated English lessons: the settings, a dry run
+adversarial review, and a thinking model's thinking about a prompt - the
+questions it asked itself marked - taught to the network as thoughts), Tutor (automated English lessons: the settings, a dry run
 that marks without training, a chart of the marks per round, the report card
 with the mistakes, every lesson with what the network wrote, the correction
 and the teacher's line, and the lesson plan the teacher writes from the report

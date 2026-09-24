@@ -807,6 +807,7 @@ fn think_route(svc: &Arc<Service>, r: &Request) -> Answer {
         return Err(ApiError::bad_request("'prompt' must not be empty"));
     }
     let lines = f.count_or("lines", 5, 1)?;
+    // missing - or null, which the API reads as missing - asks the model to think; "default" leaves it to the model
     let level = match f.get("think") {
         None | Some(Json::Null) => Some(Json::Bool(true)),
         Some(Json::Bool(b)) => Some(Json::Bool(*b)),
