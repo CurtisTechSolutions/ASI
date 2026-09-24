@@ -1799,9 +1799,10 @@ read buffers are pooled, all of which keep the allocation rate off the collector
 The server's `POST /api/uploads` streams multipart parts and raw bodies into the upload directory
 (`Uploads.StoreStream`: the first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming
 its entries), the listing inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline
-texts and `Uploads.Source` (ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be
-parsed whole, are capped at 512 MB. `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status
-bar can show how close a run is to its ceiling.
+texts and `Uploads.Source` (ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which carry the file
+inline, are parsed whole - held in memory while they are, as the Python server holds them - but not capped either
+(D-035). `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status bar can show how close a run
+is to its ceiling.
 
 Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
 with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),
@@ -3413,6 +3414,19 @@ connection - under the whole JSON contract §12 defines and the Python and Go se
 is replying.  `frontend/dist` runs against `radixnet serve` unmodified: `/api/status` lists every route the server
 has (`routes`) and a tab is shown against the Rust server when the route it needs is in that list, and what it
 will not serve says so with a 400 rather than a half answer (`/api/words` on a character model).
+
+**Uploads stream, as they do on the Go server** (D-035).  `POST /api/uploads` is the one route registered as
+*streaming* (`Server::stream_route`): the request's head is read, the handler is given the body as it arrives -
+ending where `Content-Length` says, and failing on a client that sent less - and `multipart::store_stream` writes a
+multipart file part or a raw body straight to a `.part` file in the upload directory (`stream_parts` finds the
+parts on the way, a window at a time, and the listing skips `.part` files), validates an archive from that file
+(`source::inspect`, a batch of entries at a time, the pass remembered for the listing's record) and moves it into
+place under a `.zip` name; a text file is converted into place a chunk at a time (byte-order mark dropped, bytes
+that are not UTF-8 replaced) and counted a line at a time.  The JSON forms, which carry the file inline, are read
+whole.  Every other route reads its body whole under a 16 MiB cap (`http::MAX_BODY`), which is what keeps a bad
+`Content-Length` from asking for the machine's memory; a client that sends `Expect: 100-continue` (curl, for a
+large file) is answered before the body goes; and an answer goes out in one write, so a connection closed on a
+body the server did not read - a refused upload - still carries it.  So no server refuses an upload for its size.
 
 Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
 of the port:

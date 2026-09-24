@@ -1676,7 +1676,9 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let path = entry.path();
-            if !path.is_file() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // a file still on its way in (a `.part`) is not an upload yet
+            if !path.is_file() || name.ends_with(".part") {
                 continue;
             }
             // an archive reports the lines of its text entries, not its bytes read as text
@@ -1684,16 +1686,10 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
                 rows.push(record);
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let lines = std::fs::read_to_string(&path)
-                .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
-                .unwrap_or(0);
-            rows.push(Json::obj([
-                ("name", Json::str(name)),
-                ("bytes", Json::Int(bytes as i64)),
-                ("lines", Json::Int(lines as i64)),
-            ]));
+            // a text file, counted a line at a time, whatever its size
+            if let Ok(record) = crate::multipart::record(&path) {
+                rows.push(record);
+            }
         }
     }
     Ok(Json::obj([("uploads", Json::Arr(rows))]))
@@ -1702,12 +1698,14 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
 /// `POST /api/uploads`: every form Python's `_r_upload` takes - JSON `{name,
 /// content | content_base64}` or `{files: [...]}`, `multipart/form-data`, or a
 /// raw body named by `?name=` - answered with the records of what was stored.
-fn upload(svc: &Arc<Service>, r: &Request) -> Answer {
+/// The route streams: the body is read as it arrives and a multipart part or
+/// a raw body goes straight to disk, so an archive may be of any size
+/// (`multipart::store_stream`, D-035).
+fn upload(svc: &Arc<Service>, r: &Request, body: &mut dyn std::io::Read) -> Answer {
     if svc.upload_dir.is_none() {
         return Err(ApiError::bad_request("no upload directory is configured"));
     }
-    let files = crate::multipart::Form::read(r, None)?.files()?;
-    crate::multipart::store_all(svc, &files)
+    crate::multipart::store_stream(svc, r, body)
 }
 
 fn upload_delete(svc: &Arc<Service>, r: &Request) -> Answer {
@@ -1868,7 +1866,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("POST", "/api/load", load);
     server.route("POST", "/api/reset", reset);
     server.route("GET", "/api/uploads", uploads);
-    server.route("POST", "/api/uploads", upload);
+    server.stream_route("POST", "/api/uploads", upload);
     server.route("POST", "/api/uploads/delete", upload_delete);
     server.route("GET", "/api/schedule", schedule);
     server.route("POST", "/api/schedule/preview", schedule_preview);

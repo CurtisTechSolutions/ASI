@@ -255,7 +255,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
 | `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"} (+ `archive`, `files`, `skipped` for a ZIP)], "upload_dir"}` |
-| `POST /api/uploads` | upload text files or ZIP archives: JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`, `multipart/form-data` (`curl -F file=@corpus.zip`), or a raw body with `?name=corpus.zip` -> `{"uploads": [...], "archives": [{"name","entries","extracted","skipped": [{"path","reason"}]}]}` (201). A ZIP stays one upload (its record carries `archive: true`, `files`, `skipped` and the summed `lines`); whenever it is selected the server unpacks its text entries in memory. Directories, `__MACOSX` / system files, nested archives, encrypted, binary and empty entries are ignored; an archive with no text entry (or a corrupt one) is refused. There is no size limit: the upload body limit does not apply to `/api/uploads`, and an archive may hold any number of entries (`extract_texts(max_entries=, max_bytes=)` exists for callers who want a cap) |
+| `POST /api/uploads` | upload text files or ZIP archives: JSON `{"name","content"}` / `{"name","content_base64"}` or `{"files": [...]}`, `multipart/form-data` (`curl -F file=@corpus.zip`), or a raw body with `?name=corpus.zip` -> `{"uploads": [...], "archives": [{"name","entries","extracted","skipped": [{"path","reason"}]}]}` (201). A ZIP stays one upload (its record carries `archive: true`, `files`, `skipped` and the summed `lines`); whenever it is selected the server unpacks its text entries in memory. Directories, `__MACOSX` / system files, nested archives, encrypted, binary and empty entries are ignored; an archive with no text entry (or a corrupt one) is refused. There is no size limit, on any of the three servers: the body limit does not apply to `/api/uploads` (the Go and Rust servers stream a multipart or raw upload straight to disk and hold only a JSON form, which carries its file inline), and an archive may hold any number of entries (`extract_texts(max_entries=, max_bytes=)` exists for callers who want a cap) |
 | `POST /api/uploads/delete` | `{"name"}` |
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
@@ -2209,10 +2209,11 @@ smaller corpus, or raise the limit.
 
 The server does the same everywhere: `POST /api/uploads` streams multipart
 parts and raw bodies straight into the upload directory (an archive is
-validated by streaming its entries; the JSON forms are capped at 512 MB), the
-listing inspects archives by streaming, and `POST /api/train` with `files`
-(plus the optional `chunk_size`, `inflight`, `parallel_parts`) streams them
-through the job; the frontend needs no change.
+validated by streaming its entries; the JSON forms, which carry the file
+inline, are read whole but not capped either), the listing inspects archives
+by streaming, and `POST /api/train` with `files` (plus the optional
+`chunk_size`, `inflight`, `parallel_parts`) streams them through the job; the
+frontend needs no change.
 
 ### The Go HTTP server and the frontend
 
@@ -2292,7 +2293,12 @@ generation and the agent, images and speech, MCP and the WebDriver browser.
 It reads and writes every model file byte
 for byte as Python does, and `radixnet serve` answers the same JSON API the
 Python and Go servers answer, so `frontend/dist` runs against it unmodified -
-a tab appears when the route it needs is in `/api/status`.  `rust/README.md`
+a tab appears when the route it needs is in `/api/status`.  Its
+`POST /api/uploads` streams as the Go server's does: a multipart or raw upload
+of any size goes straight to the upload directory and is validated from there,
+entry by entry, a client that announces the body with `Expect: 100-continue`
+(curl, for a large file) gets the nod before it sends, and only the routes
+that read JSON keep a cap (16 MiB) on what they will hold.  `rust/README.md`
 lists every module and the three things deliberately not ported (the torch
 backend, the Stable Diffusion encoder, local Whisper).
 
