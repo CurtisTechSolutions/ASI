@@ -65,6 +65,17 @@ is a prebuilt binary for convenience.
 `../README.md` § *Go implementation of the count / reward model* lists every
 command and every global flag, and says where the goroutines go.
 
+## Search and training methods
+
+`predict` and `generate` take `--top-k`, `--top-p`, `--min-p` (what a sampled
+step draws from) and `--diversity` (the beam's K picked apart); `train` takes
+`--order`, `--curriculum`, `--replay`, `--replay-size`, `--patience` and
+`--min-delta`, and the model keeps its replay buffer at the end of its file.
+The HTTP server takes the same names.  All off by default, and held to Python's
+graph, history and buffer by `../tests/test_go_parity.py::TestGoSearchAndTraining`
+(`../SPEC-SearchAndTraining.md`; `radixnet/training.go`).  A streaming source
+is read into memory when a run asks for an order, a curriculum or replay.
+
 ## The second traversal
 
 `predict`, `generate` and `bench` take `--traversal least-punished`: the walk is

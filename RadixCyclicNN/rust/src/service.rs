@@ -672,6 +672,16 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
     pairs.push(("kind".to_string(), Json::str(kind)));
     pairs.push(("model_label".to_string(), Json::str(label)));
     pairs.push(("units".to_string(), Json::str(units)));
+    // the replay buffer the model keeps (../../SPEC-SearchAndTraining.md section 4)
+    let replay = svc.with_model(|m| match &m.replay {
+        Some(b) => Json::obj([
+            ("size", Json::Int(b.size as i64)),
+            ("texts", Json::Int(b.len() as i64)),
+            ("seen", Json::Int(b.seen)),
+        ]),
+        None => Json::Null,
+    });
+    pairs.push(("replay".to_string(), replay));
     pairs.push(("kinds".to_string(), svc.kinds()));
     pairs.push(("job".to_string(), svc.job_json()));
     pairs.push((

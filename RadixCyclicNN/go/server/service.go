@@ -522,6 +522,21 @@ func (s *Service) Backends() map[string]any {
 }
 
 // Status is GET /api/status.
+// replaySummary is the model's replay buffer at a glance - {size, texts,
+// seen} - or nil when it keeps none (../../SPEC-SearchAndTraining.md §4).
+func (s *Service) replaySummary() any {
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		if m.Replay == nil {
+			return nil, nil
+		}
+		return map[string]any{"size": m.Replay.Size, "texts": m.Replay.Len(), "seen": m.Replay.Seen}, nil
+	})
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 func (s *Service) Status() (map[string]any, error) {
 	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.Stats(), nil })
 	if err != nil {
@@ -547,6 +562,7 @@ func (s *Service) Status() (map[string]any, error) {
 	stats["model_label"] = label
 	stats["units"] = units
 	stats["kinds"] = s.kinds()
+	stats["replay"] = s.replaySummary()
 	stats["job"] = job
 	stats["backends"] = s.Backends()
 	stats["model_path"] = modelPath
@@ -589,12 +605,12 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	}, nil
 }
 
-// Encoding is GET /api/encoding: the text encoding every kind shares.
+// Encoding is GET /api/encoding: how the active model reads text - the unit,
+// the n of the n-gram, the stride and the sentinels.
 //
-// Read-only, and "configurable" says so.  The window is not a setting but part
-// of the model format: the graph's labels, its splits and merges, the saved
-// file and the Python implementation all assume the same number, so a model
-// trained at one window could not be read at another.
+// A choice, and "configurable" says so - but one made when a model is created
+// and fixed for its life, because the graph's labels, its splits and merges and
+// its saved file are all written in it: POST /api/reset is where it is chosen.
 func (s *Service) Encoding() map[string]any {
 	enc := s.model.Encoding()
 	return map[string]any{

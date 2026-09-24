@@ -222,7 +222,7 @@ func init() {
 	route("GET", "/api/health", rHealth)
 	doc("GET", "/api/health", "liveness: {ok, version, engine: go, workers}")
 	route("GET", "/api/status", rStatus)
-	doc("GET", "/api/status", "model statistics, the current job, the engine and its goroutine pool")
+	doc("GET", "/api/status", "model statistics, the current job, the engine and its goroutine pool, replay (the model's replay buffer: {size, texts, seen} or null)")
 	route("GET", "/api/model", rModel)
 	doc("GET", "/api/model", "the model kind this server runs (count) and its weight function")
 	route("POST", "/api/model/select", rModelSelect)

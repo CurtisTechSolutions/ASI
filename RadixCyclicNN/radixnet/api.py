@@ -709,6 +709,8 @@ class ModelService:
             kind=self.kind,
             model_label=type(self.model).label,
             units=self.model.encoding.units_name,
+            # the replay buffer the model keeps (../SPEC-SearchAndTraining.md §4): {size, texts, seen} or null
+            replay=self.model.replay_summary(),
             kinds=model_kinds(),
             job=job.to_dict() if job is not None else None,
             backends=self.backends,
@@ -3942,7 +3944,9 @@ def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
-    ("GET", "/api/status", _r_status, "model stats (with the active kind), current job, backend availability, paths"),
+    ("GET", "/api/status", _r_status,
+     "model stats (with the active kind), current job, backend availability, paths, replay (the model's replay "
+     "buffer: {size, texts, seen} or null)"),
     ("GET", "/api/model", _r_model, "the active model kind, every kind (radix | count) and their default files"),
     ("POST", "/api/model/select", _r_model_select,
      "switch the active model kind: {kind: radix | count}; the previous model stays in memory"),

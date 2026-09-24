@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { useNetworkSettings } from "../hooks/useNetworkSettings.jsx";
-import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber } from "../util.js";
+import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber, unitName } from "../util.js";
+import { ENCODING_PRESETS, describeEncoding, encodingSpec, replayLine } from "../settings.js";
 import Alert from "./Alert.jsx";
-import { NumberField, TextField } from "./Fields.jsx";
-import TraversalFields from "./TraversalFields.jsx";
+import { NumberField, SelectField, TextField } from "./Fields.jsx";
 
 /**
  * The score function of every kind that has one, as {name, label, hint, integer, min}.
@@ -191,15 +190,18 @@ function ScoreFunctionCard({ status }) {
 }
 
 /** What the text becomes before the graph ever sees it, and what comes back out of it. */
-function EncodingCard() {
+function EncodingCard({ status }) {
   const [info, setInfo] = useState(null);
   const [text, setText] = useStoredState("network.previewText", "the cat sat on the mat");
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // asked again whenever the model changes: a new model can read text another way
+  const modelKey = status ? `${status.kind}|${status.encoding}` : "";
 
   useEffect(() => {
     let alive = true;
+    setPreview(null);
     api
       .encoding()
       .then((data) => {
@@ -211,7 +213,7 @@ function EncodingCard() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [modelKey]);
 
   async function run() {
     setBusy(true);
@@ -229,6 +231,9 @@ function EncodingCard() {
   const unknown = new Set(asArray(preview && preview.unknown_windows));
   const path = preview && preview.path;
   const labels = asArray(path && path.labels);
+  const word = info && info.unit === "word";
+  const units = (count) => (word ? (count === 1 ? "word" : "words") : count === 1 ? "character" : "characters");
+  const n = info ? info.ngram ?? info.window : null;
 
   return (
     <div className="card wide">
@@ -238,25 +243,34 @@ function EncodingCard() {
       ) : (
         <>
           <dl className="kv">
-            <dt>window</dt>
-            <dd>{fmtInt(info.window)} characters</dd>
+            <dt>encoding</dt>
+            <dd>
+              <code>{String(info.encoding ?? "")}</code> - {describeEncoding(info.encoding)}
+            </dd>
+            <dt>unit</dt>
+            <dd>{units(2)}</dd>
+            <dt>n</dt>
+            <dd>
+              {fmtInt(n)} {units(n)} per gram
+            </dd>
             <dt>stride</dt>
-            <dd>{fmtInt(info.stride)}</dd>
+            <dd>
+              {fmtInt(info.stride)} ({info.stride === 1 ? "a sliding window" : info.stride === n ? "non-overlapping groups" : "overlapping grams"})
+            </dd>
             <dt>overlap</dt>
-            <dd>{fmtInt(info.overlap)} characters between neighbours</dd>
+            <dd>
+              {fmtInt(info.overlap)} {units(info.overlap)} between neighbours
+            </dd>
             <dt>sentinels</dt>
             <dd>
               <code>{String(info.start_label)}</code> <code>{String(info.end_label)}</code>{" "}
               <code>{String(info.back_label)}</code>
             </dd>
-            <dt>settable</dt>
-            <dd>{info.configurable ? "yes" : "no"}</dd>
           </dl>
           <p className="muted">
-            {String(info.note || "")} The window is not a setting but part of the <b>model format</b>: the graph's
-            labels, its splits and merges, the saved file and the Go port all assume the same number, so a model
-            trained at one window could not be read at another. What <i>is</i> adjustable - the score function
-            above, and the traversal a search runs - has its own settings.
+            Text goes in as {describeEncoding(info.encoding)} and comes back out of the (possibly merged) node labels
+            along a path. Every label in the graph is written in it, so it is fixed for the model&apos;s life and
+            saved with it: to read text another way, make a new model above.
           </p>
         </>
       )}
@@ -276,7 +290,7 @@ function EncodingCard() {
         <>
           <h3>The encoder</h3>
           <p className="muted">
-            {fmtInt(preview.chars)} characters become {fmtInt(preview.count)} overlapping windows.
+            {fmtInt(preview.chars)} {units(preview.chars)} become {fmtInt(preview.count)} gram(s).
           </p>
           <p className="chips">
             {windows.map((w, i) => (
@@ -284,21 +298,21 @@ function EncodingCard() {
                 {w.replace(/ /g, "␣")}
               </code>
             ))}
-            {windows.length === 0 ? <span className="muted">nothing: the text is shorter than one window.</span> : null}
+            {windows.length === 0 ? <span className="muted">nothing: the text is shorter than one gram.</span> : null}
           </p>
           <h3>The decoder</h3>
           <p className="text-display">{String(preview.decoded || "")}</p>
           <p className="muted">
             {preview.round_trip
-              ? "The windows decode back to exactly the text that went in."
-              : "The windows do not decode back to the text that went in (a text shorter than one window encodes to nothing)."}
+              ? "The grams decode back to exactly the text that went in."
+              : "The grams do not decode back to the text that went in (a text shorter than one gram encodes to nothing, and a grouping encoding drops the tail that fills no group)."}
           </p>
           <h3>Through the graph</h3>
           {path && path.known ? (
             <>
               <p className="muted">
                 {fmtInt(path.nodes)} node(s) between the sentinels, {fmtInt(path.compressed)} of them <b>merged</b> -
-                a label longer than the window is a radix chain the graph compressed into one node. The decoder
+                a label longer than one gram is a radix chain the graph compressed into one node. The decoder
                 reads the text back off those labels.
               </p>
               <p className="chips">
@@ -315,49 +329,215 @@ function EncodingCard() {
           )}
         </>
       ) : (
-        <p className="muted">Press the button to see the windows a text becomes and the nodes it walks.</p>
+        <p className="muted">Press the button to see the grams a text becomes and the nodes it walks.</p>
       )}
       <Alert message={error} onDismiss={() => setError(null)} />
     </div>
   );
 }
 
+/** The model that is loaded: its kind, how it reads text, how big it is, and the buffer it rehearses from. */
+function ThisModelCard({ status }) {
+  if (!status) {
+    return (
+      <div className="card">
+        <h2>This model</h2>
+        <p className="muted">Waiting for the server…</p>
+      </div>
+    );
+  }
+  return (
+    <div className="card">
+      <h2>This model</h2>
+      <dl className="kv">
+        <dt>kind</dt>
+        <dd>{String(status.model_label || status.kind || "–")}</dd>
+        <dt>encoding</dt>
+        <dd>
+          {status.encoding ? (
+            <>
+              <code>{String(status.encoding)}</code> - {describeEncoding(status.encoding)}
+            </>
+          ) : (
+            "–"
+          )}
+        </dd>
+        <dt>counts in</dt>
+        <dd>{unitName(status)}</dd>
+        <dt>size</dt>
+        <dd>
+          {fmtInt(status.nodes)} nodes, {fmtInt(status.edges)} edges
+        </dd>
+        <dt>trained on</dt>
+        <dd>
+          {fmtInt(status.trained_texts)} texts over {fmtInt(status.epochs_total)} epochs
+        </dd>
+        <dt>file</dt>
+        <dd>{status.model_path ? <code>{String(status.model_path)}</code> : "none (in memory only)"}</dd>
+      </dl>
+      <p className="muted">
+        {replayLine(status.replay)} Its size is set by a training run (the replay buffer size on the{" "}
+        <a href="#train">Train</a> tab); the buffer is saved in the model&apos;s file.
+      </p>
+    </div>
+  );
+}
+
 /**
- * Network settings: the settings of the network itself, as opposed to the
- * options of one run.
- *
- * The **traversal** every search uses (shared with the Predict and Generate
- * tabs, which show the same control), the **score function** of whichever kind
- * is active, and the **encoder / decoder** - what a text becomes before the
- * graph ever sees it, and what comes back out of it.
+ * A new model in any kind and encoding: POST /api/reset. Two clicks, because it
+ * replaces the model of that kind in memory.
  */
-export default function NetworkSettingsPanel({ status }) {
-  const { traversal, shared, reset } = useNetworkSettings();
+function NewModelCard({ status, onStatus }) {
+  const kinds = asArray(status && status.kinds).filter((k) => k && typeof k.kind === "string");
+  const activeKind = (status && status.kind) || "";
+  const [kind, setKind] = useStoredState("model.new.kind", "");
+  const [preset, setPreset] = useStoredState("model.new.encoding", "char:3:1");
+  const [unit, setUnit] = useStoredState("model.new.unit", "char");
+  const [n, setN] = useStoredState("model.new.ngram", "3");
+  const [stride, setStride] = useStoredState("model.new.stride", "1");
+  const [seed, setSeed] = useStoredState("model.new.seed", "");
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [error, setError] = useState(null);
+  const jobRunning = jobIsRunning(status);
+
+  const chosenKind = kinds.some((k) => k.kind === kind) ? kind : activeKind;
+  const chosen = kinds.find((k) => k.kind === chosenKind);
+  const custom = preset === "custom";
+  const encoding = custom ? encodingSpec(unit, n, stride) : { spec: preset };
+  const seedValue = seed.trim() === "" ? null : parseInteger(seed, null);
+  const seedBad = seed.trim() !== "" && (seedValue === null || String(seedValue) !== seed.trim());
+  const problem = encoding.error || (seedBad ? "The seed must be a whole number (blank = the server's)." : null);
+
+  async function create() {
+    if (problem) return;
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    setArmed(false);
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const body = { kind: chosenKind, encoding: encoding.spec };
+      if (seedValue !== null) body.seed = seedValue;
+      await api.reset(body);
+      setNotice(`A new ${chosen ? chosen.label || chosenKind : chosenKind} model, reading text as ${describeEncoding(encoding.spec)}.`);
+      if (onStatus) {
+        const next = await api.status();
+        if (next && typeof next === "object") onStatus(next);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <h2>New model</h2>
+      <p className="muted">
+        A fresh, untrained model of any kind, reading text in any encoding. It replaces the model of that kind in
+        memory - anything not saved is lost, though its file is untouched until you save - and a model of another
+        kind stays in memory, as switching in the header keeps it.
+      </p>
+      <div className="row">
+        <SelectField
+          label="Kind"
+          value={chosenKind}
+          onChange={(value) => {
+            setKind(value);
+            setArmed(false);
+          }}
+          options={kinds.length ? kinds.map((k) => [k.kind, k.label || k.kind]) : [["", "–"]]}
+          disabled={busy || jobRunning || kinds.length === 0}
+        />
+        <SelectField
+          label="Encoding"
+          hint="how it reads text; fixed for its life"
+          value={preset}
+          onChange={(value) => {
+            setPreset(value);
+            setArmed(false);
+          }}
+          options={ENCODING_PRESETS}
+          disabled={busy || jobRunning}
+        />
+      </div>
+      {custom ? (
+        <div className="row">
+          <SelectField
+            label="Unit"
+            value={unit}
+            onChange={setUnit}
+            options={[
+              ["char", "characters"],
+              ["word", "words"],
+            ]}
+            disabled={busy || jobRunning}
+          />
+          <NumberField label="n" hint="units per gram" value={n} onChange={setN} min={1} step={1} disabled={busy || jobRunning} />
+          <NumberField
+            label="Stride"
+            hint="1 slides the window, n cuts groups"
+            value={stride}
+            onChange={setStride}
+            min={1}
+            step={1}
+            disabled={busy || jobRunning}
+          />
+        </div>
+      ) : null}
+      <div className="row">
+        <TextField label="Seed" hint="blank = the server's" value={seed} onChange={setSeed} placeholder="the server's" disabled={busy || jobRunning} />
+      </div>
+      {chosen && chosen.description ? <p className="muted">{String(chosen.description)}</p> : null}
+      <Alert message={problem} />
+      <div className="actions">
+        <button
+          type="button"
+          className={armed ? "danger" : "primary"}
+          disabled={busy || jobRunning || Boolean(problem) || !chosenKind}
+          onBlur={() => setArmed(false)}
+          onClick={create}
+        >
+          {busy ? "Creating…" : armed ? `Replace the ${chosen ? chosen.label || chosenKind : chosenKind} model? Click again` : "Create the model"}
+        </button>
+      </div>
+      {jobRunning ? <p className="muted">A job is running; a new model can be made once it finishes.</p> : null}
+      <Alert kind="ok" message={notice} onDismiss={() => setNotice(null)} />
+      <Alert message={error} onDismiss={() => setError(null)} />
+    </div>
+  );
+}
+
+/**
+ * Model settings: what belongs to the model and is saved with it, as opposed
+ * to the settings of this browser (the Settings tab).
+ *
+ * **This model** - its kind, its encoding, its size and the replay buffer it
+ * rehearses from; a **new model** in any kind and encoding; the **score
+ * function** of whichever kind is active; and the **encoder / decoder** - what
+ * a text becomes before the graph ever sees it, and what comes back out of it.
+ */
+export default function ModelSettingsPanel({ status, onStatus }) {
   return (
     <>
       <div className="card wide">
-        <h2>Network settings</h2>
+        <h2>Model settings</h2>
         <p className="muted">
-          The settings of the network itself, as opposed to the options of one run: what every search looks for,
-          how an edge is scored, and how text goes in and comes back out. The traversal is remembered in this
-          browser; the score function is the model's own and is saved with it.
+          What belongs to the model and is saved with it: the encoding it reads text in, how an edge is scored,
+          and the replay buffer it rehearses from. The settings of this browser - the traversal, the sampling
+          filters, how a run walks its texts - are on the <a href="#settings">Settings</a> tab.
         </p>
       </div>
-
-      <div className="card">
-        <h2>Traversal</h2>
-        <TraversalFields />
-        {shared ? (
-          <div className="actions">
-            <button type="button" className="small" disabled={traversal === "reward"} onClick={reset}>
-              Back to the default (reward)
-            </button>
-          </div>
-        ) : null}
-      </div>
-
+      <ThisModelCard status={status} />
+      <NewModelCard status={status} onStatus={onStatus} />
       <ScoreFunctionCard status={status} />
-      <EncodingCard />
+      <EncodingCard status={status} />
     </>
   );
 }

@@ -6,7 +6,8 @@ React hooks shared by the panels.
 |---|---|
 | `useJob.js` | the lifecycle of one asynchronous server job: start it, poll `GET /api/job` every second until it leaves the `running` state, stop it, and keep polling until the terminal state is actually observed |
 | `useStoredState.js` | `useState` that remembers its value in this browser (see `../storage.js`) — one panel's own setting, under its own name |
-| `useNetworkSettings.jsx` | the settings **several** panels share, held once in a provider at the top of the app: the traversal a search runs and its two scales. Edited on the Network settings tab, and read (and written) by the Predict and Generate tabs, which show the same control |
+| `useSiteSettings.jsx` | the settings **several** panels share, held once in a provider at the top of the app: the traversal (through `useNetworkSettings`), the sampling filters and the diversity, and how a run walks its texts. Edited on the Settings tab, and read (and written) by the Predict, Generate and Train tabs, which show the same controls. The rules are pure functions in `../settings.js` |
+| `useNetworkSettings.jsx` | the traversal a search runs and its two scales — one of the site-wide settings, under its original `network.*` names |
 
 ## Why `useJob` exists
 
@@ -38,21 +39,24 @@ stop();                                  // defaults to POST /api/job/stop
 controls, and `JobStatus.jsx` renders the state badge, the timestamps and the
 error. The status bar polls separately, every 2 s, from `StatusBar.jsx`.
 
-## Why `useNetworkSettings` is a provider and not another `useStoredState`
+## Why the site-wide settings are a provider and not another `useStoredState`
 
 `useStoredState` remembers a value per name, but two mounted components using
 the same name share the *stored* value and not the state — and every panel here
 stays mounted while it is hidden, so two copies of one setting would drift apart
 within a session and only agree again after a reload. A setting that belongs to
-the network rather than to a panel therefore lives **once**, in
-`NetworkSettingsProvider` at the top of `App.jsx`, and every panel reads it
-through `useNetworkSettings()`: one source of truth, several doors into it.
+the site rather than to a panel therefore lives **once**, in
+`SiteSettingsProvider` at the top of `App.jsx`, and every panel reads it
+through `useSiteSettings()`: one source of truth, several doors into it.
 
 ```jsx
-const { traversal, penaltyScale, meritScale, set, reset, body } = useNetworkSettings();
+const { network, search, training } = useSiteSettings();
 
-set("traversal", "punishment");          // changes it everywhere at once
-await api.predict({ prefix, ...body });  // `body` is what the request needs for it
+network.set("traversal", "punishment");  // changes it everywhere at once
+search.set("topP", "0.9");
+await api.predict({ prefix, mode, ...network.body, ...search.body(mode) });  // only what `mode` reads, only what is on
+await api.train({ texts, ...training.body() });
+search.problems;                         // {topP: "Top-p must lie in (0, 1] ..."} while a field is out of range
 ```
 
 Outside the provider the hook returns the defaults with no-op setters, so a

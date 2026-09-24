@@ -2,8 +2,9 @@ import { createContext, useContext, useMemo } from "react";
 import { useStoredState } from "./useStoredState.js";
 
 /**
- * The network settings every panel shares, in one place (the Network settings
- * tab is where they are edited).
+ * The traversal every search runs, in one place: the Settings tab is where it
+ * is edited, and it is one of the site-wide settings `useSiteSettings.jsx`
+ * gathers (this provider sits inside `SiteSettingsProvider`).
  *
  * `useStoredState` remembers a value per name, but two mounted components
  * using the same name would share the *stored* value and not the state - and

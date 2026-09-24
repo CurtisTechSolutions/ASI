@@ -362,6 +362,12 @@ class GraphModel:
             patience=cfg.patience, min_delta=cfg.min_delta, buffer=self.replay,
         )
 
+    def replay_summary(self) -> dict | None:
+        """The replay buffer at a glance - ``{size, texts, seen}`` - or ``None`` when the model keeps none."""
+        if self.replay is None:
+            return None
+        return {"size": self.replay.size, "texts": len(self.replay), "seen": self.replay.seen}
+
     def _with_replay(self, doc: dict) -> dict:
         """A model document with the ``replay`` block at its end - only when there is a buffer."""
         if self.replay is not None:

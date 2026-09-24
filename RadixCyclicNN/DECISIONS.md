@@ -85,6 +85,9 @@ D-073 words as symbols (superseded by it)
 **Part XVII — A third implementation** · D-072 the Rust port · D-074 how parity is measured ·
 D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 
+**Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
+number · D-079 a setting's home is decided by who keeps it
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -2510,7 +2513,8 @@ against the edge — splits the same way.
 
 ### D-070 — A setting of the network gets one home and one value, wherever it is edited
 
-**Status** Accepted · 2026-09-20 · **Layer** frontend
+**Status** Accepted · 2026-09-20 · **Layer** frontend · **Extended by** D-079 (the tab became two: the
+browser's Settings and the model's Model settings; `useSiteSettings` generalises `useNetworkSettings`)
 
 **Context** D-069 gave every search a traversal, and the frontend had nowhere
 to put it. It went on the two tabs that use it, Predict and Generate, as a copy
@@ -3045,6 +3049,93 @@ from the server: it appears the day the route does.
 **Lives in** `rust/src/cli.rs`, `rust/src/service.rs` (`build`), `rust/src/duo.rs`
 (`Service::ensure_negative`), `rust/src/checkpoint.rs`, `rust/src/kinds.rs`,
 `frontend/src/App.jsx`, `tests/rust_harness.py`
+
+---
+
+# Part XVIII — More ways to search and to train
+
+### D-078 — Every search and training method is off by default, and none of them draws a random number
+
+**Status** Accepted · 2026-09-24 · **Layer** search, training · **Beside** D-008, D-024, D-039, D-074
+
+**Context** The search had two knobs a language-model user reaches for first and did not find - a way to keep a
+sampled walk off its long tail, and a beam that did not hand back five spellings of one sentence - and training
+had one shape: every text, in corpus order, every epoch, until the epochs ran out. A model trained on a second
+corpus forgot the first; nothing let a run start easy; nothing stopped a run that had stopped learning. Adding
+them to one implementation is an afternoon. Adding them to three that are held to the same graph and the same file
+byte for byte (D-039, D-074) is a contract problem first.
+
+**Decision** Sampling filters (`top_k`, `top_p`, `min_p`), a diverse beam (`diversity`), and a training plan (an
+`order`, a `curriculum`, a `replay` buffer kept with the model, early stopping by `patience` and `min_delta`), in
+Python, Go and Rust, under one written contract (`SPEC-SearchAndTraining.md`). Three rules make it a contract
+rather than three features:
+
+* **Off means absent.** Every setting has an *off* value that is the default, and off changes nothing - the draw,
+  the beam, the pass and the file are what they were. The frontend and the servers send and store a setting only
+  when it is on.
+* **Nothing new draws a random number.** The shuffle and the replay buffer order texts by SplitMix64 keys of the
+  model's seed; the filters keep the cheapest option and draw once per step however many survive. The model's own
+  generator - and so every weight, every sample, every seeded walk - is where it would have been, in every port.
+* **Rules, not recipes.** Every rounding (`ceil` for the curriculum, half-up for the rehearsal), every order
+  (`top_k` then `min_p` then `top_p`, ties by position) and every tie (`(priority, g)` in the buffer) is written
+  down, because "about the same" is not a parity test.
+
+**Alternatives rejected**
+* **A frontier penalty for the diverse beam** - charging a partial path for ending in a node another kept path
+  ends in. Implemented first: on real graphs it changed nothing (compressed endings differ node by node), and
+  tuned harder it pruned the best path. Picking the K from a pool of *finished* paths by maximal marginal
+  relevance cannot lose the best path - it is always the first pick - and trades exactly what it says it trades.
+* **Reservoir sampling for the buffer.** It needs a random number per offer, which would move the model's
+  generator; bottom-k by a hash is as uniform, deterministic, and mergeable.
+* **Rehearsing punished texts.** A thumbs down, 2NRL's negative phase or the agent's punishment trains *against*
+  a text; putting it in a buffer that later training rehearses *for* would teach the failure back. A pass stamped
+  with a feedback phase is never planned and never touches the buffer.
+* **Letting a partial epoch count toward the stop.** Its loss is over fewer (and, shortest-first, easier) texts;
+  comparing it with a full epoch would stop a curriculum just as it got hard. The cost, stated in the spec: with the
+  linear curriculum, early stopping watches only the epochs after the curriculum reaches every text.
+
+**Consequences** A model file can now carry a `replay` block - only when it keeps a buffer, so every file written
+before is still what it was. Fixing the units on the way (a prefix's lead, the resonant model's `chars` and
+`trained_chars`, all counted in characters where the rest counts in units) was a precondition: a curriculum by
+length is meaningless on a word model if length means characters.
+
+**Lives in** `radixnet/training.py`, `radixnet/search.py`, `radixnet/beam.py`, `go/radixnet/training.go`,
+`rust/src/training.rs`, `SPEC-SearchAndTraining.md`
+
+### D-079 — A setting's home is decided by who keeps it: this browser, or the model
+
+**Status** Accepted · 2026-09-24 · **Layer** frontend · **Extends** D-070
+
+**Context** D-070 gave the settings of the network one home, a *Network settings* tab, and one value each. The
+search and training methods (D-078) brought six more that shape every search and every run, and the tab mixed two
+kinds of setting that behave differently: the traversal was remembered in the browser and stayed put when another
+model was loaded, while the score function and the encoding belonged to the model, were saved in its file, and
+changed with it. A tab that holds both invites the question "if I load another model, which of these change?" - and
+answers it only by trial.
+
+**Decision** Two tabs, split by owner. **Settings** holds what this browser keeps - the traversal, the sampling
+filters and the diversity, how a run walks its texts - and says it is never saved with a model. **Model
+settings** holds what the model keeps - its kind, its encoding, its size, its replay buffer, the score function -
+and gains the one thing that was missing: a form that makes a **new model** in any kind and encoding, since an
+encoding is chosen when a model is born (D-071) and a trained model cannot be moved to another. The action tabs
+(Predict, Generate, Train) show the browser's settings as the same controls, D-070's one-value-several-doors rule
+carried over through `useSiteSettings`; the rules themselves (ranges, what a mode reads, what a request carries)
+are pure functions in `src/settings.js` with their own tests.
+
+**Alternatives rejected**
+* **Per-tab copies** of the filters and the plan. Two values for one setting, drifting apart within a session
+  because every panel stays mounted - the problem D-070 already solved.
+* **Saving the search defaults with the model.** They are how *this person* likes to search, not a property of
+  the graph; a shared model file should not carry one user's taste for nucleus sampling.
+* **One tab with two headings.** It leaves the loaded-another-model question to the reader; a tab boundary
+  answers it.
+
+**Consequences** `#network` links still work (they open Model settings). `/api/status` reports the replay buffer
+(`{size, texts, seen}` or null) on all three servers so the model's tab can show it, and D-070's paragraph on the
+encoder card being read-only is history: the encoding is chosen on the New model card instead.
+
+**Lives in** `frontend/src/components/SettingsPanel.jsx`, `frontend/src/components/ModelSettingsPanel.jsx`,
+`frontend/src/hooks/useSiteSettings.jsx`, `frontend/src/settings.js`
 
 ---
 

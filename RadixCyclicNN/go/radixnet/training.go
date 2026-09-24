@@ -9,6 +9,7 @@ package radixnet
 // was; every rounding and every tie is the one the spec names.
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -233,6 +234,29 @@ type ReplayDoc struct {
 	Texts []string `json:"texts"`
 }
 
+// UnmarshalJSON reads a block as Python does: a missing size or seen is the
+// number of texts it holds.
+func (d *ReplayDoc) UnmarshalJSON(raw []byte) error {
+	var aux struct {
+		Size  *int     `json:"size"`
+		Seen  *int64   `json:"seen"`
+		Index []int64  `json:"index"`
+		Texts []string `json:"texts"`
+	}
+	if err := json.Unmarshal(raw, &aux); err != nil {
+		return err
+	}
+	d.Index, d.Texts = aux.Index, aux.Texts
+	d.Size, d.Seen = len(aux.Texts), int64(len(aux.Texts))
+	if aux.Size != nil {
+		d.Size = *aux.Size
+	}
+	if aux.Seen != nil {
+		d.Seen = *aux.Seen
+	}
+	return nil
+}
+
 // Doc is the buffer as the file carries it.
 func (b *ReplayBuffer) Doc() *ReplayDoc {
 	d := &ReplayDoc{Size: b.Size, Seen: b.Seen, Index: make([]int64, len(b.items)), Texts: make([]string, len(b.items))}
@@ -247,6 +271,9 @@ func (b *ReplayBuffer) Doc() *ReplayDoc {
 func ReplayFromDoc(d *ReplayDoc, seed int64) (*ReplayBuffer, error) {
 	if len(d.Index) != len(d.Texts) {
 		return nil, fmt.Errorf("replay block has %d indices for %d texts", len(d.Index), len(d.Texts))
+	}
+	if d.Size < 0 {
+		return nil, fmt.Errorf("replay_size must be >= 0, got %d", d.Size)
 	}
 	return NewReplayBuffer(d.Size, seed, d.Seen, d.Index, d.Texts), nil
 }

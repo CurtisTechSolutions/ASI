@@ -18,8 +18,10 @@ import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
+import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
-import { useNetworkSettings } from "../hooks/useNetworkSettings.jsx";
+import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
+import { problemText, searchProblemsFor } from "../settings.js";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -114,11 +116,13 @@ export default function PredictPanel({ status }) {
   const [toEnd, setToEnd] = useStoredState("predict.toEnd", false);
   const [stepPenalty, setStepPenalty] = useStoredState("predict.stepPenalty", "0");
   const [temperature, setTemperature] = useStoredState("predict.temperature", "1.0");
-  const network = useNetworkSettings();  // the traversal is shared with the Network settings tab
+  // the traversal, the sampling filters and the diversity are site-wide (the Settings tab)
+  const { network, search } = useSiteSettings();
   const [guard, setGuard] = useStoredState("predict.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const [sent, setSent] = useState({}); // the search settings the shown result was asked with
   const [liked, setLiked] = useState(() => new Set());
   const [lastLiked, setLastLiked] = useState(null);
   const { job, running, busy, error: jobError, start, clearError } = useJob("feedback");
@@ -129,6 +133,9 @@ export default function PredictPanel({ status }) {
   // the resonant model searches (node, chars, phase): k-best is exact AND runs the metacognitive layer
   const resonantKind = Boolean(status && status.kind === "resonant");
   const likeDisabled = busy || running || jobIsRunning(status);
+  // the mode the search really runs in: the count model's dijkstra is its beam
+  const effectiveMode = beamOnly && mode === "dijkstra" ? "beam" : mode;
+  const searchProblem = problemText(searchProblemsFor(search.values, effectiveMode));
 
   async function like(text) {
     const trimmed = String(text ?? "");
@@ -143,10 +150,14 @@ export default function PredictPanel({ status }) {
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (searchProblem) {
+      setError(searchProblem);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const effectiveMode = beamOnly && mode === "dijkstra" ? "beam" : mode;
+      const tuning = search.body(effectiveMode);
       const body = {
         prefix,
         length: parseInteger(length, 20),
@@ -156,6 +167,7 @@ export default function PredictPanel({ status }) {
         temperature: parseNumber(temperature, 1),
         guard,
         ...network.body,
+        ...tuning,
       };
       if (effectiveMode === "beam") {
         body.k = parseInteger(k, 5);
@@ -164,6 +176,7 @@ export default function PredictPanel({ status }) {
       }
       const data = await api.predict(body);
       setResult(data && typeof data === "object" ? data : {});
+      setSent(tuning);
       setLastLiked(null);
     } catch (err) {
       setError(err.message);
@@ -256,6 +269,7 @@ export default function PredictPanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <SearchFields mode={effectiveMode} compact />
         <TraversalFields compact />
         <CheckField label="Run to END (cheapest complete path)" checked={toEnd} onChange={setToEnd} />
         <CheckField
@@ -265,7 +279,7 @@ export default function PredictPanel({ status }) {
           onChange={setGuard}
         />
         <div className="actions">
-          <button type="submit" className="primary" disabled={loading}>
+          <button type="submit" className="primary" disabled={loading || Boolean(searchProblem)}>
             {loading ? "Predicting…" : "Predict"}
           </button>
         </div>
@@ -332,6 +346,26 @@ export default function PredictPanel({ status }) {
                 </>
               ) : null}
             </dl>
+            {sent.diversity ? (
+              <p className="muted">
+                The top {fmtInt(top.length)} were picked for diversity {fmtNum(sent.diversity, 2)}: the best first, then
+                each by its cost plus what it repeats of the ones before it - so after the first they are not in cost
+                order.
+              </p>
+            ) : null}
+            {sent.top_k || sent.top_p || sent.min_p ? (
+              <p className="muted">
+                Sampled through{" "}
+                {[
+                  sent.top_k ? `top-K ${fmtInt(sent.top_k)}` : null,
+                  sent.min_p ? `min-p ${fmtNum(sent.min_p, 3)}` : null,
+                  sent.top_p ? `top-p ${fmtNum(sent.top_p, 3)}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(", ")}
+                .
+              </p>
+            ) : null}
             {resultIsCount && result.mode !== "sample" ? (
               <>
                 <PathTable

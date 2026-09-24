@@ -257,11 +257,18 @@ A streaming source (the Go and Rust readers of large files and archives) is
 read into memory first when a run asks for a non-corpus order, a curriculum or
 replay: each needs the whole list before the first epoch.
 
+`GET /api/status` reports the buffer on all three servers: `"replay": {"size",
+"texts", "seen"}` - its capacity, how many texts it holds, how many were ever
+offered - or `null` when the model keeps none.
+
 ## 8. What the frontend does with them
 
 The **Settings** tab keeps the search and training settings of this browser —
-the defaults every tab starts from, shared by Predict, Generate and Train the
-way the traversal already was (`frontend/src/hooks/useSiteSettings.jsx`). The
+the traversal, the sampling filters and the diversity, and how a run walks its
+texts — the defaults every tab starts from, shared by Predict, Generate and
+Train the way the traversal already was (`frontend/src/hooks/useSiteSettings.jsx`,
+the rules in `frontend/src/settings.js`). A tab sends a setting only when its
+mode reads it and it is not off, and refuses to send one out of range. The
 **Model settings** tab holds what belongs to the model and is saved with it:
-the encoding it reads text in, a form that makes a new model in any encoding,
-and the score function.
+the model's kind, encoding, size and replay buffer, a form that makes a new
+model in any kind and encoding, the score function, and the encoder / decoder.

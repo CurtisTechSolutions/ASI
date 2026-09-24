@@ -18,8 +18,8 @@ import { TRAVERSALS, useNetworkSettings } from "../hooks/useNetworkSettings.jsx"
  * to the count model, which is the one that keeps the judged paths it reads.
  *
  * The setting is shared (`useNetworkSettings`), so this control is the same
- * control wherever it appears: the Network settings tab, Predict and Generate
- * all read and write one value. `compact` is the version for the action tabs -
+ * control wherever it appears: the Settings tab, Predict and Generate all read
+ * and write one value. `compact` is the version for the action tabs -
  * the fields and one line, without the explanation.
  */
 export default function TraversalFields({ compact = false }) {
@@ -30,7 +30,7 @@ export default function TraversalFields({ compact = false }) {
       <div className="row">
         <SelectField
           label="Traversal"
-          hint={compact ? "shared with Network settings" : undefined}
+          hint={compact ? "shared with Settings" : undefined}
           value={traversal}
           onChange={(value) => set("traversal", value)}
           options={TRAVERSALS}

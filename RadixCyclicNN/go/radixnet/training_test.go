@@ -1,6 +1,7 @@
 package radixnet
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"testing"
@@ -83,6 +84,13 @@ func TestReplayBufferIsBottomKWhateverTheOrder(t *testing.T) {
 	}
 	if _, err := ReplayFromDoc(&ReplayDoc{Size: 3, Index: []int64{0, 1}, Texts: []string{"a"}}, 7); err == nil {
 		t.Fatal("a block with more indices than texts was read")
+	}
+	if _, err := ReplayFromDoc(&ReplayDoc{Size: -1, Index: []int64{0}, Texts: []string{"a"}}, 7); err == nil {
+		t.Fatal("a negative size was read")
+	}
+	var bare ReplayDoc // a block without size or seen holds as many as it lists, as Python reads it
+	if err := json.Unmarshal([]byte(`{"index": [4, 2], "texts": ["x", "y"]}`), &bare); err != nil || bare.Size != 2 || bare.Seen != 2 {
+		t.Fatalf("defaults: %+v %v", bare, err)
 	}
 }
 
