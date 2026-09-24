@@ -14,7 +14,8 @@ and Go servers can serve the page with zero npm steps. **Rebuild and recommit
 |---|---|
 | `main.jsx` | the React root |
 | `App.jsx` | the header, the status bar and the tabbed panels |
-| `api.js` | the fetch wrapper — JSON, and `{"error": ...}` turned into a thrown error |
+| `api.js` | the fetch wrapper — JSON, and `{"error": ...}` turned into a thrown error; `talkStream` reads a streamed reply from `/v1/messages` |
+| `sse.js` | server-sent events read out of a byte stream one frame at a time, for the Talk panel (`test/sse.test.mjs`) |
 | `util.js` | parsing and formatting helpers (`fmtInt`, `fmtNum`, `fmtBytes`, `fmtCounter`, `asArray`, `parseInteger`, `splitLines`, …) |
 | `audio.js` | microphone capture, Web Speech dictation, and WAV encoding for the Speech panel — decodes with the Web Audio API, mixes to mono, resamples to 16 kHz and writes 16-bit PCM, so the server never needs ffmpeg |
 | `styles.css` | all of the styling. Responsive; a single column under 800 px |

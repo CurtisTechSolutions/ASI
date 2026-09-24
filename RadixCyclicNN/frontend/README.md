@@ -3,8 +3,8 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
-Code, Agent, Images, Speech, Checkpoints, Model settings, Settings, Graph.
+Panels: Train, Predict, Generate, Talk, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama,
+Tutor, Code, Agent, Images, Speech, Checkpoints, Model settings, Settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
@@ -16,6 +16,19 @@ windows hold it. On that model every length field says *words* rather than
 *characters*, Score reports per word, and the status bar carries the size of the
 vocabulary: the unit follows `units` in `/api/status`, because a number whose
 unit depends on the model is a number that will be read wrong.
+
+The Talk panel (`POST /v1/messages`, streamed; `src/sse.js` reads the events)
+is the model in today's format: type a line, and the reply arrives the way every
+language model's does now - its **thinking** first, line by line as the search
+takes each step (what it looked for and whether the graph knew it, how many
+paths it weighed, what the negative network vetoed and why, where it caught
+itself repeating and how it backed out, what it finally said at what cost), then
+the **text**, one node of the walk at a time, so a merged node shows up as a
+word and an unmerged one as a letter. A reply is what the Converse tab would say
+next after the line, and the conversation so far is heard on both sides. The
+same conversation is served to any client at `POST /v1/chat/completions`
+(OpenAI's dialect) and `POST /v1/messages` (Anthropic's); the last card shows
+the `curl`.
 
 The Converse panel (`POST /api/converse`) lets the model talk to itself in a
 chat view that reads newest first: a new turn is appended to the top and pushes

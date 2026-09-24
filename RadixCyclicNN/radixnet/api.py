@@ -94,6 +94,10 @@ from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
+from .assistant import (
+    ANTHROPIC, OPENAI, AnthropicStream, Ask, AskError, OpenAIStream, Reply, input_units as assistant_input_units,
+    kind_of_id, model_id, parse_request, respond as assistant_respond, to_format,
+)
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .duo import FilterConfig, NegativeFilter
 from .model import (
@@ -190,7 +194,7 @@ _READER_YIELD_SECONDS = 1.0
 _CORS_HEADERS = (
     ("Access-Control-Allow-Origin", "*"),
     ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-    ("Access-Control-Allow-Headers", "Content-Type, Accept"),
+    ("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, X-API-Key, anthropic-version, anthropic-beta"),
     ("Access-Control-Max-Age", "86400"),
 )
 
@@ -235,10 +239,11 @@ class ApiError(Exception):
 
     __slots__ = ("status", "message")
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, param: str | None = None) -> None:
         super().__init__(message)
         self.status = int(status)
         self.message = message
+        self.param = param  # the request field to blame, when one is (named by the /v1 error shapes)
 
 
 class Job:
@@ -369,6 +374,7 @@ class ModelService:
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
+        self._born = int(time.time())  # what /v1/models reports as every model's ``created``
         self.guard_config = FilterConfig()  # how strictly the negative network guards the output paths
         self._path_kind = model_class(kind).kind  # the kind ``model_path`` belongs to
         if self.model_path and os.path.isfile(self.model_path):
@@ -876,6 +882,108 @@ class ModelService:
             "repeats": dialogue_repeats(spoken),
             "guard": report,
         }
+
+    # -- today's format: messages in, an assistant message out ----------------
+
+    def voice_for(self, name: str) -> GraphModel:
+        """The model a request's ``model`` names: the active one, or a kind kept in memory (:func:`kind_of_id`).
+
+        ``""``, ``radixnet`` and the active kind's id answer with the active
+        model; another kind answers with the model of that kind in memory -
+        which is what ``partner`` does for ``/api/converse`` - and one that is
+        not there is a 404 saying so.  Call it with the model lock held.
+        """
+        kind = kind_of_id(name)
+        if not kind or kind == self.model.kind:
+            return self.model
+        if kind == "word":
+            for candidate in (self.model, *self._parked.values()):
+                if candidate.kind == "count" and candidate.encoding.unit == WORDS:
+                    return candidate
+        else:
+            found = self._parked.get(kind)
+            if found is not None:
+                return found
+        raise ApiError(
+            404, f"the model {name!r} is not in memory; the models here are {', '.join(self.model_ids())} "
+                 "(select a kind once to load it)", param="model",
+        )
+
+    def model_ids(self) -> list[str]:
+        """The ids of every model in memory, the active one first."""
+        return [model_id(m) for m in (self.model, *self._parked.values())]
+
+    def list_models(self) -> dict:
+        """``GET /v1/models``: the models in memory as an OpenAI model list, ``radixnet-<kind>`` each."""
+        with self.session():
+            models = [self.model, *self._parked.values()]
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model_id(m), "object": "model", "created": self._born, "owned_by": "radixnet",
+                        "kind": m.kind, "label": type(m).label, "encoding": str(m.encoding),
+                        "units": m.encoding.units_name, "active": m is self.model,
+                    }
+                    for m in models
+                ],
+            }
+
+    def count_input(self, ask: Ask) -> dict:
+        """``POST /v1/messages/count_tokens``: the units of the model's encoding a request holds."""
+        with self.session():
+            voice = self.voice_for(ask.model)
+            return {"input_tokens": assistant_input_units(voice.encoding, ask)}
+
+    def respond(self, ask: Ask) -> Reply:
+        """Answer a request in today's format (:mod:`radixnet.assistant`), the guard on the way out.
+
+        The negative network vetoes candidates before they are spoken, as it
+        does for every other answer here (:meth:`guard`), and every veto is a
+        line of the thinking with the reason; ``ask.guard`` off hands out what
+        the positive model wrote.  With ``ask.learn`` (the default) a rethink
+        teaches the graph where it goes round, so a conversation changes the
+        model, exactly as ``/api/converse`` does.
+        """
+        with self.session():
+            voice = self.voice_for(ask.model)
+            pair = self.guard(voice) if ask.guard else None
+            try:
+                return assistant_respond(voice, ask, pair=pair)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+
+    def respond_stream(self, ask: Ask, dialect: str) -> "EventStream":
+        """:meth:`respond` as server-sent events in ``dialect``'s shape, written as the search produces them.
+
+        The frames go out from inside the search: every line of the thinking
+        the moment the search takes that step, every chunk of the text as the
+        walk is decoded.  The model lock is held for the whole stream.
+        """
+        def run(write: Callable[[str], None]) -> None:
+            with self.session():
+                voice = self.voice_for(ask.model)
+                pair = self.guard(voice) if ask.guard else None
+                renderer: list = []
+
+                def on_event(event: dict) -> None:
+                    if event["type"] == "start" and not renderer:
+                        if dialect == OPENAI:
+                            renderer.append(OpenAIStream(
+                                event["id"], event["model"], event["created"], include_usage=ask.include_usage,
+                                thinking=ask.thinking,
+                            ))
+                        else:
+                            renderer.append(AnthropicStream(
+                                event["id"], event["model"], event["created"], input_units=event["input_units"],
+                                thinking=ask.thinking,
+                            ))
+                    for frame in renderer[0].frames(event):
+                        write(frame)
+
+                assistant_respond(voice, ask, pair=pair, on_event=on_event)
+
+        return EventStream(run, OpenAIStream.error if dialect == OPENAI else AnthropicStream.error)
 
     def score(self, text: str) -> dict:
         with self.session() as model:
@@ -2079,6 +2187,10 @@ class Fields:
     def present(self, name: str) -> bool:
         return self._lookup(name) is not _MISSING
 
+    def body(self) -> dict:
+        """The body as it arrived, for a request read as one document (the ``/v1`` dialects)."""
+        return self._body
+
     @staticmethod
     def _default(name: str, default: Any, kind: str) -> Any:
         if default is _MISSING:
@@ -2368,6 +2480,81 @@ def _train_overrides(fields: Fields) -> dict:
 # ---------------------------------------------------------------------------
 
 RouteFn = Callable[[ModelService, Fields, dict[str, list[str]]], tuple[int, Any]]
+
+
+class EventStream:
+    """An answer streamed as server-sent events: ``run(write)`` writes every frame the moment it is produced.
+
+    A route returns one in place of a JSON document.  The handler sends the
+    headers, calls ``run`` with a function that writes one frame, and closes
+    the connection when it returns; ``error(message)`` is the frame a failure
+    after the headers went out is reported with, in the dialect's own shape.
+    """
+
+    content_type = "text/event-stream; charset=utf-8"
+
+    def __init__(self, run: Callable[[Callable[[str], None]], None], error: Callable[[str], str]) -> None:
+        self.run = run
+        self.error = error
+
+
+def _v1_dialect(path: str) -> str | None:
+    """Which dialect a ``/v1`` path speaks (``None`` for the API's own routes)."""
+    if not (path == "/v1" or path.startswith("/v1/")):
+        return None
+    return ANTHROPIC if path.startswith("/v1/messages") else OPENAI
+
+
+def _shape_error(dialect: str | None, status: int, message: str, param: str | None = None) -> dict:
+    """An error as the client expects it: the API's ``{"error": "..."}``, or the dialect's own envelope."""
+    if dialect is None:
+        return {"error": message}
+    if dialect == OPENAI:
+        kind = "server_error" if status >= 500 else "invalid_request_error"
+        code = "model_not_found" if status == 404 and param == "model" else None
+        return {"error": {"message": message, "type": kind, "param": param, "code": code}}
+    if status >= 500:
+        kind = "api_error"
+    elif status == 404:
+        kind = "not_found_error"
+    elif status == 413:
+        kind = "request_too_large"
+    else:
+        kind = "invalid_request_error"
+    return {"type": "error", "error": {"type": kind, "message": message}}
+
+
+def _v1_ask(f: Fields, dialect: str) -> Ask:
+    try:
+        return parse_request(f.body(), dialect)
+    except AskError as exc:
+        raise ApiError(400, exc.message, param=exc.param) from exc
+
+
+def _r_v1_chat_completions(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    ask = _v1_ask(f, OPENAI)
+    if ask.stream:
+        with svc.session():
+            svc.voice_for(ask.model)  # a model that is not here is a 404 before any frame goes out
+        return 200, svc.respond_stream(ask, OPENAI)
+    return 200, to_format(svc.respond(ask), OPENAI)
+
+
+def _r_v1_messages(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    ask = _v1_ask(f, ANTHROPIC)
+    if ask.stream:
+        with svc.session():
+            svc.voice_for(ask.model)
+        return 200, svc.respond_stream(ask, ANTHROPIC)
+    return 200, to_format(svc.respond(ask), ANTHROPIC)
+
+
+def _r_v1_count_tokens(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.count_input(_v1_ask(f, ANTHROPIC))
+
+
+def _r_v1_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.list_models()
 
 
 def _r_health(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3944,6 +4131,18 @@ def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
+    ("POST", "/v1/chat/completions", _r_v1_chat_completions,
+     "today's format, OpenAI's dialect: {model, messages, max_tokens, temperature, stop, n, stream, stream_options, "
+     "tools, thinking, and the dialogue's dials (mode, context, k, explore, avoid_repeats, learn, guard, seed)} -> a "
+     "chat.completion whose message carries the thinking as reasoning_content, or chat.completion.chunk events "
+     "with stream: true; a token is one unit of the model's encoding"),
+    ("POST", "/v1/messages", _r_v1_messages,
+     "today's format, Anthropic's dialect: {model, system, messages, max_tokens, stop_sequences, stream, tools, "
+     "thinking, and the same dials} -> a message of thinking, text and tool_use blocks, or the message_start / "
+     "content_block_* / message_delta / message_stop events with stream: true"),
+    ("POST", "/v1/messages/count_tokens", _r_v1_count_tokens,
+     "{system, messages} -> {input_tokens}: the units of the model's encoding the request holds"),
+    ("GET", "/v1/models", _r_v1_models, "the models in memory as an OpenAI model list: radixnet-<kind>, the active one first"),
     ("GET", "/api/status", _r_status,
      "model stats (with the active kind), current job, backend availability, paths, replay (the model's replay "
      "buffer: {size, texts, seen} or null)"),
@@ -4320,6 +4519,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._send(204, b"", None, method)
         if path == "/api" or path.startswith("/api/"):
             return self._handle_api(method, path.rstrip("/") or "/api", query, body)
+        if path == "/v1" or path.startswith("/v1/"):
+            return self._handle_api(method, path.rstrip("/") or "/v1", query, body)
         if method in ("GET", "HEAD"):
             return self._handle_static(method, path)
         return self._send_json(405, {"error": f"method {method} is not allowed for {path}"}, method, allow="GET, HEAD, OPTIONS")
@@ -4327,15 +4528,18 @@ class ApiHandler(BaseHTTPRequestHandler):
     # -- API -----------------------------------------------------------------
 
     def _handle_api(self, method: str, path: str, query: str, body: bytes) -> int:
+        dialect = _v1_dialect(path)  # a /v1 route answers its errors in its dialect's envelope
         route = _ROUTES.get(path)
         if route is None:
-            return self._send_json(404, {"error": f"unknown API endpoint {path}"}, method)
+            return self._send_json(404, _shape_error(dialect, 404, f"unknown API endpoint {path}"), method)
         lookup = "GET" if method == "HEAD" else method
         fn = route.get(lookup)
         if fn is None:
             allow = ", ".join(sorted(route) + ["OPTIONS"])
-            return self._send_json(405, {"error": f"method {method} is not allowed for {path}; use {allow}"}, method, allow=allow)
+            message = f"method {method} is not allowed for {path}; use {allow}"
+            return self._send_json(405, _shape_error(dialect, 405, message), method, allow=allow)
         service = self.server.service
+        param: str | None = None
         try:
             params = parse_qs(query, keep_blank_values=True)
             if lookup == "POST" and path in _BINARY_ROUTES:
@@ -4344,7 +4548,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 fields = Fields(parse_body(body) if lookup == "POST" else {})
             status, payload = fn(service, fields, params)
         except ApiError as exc:
-            status, payload = exc.status, {"error": exc.message}
+            status, payload, param = exc.status, {"error": exc.message}, exc.param
         except FileNotFoundError as exc:
             status, payload = 404, {"error": _os_error_text(exc)}
         except (ValueError, TypeError) as exc:
@@ -4354,7 +4558,48 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - reported to the client, logged here
             self._log_exception(f"{method} {path} failed")
             status, payload = 500, {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(payload, EventStream):
+            return self._send_stream(status, payload, method)
+        if dialect is not None and status >= 400 and isinstance(payload, dict) and isinstance(payload.get("error"), str):
+            payload = _shape_error(dialect, status, payload["error"], param)
         return self._send_json(status, payload, method)
+
+    def _send_stream(self, status: int, stream: EventStream, method: str) -> int:
+        """Write a streamed answer: the headers, then every frame as it is produced, then close the connection.
+
+        No ``Content-Length`` can be known in advance, so the response is
+        delimited by closing the connection (``Connection: close``), which
+        every client of these formats handles.  A failure after the headers
+        went out is written as the dialect's error frame.
+        """
+        self.send_response(status)
+        for name, value in _CORS_HEADERS:
+            self.send_header(name, value)
+        self.send_header("Content-Type", stream.content_type)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if method == "HEAD":
+            return status
+
+        def write(frame: str) -> None:
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            stream.run(write)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass  # the client went away; nothing to tell it
+        except ApiError as exc:
+            with contextlib.suppress(OSError):
+                write(stream.error(exc.message))
+        except Exception as exc:  # noqa: BLE001 - reported to the client in the stream, logged here
+            self._log_exception("streaming failed")
+            with contextlib.suppress(OSError):
+                write(stream.error(f"{type(exc).__name__}: {exc}"))
+        return status
 
     # -- static files ----------------------------------------------------------
 

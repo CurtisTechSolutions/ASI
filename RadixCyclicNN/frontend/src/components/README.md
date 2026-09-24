@@ -13,6 +13,7 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `TrainPanel.jsx` | Train | corpora, epochs, the learning-rate schedule, uploads |
 | `PredictPanel.jsx` | Predict | a prefix in, the K best and K worst continuations out, with a Like button that rewards the result and a traversal to pick (follow the rewards, or avoid the punishments) |
 | `GeneratePanel.jsx` | Generate | free generation, beam or sample, either traversal, with 👍 / 👎 feeding 2NRL |
+| `TalkPanel.jsx` | Talk | the model in today's format: a line in, the reply streamed out - the search's own trace as the **thinking** first, then the text one node of the walk at a time - over `POST /v1/messages`; the last card shows how any client reaches the same conversation |
 | `ConversePanel.jsx` | Converse | the model talking to itself. Newest turn on top, stutter detection, and "Explore" to back out of a repetition |
 | `ChatPanel.jsx` | Chat | an LLM conversing with the model and marking every reply |
 | `ScorePanel.jsx` | Score | what the model makes of a piece of text (per character, or per **word** on a word model) |

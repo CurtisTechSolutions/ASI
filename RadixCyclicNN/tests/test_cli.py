@@ -722,6 +722,61 @@ class TestServe(unittest.TestCase):
         self.assertFalse(doc["frontend_built"])
 
 
+
+class TestTalk(unittest.TestCase):
+    """``talk``: the model in today's format, from the command line."""
+
+    def test_one_message(self):
+        doc = run_json("talk", "--message", "the cat sat on the", "--no-learn", model=MODEL)
+        self.assertEqual((doc["object"], doc["model"], doc["radixnet"]["kind"]), ("chat.completion", "radixnet-radix", "radix"))
+        message = doc["choices"][0]["message"]
+        self.assertTrue(message["content"])
+        self.assertTrue(message["reasoning_content"].startswith('answering "the cat sat on the"'), message["reasoning_content"])
+        self.assertIn(doc["choices"][0]["finish_reason"], ("stop", "length"))
+        self.assertEqual(doc["usage"]["prompt_tokens"], len("the cat sat on the"))
+        human = run_cli("talk", "--message", "the cat sat on the", "--no-learn", model=MODEL, json_mode=False).stdout
+        self.assertIn("you: the cat sat on the\n", human)
+        self.assertIn('  · answering "the cat sat on the"\n', human)
+        self.assertIn(f"model: {message['content']}\n", human)
+        self.assertIn(" chars said, ", human)
+
+    def test_a_conversation_in_the_other_dialect(self):
+        doc = run_json("talk", "--format", "anthropic", "--message", "the cat sat", "--message", "the dog runs",
+                       "--no-learn", "--no-thinking", "--max-tokens", 20, model=MODEL)
+        self.assertEqual((doc["format"], len(doc["exchanges"]), doc["taught"]), ("anthropic", 2, []))
+        for exchange in doc["exchanges"]:
+            self.assertEqual((exchange["type"], exchange["role"]), ("message", "assistant"))
+            self.assertEqual([b["type"] for b in exchange["content"]], ["text"])
+            self.assertIn(exchange["stop_reason"], ("end_turn", "max_tokens"))
+        # the second reply heard the first exchange
+        self.assertEqual(doc["exchanges"][1]["usage"]["input_tokens"],
+                         len("the cat sat") + len(doc["exchanges"][0]["content"][0]["text"]) + len("the dog runs"))
+
+    def test_a_request_file_and_the_prompt(self):
+        request = tmp_path("talk-request.json")
+        with open(request, "w", encoding="utf-8") as fh:
+            json.dump({"messages": [{"role": "user", "content": "the cat sat"}], "max_tokens": 20, "learn": False,
+                       "stop_sequences": ["zzz"], "thinking": {"type": "enabled"}}, fh)
+        doc = run_json("talk", "--format", "anthropic", "--request", request, model=MODEL)
+        self.assertEqual([b["type"] for b in doc["content"]], ["thinking", "text"])
+        self.assertEqual(doc["radixnet"]["choices"][0]["turn"]["context"], "the cat sat")
+        # lines on stdin are the conversation
+        proc = subprocess.run(
+            cli_command("talk", "--no-learn", model=MODEL, json_mode=False), cwd=ROOT, env=ENV, input="the cat sat\nthe dog runs\n",
+            capture_output=True, text=True, encoding="utf-8", timeout=180,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.count("model: "), 2, proc.stdout)
+        self.assertIn("you: the dog runs", proc.stdout)
+        # nothing said is an error, and so is a bad request
+        proc = run_cli("talk", model=MODEL, expect=1)
+        self.assertIn("nothing was said", proc.stderr)
+        bad = tmp_path("talk-bad.json")
+        with open(bad, "w", encoding="utf-8") as fh:
+            json.dump({"messages": [{"role": "user", "content": "x"}], "max_tokens": 0}, fh)
+        proc = run_cli("talk", "--request", bad, model=MODEL, expect=1)
+        self.assertIn("max_tokens must be >= 1", proc.stderr)
+
 if __name__ == "__main__":
     unittest.main()
 

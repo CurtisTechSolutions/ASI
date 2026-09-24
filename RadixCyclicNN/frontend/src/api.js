@@ -7,6 +7,8 @@
  * panels only ever deal with one error shape (`err.message`).
  */
 
+import { EventStreamParser } from "./sse.js";
+
 /** Base URL prefix; empty by default so relative /api URLs work when the Python server serves dist. */
 export const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
@@ -91,6 +93,58 @@ async function sendAudio(path, audio, options = {}) {
 }
 
 /**
+ * Today's format, streamed (see TalkPanel): `POST /v1/messages` with `stream: true`,
+ * one `onEvent(name, data)` per server-sent event until the server closes the
+ * stream. Resolves when it ends; rejects with an ApiError when the request was
+ * refused (the dialect's own error envelope, `{type: "error", error: {message}}`)
+ * or the connection broke, and with the fetch's AbortError when `signal` fires.
+ */
+async function talkStream(body, onEvent, signal) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal,
+    });
+  } catch (err) {
+    if (err && err.name === "AbortError") throw err;
+    throw new ApiError(`Network error: ${err && err.message ? err.message : "request failed"}`);
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+    try {
+      const data = JSON.parse(text);
+      if (data && data.error && typeof data.error.message === "string") message = data.error.message;
+      else if (data && typeof data.error === "string") message = data.error;
+    } catch {
+      // not JSON: the status line is the message
+    }
+    throw new ApiError(message, response.status);
+  }
+  const parser = new EventStreamParser();
+  const deliver = (frames) => {
+    for (const frame of frames) onEvent(frame.event, frame.data);
+  };
+  if (!response.body || typeof response.body.getReader !== "function") {
+    deliver(parser.push(await response.text()));
+    deliver(parser.end());
+    return;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    deliver(parser.push(decoder.decode(value, { stream: true })));
+  }
+  deliver(parser.push(decoder.decode()));
+  deliver(parser.end());
+}
+
+/**
  * Normalise a job payload. Job-starting endpoints answer {"job": {...}}, while
  * GET /api/job and the stop endpoints answer with the job status itself; both
  * may carry null when no job exists yet.
@@ -123,6 +177,13 @@ export const api = {
   generate: (body) => post("/api/generate", body),
   /** The model converses with itself (or with the other kind in memory): turns of a dialogue. */
   converse: (body) => post("/api/converse", body),
+  /**
+   * Today's format (see TalkPanel): a Messages request in, one whole message out - thinking, text and
+   * tool_use blocks. `talkStream` is the same request streamed; `models` lists the models in memory.
+   */
+  talk: (body) => post("/v1/messages", body),
+  talkStream,
+  models: () => get("/v1/models"),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),
   /** Rated texts -> 2NRL (both kinds), reward (thumbs up only) or punish (thumbs down only). */

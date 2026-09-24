@@ -1007,6 +1007,168 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def _talk_body(args: argparse.Namespace, dialect: str, history: list[dict], said: str) -> dict:
+    """A request in ``dialect``'s shape from the ``talk`` flags: the conversation so far, then what was just said."""
+    from .assistant import ANTHROPIC
+
+    messages = [*history, {"role": "user", "content": said}]
+    body: dict[str, Any] = {
+        "messages": messages, "max_tokens": args.max_tokens, "temperature": args.temperature, "mode": args.mode,
+        "context": args.context, "k": args.k, "step_penalty": args.step_penalty, "explore": args.explore,
+        "avoid_repeats": not args.allow_repeats, "avoid_word_repeats": not args.allow_word_repeats,
+        "learn": not args.no_learn, "guard": not args.no_guard,
+    }
+    if args.beam:
+        body["beam"] = args.beam
+    if args.seed is not None:
+        body["seed"] = args.seed
+    if dialect == ANTHROPIC:
+        if args.system:
+            body["system"] = args.system
+        if args.stop:
+            body["stop_sequences"] = list(args.stop)
+        body["thinking"] = {"type": "disabled" if args.no_thinking else "enabled"}
+        body["tools"] = [{"name": name, "input_schema": {"type": "object"}} for name in args.tool or []]
+    else:
+        if args.system:
+            messages.insert(0, {"role": "system", "content": args.system})
+        if args.stop:
+            body["stop"] = list(args.stop)
+        if args.n > 1:
+            body["n"] = args.n
+        body["thinking"] = not args.no_thinking
+        body["tools"] = [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}} for name in args.tool or []]
+    if not body["tools"]:
+        del body["tools"]
+    return body
+
+
+def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
+    """Talk to the model in today's format: messages in, a reply out - the thinking first, then the text, streamed.
+
+    One reply per ``--message`` (or per line typed at the prompt), the
+    conversation carried on from one to the next; ``--request FILE`` sends a
+    request body written in the dialect's own shape.  Under ``--json`` the
+    document printed is the dialect's own answer - what the ``/v1`` route of
+    the server would return - so the same request can be checked against
+    every server (:mod:`radixnet.assistant`).
+    """
+    from .assistant import ANTHROPIC, OPENAI, AskError, parse_request, respond, to_format
+
+    dialect = args.format
+    model, origin = open_model(args, console, required=True)
+    pair = open_guard(args, console, model)
+    if args.request:
+        try:
+            with open(args.request, encoding="utf-8") as fh:
+                request = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise CliError(f"cannot read the request {args.request}: {exc}") from exc
+        if not isinstance(request, dict):
+            raise CliError(f"{args.request} must hold a JSON object: a request in the {dialect} shape")
+    taught: set[int] = set()
+    exchanges: list[dict] = []
+    out = console.stdout
+
+    def show(event: dict, state: dict) -> None:
+        """Print the reply as it arrives: the thinking line by line, the text chunk by chunk."""
+        if console.json_mode:
+            return
+        kind = event["type"]
+        if kind == "start":
+            if event["index"]:
+                console.say(f"--- choice {event['index'] + 1} ---")
+            state["text"] = False
+        elif kind == "thinking":
+            console.say("  · " + event["text"].lstrip("\n"))
+        elif kind == "text":
+            if not state["text"]:
+                out.write("model: ")
+                state["text"] = True
+            out.write(event["text"])
+            out.flush()
+        elif kind == "tool_use":
+            if state["text"]:
+                out.write("\n")
+                state["text"] = False
+            console.say(f"tool call: {event['name']} {json.dumps(event['input'], ensure_ascii=False, sort_keys=True)}")
+        elif kind == "done":
+            if state["text"]:
+                out.write("\n")
+                out.flush()
+            elif not event.get("turn"):
+                console.say("model: (nothing to say)")
+            units = model.encoding.units_name
+            said = event["output_units"] - event["thinking_units"]
+            console.say(f"    [{event['stop_reason']}; {said} {units} said, {event['thinking_units']} thought]")
+
+    def one(body: dict) -> dict:
+        try:
+            ask = parse_request(body, dialect)
+        except AskError as exc:
+            raise CliError(f"bad request: {exc.message}") from exc
+        state: dict = {"text": False}
+        try:
+            reply = respond(model, ask, pair=pair if ask.guard else None, on_event=lambda e: show(e, state))
+        except (TypeError, ValueError) as exc:
+            raise CliError(str(exc)) from exc
+        for choice in reply.choices:
+            turn = choice.turn or {}
+            rethink = turn.get("rethink") or {}
+            if rethink.get("taught", -1) >= 0:
+                taught.add(rethink["taught"])
+        doc = to_format(reply, dialect)
+        exchanges.append(doc)
+        return doc
+
+    def spoken_text(doc: dict) -> str:
+        """The reply's text, to carry the conversation on with."""
+        if dialect == ANTHROPIC:
+            return "".join(b.get("text", "") for b in doc.get("content", []) if b.get("type") == "text")
+        message = doc["choices"][0]["message"] if doc.get("choices") else {}
+        return message.get("content") or ""
+
+    history: list[dict] = []
+    if args.request:
+        doc = one(request)
+    elif args.message:
+        for said in args.message:
+            console.say(f"you: {said}")
+            doc = one(_talk_body(args, dialect, history, said))
+            history.append({"role": "user", "content": said})
+            history.append({"role": "assistant", "content": spoken_text(doc)})
+    else:
+        interactive = sys.stdin.isatty() and not console.json_mode
+        if interactive:
+            console.say(f"talking to {origin.describe()} ({dialect} format); an empty line or Ctrl-D ends it")
+        doc = None
+        while True:
+            if interactive:
+                out.write("you> ")
+                out.flush()
+            line = sys.stdin.readline()
+            if not line or not line.strip():
+                break
+            said = line.rstrip("\n")
+            if not interactive:
+                console.say(f"you: {said}")
+            doc = one(_talk_body(args, dialect, history, said))
+            history.append({"role": "user", "content": said})
+            history.append({"role": "assistant", "content": spoken_text(doc)})
+        if doc is None:
+            raise CliError("nothing was said: give --message TEXT, --request FILE, or type a line")
+    saved = None
+    if taught and args.save:
+        saved = save_model(model, args.out or args.model)
+        console.say(f"saved {saved['path']} (it learned to hand over at {len(taught)} node(s))")
+    elif taught:
+        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
+    if len(exchanges) == 1:
+        return {**doc, **({"saved": saved} if saved is not None else {})}
+    return {"format": dialect, "exchanges": exchanges, "taught": sorted(taught),
+            **({"saved": saved} if saved is not None else {})}
+
+
 def cmd_score(args: argparse.Namespace, console: Console) -> dict:
     texts = [args.text] if args.text is not None else read_texts([args.data], what="scorable")
     model, _ = open_model(args, console, required=True)
@@ -3785,6 +3947,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"  {PROG} predict --prefix 'the quick brown' --length 20\n"
             f"  {PROG} 2nrl --bad data/sample_garbage.txt --good data/sample_corpus.txt\n"
             f"  {PROG} evolve --data data/sample_corpus.txt --generations 0   # Ctrl-C stops and saves\n"
+            f"  {PROG} talk --message 'tell me about the cat'   # today's format: thinking, then the reply\n"
             f"  {PROG} --json info\n"
             f"  {PROG} serve --port 8000\n"
             "\nglobal options go before the command (they are accepted after it as well)."
@@ -3907,6 +4070,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
+
+    # talk -------------------------------------------------------------------
+    p = command(
+        "talk", "talk to the model in today's format: messages in, a reply out, the thinking first, streamed",
+        "The model answers the way every language model is talked to now: a conversation of messages goes in,\n"
+        "an assistant message comes back - its thinking first (the search's own trace: what it looked for, what\n"
+        "the negative network vetoed and why, where it caught itself repeating), then the text, streamed chunk by\n"
+        "chunk as the walk is decoded.  A reply is what `converse` would say next after the last message, so it is\n"
+        "a real walk of the graph.  --format picks the dialect the answer is rendered in (and --request read in):\n"
+        "OpenAI's Chat Completions or Anthropic's Messages, the same shapes `serve` answers at /v1/chat/completions\n"
+        "and /v1/messages.  Without --message or --request, lines typed at the prompt are the conversation.",
+    )
+    p.add_argument("--message", action="append", metavar="TEXT",
+                   help="what to say (repeat for several turns of one conversation)")
+    p.add_argument("--system", metavar="TEXT", help="a system prompt (accepted, and not read: the network cannot follow instructions)")
+    p.add_argument("--request", metavar="FILE", help="a JSON request body in the --format shape, sent as it is")
+    p.add_argument("--format", choices=("openai", "anthropic"), default="openai",
+                   help="the dialect of the answer (and of --request): openai = Chat Completions, anthropic = Messages")
+    p.add_argument("--max-tokens", type=pos_int, default=60, metavar="N",
+                   help="units (characters, or words on a word model) the reply may add to the context it picks up")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature")
+    p.add_argument("--stop", action="append", metavar="SEQ", help="a stop sequence: the reply is cut before it (repeatable)")
+    p.add_argument("--n", type=pos_int, default=1, help="openai: how many alternative replies, each unheard by the last")
+    p.add_argument("--tool", action="append", metavar="NAME",
+                   help="offer a tool by name: a <tool> call the reply writes to it comes back as a tool call (repeatable)")
+    p.add_argument("--no-thinking", action="store_true", help="leave the thinking out of the answer")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="how a reply is found")
+    p.add_argument("--context", type=nonneg_int, default=12, help="characters of the last message a reply picks up")
+    p.add_argument("--k", type=pos_int, default=5, help="candidates considered per reply")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * k, 16))")
+    p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam: extra cost per edge")
+    p.add_argument("--allow-repeats", action="store_true", help="do not skip replies the conversation already heard")
+    p.add_argument("--allow-word-repeats", action="store_true", help="do not skip a reply that repeats its own words")
+    p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                   help="times a reply that caught itself repeating may back up and look for another way on")
+    p.add_argument("--no-learn", action="store_true", help="do not teach the graph where it goes round")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    add_guard_flags(p)
+    p.set_defaults(handler=cmd_talk)
 
     # chat -------------------------------------------------------------------
     p = command(

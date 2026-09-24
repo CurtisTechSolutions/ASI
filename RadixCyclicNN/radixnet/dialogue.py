@@ -37,7 +37,7 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from .beam import path_probability
 from .graph import FIRST, START
@@ -55,6 +55,17 @@ Veto = Callable[[str], bool]
 The conversation knows nothing about *why* - :class:`radixnet.duo.NegativeFilter` passes its own judgement in
 (the negative network guarding the positive one), and a candidate it refuses is skipped exactly like one that
 had been said before, except that it may not even be the fallback."""
+
+Trace = Callable[[dict], Any]
+"""Where a reply says what it is doing while it does it: ``trace(event)`` for every step of :func:`reply`.
+
+Each event is a dict with a ``kind`` - ``"context"`` (a tail of the line tried, and whether the graph knows it
+whole: ``context``, ``usable``), ``"candidates"`` (a search run from a context: ``context``, ``offered``,
+``mode``), ``"pick"`` (what one look through them came to: ``skipped``, ``vetoed``, ``repeat``, ``spoken``,
+``caught``), ``"rethink"`` (a :class:`Rethink` that just happened, its fields under ``kind_of``, ``noticed``,
+``cut``, ``steps``, ``explored``, ``found``, ``taught``) and ``"fresh"`` (the subject is being changed).  It
+is how the assistant format streams the thinking as the search happens (:mod:`radixnet.assistant`); without
+one a reply is exactly what it always was."""
 
 
 EXPLORE = 3
@@ -622,6 +633,7 @@ def reply(
     explore: int = EXPLORE,
     learn: bool = True,
     veto: Veto | None = None,
+    trace: Trace | None = None,
 ) -> Turn | None:
     """What ``voice`` says next after ``previous`` - one turn, or ``None`` when it has nothing to say.
 
@@ -646,7 +658,8 @@ def reply(
 
     It is public because the other voice need not be a model at all: the chat
     loop (:mod:`radixnet.chat`) has an LLM speak every other line and calls
-    this for the model's own.
+    this for the model's own.  ``trace`` hears every step as it is taken
+    (:data:`Trace`); it is how the assistant format streams the thinking.
     """
     mode = "beam" if mode in ("", "dijkstra") else mode
     if mode not in MODES:
@@ -660,6 +673,10 @@ def reply(
     rethought: Rethink | None = None
     draws = k if mode == "sample" else 1
 
+    def notice(kind: str, **fields: Any) -> None:
+        if trace is not None:
+            trace({"kind": kind, **fields})
+
     def think_again(pick: _Pick, keep: str) -> tuple[PathResult | None, bool]:
         """A candidate rejected for repeating - its own words, or the conversation's - is worth backing out of:
         keep what it said up to the repetition and look for another way on, once per turn."""
@@ -672,17 +689,30 @@ def reply(
             avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, learn=learn, veto=veto,
         )
         offered += rethought.explored
+        notice("rethink", kind_of=rethought.kind, noticed=rethought.noticed, cut=rethought.cut, steps=rethought.steps,
+               explored=rethought.explored, found=rethought.found, taught=rethought.taught)
         return (found, False) if found is not None else (pick.spoken, pick.repeat)
 
+    def look(from_ctx: str) -> tuple[PathResult | None, bool]:
+        """One look through what ``from_ctx`` offers: the candidates, the pick, and the rethink it may call for."""
+        nonlocal offered, skipped, vetoed
+        cands = _candidates(voice, from_ctx, mode, k, beam, max_length, step_penalty, temperature, rng)
+        offered += len(cands)
+        notice("candidates", context=from_ctx, offered=len(cands), mode=mode)
+        pick = _pick(cands, heard, avoid_repeats, veto, avoid_word_repeats)
+        skipped += pick.skipped
+        vetoed += pick.vetoed
+        notice("pick", skipped=pick.skipped, vetoed=pick.vetoed, repeat=pick.repeat,
+               spoken=pick.spoken.full_text if pick.spoken is not None else None,
+               caught=pick.caught.full_text if pick.caught is not None else None)
+        return think_again(pick, from_ctx)
+
     while ctx:
-        if _usable(voice, ctx):
+        usable = _usable(voice, ctx)
+        notice("context", context=ctx, usable=usable)
+        if usable:
             for _draw in range(draws):
-                cands = _candidates(voice, ctx, mode, k, beam, max_length, step_penalty, temperature, rng)
-                offered += len(cands)
-                pick = _pick(cands, heard, avoid_repeats, veto, avoid_word_repeats)
-                skipped += pick.skipped
-                vetoed += pick.vetoed
-                spoken, repeat = think_again(pick, ctx)
+                spoken, repeat = look(ctx)
                 if spoken is not None and not repeat:
                     break
             if spoken is not None and not repeat:
@@ -690,15 +720,11 @@ def reply(
         ctx = _shorter(ctx)
     if spoken is None or repeat:
         # nothing (new) follows the previous line: change the subject with a fresh text
+        notice("fresh")
         fresh_pick: PathResult | None = None
         fresh_repeat = False
         for _draw in range(draws):
-            cands = _candidates(voice, "", mode, k, beam, max_length, step_penalty, temperature, rng)
-            offered += len(cands)
-            pick = _pick(cands, heard, avoid_repeats, veto, avoid_word_repeats)
-            skipped += pick.skipped
-            vetoed += pick.vetoed
-            fresh_pick, fresh_repeat = think_again(pick, "")
+            fresh_pick, fresh_repeat = look("")
             if fresh_pick is not None and not fresh_repeat:
                 break
         if fresh_pick is not None and (spoken is None or not fresh_repeat):
