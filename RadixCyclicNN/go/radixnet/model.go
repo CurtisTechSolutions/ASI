@@ -37,6 +37,11 @@ type Model struct {
 	// Neg is the model-level state of the negative network - the journal and
 	// how strictly it judges - and is nil on a count / reward model.
 	Neg *Negative
+
+	// Replay is the replay buffer: a uniform sample of every text this model
+	// was trained on, rehearsed by a run with Plan.Replay > 0, or nil
+	// (../../SPEC-SearchAndTraining.md §4).
+	Replay *ReplayBuffer
 }
 
 // NewModel creates an untrained model.
@@ -200,6 +205,11 @@ type TrainOptions struct {
 	// Inflight bounds the chunks being read, processed or waiting for their turn at once (0 = two per
 	// CPU): the memory ceiling of a pass is the graph plus Inflight chunks, whatever the corpus size.
 	Inflight int
+	// Plan is how the run walks its texts: the order, the curriculum, the
+	// rehearsal of the replay buffer and the early stop, each off in its zero
+	// value (training.go, ../../SPEC-SearchAndTraining.md).  Train reads it;
+	// the feedback passes walk every text in corpus order.
+	Plan Plan
 }
 
 // DefaultTrainOptions mirror the Python defaults (5 epochs, compression after every epoch).
@@ -211,7 +221,39 @@ func (m *Model) Train(texts []string, opts TrainOptions) ([]map[string]any, erro
 	if m.IsNegative() {
 		return m.Blame(texts, blameFromTrain(opts))
 	}
-	return m.passesSource(SliceSource(texts), opts, true, 0.0)
+	return m.trainSource(SliceSource(texts), texts, opts)
+}
+
+// trainSource runs a training pass over src, whose texts are texts when the
+// run needs them in memory (nil otherwise): the plain streaming pass when
+// nothing about the plan is set, the planned one when something is.
+func (m *Model) trainSource(src TextSource, texts []string, opts TrainOptions) ([]map[string]any, error) {
+	if err := opts.Plan.Check(); err != nil {
+		return nil, err
+	}
+	// a model that keeps a replay buffer offers every run's texts to it; a pass
+	// stamped with a phase is feedback, and walks the texts as it always has
+	if opts.Phase != "" || (!opts.Plan.Active() && m.Replay == nil) {
+		return m.passesSource(src, opts, true, 0.0, nil)
+	}
+	enc := m.Encoding()
+	kept := make([]string, 0, len(texts))
+	lengths := make([]int, 0, len(texts))
+	for _, t := range texts {
+		if n := enc.Len(t); n >= enc.N {
+			kept = append(kept, t)
+			lengths = append(lengths, n)
+		}
+	}
+	plan, err := NewTrainingPlan(kept, lengths, m.G.Seed, opts.Epochs, opts.Plan, m.Replay)
+	if err != nil {
+		return nil, err
+	}
+	plan.Skipped = len(texts) - len(kept)
+	if texts != nil {
+		src = SliceSource(append(append([]string(nil), kept...), plan.Replayed()...))
+	}
+	return m.passesSource(src, opts, true, 0.0, plan)
 }
 
 // TrainSource is Train over a streaming source (a massive ZIP archive, a file,
@@ -226,7 +268,17 @@ func (m *Model) TrainSource(src TextSource, opts TrainOptions) ([]map[string]any
 		}
 		return m.Blame(texts, blameFromTrain(opts))
 	}
-	return m.passesSource(src, opts, true, 0.0)
+	var texts []string
+	if opts.Phase == "" && (opts.Plan.NeedsTexts() || m.Replay != nil) {
+		// an order, a curriculum or a rehearsal needs the whole list before the
+		// first epoch, and a replay buffer is offered the run's texts after the last
+		collected, err := CollectTexts(src)
+		if err != nil {
+			return nil, err
+		}
+		texts, src = collected, SliceSource(collected)
+	}
+	return m.trainSource(src, texts, opts)
 }
 
 // blameFromTrain carries a training call's settings over to a blame pass.
@@ -452,7 +504,7 @@ func (m *Model) TwoNRL(bad, good []string, negEpochs, posEpochs int, strength fl
 }
 
 func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward float64) ([]map[string]any, error) {
-	return m.passesSource(SliceSource(texts), opts, count, reward)
+	return m.passesSource(SliceSource(texts), opts, count, reward, nil)
 }
 
 // passesSource runs opts.Epochs passes over a streaming source with uncapped
@@ -466,7 +518,7 @@ func (m *Model) passes(texts []string, opts TrainOptions, count bool, reward flo
 // bumped by the text goroutines, racily unless Exact.  Memory is the graph
 // plus at most Inflight chunks: the reader waits when that many are in
 // flight, which is what keeps a corpus of any size from piling up.
-func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, reward float64) ([]map[string]any, error) {
+func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, reward float64, plan *TrainingPlan) ([]map[string]any, error) {
 	// a rewarded path was judged correct, a penalised one wrong, a plain training pass neither
 	outcome := PathUnjudged
 	if reward > 0 {
@@ -517,8 +569,16 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 	}
 	seq.wait()
 	if count {
-		m.metaAddInt("trained_texts", stats.texts)
-		m.metaAddInt("trained_chars", stats.chars)
+		texts, chars := int64(stats.texts), int64(stats.chars)
+		if plan != nil && plan.Texts != nil {
+			// the run's own texts only: a rehearsed text was counted when it was first read
+			texts, chars = int64(len(plan.Texts)), 0
+			for _, t := range plan.Texts {
+				chars += int64(m.Encoding().Len(t))
+			}
+		}
+		m.metaAddInt("trained_texts", texts)
+		m.metaAddInt("trained_chars", chars)
 	}
 	pendingMerges := 0
 	if opts.AutoCompress {
@@ -527,13 +587,24 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 
 	for epoch := 0; epoch < opts.Epochs; epoch++ {
 		t0 := time.Now()
+		epochParts := parts
+		ownParts := false // this epoch opened its own list, and closes it
+		if plan != nil && !plan.Plain() {
+			// this epoch's texts: the order, the curriculum and the rehearsal
+			number := m.metaCounter("epochs_total").Bumped(1).Value
+			walked, err := openParts(SliceSource(plan.Epoch(epoch, number)))
+			if err != nil {
+				return nil, err
+			}
+			epochParts, ownParts = walked, true
+		}
 		traversed := make([]int64, len(g.EdgeW))
 		extra := map[int]int64{} // traversals of edges created by a late split (sequencer only)
 		var total int64
 		var chunks int64
 		var passStats streamStats
-		seq := newSequencer(parts.Len())
-		err := runParts(parts, m.Encoding(), chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
+		seq := newSequencer(epochParts.Len())
+		err := runParts(epochParts, m.Encoding(), chunkSize, workers, opts.Inflight, opts.ParallelParts, &passStats, seq, func(part, idx int, chunk []string) error {
 			atomic.AddInt64(&chunks, 1)
 			grams := m.encodeAll(chunk)
 			perText := make([][]Transition, len(chunk))
@@ -643,6 +714,9 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			return nil, err
 		}
 		seq.wait()
+		if ownParts {
+			epochParts.Close()
+		}
 		if reward != 0 {
 			m.metaAddInt("feedback_passes", 1)
 			if reward > 0 {
@@ -670,23 +744,33 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			"merges":            merges,
 			"transitions":       total,
 			"chunks":            int(chunks),
-			"parts":             parts.Len(),
+			"parts":             epochParts.Len(),
 			"seconds":           time.Since(t0).Seconds(),
 			"skipped_short":     int(stats.skippedShort),
 			"traversed":         count,
 			"reward":            reward,
 		}
+		if plan != nil && plan.Texts != nil {
+			record["skipped_short"] = plan.Skipped // the run's texts, not the list the structure pass read
+		}
 		if opts.Phase != "" {
 			record["phase"] = opts.Phase
+		}
+		stopping := plan != nil && plan.Stop(epoch, loss)
+		if stopping {
+			record["early_stop"] = true
 		}
 		m.History = append(m.History, record)
 		records = append(records, record)
 		if opts.Progress != nil {
 			opts.Progress(record)
 		}
-		if opts.Stop != nil && opts.Stop() {
+		if stopping || (opts.Stop != nil && opts.Stop()) {
 			break
 		}
+	}
+	if plan != nil {
+		m.Replay = plan.Finish()
 	}
 	return records, nil
 }
@@ -939,6 +1023,13 @@ type PredictOptions struct {
 	Traversal    string
 	PenaltyScale float64
 	MeritScale   float64
+	// TopK, TopP and MinP narrow what a sampled step draws from, and Diversity
+	// spreads the beam's K apart (../../SPEC-SearchAndTraining.md); each is off
+	// at its zero value.
+	TopK      int
+	TopP      float64
+	MinP      float64
+	Diversity float64
 }
 
 // DefaultPredictOptions mirror the Python defaults.
@@ -974,6 +1065,12 @@ func checkPredictArgs(o PredictOptions) error {
 	if _, err := ResolveTraversal(o.Traversal); err != nil {
 		return err
 	}
+	if err := (SamplingFilter{TopK: o.TopK, TopP: o.TopP, MinP: o.MinP}).Check(); err != nil {
+		return err
+	}
+	if !(o.Diversity >= 0) {
+		return fmt.Errorf("diversity must be >= 0, got %v", o.Diversity)
+	}
 	return nil
 }
 
@@ -991,18 +1088,29 @@ func (m *Model) Predict(prefix string, o PredictOptions) (*Prediction, error) {
 	if mode != "beam" && mode != "sample" {
 		return nil, fmt.Errorf("unknown mode %q; expected 'beam', 'dijkstra' or 'sample'", o.Mode)
 	}
-	return m.search(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, rngNone, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
+	return m.search(prefix, o.Length, mode, o.K, o.Beam, o.StepPenalty, o.Temperature, o.ToEnd, o.MaxLength, rngNone, o.walk())
 }
 
-// walkCosts is the traversal a search runs and its two scales (penalty.go).
+// walk is the traversal and the search tuning these options ask for.
+func (o PredictOptions) walk() walkCosts {
+	return walkCosts{Traversal: o.Traversal, PenaltyScale: o.PenaltyScale, MeritScale: o.MeritScale,
+		Filter: SamplingFilter{TopK: o.TopK, TopP: o.TopP, MinP: o.MinP}, Diversity: o.Diversity}
+}
+
+// walkCosts is the traversal a search runs and its two scales (penalty.go),
+// with the sampling filter a stochastic walk draws through and the diversity
+// the beam picks its K with (../../SPEC-SearchAndTraining.md) - both off in
+// their zero values.
 type walkCosts struct {
 	Traversal    string
 	PenaltyScale float64
 	MeritScale   float64
+	Filter       SamplingFilter
+	Diversity    float64
 }
 
 // rewardWalk is the default traversal: the model's own distribution, unchanged.
-var rewardWalk = walkCosts{DefaultTraversal, 1, 1}
+var rewardWalk = walkCosts{Traversal: DefaultTraversal, PenaltyScale: 1, MeritScale: 1}
 
 // rngNone reads as "no private generator" at a call site full of arguments.
 var rngNone *MT19937
@@ -1042,7 +1150,9 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 	}
 	traversal, _ := ResolveTraversal(walk.Traversal)
 	node, offset, lead := m.prefixStart(prefix)
-	leadLen := runeLen(lead)
+	// the lead is the unmatched rest of the located gram: a length in the
+	// encoding's units, as length and maxLength are - words under a word encoding
+	leadLen := g.Enc.Len(lead)
 	want := length - leadLen
 	if want < 0 {
 		want = 0
@@ -1064,7 +1174,7 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 				maxChars = want
 			}
 		}
-		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Costs: costs, Traversal: ranking})
+		top, bottom, expanded, err = g.BeamPredict(node, offset, want, BeamOptions{K: k, Beam: beam, MaxChars: maxChars, StepPenalty: stepPenalty, ToEnd: toEnd, Costs: costs, Traversal: ranking, Diversity: walk.Diversity})
 		if err != nil {
 			return nil, err
 		}
@@ -1081,7 +1191,7 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 		if maxChars < 0 {
 			maxChars = 0
 		}
-		one, err := g.SampleWalkBy(node, offset, maxChars, temperature, rng, nil, costs, ranking)
+		one, err := g.SampleWalkFiltered(node, offset, maxChars, temperature, rng, nil, costs, ranking, walk.Filter)
 		if err != nil {
 			return nil, err
 		}
@@ -1132,10 +1242,20 @@ type GenerateOptions struct {
 	Prefix      string
 	StepPenalty float64
 	Beam        int
-	// Traversal and its scales: see PredictOptions.
+	// Traversal and its scales, the sampling filter and the diversity: see PredictOptions.
 	Traversal    string
 	PenaltyScale float64
 	MeritScale   float64
+	TopK         int
+	TopP         float64
+	MinP         float64
+	Diversity    float64
+}
+
+// walk is the traversal and the search tuning these options ask for.
+func (o GenerateOptions) walk() walkCosts {
+	return walkCosts{Traversal: o.Traversal, PenaltyScale: o.PenaltyScale, MeritScale: o.MeritScale,
+		Filter: SamplingFilter{TopK: o.TopK, TopP: o.TopP, MinP: o.MinP}, Diversity: o.Diversity}
 }
 
 // DefaultGenerateOptions mirror the Python defaults.
@@ -1156,6 +1276,12 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 	}
 	if o.Count < 0 {
 		return nil, fmt.Errorf("count must be >= 0, got %d", o.Count)
+	}
+	if err := (SamplingFilter{TopK: o.TopK, TopP: o.TopP, MinP: o.MinP}).Check(); err != nil {
+		return nil, err
+	}
+	if !(o.Diversity >= 0) {
+		return nil, fmt.Errorf("diversity must be >= 0, got %v", o.Diversity)
 	}
 	mode := o.Mode
 	if mode == "" {
@@ -1182,7 +1308,7 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 		}
 		results := make([]*PathResult, 0, o.Count)
 		for i := 0; i < o.Count; i++ {
-			walk, err := m.search(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
+			walk, err := m.search(o.Prefix, o.MaxLength, "sample", 0, 0, 0.0, o.Temperature, false, o.MaxLength, rng, o.walk())
 			if err != nil {
 				return nil, err
 			}
@@ -1191,10 +1317,12 @@ func (m *Model) Generate(o GenerateOptions) ([]*PathResult, error) {
 		return results, nil
 	}
 	k := o.Count
+	walk := o.walk()
 	if mode == "dijkstra" {
 		k = 1
+		walk.Diversity = 0 // one path: Python's dijkstra takes no diversity, and a pool would move the early exit
 	}
-	found, err := m.search(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, rngNone, walkCosts{o.Traversal, o.PenaltyScale, o.MeritScale})
+	found, err := m.search(o.Prefix, 0, "beam", k, o.Beam, o.StepPenalty, 1.0, true, o.MaxLength, rngNone, walk)
 	if err != nil {
 		return nil, err
 	}

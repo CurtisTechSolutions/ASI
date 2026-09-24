@@ -37,6 +37,7 @@ from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, tr
 from .encoding import WINDOW, WORDS, Encoding, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
+from .training import ORDERS
 from .recall import DEFAULT_LEAD
 from .speech import ASR_BACKENDS as SPEECH_BACKENDS
 from .speech import DEFAULT_RATE as SPEECH_RATE
@@ -768,6 +769,8 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
         epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size,
         auto_compress=not args.no_compress, checkpoint_every=every,
         lr_schedule=args.lr_schedule, act_lr_schedule=args.act_lr_schedule, reverse_schedule=args.reverse_schedule,
+        order=args.order, curriculum=args.curriculum, replay=args.replay, replay_size=args.replay_size,
+        patience=args.patience, min_delta=args.min_delta,
     )
     try:
         config.validate()
@@ -825,6 +828,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         length=args.length, mode=mode, step_penalty=args.step_penalty, temperature=args.temperature,
         to_end=args.to_end, max_length=args.max_length,
         traversal=args.traversal, penalty_scale=args.penalty_scale, merit_scale=args.merit_scale,
+        **search_options(args),
     )
     options.update(k=args.k, beam=args.beam)
     result = model.predict(args.prefix, **options)
@@ -899,6 +903,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         max_length=args.max_length, mode=args.mode, temperature=args.temperature, seed=args.seed,
         prefix=args.prefix, step_penalty=args.step_penalty, beam=args.beam,
         traversal=args.traversal, penalty_scale=args.penalty_scale, merit_scale=args.merit_scale,
+        **search_options(args),
     )
     guard: dict | None = None
     if pair is None:
@@ -1869,6 +1874,44 @@ def open_negative(args: argparse.Namespace, console: Console, *, required: bool)
         )
     seed = effective_seed(args)
     return NegativeNet(seed=seed), Origin("new", None, f"seed {seed}")
+
+
+def add_plan_flags(parser: argparse.ArgumentParser) -> None:
+    """How a training run walks its texts (``../SPEC-SearchAndTraining.md`` §3-6), each off by default."""
+    parser.add_argument("--order", choices=ORDERS, default="corpus",
+                        help="how every epoch walks the texts: corpus (as given), shortest-first, longest-first, or "
+                             "shuffle (a fresh order every epoch, from the model's seed)")
+    parser.add_argument("--curriculum", type=fraction, default=1.0, metavar="C",
+                        help="the first epoch walks the first C of the ordered texts, the last all of them - with "
+                             "--order shortest-first that is the short texts first (1 = off)")
+    parser.add_argument("--replay", type=nonneg_float, default=0.0, metavar="R",
+                        help="every epoch also rehearses R times as many texts from the model's replay buffer - what "
+                             "it read in earlier runs - after the new ones (0 = off)")
+    parser.add_argument("--replay-size", type=nonneg_int, default=None, metavar="N",
+                        help="keep a replay buffer of N texts: a uniform sample of everything the model is trained on, "
+                             "saved with it (0 drops it; default: leave the model's as it is)")
+    parser.add_argument("--patience", type=nonneg_int, default=0, metavar="N",
+                        help="stop after N full epochs without the loss improving by --min-delta (0 = off)")
+    parser.add_argument("--min-delta", type=nonneg_float, default=0.0, metavar="X",
+                        help="how much the loss must fall below its best to count as an improvement")
+
+
+def add_search_flags(parser: argparse.ArgumentParser) -> None:
+    """The sampling filters and the beam's diversity (``../SPEC-SearchAndTraining.md``), each off by default."""
+    parser.add_argument("--top-k", type=nonneg_int, default=0, metavar="K",
+                        help="sample: draw each step from the K cheapest options only (0 = off)")
+    parser.add_argument("--top-p", type=unit_interval_open_low, default=1.0, metavar="P",
+                        help="sample: nucleus - the smallest set of cheapest options holding P of the mass (1 = off)")
+    parser.add_argument("--min-p", type=unit_interval_open_high, default=0.0, metavar="P",
+                        help="sample: keep the options at least P times as likely as the best one (0 = off)")
+    parser.add_argument("--diversity", type=nonneg_float, default=0.0, metavar="X",
+                        help="beam: pick the K continuations to spread out - a path pays X times its overlap with "
+                             "one already picked, so they stop varying one ending (0 = off; costs are untouched)")
+
+
+def search_options(args: argparse.Namespace) -> dict:
+    """What :func:`add_search_flags` asked for, as keyword arguments of ``predict`` / ``generate``."""
+    return {"top_k": args.top_k, "top_p": args.top_p, "min_p": args.min_p, "diversity": args.diversity}
 
 
 def add_traversal_flags(parser: argparse.ArgumentParser) -> None:
@@ -3473,9 +3516,30 @@ def _float_at_least(minimum: float) -> Callable[[str], float]:
     return parse
 
 
+def _float_in(low: float, high: float, low_open: bool, high_open: bool) -> Callable[[str], float]:
+    """A number inside an interval, e.g. ``(0, 1]`` for ``--top-p`` and ``[0, 1)`` for ``--min-p``."""
+    shown = f"{'(' if low_open else '['}{low:g}, {high:g}{')' if high_open else ']'}"
+
+    def parse(text: str) -> float:
+        try:
+            value = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected a number, got {text!r}") from None
+        above = value > low if low_open else value >= low
+        below = value < high if high_open else value <= high
+        if not (math.isfinite(value) and above and below):
+            raise argparse.ArgumentTypeError(f"must lie in {shown}, got {text}")
+        return value
+
+    return parse
+
+
 nonneg_int = _int_at_least(0)
 pos_int = _int_at_least(1)
 nonneg_float = _float_at_least(0.0)
+unit_interval_open_low = _float_in(0.0, 1.0, True, False)    # (0, 1]
+unit_interval_open_high = _float_in(0.0, 1.0, False, True)   # [0, 1)
+fraction = _float_in(0.0, 1.0, True, False)                  # (0, 1]
 
 
 def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> None:
@@ -3761,6 +3825,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="play the schedules backwards: the last epoch's rates first (a ramp up becomes a ramp down)")
     p.add_argument("--batch-size", type=pos_int, default=TrainConfig.batch_size, help="transitions per backend step")
     p.add_argument("--no-compress", action="store_true", help="do not merge unary chains after each epoch")
+    add_plan_flags(p)
     _add_checkpoint_options(p, "epoch")
     p.add_argument("--resume", action="store_true",
                    help="start from the latest checkpoint in --checkpoint-dir (falls back to --model)")
@@ -3785,6 +3850,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to-end", action="store_true", help="dijkstra: cheapest path all the way to the end of a text")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="dijkstra: extra cost per edge (prefers short paths)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    add_search_flags(p)
     add_traversal_flags(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_predict)
@@ -3804,6 +3870,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
     p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
+    add_search_flags(p)
     add_traversal_flags(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_generate)

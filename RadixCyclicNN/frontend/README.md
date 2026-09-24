@@ -4,7 +4,7 @@ Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
 Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
-Code, Agent, Images, Speech, Checkpoints, Network settings, Graph.
+Code, Agent, Images, Speech, Checkpoints, Model settings, Settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
@@ -112,15 +112,14 @@ contract (`../DESIGN.md` §12) and `/api/status` says which one is replying in
 |---|---|
 | `python` | everything: every panel in the list above |
 | `go` | the model, the negative network, the tutor, code, the agent and the LLM clients; no scheduler and no MCP |
-| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Network settings and Graph, over any encoding |
+| `rust` | the model itself - Train, Predict, Generate, Score, Words, 2NRL, Model settings, Settings and Graph, over any encoding - and the areas it lists in `/api/status` `routes` |
 
-All three switch between a character and a word **encoding** from the selector
-in Network settings. An encoding is fixed for a model's life - the labels, the
-split rules and the file are all measured in its units - so switching is to a
-different model, and the one that was running is kept as it was left: switch to
-words, back, and forward again and the training is still there. Each encoding
-has its own file (`model.count.json`, `model.word.json`), and saving follows
-whichever is active. `POST /api/reset` is where a new encoding is chosen.
+All three make a new model in any kind and **encoding** from the New model
+card on Model settings (`POST /api/reset {kind, encoding, seed}`). An encoding
+is fixed for a model's life - the labels, the split rules and the file are all
+measured in its units - so a new encoding is a new model, and a model of
+another kind is kept in memory as it was left, as switching kinds in the header
+keeps it.
 
 A panel whose API the running server does not have **hides itself** rather than
 failing: `App.jsx` reads `engine` from `/api/status` and drops the tabs that
@@ -128,17 +127,37 @@ engine cannot answer. So the Rust badge in the status bar is also the
 explanation for the shorter tab row, and nothing in the app has to be rebuilt to
 point it at a different one.
 
-## Network settings
+## Settings and Model settings
 
-The **Network settings** panel holds the settings of the network itself, as
-opposed to the options of one run:
+Two tabs hold the settings, split by who keeps them (`../DECISIONS.md` D-079).
+
+**Settings** is this browser's: what every search and every run starts from,
+whichever model is loaded, and never saved with one.
 
 * the **traversal** every search uses - `reward` (the model's own distribution,
-  rewards and all) or `punishment` (the rewards leave the score and the
-  penalties price every step, so the cheapest path is the least punished one),
-  with a penalty and a merit scale. The Predict and Generate tabs show the same
-  control: it is one setting (`src/hooks/useNetworkSettings.jsx`), remembered in
-  this browser, and changing it anywhere changes it everywhere;
+  rewards and all), `punishment` (the rewards leave the score and the
+  penalties price every step, so the cheapest path is the least punished one)
+  or `least-punished`, with a penalty and a merit scale;
+* the **sampling filters** - top-K, top-p (nucleus) and min-p narrow what a
+  sampled step draws from - and the beam's **diversity**, which picks its K
+  further apart (`../SPEC-SearchAndTraining.md` sections 1-2);
+* **how a run walks its texts** - the order, the curriculum, the rehearsal of
+  the model's replay buffer and its size, and early stopping (sections 3-6);
+* how many settings this browser remembers, and a button that forgets them.
+
+Predict, Generate and Train show the same controls, and each is one setting
+(`src/hooks/useSiteSettings.jsx`): changing it anywhere changes it everywhere.
+An action tab shows only what its mode reads - the filters for `sample`, the
+diversity for `beam` - sends a setting only when it is on, and refuses to send
+a value out of range, with the reason beside the field.
+
+**Model settings** is the model's: what is saved in its file and changes when
+another model is loaded.
+
+* **this model** - its kind, encoding, size and file, and the replay buffer it
+  rehearses from (`replay` in `/api/status`);
+* a **new model** in any kind and encoding (`POST /api/reset`) - two clicks,
+  since it replaces the model of that kind in memory;
 * the **score function** of whichever kind is active - the count model's dual
   frequency scales and sliding window, the resonant model's phase and
   resonance settings (`GET /api/model` to read, `POST /api/model/weights` to
@@ -146,11 +165,12 @@ opposed to the options of one run:
   negative network's blame function stays on the Negative tab beside the
   failures it weighs;
 * the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
-  the sliding window, its stride and the three sentinels - read-only, because
-  the window is part of the model format rather than a setting - and a live
-  preview that encodes a text, decodes it back and walks it through the graph's
-  own node labels, where a label longer than the window is a radix chain the
-  graph merged into one node.
+  the unit, the n and the stride, the three sentinels, and a live preview that
+  encodes a text, decodes it back and walks it through the graph's own node
+  labels, where a label longer than one gram is a radix chain the graph merged
+  into one node.
+
+The old `#network` link opens Model settings.
 
 ## Configuration
 
@@ -173,5 +193,7 @@ opposed to the options of one run:
     src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
-    src/hooks/useNetworkSettings.jsx  the settings several panels share, held once (the traversal)
+    src/settings.js             the site-wide settings' rules: ranges, what a mode reads, request bodies (pure)
+    src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search and training)
+    src/hooks/useNetworkSettings.jsx  the traversal, one of them
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

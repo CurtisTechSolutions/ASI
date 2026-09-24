@@ -19,7 +19,7 @@ from heapq import heappop, heappush
 from .encoding import WINDOW, Decoder
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 
-__all__ = ["CostFn", "PathResult", "dijkstra_predict", "sample_walk"]
+__all__ = ["CostFn", "PathResult", "check_sampling", "dijkstra_predict", "sample_walk", "sampling_filter"]
 
 CostFn = Callable[..., list[tuple[int, int, float]]]
 """What a search reads the graph through: ``(parent[, prev]) -> [(child, edge, cost)]``.
@@ -150,6 +150,59 @@ def least_punished(steps: list[tuple]) -> list[tuple]:
         return steps
     keep = low + PUNISH_TOLERANCE
     return [item for item in steps if item[3] <= keep]
+
+
+def check_sampling(top_k: int = 0, top_p: float = 1.0, min_p: float = 0.0) -> None:
+    """``ValueError`` for a sampling filter out of range (``../SPEC-SearchAndTraining.md`` §1, §7)."""
+    if top_k < 0:
+        raise ValueError(f"top_k must be >= 0, got {top_k}")
+    if not (0.0 < top_p <= 1.0):
+        raise ValueError(f"top_p must lie in (0, 1], got {top_p}")
+    if not (0.0 <= min_p < 1.0):
+        raise ValueError(f"min_p must lie in [0, 1), got {min_p}")
+
+
+def sampling_filter(
+    options: list[tuple], temperature: float, top_k: int = 0, top_p: float = 1.0, min_p: float = 0.0
+) -> list[tuple]:
+    """The options a stochastic step may draw from, **in the order the node offered them**.
+
+    ``options`` are ``(child, edge, cost, ...)`` tuples.  ``top_k`` keeps the
+    ``top_k`` cheapest, ``min_p`` those whose weight
+    ``exp(-(cost - lowest) / temperature)`` is at least ``min_p`` - a
+    probability at least ``min_p`` times the best one's - and ``top_p`` the
+    smallest set of cheapest options whose weights reach ``top_p`` of the total
+    (nucleus sampling), in that order.  Options rank by ``(cost, position)``.
+
+    The cheapest option always survives, so the weights the draw then uses are
+    the numbers it would have used unfiltered; with every filter off the list
+    comes back untouched (``../SPEC-SearchAndTraining.md`` §1).
+    """
+    n = len(options)
+    if n <= 1 or temperature == 0 or (top_k <= 0 and top_p >= 1.0 and min_p <= 0.0):
+        return options
+    ranked = sorted(range(n), key=lambda i: (options[i][2], i))
+    if 0 < top_k < n:
+        ranked = ranked[:top_k]
+    lowest = options[ranked[0]][2]
+    inv_t = 1.0 / temperature
+    weight = {i: math.exp(-(options[i][2] - lowest) * inv_t) for i in ranked}
+    if min_p > 0.0:
+        ranked = [i for i in ranked if weight[i] >= min_p]
+    if top_p < 1.0:
+        total = math.fsum(weight[i] for i in ranked)
+        acc = 0.0
+        kept: list[int] = []
+        for i in ranked:
+            kept.append(i)
+            acc += weight[i]
+            if acc >= top_p * total:
+                break
+        ranked = kept
+    if len(ranked) == n:
+        return options
+    keep = set(ranked)
+    return [item for i, item in enumerate(options) if i in keep]
 
 
 def _start_emission(graph: RadixCyclicGraph, start_node: int, start_offset: int) -> int:
@@ -303,6 +356,9 @@ def sample_walk(
     include_context: bool | None = None,
     costs: CostFn | None = None,
     traversal: str = REWARD,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    min_p: float = 0.0,
 ) -> PathResult:
     """Stochastic walk sampling each child from ``softmax(scores / temperature)``.
 
@@ -322,10 +378,16 @@ def sample_walk(
     two are different currencies and not composed: the least-punished traversal
     reads the blame itself, so a ``costs`` handed in with it is ignored
     (``../SPEC-LeastPunished.md`` §1, :mod:`radixnet.penalty`).
+
+    ``top_k``, ``top_p`` and ``min_p`` narrow what each step draws from
+    (:func:`sampling_filter`); off, as they are by default, the walk is draw
+    for draw the one it always was (``../SPEC-SearchAndTraining.md`` §1).
     """
     traversal = parse_traversal(traversal)
     if temperature < 0:
         raise ValueError("temperature must be >= 0")
+    check_sampling(top_k, top_p, min_p)
+    filtering = top_k > 0 or top_p < 1.0 or min_p > 0.0
     if rng is None:
         rng = graph.rng
     labels = graph.labels
@@ -350,6 +412,9 @@ def sample_walk(
         if temperature == 0 or len(options) == 1:
             pick = min(options, key=lambda item: item[2])
         else:
+            if filtering:
+                # the draw below still runs, however few options are left: one random() per step
+                options = sampling_filter(options, temperature, top_k, top_p, min_p)
             inv_t = 1.0 / temperature
             lowest = min(cst for _, _, cst in options)
             weights = [exp(-(cst - lowest) * inv_t) for _, _, cst in options]

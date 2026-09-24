@@ -58,6 +58,7 @@ from .model import (
     _weight_groups,
     carry_meta,
     meta_add,
+    meta_counter,
     meta_stats,
 )
 from .penalty import DEFAULT_TRAVERSAL
@@ -928,24 +929,40 @@ class CountRewardNet(GraphModel):
         checkpoint_manager=None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
+        planned: bool = False,
     ) -> list[dict]:
-        """``cfg.epochs`` passes over ``texts``: each traverses (``count``) and / or rewards (``reward``) every path."""
+        """``cfg.epochs`` passes over ``texts``: each traverses (``count``) and / or rewards (``reward``) every path.
+
+        ``planned`` (plain training) walks them the way ``cfg`` says - the order,
+        the curriculum, the rehearsal of the replay buffer and the early stop of
+        ``../SPEC-SearchAndTraining.md``; the feedback passes walk every text in
+        corpus order, as they always have.
+        """
         texts, skipped_short = self._clean_texts(texts)
+        plan = self._plan(texts, cfg) if planned else None
         graph = self.graph
         meta = self.meta
         records: list[dict] = []
         grams = [self.encoder.encode(t) for t in texts]
+        rehearsed = plan.replayed() if plan is not None else []
+        rehearsal = {t: self.encoder.encode(t) for t in rehearsed}
         if count:
+            # a rehearsed text is not new: it was counted when it was first read
             meta_add(meta, "trained_texts", len(texts))
             meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         # build the structure first (no counting) and compress it, so every pass - the first included - walks
         # the same transitions: steps inside a compressed node are deterministic and never counted
-        self._observe_grams(grams, False)
+        self._observe_grams(grams + [rehearsal[t] for t in rehearsed], False)
         pending_merges = graph.compress() if cfg.auto_compress else 0
         outcome = None if not reward else reward > 0  # a rewarded path was judged correct, a penalised one wrong
-        for _ in range(cfg.epochs):
+        for j in range(cfg.epochs):
             t0 = time.perf_counter()
-            transitions = self._observe_grams(grams, count)
+            if plan is None or plan.plain:
+                walked = grams
+            else:
+                chosen, again = plan.epoch(j, meta_counter(meta, "epochs_total").bumped(1).value)
+                walked = [grams[i] for i in chosen] + [rehearsal[t] for t in again]
+            transitions = self._observe_grams(walked, count)
             edges = [e for _, e in transitions]
             for walk in _walks(transitions):  # what each text did, in its own context
                 graph.record_path(walk, outcome, create=outcome is not None)
@@ -980,14 +997,19 @@ class CountRewardNet(GraphModel):
             }
             if phase is not None:
                 record["phase"] = phase
+            stopping = plan is not None and plan.stop(j, loss)
+            if stopping:
+                record["early_stop"] = True
             self.history.append(record)
             records.append(record)
             if progress is not None:
                 progress(record)
             if checkpoint_manager is not None and cfg.checkpoint_every and epoch % cfg.checkpoint_every == 0:
                 checkpoint_manager.save(self, epoch, "epoch", record)
-            if stop_event is not None and stop_event.is_set():
+            if stopping or (stop_event is not None and stop_event.is_set()):
                 break
+        if plan is not None:
+            self.replay = plan.finish()
         return records
 
     def train(
@@ -1009,7 +1031,7 @@ class CountRewardNet(GraphModel):
         cfg = _resolve_config(config, overrides)
         return self._passes(
             texts, cfg, count=True, reward=0.0, phase=phase, checkpoint_manager=checkpoint_manager,
-            progress=progress, stop_event=stop_event,
+            progress=progress, stop_event=stop_event, planned=phase is None,  # a phase marks a feedback pass
         )
 
     def reward(
@@ -1321,6 +1343,10 @@ class CountRewardNet(GraphModel):
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> Prediction:
         """Continue ``prefix``: the ``k`` most likely and the ``k`` least likely continuations in one search.
 
@@ -1350,6 +1376,7 @@ class CountRewardNet(GraphModel):
         return self._search(
             prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
             traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+            top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity,
         )
 
     # -- introspection -------------------------------------------------------
@@ -1400,7 +1427,7 @@ class CountRewardNet(GraphModel):
     # -- persistence ---------------------------------------------------------
 
     def to_dict(self) -> dict:
-        return {
+        return self._with_replay({
             "format": self.format,
             "version": MODEL_FORMAT_VERSION,
             "saved_at": _utc_now(),
@@ -1408,7 +1435,7 @@ class CountRewardNet(GraphModel):
             "meta": dict(self.meta),
             "history": [dict(r) for r in self.history],
             "graph": self.graph.to_dict(),
-        }
+        })
 
     @classmethod
     def from_dict(cls, d: dict, backend: str = "auto", device: str | None = None) -> "CountRewardNet":
@@ -1424,6 +1451,7 @@ class CountRewardNet(GraphModel):
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
         model.meta = carry_meta(meta)
+        model._read_replay(d)
         return model
 
     def __repr__(self) -> str:

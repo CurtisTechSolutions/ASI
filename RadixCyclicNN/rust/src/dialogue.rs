@@ -425,6 +425,7 @@ fn candidates(
             DEFAULT_TRAVERSAL,
             1.0,
             1.0,
+            crate::model::SearchTuning::default(),
         )?;
         return Ok(vec![walk.best]);
     }

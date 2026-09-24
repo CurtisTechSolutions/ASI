@@ -1082,6 +1082,10 @@ class NegativeNet(GraphModel):
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> Prediction:
         """How a prefix goes wrong: the ``k`` most likely continuations *among the known failures* (and the ``k``
         least likely, as ``bottom``).
@@ -1106,6 +1110,7 @@ class NegativeNet(GraphModel):
         return self._search(
             prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
             traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+            top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity,
         )
 
     # -- the filter ----------------------------------------------------------

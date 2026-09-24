@@ -27,7 +27,8 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `ImagesPanel.jsx` | Images | the Stable Diffusion encoder, base64, and what the model remembers of a picture |
 | `SpeechPanel.jsx` | Speech | teaching it by talking to it — microphone, dictation, and decoding an `aud:` text back to sound |
 | `CheckpointPanel.jsx` | Checkpoints | list, save, restore |
-| `NetworkSettingsPanel.jsx` | Network settings | the settings of the network itself, as opposed to the options of one run: the **traversal** every search uses (shared with Predict and Generate), the **score function** of whichever kind is active (`GET /api/model` → `POST /api/model/weights`; the sine model has none and says so), and the **encoder / decoder** — the window, the sentinels, and a live preview that encodes a text, decodes it back and walks it through the graph's own (possibly merged) node labels (`GET /api/encoding`, `POST /api/encoding/preview`) |
+| `ModelSettingsPanel.jsx` | Model settings | what belongs to the model and is saved with it: **this model** (kind, encoding, size, the replay buffer), a **new model** in any kind and encoding (`POST /api/reset`, two clicks), the **score function** of whichever kind is active (`GET /api/model` → `POST /api/model/weights`; the sine model has none and says so), and the **encoder / decoder** — the unit, the n, the stride, the sentinels, and a live preview that encodes a text, decodes it back and walks it through the graph's own (possibly merged) node labels (`GET /api/encoding`, `POST /api/encoding/preview`) |
+| `SettingsPanel.jsx` | Settings | the settings of this browser, whichever model is loaded: the **traversal**, the **sampling filters** and the beam's **diversity**, **how a run walks its texts** (order, curriculum, replay, early stop), and how many settings the browser remembers. Predict, Generate and Train show the same controls |
 | `GraphView.jsx` | Graph | the graph itself, drawn and navigable |
 
 ## The shared widgets
@@ -44,7 +45,9 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `RatingsCard.jsx` | 👍 / 👎 on an output, and training on the ratings collected |
 | `RecallCard.jsx` | what the model remembers of what it was shown |
 | `GuardNotice.jsx` | what the negative network stopped on the way out |
-| `TraversalFields.jsx` | the **traversal** the search runs — *what* it looks for, as opposed to the mode, which is how it looks. `reward` follows the model's own distribution, rewards and all; `punishment` takes the rewards out of the score and lets the penalties price every step, so the cheapest path is the least punished one. It reads and writes the shared setting (`../hooks/useNetworkSettings.jsx`), so the same control appears on the Network settings, Predict and Generate tabs and all three move together; `compact` is the version without the explanation |
+| `TraversalFields.jsx` | the **traversal** the search runs — *what* it looks for, as opposed to the mode, which is how it looks. `reward` follows the model's own distribution, rewards and all; `punishment` takes the rewards out of the score and lets the penalties price every step, so the cheapest path is the least punished one. It reads and writes the shared setting (`../hooks/useNetworkSettings.jsx`), so the same control appears on the Settings, Predict and Generate tabs and all three move together; `compact` is the version without the explanation |
+| `SearchFields.jsx` | the **sampling filters** (top-K, top-p, min-p) and the beam's **diversity** (`../../../SPEC-SearchAndTraining.md` §1-2), over `useSiteSettings().search`. Given the mode the search really runs in, `compact` shows only what that mode reads, and a value out of range as an error beside the field |
+| `TrainingPlanFields.jsx` | **how a run walks its texts** — the order, the curriculum, the replay and its buffer's size, the early stop (§3-6) — over `useSiteSettings().training`. On the Train tab (`compact`) it previews how many texts each epoch walks and what the model's buffer holds |
 
 ## Adding a panel
 

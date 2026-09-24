@@ -3,6 +3,7 @@ package radixnet
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -219,11 +220,121 @@ func (g *Graph) SampleWalk(startNode, startOffset, maxChars int, temperature flo
 // handed in with it is ignored - the two are different currencies and are not
 // composed (../../SPEC-LeastPunished.md, penalty.go).
 func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn, traversal Traversal) (*PathResult, error) {
+	return g.SampleWalkFiltered(startNode, startOffset, maxChars, temperature, rng, includeContext, costs, traversal, SamplingFilter{})
+}
+
+// SamplingFilter narrows what every step of a stochastic walk draws from
+// (../../SPEC-SearchAndTraining.md §1).  The zero value is off: TopK 0 keeps
+// every option, TopP 0 or 1 the whole mass, MinP 0 every weight.
+type SamplingFilter struct {
+	TopK int     // the TopK cheapest options (0 = off)
+	TopP float64 // nucleus: the smallest set of cheapest options holding TopP of the mass (0 or 1 = off)
+	MinP float64 // the options at least MinP times as likely as the best (0 = off)
+}
+
+// active is whether the filter keeps anything less than every option.
+func (f SamplingFilter) active() bool {
+	return f.TopK > 0 || (f.TopP > 0 && f.TopP < 1) || f.MinP > 0
+}
+
+// Check is the error for a filter out of range: TopK < 0, TopP outside
+// (0, 1] (0 itself reads as off), MinP outside [0, 1).
+func (f SamplingFilter) Check() error {
+	if f.TopK < 0 {
+		return fmt.Errorf("top_k must be >= 0, got %d", f.TopK)
+	}
+	if f.TopP < 0 || f.TopP > 1 || math.IsNaN(f.TopP) {
+		return fmt.Errorf("top_p must lie in (0, 1], got %v", f.TopP)
+	}
+	if !(f.MinP >= 0 && f.MinP < 1) {
+		return fmt.Errorf("min_p must lie in [0, 1), got %v", f.MinP)
+	}
+	return nil
+}
+
+// Filter is the options a stochastic step may draw from, in the order the node
+// offered them.  Options rank by (cost, position); TopK, then MinP, then TopP
+// narrow them; the cheapest always survives, so the weights the draw then uses
+// are the numbers it would have used unfiltered.
+func (f SamplingFilter) Filter(options []ChildCost, temperature float64) []ChildCost {
+	n := len(options)
+	if n <= 1 || temperature == 0 || !f.active() {
+		return options
+	}
+	ranked := make([]int, n)
+	for i := range ranked {
+		ranked[i] = i
+	}
+	sort.SliceStable(ranked, func(a, b int) bool {
+		ca, cb := options[ranked[a]].Cost, options[ranked[b]].Cost
+		if ca != cb {
+			return ca < cb
+		}
+		return ranked[a] < ranked[b]
+	})
+	if f.TopK > 0 && f.TopK < n {
+		ranked = ranked[:f.TopK]
+	}
+	lowest := options[ranked[0]].Cost
+	invT := 1.0 / temperature
+	weight := make(map[int]float64, len(ranked))
+	for _, i := range ranked {
+		weight[i] = math.Exp(-(options[i].Cost - lowest) * invT)
+	}
+	if f.MinP > 0 {
+		kept := ranked[:0:0]
+		for _, i := range ranked {
+			if weight[i] >= f.MinP {
+				kept = append(kept, i)
+			}
+		}
+		ranked = kept
+	}
+	if f.TopP > 0 && f.TopP < 1 {
+		ws := make([]float64, len(ranked))
+		for j, i := range ranked {
+			ws[j] = weight[i]
+		}
+		total := fsum(ws)
+		acc := 0.0
+		kept := ranked[:0:0]
+		for _, i := range ranked {
+			kept = append(kept, i)
+			acc += weight[i]
+			if acc >= f.TopP*total {
+				break
+			}
+		}
+		ranked = kept
+	}
+	if len(ranked) == n {
+		return options
+	}
+	keep := make([]bool, n)
+	for _, i := range ranked {
+		keep[i] = true
+	}
+	out := make([]ChildCost, 0, len(ranked))
+	for i, item := range options {
+		if keep[i] {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// SampleWalkFiltered is SampleWalkBy with a SamplingFilter: every step draws
+// from what the filter keeps, with the one random number it always drew - off,
+// the walk is draw for draw the one it always was.
+func (g *Graph) SampleWalkFiltered(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn, traversal Traversal, filter SamplingFilter) (*PathResult, error) {
 	if traversal == ByLeastPunished {
 		costs = nil
 	}
 	if temperature < 0 {
 		return nil, fmt.Errorf("temperature must be >= 0")
+	}
+	if err := filter.Check(); err != nil {
+		return nil, err
 	}
 	if rng == nil {
 		rng = g.rng
@@ -264,6 +375,8 @@ func (g *Graph) SampleWalkBy(startNode, startOffset, maxChars int, temperature f
 				}
 			}
 		} else {
+			// the draw below still runs, however few options are left: one random number per step
+			options = filter.Filter(options, temperature)
 			invT := 1.0 / temperature
 			lowest := options[0].Cost
 			for _, item := range options[1:] {

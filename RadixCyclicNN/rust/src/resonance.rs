@@ -962,6 +962,9 @@ struct Pass<'a> {
     phase: Option<&'a str>,
     learn: bool,
     sharpen: f64,
+    /// How plain training walks the texts (`../../SPEC-SearchAndTraining.md`);
+    /// `None` for the feedback passes, which walk every text in corpus order.
+    plan: Option<&'a crate::training::Plan>,
 }
 
 impl Model {
@@ -1132,7 +1135,9 @@ impl Model {
 
     /// The routine behind train, reward and punish: `epochs` of walks over
     /// the texts, the structure settled (and compressed) first so every epoch
-    /// walks the same transitions.
+    /// walks the same transitions.  A pass with a plan (plain training) walks
+    /// the texts the way it says - the order, the curriculum, the rehearsal of
+    /// the replay buffer and the early stop.
     fn phase_passes(
         &mut self,
         texts: &[String],
@@ -1142,8 +1147,24 @@ impl Model {
         let enc = self.g.enc;
         let cleaned: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
         let skipped = texts.len() - cleaned.len();
+        if let Some(plan) = o.plan {
+            plan.check()?;
+        }
+        // a model that keeps a replay buffer offers every run's texts to it
+        let mut plan = match o.plan {
+            Some(p) if p.active() || self.replay.is_some() => {
+                Some(self.training_plan(cleaned.iter().map(|t| (*t).clone()).collect(), o.epochs, p)?)
+            }
+            _ => None,
+        };
+        let rehearsed = plan.as_ref().map(|p| p.replayed()).unwrap_or_default();
+        let base = self.meta.epochs_total.value; // `train` counts the epochs once the run is over
         if !cleaned.is_empty() {
-            let grams: Vec<Vec<String>> = cleaned.iter().map(|t| enc.encode(t)).collect();
+            let grams: Vec<Vec<String>> = cleaned
+                .iter()
+                .map(|t| enc.encode(t))
+                .chain(rehearsed.iter().map(|t| enc.encode(t)))
+                .collect();
             self.observe_all(&grams)?;
             if o.auto_compress {
                 self.g.compress();
@@ -1157,7 +1178,16 @@ impl Model {
             let mut cost = 0.0;
             let mut touched: Vec<usize> = Vec::new();
             let mut in_touched: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            for text in &cleaned {
+            // this epoch's texts: the order, the curriculum and the rehearsal
+            let planned_texts = match plan.as_ref() {
+                Some(p) if !p.plain() => Some(p.epoch_texts(epoch - 1, base + epoch as i64)),
+                _ => None,
+            };
+            let walked: Vec<&String> = match &planned_texts {
+                Some(list) => list.iter().collect(),
+                None => cleaned.clone(),
+            };
+            for text in &walked {
                 let done = self.phase_walk_text(text, o.learn, o.count, o.reward, o.strength)?;
                 transitions += done.transitions;
                 cycles += done.cycles;
@@ -1177,6 +1207,16 @@ impl Model {
             self.g.carry_counters(false); // the epoch is over: wrap whatever reached the limit
             let loss = cost / transitions.max(1) as f64;
             let signatures = self.res.as_ref().map(|r| r.metacog.len()).unwrap_or(0);
+            let stopping = plan.as_mut().is_some_and(|p| p.stop(epoch - 1, loss));
+            let mut extra = vec![
+                (
+                    "traversed".to_string(),
+                    Json::Int(if o.count { transitions as i64 } else { 0 }),
+                ),
+                ("cycles".to_string(), Json::Int(cycles as i64)),
+                ("signatures".to_string(), Json::Int(signatures as i64)),
+            ];
+            extra.extend(crate::model::early_stop_extra(stopping));
             let record = EpochRecord {
                 epoch: epoch as i64,
                 loss,
@@ -1192,14 +1232,7 @@ impl Model {
                 traversed: o.count,
                 reward: o.reward * transitions as f64,
                 phase: o.phase.map(str::to_string),
-                extra: vec![
-                    (
-                        "traversed".to_string(),
-                        Json::Int(if o.count { transitions as i64 } else { 0 }),
-                    ),
-                    ("cycles".to_string(), Json::Int(cycles as i64)),
-                    ("signatures".to_string(), Json::Int(signatures as i64)),
-                ],
+                extra,
             };
             crate::log_debug!(
                 LOG,
@@ -1211,7 +1244,7 @@ impl Model {
             self.epoch_done(&record)?;
             let go_on = on_epoch(&record);
             records.push(record);
-            if !go_on {
+            if stopping || !go_on {
                 break;
             }
         }
@@ -1220,6 +1253,9 @@ impl Model {
             .map(|r| r.extra_value("cycles").and_then(|v| v.as_i64()).unwrap_or(0))
             .sum();
         self.add_cycles_seen(seen);
+        if let Some(p) = plan.as_mut() {
+            self.replay = p.finish();
+        }
         Ok(records)
     }
 
@@ -1238,14 +1274,18 @@ impl Model {
     }
 
     /// Learns from texts: every traversal counted at its phase, and the cycle
-    /// decisions beside it.  There is no learning rate here; `epochs` and
-    /// `auto_compress` are what a training config means to this model.
+    /// decisions beside it.  There is no learning rate here; `epochs`,
+    /// `auto_compress` and the `plan` (the order, the curriculum, the
+    /// rehearsal, the early stop) are what a training config means to this
+    /// model.  A pass stamped with a `phase` is feedback: it walks every text
+    /// in corpus order and leaves the replay buffer alone.
     pub fn resonant_train(
         &mut self,
         texts: &[String],
         epochs: usize,
         auto_compress: bool,
         phase: Option<&str>,
+        plan: &crate::training::Plan,
         on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
     ) -> Result<Vec<EpochRecord>, String> {
         let enc = self.g.enc;
@@ -1259,13 +1299,14 @@ impl Model {
             phase,
             learn: true,
             sharpen: 1.0,
+            plan: phase.is_none().then_some(plan),
         };
         let records = self.phase_passes(texts, &pass, on_epoch)?;
         self.meta.epochs_total.add(records.len() as i64);
-        // characters, as Python's `len(t)` counts them
+        // the encoding's units, as every other kind counts them: words under a word encoding
         self.meta
             .trained_chars
-            .add(cleaned.iter().map(|t| t.chars().count() as i64).sum());
+            .add(cleaned.iter().map(|t| enc.len(t) as i64).sum());
         self.meta.trained_texts.add(cleaned.len() as i64);
         crate::log_info!(
             LOG,
@@ -1307,6 +1348,7 @@ impl Model {
                 phase: Some(phase),
                 learn: true,
                 sharpen: sharpen(1.0 + sharpen_rate * strength),
+                plan: None,
             };
             return self.phase_passes(texts, &pass, on_epoch);
         };
@@ -1325,6 +1367,7 @@ impl Model {
                 phase: Some(phase),
                 learn: true,
                 sharpen: sharpen(1.0 + sharpen_rate * strength * weight),
+                plan: None,
             };
             let group_records = self.phase_passes(&group, &pass, &mut |_| true)?;
             let first = self.history.len() - group_records.len();
@@ -1545,7 +1588,7 @@ impl Model {
         } else {
             self.g.text_bucket(prefix)
         };
-        let lead_len = lead.chars().count();
+        let lead_len = self.g.enc.len(&lead); // in units, as `length` is
         let want = o.length.saturating_sub(lead_len);
         let (cap, max_chars) = if mode == "sample" {
             let cap = o.max_length.unwrap_or(o.length);
@@ -1616,6 +1659,7 @@ impl Model {
                     o.step_penalty,
                     o.to_end,
                     costs.as_ref(),
+                    o.diversity,
                 )?;
                 width = if o.beam == 0 {
                     crate::beam::default_beam(o.k)
@@ -1639,6 +1683,7 @@ impl Model {
                         o.temperature,
                         rng,
                         costs.as_ref(),
+                        o.tuning().filter,
                     )?,
                     None => {
                         // the graph's own generator, lent to the walk and put back
@@ -1653,6 +1698,7 @@ impl Model {
                             o.temperature,
                             &mut own,
                             costs.as_ref(),
+                            o.tuning().filter,
                         );
                         self.g.rng = own;
                         walk?
@@ -1747,6 +1793,10 @@ impl Model {
             traversal: o.traversal.clone(),
             penalty_scale: o.penalty_scale,
             merit_scale: o.merit_scale,
+            top_k: o.top_k,
+            top_p: o.top_p,
+            min_p: o.min_p,
+            diversity: o.diversity,
         };
         match mode.as_str() {
             "kbest" => {
@@ -1794,11 +1844,12 @@ impl Model {
     /// The log-probability of a text under the model, phase included: every
     /// transition contributes `log P(child | parent, phase)`, and a step inside
     /// a compressed node moves the phase on without being a transition.
-    /// `chars` is the text's length in characters, as Python's `len` counts it.
+    /// `chars` is the text's length in the encoding's units, as every other
+    /// kind counts it: a six-word text under a word encoding is 6, not 22.
     pub fn resonant_score(&mut self, text: &str) -> Score {
         let enc = self.g.enc;
         let grams = enc.encode(text);
-        let chars = text.chars().count();
+        let chars = enc.len(text);
         if grams.is_empty() {
             return Score {
                 chars,
@@ -2081,7 +2132,10 @@ mod tests {
 
     fn trained() -> Model {
         let mut m = Model::new_resonant(1, &ResonantOptions::default(), Encoding::default()).unwrap();
-        m.resonant_train(&texts(), 2, true, None, &mut |_| true).unwrap();
+        m.resonant_train(&texts(), 2, true, None, &crate::training::Plan::default(), &mut |_| {
+            true
+        })
+        .unwrap();
         m
     }
 

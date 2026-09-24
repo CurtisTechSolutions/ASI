@@ -7,7 +7,10 @@ import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import LineChart from "./LineChart.jsx";
 import UploadPicker from "./UploadPicker.jsx";
+import TrainingPlanFields from "./TrainingPlanFields.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
+import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
+import { problemText } from "../settings.js";
 
 const MAX_ROWS = 300;
 const PREVIEW_DEBOUNCE_MS = 350;
@@ -26,6 +29,10 @@ function multiplierSeries(points, key, base, name, color) {
  * The learning rates can follow a schedule: an expression of the epoch
  * (a "graph function") that the server evaluates once per epoch; the panel
  * previews the resulting curve through POST /api/schedule/preview while typing.
+ *
+ * How the run walks its texts - the order, the curriculum, the rehearsal of
+ * the model's replay buffer and the early stop - is a site-wide setting
+ * (`useSiteSettings`), shown here and on the Settings tab.
  */
 export default function TrainPanel({ status }) {
   const [text, setText] = useStoredState("train.text", "");
@@ -48,6 +55,10 @@ export default function TrainPanel({ status }) {
   const [serverHistory, setServerHistory] = useState([]);
   const [historyError, setHistoryError] = useState(null);
   const { job, running, busy, error, start, stop, clearError } = useJob("train");
+  const { training } = useSiteSettings();
+  // training the negative network is blaming: its texts are walked as they always were
+  const negativeKind = Boolean(status && status.kind === "negative");
+  const planProblem = negativeKind ? null : problemText(training.problems);
 
   const otherJobRunning = jobIsRunning(status) && !running;
   const countKind = Boolean(status && status.kind === "count");
@@ -149,6 +160,10 @@ export default function TrainPanel({ status }) {
       setFormError("Enter at least one training text (one per line) or select uploaded files.");
       return;
     }
+    if (planProblem) {
+      setFormError(planProblem);
+      return;
+    }
     setFormError(null);
     const goSplit = goEngine && split !== "lines";
     await start(() =>
@@ -165,6 +180,7 @@ export default function TrainPanel({ status }) {
         ...(scheduled && reverseSchedule ? { reverse_schedule: true } : {}),
         batch_size: parseInteger(batchSize, 256),
         auto_compress: autoCompress,
+        ...(negativeKind ? {} : training.body()),
       }),
     );
   }
@@ -328,11 +344,29 @@ export default function TrainPanel({ status }) {
             </div>
           ) : null}
         </fieldset>
+        <fieldset className="schedule">
+          <legend>How the run walks its texts (shared with Settings)</legend>
+          {negativeKind ? (
+            <p className="muted">
+              Training the negative network is blaming: every text is a failure, and each epoch blames all of them in
+              the order given. The order, the curriculum, replay and early stopping belong to the models that learn
+              from what they read.
+            </p>
+          ) : (
+            <TrainingPlanFields
+              compact
+              disabled={running}
+              texts={files.length === 0 ? splitLines(text).length : 0}
+              epochs={parseInteger(epochs, 5)}
+              replay={status ? status.replay : null}
+            />
+          )}
+        </fieldset>
         {countKind ? (
           <p className="muted">
             The <b>score function</b> - how an edge's share of its node, the sliding window and the rewards weigh
-            against each other - is a setting of the network rather than of a training run, and lives on the{" "}
-            <a href="#network">Network settings</a> tab, beside the traversal and the encoder.
+            against each other - is a setting of the model rather than of a training run, and lives on the{" "}
+            <a href="#model">Model settings</a> tab, beside the encoder.
           </p>
         ) : null}
         <CheckField
@@ -342,7 +376,7 @@ export default function TrainPanel({ status }) {
           disabled={running}
         />
         <div className="actions">
-          <button type="submit" className="primary" disabled={running || busy || otherJobRunning}>
+          <button type="submit" className="primary" disabled={running || busy || otherJobRunning || Boolean(planProblem)}>
             {busy ? "Starting…" : "Start training"}
           </button>
           <button type="button" className="danger" disabled={!running} onClick={() => stop()}>
@@ -365,6 +399,12 @@ export default function TrainPanel({ status }) {
         <Alert message={historyError} onDismiss={() => setHistoryError(null)} />
         {!showingJob && history.length > 0 ? (
           <p className="muted">Showing the model's stored training history ({history.length} epochs).</p>
+        ) : null}
+        {showingJob && jobHistory.some((r) => r && r.early_stop) ? (
+          <p className="muted">
+            The run stopped early: the loss had stopped improving by the minimum for as many full epochs as the
+            patience allows.
+          </p>
         ) : null}
         {history.length > 0 ? (
           <>
@@ -392,8 +432,11 @@ export default function TrainPanel({ status }) {
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
-                    <tr key={i}>
-                      <td>{fmtInt(r.epoch)}</td>
+                    <tr key={i} className={r.early_stop ? "stopped" : undefined}>
+                      <td title={r.early_stop ? "the run stopped early after this epoch" : undefined}>
+                        {fmtInt(r.epoch)}
+                        {r.early_stop ? " (stopped)" : ""}
+                      </td>
                       <td>{fmtNum(r.loss, 4)}</td>
                       <td>{fmtNum(r.perplexity, 3)}</td>
                       <td>{fmtNum(r.lr, 4)}</td>

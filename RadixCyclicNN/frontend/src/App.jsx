@@ -20,10 +20,11 @@ import AgentPanel from "./components/AgentPanel.jsx";
 import ImagesPanel from "./components/ImagesPanel.jsx";
 import SpeechPanel from "./components/SpeechPanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
-import NetworkSettingsPanel from "./components/NetworkSettingsPanel.jsx";
+import ModelSettingsPanel from "./components/ModelSettingsPanel.jsx";
+import SettingsPanel from "./components/SettingsPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 import WordsPanel from "./components/WordsPanel.jsx";
-import { NetworkSettingsProvider } from "./hooks/useNetworkSettings.jsx";
+import { SiteSettingsProvider } from "./hooks/useSiteSettings.jsx";
 
 // The Python and Go servers run every tab: the lessons, the evolve loop, the Ollama corpus and review, code
 // generation, tool use and the image and speech encoders. The Go side's images use a thumbnail rather than
@@ -52,7 +53,8 @@ const TABS = [
   { id: "images", label: "Images", Component: ImagesPanel, route: "/api/images" },
   { id: "speech", label: "Speech", Component: SpeechPanel, route: "/api/speech" },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel, route: "/api/checkpoints" },
-  { id: "network", label: "Network settings", Component: NetworkSettingsPanel, model: true },
+  { id: "model", label: "Model settings", Component: ModelSettingsPanel, model: true },
+  { id: "settings", label: "Settings", Component: SettingsPanel, model: true },
   { id: "graph", label: "Graph", Component: GraphView, single: true, model: true },
 ];
 
@@ -113,8 +115,12 @@ function tabsFor(engine, status) {
   );
 }
 
+/** Tabs that were renamed: an old link still lands where it meant to. */
+const TAB_ALIASES = { network: "model" };
+
 function tabFromHash() {
-  const id = window.location.hash.replace(/^#/, "");
+  const raw = window.location.hash.replace(/^#/, "");
+  const id = TAB_ALIASES[raw] || raw;
   return TABS.some((t) => t.id === id) ? id : TABS[0].id;
 }
 
@@ -161,7 +167,7 @@ export default function App() {
   }, []);
 
   return (
-    <NetworkSettingsProvider>
+    <SiteSettingsProvider>
       <div className="app">
         <header className="app-header">
           <div className="app-header-row">
@@ -218,7 +224,7 @@ export default function App() {
               hidden={activeTab !== id}
               className={`panel${single ? " single" : ""}`}
             >
-              <Component status={status} />
+              <Component status={status} onStatus={setStatus} />
             </section>
           ))}
         </main>
@@ -230,6 +236,6 @@ export default function App() {
           <SettingsReset />
         </footer>
       </div>
-    </NetworkSettingsProvider>
+    </SiteSettingsProvider>
   );
 }

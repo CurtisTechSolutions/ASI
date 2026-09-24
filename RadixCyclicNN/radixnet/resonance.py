@@ -802,25 +802,39 @@ class ResonantNet(GraphModel):
         checkpoint_manager=None,
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
+        planned: bool = False,
     ) -> list[dict]:
-        """One routine behind ``train`` / ``reward`` / ``punish``: N epochs of walks over ``texts``."""
+        """One routine behind ``train`` / ``reward`` / ``punish``: N epochs of walks over ``texts``.
+
+        ``planned`` (plain training) walks them the way ``cfg`` says
+        (``../SPEC-SearchAndTraining.md``); the feedback passes walk every text
+        in corpus order.
+        """
         cleaned, skipped = self._clean_texts(texts)
+        plan = self._plan(cleaned, cfg) if planned else None
+        rehearsed = plan.replayed() if plan is not None else []
+        base = int(self.meta.get("epochs_total", 0))  # `train` counts the epochs once the run is over
         graph = self.graph
         records: list[dict] = []
         if cleaned:
             # register everything structurally (and compress) before the first counting pass, so
             # every epoch - the first included - walks exactly the same transitions
-            self._observe(cleaned, count=False)
+            self._observe(cleaned + rehearsed, count=False)
             if cfg.auto_compress:
                 graph.compress()
-            self._observe(cleaned, count=False)
+            self._observe(cleaned + rehearsed, count=False)
         for epoch in range(1, cfg.epochs + 1):
             started = time.perf_counter()
             transitions = 0
             cycles = 0
             cost = 0.0
             touched: set[int] = set()
-            for text in cleaned:
+            if plan is None or plan.plain:
+                walked = cleaned
+            else:
+                chosen, again = plan.epoch(epoch - 1, base + epoch)
+                walked = [cleaned[i] for i in chosen] + again
+            for text in walked:
                 done = self._walk(text, learn=learn, count=count, reward=reward, strength=strength)
                 transitions += done["transitions"]
                 cycles += done["cycles"]
@@ -851,15 +865,20 @@ class ResonantNet(GraphModel):
             }
             if phase:
                 record["phase"] = phase
+            stopping = plan is not None and plan.stop(epoch - 1, loss)
+            if stopping:
+                record["early_stop"] = True
             self.history.append(record)
             records.append(record)
             if progress is not None:
                 progress(record)
             if checkpoint_manager is not None and cfg.checkpoint_every and epoch % cfg.checkpoint_every == 0:
                 checkpoint_manager.save(self, epoch, "epoch", record)
-            if stop_event is not None and stop_event.is_set():
+            if stopping or (stop_event is not None and stop_event.is_set()):
                 break
         self.meta["cycles_seen"] += sum(r["cycles"] for r in records)
+        if plan is not None:
+            self.replay = plan.finish()
         return records
 
     def train(
@@ -879,9 +898,11 @@ class ResonantNet(GraphModel):
         records = self._passes(
             texts, cfg, count=True, reward=0.0, strength=1.0, phase=phase,
             checkpoint_manager=checkpoint_manager, progress=progress, stop_event=stop_event,
+            planned=phase is None,  # a phase marks a feedback pass: corpus order, the buffer left alone
         )
         self.meta["epochs_total"] += len(records)
-        self.meta["trained_chars"] += sum(len(t) for t in cleaned)
+        # the encoding's units, as every other kind counts them: words under a word encoding
+        self.meta["trained_chars"] += sum(self.encoding.length(t) for t in cleaned)
         self.meta["trained_texts"] += len(cleaned)
         return records
 
@@ -1117,6 +1138,10 @@ class ResonantNet(GraphModel):
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> Prediction:
         """The shared search hook, routed through :meth:`predict`.
 
@@ -1129,6 +1154,7 @@ class ResonantNet(GraphModel):
             prefix, length=length, mode=mode, step_penalty=step_penalty, temperature=temperature,
             to_end=to_end, max_length=max_length, k=max(1, k), beam=beam, rng=rng,
             traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+            top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity,
         )
 
     def predict(
@@ -1146,6 +1172,10 @@ class ResonantNet(GraphModel):
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> Prediction:
         """Continue ``prefix`` over the phase-unrolled graph.
 
@@ -1169,6 +1199,10 @@ class ResonantNet(GraphModel):
         punishments pricing the step, so the cheapest walk is the least
         punished one (:mod:`radixnet.penalty`).  The phase, the cycles and the
         metacognitive handoff are unchanged by it.
+
+        ``top_k`` / ``top_p`` / ``min_p`` narrow what ``"sample"`` draws from and
+        ``diversity`` spreads ``"beam"`` out (``../SPEC-SearchAndTraining.md``);
+        the two exact searches take neither.
         """
         mode = (mode or "kbest").lower()
         if mode not in ("kbest", "beam", "dijkstra", "sample"):
@@ -1179,18 +1213,19 @@ class ResonantNet(GraphModel):
         costs = phase_traversal_costs(graph, traversal, penalty_scale, merit_scale)
         node, offset, lead = self._prefix_start(prefix)
         bucket = graph.text_bucket(prefix) if prefix else 0
-        want = max(0, length - len(lead))
+        lead_len = self.encoding.length(lead)  # in units, as `length` is
+        want = max(0, length - lead_len)
         cap: int | None
         if mode == "sample":
             cap = max_length if max_length is not None else length
-            max_chars = max(0, cap - len(lead))
+            max_chars = max(0, cap - lead_len)
         elif max_length is None and length == 0:
             cap, max_chars = 0, 0      # "emit nothing" stays empty even without a cap
         elif max_length is None:
             cap, max_chars = None, None  # no limit: the whole path is returned
         else:
             cap = max(length, max_length)
-            max_chars = max(want, cap - len(lead))
+            max_chars = max(want, cap - lead_len)
         width = 0
         if mode == "kbest":
             found, expanded = phase_kbest(
@@ -1209,13 +1244,14 @@ class ResonantNet(GraphModel):
             top, bottom, expanded = phase_beam(
                 graph, self.metacog, node, offset, bucket, min_chars=want, k=k, beam=beam,
                 max_chars=max_chars, step_penalty=step_penalty, to_end=to_end, costs=costs,
+                diversity=diversity,
             )
             width = default_beam(k) if beam is None else int(beam)
             best = top[0] if top else None
         else:
             walk = phase_walk(
                 graph, self.metacog, node, offset, bucket, max_chars=max_chars,
-                temperature=temperature, rng=rng, costs=costs,
+                temperature=temperature, rng=rng, costs=costs, top_k=top_k, top_p=top_p, min_p=min_p,
             )
             top, bottom, expanded, best = [walk], [], walk.expanded, walk
         enc = self.encoding
@@ -1264,6 +1300,10 @@ class ResonantNet(GraphModel):
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> list[PathResult]:
         """Whole texts from the prediction search; ``"kbest"`` (the default) returns the exact ``count`` cheapest.
 
@@ -1279,6 +1319,7 @@ class ResonantNet(GraphModel):
                 max_length=max_length, mode=mode, temperature=temperature, count=count, seed=seed,
                 prefix=prefix, step_penalty=step_penalty, beam=beam, traversal=traversal,
                 penalty_scale=penalty_scale, merit_scale=merit_scale,
+                top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity,
             )
         if max_length < 0:
             raise ValueError(f"max_length must be >= 0, got {max_length}")
@@ -1312,7 +1353,7 @@ class ResonantNet(GraphModel):
         if not isinstance(text, str):
             raise TypeError("text must be a string")
         grams = self.encoder.encode(text)
-        chars = len(text)
+        chars = self.encoding.length(text)  # the encoding's units: a six-word text is 6, not 22
         if not grams:
             return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0, "unknown_transitions": 0}
         graph = self.graph
@@ -1436,7 +1477,7 @@ class ResonantNet(GraphModel):
 
     def to_dict(self) -> dict:
         """JSON-serialisable document (``format`` names the kind for :func:`load_model`)."""
-        return {
+        return self._with_replay({
             "format": RESONANT_MODEL_FORMAT,
             "version": MODEL_FORMAT_VERSION,
             "saved_at": _utc_now(),
@@ -1450,7 +1491,7 @@ class ResonantNet(GraphModel):
                 "back_ceiling": self.back_ceiling,
             },
             "graph": self.graph.to_dict(),
-        }
+        })
 
     @classmethod
     def from_dict(cls, d: dict, backend: str = "auto", device: str | None = None) -> "ResonantNet":
@@ -1466,6 +1507,7 @@ class ResonantNet(GraphModel):
         model.back_ceiling = float(cycles.get("back_ceiling", 0.10))
         model.history = list(d.get("history") or [])
         model.meta = {**model._new_meta(model.seed), **(d.get("meta") or {})}
+        model._read_replay(d)
         return model
 
     def __repr__(self) -> str:

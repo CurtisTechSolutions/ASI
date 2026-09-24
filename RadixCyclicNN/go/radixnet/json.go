@@ -662,6 +662,10 @@ type ModelDoc struct {
 	Filter *filterDoc `json:"filter,omitempty"`
 
 	Graph *GraphDoc `json:"graph"`
+
+	// Replay is the replay buffer, written only when the model keeps one
+	// (../../SPEC-SearchAndTraining.md §4), so an ordinary file is unchanged.
+	Replay *ReplayDoc `json:"replay,omitempty"`
 }
 
 // filterDoc is how strictly a negative network judges.
@@ -685,6 +689,9 @@ func (m *Model) ToDoc() *ModelDoc {
 		doc.Format = NegativeFormat
 		doc.Log = append([]LogEntry{}, m.Neg.Log...)
 		doc.Filter = &filterDoc{Threshold: m.Neg.Threshold, MinCoverage: m.Neg.MinCoverage}
+	}
+	if m.Replay != nil {
+		doc.Replay = m.Replay.Doc()
 	}
 	return doc
 }
@@ -726,6 +733,13 @@ func FromDoc(d *ModelDoc) (*Model, error) {
 	m.carryMeta() // a file may carry a counter that was never wrapped
 	if d.Format == NegativeFormat && !g.IsNegative() {
 		return nil, fmt.Errorf("%s document without a negative graph", NegativeFormat)
+	}
+	if d.Replay != nil {
+		buffer, err := ReplayFromDoc(d.Replay, g.Seed)
+		if err != nil {
+			return nil, err
+		}
+		m.Replay = buffer
 	}
 	return m, nil
 }

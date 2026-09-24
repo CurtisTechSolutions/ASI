@@ -471,7 +471,7 @@ frontend-build: ## Rebuild frontend/dist (what `make serve` serves)
 frontend-dev: ## Vite dev server with hot reload on http://localhost:5173 (expects `make serve` running)
 	cd frontend && npm run dev
 
-frontend-test: ## Unit tests of the frontend's settings store (node --test, no dependencies, no npm install needed)
+frontend-test: ## Unit tests of the frontend's settings store and site-wide settings (node --test, no npm install needed)
 	cd frontend && npm test
 
 ##@ Docker (Compose stack)

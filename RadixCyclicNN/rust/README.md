@@ -35,9 +35,10 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/graph.rs` | the self-compressing cyclic graph: split, merge, observe, trace, the invariants, and `observe_back` (what a voice backing out of a loop teaches it) |
 | `src/weights.rs` | the dual frequency weight function, the softmax costs, and the punishment |
 | `src/paths.rs` | what a *walk* did: the judged contexts and their counters |
-| `src/search.rs` | the traversals, what a node offers a walk, and the stochastic walk |
+| `src/search.rs` | the traversals, what a node offers a walk, the stochastic walk and the sampling filters it draws through (top-K, top-p, min-p) |
 | `src/penalty.rs` | the punishment traversal: the merit / penalty split, and the cost function it prices a step with |
-| `src/beam.rs` | the two beams - the k best paths and the k worst |
+| `src/beam.rs` | the two beams - the k best paths and the k worst - and the diverse pick of the k best |
+| `src/training.rs` | how a run walks its texts: the order, the curriculum, the replay buffer and early stopping (`../SPEC-SearchAndTraining.md`), keyed by SplitMix64 so no random number is drawn |
 | `src/model.rs` | train, predict, generate, score, reward / punish / 2NRL, and the epoch hook checkpoints are written through |
 | `src/kinds.rs` | the model kinds - `count` (this port's default), `radix`, `resonant`, `negative` - and training, 2NRL, reward, punish and `invert_paths` dispatched to each |
 | `src/radix.rs`, `src/activation.rs`, `src/backend.rs`, `src/dijkstra.rs` | the sine-activation model: `f(z) = a*sin(b*(z-h)) + k` per node, a learned weight per edge, Python's one-hop learning rule over CSR, and the exact Dijkstra prediction |
@@ -169,6 +170,9 @@ cargo run --release --bin radixnet -- --model model.count.json train --data ../d
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --k 5
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal least-punished
 cargo run --release --bin radixnet -- --model model.count.json predict --prefix "the cat" --traversal punishment --merit-scale 0
+cargo run --release --bin radixnet -- --model model.count.json --seed 7 generate --mode sample --top-p 0.9 --seeded
+cargo run --release --bin radixnet -- --model model.count.json generate --mode beam --count 5 --diversity 2
+cargo run --release --bin radixnet -- --model model.count.json train --data ../data/sample_corpus.txt --order shortest-first --curriculum 0.3 --replay-size 256
 cargo run --release --bin radixnet -- --encoding word:3:1 --model model.word.json train --data ../data/sample_corpus.txt
 cargo run --release --bin radixnet -- --model model.word.json words --limit 20    # the alphabet its grams are made of
 cargo run --release --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../frontend/dist
@@ -198,6 +202,11 @@ same settings and must produce the same structure, counts, rewards, sliding
 window and RNG state, the same predictions, generated texts and scores, the same
 judged paths and node ratios — and each side must load and continue the other's
 file, gzipped or not.
+
+`../tests/test_rust_parity_methods.py` does the same for the search and training
+methods on the count, sine and phase models: six training plans, the same graph,
+history and `replay` block byte for byte, and the same texts from the filters and
+the diverse beam.
 
 One thing it asks for that the Go suite does not: **the graph document has to be
 Python's byte for byte**, but for the `version` cache stamp that every load

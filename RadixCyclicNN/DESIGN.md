@@ -745,8 +745,11 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
-* `NetworkSettingsPanel.jsx` — **Network settings** (section 31.4): the settings of the network itself, as opposed to the options of one run. Three cards: the **traversal** every search uses (`TraversalFields.jsx` over the shared `useNetworkSettings`), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), and the **encoder / decoder** (`GET /api/encoding` for the window, stride, overlap and sentinels, `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the windows the model has never seen marked and a label longer than the window shown as the merged chain it is).
-* `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Network settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
+* `SettingsPanel.jsx` — **Settings** (section 31.4): the site-wide settings of this browser, what every search and every run starts from. Four cards: the **traversal** (`TraversalFields.jsx`), **sampling and diversity** (`SearchFields.jsx`), **how a run walks its texts** (`TrainingPlanFields.jsx`) - each with a button back to its defaults - and **this browser** (how many settings are remembered, and a two-click button that forgets them all).
+* `ModelSettingsPanel.jsx` — **Model settings** (section 31.4): what belongs to the model and is saved with it. Four cards: **this model** (kind, encoding, size, file, and the replay buffer from `/api/status` `replay`), a **new model** in any kind and encoding (`POST /api/reset {kind, encoding, seed}`, two clicks, the encoding checked before it is sent), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), and the **encoder / decoder** (`GET /api/encoding` for the unit, the n, the stride, the overlap and the sentinels - asked again whenever the model changes - and `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the grams the model has never seen marked and a label longer than one gram shown as the merged chain it is).
+* `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
+* `SearchFields.jsx` — the sampling filters (top-K, top-p, min-p) and the beam's diversity (`SPEC-SearchAndTraining.md` sections 1-2), over the shared `useSiteSettings().search`. Given the `mode` the search will really run in, the compact version shows only what that mode reads - the filters for `sample`, the diversity for `beam`, nothing for the exact searches - and an out-of-range value as an error the tab refuses to send.
+* `TrainingPlanFields.jsx` — the order, the curriculum, the replay and the early stop (sections 3-6), over `useSiteSettings().training`; on the Train tab it previews how many texts each epoch walks and how many buffered texts it rehearses, and says what the model's buffer holds.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any).
 * `ScorePanel.jsx` — score a text.
 * `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
@@ -779,14 +782,17 @@ removeSetting / settingNames / clearSettings(storage)   // only this app's keys
 browserStorage()                       // localStorage probed once with a real write, else null
 ```
 
-A setting that belongs to the **network** rather than to a panel - the traversal and its two scales - is the one
-exception, and it is why `src/hooks/useNetworkSettings.jsx` exists: `NetworkSettingsProvider` holds it once at the
-top of `App.jsx` (persisted with `useStoredState` under `network.*`) and every panel reads it through
-`useNetworkSettings()`, which also hands back `body`, the request fields a `/api/predict` or `/api/generate` call
-needs for it. Two panels cannot share a `useStoredState` name - they would share the stored value but not the
-state, and every panel here stays mounted while hidden, so they would drift apart within a session - so a shared
-setting has to live in one place with several doors into it. Outside the provider the hook returns the defaults
-with no-op setters.
+The settings that belong to the **site** rather than to a panel - the traversal and its two scales, the sampling
+filters and the beam's diversity, and how a run walks its texts - are the exception, and they are why
+`src/hooks/useSiteSettings.jsx` exists: `SiteSettingsProvider` holds them once at the top of `App.jsx` (persisted
+with `useStoredState` under `site.search.*` and `site.train.*`; the traversal keeps its `network.*` names through
+`useNetworkSettings.jsx`, which the site provider wraps) and every panel reads them through `useSiteSettings()` -
+`{network, search, training}`, each group with its values, their problems, whether any is on, `set`, `reset` and
+`body`, the request fields. The rules themselves - ranges, what a mode reads, what a body carries - are pure
+functions in `src/settings.js`, tested by `test/settings.test.mjs`. Two panels cannot share a `useStoredState`
+name - they would share the stored value but not the state, and every panel here stays mounted while hidden, so
+they would drift apart within a session - so a shared setting has to live in one place with several doors into it.
+Outside the provider the hooks return the defaults with no-op setters.
 
 `useStoredState(name, initialValue)` is `useState` with that store behind it: the initial value is the stored
 one when a value of the same shape exists, every later change is written back 250 ms after the last keystroke,
@@ -3257,7 +3263,7 @@ walk is indifferent.  Both scales must be `>= 0`.
   (`add_traversal_flags`), and the `--json` document carries `traversal`.
 * HTTP API: `traversal`, `penalty_scale`, `merit_scale` on `POST /api/predict` and `POST /api/generate`
   (`_traversal_fields`), both servers.
-* Frontend: the **Network settings** tab (section 31.4) and, as the same control, the Predict and Generate tabs
+* Frontend: the **Settings** tab (section 31.4) and, as the same control, the Predict and Generate tabs
   (`frontend/src/components/TraversalFields.jsx` over the shared `useNetworkSettings`), with the two scales shown
   only when the punishment traversal is chosen; the Result card reports the traversal that ran.
 * Go: `Graph.ChildEvidence`, `Graph.PenaltyCosts`, `Graph.TraversalCosts`, a `CostFn` on `SampleWalk` and
@@ -3269,40 +3275,53 @@ API), `go/radixnet/penalty_test.go` (the same contract in Go) and
 `tests/test_go_parity.py::TestGoParity::test_the_punishment_traversal_matches` (both sides walk the same
 least-punished paths at the same costs, under three settings of the scales, for `predict` and `generate`).
 
-### 31.4 The Network settings tab
+### 31.4 The Settings and Model settings tabs
 
 The traversal is a setting of the **network**, not an option of one run, and it was the first of those the
-frontend had nowhere to put. `frontend/src/components/NetworkSettingsPanel.jsx` is that place, and it collects
-the three settings of the network itself:
+frontend had nowhere to put: it began on a *Network settings* tab beside the score function and the encoder. The
+search and training methods (section 35) brought more settings of the same kind - they shape every search and
+every run whichever tab starts it - and they split that tab along the line that matters: **who keeps the
+setting**.
+
+| tab | what it holds | kept by |
+|---|---|---|
+| **Settings** (`SettingsPanel.jsx`) | the traversal and its scales; the sampling filters and the diversity; the order, the curriculum, the replay and the early stop; the browser's own store | this browser (`useSiteSettings`, section 13.1) - never saved with a model, the same whichever model is loaded |
+| **Model settings** (`ModelSettingsPanel.jsx`) | this model (kind, encoding, size, replay buffer); a new model in any kind and encoding; the score function; the encoder / decoder | the model - saved in its file, gone when another model is loaded |
 
 | card | what it sets | how |
 |---|---|---|
-| **Traversal** | the traversal every search runs, and its penalty / merit scales | the shared `useNetworkSettings` store, remembered in this browser; `TraversalFields.jsx` renders it here in full and on the Predict and Generate tabs in its `compact` form |
+| **Traversal** | the traversal every search runs, and its penalty / merit scales | `TraversalFields.jsx` over the shared store, here in full and on the Predict and Generate tabs in its `compact` form |
+| **Sampling and diversity** | `top_k`, `top_p`, `min_p`, `diversity` | `SearchFields.jsx`; Predict and Generate show only what their mode reads and send only what is on (`searchBody`) |
+| **How a run walks its texts** | `order`, `curriculum`, `replay`, `replay_size`, `patience`, `min_delta` | `TrainingPlanFields.jsx`; the Train tab shows the same fields with a preview of the curriculum and the rehearsal, and sends only what is on (`trainingBody`) |
+| **This model** | nothing: it reports | `/api/status` - the kind, the encoding, the size, the file and `replay` (`{size, texts, seen}` or null, all three servers) |
+| **New model** | a fresh model | `POST /api/reset {kind, encoding, seed}` - two clicks, since it replaces the model of that kind in memory; the encoding presets and the three dials by hand, checked (`encodingSpec`) before anything is sent |
 | **Score function** | the active kind's weight function | `GET /api/model` → `weights` on mount and after every change, `POST /api/model/weights` to apply. The count model's `global_scale / window_scale / reward_scale / count_scale / path_scale / window`, the resonant model's `buckets / period / kick_scale / resonance_scale / amp_scale / reward_scale / concentration`. A kind without one - the sine model, whose score is learned rather than set, and the negative network, whose blame function is on its own tab - gets the sentence saying so and where to look instead |
-| **Encoder / decoder** | nothing: it is read-only, and says so | `GET /api/encoding` for the window, stride, overlap and the three sentinels; `POST /api/encoding/preview` for a text the user types - the windows it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than the window is a merged radix chain and `decode_path` reads the text back out of it |
+| **Encoder / decoder** | nothing: it reports | `GET /api/encoding` for the unit, the n, the stride, the overlap and the three sentinels; `POST /api/encoding/preview` for a text the user types - the grams it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than one gram is a merged radix chain |
 
-Two decisions are worth stating.
+The decisions worth stating:
 
-**One setting, several doors.** The traversal is edited in three places and is one value
-(`src/hooks/useNetworkSettings.jsx`, section 13.1): a provider at the top of `App.jsx` holds it, every panel reads
-it through `useNetworkSettings()`, and changing it anywhere changes it everywhere at once. Two `useStoredState`
-calls under one name would have shared the *stored* value and not the state, and every panel here stays mounted
-while hidden, so they would have disagreed until a reload.
+**One setting, several doors.** Each site-wide setting is edited in several places and is one value: a provider at
+the top of `App.jsx` holds it, every panel reads it through `useSiteSettings()`, and changing it anywhere changes it
+everywhere at once. Two `useStoredState` calls under one name would have shared the *stored* value and not the
+state, and every panel here stays mounted while hidden, so they would have disagreed until a reload. The old hash
+`#network` still opens the model's tab.
 
-**The score function moved off the Train tab.** It was a fieldset there, count-model-only and missing
-`path_scale`; the Train tab now carries one line pointing at this one. How an edge is scored is a property of the
-model that is saved with it, not a setting of a training run, and having it in two places would have had the same
-drift problem - the form that was not touched would keep showing what the function used to be.
+**A tab sends only what its search reads.** The filters shape a sampled walk and the diversity a beam; the exact
+searches read neither. So a request carries a setting only when its mode reads it and it is not off, and a value
+out of range stops the tab from sending anything at all - with the reason beside the field - rather than being
+sent to a 400. A server older than the setting never sees it.
 
-**The encoder is chosen once, not edited.** The encoding *is* a setting now (§34's dial: the unit, the n and the
-stride), but it is one a model is *born* with rather than one it can be moved between: the labels, the split and
-merge rules and the saved file are all measured in its units, so a graph built at `char:3:1` could not be read at
-`word:2:1`. The card therefore reports `configurable: true` with `fixed_for_life: true` and points at
-`POST /api/reset`, which is where a new model under a new encoding is made; changing the dial on a trained model
-would mean silently throwing the training away, and a server that does that without saying so is worse than one
-that refuses. What the card spends its space on is making the encoding *visible* - the grams a text becomes, the
-ones this model has never seen, and the walk through the graph's own labels - which is also the clearest
-demonstration of the radix compression anywhere in the frontend.
+**The score function lives with the model.** It was a fieldset on the Train tab once, count-model-only and missing
+`path_scale`; how an edge is scored is a property of the model that is saved with it, not a setting of a training
+run, and having it in two places would have had the same drift problem.
+
+**The encoder is chosen once, not edited.** The encoding is a dial (section 34: the unit, the n and the stride),
+but one a model is *born* with rather than one it can be moved between: the labels, the split and merge rules and
+the saved file are all measured in its units, so a graph built at `char:3:1` could not be read at `word:2:1`. The
+New model card is therefore where an encoding is chosen, and the encoder card spends its space on making the
+encoding *visible* - the grams a text becomes, the ones this model has never seen, and the walk through the graph's
+own labels - which is also the clearest demonstration of the radix compression anywhere in the frontend.
+
 ## 32. The least-punished traversal (`radixnet/search.py`, `go/radixnet/search.go`, `rust/src/search.rs`) — ranking a walk by what went wrong
 
 The full argument, the alternatives rejected and the measured behaviour are in `SPEC-LeastPunished.md`; this is what
@@ -3532,3 +3551,50 @@ because a number whose unit depends on the model is a number that will be read w
 
 **N stays 3**: the overlap is two words and the pivot is the middle one, which is D-006's argument word for
 word.  Word bigrams need `WINDOW = 2`, a separate change with its own costs, and nothing here prevents it later.
+
+## 35. Search and training methods (`radixnet/training.py`, `go/radixnet/training.go`, `rust/src/training.rs`) — sampling filters, a diverse beam, curricula, replay and early stopping
+
+`SPEC-SearchAndTraining.md` is the contract, precise to the rounding and the tie; this is where it lives and what it
+cost. Every setting is **off by default**, and off it changes nothing: the draw, the beam, the training pass and the
+model file are exactly what they were, which the existing parity suites confirm unchanged.
+
+**Search.** `sampling_filter` (`search.py`; `SamplingFilter` in Go and Rust) narrows the options of a sampled step -
+`top_k`, then `min_p`, then `top_p` - ranking by `(cost, position)` and handing the survivors back in the order the
+node offered them, so the draw that follows is the one it always was with fewer options. Two rules keep three
+implementations on one random stream: the cheapest option always survives (so `lowest`, and every weight, is the
+same number), and a step with a positive temperature and more than one option draws exactly once however few
+survive. `sample_walk` and the resonant model's `phase_walk` both use it. `diverse_pick` (`beam.py`) is the diverse
+beam: the top beam keeps a pool of `max(k, width)` finished paths instead of `k`, and the K are picked from it by
+maximal marginal relevance - `(punish, cost + diversity · overlap, position)`, the overlap being the share of the
+shorter path's nodes two paths share from the start. It replaced a first attempt that penalised paths ending in the
+same node inside the frontier: that changed nothing on real graphs (the endings differ node by node) and, tuned
+harder, pruned the best path; picking from finished paths cannot lose the best one, which is always the first
+pick. Only the top side is spread; `phase_beam` applies the same pick.
+
+**Training.** A `TrainingPlan` is built once per plain `train` call from the run's usable texts: the order
+(`corpus`, `shortest-first`, `longest-first`, `shuffle` - the last by SplitMix64 keys of the seed and the epoch
+number, so no random number is drawn and the model's generator stays where it was), the curriculum's share per
+epoch (`ceil(frac_j · n)`, linear from `c` to 1), the rehearsal slice of the replay buffer, and the early stop
+(skipping epochs still inside the curriculum). The structure pass still observes every text - and, when any is
+rehearsed, the whole buffer - before the first epoch, so a plan changes what each epoch *counts*, never the graph's
+shape. The `ReplayBuffer` is bottom-k sampling by `replay_key(seed, g)`: uniform over every text ever offered,
+whatever order they came in, deterministic, and small enough to write into the model file (`replay`, last, only when
+there is one; a reader recomputes the priorities rather than trusting the order). A pass stamped with a feedback
+phase - 2NRL, a thumbs up or down, the agent's punishment - is not planned: a punished text is not one to rehearse.
+
+**Where it runs.** Python: every kind that learns by walking a list of texts (count, sine, resonant). Go: the count
+model (the only one it has); a streaming source is read into memory when a plan needs the whole list. Rust: every
+kind, byte for byte with Python. CLI: `--top-k --top-p --min-p --diversity` on `predict` / `generate`, `--order
+--curriculum --replay --replay-size --patience --min-delta` on `train`. HTTP: the same names on `/api/predict`,
+`/api/generate` and `/api/train` on all three servers, with the same 400s, and `/api/status` reports the buffer.
+Frontend: the Settings tab and the controls it shares with Predict, Generate and Train (section 31.4).
+
+**Fixed on the way.** The lead of a prefix (the unmatched rest of the located gram) was measured in characters where
+`length` is in units - a word model asked for three words got three minus the lead's *characters*; the resonant
+model's score counted `chars` in characters and its `trained_chars` too. All count units now, in every port.
+
+Tests: `tests/test_search_training.py` (the rules, pinned keys, every kind's planned training, the phase rule, the
+HTTP API and the CLI), `tests/test_rust_parity_methods.py` (Rust against Python on six plans in three kinds - graph,
+history and replay block byte for byte - the filters and the diverse beam, and the server),
+`tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`, `go/radixnet/sampling_test.go`,
+the `training`, `search` and `beam` unit tests in Rust, and `frontend/test/settings.test.mjs`.

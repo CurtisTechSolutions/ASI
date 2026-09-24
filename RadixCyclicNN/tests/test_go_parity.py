@@ -1659,6 +1659,96 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class TestGoSearchAndTraining(unittest.TestCase):
+    """The methods of ``SPEC-SearchAndTraining.md``: the same plans, buffers, stops and searches as Python."""
+
+    PLANS = (
+        ("curriculum", [], ["--epochs", 4, "--order", "shortest-first", "--curriculum", 0.3], []),
+        ("shuffle", [], ["--epochs", 3, "--order", "shuffle"], []),
+        ("patience", [], ["--epochs", 8, "--order", "longest-first", "--patience", 1, "--min-delta", 0.5], []),
+        ("replay-size", [], ["--epochs", 2, "--replay-size", 7], []),
+        ("rehearsal", [], ["--epochs", 2, "--replay-size", 6], [
+            ("second", ["--epochs", 3, "--replay", 0.4, "--order", "shuffle", "--curriculum", 0.5]),
+            ("first", ["--epochs", 2, "--replay", 2.5, "--replay-size", 4]),
+        ]),
+        ("words", ["--encoding", "word:2:1"], ["--epochs", 3, "--order", "shortest-first", "--curriculum", 0.5,
+                                               "--replay-size", 5], []),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        with open(CORPUS, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        parts = {}
+        for name, part in (("first", lines[: len(lines) // 2]), ("second", lines[len(lines) // 2:])):
+            parts[name] = os.path.join(TMP.name, f"methods-{name}.txt")
+            with open(parts[name], "w", encoding="utf-8") as fh:
+                fh.write("\n".join(part) + "\n")
+        cls.models = {}
+        for name, new, first, later in cls.PLANS:
+            pm = os.path.join(TMP.name, f"methods-{name}.py.json")
+            gm = os.path.join(TMP.name, f"methods-{name}.go.json")
+            py("--kind", "count", "--seed", 3, *new, "train", "--data", CORPUS, *first, model=pm)
+            go("--seed", 3, *new, "train", "--data", CORPUS, *first, model=gm)
+            for corpus, flags in later:
+                py("train", "--data", parts[corpus], *flags, model=pm)
+                go("train", "--data", parts[corpus], *flags, model=gm)
+            cls.models[name] = (pm, gm)
+
+    def test_the_same_graph_history_and_buffer(self):
+        for name, (pm, gm) in self.models.items():
+            with self.subTest(plan=name):
+                a, b = load_json(pm), load_json(gm)
+                pg, gg = a["graph"], b["graph"]
+                self.assertEqual(pg["nodes"]["labels"], gg["nodes"]["labels"])
+                self.assertEqual(pg["edges"]["count"], gg["edges"]["count"])
+                self.assertEqual(pg["edges"]["reward"], gg["edges"]["reward"])
+                self.assertEqual(pg["rng_state"], gg["rng_state"])
+                self.assertEqual(pg["weights"]["window_events"], gg["weights"]["window_events"])
+                assert_close(self, pg["edges"]["w"], gg["edges"]["w"], 1e-12)
+                self.assertEqual(len(a["history"]), len(b["history"]))
+                for x, y in zip(a["history"], b["history"]):
+                    self.assertEqual((x["epoch"], x["transitions"], x["skipped_short"], x.get("early_stop")),
+                                     (y["epoch"], y["transitions"], y["skipped_short"], y.get("early_stop")))
+                    self.assertLessEqual(abs(x["loss"] - y["loss"]), 1e-9)
+                for key in ("epochs_total", "trained_texts", "trained_chars"):
+                    self.assertEqual(a["meta"][key], b["meta"][key], key)
+                self.assertEqual(a.get("replay"), b.get("replay"))
+                self.assertEqual(list(a)[-1] == "replay", list(b)[-1] == "replay")
+        a = load_json(self.models["patience"][0])
+        self.assertTrue(a["history"][-1].get("early_stop"))
+        self.assertEqual(len(load_json(self.models["rehearsal"][1])["replay"]["texts"]), 4)
+
+    def test_the_same_searches(self):
+        pm, gm = self.models["replay-size"]
+        texts = lambda doc: [(s["text"], round(s["cost"], 9)) for s in doc["samples"]]  # noqa: E731
+        for flags in (["--temperature", 1.3, "--top-k", 2], ["--temperature", 1.0, "--top-p", 0.6],
+                      ["--temperature", 2.0, "--min-p", 0.3],
+                      ["--temperature", 1.5, "--top-k", 3, "--top-p", 0.9, "--min-p", 0.05]):
+            with self.subTest(flags=flags):
+                args = ["generate", "--mode", "sample", "--count", 6, "--max-length", 40, *flags, "--no-guard"]
+                self.assertEqual(texts(py("--seed", 11, *args, model=pm)),
+                                 texts(go("--seed", 11, *args, "--seeded", model=gm)))
+        for flags in (["--diversity", 2.0], ["--diversity", 0.5, "--beam", 12]):
+            with self.subTest(flags=flags):
+                args = ["generate", "--mode", "beam", "--count", 5, "--max-length", 40, *flags, "--no-guard"]
+                self.assertEqual(texts(py(*args, model=pm)), texts(go(*args, model=gm)))
+        a = py("predict", "--prefix", "the cat", "--length", 10, "--k", 4, "--diversity", 3.0, "--no-guard", model=pm)
+        b = go("predict", "--prefix", "the cat", "--length", 10, "--k", 4, "--diversity", 3.0, "--no-guard", model=gm)
+        self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+        assert_close(self, [t["cost"] for t in a["top"]], [t["cost"] for t in b["top"]])
+
+    def test_both_refuse_the_same_values(self):
+        model = os.path.join(TMP.name, "methods-bad.json")
+        for args in (["generate", "--top-p", 0], ["generate", "--min-p", 1], ["predict", "--diversity", -1],
+                     ["train", "--data", CORPUS, "--order", "random"], ["train", "--data", CORPUS, "--curriculum", 0],
+                     ["train", "--data", CORPUS, "--replay-size", -1], ["train", "--data", CORPUS, "--replay", -1]):
+            with self.subTest(args=args):
+                go(*args, model=model, expect=1)
+                self.assertNotEqual(subprocess.run([sys.executable, "-m", "radixnet", "--model", model,
+                                                    *map(str, args)], cwd=ROOT, capture_output=True).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

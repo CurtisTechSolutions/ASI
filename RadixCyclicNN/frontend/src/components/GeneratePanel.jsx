@@ -7,8 +7,10 @@ import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
+import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
-import { useNetworkSettings } from "../hooks/useNetworkSettings.jsx";
+import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
+import { problemText, searchProblemsFor } from "../settings.js";
 
 /**
  * Generate whole texts with the prediction search (beam: the K most likely
@@ -25,7 +27,8 @@ export default function GeneratePanel({ status }) {
   const [temperature, setTemperature] = useStoredState("generate.temperature", "1.0");
   const [mode, setMode] = useStoredState("generate.mode", "beam");
   const [prefix, setPrefix] = useStoredState("generate.prefix", "");
-  const network = useNetworkSettings();  // the traversal is shared with the Network settings tab
+  // the traversal, the sampling filters and the diversity are site-wide (the Settings tab)
+  const { network, search } = useSiteSettings();
   const [guard, setGuard] = useStoredState("generate.guard", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -35,12 +38,19 @@ export default function GeneratePanel({ status }) {
   const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
   // the resonant model's k-best search returns the exact K most likely texts, and far cheaper than a beam
   const resonantKind = Boolean(status && status.kind === "resonant");
+  const searchProblem = problemText(searchProblemsFor(search.values, mode));
+  const [sent, setSent] = useState({}); // the search settings the shown samples were asked with
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (searchProblem) {
+      setError(searchProblem);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
+      const tuning = search.body(mode);
       const data = await api.generate({
         count: parseInteger(count, 1),
         max_length: parseInteger(maxLength, 60),
@@ -49,8 +59,10 @@ export default function GeneratePanel({ status }) {
         guard,
         ...(prefix ? { prefix } : {}),
         ...network.body,
+        ...tuning,
       });
       setSamples(asArray(data && data.samples));
+      setSent(tuning);
       setGuarded((data && data.guard) || null);
     } catch (err) {
       setError(err.message);
@@ -103,6 +115,7 @@ export default function GeneratePanel({ status }) {
             disabled={mode !== "sample"}
           />
         </div>
+        <SearchFields mode={mode} compact />
         <TraversalFields compact />
         <CheckField
           label="Filter with the negative network"
@@ -111,7 +124,7 @@ export default function GeneratePanel({ status }) {
           onChange={setGuard}
         />
         <div className="actions">
-          <button type="submit" className="primary" disabled={loading}>
+          <button type="submit" className="primary" disabled={loading || Boolean(searchProblem)}>
             {loading ? "Generating…" : "Generate"}
           </button>
         </div>
@@ -125,6 +138,12 @@ export default function GeneratePanel({ status }) {
           phase). Press the same thumb again to remove the rating.
         </p>
         <GuardNotice guard={guarded} what="candidates" />
+        {sent.diversity && samples && samples.length > 1 ? (
+          <p className="muted">
+            Picked for diversity {fmtNum(sent.diversity, 2)}: the most likely text first, then each by its cost plus
+            what it repeats of the ones before it, so after the first they are not in cost order.
+          </p>
+        ) : null}
         {samples === null ? (
           <p className="muted">Press Generate to sample texts from the model.</p>
         ) : samples.length === 0 ? (

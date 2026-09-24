@@ -122,7 +122,8 @@ from .blame import teach_reviews
 from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
-from .search import PathResult
+from .search import PathResult, check_sampling
+from .training import check_plan
 from .speech import DEFAULT_RATE as SPEECH_DEFAULT_RATE
 from .speech import SpeechError
 from .speech import decode_text as decode_speech_text
@@ -708,6 +709,8 @@ class ModelService:
             kind=self.kind,
             model_label=type(self.model).label,
             units=self.model.encoding.units_name,
+            # the replay buffer the model keeps (../SPEC-SearchAndTraining.md §4): {size, texts, seen} or null
+            replay=self.model.replay_summary(),
             kinds=model_kinds(),
             job=job.to_dict() if job is not None else None,
             backends=self.backends,
@@ -2435,8 +2438,13 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _train_config(f: Fields) -> TrainConfig:
-    """The optional training settings of a request body, defaults from :class:`TrainConfig`."""
-    return TrainConfig(
+    """The optional training settings of a request body, defaults from :class:`TrainConfig`.
+
+    ``order``, ``curriculum``, ``replay``, ``replay_size``, ``patience`` and
+    ``min_delta`` are the training methods of ``../SPEC-SearchAndTraining.md``;
+    a value out of range is a 400, before any job starts.
+    """
+    config = TrainConfig(
         epochs=f.integer("epochs", TrainConfig.epochs, minimum=0),
         lr=f.number("lr", TrainConfig.lr, minimum=0.0),
         act_lr=f.number("act_lr", TrainConfig.act_lr, minimum=0.0),
@@ -2448,7 +2456,19 @@ def _train_config(f: Fields) -> TrainConfig:
         auto_compress=f.flag("auto_compress", TrainConfig.auto_compress),
         shuffle=f.flag("shuffle", TrainConfig.shuffle),
         checkpoint_every=f.integer("checkpoint_every", TrainConfig.checkpoint_every, minimum=0),
+        order=f.text("order", TrainConfig.order).strip().lower() or TrainConfig.order,
+        curriculum=f.number("curriculum", TrainConfig.curriculum),
+        replay=f.number("replay", TrainConfig.replay, minimum=0.0),
+        replay_size=f.integer("replay_size", None, minimum=0),
+        patience=f.integer("patience", TrainConfig.patience, minimum=0),
+        min_delta=f.number("min_delta", TrainConfig.min_delta, minimum=0.0),
     )
+    try:
+        check_plan(config.order, config.curriculum, config.replay, config.replay_size, config.patience,
+                   config.min_delta)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return config
 
 
 def _r_train(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -2495,6 +2515,28 @@ def _traversal_fields(f: Fields) -> dict:
     }
 
 
+def _search_fields(f: Fields) -> dict:
+    """The sampling filters and the beam's diversity (``../SPEC-SearchAndTraining.md`` §1-2).
+
+    Only the ones a request gives are passed on - each is off at its default,
+    so a request that names none of them searches exactly as it always did.
+    """
+    out: dict[str, Any] = {}
+    if f.present("top_k"):
+        out["top_k"] = f.integer("top_k", 0, minimum=0)
+    if f.present("top_p"):
+        out["top_p"] = f.number("top_p", 1.0)
+    if f.present("min_p"):
+        out["min_p"] = f.number("min_p", 0.0)
+    if f.present("diversity"):
+        out["diversity"] = f.number("diversity", 0.0, minimum=0.0)
+    try:
+        check_sampling(out.get("top_k", 0), out.get("top_p", 1.0), out.get("min_p", 0.0))
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return out
+
+
 def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     prefix = f.text("prefix")
     return 200, svc.predict(
@@ -2509,6 +2551,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         k=f.integer("k", 5, minimum=0),
         beam=f.integer("beam", None, minimum=1),
         **_traversal_fields(f),
+        **_search_fields(f),
     )
 
 
@@ -2524,6 +2567,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
         beam=f.integer("beam", None, minimum=1),
         **_traversal_fields(f),
+        **_search_fields(f),
     )
 
 
@@ -3900,13 +3944,19 @@ def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
-    ("GET", "/api/status", _r_status, "model stats (with the active kind), current job, backend availability, paths"),
+    ("GET", "/api/status", _r_status,
+     "model stats (with the active kind), current job, backend availability, paths, replay (the model's replay "
+     "buffer: {size, texts, seen} or null)"),
     ("GET", "/api/model", _r_model, "the active model kind, every kind (radix | count) and their default files"),
     ("POST", "/api/model/select", _r_model_select,
      "switch the active model kind: {kind: radix | count}; the previous model stays in memory"),
     ("POST", "/api/train", _r_train,
      "start a training job: {texts | text | files, epochs, lr, act_lr, lr_schedule, act_lr_schedule, reverse_schedule, "
-     "batch_size, auto_compress}"),
+     "batch_size, clip, shuffle, auto_compress, checkpoint_every, order: corpus | shortest-first | longest-first | "
+     "shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay "
+     "(the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the "
+     "buffer's capacity from now on; 0 drops it), patience, min_delta (stop after `patience` full epochs without "
+     "the loss improving by `min_delta`; 0 = off)}"),
     ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
     ("POST", "/api/schedule/preview", _r_schedule_preview,
      "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr, "
@@ -3917,12 +3967,16 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "continue a prefix: {prefix, length, mode: dijkstra | beam | sample, to_end, step_penalty, temperature, max_length "
      "(optional cap; default none), k, beam (beam mode: the top-K and bottom-K continuations), traversal: reward "
      "(default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest "
-     "path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), guard "
+     "path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), "
+     "top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at "
+     "least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations spread out - "
+     "a path pays diversity times its overlap with one already picked; off at 0), guard "
      "(default on: the negative network vetoes the continuations it recognises as failures)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
      "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
-     "penalty_scale, merit_scale, guard (default on: the model over-samples and the "
+     "penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), "
+     "guard (default on: the model over-samples and the "
      "negative network vetoes what it recognises as failure)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "

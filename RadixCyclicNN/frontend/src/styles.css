@@ -568,7 +568,7 @@ dl.kv dd {
   font-style: italic;
 }
 
-/* a window the model has never seen (the encoder preview on the Network settings tab) */
+/* a gram the model has never seen (the encoder preview on the Model settings tab) */
 .chip.unknown {
   border-style: dashed;
   color: var(--muted);
@@ -1585,4 +1585,9 @@ table.data b.ok {
 table.data td.bad,
 table.data b.bad {
   color: var(--danger);
+}
+
+/* the epoch that stopped a run early (the Train tab's history) */
+table.data tr.stopped td {
+  font-weight: 600;
 }

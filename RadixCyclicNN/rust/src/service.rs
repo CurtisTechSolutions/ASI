@@ -25,11 +25,11 @@ use crate::graph::{END, START};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::kinds;
-use crate::model::{GenerateOptions, Model, PredictOptions};
+use crate::model::{GenerateOptions, Model, PredictOptions, SearchTuning};
 use crate::penalty::{resolve_traversal, DEFAULT_TRAVERSAL, TRAVERSALS};
 use crate::radix::{Feedback, TrainConfig};
 use crate::report::{node_rows, path_rows, split_texts, stats};
-use crate::search::PathResult;
+use crate::search::{PathResult, SamplingFilter};
 use crate::GraphOptions;
 
 /// What this server can be asked for and what it answers with.
@@ -672,6 +672,16 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
     pairs.push(("kind".to_string(), Json::str(kind)));
     pairs.push(("model_label".to_string(), Json::str(label)));
     pairs.push(("units".to_string(), Json::str(units)));
+    // the replay buffer the model keeps (../../SPEC-SearchAndTraining.md section 4)
+    let replay = svc.with_model(|m| match &m.replay {
+        Some(b) => Json::obj([
+            ("size", Json::Int(b.size as i64)),
+            ("texts", Json::Int(b.len() as i64)),
+            ("seen", Json::Int(b.seen)),
+        ]),
+        None => Json::Null,
+    });
+    pairs.push(("replay".to_string(), replay));
     pairs.push(("kinds".to_string(), svc.kinds()));
     pairs.push(("job".to_string(), svc.job_json()));
     pairs.push((
@@ -815,6 +825,22 @@ fn traversal_of(r: &Request) -> Result<(String, f64, f64), ApiError> {
     ))
 }
 
+/// The sampling filters and the beam's diversity of a request
+/// (`../../SPEC-SearchAndTraining.md` sections 1-2): each is off at its
+/// default, so a request that names none of them searches as it always did.
+fn search_fields(r: &Request) -> Result<SearchTuning, ApiError> {
+    let tuning = SearchTuning {
+        filter: SamplingFilter {
+            top_k: r.usize("top_k", 0)?,
+            top_p: r.number("top_p", 1.0)?,
+            min_p: r.number("min_p", 0.0)?,
+        },
+        diversity: r.number("diversity", 0.0)?,
+    };
+    tuning.check()?;
+    Ok(tuning)
+}
+
 fn path_json(result: &PathResult) -> Json {
     let mut pairs = vec![
         ("text".to_string(), Json::str(result.text.clone())),
@@ -838,6 +864,7 @@ fn path_json(result: &PathResult) -> Json {
 
 fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     let (traversal, penalty_scale, merit_scale) = traversal_of(r)?;
+    let tuning = search_fields(r)?;
     let max_length = r.body.at("max_length").as_i64();
     let opts = PredictOptions {
         length: r.usize("length", 20)?,
@@ -852,6 +879,10 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         traversal,
         penalty_scale,
         merit_scale,
+        top_k: tuning.filter.top_k,
+        top_p: tuning.filter.top_p,
+        min_p: tuning.filter.min_p,
+        diversity: tuning.diversity,
     };
     let prefix = r.text("prefix", "");
     let (kind, ..) = svc.active_kind();
@@ -907,6 +938,7 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
 
 fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     let (traversal, penalty_scale, merit_scale) = traversal_of(r)?;
+    let tuning = search_fields(r)?;
     let seeded = r.body.get("seed").and_then(|v| v.as_i64());
     let opts = GenerateOptions {
         max_length: r.usize("max_length", 60)?,
@@ -920,6 +952,10 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
         traversal,
         penalty_scale,
         merit_scale,
+        top_k: tuning.filter.top_k,
+        top_p: tuning.filter.top_p,
+        min_p: tuning.filter.min_p,
+        diversity: tuning.diversity,
     };
     // the negative network guards the texts: the model is asked for
     // `over_sample` times as many and what the negative half recognises as
@@ -1136,10 +1172,33 @@ pub(crate) fn train_config(r: &Request) -> Result<TrainConfig, ApiError> {
         auto_compress: r.flag("auto_compress", !r.flag("no_compress", false)),
         shuffle: r.flag("shuffle", base.shuffle),
         checkpoint_every: r.usize("checkpoint_every", 0)?,
+        plan: plan_fields(r)?,
         ..base
     };
     config.validate().map_err(ApiError::bad_request)?;
     Ok(config)
+}
+
+/// How a training run walks its texts (`../../SPEC-SearchAndTraining.md`
+/// sections 3-6): `order`, `curriculum`, `replay`, `replay_size`, `patience`
+/// and `min_delta`, each off when the request leaves it out.  A value out of
+/// range is a 400, before any job starts.
+fn plan_fields(r: &Request) -> Result<crate::training::Plan, ApiError> {
+    let order = r.text("order", "").trim().to_ascii_lowercase();
+    let plan = crate::training::Plan {
+        order: if order.is_empty() { "corpus".to_string() } else { order },
+        curriculum: r.number("curriculum", 1.0)?,
+        replay: r.number("replay", 0.0)?,
+        // absent (or null) leaves the model's buffer as it is; 0 drops it
+        replay_size: match r.body.get("replay_size") {
+            None | Some(Json::Null) => None,
+            Some(_) => Some(r.usize("replay_size", 0)?),
+        },
+        patience: r.usize("patience", 0)?,
+        min_delta: r.number("min_delta", 0.0)?,
+    };
+    plan.check()?;
+    Ok(plan)
 }
 
 fn train(svc: &Arc<Service>, r: &Request) -> Answer {

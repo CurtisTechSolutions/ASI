@@ -37,8 +37,9 @@ from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
 from .graph import BACK, END, FIRST, START, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
-from .search import LEAST_PUNISHED, REWARD, PathResult, dijkstra_predict, parse_traversal, sample_walk
+from .search import LEAST_PUNISHED, REWARD, PathResult, check_sampling, dijkstra_predict, parse_traversal, sample_walk
 from .schedule import preview_points
+from .training import ReplayBuffer, TrainingPlan, check_plan
 
 __all__ = [
     "GraphModel",
@@ -138,6 +139,19 @@ class TrainConfig:
     """Graph function of the epoch for ``act_lr``; may use ``lr`` (the epoch's learning rate), e.g. ``"lr / 10"``."""
     reverse_schedule: bool = False
     """Play the schedules backwards: the last epoch's rates come first (a ramp up becomes a ramp down)."""
+    order: str = "corpus"
+    """How an epoch walks the texts: ``corpus``, ``shortest-first``, ``longest-first`` or ``shuffle``
+    (``../SPEC-SearchAndTraining.md`` §3)."""
+    curriculum: float = 1.0
+    """The share of the ordered texts the first epoch walks, growing to all of them by the last (1 = off)."""
+    replay: float = 0.0
+    """How many texts of the model's replay buffer each epoch rehearses, as a share of the run's texts (0 = off)."""
+    replay_size: int | None = None
+    """The replay buffer's capacity from this run on (``None`` leaves the model's alone, 0 drops it)."""
+    patience: int = 0
+    """Stop after this many full epochs without the loss improving by ``min_delta`` (0 = off)."""
+    min_delta: float = 0.0
+    """How much an epoch's loss must fall below the best so far to count as an improvement."""
 
     def rates(self) -> list[tuple[float, float]]:
         """``(lr, act_lr)`` for every epoch of this config, schedules applied (constant when none are set)."""
@@ -168,6 +182,7 @@ class TrainConfig:
             raise ValueError(f"clip must be > 0, got {self.clip}")
         if self.checkpoint_every < 0:
             raise ValueError(f"checkpoint_every must be >= 0, got {self.checkpoint_every}")
+        check_plan(self.order, self.curriculum, self.replay, self.replay_size, self.patience, self.min_delta)
 
     def to_dict(self) -> dict:
         """Plain-dict form (JSON-serialisable)."""
@@ -335,6 +350,34 @@ class GraphModel:
     history: list[dict]
     meta: dict
     seed: int
+    replay: ReplayBuffer | None = None
+    """The replay buffer: a uniform sample of every text this model was trained on, rehearsed by a run with
+    ``replay > 0`` - or ``None``, and then the file does not mention it (``../SPEC-SearchAndTraining.md`` §4)."""
+
+    def _plan(self, texts: list[str], cfg: TrainConfig) -> TrainingPlan:
+        """How one ``train`` call walks ``texts``: the order, the curriculum, the rehearsal, the stop."""
+        return TrainingPlan(
+            texts, [self.encoding.length(t) for t in texts], seed=self.seed, epochs=cfg.epochs,
+            order=cfg.order, curriculum=cfg.curriculum, replay=cfg.replay, replay_size=cfg.replay_size,
+            patience=cfg.patience, min_delta=cfg.min_delta, buffer=self.replay,
+        )
+
+    def replay_summary(self) -> dict | None:
+        """The replay buffer at a glance - ``{size, texts, seen}`` - or ``None`` when the model keeps none."""
+        if self.replay is None:
+            return None
+        return {"size": self.replay.size, "texts": len(self.replay), "seen": self.replay.seen}
+
+    def _with_replay(self, doc: dict) -> dict:
+        """A model document with the ``replay`` block at its end - only when there is a buffer."""
+        if self.replay is not None:
+            doc["replay"] = self.replay.to_dict()
+        return doc
+
+    def _read_replay(self, d: dict) -> None:
+        """The ``replay`` block of a model document, if it has one."""
+        block = d.get("replay")
+        self.replay = ReplayBuffer.from_dict(block, self.seed) if isinstance(block, dict) else None
 
     @staticmethod
     def _new_meta(seed: int) -> dict:
@@ -625,18 +668,28 @@ class GraphModel:
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> Prediction:
         """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
         continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
         ``bottom``; ``length``, ``to_end`` and ``max_length`` follow :meth:`RadixNet.predict`.  ``traversal``
         picks the cost function the search reads the graph through
         (``"punishment"``, :mod:`radixnet.penalty`) or, with ``"least-punished"``,
-        what a walk is *ranked* by (``../SPEC-LeastPunished.md``)."""
+        what a walk is *ranked* by (``../SPEC-LeastPunished.md``).  ``top_k`` / ``top_p`` / ``min_p`` narrow what
+        a sampled step draws from and ``diversity`` spreads the top beam out
+        (``../SPEC-SearchAndTraining.md`` §1-2); each is off at its default."""
         graph = self.graph
+        enc = self.encoding
         traversal = resolve_traversal(traversal)
         costs = traversal_costs(graph, traversal, penalty_scale, merit_scale)
         node, offset, lead = self._prefix_start(prefix)
-        want = max(0, length - len(lead))
+        # the lead is the unmatched rest of the located gram: a length in the encoding's units, as
+        # `length` and `max_length` are - its words under a word encoding, not its characters
+        lead_len = enc.length(lead)
+        want = max(0, length - lead_len)
         cap: int | None
         if mode == "beam":
             if max_length is None and length == 0:
@@ -645,20 +698,19 @@ class GraphModel:
                 cap, max_chars = None, None
             else:
                 cap = max(length, max_length)
-                max_chars = max(want, cap - len(lead))
+                max_chars = max(want, cap - lead_len)
             top, bottom, expanded = beam_predict(
                 graph, node, offset, min_chars=want, k=k, beam=beam, max_chars=max_chars,
-                step_penalty=step_penalty, to_end=to_end, costs=costs, traversal=traversal,
+                step_penalty=step_penalty, to_end=to_end, costs=costs, traversal=traversal, diversity=diversity,
             )
             width = default_beam(k) if beam is None else int(beam)
         else:
             cap = max_length if max_length is not None else length
             walk = sample_walk(
-                graph, node, offset, max_chars=max(0, cap - len(lead)), temperature=temperature, rng=rng,
-                costs=costs, traversal=traversal,
+                graph, node, offset, max_chars=max(0, cap - lead_len), temperature=temperature, rng=rng,
+                costs=costs, traversal=traversal, top_k=top_k, top_p=top_p, min_p=min_p,
             )
             top, bottom, expanded, width = [walk], [], walk.expanded, 0
-        enc = self.encoding
         for result in top + bottom:
             if lead:
                 joined = enc.join(lead, result.text)
@@ -690,6 +742,10 @@ class GraphModel:
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> list[PathResult]:
         """Generate whole texts with the prediction search, from START or continuing ``prefix``.
 
@@ -705,7 +761,9 @@ class GraphModel:
         Every result's ``text`` (and ``full_text``) is the whole text, prefix
         included; ``probability`` is ``exp(-cost)``.  ``traversal`` picks what
         the search is looking for - ``"reward"`` or ``"punishment"``, the text
-        that accumulated the least punishment (:meth:`predict`).
+        that accumulated the least punishment (:meth:`predict`).  ``top_k`` /
+        ``top_p`` / ``min_p`` narrow what a sampled step draws from and
+        ``diversity`` spreads the beam's texts apart (``../SPEC-SearchAndTraining.md``).
         """
         if max_length < 0:
             raise ValueError(f"max_length must be >= 0, got {max_length}")
@@ -718,6 +776,9 @@ class GraphModel:
             raise ValueError(f"unknown mode {mode!r}; expected 'beam', 'dijkstra' or 'sample'")
         if count == 0:
             return []
+        check_sampling(top_k, top_p, min_p)
+        if not (diversity >= 0.0):
+            raise ValueError(f"diversity must be >= 0, got {diversity}")
         walk_options = {"traversal": traversal, "penalty_scale": penalty_scale, "merit_scale": merit_scale}
         if mode == "sample":
             rng = random.Random(seed) if seed is not None else None
@@ -725,7 +786,7 @@ class GraphModel:
             for _ in range(count):
                 walk = self._search(
                     prefix, max_length, "sample", 0, None, 0.0, temperature, False, max_length, rng=rng,
-                    **walk_options,
+                    top_k=top_k, top_p=top_p, min_p=min_p, **walk_options,
                 )
                 results.append(_whole_text(walk, prefix, self.encoding))
             return results
@@ -737,7 +798,7 @@ class GraphModel:
             return [_whole_text(best, prefix, self.encoding)]
         found = self.predict(
             prefix, length=0, mode="beam", k=count, beam=beam, to_end=True, max_length=max_length,
-            step_penalty=step_penalty, **walk_options,
+            step_penalty=step_penalty, diversity=diversity, **walk_options,
         )
         return [_whole_text(result, prefix, self.encoding) for result in found.top]
 
@@ -913,9 +974,19 @@ class RadixNet(GraphModel):
         Keyword ``overrides`` replace individual :class:`TrainConfig` fields.
         ``phase`` (optional) is stamped on every record - :meth:`two_nrl` uses
         it.  Returns the epoch records (also appended to :attr:`history`).
+
+        The texts are walked the way ``cfg`` says - the order, the curriculum,
+        the rehearsal of the replay buffer and the early stop of
+        ``../SPEC-SearchAndTraining.md`` - unless the call carries a ``phase``:
+        a pass stamped ``"negative"`` or ``"positive"`` is feedback
+        (:meth:`reward`, :meth:`punish`, :meth:`two_nrl`), walks every text in
+        corpus order, and neither reads the replay buffer nor offers it a text -
+        a punished text is not one to rehearse.
         """
         cfg = _resolve_config(config, overrides)
         texts, skipped_short = self._clean_texts(texts)
+        plan = self._plan(texts, cfg) if phase is None else None
+        rehearsed = plan.replayed() if plan is not None else []
         graph = self.graph
         backend = self.backend
         rng = graph.rng
@@ -923,6 +994,9 @@ class RadixNet(GraphModel):
         records: list[dict] = []
 
         transitions, observed_version = self._observe(texts, count=True)
+        if rehearsed:
+            self._observe(rehearsed, count=False)  # a rehearsed text is not new: nothing to count
+            transitions, observed_version = self._observe(texts, count=False)
         meta_add(meta, "trained_texts", len(texts))
         meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         pending_merges = graph.compress() if cfg.auto_compress else 0
@@ -930,13 +1004,20 @@ class RadixNet(GraphModel):
         parents_all: list[int] = []
         positions_all: list[int] = []
         arrays_version = -1
+        walked = texts
         rates = cfg.rates()  # (lr, act_lr) per epoch: the schedules are graph functions of the epoch
         for k in range(cfg.epochs):
             t0 = time.perf_counter()
             lr, act_lr = rates[k]
-            if graph.structure_version != observed_version:
+            if plan is not None and not plan.plain:
+                # this epoch's texts: the order, the curriculum and the rehearsal (../SPEC-SearchAndTraining.md)
+                chosen, again = plan.epoch(k, meta_counter(meta, "epochs_total").bumped(1).value)
+                walked = [texts[i] for i in chosen] + again
+                transitions, observed_version = self._observe(walked, count=False)
+                arrays_version = -1
+            elif graph.structure_version != observed_version:
                 # a merge (or an external structural change) moved edge ids
-                transitions, observed_version = self._observe(texts, count=False)
+                transitions, observed_version = self._observe(walked, count=False)
             csr = graph.to_csr()
             state = backend.prepare(csr, graph.node_params())
             if arrays_version != observed_version:
@@ -983,6 +1064,9 @@ class RadixNet(GraphModel):
             }
             if phase is not None:
                 record["phase"] = phase
+            stopping = plan is not None and plan.stop(k, loss)
+            if stopping:
+                record["early_stop"] = True
             self.history.append(record)
             records.append(record)
             if cfg.verbose:
@@ -998,8 +1082,10 @@ class RadixNet(GraphModel):
                 progress(record)
             if checkpoint_manager is not None and cfg.checkpoint_every and epoch % cfg.checkpoint_every == 0:
                 checkpoint_manager.save(self, epoch, "epoch", record)
-            if stop_event is not None and stop_event.is_set():
+            if stopping or (stop_event is not None and stop_event.is_set()):
                 break
+        if plan is not None:
+            self.replay = plan.finish()
         return records
 
     # -- inference -----------------------------------------------------------
@@ -1018,6 +1104,10 @@ class RadixNet(GraphModel):
         traversal: str = DEFAULT_TRAVERSAL,
         penalty_scale: float = 1.0,
         merit_scale: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        diversity: float = 0.0,
     ) -> PathResult:
         """Continue ``prefix``.
 
@@ -1049,6 +1139,10 @@ class RadixNet(GraphModel):
         ``"least-punished"`` is the count model's own traversal and is refused
         here: it ranks a walk by the blame on its **worst step**, which needs
         the judged paths this model does not keep (``../SPEC-LeastPunished.md``).
+
+        ``top_k`` / ``top_p`` / ``min_p`` narrow what a sampled step draws from
+        and ``diversity`` spreads the beam out (``../SPEC-SearchAndTraining.md``);
+        Dijkstra, which returns one path, takes none of them.
         """
         if parse_traversal(traversal) == LEAST_PUNISHED:
             raise ValueError(
@@ -1064,10 +1158,12 @@ class RadixNet(GraphModel):
             return self._search(
                 prefix, length, mode, k, beam, step_penalty, temperature, to_end, max_length,
                 traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
+                top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity,
             )
         graph = self.graph
         node, offset, lead = self._prefix_start(prefix)
-        want = max(0, length - len(lead))
+        lead_len = self.encoding.length(lead)  # in units, as `length` is
+        want = max(0, length - lead_len)
         cap: int | None
         if max_length is None and length == 0:
             cap = 0  # "emit nothing" stays empty even without a cap
@@ -1077,7 +1173,7 @@ class RadixNet(GraphModel):
             max_chars = None
         else:
             cap = max(length, max_length)
-            max_chars = max(want, cap - len(lead))
+            max_chars = max(want, cap - lead_len)
         result = dijkstra_predict(
             graph, node, offset, min_chars=want, max_chars=max_chars,
             step_penalty=step_penalty, to_end=to_end,
@@ -1354,8 +1450,8 @@ class RadixNet(GraphModel):
     # -- persistence ---------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """JSON-serialisable snapshot (graph, history, meta)."""
-        return {
+        """JSON-serialisable snapshot (graph, history, meta, and the replay buffer when there is one)."""
+        return self._with_replay({
             "format": MODEL_FORMAT,
             "version": MODEL_FORMAT_VERSION,
             "saved_at": _utc_now(),
@@ -1363,7 +1459,7 @@ class RadixNet(GraphModel):
             "history": [dict(r) for r in self.history],
             "backend": self.backend.name,
             "graph": self.graph.to_dict(),
-        }
+        })
 
     @classmethod
     def from_dict(cls, d: dict, backend: str = "auto", device: str | None = None) -> "RadixNet":
@@ -1380,6 +1476,7 @@ class RadixNet(GraphModel):
         meta = cls._new_meta(graph.seed)
         meta.update(d.get("meta") or {})
         model.meta = carry_meta(meta)
+        model._read_replay(d)
         return model
 
 

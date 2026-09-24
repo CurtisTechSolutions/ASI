@@ -102,6 +102,7 @@ pub mod source;
 pub mod speech;
 pub mod toolbox;
 pub mod tools;
+pub mod training;
 pub mod tutor;
 pub mod vision;
 pub mod web;
