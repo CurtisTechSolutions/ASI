@@ -290,7 +290,7 @@ commands:
   converse   the model talks to itself
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
-  ollama     a corpus written to order, and the adversarial review (models | corpus | review)
+  ollama     a corpus written to order, the adversarial review and the copy editor (models | corpus | review | correct)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client

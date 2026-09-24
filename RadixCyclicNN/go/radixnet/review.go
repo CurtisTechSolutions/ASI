@@ -8,10 +8,11 @@ import (
 	"strings"
 )
 
-// Ollama integration beyond the chat client: prompt-driven training corpora and
-// the adversarial review.  Both are the Python `radixnet/ollama.py` functions,
-// and both work with any LLMClient (they only ever call Generate), so ChatGPT
-// reviews as happily as a local model does.
+// Ollama integration beyond the chat client: prompt-driven training corpora,
+// the adversarial review and the copy editor's letter-level corrections.  All
+// are the Python `radixnet/ollama.py` functions, and all work with any
+// LLMClient (they only ever call Generate), so ChatGPT reviews as happily as a
+// local model does.
 
 // CorpusStyles are the two kinds of corpus the LLM is asked for.
 var CorpusStyles = []string{"good", "garbage"}
@@ -366,6 +367,354 @@ func ReasonOrder(counts map[string]int) []string {
 		return names[i] < names[j]
 	})
 	return names
+}
+
+// -- letter-level correction --------------------------------------------------
+
+const correctSystem = "You are a meticulous copy editor correcting short texts written by a small experimental " +
+	"character-level language model. For each text write the corrected text: the same text in correct, natural " +
+	"English with the SMALLEST possible change. Keep every character that is already right, keep the wording, " +
+	"the meaning and the length as they are, and change only what is actually wrong: a misspelt letter, a missing " +
+	"or doubled punctuation mark, a wrong ending, a missing word. Never rewrite, never add commentary, never " +
+	"quote. If a text is already correct, return it exactly as it is. Name the kind of mistake with one word from " +
+	"this list: %s; use \"none\" for a text you did not change. Reply with JSON only, no prose, exactly of the " +
+	"form {\"corrections\": [{\"index\": <int>, \"correction\": \"<the corrected text>\", \"reason\": " +
+	"\"<one word from the list>\", \"note\": \"<one short sentence saying what was wrong, or 'nothing'>\"}, " +
+	"...]} with one entry per text, in the given order and with the given index."
+
+// CorrectionVerdicts are what the editor did with a text: changed it, handed it
+// back as it was, or could not be understood about it.
+var CorrectionVerdicts = []string{"corrected", "unchanged", "uncorrected"}
+
+// DefaultCorrectionBatch is how many texts go into one correction call.
+const DefaultCorrectionBatch = 20
+
+// Change is one edit of a correction's diff, as the record carries it: Op is
+// "replace", "delete" or "insert" (the equal runs are left out), Wrong what
+// the network wrote over At (a half-open span of its text) and Right what the
+// editor put there instead over To (a span of the correction).
+type Change struct {
+	Op    string `json:"op"`
+	Wrong string `json:"wrong"`
+	Right string `json:"right"`
+	At    [2]int `json:"at"`
+	To    [2]int `json:"to"`
+}
+
+// CorrectionEntry is one text as the copy editor handled it.
+//
+// Verdict is "corrected" when the editor changed something, "unchanged" when it
+// handed the text back as it was (it is correct, so it clears blame) and
+// "uncorrected" when its answer could not be understood for that text
+// (Correction is nil: nothing is known about it, so it neither blames nor
+// clears).  Changes are the edits of the character alignment (Edits) with
+// the equal runs left out; Reason is the editor's word for the mistake mapped
+// onto CorrectionReasons (the shape of the diff decides when it gave none).
+type CorrectionEntry struct {
+	Index      int      `json:"index"`
+	Text       string   `json:"text"`
+	Correction *string  `json:"correction"`
+	Verdict    string   `json:"verdict"`
+	Reason     string   `json:"reason"`
+	Note       string   `json:"note"`
+	Changes    []Change `json:"changes"`
+	Edits      int      `json:"edits"`
+	WrongChars int      `json:"wrong_chars"`
+	RightChars int      `json:"right_chars"`
+}
+
+// parsedCorrection is what the editor said about one text before the diff is taken.
+type parsedCorrection struct {
+	correction string
+	reason     string
+	note       string
+}
+
+// truthyText is Python's `str(a or b or "")`: the first of the keys whose value
+// is truthy, as text.
+func truthyText(entry map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch value := entry[key].(type) {
+		case nil:
+		case string:
+			if value != "" {
+				return value
+			}
+		case bool:
+			if value {
+				return "True"
+			}
+		case float64:
+			if value != 0 {
+				return pythonString(value)
+			}
+		default:
+			return pythonString(value)
+		}
+	}
+	return ""
+}
+
+// parseCorrections reads whatever shape the editor drifted into:
+// {"corrections": [...]}, {"results"/"items": [...]}, a bare list (of objects
+// or of corrected lines), or one object when a single text was asked about;
+// corrected / text stand in for correction, error for reason and critique /
+// comment for note.  Entries that could be understood come back by index.
+func parseCorrections(raw string, count int) map[int]parsedCorrection {
+	parsed := map[int]parsedCorrection{}
+	data := loadsLenient(raw)
+	var items []any
+	listed := false
+	switch value := data.(type) {
+	case map[string]any:
+		for _, key := range []string{"corrections", "results", "items"} {
+			if list, ok := value[key]; ok && list != nil {
+				items, _ = list.([]any) // something other than a list under the key: nothing understood
+				listed = true
+				break
+			}
+		}
+		if !listed {
+			if _, ok := value["correction"]; ok {
+				items = []any{value}
+			} else if _, ok := value["corrected"]; ok {
+				items = []any{value}
+			}
+		}
+	case []any:
+		items = value
+	}
+	for position, item := range items {
+		entry, ok := item.(map[string]any)
+		if text, isText := item.(string); isText { // a bare list of corrected lines
+			entry, ok = map[string]any{"correction": text}, true
+		}
+		if !ok {
+			continue
+		}
+		index := position
+		if given, ok := numberOf(entry["index"]); ok {
+			index = int(given)
+		}
+		var correction string
+		found := false
+		for _, key := range []string{"correction", "corrected", "text"} {
+			if value, ok := entry[key]; ok {
+				correction, found = value.(string)
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		correction = strings.TrimSpace(strings.Trim(strings.TrimSpace(correction), "\"'`“”"))
+		reason := strings.ToLower(strings.TrimSpace(truthyText(entry, "reason", "error")))
+		note := collapse(truthyText(entry, "note", "critique", "comment"))
+		if _, seen := parsed[index]; index >= 0 && index < count && !seen {
+			parsed[index] = parsedCorrection{correction: correction, reason: reason, note: note}
+		}
+	}
+	return parsed
+}
+
+// correctionEntry is one CorrectTexts result: the diff against the correction,
+// and what the editor said.  A nil correction is an uncorrected text.
+func correctionEntry(index int, text string, correction *string, reason, note string) CorrectionEntry {
+	entry := CorrectionEntry{Index: index, Text: text, Changes: []Change{}}
+	if correction == nil {
+		if note == "" {
+			note = "no correction returned"
+		}
+		entry.Verdict, entry.Note = "uncorrected", note
+		return entry
+	}
+	for _, edit := range Edits(text, *correction) {
+		if edit.Op == "equal" {
+			continue
+		}
+		entry.Changes = append(entry.Changes, Change{
+			Op: edit.Op, Wrong: edit.Wrong, Right: edit.Right, At: [2]int{edit.A0, edit.A1}, To: [2]int{edit.B0, edit.B1},
+		})
+		entry.WrongChars += edit.A1 - edit.A0
+		entry.RightChars += edit.B1 - edit.B0
+	}
+	entry.Correction = correction
+	entry.Edits = len(entry.Changes)
+	if *correction != text {
+		entry.Verdict = "corrected"
+		entry.Reason = CorrectionReason(reason, note, entry.Changes)
+		if note == "" {
+			note = "corrected"
+		}
+	} else {
+		entry.Verdict, entry.Reason = "unchanged", "none"
+		if note == "" {
+			note = "nothing"
+		}
+	}
+	entry.Note = note
+	return entry
+}
+
+// CorrectTexts asks the copy editor for the letter-level correction of every
+// text, in input order (see CorrectionEntry for what comes back).  Blank texts
+// are uncorrected without asking; a text the answer said nothing usable about
+// comes back uncorrected too, with Correction nil.
+func CorrectTexts(client LLMClient, texts []string, context, model string, batch int) ([]CorrectionEntry, error) {
+	if batch < 1 {
+		return nil, fmt.Errorf("batch must be >= 1")
+	}
+	reasons := []string{}
+	for _, reason := range CorrectionReasons {
+		if reason != "none" {
+			reasons = append(reasons, reason)
+		}
+	}
+	system := fmt.Sprintf(correctSystem, strings.Join(reasons, ", "))
+	out := make([]CorrectionEntry, 0, len(texts))
+	for start := 0; start < len(texts); start += batch {
+		end := start + batch
+		if end > len(texts) {
+			end = len(texts)
+		}
+		chunk := texts[start:end]
+		var numbered []string
+		for i, text := range chunk {
+			if strings.TrimSpace(text) != "" {
+				numbered = append(numbered, fmt.Sprintf("[%d] %s", i, text))
+			}
+		}
+		parsed := map[int]parsedCorrection{}
+		if len(numbered) > 0 {
+			user := ""
+			if strings.TrimSpace(context) != "" {
+				user = "Context: " + strings.TrimSpace(context) + "\n\n"
+			}
+			user += fmt.Sprintf("Correct these %d texts:\n%s\n\nReturn the JSON now.", len(numbered), strings.Join(numbered, "\n"))
+			raw, err := client.Generate(user, LLMOptions{System: system, Model: model, JSON: true, Temperature: 0})
+			if err != nil {
+				return nil, err
+			}
+			parsed = parseCorrections(raw, len(chunk))
+		}
+		for i, text := range chunk {
+			switch found, ok := parsed[i]; {
+			case strings.TrimSpace(text) == "":
+				out = append(out, correctionEntry(start+i, text, nil, "", "empty output"))
+			case ok:
+				correction := found.correction
+				out = append(out, correctionEntry(start+i, text, &correction, found.reason, found.note))
+			default:
+				out = append(out, correctionEntry(start+i, text, nil, "", ""))
+			}
+		}
+	}
+	return out, nil
+}
+
+// CorrectionResult is one copy-edited set of texts, split into what was
+// changed, what was right as it was, and what got no answer.
+//
+// ChangeRate is the share of the answered texts the editor changed (nil when it
+// answered none): the copy editor's counterpart of the reviewer's pass rate,
+// falling as the model's writing improves.
+type CorrectionResult struct {
+	Source      string            `json:"source"`
+	Model       string            `json:"model"`
+	Texts       []string          `json:"texts"`
+	Corrections []CorrectionEntry `json:"corrections"`
+	Corrected   []string          `json:"corrected"`
+	Unchanged   []string          `json:"unchanged"`
+	Uncorrected []string          `json:"uncorrected"`
+	Edits       int               `json:"edits"`
+	WrongChars  int               `json:"wrong_chars"`
+	RightChars  int               `json:"right_chars"`
+	ChangeRate  *float64          `json:"change_rate"`
+}
+
+// AdversarialCorrectionOptions are the knobs of one copy-editing round.
+type AdversarialCorrectionOptions struct {
+	Count       int
+	Prefix      string
+	MaxLength   int
+	Temperature float64
+	Texts       []string // correct these instead of sampling from the model
+	Context     string
+	Model       string // the editor's model, "" for the client's own
+	Seed        *int64
+	Batch       int
+}
+
+// AdversarialCorrection lets the LLM copy-edit the network's own output (or
+// the given texts), letter by letter, and splits the result into the texts it
+// changed, the ones it handed back and the ones it said nothing usable about -
+// ready for TeachCorrections.
+func AdversarialCorrection(model *Model, client LLMClient, o AdversarialCorrectionOptions) (*CorrectionResult, error) {
+	samples, source := o.Texts, "given"
+	if o.Texts == nil {
+		if model == nil {
+			return nil, fmt.Errorf("either a model to sample from or texts to correct is required")
+		}
+		count := o.Count
+		if count < 1 {
+			count = 8
+		}
+		drawn, err := SampleTexts(model, count, o.Prefix, o.MaxLength, o.Temperature, o.Seed)
+		if err != nil {
+			return nil, err
+		}
+		samples, source = drawn, "model"
+	}
+	batch := o.Batch
+	if batch < 1 {
+		batch = DefaultCorrectionBatch
+	}
+	corrections, err := CorrectTexts(client, samples, o.Context, o.Model, batch)
+	if err != nil {
+		return nil, err
+	}
+	editor := o.Model
+	if editor == "" {
+		editor = client.ModelName()
+	}
+	return SummariseCorrections(source, editor, samples, corrections), nil
+}
+
+// SummariseCorrections splits a copy-edited set into what was changed, what
+// was right as it was and what got no answer, and totals the edits.
+//
+// It is separate from AdversarialCorrection for the same reason
+// SummariseReviews is: a server samples under its model lock and corrects
+// outside it.
+func SummariseCorrections(source, model string, texts []string, corrections []CorrectionEntry) *CorrectionResult {
+	result := &CorrectionResult{
+		Source: source, Model: model, Texts: texts, Corrections: corrections,
+		Corrected: []string{}, Unchanged: []string{}, Uncorrected: []string{},
+	}
+	if result.Texts == nil {
+		result.Texts = []string{}
+	}
+	if result.Corrections == nil {
+		result.Corrections = []CorrectionEntry{}
+	}
+	for _, entry := range corrections {
+		switch entry.Verdict {
+		case "corrected":
+			result.Corrected = append(result.Corrected, entry.Text)
+		case "unchanged":
+			result.Unchanged = append(result.Unchanged, entry.Text)
+		case "uncorrected":
+			result.Uncorrected = append(result.Uncorrected, entry.Text)
+		}
+		result.Edits += entry.Edits
+		result.WrongChars += entry.WrongChars
+		result.RightChars += entry.RightChars
+	}
+	if answered := len(result.Corrected) + len(result.Unchanged); answered > 0 {
+		rate := float64(len(result.Corrected)) / float64(answered)
+		result.ChangeRate = &rate
+	}
+	return result
 }
 
 // -- conversing with the network, and marking the conversation ----------------

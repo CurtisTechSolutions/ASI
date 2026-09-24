@@ -11,18 +11,22 @@ import (
 )
 
 // The LLM command groups: a training corpus written to order, the adversarial
-// review that feeds the negative network, and ChatGPT's own two actions.
+// review and the copy editor's corrections that feed the negative network, and
+// ChatGPT's own two actions.
 
 func ollamaUsage() {
 	fmt.Fprint(os.Stderr, `usage: radixnet-count [global options] ollama <action> [options]
 
-Two ways of hooking the network into a local large language model: a corpus written to
-order, and an adversarial review of what the network itself writes.
+Three ways of hooking the network into a local large language model: a corpus written to
+order, an adversarial review of what the network itself writes, and a copy editor's
+letter-level corrections of it.
 
 actions:
   models   list the models the endpoint offers (never fails: it answers "is it there?")
   corpus   ask for --lines lines about --prompt (--style good | garbage), optionally training on them
   review   let the LLM mark --count samples (or --text / --data), optionally blaming the failures
+  correct  let the LLM write --count samples (or --text / --data) out correctly, changing as little
+           as it can; with --blame only the characters it changed are blamed
 
 --url and --ollama-model override $OLLAMA_HOST and $RADIXNET_OLLAMA_MODEL.
 `)
@@ -41,10 +45,12 @@ func cmdOllama(args []string) {
 		cmdOllamaCorpus(rest)
 	case "review":
 		cmdOllamaReview(rest)
+	case "correct":
+		cmdOllamaCorrect(rest)
 	case "help", "-h", "--help":
 		ollamaUsage()
 	default:
-		fail("unknown ollama action %q (models, corpus, review)", action)
+		fail("unknown ollama action %q (models, corpus, review, correct)", action)
 	}
 }
 
@@ -273,6 +279,128 @@ func cmdOllamaReview(args []string) {
 	if jsonMode {
 		emit(doc)
 	}
+}
+
+// cmdOllamaCorrect lets the LLM copy-edit the network's samples (or the given
+// texts); the diff is what the negative network learns.
+func cmdOllamaCorrect(args []string) {
+	var texts, data multiFlag
+	fs := flag.NewFlagSet("ollama correct", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	fs.Var(&texts, "text", "correct this text instead of sampling (repeatable)")
+	fs.Var(&data, "data", "correct the texts of FILE (one per line) instead of sampling")
+	count := fs.Int("count", 8, "samples to draw from the model")
+	prefix := fs.String("prefix", "", "continue this prefix instead of generating from scratch")
+	maxLength := fs.Int("max-length", 60, "characters per sample")
+	temperature := fs.Float64("temperature", 1.0, "sampling temperature")
+	context := fs.String("context", "", "extra context for the editor (e.g. what the model was trained on)")
+	blame := fs.Bool("blame", false, "teach the negative network: blame only the characters the editor changed, "+
+		"under its reason, and let the unchanged texts clear blame")
+	severity := fs.Float64("severity", radixnet.CorrectionSeverity, "blame per corrected text with -blame (1 = one ordinary failure)")
+	addNegativeFlag(fs)
+	_ = fs.Parse(args)
+
+	if *severity < 0 {
+		fail("-severity must be >= 0, got %v", *severity)
+	}
+	client := flags.client(radixnet.ProviderOllama)
+	o := radixnet.AdversarialCorrectionOptions{
+		Count: *count, Prefix: *prefix, MaxLength: *maxLength, Temperature: *temperature,
+		Context: *context, Model: client.ModelName(),
+	}
+	var model *radixnet.Model
+	given := append([]string{}, texts...) // a blank text is handed back uncorrected, so it stays in the set
+	if len(data) > 0 {
+		given = append(given, readTexts(data, "lines", 0)...)
+	}
+	if len(given) > 0 {
+		o.Texts = given
+	} else {
+		model = openModel(true)
+		seed := seedFlag
+		o.Seed = &seed
+	}
+	say("ollama     %s: %s", client.BaseURL(), client.ModelName())
+	if len(given) > 0 {
+		say("correcting %d given text(s)", len(given))
+	} else {
+		say("correcting %d sample(s) of %d chars", *count, *maxLength)
+	}
+	say("")
+	result, err := radixnet.AdversarialCorrection(model, client, o)
+	if err != nil {
+		fail("%v", err)
+	}
+	say("%-11s %-42s %-42s %-14s %s", "verdict", "text", "correction", "reason", "changes")
+	for _, entry := range result.Corrections {
+		correction := "-"
+		if entry.Correction != nil {
+			correction = quote(clip(*entry.Correction, 40))
+		}
+		reason := entry.Reason
+		if reason == "" {
+			reason = "-"
+		}
+		say("%-11s %-42s %-42s %-14s %s", entry.Verdict, quote(clip(entry.Text, 40)), correction, reason,
+			changesOf(entry.Changes, 4))
+	}
+	say("")
+	say("%d texts: %d corrected (%d change(s), %d wrong character(s)), %d unchanged, %d uncorrected; change rate %s",
+		len(result.Corrections), len(result.Corrected), result.Edits, result.WrongChars, len(result.Unchanged),
+		len(result.Uncorrected), fmtRate(result.ChangeRate))
+	doc := map[string]any{
+		"source": result.Source, "model": result.Model, "texts": result.Texts, "corrections": result.Corrections,
+		"corrected": result.Corrected, "unchanged": result.Unchanged, "uncorrected": result.Uncorrected,
+		"edits": result.Edits, "wrong_chars": result.WrongChars, "right_chars": result.RightChars,
+		"change_rate": result.ChangeRate, "negative": nil,
+	}
+	if *blame {
+		negative := openNegative(false)
+		say("")
+		say("negative model: %s", negativeFile())
+		say("blaming the changed characters of %d corrected text(s) at severity %g", len(result.Corrected), *severity)
+		report, err := radixnet.TeachCorrections(negative, result.Corrections, *severity, true, "correction",
+			radixnet.TeachOptions{})
+		if err != nil {
+			fail("%v", err)
+		}
+		saved := saveNegative(negative)
+		say("blamed %d text(s) over %d edge(s) (%d changed unit(s)), cleared %d of %d unchanged",
+			report.Blamed, report.Edges, report.Edits, report.Cleared, report.Passed)
+		say("negative model: %s", saved)
+		reasonTable(negative, 10)
+		doc["negative"] = map[string]any{
+			"path": saved, "taught": report, "reasons": negative.Reasons(), "stats": negative.Stats(),
+		}
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// changesOf renders the edits of one correction for a table cell:
+// "e" -> "", "??" -> "?".
+func changesOf(changes []radixnet.Change, limit int) string {
+	parts := []string{}
+	for i, change := range changes {
+		if i >= limit {
+			parts = append(parts, fmt.Sprintf("+%d", len(changes)-limit))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s -> %s", quote(change.Wrong), quote(change.Right)))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// fmtRate renders a share that may be unknown.
+func fmtRate(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.4f", *value)
 }
 
 // -- ChatGPT ------------------------------------------------------------------
