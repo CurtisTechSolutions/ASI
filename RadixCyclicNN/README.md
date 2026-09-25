@@ -2533,7 +2533,7 @@ window is on (the default), or **by hand**:
 python -m radixnet --model model.json window --on                    # 32 -> 16 -> 8 -> 4, stepping every epoch
 python -m radixnet --model model.json train --data data/sample_corpus.txt --epochs 8   # each epoch: merge, halve, move
 python -m radixnet --model model.json window --manual --step 4       # by hand: the whole ladder, once
-#   step   4 step(s) at 32, 16, 8, 4: 0 merge(s), 41 split(s), nodes 29 -> 70, edges 41 -> 82
+#   step     4 step(s) at 32, 16, 8, 4: 0 merge(s), 41 split(s), nodes 29 -> 70, edges 40 -> 81
 python -m radixnet --model model.json window --step                  # at 32 again: what stayed unary merges back
 python -m radixnet --model model.json window                         # show it
 python -m radixnet --model model.json window --off                   # compression is unbounded again
