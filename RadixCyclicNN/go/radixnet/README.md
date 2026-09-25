@@ -96,7 +96,7 @@ takes a write lock.**
 
 | file | what it is |
 |---|---|
-| `tutor.go` | the English lessons — set, answer, mark |
+| `tutor.go` | the English lessons — set, answer, mark, and the marker's thinking taught as thoughts |
 | `recall.go` | what it remembers of what it was shown |
 | `dialogue.go`, `chat.go` | conversing with itself, and with an LLM that marks the replies |
 | `plan.go` | the lesson plan — the report card at the end of a run, the grammar focus each mistake drills, and the level it moves the student to |

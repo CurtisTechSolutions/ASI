@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { THINK_LEVELS, roundThinkingSays, tutorThinkingBody } from "../thinking.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import LineChart from "./LineChart.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
+import { ThinkingText } from "./ThoughtView.jsx";
 
 const MAX_ROWS = 200;
 const DEFAULT_PLAN_LESSONS = 3;
@@ -356,10 +358,46 @@ function LessonTable({ rows, total, running }) {
   );
 }
 
+/**
+ * What the marker thought while it marked, round by round - the questions it asked itself marked - and what the
+ * network was taught of it. Nothing when no round thought (the marker was not asked, or does not think).
+ */
+function TeacherThinking({ rounds }) {
+  const thought = rounds.filter((r) => asArray(r.thinking).length > 0);
+  if (thought.length === 0) return null;
+  const batched = thought.some((r) => Number(r.batch) > 1);
+  return (
+    <>
+      <h3>The teacher&apos;s thinking</h3>
+      <p className="muted">
+        What the marker thought before it gave its marks. Taught to the network, it becomes thoughts that begin at the
+        THINK sentinel - what the <a href="#think">Think</a> tab runs - and every marked question a place where the
+        network stops to think.
+      </p>
+      <ol className="thinking-list">
+        {thought.map((r, i) => (
+          <li key={i}>
+            <p className="question">
+              <b>
+                {batched ? `Batch ${fmtInt(r.batch)}, round ${fmtInt(r.round)}` : `Round ${fmtInt(r.round)}`}
+              </b>
+            </p>
+            {asArray(r.thinking).map((text, j) => (
+              <ThinkingText key={j} text={String(text ?? "")} />
+            ))}
+            <p className="muted answer">{roundThinkingSays(r) || "shown, not taught"}</p>
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
 /** What each round learned from its grades. */
 function RoundTable({ rounds }) {
   if (rounds.length === 0) return null;
   const batched = rounds.some((r) => Number(r.batch) > 1); // only an auto run has more than one
+  const thinking = rounds.some((r) => asArray(r.thinking).length > 0 || Number(r.thoughts) > 0);
   return (
     <>
       <h3>Rounds</h3>
@@ -381,6 +419,7 @@ function RoundTable({ rounds }) {
               <th>weight</th>
               <th>neg loss</th>
               <th>pos loss</th>
+              {thinking ? <th>thoughts</th> : null}
               <th>seconds</th>
             </tr>
           </thead>
@@ -414,6 +453,24 @@ function RoundTable({ rounds }) {
                 </td>
                 <td>{fmtNum(r.neg_loss, 4)}</td>
                 <td>{fmtNum(r.pos_loss, 4)}</td>
+                {thinking ? (
+                  <td
+                    title={
+                      roundThinkingSays(r) ||
+                      (asArray(r.thinking).length > 0
+                        ? "the teacher's thinking was shown, not taught"
+                        : "the teacher did not think this round")
+                    }
+                  >
+                    {Number(r.thoughts) > 0 ? (
+                      <>
+                        {fmtInt(r.thoughts)} <small>(+{fmtInt(r.thought_questions)}?)</small>
+                      </>
+                    ) : (
+                      "–"
+                    )}
+                  </td>
+                ) : null}
                 <td>{fmtNum(r.seconds, 2)}</td>
               </tr>
             ))}
@@ -467,6 +524,9 @@ export default function TutorPanel({ status }) {
   const [batchSize, setBatchSize] = useStoredState("tutor.batchSize", "4");
   const [checkpointEvery, setCheckpointEvery] = useStoredState("tutor.checkpointEvery", "0");
   const [prefixes, setPrefixes] = useStoredState("tutor.prefixes", "");
+  const [thinkLevel, setThinkLevel] = useStoredState("tutor.think", "");
+  const [learnThinking, setLearnThinking] = useStoredState("tutor.learnThinking", false);
+  const [thinkQuestions, setThinkQuestions] = useStoredState("tutor.thinkQuestions", true);
   const [preview, setPreview] = useState(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [plan, setPlan] = useState(null);
@@ -521,6 +581,7 @@ export default function TutorPanel({ status }) {
       grammar_weight: parseNumber(grammarWeight, 0.6),
       adapt,
       teach_answer: teachAnswer,
+      ...tutorThinkingBody({ think: thinkLevel, learnThinking, thinkQuestions }),
     };
   }
 
@@ -1007,6 +1068,40 @@ export default function TutorPanel({ status }) {
           />
         </div>
 
+        <h3>The teacher&apos;s thinking</h3>
+        <p className="muted">
+          A thinking model (qwen3, deepseek-r1, …) on Ollama reasons before it marks, and every round shows what it
+          thought. Trained on, that thinking becomes the network&apos;s own thoughts - walks from the THINK sentinel, at
+          the positive epochs and rate - and every question the teacher asked itself a place where the network stops to
+          think. ChatGPT keeps its reasoning to itself.
+        </p>
+        <div className="row auto">
+          <SelectField
+            label="The marker thinks"
+            hint="asked while it marks"
+            value={thinkLevel}
+            onChange={setThinkLevel}
+            disabled={running}
+            options={[["", learnThinking ? "on (for training)" : "not asked"], ...THINK_LEVELS]}
+          />
+          <div className="checks">
+            <CheckField
+              label="Train on the teacher's thinking"
+              hint="its thinking is taught as thoughts (this changes the model; a dry run only shows it)"
+              checked={learnThinking}
+              onChange={setLearnThinking}
+              disabled={running}
+            />
+            <CheckField
+              label="Learn where it questions itself"
+              hint="every question in the thinking marks a node where the network stops to think"
+              checked={thinkQuestions}
+              onChange={setThinkQuestions}
+              disabled={running || !learnThinking}
+            />
+          </div>
+        </div>
+
         <div className="actions">
           <button type="submit" className="primary" disabled={running || busy || otherJobRunning}>
             {busy ? "Starting…" : parseInteger(batches, 1) === 1 ? "Start lessons" : "Start auto run"}
@@ -1058,6 +1153,15 @@ export default function TutorPanel({ status }) {
             {planBusy ? <span className="muted">{planNote(provider)}</span> : null}
           </div>
           <Alert message={planError} onDismiss={() => setPlanError(null)} />
+          {asArray(preview.thinking).length > 0 ? (
+            <>
+              <h3>What the marker thought</h3>
+              {asArray(preview.thinking).map((text, i) => (
+                <ThinkingText key={i} text={String(text ?? "")} />
+              ))}
+              <p className="muted">A dry run shows the thinking; a run with “Train on the teacher&apos;s thinking” teaches it.</p>
+            </>
+          ) : null}
           <LessonTable rows={previewLessons} total={previewLessons.length} running={false} />
         </div>
       ) : null}
@@ -1101,6 +1205,7 @@ export default function TutorPanel({ status }) {
           </>
         ) : null}
         <RoundTable rounds={roundRecords.slice(-MAX_ROWS)} />
+        <TeacherThinking rounds={roundRecords.slice(-MAX_ROWS)} />
         <h3>Every lesson</h3>
         <LessonTable rows={lessons.slice(-MAX_ROWS)} total={lessons.length} running={running} />
       </div>

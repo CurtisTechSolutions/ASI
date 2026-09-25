@@ -1813,6 +1813,13 @@ func cmdTutor(args []string) {
 	threshold := fs.Float64("threshold", cfg.Threshold, "mark out of 10 a sentence must reach to pass")
 	grammarWeight := fs.Float64("grammar-weight", cfg.GrammarWeight, "share of the mark that is grammar")
 	batch := fs.Int("batch", cfg.Batch, "sentences marked in one Ollama call")
+	think := fs.String("think", "", "ask the marker to think while it marks: true | false | low | medium | high | "+
+		"default (the model's choice); every round shows what it thought (default: on with -learn-thinking, "+
+		"otherwise not asked)")
+	learnThinking := fs.Bool("learn-thinking", false, "teach the network the marker's thinking as thoughts that "+
+		"begin at the THINK sentinel - what `think` and a conversation that catches itself repeating think in")
+	noThinkQuestions := fs.Bool("no-think-questions", false, "with -learn-thinking: do not teach the questions "+
+		"in the thinking as places where the network stops to think")
 	noAdapt := fs.Bool("no-adapt", false, "do not drill the previous round's weakest points")
 	drills := fs.Int("drills", cfg.Drills, "extra correct example sentences per round")
 	plan := fs.Int("plan", cfg.Plan, "hand the report card at the end back to the teacher and print the next N lessons it plans (0 = off)")
@@ -1843,6 +1850,10 @@ func cmdTutor(args []string) {
 	cfg.Mode, cfg.Length, cfg.MaxLength, cfg.Temperature = *mode, *length, *maxLength, *temperature
 	cfg.ToEnd = !*noToEnd
 	cfg.Threshold, cfg.GrammarWeight, cfg.Batch = *threshold, *grammarWeight, *batch
+	if *think != "" {
+		cfg.Think = *think
+	}
+	cfg.LearnThinking, cfg.ThinkQuestions = *learnThinking, !*noThinkQuestions
 	cfg.Adapt, cfg.Drills, cfg.TeachAnswer, cfg.Learn = !*noAdapt, *drills, !*noTeachAnswer, !*dryRun
 	cfg.Plan = *plan
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
@@ -1869,6 +1880,9 @@ func cmdTutor(args []string) {
 		}
 	}
 	m := openModel(true)
+	if cfg.Learn && cfg.LearnThinking && m.IsNegative() {
+		fail("the negative network judges; it does not think (a negative model cannot be taught thoughts)")
+	}
 	trainer, err := radixnet.NewTutorTrainer(m, client, cfg)
 	if err != nil {
 		fail("%v", err)
@@ -1892,6 +1906,7 @@ func cmdTutor(args []string) {
 	} else {
 		say("corrections: as whole sentences (--no-diff-corrections)")
 	}
+	say("thinking: %s", tutorThinkingLine(cfg))
 	if !jsonMode {
 		trainer.Progress = func(record map[string]any) { sayLesson(record) }
 	}
@@ -2001,6 +2016,14 @@ func sayLesson(record map[string]any) {
 		say("round %v: %v/%v passed, mean %s (grammar %s), weakest: %s -> %s (bad=%v, good=%v)",
 			record["round"], record["passed"], record["lessons"], fmtMark(record["mean_score"]),
 			fmtMark(record["mean_grammar"]), weak, action, record["bad"], record["good"])
+		thinking, _ := record["thinking"].([]string)
+		for _, thought := range thinking {
+			say("    thinking: %s", clip(thought, 100))
+		}
+		if thoughts, _ := record["thoughts"].(int); thoughts > 0 {
+			say("    taught %v thought(s) and %v question(s) it asked itself; it now stops to think at %v more node(s)",
+				thoughts, record["thought_questions"], record["thought_nodes"])
+		}
 	case "batch":
 		say("batch %v (%v): %v level, openings of %v words, pass at %v, %v drill(s) - %v",
 			record["batch"], record["step"], record["level"], record["words"], fmtMark(record["threshold"]),
@@ -2017,6 +2040,31 @@ func sayLesson(record map[string]any) {
 	case "note":
 		say("note: %v", record["message"])
 	}
+}
+
+// tutorThinkingLine is what the tutor does with its marker's thinking, for the settings line.
+func tutorThinkingLine(cfg radixnet.TutorConfig) string {
+	think := cfg.ResolvedThink()
+	if think == nil && !cfg.LearnThinking {
+		return "not asked (-think LEVEL shows it, -learn-thinking teaches it)"
+	}
+	asked := "the model's choice"
+	switch v := think.(type) {
+	case bool:
+		asked = map[bool]string{true: "on", false: "off"}[v]
+	case string:
+		asked = v
+	}
+	if !cfg.LearnThinking {
+		return "the marker thinks (" + asked + "); shown, not taught (-learn-thinking)"
+	}
+	if !cfg.Learn {
+		return "the marker thinks (" + asked + "); a dry run teaches none of it"
+	}
+	if cfg.ThinkQuestions {
+		return "the marker thinks (" + asked + "); taught as thoughts and every question in it as a place to stop and think"
+	}
+	return "the marker thinks (" + asked + "); taught as thoughts"
 }
 
 func fmtMark(value any) string {

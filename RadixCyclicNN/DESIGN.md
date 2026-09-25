@@ -1123,8 +1123,10 @@ def write_exercises(client, topic, count=5, *, focus=None, level="beginner", wea
     # "opening" / "stem" instead of "prefix", trailing punctuation, duplicates and an answer without the prefix
 def drill_sentences(client, topic, count, *, weak=(), model=None) -> list[str]   # extra correct examples to imitate
 def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0.6, model=None, batch=10,
-                      external=None, graded_by=None)   # graded_by: the provider behind the client
+                      external=None, graded_by=None, think=None, thinking=None)
+    # graded_by: the provider behind the client; think: the thinking level asked of the marker (None sends none)
     # one JSON call per batch: {"grades": [{"index","grammar","spelling","fluency","error","correction","comment"}]}
+    # a client that says what it thought (Ollama's complete) appends it to `thinking`, one line per call
     # empty completion -> failed without asking (graded_by="empty", the exercise's own answer as the correction);
     # unreadable answer -> score None, graded_by="unrated", counted as a failure
 def report_card(lessons) -> dict          # {"lessons","graded","passed","failed","pass_rate","mean_score",
@@ -1204,7 +1206,8 @@ the topic, the focus and the weak points), so one batch's report card is the nex
 `grader_model`; `__post_init__` normalises the providers and fills in the models they imply, and
 `resolved_grader_model` is what the marking runs on), the completion settings (`mode`, `length`, `max_length`, `temperature`,
 `to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `plan`, `teach_answer`,
-`learn`), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
+`learn`), the teacher's thinking (`think`, `learn_thinking`, `think_questions`; `resolved_think` is what the marking
+asks for - `think` as given, else on while `learn_thinking`, else nothing), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
 `min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`, `batch_size`, `strength`, `replay`, `replay_limit`,
 `checkpoint_every`).
 
@@ -1215,7 +1218,8 @@ one is built from the environment), and every grade records which one marked it:
 1. `set_exercises` — the teacher writes the openings (with the previous round's weakest points as the syllabus when
    `adapt`).
 2. `complete` — `model.predict(exercise.cue, ...)` per attempt (attempt 0 in `mode`, later ones sampled).
-3. `grade` — one call per `batch` sentences.
+3. `grade` — one call per `batch` sentences, asking the marker for `resolved_think`; what it thought comes back
+   with the marks, one line per call.
 4. `corrections_of` + `texts_of` + `learn` — a failure the teacher corrected is a `Correction(wrong, right,
    weight_of(grade))` taught by `model.correct` (section 16.4), not a whole sentence in `bad`; `weight_of(grade) =
    min_weight + (1 - min_weight) * (threshold - score) / threshold` (1 for an unrated one). What is left is the old
@@ -1226,6 +1230,10 @@ one is built from the environment), and every grade records which one marked it:
    `punish(weights=)` when only one side exists, and `action` names what ran ("correct+2nrl"). The corrections join
    the replay buffer like any taught text. `diff_corrections=False` goes back to the whole-sentence way;
    `learn=False` reports what it would have taught and touches nothing.
+5. `teach_thinking` — with `learn_thinking` (and `learn`), what the marker thought is taught to the network as
+   thoughts: `think_on(model, thinking, questions=think_questions)` at the fine-tune pass's `pos_epochs`, `pos_lr`
+   and `batch_size` (section 36.2), so every question the teacher asked itself marks a node where the network stops
+   to think. A dry run records the thinking and teaches none of it.
 
 `run()` is a loop over **batches**: one batch is `rounds` rounds and the report card over them (its own lessons,
 not the run's).  With `batches` > 1 - or 0, which keeps going until the stop event - it closes the loop itself:
@@ -1238,7 +1246,8 @@ Records: `{"kind": "lesson", batch, round, exercise, prefix, focus, attempt, mod
 spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds, why, variants}` (`changes` is what
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
-`pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
+`pos_loss`, `mean_weight`, `mean_reward`, `drills`, and `thinking`, `thoughts`, `thought_questions`,
+`thought_nodes` - what the marker thought and what it taught) and a final `{"kind": "report", rounds, ...}`.  With
 `plan = N` (`--plan N`, `POST /api/tutor/start {"plan": N}`) one more record closes the run:
 `{"kind": "plan", batch, rounds, ...LessonPlan.to_dict()}`, from `TutorTrainer.plan(card=None, count=N)` — the
 run's own report card unless one is given.  A teacher that cannot plan costs only a `note`; the lessons stand.
@@ -1254,6 +1263,24 @@ changed are blamed. The round records then carry `negative_blamed`, `negative_ed
 wrong in the same way (`--variants N`, `--variant-weight X`, `{"variants": N, "variant_weight": X}`; the lesson
 records carry them as `why` and `variants`).
 
+**What the teacher thought.**  A mark is the teacher's conclusion; a thinking model (qwen3, deepseek-r1, gpt-oss)
+also reasons its way to it, and Ollama hands the reasoning back beside the answer (`complete`, section 16.1).  That
+reasoning is the one supply of *thoughts* the tutor has for free: it is about exactly the sentences the network
+wrote, and it asks itself the questions a teacher asks (*does every verb agree with its subject?*).  So the
+marking call asks for it (`think`, `--think LEVEL`: `true`, `false`, `low`, `medium`, `high` or `default`, the
+model's own choice), every round records it (`thinking`, whitespace collapsed to one line per call), and with
+`learn_thinking` (`--learn-thinking`) step 5 teaches it as thoughts - walks from the THINK sentinel - with every
+question in it a node where the network learns to stop and think (`think_questions`, `--no-think-questions` to
+leave them out; section 36).  The network then learns the English it got wrong and how its teacher reasoned about
+it, and `think` (or a voice that catches itself repeating) thinks in those thoughts.  Asking a model to think
+costs time, so the marker is asked only when something reads the answer: `think` unset means on while the
+thinking is taught and not asked otherwise, and `--think` alone shows the thinking without teaching it.  A dry run
+shows it too.  Only an Ollama client says what it thought (`_complete` asks a client for `complete` and falls
+back to `generate`), so a ChatGPT marker records nothing, and the negative network is refused before a lesson is
+set - it judges; it does not think (400 from the API, an error from the CLI).  The ports do the same: Go's
+`TutorConfig.Think` / `LearnThinking` / `ThinkQuestions`, `TutorTrainer.TeachThinking` and the optional
+`thoughtfulClient` interface, Rust's `LlmClient::complete_thinking` and `TutorTrainer::teach_thinking`.
+
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
 the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons, the card and
@@ -1263,15 +1290,19 @@ the plan.  `--plan [N]` (default 3) prints the planned lessons as a table, the s
 
 CLI flags for the teacher: `--tutor-provider ollama|chatgpt` (`--provider`), `--tutor-model`, `--grader-provider`,
 `--grader-model`, `--url`, `--grader-url`; a `chatgpt` teacher without `$OPENAI_API_KEY` stops before anything is
-sent.
+sent.  For its thinking: `--think LEVEL`, `--learn-thinking`, `--no-think-questions`; the settings table says what
+will happen to it (a `thinking` row), and every round prints what the marker thought and what the network learned
+from it (*taught 1 thought and 2 questions it asked itself; it now stops to think at 2 more nodes*).
 
 API: `GET /api/tutor` (defaults, error types, modes, `levels`, `plan_lessons`, and `providers` — each teacher's url,
 model and whether it is `configured`), `POST /api/tutor/start` (job), `GET /api/tutor/history`,
-`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer) and `POST /api/tutor/plan`
+`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer; `thinking` is what the
+marker thought, empty unless `think` asked it to) and `POST /api/tutor/plan`
 (`{report, count, topic, level, exercises, drills}` -> `{plan, source, provider, model, url, report}`; without
 `report` the card at the end of the last run — `ModelService.tutor_card()`, the last `"report"` record of the
 history — is used, and 400 says so when there is none). All of them take `tutor_provider` / `grader_provider` (and
-`url` / `grader_url`); a `chatgpt` teacher on a server without a key is refused with 400. The service releases the model
+`url` / `grader_url`); a `chatgpt` teacher on a server without a key is refused with 400.  `start` and `lesson`
+take `think`, `learn_thinking` and `think_questions` (a `null` `think` is no `think`, as in every other body). The service releases the model
 lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
 teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with (ChatGPT: the server's
 `--chatgpt-model`).
@@ -1293,7 +1324,13 @@ and **Prefix words** field are `brief` and `words`; the **Plan** field is the ru
 that ends with a `"plan"` record shows it in the same card without asking again.  **Batches** is the auto run: the
 button becomes *Start auto run*, the Rounds table gains a `batch` column, the report card is the last batch's, and
 every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
-per batch) so the settings show what the server is teaching.
+per batch) so the settings show what the server is teaching.  **The teacher's thinking** settings are *The marker
+thinks* (the level; blank leaves it to the server, and the blank option says which way that goes), *Train on the
+teacher's thinking* and *Learn where it questions itself* (`tutorThinkingBody` in `frontend/src/thinking.js`); a
+dry run shows *What the marker thought* under its report card, and a run adds a `thoughts` column to the Rounds
+table (`1 (+2?)`: one thought and the two questions it asked itself) and a list of what the teacher thought round
+by round, the questions marked as the Ollama tab marks them (`ThinkingText`) with what the network learned from
+them (`roundThinkingSays`).
 
 Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
 it again, answers drill requests and plans the next lessons; the parsers, the marking, the widening -
@@ -1301,7 +1338,12 @@ it again, answers drill requests and plans the next lessons; the parsers, the ma
 planner, the loop with a scripted model, the endpoints and the CLI), `tests/test_blame.py` (a widened lesson
 becomes its whole family of faults) and the same in Go (`go/radixnet/tutor_test.go`, `blame_test.go`), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
-model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
+model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.  The fake teacher thinks aloud
+when asked (in Ollama's `thinking` field, or inline in `<think>` tags), so the thinking cases - asked or not, read
+from either place, taught with and without its questions, shown by a dry run, a bad level, the negative network
+refused - run in Python and Go, and `test_go_parity.py` / `test_rust_parity_teach.py` hold the Go and Rust
+tutors to Python's requests, records and models with `--learn-thinking`, and to its refusal of the negative
+network (the Rust one on the server as well).
 
 ### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves, counted per path
 
@@ -3889,6 +3931,11 @@ network learns to question where its teacher did. `radixnet ollama think --promp
 /api/ollama/think {"train": true}`) is the whole pipeline; `--with-answers` trains the answers as ordinary texts
 too, and the negative network refuses thoughts (it judges; it does not think).
 
+The tutor is the second source (section 16.3): its marker reasons about the very sentences the network wrote before
+it marks them, so `tutor --learn-thinking` (the Tutor tab's *Train on the teacher's thinking*, `{"learn_thinking":
+true}`) asks for that reasoning while it marks and teaches it through the same `think_on` after every round - the
+network learns to question itself where its teacher did, about its own mistakes.
+
 ### 36.3 What it touches, and the three ports
 
 * `graph.py`: `THINK`, `FIRST`, `ORIGINS`, `THINK_Z`, `observe_think`, `think_cost`, `thinks_at`, `origin` on
@@ -3904,18 +3951,23 @@ too, and the negative network refuses thoughts (it judges; it does not think).
 * `cli.py`: `think`, `ollama think`, `converse --no-think --think-depth` (and *it learned to stop and think at N
   node(s)*); `api.py`: `POST /api/think`, `POST /api/ollama/think`, `think` / `think_depth` on `/api/converse`,
   `think_label` on `/api/encoding`.
+* `tutor.py`: `_complete`, `think` / `thinking` on `grade_completions`, `TutorConfig.think` / `learn_thinking` /
+  `think_questions` / `resolved_think`, `TutorTrainer.teach_thinking`; `tutor --think --learn-thinking
+  --no-think-questions`, the same fields on `/api/tutor/start` and `/api/tutor/lesson` (section 16.3).
 * Go - `thinking.go` (`Model.Think`, `ThinkOn`, `Place`, `QuestionsIn`, `Summarize`, `ThoughtsOf`), `graph.go`
   (`Think`, `First`, `IsOrigin`, `ThinkZ`, `ObserveThink`, `ThinkCost`, `ThinksAt`, `ObserveFrom` / `TraceFrom` /
   `NodePathFrom`), `json.go` (`withSentinels`), `search.go`, `model.go` (`TrainOptions.Origin`, `walkStart`),
   `dialogue.go` (`ThinkBack`, `Rethink.Thought`), `ollama.go` (`Complete`, `ThinkValue`, `SplitThinking`,
-  `QuestionsFromPrompt`, `ThoughtsFromPrompt`), the same routes in `server/` and the same commands in
-  `cmd/radixnet-count` - and Rust (`thinking.rs`, `graph.rs`, `file.rs`, `search.rs`, `model.rs`, `dialogue.rs`,
-  `ollama.rs`, the `think` command and routes) produce the same records: the Go parity tests compare the
+  `QuestionsFromPrompt`, `ThoughtsFromPrompt`), `tutor.go` (`TeachThinking`, `thoughtfulClient`), the same routes in
+  `server/` and the same commands in `cmd/radixnet-count` - and Rust (`thinking.rs`, `graph.rs`, `file.rs`,
+  `search.rs`, `model.rs`, `dialogue.rs`, `ollama.rs`, `llm.rs`'s `complete_thinking`, `tutor/trainer.rs`'s
+  `teach_thinking`, the `think` command and routes) produce the same records: the Go parity tests compare the
   rethinks' thoughts field for field, the Rust ones the model files byte for byte.
 * Tests: `tests/test_thinking.py`, `TestThinkSentinel` in `test_graph.py`, the origin cases in `test_search.py`,
-  `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py`;
-  `go/radixnet/thinking_test.go`, `go/server/thinking_test.go`; the unit tests in `rust/src/thinking.rs` and
-  `rust/src/ollama.rs`.
+  `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py` and `test_tutor.py`;
+  `go/radixnet/thinking_test.go`, `go/server/thinking_test.go`, the thinking cases in `go/radixnet/tutor_test.go`
+  and `go/server/tutor_test.go`; the unit tests in `rust/src/thinking.rs` and `rust/src/ollama.rs`; the tutor's
+  thinking held to Python's by `test_go_parity.py` and `test_rust_parity_teach.py`.
 
 ## 37. Today's format (`radixnet/assistant.py`, `go/radixnet/assistant.go`, `rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
 

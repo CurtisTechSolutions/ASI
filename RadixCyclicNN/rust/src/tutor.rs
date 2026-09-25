@@ -840,6 +840,8 @@ pub struct GradeOptions {
     pub temperature: f64,
     /// The provider behind the marker (`""` = the client's own).
     pub graded_by: String,
+    /// The thinking level asked of the marker (Ollama's `think`; `None` sends nothing).
+    pub think: Option<Json>,
 }
 
 impl Default for GradeOptions {
@@ -852,6 +854,7 @@ impl Default for GradeOptions {
             batch: 10,
             temperature: 0.0,
             graded_by: String::new(),
+            think: None,
         }
     }
 }
@@ -861,8 +864,13 @@ impl Default for GradeOptions {
 /// An empty completion is failed without asking (`graded_by` `empty`), with
 /// the teacher's model answer as the correction; a lesson the answer said
 /// nothing usable about keeps no score and `graded_by` `unrated`, and counts
-/// as a failure.
-pub fn grade_completions(client: &dyn LlmClient, lessons: &mut [Lesson], o: &GradeOptions) -> Result<(), ReviewError> {
+/// as a failure.  Returns what the marker thought before each batch's marks -
+/// one line per batch that thought.
+pub fn grade_completions(
+    client: &dyn LlmClient,
+    lessons: &mut [Lesson],
+    o: &GradeOptions,
+) -> Result<Vec<String>, ReviewError> {
     if o.batch < 1 {
         return Err(ReviewError::Invalid("batch must be >= 1".to_string()));
     }
@@ -873,6 +881,7 @@ pub fn grade_completions(client: &dyn LlmClient, lessons: &mut [Lesson], o: &Gra
     };
     let temperature = if o.temperature > 0.0 { o.temperature } else { 0.2 };
     let system = grade_system();
+    let mut thinking: Vec<String> = Vec::new();
     for chunk in lessons.chunks_mut(o.batch) {
         let mut asked: Vec<usize> = Vec::new();
         let mut body: Vec<String> = Vec::new();
@@ -910,12 +919,19 @@ pub fn grade_completions(client: &dyn LlmClient, lessons: &mut [Lesson], o: &Gra
             asked.len(),
             body.join("\n")
         ));
-        let options = LlmOptions::default()
+        let mut options = LlmOptions::default()
             .system(system.clone())
             .model(o.model.as_str())
             .json()
             .temperature(temperature);
-        let raw = client.generate(&user, &options)?;
+        if let Some(level) = &o.think {
+            options = options.think(level.clone());
+        }
+        let (raw, thought) = client.complete_thinking(&user, &options)?;
+        let thought = thought.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !thought.is_empty() {
+            thinking.push(thought);
+        }
         let mut parsed = parse_grades(&raw, chunk.len(), o.grammar_weight, o.threshold, graded_by);
         for i in asked {
             let lesson = &mut chunk[i];
@@ -939,7 +955,7 @@ pub fn grade_completions(client: &dyn LlmClient, lessons: &mut [Lesson], o: &Gra
             lesson.grade = grade;
         }
     }
-    Ok(())
+    Ok(thinking)
 }
 
 // -- why it is wrong, and the same mistake again --------------------------------------------------

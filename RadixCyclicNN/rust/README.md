@@ -71,7 +71,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/ollama.rs`, `src/chatgpt.rs` | the two providers: `radixnet ollama models\|corpus\|review`, `radixnet chatgpt models\|ask`, `/api/ollama/*`, `/api/chatgpt/models` |
 | `src/review.rs` | a corpus from a prompt, the adversarial review and the conversation marking, with Python's prompts byte for byte |
 | `src/critic.rs` | the Negative tab's automatic loop: the model writes, an LLM reviews, the failures blame - `radixnet negative auto`, `/api/negative/auto` |
-| `src/tutor.rs`, `src/tutor/{trainer,serve}.rs`, `src/plan.rs` | the English tutor: exercises, marks, rewards weighted by the mark, the auto run and the lesson plan - `radixnet tutor`, `/api/tutor/*` |
+| `src/tutor.rs`, `src/tutor/{trainer,serve}.rs`, `src/plan.rs` | the English tutor: exercises, marks, rewards weighted by the mark, the marker's thinking taught as thoughts, the auto run and the lesson plan - `radixnet tutor`, `/api/tutor/*` |
 | `src/chat.rs` | an LLM converses with the model and marks every reply - `radixnet chat`, `/api/chat/*` |
 | `src/calc.rs`, `src/web.rs` | the calculator (Python's grammar, whitelist and error texts) and browsing (a client that refuses anything but a public page, every redirect hop re-checked) |
 | `src/tools.rs`, `src/toolbox.rs`, `src/toolbox/sandbox.rs` | the tool registry and the `<tool>` text format, the built-in tools, and the Python sandbox programs run in - `radixnet tools`, `/api/tools/*` |

@@ -2048,6 +2048,8 @@ class ModelService:
         blamed.
         """
         config.validate()
+        if config.learn and config.learn_thinking and self.model.kind == "negative":
+            raise ApiError(400, "the negative network judges; it does not think")
         manager = self._require_checkpoints("checkpoint_every") if config.checkpoint_every else None
         negative = self.negative_model() if blame else None
 
@@ -4285,6 +4287,9 @@ def _tutor_config(f: Fields, svc: ModelService) -> TutorConfig:
         threshold=f.number("threshold", d.threshold, minimum=0.0),
         grammar_weight=f.number("grammar_weight", d.grammar_weight, minimum=0.0),
         batch=f.integer("batch", d.batch, minimum=1),
+        think=None if f._lookup("think") is _MISSING else f._lookup("think"),
+        learn_thinking=f.flag("learn_thinking", d.learn_thinking),
+        think_questions=f.flag("think_questions", d.think_questions),
         adapt=f.flag("adapt", d.adapt),
         drills=f.integer("drills", d.drills, minimum=0),
         variants=f.integer("variants", d.variants, minimum=0),
@@ -4367,13 +4372,15 @@ def _r_tutor_lesson(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         with svc.session() as model:  # the search runs under the lock, the LLM calls do not
             trainer.model = model
             lessons = [trainer.complete(ex, attempt) for ex in exercises for attempt in range(config.attempts)]
-        trainer.grade(lessons)
+        thinking: list[str] = []
+        trainer.grade(lessons, thinking)
     except LLMError as exc:
         raise ApiError(502, str(exc)) from exc
     return 200, {
         "source": "given" if given else config.tutor_provider, "model": client.model, "url": client.url,
         "config": config.to_dict(), "exercises": [e.to_dict() for e in exercises],
         "lessons": [lesson.to_dict() for lesson in lessons], "report": report_card(lessons),
+        "thinking": thinking,
     }
 
 
@@ -4672,11 +4679,16 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "0 = until stopped), tutor_provider: ollama|chatgpt, tutor_model, grader_provider, "
      "grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it "
      "failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same "
-     "mistake, blamed at 'variant_weight' of its severity), ...}"),
+     "mistake, blamed at 'variant_weight' of its severity), think (the thinking level asked of the marker: true | "
+     "false | low | medium | high | default; on by default with learn_thinking), learn_thinking (teach the network "
+     "the marker's thinking as thoughts that begin at the THINK sentinel), think_questions (and every question in "
+     "it as a place where the network stops to think), ...} - every round record carries the marker's 'thinking' "
+     "and what was taught of it ('thoughts', 'thought_questions', 'thought_nodes')"),
     ("GET", "/api/tutor/history", _r_tutor_history, "lesson / round / report records of all tutor runs"),
     ("POST", "/api/tutor/lesson", _r_tutor_lesson,
      "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, "
-     "threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card"),
+     "threshold, think, learn_thinking, ...} -> completions with grades (grammar, spelling, fluency, error, "
+     "correction), a report card and the marker's 'thinking'"),
     ("POST", "/api/tutor/plan", _r_tutor_plan,
      "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, "
      "level, words, threshold, exercises, drills, tutor_provider, tutor_model, url} -> {plan: {summary, prompt "

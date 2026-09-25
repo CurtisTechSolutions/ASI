@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,11 +15,15 @@ import (
 // A fake Ollama plays the English teacher: it writes exercises as JSON, marks
 // completions by a rule (only the corpus sentences are correct English),
 // explains why a sentence is wrong and writes more sentences with the same
-// mistake, and answers drill requests with plain lines.  Every prompt is
-// recorded.
+// mistake, and answers drill requests with plain lines.  Asked to think while
+// it marks, it thinks two questions aloud - in Ollama's own field, inline
+// between <think> tags, or not at all (thinking: "", "inline", "none").  Every
+// prompt is recorded, and the think level each request asked for.
 type fakeTeacher struct {
 	server   *httptest.Server
 	prompts  map[string][]string
+	thinks   map[string][]any
+	thinking string
 	failWith int
 	// answers replace the generated ones when set
 	exerciseAnswer string
@@ -32,6 +37,14 @@ var tutorCorpus = []string{"the cat sat on the mat", "the dogs run in the park",
 var gradeLine = regexp.MustCompile(`^\[(\d+)\] <<(.*?)>>(.*)$`)
 
 var whyLine = regexp.MustCompile(`^\[(\d+)\] mistake: (.*)$`)
+
+var markedLine = regexp.MustCompile(`(?m)^\[\d+\] `)
+
+// fakeThinking is what the fake teacher thinks before it marks: how many sentences, and two questions.
+func fakeThinking(prompt string) string {
+	return fmt.Sprintf("I have %d sentences to mark. Does every verb agree with its subject? Not always. "+
+		"Is each sentence finished? Mostly, so I mark them one by one.", len(markedLine.FindAllString(prompt, -1)))
+}
 
 func markSentence(prefix, continuation string) map[string]any {
 	sentence := strings.Join(strings.Fields(prefix+continuation), " ")
@@ -54,7 +67,7 @@ func markSentence(prefix, continuation string) map[string]any {
 
 func newFakeTeacher(t *testing.T) *fakeTeacher {
 	t.Helper()
-	fake := &fakeTeacher{prompts: map[string][]string{}}
+	fake := &fakeTeacher{prompts: map[string][]string{}, thinks: map[string][]any{}}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fake.failWith != 0 {
 			w.Header().Set("Content-Type", "application/json")
@@ -84,7 +97,16 @@ func newFakeTeacher(t *testing.T) *fakeTeacher {
 			kind = "why"
 		}
 		fake.prompts[kind] = append(fake.prompts[kind], prompt)
-		writeJSONBody(w, map[string]any{"model": body["model"], "response": fake.answer(kind, prompt, system), "done": true})
+		fake.thinks[kind] = append(fake.thinks[kind], body["think"])
+		reply := map[string]any{"model": body["model"], "response": fake.answer(kind, prompt, system), "done": true}
+		if think := body["think"]; think != nil && think != false && kind == "grades" && fake.thinking != "none" {
+			if fake.thinking == "inline" {
+				reply["response"] = "<think>" + fakeThinking(prompt) + "</think>\n" + reply["response"].(string)
+			} else {
+				reply["thinking"] = fakeThinking(prompt)
+			}
+		}
+		writeJSONBody(w, reply)
 	}))
 	t.Cleanup(fake.server.Close)
 	return fake
@@ -1143,4 +1165,170 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// -- the teacher's thinking ---------------------------------------------------
+
+const fakeThought = "I have 2 sentences to mark. Does every verb agree with its subject? Not always. " +
+	"Is each sentence finished? Mostly, so I mark them one by one."
+
+func thinkingRound(t *testing.T, fake *fakeTeacher, m *Model, cfg TutorConfig) map[string]any {
+	t.Helper()
+	trainer, err := NewTutorTrainer(m, fake.client(t), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := trainer.RunRound(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func TestTheMarkerThinksWhenAskedAndEveryRoundSaysWhatItThought(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := tutorConfig()
+	cfg.Think, cfg.Learn = "high", false
+	record := thinkingRound(t, fake, tutorModel(t), cfg)
+	if got, _ := record["thinking"].([]string); !reflect.DeepEqual(got, []string{fakeThought}) {
+		t.Fatalf("thinking = %q", record["thinking"])
+	}
+	if record["thoughts"] != 0 || record["thought_questions"] != 0 || record["thought_nodes"] != 0 {
+		t.Fatalf("a dry run taught %v thought(s)", record["thoughts"])
+	}
+	if len(fake.thinks["grades"]) == 0 {
+		t.Fatal("nothing was marked")
+	}
+	for _, think := range fake.thinks["grades"] {
+		if think != "high" {
+			t.Fatalf("the marker was asked think=%v", think)
+		}
+	}
+	for _, think := range fake.thinks["exercises"] { // only the marking is asked to think
+		if think != nil {
+			t.Fatalf("the exercise writer was asked think=%v", think)
+		}
+	}
+}
+
+func TestWithoutThinkTheMarkerIsAskedAsBefore(t *testing.T) {
+	fake := newFakeTeacher(t)
+	cfg := tutorConfig()
+	cfg.Learn = false
+	record := thinkingRound(t, fake, tutorModel(t), cfg)
+	if got, _ := record["thinking"].([]string); got == nil || len(got) != 0 {
+		t.Fatalf("thinking = %#v, want an empty list", record["thinking"])
+	}
+	for kind, thinks := range fake.thinks {
+		for _, think := range thinks {
+			if think != nil {
+				t.Fatalf("a %s request was asked think=%v", kind, think)
+			}
+		}
+	}
+}
+
+func TestInlineThinkingIsReadAndTheMarksStillAre(t *testing.T) {
+	fake := newFakeTeacher(t)
+	fake.thinking = "inline"
+	cfg := tutorConfig()
+	cfg.Think, cfg.Learn = true, false
+	trainer, err := NewTutorTrainer(tutorModel(t), fake.client(t), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, lessons, err := trainer.RunRound(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := record["thinking"].([]string); len(got) != 1 || !strings.HasPrefix(got[0], "I have 2 sentences to mark.") {
+		t.Fatalf("thinking = %q", record["thinking"])
+	}
+	for _, lesson := range lessons {
+		if lesson.Grade.GradedBy != "ollama" {
+			t.Fatalf("a lesson went unmarked: %+v", lesson.Grade)
+		}
+	}
+}
+
+func TestTheNetworkIsTaughtTheTeachersThinking(t *testing.T) {
+	fake := newFakeTeacher(t)
+	m := tutorModel(t)
+	cfg := tutorConfig()
+	cfg.LearnThinking = true
+	record := thinkingRound(t, fake, m, cfg)
+	for _, think := range fake.thinks["grades"] { // on by default once the thinking is taught
+		if think != true {
+			t.Fatalf("the marker was asked think=%v", think)
+		}
+	}
+	if got, _ := record["thinking"].([]string); len(got) != 1 {
+		t.Fatalf("thinking = %q", record["thinking"])
+	}
+	if record["thoughts"] != 1 || record["thought_questions"] != 2 || record["thought_nodes"] != 2 {
+		t.Fatalf("taught %v thought(s), %v question(s), %v node(s)",
+			record["thoughts"], record["thought_questions"], record["thought_nodes"])
+	}
+	if len(m.G.Children(Think)) == 0 || len(m.G.Parents(Think)) == 0 {
+		t.Fatal("Think learned nothing")
+	}
+	quiet := DefaultThinkOptions()
+	quiet.Learn = false
+	if thought, err := m.Think(quiet); err != nil || thought.Text == "" {
+		t.Fatalf("the network cannot think in what it was taught: %v %+v", err, thought)
+	}
+}
+
+func TestTheQuestionsCanBeLeftOut(t *testing.T) {
+	fake := newFakeTeacher(t)
+	m := tutorModel(t)
+	cfg := tutorConfig()
+	cfg.LearnThinking, cfg.ThinkQuestions = true, false
+	record := thinkingRound(t, fake, m, cfg)
+	if record["thoughts"] != 1 || record["thought_questions"] != 0 || record["thought_nodes"] != 0 {
+		t.Fatalf("taught %v thought(s), %v question(s), %v node(s)",
+			record["thoughts"], record["thought_questions"], record["thought_nodes"])
+	}
+	if len(m.G.Children(Think)) == 0 || len(m.G.Parents(Think)) != 0 {
+		t.Fatal("the thought was not taught, or a question was")
+	}
+}
+
+func TestADryRunShowsTheTeachersThinkingAndTeachesNoneOfIt(t *testing.T) {
+	fake := newFakeTeacher(t)
+	m := tutorModel(t)
+	cfg := tutorConfig()
+	cfg.LearnThinking, cfg.Learn = true, false
+	record := thinkingRound(t, fake, m, cfg)
+	if got, _ := record["thinking"].([]string); len(got) != 1 || record["thoughts"] != 0 {
+		t.Fatalf("thinking = %q, thoughts = %v", record["thinking"], record["thoughts"])
+	}
+	if len(m.G.Children(Think)) != 0 {
+		t.Fatal("a dry run taught a thought")
+	}
+}
+
+func TestAThinkingLevelThatIsNotOneIsRefused(t *testing.T) {
+	cfg := tutorConfig()
+	cfg.Think = "loud"
+	if cfg.Validate() == nil {
+		t.Fatal("think=loud was accepted")
+	}
+	for _, value := range []any{nil, true, false, "low", "medium", "high", "default"} {
+		cfg.Think = value
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("think=%v: %v", value, err)
+		}
+	}
+	cases := []struct {
+		think         any
+		learnThinking bool
+		want          any
+	}{{nil, false, nil}, {nil, true, true}, {"default", true, nil}, {false, true, false}, {"High", false, "high"}}
+	for _, c := range cases {
+		cfg.Think, cfg.LearnThinking = c.think, c.learnThinking
+		if got := cfg.ResolvedThink(); got != c.want {
+			t.Fatalf("think=%v learn_thinking=%v resolved to %v, want %v", c.think, c.learnThinking, got, c.want)
+		}
+	}
 }

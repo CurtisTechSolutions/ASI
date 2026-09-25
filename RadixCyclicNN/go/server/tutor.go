@@ -85,6 +85,9 @@ func (s *Service) StartTutor(config radixnet.TutorConfig, client, grader radixne
 	if err := config.Validate(); err != nil {
 		return nil, badRequest("%v", err)
 	}
+	if config.Learn && config.LearnThinking && s.model.IsNegative() {
+		return nil, badRequest("the negative network judges; it does not think")
+	}
 	var negative *radixnet.Model
 	if blame {
 		found, err := s.negativeModel()
@@ -213,12 +216,13 @@ func (s *Service) TutorLesson(
 		return nil, err
 	}
 	lessons = completed.([]*radixnet.Lesson)
-	if err := trainer.GradeLessons(lessons); err != nil { // the LLM call is outside the lock
+	thinking, err := trainer.GradeLessons(lessons) // the LLM call is outside the lock
+	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
 		"source": source, "model": client.ModelName(), "url": client.BaseURL(), "config": config,
-		"exercises": exercises, "lessons": lessons, "report": radixnet.ReportCard(lessons),
+		"exercises": exercises, "lessons": lessons, "report": radixnet.ReportCard(lessons), "thinking": thinking,
 	}, nil
 }
 
@@ -228,13 +232,13 @@ func init() {
 	route("GET", "/api/tutor", rTutor)
 	doc("GET", "/api/tutor", "the English tutor: the teachers on offer (ollama, chatgpt: url, model, configured), the error types a completion is marked with, the completion modes and every default setting")
 	route("POST", "/api/tutor/start", rTutorStart)
-	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, batches (auto run: each batch planned from the last, 0 = until stopped), exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same mistake, blamed at 'variant_weight' of its severity), variants, variant_weight, ...}")
+	doc("POST", "/api/tutor/start", "start a tutor job - the teacher writes the prefixes, the network completes them, the teacher marks the grammar and the 2NRL follows: {topic, rounds, batches (auto run: each batch planned from the last, 0 = until stopped), exercises, attempts, focus, level, mode, threshold, grammar_weight, drills, adapt, twonrl_per: round|lesson, diff_corrections, keep_weight, min_weight, neg_epochs, pos_epochs, strength, tutor_provider: ollama|chatgpt, tutor_model, grader_provider, grader_model, url, grader_url, blame (every failed sentence also teaches the negative network why it failed, and the teacher is asked why it is wrong and for 'variants' more sentences with the same mistake, blamed at 'variant_weight' of its severity), variants, variant_weight, think (the thinking level asked of the marker: true | false | low | medium | high | default; on by default with learn_thinking), learn_thinking (teach the network the marker's thinking as thoughts that begin at the THINK sentinel), think_questions (and every question in it as a place where the network stops to think), ...} - every round record carries the marker's 'thinking' and what was taught of it ('thoughts', 'thought_questions', 'thought_nodes')")
 	route("GET", "/api/tutor/history", rTutorHistory)
 	doc("GET", "/api/tutor/history", "lesson / round / report records of all tutor runs")
 	route("GET", "/api/chatgpt/models", rChatGPTModels)
 	doc("GET", "/api/chatgpt/models", "is ChatGPT usable as a teacher here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails")
 	route("POST", "/api/tutor/lesson", rTutorLesson)
-	doc("POST", "/api/tutor/lesson", "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, threshold, ...} -> completions with grades (grammar, spelling, fluency, error, correction) and a report card")
+	doc("POST", "/api/tutor/lesson", "one round of lessons without training: {topic, exercises, prefixes (skip the LLM and use these), attempts, threshold, think, learn_thinking, ...} -> completions with grades (grammar, spelling, fluency, error, correction), a report card and the marker's 'thinking'")
 	route("POST", "/api/tutor/plan", rTutorPlan)
 	doc("POST", "/api/tutor/plan", "the lesson plan a report card implies: {report (default: the card at the end of the last run), count, topic, level, words, threshold, exercises, drills, tutor_model, url} -> {plan: {summary, prompt (the brief for the next batch: start a run with it as 'brief'), upgrade: {step, level, words, threshold, drills, note}, level, weak, targets, lessons: [{focus, targets, topic, why, exercises, drills, prefixes}]}, source}")
 }
@@ -393,6 +397,11 @@ func tutorConfigFrom(rq *request) (radixnet.TutorConfig, error) {
 	number("threshold", d.Threshold, 0, &c.Threshold)
 	number("grammar_weight", d.GrammarWeight, 0, &c.GrammarWeight)
 	integer("batch", d.Batch, 1, &c.Batch)
+	if raw, present := f.lookup("think"); present && raw != nil { // null reads as missing, as everywhere
+		c.Think = raw
+	}
+	flag("learn_thinking", d.LearnThinking, &c.LearnThinking)
+	flag("think_questions", d.ThinkQuestions, &c.ThinkQuestions)
 	flag("adapt", d.Adapt, &c.Adapt)
 	integer("drills", d.Drills, 0, &c.Drills)
 	integer("variants", d.Variants, 0, &c.Variants)

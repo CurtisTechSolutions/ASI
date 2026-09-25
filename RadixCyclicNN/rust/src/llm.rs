@@ -244,6 +244,13 @@ pub trait LlmClient: Send + Sync {
     }
     /// One completion of `prompt` (with `o.system` as the instruction).
     fn generate(&self, prompt: &str, o: &LlmOptions) -> Result<String, LlmError>;
+    /// One completion and the thinking behind it, `(answer, thinking)`: a
+    /// client that can say what it thought (Ollama, with `o.think` as the
+    /// level) gives both; every other answers as `generate` does and thought
+    /// nothing anyone can read.
+    fn complete_thinking(&self, prompt: &str, o: &LlmOptions) -> Result<(String, String), LlmError> {
+        Ok((self.generate(prompt, o)?, String::new()))
+    }
     /// One chat turn: the assistant's text.
     fn chat(&self, messages: &[Json], o: &LlmOptions) -> Result<String, LlmError>;
 }

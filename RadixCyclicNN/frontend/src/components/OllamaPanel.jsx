@@ -15,11 +15,12 @@ import {
   splitLines,
   yesNo,
 } from "../util.js";
-import { THINK_LEVELS, ollamaThinkRequest, questionRuns, questionsIn, thinkLevelSays } from "../thinking.js";
+import { THINK_LEVELS, ollamaThinkRequest, questionsIn, thinkLevelSays } from "../thinking.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import UploadPicker from "./UploadPicker.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
+import { ThinkingText } from "./ThoughtView.jsx";
 
 const MAX_ROWS = 100;
 const SLOW_NOTE = "Ollama is working; this can take a minute or two.";
@@ -904,23 +905,6 @@ function EpochTable({ history }) {
   );
 }
 
-/** A thinking model's thinking, with the questions it asked itself marked: where the network will learn to stop and think. */
-function Thinking({ text }) {
-  return (
-    <p className="thinking-text">
-      {questionRuns(text).map((run, i) =>
-        run.question ? (
-          <mark key={i} title="a question it asked itself: taught, the network stops to think here">
-            {run.text}
-          </mark>
-        ) : (
-          <span key={i}>{run.text}</span>
-        ),
-      )}
-    </p>
-  );
-}
-
 /**
  * A thinking model thinks about a prompt (POST /api/ollama/think): it writes questions about it and thinks each
  * one through, and its thinking comes back beside the answers. With "Teach the thinking to the network" on the
@@ -1110,7 +1094,7 @@ function ThinkingCards({ overrides, status }) {
                   <p className="question">
                     <b>{String(t.question ?? "")}</b>
                   </p>
-                  {t.thinking ? <Thinking text={t.thinking} /> : <p className="muted">(no thinking: the model did not think)</p>}
+                  {t.thinking ? <ThinkingText text={t.thinking} /> : <p className="muted">(no thinking: the model did not think)</p>}
                   <p className="muted answer">answer: {t.answer ? String(t.answer) : "–"}</p>
                 </li>
               ))}
